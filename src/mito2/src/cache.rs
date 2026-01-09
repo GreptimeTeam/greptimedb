@@ -42,6 +42,8 @@ use store_api::storage::{ConcreteDataType, FileId, RegionId, TimeSeriesRowSelect
 use crate::cache::cache_size::parquet_meta_size;
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::index::inverted_index::{InvertedIndexCache, InvertedIndexCacheRef};
+#[cfg(feature = "vector_index")]
+use crate::cache::index::vector_index::{VectorIndexCache, VectorIndexCacheRef};
 use crate::cache::write_cache::WriteCacheRef;
 use crate::metrics::{CACHE_BYTES, CACHE_EVICTION, CACHE_HIT, CACHE_MISS};
 use crate::read::Batch;
@@ -247,6 +249,16 @@ impl CacheStrategy {
         }
     }
 
+    /// Calls [CacheManager::vector_index_cache()].
+    /// It returns None if the strategy is [CacheStrategy::Compaction] or [CacheStrategy::Disabled].
+    #[cfg(feature = "vector_index")]
+    pub fn vector_index_cache(&self) -> Option<&VectorIndexCacheRef> {
+        match self {
+            CacheStrategy::EnableAll(cache_manager) => cache_manager.vector_index_cache(),
+            CacheStrategy::Compaction(_) | CacheStrategy::Disabled => None,
+        }
+    }
+
     /// Calls [CacheManager::puffin_metadata_cache()].
     /// It returns None if the strategy is [CacheStrategy::Compaction] or [CacheStrategy::Disabled].
     pub fn puffin_metadata_cache(&self) -> Option<&PuffinMetadataCacheRef> {
@@ -303,6 +315,9 @@ pub struct CacheManager {
     inverted_index_cache: Option<InvertedIndexCacheRef>,
     /// Cache for bloom filter index.
     bloom_filter_index_cache: Option<BloomFilterIndexCacheRef>,
+    /// Cache for vector index.
+    #[cfg(feature = "vector_index")]
+    vector_index_cache: Option<VectorIndexCacheRef>,
     /// Puffin metadata cache.
     puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
     /// Cache for time series selectors.
@@ -434,6 +449,11 @@ impl CacheManager {
             cache.invalidate_file(file_id.file_id());
         }
 
+        #[cfg(feature = "vector_index")]
+        if let Some(cache) = &self.vector_index_cache {
+            cache.invalidate_file(file_id.file_id());
+        }
+
         if let Some(cache) = &self.puffin_metadata_cache {
             cache.remove(&file_id.to_string());
         }
@@ -484,6 +504,11 @@ impl CacheManager {
 
     pub(crate) fn bloom_filter_index_cache(&self) -> Option<&BloomFilterIndexCacheRef> {
         self.bloom_filter_index_cache.as_ref()
+    }
+
+    #[cfg(feature = "vector_index")]
+    pub(crate) fn vector_index_cache(&self) -> Option<&VectorIndexCacheRef> {
+        self.vector_index_cache.as_ref()
     }
 
     pub(crate) fn puffin_metadata_cache(&self) -> Option<&PuffinMetadataCacheRef> {
@@ -646,6 +671,9 @@ impl CacheManagerBuilder {
             self.index_content_size,
             self.index_content_page_size,
         );
+        #[cfg(feature = "vector_index")]
+        let vector_index_cache = (self.index_content_size != 0)
+            .then(|| Arc::new(VectorIndexCache::new(self.index_content_size)));
         let index_result_cache = (self.index_result_cache_size != 0)
             .then(|| IndexResultCache::new(self.index_result_cache_size));
         let puffin_metadata_cache =
@@ -672,6 +700,8 @@ impl CacheManagerBuilder {
             write_cache: self.write_cache,
             inverted_index_cache: Some(Arc::new(inverted_index_cache)),
             bloom_filter_index_cache: Some(Arc::new(bloom_filter_index_cache)),
+            #[cfg(feature = "vector_index")]
+            vector_index_cache,
             puffin_metadata_cache: Some(Arc::new(puffin_metadata_cache)),
             selector_result_cache,
             index_result_cache,

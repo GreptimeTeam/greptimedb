@@ -14,6 +14,8 @@
 
 //! Parquet reader.
 
+#[cfg(feature = "vector_index")]
+use std::collections::BTreeSet;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -41,6 +43,8 @@ use table::predicate::Predicate;
 
 use crate::cache::CacheStrategy;
 use crate::cache::index::result_cache::PredicateKey;
+#[cfg(feature = "vector_index")]
+use crate::error::ApplyVectorIndexSnafu;
 use crate::error::{
     ArrowReaderSnafu, InvalidMetadataSnafu, InvalidParquetSnafu, ReadDataPartSnafu,
     ReadParquetSnafu, Result,
@@ -61,6 +65,8 @@ use crate::sst::index::fulltext_index::applier::{
 use crate::sst::index::inverted_index::applier::{
     InvertedIndexApplierRef, InvertedIndexApplyMetrics,
 };
+#[cfg(feature = "vector_index")]
+use crate::sst::index::vector_index::applier::VectorIndexApplierRef;
 use crate::sst::parquet::file_range::{
     FileRangeContext, FileRangeContextRef, PreFilterMode, RangeBase, row_group_contains_delete,
 };
@@ -74,6 +80,7 @@ use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, PARQUET_METADATA_KEY};
 const INDEX_TYPE_FULLTEXT: &str = "fulltext";
 const INDEX_TYPE_INVERTED: &str = "inverted";
 const INDEX_TYPE_BLOOM: &str = "bloom filter";
+const INDEX_TYPE_VECTOR: &str = "vector";
 
 macro_rules! handle_index_error {
     ($err:expr, $file_handle:expr, $index_type:expr) => {
@@ -117,6 +124,12 @@ pub struct ParquetReaderBuilder {
     inverted_index_appliers: [Option<InvertedIndexApplierRef>; 2],
     bloom_filter_index_appliers: [Option<BloomFilterIndexApplierRef>; 2],
     fulltext_index_appliers: [Option<FulltextIndexApplierRef>; 2],
+    /// Vector index applier for KNN search.
+    #[cfg(feature = "vector_index")]
+    vector_index_applier: Option<VectorIndexApplierRef>,
+    /// Over-fetched k for vector index scan.
+    #[cfg(feature = "vector_index")]
+    vector_index_k: Option<usize>,
     /// Expected metadata of the region while reading the SST.
     /// This is usually the latest metadata of the region. The reader use
     /// it get the correct column id of a column by name.
@@ -150,6 +163,10 @@ impl ParquetReaderBuilder {
             inverted_index_appliers: [None, None],
             bloom_filter_index_appliers: [None, None],
             fulltext_index_appliers: [None, None],
+            #[cfg(feature = "vector_index")]
+            vector_index_applier: None,
+            #[cfg(feature = "vector_index")]
+            vector_index_k: None,
             expected_metadata: None,
             flat_format: false,
             compaction: false,
@@ -208,6 +225,19 @@ impl ParquetReaderBuilder {
         index_appliers: [Option<FulltextIndexApplierRef>; 2],
     ) -> Self {
         self.fulltext_index_appliers = index_appliers;
+        self
+    }
+
+    /// Attaches the vector index applier to the builder.
+    #[cfg(feature = "vector_index")]
+    #[must_use]
+    pub(crate) fn vector_index_applier(
+        mut self,
+        applier: Option<VectorIndexApplierRef>,
+        k: Option<usize>,
+    ) -> Self {
+        self.vector_index_applier = applier;
+        self.vector_index_k = k;
         self
     }
 
@@ -572,6 +602,19 @@ impl ParquetReaderBuilder {
             )
             .await;
         }
+        #[cfg(feature = "vector_index")]
+        {
+            self.prune_row_groups_by_vector_index(
+                row_group_size,
+                num_row_groups,
+                &mut output,
+                metrics,
+            )
+            .await;
+            if output.is_empty() {
+                return output;
+            }
+        }
         output
     }
 
@@ -799,6 +842,48 @@ impl ParquetReaderBuilder {
         pruned
     }
 
+    /// Prunes row groups by vector index results.
+    #[cfg(feature = "vector_index")]
+    async fn prune_row_groups_by_vector_index(
+        &self,
+        row_group_size: usize,
+        num_row_groups: usize,
+        output: &mut RowGroupSelection,
+        metrics: &mut ReaderFilterMetrics,
+    ) {
+        let Some(applier) = &self.vector_index_applier else {
+            return;
+        };
+        let Some(k) = self.vector_index_k else {
+            return;
+        };
+        if !self.file_handle.meta_ref().vector_index_available() {
+            return;
+        }
+
+        let file_size_hint = self.file_handle.meta_ref().index_file_size();
+        let apply_res = applier
+            .apply_with_k(self.file_handle.index_id(), Some(file_size_hint), k)
+            .await;
+        let row_ids = match apply_res {
+            Ok(res) => res.row_offsets,
+            Err(err) => {
+                handle_index_error!(err, self.file_handle, INDEX_TYPE_VECTOR);
+                return;
+            }
+        };
+
+        let selection = match vector_selection_from_offsets(row_ids, row_group_size, num_row_groups)
+        {
+            Ok(selection) => selection,
+            Err(err) => {
+                handle_index_error!(err, self.file_handle, INDEX_TYPE_VECTOR);
+                return;
+            }
+        };
+        apply_selection_and_update_metrics(output, &selection, metrics, INDEX_TYPE_VECTOR);
+    }
+
     async fn prune_row_groups_by_fulltext_bloom(
         &self,
         row_group_size: usize,
@@ -983,6 +1068,29 @@ fn apply_selection_and_update_metrics(
     *output = intersection;
 }
 
+#[cfg(feature = "vector_index")]
+fn vector_selection_from_offsets(
+    row_offsets: Vec<u64>,
+    row_group_size: usize,
+    num_row_groups: usize,
+) -> Result<RowGroupSelection> {
+    let mut row_ids = BTreeSet::new();
+    for offset in row_offsets {
+        let row_id = u32::try_from(offset).map_err(|_| {
+            ApplyVectorIndexSnafu {
+                reason: format!("Row offset {} exceeds u32::MAX", offset),
+            }
+            .build()
+        })?;
+        row_ids.insert(row_id);
+    }
+    Ok(RowGroupSelection::from_row_ids(
+        row_ids,
+        row_group_size,
+        num_row_groups,
+    ))
+}
+
 fn all_required_row_groups_searched(
     required_row_groups: &RowGroupSelection,
     cached_row_groups: &RowGroupSelection,
@@ -1008,6 +1116,8 @@ pub(crate) struct ReaderFilterMetrics {
     pub(crate) rg_minmax_filtered: usize,
     /// Number of row groups filtered by bloom filter index.
     pub(crate) rg_bloom_filtered: usize,
+    /// Number of row groups filtered by vector index.
+    pub(crate) rg_vector_filtered: usize,
 
     /// Number of rows in row group before filtering.
     pub(crate) rows_total: usize,
@@ -1017,6 +1127,8 @@ pub(crate) struct ReaderFilterMetrics {
     pub(crate) rows_inverted_filtered: usize,
     /// Number of rows in row group filtered by bloom filter index.
     pub(crate) rows_bloom_filtered: usize,
+    /// Number of rows filtered by vector index.
+    pub(crate) rows_vector_filtered: usize,
     /// Number of rows filtered by precise filter.
     pub(crate) rows_precise_filtered: usize,
 
@@ -1036,11 +1148,13 @@ impl ReaderFilterMetrics {
         self.rg_inverted_filtered += other.rg_inverted_filtered;
         self.rg_minmax_filtered += other.rg_minmax_filtered;
         self.rg_bloom_filtered += other.rg_bloom_filtered;
+        self.rg_vector_filtered += other.rg_vector_filtered;
 
         self.rows_total += other.rows_total;
         self.rows_fulltext_filtered += other.rows_fulltext_filtered;
         self.rows_inverted_filtered += other.rows_inverted_filtered;
         self.rows_bloom_filtered += other.rows_bloom_filtered;
+        self.rows_vector_filtered += other.rows_vector_filtered;
         self.rows_precise_filtered += other.rows_precise_filtered;
 
         // Merge optional applier metrics
@@ -1078,6 +1192,9 @@ impl ReaderFilterMetrics {
         READ_ROW_GROUPS_TOTAL
             .with_label_values(&["bloom_filter_index_filtered"])
             .inc_by(self.rg_bloom_filtered as u64);
+        READ_ROW_GROUPS_TOTAL
+            .with_label_values(&["vector_index_filtered"])
+            .inc_by(self.rg_vector_filtered as u64);
 
         PRECISE_FILTER_ROWS_TOTAL
             .with_label_values(&["parquet"])
@@ -1094,6 +1211,9 @@ impl ReaderFilterMetrics {
         READ_ROWS_IN_ROW_GROUP_TOTAL
             .with_label_values(&["bloom_filter_index_filtered"])
             .inc_by(self.rows_bloom_filtered as u64);
+        READ_ROWS_IN_ROW_GROUP_TOTAL
+            .with_label_values(&["vector_index_filtered"])
+            .inc_by(self.rows_vector_filtered as u64);
     }
 
     fn update_index_metrics(&mut self, index_type: &str, row_group_count: usize, row_count: usize) {
@@ -1110,8 +1230,64 @@ impl ReaderFilterMetrics {
                 self.rg_bloom_filtered += row_group_count;
                 self.rows_bloom_filtered += row_count;
             }
+            INDEX_TYPE_VECTOR => {
+                self.rg_vector_filtered += row_group_count;
+                self.rows_vector_filtered += row_count;
+            }
             _ => {}
         }
+    }
+}
+
+#[cfg(all(test, feature = "vector_index"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_vector_selection_from_offsets() {
+        let row_group_size = 4;
+        let num_row_groups = 3;
+        let selection =
+            vector_selection_from_offsets(vec![0, 1, 5, 9], row_group_size, num_row_groups)
+                .unwrap();
+
+        assert_eq!(selection.row_group_count(), 3);
+        assert_eq!(selection.row_count(), 4);
+        assert!(selection.contains_non_empty_row_group(0));
+        assert!(selection.contains_non_empty_row_group(1));
+        assert!(selection.contains_non_empty_row_group(2));
+    }
+
+    #[test]
+    fn test_vector_selection_from_offsets_out_of_range() {
+        let row_group_size = 4;
+        let num_row_groups = 2;
+        let selection = vector_selection_from_offsets(
+            vec![0, 7, u64::from(u32::MAX) + 1],
+            row_group_size,
+            num_row_groups,
+        );
+        assert!(selection.is_err());
+    }
+
+    #[test]
+    fn test_vector_selection_updates_metrics() {
+        let row_group_size = 4;
+        let total_rows = 8;
+        let mut output = RowGroupSelection::new(row_group_size, total_rows);
+        let selection = vector_selection_from_offsets(vec![1], row_group_size, 2).unwrap();
+        let mut metrics = ReaderFilterMetrics::default();
+
+        apply_selection_and_update_metrics(
+            &mut output,
+            &selection,
+            &mut metrics,
+            INDEX_TYPE_VECTOR,
+        );
+
+        assert_eq!(metrics.rg_vector_filtered, 1);
+        assert_eq!(metrics.rows_vector_filtered, 7);
+        assert_eq!(output.row_count(), 1);
     }
 }
 
