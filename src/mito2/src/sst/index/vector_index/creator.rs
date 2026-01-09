@@ -326,6 +326,7 @@ impl VectorIndexer {
 
         for (col_id, creator) in &mut self.creators {
             let Some(values) = batch.field_col_value(*col_id) else {
+                creator.add_nulls(n);
                 continue;
             };
 
