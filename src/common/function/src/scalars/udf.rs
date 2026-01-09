@@ -69,6 +69,13 @@ impl ScalarUDFImpl for ScalarUdf {
         self.function.return_type(arg_types)
     }
 
+    fn return_field_from_args(
+        &self,
+        args: datafusion_expr::ReturnFieldArgs,
+    ) -> datafusion_common::Result<arrow_schema::FieldRef> {
+        self.function.return_field_from_args(args)
+    }
+
     fn invoke_with_args(
         &self,
         args: ScalarFunctionArgs,
