@@ -410,6 +410,9 @@ impl SeqScan {
 
         let stream = try_stream! {
             part_metrics.on_first_poll();
+            // Start fetch time before building sources so scan cost contains
+            // build part cost.
+            let mut fetch_start = Instant::now();
 
             let range_builder_list = Arc::new(RangeBuilderList::new(
                 stream_ctx.input.num_memtables(),
@@ -431,8 +434,6 @@ impl SeqScan {
                     file_scan_semaphore.clone(),
                 ).await?;
 
-                let mut metrics = ScannerMetrics::default();
-                let mut fetch_start = Instant::now();
                 let mut reader =
                     Self::build_reader_from_sources(&stream_ctx, sources, semaphore.clone(), Some(&part_metrics))
                         .await?;
@@ -441,6 +442,12 @@ impl SeqScan {
                     .with_start(Some(part_range.start))
                     .with_end(Some(part_range.end));
 
+                let mut metrics = ScannerMetrics {
+                    scan_cost: fetch_start.elapsed(),
+                    ..Default::default()
+                };
+                fetch_start = Instant::now();
+
                 while let Some(batch) = reader.next_batch().await? {
                     metrics.scan_cost += fetch_start.elapsed();
                     metrics.num_batches += 1;
@@ -448,6 +455,7 @@ impl SeqScan {
 
                     debug_assert!(!batch.is_empty());
                     if batch.is_empty() {
+                        fetch_start = Instant::now();
                         continue;
                     }
 
@@ -476,6 +484,7 @@ impl SeqScan {
                 }
 
                 metrics.scan_cost += fetch_start.elapsed();
+                fetch_start = Instant::now();
                 part_metrics.merge_metrics(&metrics);
             }
 
@@ -516,6 +525,9 @@ impl SeqScan {
 
         let stream = try_stream! {
             part_metrics.on_first_poll();
+            // Start fetch time before building sources so scan cost contains
+            // build part cost.
+            let mut fetch_start = Instant::now();
 
             let range_builder_list = Arc::new(RangeBuilderList::new(
                 stream_ctx.input.num_memtables(),
@@ -534,11 +546,15 @@ impl SeqScan {
                     file_scan_semaphore.clone(),
                 ).await?;
 
-                let mut metrics = ScannerMetrics::default();
-                let mut fetch_start = Instant::now();
                 let mut reader =
                     Self::build_flat_reader_from_sources(&stream_ctx, sources, semaphore.clone(), Some(&part_metrics))
                         .await?;
+
+                let mut metrics = ScannerMetrics {
+                    scan_cost: fetch_start.elapsed(),
+                    ..Default::default()
+                };
+                fetch_start = Instant::now();
 
                 while let Some(record_batch) = reader.try_next().await? {
                     metrics.scan_cost += fetch_start.elapsed();
@@ -547,6 +563,7 @@ impl SeqScan {
 
                     debug_assert!(record_batch.num_rows() > 0);
                     if record_batch.num_rows() == 0 {
+                        fetch_start = Instant::now();
                         continue;
                     }
 
@@ -558,6 +575,7 @@ impl SeqScan {
                 }
 
                 metrics.scan_cost += fetch_start.elapsed();
+                fetch_start = Instant::now();
                 part_metrics.merge_metrics(&metrics);
             }
 

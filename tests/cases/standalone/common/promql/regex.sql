@@ -26,6 +26,7 @@ TQL EVAL (0, 100, '15s') test{host=~"(10\\.0\\.160\\.237:8080|10\\.0\\.160\\.237
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (flat_format.*) REDACTED
 TQL ANALYZE VERBOSE (0, 0, '1s') test{host=~".*"};
 
 -- SQLNESS REPLACE (metrics.*) REDACTED
@@ -35,6 +36,7 @@ TQL ANALYZE VERBOSE (0, 0, '1s') test{host=~".*"};
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (flat_format.*) REDACTED
 TQL ANALYZE VERBOSE (0, 0, '1s') test{host=~".+"};
 
 -- SQLNESS REPLACE (metrics.*) REDACTED
@@ -44,6 +46,7 @@ TQL ANALYZE VERBOSE (0, 0, '1s') test{host=~".+"};
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (flat_format.*) REDACTED
 TQL ANALYZE VERBOSE (0, 0, '1s') test{host!~".*"};
 
 -- SQLNESS REPLACE (metrics.*) REDACTED
@@ -53,6 +56,7 @@ TQL ANALYZE VERBOSE (0, 0, '1s') test{host!~".*"};
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (flat_format.*) REDACTED
 TQL ANALYZE VERBOSE (0, 0, '1s') test{host!~".+"};
 
 DROP TABLE test;

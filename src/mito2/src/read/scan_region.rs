@@ -1418,6 +1418,7 @@ impl StreamContext {
                         .entries(self.input.files.iter().map(|file| FileWrapper { file }))
                         .finish()?;
                 }
+                write!(f, ", \"flat_format\": {}", self.input.flat_format)?;
 
                 #[cfg(feature = "enterprise")]
                 self.format_extension_ranges(f)?;
