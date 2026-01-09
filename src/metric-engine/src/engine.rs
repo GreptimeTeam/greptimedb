@@ -498,6 +498,8 @@ impl MetricEngine {
     }
 
     /// Batch put operation for multiple logical regions.
+    /// Requests are grouped by physical region; a failure can leave earlier
+    /// physical-region groups committed.
     pub async fn put_regions_batch(
         &self,
         requests: Vec<(RegionId, RegionPutRequest)>,

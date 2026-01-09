@@ -63,6 +63,8 @@ impl MetricEngineInner {
     /// Requests may span multiple physical regions. We group them by physical
     /// region and write sequentially. This method fails fast on validation or
     /// preparation errors within a group and stops at the first failure.
+    /// Writes in earlier physical-region groups are not rolled back if a later
+    /// group fails.
     pub async fn put_regions_batch(
         &self,
         requests: Vec<(RegionId, RegionPutRequest)>,
@@ -510,13 +512,206 @@ impl MetricEngineInner {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use common_recordbatch::RecordBatches;
+    use store_api::metric_engine_consts::{
+        DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
+        MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING,
+    };
+    use store_api::path_utils::table_dir;
     use store_api::region_engine::RegionEngine;
     use store_api::region_request::RegionRequest;
     use store_api::storage::ScanRequest;
+    use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 
     use super::*;
     use crate::test_util::{self, TestEnv};
+
+    fn assert_merged_schema(rows: &Rows, expect_sparse: bool) {
+        let column_names: HashSet<String> = rows
+            .schema
+            .iter()
+            .map(|col| col.column_name.clone())
+            .collect();
+
+        if expect_sparse {
+            assert!(
+                column_names.contains(PRIMARY_KEY_COLUMN_NAME),
+                "sparse encoding should include primary key column"
+            );
+            assert!(
+                !column_names.contains(DATA_SCHEMA_TABLE_ID_COLUMN_NAME),
+                "sparse encoding should not include table id column"
+            );
+            assert!(
+                !column_names.contains(DATA_SCHEMA_TSID_COLUMN_NAME),
+                "sparse encoding should not include tsid column"
+            );
+            assert!(
+                !column_names.contains("job"),
+                "sparse encoding should not include tag columns"
+            );
+            assert!(
+                !column_names.contains("instance"),
+                "sparse encoding should not include tag columns"
+            );
+        } else {
+            assert!(
+                !column_names.contains(PRIMARY_KEY_COLUMN_NAME),
+                "dense encoding should not include primary key column"
+            );
+            assert!(
+                column_names.contains(DATA_SCHEMA_TABLE_ID_COLUMN_NAME),
+                "dense encoding should include table id column"
+            );
+            assert!(
+                column_names.contains(DATA_SCHEMA_TSID_COLUMN_NAME),
+                "dense encoding should include tsid column"
+            );
+            assert!(
+                column_names.contains("job"),
+                "dense encoding should keep tag columns"
+            );
+            assert!(
+                column_names.contains("instance"),
+                "dense encoding should keep tag columns"
+            );
+        }
+    }
+
+    async fn create_logical_region_with_tags(
+        env: &TestEnv,
+        physical_region_id: RegionId,
+        logical_region_id: RegionId,
+        tags: &[&str],
+    ) {
+        let region_create_request = test_util::create_logical_region_request(
+            tags,
+            physical_region_id,
+            &table_dir("test", logical_region_id.table_id()),
+        );
+        env.metric()
+            .handle_request(
+                logical_region_id,
+                RegionRequest::Create(region_create_request),
+            )
+            .await
+            .unwrap();
+    }
+
+    async fn run_batch_write_with_schema_variants(
+        env: &TestEnv,
+        physical_region_id: RegionId,
+        options: Vec<(String, String)>,
+        expect_sparse: bool,
+    ) {
+        env.create_physical_region(physical_region_id, &TestEnv::default_table_dir(), options)
+            .await;
+
+        let logical_region_1 = env.default_logical_region_id();
+        let logical_region_2 = RegionId::new(1024, 1);
+
+        create_logical_region_with_tags(env, physical_region_id, logical_region_1, &["job"]).await;
+        create_logical_region_with_tags(
+            env,
+            physical_region_id,
+            logical_region_2,
+            &["job", "instance"],
+        )
+        .await;
+
+        let schema_1 = test_util::row_schema_with_tags(&["job"]);
+        let schema_2 = test_util::row_schema_with_tags(&["job", "instance"]);
+
+        let data_region_id = RegionId::new(physical_region_id.table_id(), 2);
+        let primary_key_encoding = env
+            .metric()
+            .inner
+            .get_primary_key_encoding(data_region_id)
+            .unwrap();
+        assert_eq!(
+            primary_key_encoding,
+            if expect_sparse {
+                PrimaryKeyEncoding::Sparse
+            } else {
+                PrimaryKeyEncoding::Dense
+            }
+        );
+
+        let build_requests = || {
+            let rows_1 = test_util::build_rows(1, 3);
+            let rows_2 = test_util::build_rows(2, 2);
+
+            vec![
+                (
+                    logical_region_1,
+                    RegionPutRequest {
+                        rows: Rows {
+                            schema: schema_1.clone(),
+                            rows: rows_1,
+                        },
+                        hint: None,
+                    },
+                ),
+                (
+                    logical_region_2,
+                    RegionPutRequest {
+                        rows: Rows {
+                            schema: schema_2.clone(),
+                            rows: rows_2,
+                        },
+                        hint: None,
+                    },
+                ),
+            ]
+        };
+
+        let merged_request = if expect_sparse {
+            let (merged_request, _) = env
+                .metric()
+                .inner
+                .merge_sparse_batch(physical_region_id, build_requests())
+                .unwrap();
+            let hint = merged_request
+                .hint
+                .as_ref()
+                .expect("missing sparse write hint");
+            assert_eq!(
+                hint.primary_key_encoding,
+                PrimaryKeyEncodingProto::Sparse as i32
+            );
+            merged_request
+        } else {
+            let (merged_request, _) = env
+                .metric()
+                .inner
+                .merge_dense_batch(data_region_id, build_requests())
+                .unwrap();
+            assert!(merged_request.hint.is_none());
+            merged_request
+        };
+
+        assert_merged_schema(&merged_request.rows, expect_sparse);
+
+        let affected_rows = env
+            .metric()
+            .inner
+            .put_regions_batch(build_requests())
+            .await
+            .unwrap();
+        assert_eq!(affected_rows, 5);
+
+        let request = ScanRequest::default();
+        let stream = env
+            .mito()
+            .scan_to_stream(data_region_id, request)
+            .await
+            .unwrap();
+        let batches = RecordBatches::try_collect(stream).await.unwrap();
+
+        assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 5);
+    }
 
     #[tokio::test]
     async fn test_write_logical_region() {
@@ -801,7 +996,8 @@ mod tests {
         let result = engine.inner.put_regions_batch(requests).await;
         assert!(result.is_err());
 
-        // Verify physical region remains empty due to fail-fast
+        // Invalid region is detected before any write, so the physical region remains empty.
+        // Fail-fast is per physical-region group; cross-group partial success is possible.
         let request = ScanRequest::default();
         let stream = env
             .metric()
@@ -849,5 +1045,39 @@ mod tests {
         let affected_rows = engine.inner.put_regions_batch(requests).await.unwrap();
 
         assert_eq!(affected_rows, 0);
+    }
+
+    #[tokio::test]
+    async fn test_batch_write_sparse_encoding() {
+        let env = TestEnv::new().await;
+        let physical_region_id = env.default_physical_region_id();
+
+        run_batch_write_with_schema_variants(
+            &env,
+            physical_region_id,
+            vec![(
+                MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING.to_string(),
+                "sparse".to_string(),
+            )],
+            true,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_batch_write_dense_encoding() {
+        let env = TestEnv::new().await;
+        let physical_region_id = env.default_physical_region_id();
+
+        run_batch_write_with_schema_variants(
+            &env,
+            physical_region_id,
+            vec![(
+                MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING.to_string(),
+                "dense".to_string(),
+            )],
+            false,
+        )
+        .await;
     }
 }
