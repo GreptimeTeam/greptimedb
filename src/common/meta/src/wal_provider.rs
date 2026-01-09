@@ -26,28 +26,46 @@ use common_wal::options::{KafkaWalOptions, WAL_OPTIONS_KEY, WalOptions};
 use snafu::{ResultExt, ensure};
 use store_api::storage::{RegionId, RegionNumber};
 
+use crate::ddl::allocator::wal_options::WalOptionsAllocator;
 use crate::error::{EncodeWalOptionsSnafu, InvalidTopicNamePrefixSnafu, Result};
 use crate::key::TOPIC_NAME_PATTERN_REGEX;
 use crate::kv_backend::KvBackendRef;
 use crate::leadership_notifier::LeadershipChangeListener;
-pub use topic_creator::{
-    build_kafka_client, build_kafka_topic_creator,
-};
-use topic_pool::KafkaTopicPool;
+pub use crate::wal_provider::topic_creator::{build_kafka_client, build_kafka_topic_creator};
+use crate::wal_provider::topic_pool::KafkaTopicPool;
 
-/// Allocates wal options in region granularity.
+/// Provides wal options in region granularity.
 #[derive(Default, Debug)]
-pub enum WalOptionsAllocator {
+pub enum WalProvider {
     #[default]
     RaftEngine,
     Kafka(KafkaTopicPool),
 }
 
-/// Arc wrapper of WalOptionsAllocator.
-pub type WalOptionsAllocatorRef = Arc<WalOptionsAllocator>;
+/// Arc wrapper of WalProvider.
+pub type WalProviderRef = Arc<WalProvider>;
 
-impl WalOptionsAllocator {
-    /// Tries to start the allocator.
+#[async_trait::async_trait]
+impl WalOptionsAllocator for WalProvider {
+    async fn allocate(
+        &self,
+        region_numbers: &[RegionNumber],
+        skip_wal: bool,
+    ) -> Result<HashMap<RegionNumber, String>> {
+        let wal_options = self
+            .alloc_batch(region_numbers.len(), skip_wal)?
+            .into_iter()
+            .map(|wal_options| {
+                serde_json::to_string(&wal_options).context(EncodeWalOptionsSnafu { wal_options })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(region_numbers.iter().copied().zip(wal_options).collect())
+    }
+}
+
+impl WalProvider {
+    /// Tries to start the provider.
     pub async fn start(&self) -> Result<()> {
         match self {
             Self::RaftEngine => Ok(()),
@@ -56,14 +74,14 @@ impl WalOptionsAllocator {
     }
 
     /// Allocates a batch of wal options where each wal options goes to a region.
-    /// If skip_wal is true, the wal options will be set to Noop regardless of the allocator type.
+    /// If skip_wal is true, the wal options will be set to Noop regardless of the provider type.
     pub fn alloc_batch(&self, num_regions: usize, skip_wal: bool) -> Result<Vec<WalOptions>> {
         if skip_wal {
             return Ok(vec![WalOptions::Noop; num_regions]);
         }
         match self {
-            WalOptionsAllocator::RaftEngine => Ok(vec![WalOptions::RaftEngine; num_regions]),
-            WalOptionsAllocator::Kafka(topic_manager) => {
+            WalProvider::RaftEngine => Ok(vec![WalOptions::RaftEngine; num_regions]),
+            WalProvider::Kafka(topic_manager) => {
                 let options_batch = topic_manager
                     .select_batch(num_regions)?
                     .into_iter()
@@ -80,14 +98,14 @@ impl WalOptionsAllocator {
 
     /// Returns true if it's the remote WAL.
     pub fn is_remote_wal(&self) -> bool {
-        matches!(&self, WalOptionsAllocator::Kafka(_))
+        matches!(&self, WalProvider::Kafka(_))
     }
 }
 
 #[async_trait]
-impl LeadershipChangeListener for WalOptionsAllocator {
+impl LeadershipChangeListener for WalProvider {
     fn name(&self) -> &str {
-        "WalOptionsAllocator"
+        "WalProvider"
     }
 
     async fn on_leader_start(&self) -> Result<()> {
@@ -99,13 +117,13 @@ impl LeadershipChangeListener for WalOptionsAllocator {
     }
 }
 
-/// Builds a wal options allocator based on the given configuration.
-pub async fn build_wal_options_allocator(
+/// Builds a wal provider based on the given configuration.
+pub async fn build_wal_provider(
     config: &MetasrvWalConfig,
     kv_backend: KvBackendRef,
-) -> Result<WalOptionsAllocator> {
+) -> Result<WalProvider> {
     match config {
-        MetasrvWalConfig::RaftEngine => Ok(WalOptionsAllocator::RaftEngine),
+        MetasrvWalConfig::RaftEngine => Ok(WalProvider::RaftEngine),
         MetasrvWalConfig::Kafka(kafka_config) => {
             let prefix = &kafka_config.kafka_topic.topic_name_prefix;
             ensure!(
@@ -116,26 +134,9 @@ pub async fn build_wal_options_allocator(
                 build_kafka_topic_creator(&kafka_config.connection, &kafka_config.kafka_topic)
                     .await?;
             let topic_pool = KafkaTopicPool::new(kafka_config, kv_backend, topic_creator);
-            Ok(WalOptionsAllocator::Kafka(topic_pool))
+            Ok(WalProvider::Kafka(topic_pool))
         }
     }
-}
-
-/// Allocates a wal options for each region. The allocated wal options is encoded immediately.
-pub fn allocate_region_wal_options(
-    regions: Vec<RegionNumber>,
-    wal_options_allocator: &WalOptionsAllocator,
-    skip_wal: bool,
-) -> Result<HashMap<RegionNumber, String>> {
-    let wal_options = wal_options_allocator
-        .alloc_batch(regions.len(), skip_wal)?
-        .into_iter()
-        .map(|wal_options| {
-            serde_json::to_string(&wal_options).context(EncodeWalOptionsSnafu { wal_options })
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    Ok(regions.into_iter().zip(wal_options).collect())
 }
 
 /// Inserts wal options into options.
@@ -182,21 +183,19 @@ mod tests {
     use crate::error::Error;
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::test_util::test_kafka_topic_pool;
-    use crate::wal_options_allocator::selector::RoundRobinTopicSelector;
+    use crate::wal_provider::selector::RoundRobinTopicSelector;
 
-    // Tests that the wal options allocator could successfully allocate raft-engine wal options.
+    // Tests that the wal provider could successfully allocate raft-engine wal options.
     #[tokio::test]
-    async fn test_allocator_with_raft_engine() {
+    async fn test_provider_with_raft_engine() {
         let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
         let wal_config = MetasrvWalConfig::RaftEngine;
-        let allocator = build_wal_options_allocator(&wal_config, kv_backend)
-            .await
-            .unwrap();
-        allocator.start().await.unwrap();
+        let provider = build_wal_provider(&wal_config, kv_backend).await.unwrap();
+        provider.start().await.unwrap();
 
         let num_regions = 32;
         let regions = (0..num_regions).collect::<Vec<_>>();
-        let got = allocate_region_wal_options(regions.clone(), &allocator, false).unwrap();
+        let got = provider.allocate(&regions, false).await.unwrap();
 
         let encoded_wal_options = serde_json::to_string(&WalOptions::RaftEngine).unwrap();
         let expected = regions
@@ -216,14 +215,14 @@ mod tests {
             },
             ..Default::default()
         });
-        let got = build_wal_options_allocator(&wal_config, kv_backend)
+        let got = build_wal_provider(&wal_config, kv_backend)
             .await
             .unwrap_err();
         assert_matches!(got, Error::InvalidTopicNamePrefix { .. });
     }
 
     #[tokio::test]
-    async fn test_allocator_with_kafka_allocate_wal_options() {
+    async fn test_provider_with_kafka_allocate_wal_options() {
         common_telemetry::init_default_ut_logging();
         maybe_skip_kafka_integration_test!();
         let num_topics = 5;
@@ -240,13 +239,13 @@ mod tests {
         let topic_creator = topic_pool.topic_creator();
         topic_creator.delete_topics(&topics).await.unwrap();
 
-        // Creates an options allocator.
-        let allocator = WalOptionsAllocator::Kafka(topic_pool);
-        allocator.start().await.unwrap();
+        // Creates an options provider.
+        let provider = WalProvider::Kafka(topic_pool);
+        provider.start().await.unwrap();
 
         let num_regions = 3;
         let regions = (0..num_regions).collect::<Vec<_>>();
-        let got = allocate_region_wal_options(regions.clone(), &allocator, false).unwrap();
+        let got = provider.allocate(&regions, false).await.unwrap();
 
         // Check the allocated wal options contain the expected topics.
         let expected = (0..num_regions)
@@ -261,13 +260,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_allocator_with_skip_wal() {
-        let allocator = WalOptionsAllocator::RaftEngine;
-        allocator.start().await.unwrap();
+    async fn test_provider_with_skip_wal() {
+        let provider = WalProvider::RaftEngine;
+        provider.start().await.unwrap();
 
         let num_regions = 32;
         let regions = (0..num_regions).collect::<Vec<_>>();
-        let got = allocate_region_wal_options(regions.clone(), &allocator, true).unwrap();
+        let got = provider.allocate(&regions, true).await.unwrap();
         assert_eq!(got.len(), num_regions as usize);
         for wal_options in got.values() {
             assert_eq!(wal_options, &"{\"wal.provider\":\"noop\"}");

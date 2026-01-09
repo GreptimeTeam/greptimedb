@@ -23,7 +23,7 @@ use common_meta::instruction::{
 };
 use common_meta::key::topic_region::TopicRegionKey;
 use common_meta::lock_key::RemoteWalLock;
-use common_meta::wal_options_allocator::extract_topic_from_wal_options;
+use common_meta::wal_provider::extract_topic_from_wal_options;
 use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::{error, info};
 use common_wal::options::WalOptions;

@@ -18,7 +18,7 @@ use common_meta::DatanodeId;
 use common_meta::key::datanode_table::DatanodeTableManager;
 use common_meta::key::topic_region::{TopicRegionKey, TopicRegionManager, TopicRegionValue};
 use common_meta::kv_backend::KvBackendRef;
-use common_meta::wal_options_allocator::{extract_topic_from_wal_options, prepare_wal_options};
+use common_meta::wal_provider::{extract_topic_from_wal_options, prepare_wal_options};
 use futures::TryStreamExt;
 use snafu::ResultExt;
 use store_api::path_utils::table_dir;

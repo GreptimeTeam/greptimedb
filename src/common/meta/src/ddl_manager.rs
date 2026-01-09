@@ -968,7 +968,7 @@ mod tests {
     use crate::region_registry::LeaderRegionRegistry;
     use crate::sequence::SequenceBuilder;
     use crate::state_store::KvStateStore;
-    use crate::wal_options_allocator::WalOptionsAllocator;
+    use crate::wal_provider::WalProvider;
 
     /// A dummy implemented [NodeManager].
     pub struct DummyDatanodeManager;
@@ -993,7 +993,7 @@ mod tests {
         let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
         let table_metadata_allocator = Arc::new(TableMetadataAllocator::new(
             Arc::new(SequenceBuilder::new("test", kv_backend.clone()).build()),
-            Arc::new(WalOptionsAllocator::default()),
+            Arc::new(WalProvider::default()),
         ));
         let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
         let flow_metadata_allocator = Arc::new(FlowMetadataAllocator::with_noop_peer_allocator(

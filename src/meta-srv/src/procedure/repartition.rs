@@ -27,12 +27,15 @@ use std::fmt::Debug;
 
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
+use common_meta::ddl::allocator::region_routes::RegionRoutesAllocatorRef;
+use common_meta::ddl::allocator::wal_options::WalOptionsAllocatorRef;
 use common_meta::instruction::CacheIdent;
 use common_meta::key::datanode_table::RegionInfo;
+use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
 use common_meta::node_manager::NodeManagerRef;
-use common_meta::region_keeper::{MemoryRegionKeeperRef, OperatingRegionGuard};
+use common_meta::region_keeper::MemoryRegionKeeperRef;
 use common_meta::region_registry::LeaderRegionRegistryRef;
 use common_meta::rpc::router::RegionRoute;
 use common_procedure::{Context as ProcedureContext, Status};
@@ -57,13 +60,8 @@ pub struct PersistentContext {
     pub plans: Vec<RepartitionPlanEntry>,
 }
 
-pub struct VolatileContext {
-    pub allocating_regions: Vec<OperatingRegionGuard>,
-}
-
 pub struct Context {
     pub persistent_ctx: PersistentContext,
-    pub volatile_ctx: VolatileContext,
     pub table_metadata_manager: TableMetadataManagerRef,
     pub memory_region_keeper: MemoryRegionKeeperRef,
     pub node_manager: NodeManagerRef,
@@ -71,6 +69,8 @@ pub struct Context {
     pub mailbox: MailboxRef,
     pub server_addr: String,
     pub cache_invalidator: CacheInvalidatorRef,
+    pub region_routes_allocator: RegionRoutesAllocatorRef,
+    pub wal_options_allocator: WalOptionsAllocatorRef,
 }
 
 impl Context {
@@ -98,6 +98,29 @@ impl Context {
             .context(error::TableRouteNotFoundSnafu { table_id })?;
 
         Ok(table_route_value)
+    }
+
+    /// Retrieves the table info value for the given table id.
+    ///
+    /// Retry:
+    /// - Failed to retrieve the metadata of table.
+    ///
+    /// Abort:
+    /// - Table info not found.
+    pub async fn get_table_info_value(&self) -> Result<TableInfoValue> {
+        let table_id = self.persistent_ctx.table_id;
+        let table_info_value = self
+            .table_metadata_manager
+            .table_info_manager()
+            .get(table_id)
+            .await
+            .map_err(BoxedError::new)
+            .with_context(|_| error::RetryLaterWithSourceSnafu {
+                reason: format!("Failed to get table info for table: {}", table_id),
+            })?
+            .context(error::TableInfoNotFoundSnafu { table_id })?
+            .into_inner();
+        Ok(table_info_value)
     }
 
     /// Updates the table route.

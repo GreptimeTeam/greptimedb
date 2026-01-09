@@ -18,7 +18,7 @@ use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::region_registry::{LeaderRegionRegistry, LeaderRegionRegistryRef};
 use common_meta::state_store::KvStateStore;
-use common_meta::wal_options_allocator::build_kafka_client;
+use common_meta::wal_provider::build_kafka_client;
 use common_procedure::ProcedureManagerRef;
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::test_util::InMemoryPoisonStore;
