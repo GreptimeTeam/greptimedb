@@ -52,6 +52,7 @@ use frontend::server::Services;
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
 use servers::grpc::GrpcOptions;
 use snafu::ResultExt;
+use standalone::StandaloneRepartitionProcedureFactory;
 use standalone::options::StandaloneOptions;
 
 use crate::test_util::{self, StorageType, TestGuard, create_tmp_dir_and_datanode_opts};
@@ -215,6 +216,7 @@ impl GreptimeDbStandaloneBuilder {
             flow_id_sequence,
         ));
 
+        let repartition_procedure_factory = Arc::new(StandaloneRepartitionProcedureFactory);
         let ddl_manager = Arc::new(
             DdlManager::try_new(
                 DdlContext {
@@ -229,6 +231,7 @@ impl GreptimeDbStandaloneBuilder {
                     region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
                 },
                 procedure_manager.clone(),
+                repartition_procedure_factory,
                 register_procedure_loaders,
             )
             .unwrap(),

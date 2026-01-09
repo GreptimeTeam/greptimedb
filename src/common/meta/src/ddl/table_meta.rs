@@ -161,7 +161,18 @@ impl TableMetadataAllocator {
         })
     }
 
+    /// Returns the table id allocator.
     pub fn table_id_allocator(&self) -> ResourceIdAllocatorRef {
         self.table_id_allocator.clone()
+    }
+
+    /// Returns the wal options allocator.
+    pub fn wal_options_allocator(&self) -> WalOptionsAllocatorRef {
+        self.wal_options_allocator.clone()
+    }
+
+    /// Returns the region routes allocator.
+    pub fn region_routes_allocator(&self) -> RegionRoutesAllocatorRef {
+        self.region_routes_allocator.clone()
     }
 }

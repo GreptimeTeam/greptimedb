@@ -22,7 +22,7 @@ use snafu::OptionExt;
 use table::metadata::RawTableInfo;
 
 use crate::ddl::alter_table::AlterTableProcedure;
-use crate::error::{InvalidProtoMsgSnafu, Result};
+use crate::error::{self, InvalidProtoMsgSnafu, Result};
 
 impl AlterTableProcedure {
     /// Makes alter kind proto that all regions can reuse.
@@ -112,6 +112,10 @@ fn create_proto_alter_kind(
         Kind::UnsetIndexes(v) => Ok(Some(alter_request::Kind::UnsetIndexes(v.clone()))),
         Kind::DropDefaults(v) => Ok(Some(alter_request::Kind::DropDefaults(v.clone()))),
         Kind::SetDefaults(v) => Ok(Some(alter_request::Kind::SetDefaults(v.clone()))),
+        Kind::Repartition(_) => error::UnexpectedSnafu {
+            err_msg: "Repartition operation should be handled through DdlManager and not converted to AlterTableRequest",
+        }
+        .fail()?,
     }
 }
 

@@ -736,7 +736,14 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to deserialize partition expression: {}", source))]
+    #[snafu(display("Failed to serialize partition expression"))]
+    SerializePartitionExpr {
+        #[snafu(implicit)]
+        location: Location,
+        source: partition::error::Error,
+    },
+
+    #[snafu(display("Failed to deserialize partition expression"))]
     DeserializePartitionExpr {
         #[snafu(source)]
         source: partition::error::Error,
@@ -983,7 +990,8 @@ impl ErrorExt for Error {
             | Error::MissingInsertBody { .. } => StatusCode::Internal,
             Error::ExecuteAdminFunction { .. }
             | Error::EncodeJson { .. }
-            | Error::DeserializePartitionExpr { .. } => StatusCode::Unexpected,
+            | Error::DeserializePartitionExpr { .. }
+            | Error::SerializePartitionExpr { .. } => StatusCode::Unexpected,
             Error::ViewNotFound { .. }
             | Error::ViewInfoNotFound { .. }
             | Error::TableNotFound { .. } => StatusCode::TableNotFound,
