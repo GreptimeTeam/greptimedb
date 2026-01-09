@@ -538,8 +538,8 @@ fn ensure_schema_compatible(from: &SchemaRef, to: &SchemaRef) -> Result<()> {
     if let Some((index, _)) = not_match {
         error::InvalidSchemaSnafu {
             index,
-            table_schema: to.to_string(),
-            file_schema: from.to_string(),
+            table_schema: to.field(index).data_type().to_string(),
+            file_schema: from.field(index).data_type().to_string(),
         }
         .fail()
     } else {

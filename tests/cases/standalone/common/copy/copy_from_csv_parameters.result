@@ -129,7 +129,7 @@ Affected Rows: 0
 
 Copy enable_different_order FROM '${SQLNESS_HOME}/demo/export/csv_header/demo_1.csv' with (format='csv', header='true', continue_on_error='false');
 
-Error: 1004(InvalidArguments), Schema datatypes not match at index 2, expected table schema: Field { name: "host", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "memory", data_type: Float64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "jsons", data_type: Binary, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {"greptime:type": "Json", "ARROW:extension:name": "greptime.json", "ARROW:extension:metadata": "{\"json_structure_settings\":{\"Structured\":null}}"} }, Field { name: "cpu", data_type: Float64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "ts", data_type: Timestamp(Millisecond, None), nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {"greptime:time_index": "true"} }, actual file schema: Field { name: "host", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "cpu", data_type: Float64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "memory", data_type: Float64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "jsons", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "ts", data_type: Timestamp(Second, None), nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }
+Error: 1004(InvalidArguments), Schema datatypes not match at index 2, expected table schema: Binary, actual file schema: Float64
 
 SELECT count(*) FROM enable_different_order;
 
@@ -163,7 +163,7 @@ Affected Rows: 0
 
 Copy different_order FROM '${SQLNESS_HOME}/demo/export/csv_header/demo_1.csv' with (format='csv', header='true', continue_on_error='false');
 
-Error: 1004(InvalidArguments), Schema datatypes not match at index 2, expected table schema: Field { name: "host", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "memory", data_type: Float64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "jsons", data_type: Binary, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {"greptime:type": "Json", "ARROW:extension:name": "greptime.json", "ARROW:extension:metadata": "{\"json_structure_settings\":{\"Structured\":null}}"} }, Field { name: "cpu", data_type: Float64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "ts", data_type: Timestamp(Millisecond, None), nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {"greptime:time_index": "true"} }, actual file schema: Field { name: "host", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "cpu", data_type: Float64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "memory", data_type: Float64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "jsons", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "ts", data_type: Timestamp(Second, None), nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }
+Error: 1004(InvalidArguments), Schema datatypes not match at index 2, expected table schema: Binary, actual file schema: Float64
 
 SELECT count(*) FROM different_order;
 
