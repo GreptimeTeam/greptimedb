@@ -1599,10 +1599,18 @@ impl StreamContext {
         write!(f, "{:?}", InputWrapper { input: &self.input })
     }
 
+    /// Updates dynamic filters in the predicates.
+    /// Should only be called before creating scan streams.
     pub(crate) fn update_predicate_with_dyn_filter(
-        &mut self,
+        self: &mut Arc<Self>,
         filter_exprs: Vec<Arc<dyn datafusion::physical_plan::PhysicalExpr>>,
     ) -> Vec<bool> {
+        let Some(zelf) = Arc::get_mut(self) else {
+            // shouldn't update stream ctx, since there are other references likely in scan streams
+            // which shouldn't happen in current design(should only do update before creating scan streams)
+            warn!("Failed to get mutable reference to stream_ctx when updating dynamic filters");
+            return vec![false; filter_exprs.len()];
+        };
         let mut supported = Vec::with_capacity(filter_exprs.len());
         let filter_expr = filter_exprs
             .into_iter()
@@ -1619,7 +1627,7 @@ impl StreamContext {
             }
             })
             .collect();
-        self.input.predicate.update_dyn_filters(filter_expr);
+        zelf.input.predicate.update_dyn_filters(filter_expr);
         supported
     }
 }
@@ -1711,11 +1719,11 @@ impl PredicateGroup {
     /// Updates dynamic filters in the predicates.
     pub(crate) fn update_dyn_filters(&mut self, dyn_filters: Vec<Arc<DynamicFilterPhysicalExpr>>) {
         if let Some(predicate) = &mut self.predicate_all {
-            *predicate = predicate.clone().with_dyn_filters(dyn_filters.clone());
+            predicate.set_dyn_filters(dyn_filters.clone());
         }
 
         if let Some(predicate) = &mut self.predicate_without_region {
-            *predicate = predicate.clone().with_dyn_filters(dyn_filters.clone());
+            predicate.set_dyn_filters(dyn_filters.clone());
         }
     }
 

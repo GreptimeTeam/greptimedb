@@ -499,13 +499,8 @@ impl RegionScanner for UnorderedScan {
         &mut self,
         filter_exprs: Vec<Arc<dyn datafusion::physical_plan::PhysicalExpr>>,
     ) -> Vec<bool> {
-        let Some(stream_ctx) = Arc::get_mut(&mut self.stream_ctx) else {
-            // shouldn't update stream ctx, since there are other references likely in scan streams
-            // which shouldn't happen in current design
-            warn!("Failed to get mutable reference to stream_ctx when updating dynamic filters");
-            return vec![false; filter_exprs.len()];
-        };
-        stream_ctx.update_predicate_with_dyn_filter(filter_exprs)
+        self.stream_ctx
+            .update_predicate_with_dyn_filter(filter_exprs)
     }
 
     fn set_logical_region(&mut self, logical_region: bool) {

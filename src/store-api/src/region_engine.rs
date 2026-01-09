@@ -453,7 +453,8 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
 
     /// Updates the predicate of the scanner with the given dynamic filter expressions.
     /// Returns a vector of booleans indicating which filter expressions were applied.
-    /// true indicates the filter expression was applied, false otherwise.
+    /// true indicates the filter expression was applied(will be use by scanner to prune by stat for row group),
+    /// false otherwise.
     fn update_predicate_with_dyn_filter(
         &mut self,
         filter_exprs: Vec<Arc<dyn PhysicalExpr>>,
