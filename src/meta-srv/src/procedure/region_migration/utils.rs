@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::time::Duration;
 
@@ -82,13 +82,13 @@ impl RegionMigrationTaskBatch {
     /// Returns the table regions map.
     ///
     /// The key is the table id, the value is the region ids of the table.
-    pub(crate) fn table_regions(&self) -> HashMap<TableId, Vec<RegionId>> {
+    pub(crate) fn table_regions(&self) -> HashMap<TableId, HashSet<RegionId>> {
         let mut table_regions = HashMap::new();
         for region_id in &self.region_ids {
             table_regions
                 .entry(region_id.table_id())
-                .or_insert_with(Vec::new)
-                .push(*region_id);
+                .or_insert_with(HashSet::new)
+                .insert(*region_id);
         }
         table_regions
     }
@@ -105,6 +105,8 @@ pub(crate) struct RegionMigrationAnalysis {
     pub(crate) peer_conflict: Vec<RegionId>,
     /// Regions whose table is not found.
     pub(crate) table_not_found: Vec<RegionId>,
+    /// Regions whose table exists but region route is not found (e.g., removed after repartition).
+    pub(crate) region_not_found: Vec<RegionId>,
     /// Regions still pending migration.
     pub(crate) pending: Vec<RegionId>,
 }
@@ -209,16 +211,21 @@ pub async fn analyze_region_migration_task(
                 err_msg: format!("TableRoute({table_id:?}) is a non-physical TableRouteValue."),
             }
         })?;
-        for region_route in region_routes
-            .iter()
-            .filter(|r| region_ids.contains(&r.region.id))
-        {
-            update_result_with_region_route(
-                &mut result,
-                region_route,
-                task.from_peer.id,
-                task.to_peer.id,
-            )?;
+
+        for region_route in region_routes {
+            if region_ids.contains(&region_route.region.id) {
+                update_result_with_region_route(
+                    &mut result,
+                    region_route,
+                    task.from_peer.id,
+                    task.to_peer.id,
+                )?;
+            } else {
+                // For regions in the task but not present in current table routes,
+                // they might have been removed after repartition. Mark them as region_not_found
+                // so that upper layers can stop retrying failover on them.
+                result.region_not_found.push(region_route.region.id);
+            }
         }
     }
 
@@ -460,6 +467,8 @@ mod tests {
                 RegionId::new(1024, 2),
                 RegionId::new(1024, 3),
                 RegionId::new(1024, 4),
+                // Region of existing table but route removed (e.g., after repartition).
+                RegionId::new(1024, 5),
                 RegionId::new(1025, 1),
             ],
             from_peer: Peer::empty(1),
@@ -477,6 +486,7 @@ mod tests {
                 migrated: vec![RegionId::new(1024, 1)],
                 leader_changed: vec![RegionId::new(1024, 2)],
                 peer_conflict: vec![RegionId::new(1024, 3)],
+                region_not_found: vec![RegionId::new(1024, 5)],
                 table_not_found: vec![RegionId::new(1025, 1)],
             }
         );
