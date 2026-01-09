@@ -113,7 +113,7 @@ fn create_proto_alter_kind(
         Kind::DropDefaults(v) => Ok(Some(alter_request::Kind::DropDefaults(v.clone()))),
         Kind::SetDefaults(v) => Ok(Some(alter_request::Kind::SetDefaults(v.clone()))),
         Kind::Repartition(_) => error::UnexpectedSnafu {
-            err_msg: "Repartition operation is not supported",
+            err_msg: "Repartition operation should be handled through DdlManager and not converted to AlterTableRequest",
         }
         .fail()?,
     }

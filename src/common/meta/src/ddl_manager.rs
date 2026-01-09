@@ -238,6 +238,24 @@ impl DdlManager {
         Ok(())
     }
 
+    /// Submits a repartition procedure for the specified table.
+    ///
+    /// This creates a repartition procedure using the provided `table_id`,
+    /// `table_name`, and `Repartition` configuration, and then either executes it
+    /// to completion or just submits it for asynchronous execution.
+    ///
+    /// The `Repartition` argument contains the original (`from_partition_exprs`)
+    /// and target (`into_partition_exprs`) partition expressions that define how
+    /// the table should be repartitioned.
+    ///
+    /// The `wait` flag controls whether this method waits for the repartition
+    /// procedure to finish:
+    /// - If `wait` is `true`, the procedure is executed and this method awaits
+    ///   its completion, returning both the generated `ProcedureId` and the
+    ///   final `Output` of the procedure.
+    /// - If `wait` is `false`, the procedure is only submitted to the procedure
+    ///   manager for asynchronous execution, and this method returns the
+    ///   `ProcedureId` along with `None` as the output.
     async fn submit_repartition_task(
         &self,
         table_id: TableId,
@@ -277,14 +295,19 @@ impl DdlManager {
         table_id: TableId,
         alter_table_task: AlterTableTask,
     ) -> Result<(ProcedureId, Option<Output>)> {
-        if let Some(Kind::Repartition(repartition)) = alter_table_task.alter_table.kind.as_ref() {
+        // make alter_table_task mutable so we can call .take() on its field
+        let mut alter_table_task = alter_table_task;
+        if let Some(Kind::Repartition(_)) = alter_table_task.alter_table.kind.as_ref()
+            && let Kind::Repartition(repartition) =
+                alter_table_task.alter_table.kind.take().unwrap()
+        {
             let table_name = TableName::new(
                 alter_table_task.alter_table.catalog_name,
                 alter_table_task.alter_table.schema_name,
                 alter_table_task.alter_table.table_name,
             );
             return self
-                .submit_repartition_task(table_id, table_name, repartition.clone())
+                .submit_repartition_task(table_id, table_name, repartition)
                 .await;
         }
 

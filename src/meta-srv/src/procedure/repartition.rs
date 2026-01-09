@@ -129,8 +129,8 @@ impl Context {
             memory_region_keeper: ddl_ctx.memory_region_keeper.clone(),
             node_manager: ddl_ctx.node_manager.clone(),
             leader_region_registry: ddl_ctx.leader_region_registry.clone(),
-            mailbox: mailbox.clone(),
-            server_addr: server_addr.clone(),
+            mailbox,
+            server_addr,
             cache_invalidator: ddl_ctx.cache_invalidator.clone(),
             region_routes_allocator: ddl_ctx.table_metadata_allocator.region_routes_allocator(),
             wal_options_allocator: ddl_ctx.table_metadata_allocator.wal_options_allocator(),
@@ -389,7 +389,7 @@ impl RepartitionProcedureFactory for DefaultRepartitionProcedureFactory {
         from_exprs: Vec<String>,
         to_exprs: Vec<String>,
     ) -> std::result::Result<BoxedProcedure, BoxedError> {
-        let persist_context = PersistentContext::new(table_name, table_id);
+        let persistent_ctx = PersistentContext::new(table_name, table_id);
         let from_exprs = from_exprs
             .iter()
             .map(|e| {
@@ -416,7 +416,7 @@ impl RepartitionProcedureFactory for DefaultRepartitionProcedureFactory {
                 ddl_ctx,
                 self.mailbox.clone(),
                 self.server_addr.clone(),
-                persist_context,
+                persistent_ctx,
             ),
         );
 

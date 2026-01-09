@@ -252,7 +252,7 @@ pub fn alter_expr_to_request(
             AlterKind::SetDefaults { defaults }
         }
         Kind::Repartition(_) => error::UnexpectedSnafu {
-            err_msg: "Repartition operation is not supported",
+            err_msg: "Repartition operation should be handled through DdlManager and not converted to AlterTableRequest",
         }
         .fail()?,
     };

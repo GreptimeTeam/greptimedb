@@ -51,6 +51,12 @@ pub fn build_procedure_manager(
     ))
 }
 
+/// No-op implementation of [`RepartitionProcedureFactory`] for standalone mode.
+///
+/// In standalone deployments, repartition operations are not supported, so
+/// this factory always returns a `NoSupportRepartitionProcedure` error
+/// from [`RepartitionProcedureFactory::create`] and performs no registration
+/// work in [`RepartitionProcedureFactory::register_loaders`].
 pub struct StandaloneRepartitionProcedureFactory;
 
 impl RepartitionProcedureFactory for StandaloneRepartitionProcedureFactory {
