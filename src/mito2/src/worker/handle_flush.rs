@@ -299,31 +299,31 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             .await;
         }
 
-        // Handle pending requests for the region.
-        if let Some((mut ddl_requests, mut write_requests, mut bulk_writes)) =
-            self.flush_scheduler.on_flush_success(region_id)
-        {
-            // Perform DDLs first because they require empty memtables.
-            self.handle_ddl_requests(&mut ddl_requests).await;
-            // Handle pending write requests, we don't stall these requests.
-            self.handle_write_requests(&mut write_requests, &mut bulk_writes, false)
-                .await;
-        }
-
-        // Maybe flush worker again.
-        self.maybe_flush_worker();
-
-        // Handle stalled requests.
-        self.handle_stalled_requests().await;
-
-        // Schedules compaction.
-        self.schedule_compaction(&region).await;
-
-        self.listener.on_flush_success(region_id);
         if flush_on_close {
+            // Remove region from server for flush on closing,
+            // no need to handle requests and schedule compactions.
             self.remove_region(region_id).await;
             info!("Region {} closed after flush", region_id);
+        } else {
+            // Handle pending requests for the region.
+            if let Some((mut ddl_requests, mut write_requests, mut bulk_writes)) =
+                self.flush_scheduler.on_flush_success(region_id)
+            {
+                // Perform DDLs first because they require empty memtables.
+                self.handle_ddl_requests(&mut ddl_requests).await;
+                // Handle pending write requests, we don't stall these requests.
+                self.handle_write_requests(&mut write_requests, &mut bulk_writes, false)
+                    .await;
+            }
+            // Maybe flush worker again.
+            self.maybe_flush_worker();
+            // Handle stalled requests.
+            self.handle_stalled_requests().await;
+            // Schedules compaction.
+            self.schedule_compaction(&region).await;
         }
+
+        self.listener.on_flush_success(region_id);
     }
 
     /// Updates the latest entry id since flush of the region.
