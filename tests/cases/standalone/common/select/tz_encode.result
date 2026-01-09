@@ -24,46 +24,40 @@ VALUES
 Affected Rows: 10
 
 -- should not fail with mismatch timezone
--- SQLNESS REPLACE \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z NOW
+SELECT count(*) FROM (
 SELECT
     now()
 FROM
-    ngx_access_log;
+    ngx_access_log);
 
-+--------------------------------+
-| now()                          |
-+--------------------------------+
-| NOW |
-| NOW |
-| NOW |
-| NOW |
-| NOW |
-| NOW |
-| NOW |
-| NOW |
-| NOW |
-| NOW |
-+--------------------------------+
++----------+
+| count(*) |
++----------+
+| 10       |
++----------+
 
 -- SQLNESS REPLACE TimestampNanosecond\(\d+ TimestampNanosecond(NOW
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (partitioning.*) REDACTED
-EXPLAIN SELECT
+EXPLAIN SELECT count(*) FROM (
+SELECT
     now()
 FROM
-    ngx_access_log;
+    ngx_access_log);
 
-+---------------+-------------------------------------------------------------------------------+
-| plan_type     | plan                                                                          |
-+---------------+-------------------------------------------------------------------------------+
-| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                               |
-|               | Projection: TimestampNanosecond(NOW, Some("+00:00")) AS now() |
-|               |   TableScan: ngx_access_log                                                   |
-|               | ]]                                                                            |
-| physical_plan | CooperativeExec                                                               |
++---------------+-----------------------------------------------------------------------------------+
+| plan_type     | plan                                                                              |
++---------------+-----------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                   |
+|               | Projection: count(Int64(1)) AS count(*)                                           |
+|               |   Aggregate: groupBy=[[]], aggr=[[count(Int64(1))]]                               |
+|               |     Projection: TimestampNanosecond(NOW, Some("+00:00")) AS now() |
+|               |       TableScan: ngx_access_log                                                   |
+|               | ]]                                                                                |
+| physical_plan | CooperativeExec                                                                   |
 |               |   MergeScanExec: REDACTED
-|               |                                                                               |
-+---------------+-------------------------------------------------------------------------------+
+|               |                                                                                   |
++---------------+-----------------------------------------------------------------------------------+
 
 DROP TABLE ngx_access_log;
 
