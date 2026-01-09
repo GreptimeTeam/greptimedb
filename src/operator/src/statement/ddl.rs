@@ -1411,23 +1411,22 @@ impl StatementExecutor {
         .context(InvalidPartitionSnafu)?;
 
         info!(
-            "Repartition table {} (table_id={}) from {:?} to {:?}, new partition count: {}",
+            "Submitting repartition task for table {} (table_id={}), from {} to {} partitions",
             table_ref,
             table_id,
-            from_partition_exprs,
-            into_partition_exprs,
+            from_partition_exprs.len(),
             new_partition_exprs_len
         );
 
-        let from_partition_exprs_json = from_partition_exprs
-            .iter()
-            .map(|expr| expr.as_json_str().context(SerializePartitionExprSnafu))
-            .collect::<Result<Vec<_>>>()?;
-        let into_partition_exprs_json = into_partition_exprs
-            .iter()
-            .map(|expr| expr.as_json_str().context(SerializePartitionExprSnafu))
-            .collect::<Result<Vec<_>>>()?;
-
+        let serialize_exprs = |exprs: Vec<PartitionExpr>| -> Result<Vec<String>> {
+            let mut json_exprs = Vec::with_capacity(exprs.len());
+            for expr in exprs {
+                json_exprs.push(expr.as_json_str().context(SerializePartitionExprSnafu)?);
+            }
+            Ok(json_exprs)
+        };
+        let from_partition_exprs_json = serialize_exprs(from_partition_exprs)?;
+        let into_partition_exprs_json = serialize_exprs(into_partition_exprs)?;
         let req = SubmitDdlTaskRequest {
             query_context: query_context.clone(),
             task: DdlTask::new_alter_table(AlterTableExpr {
@@ -1437,6 +1436,7 @@ impl StatementExecutor {
                 kind: Some(Kind::Repartition(Repartition {
                     from_partition_exprs: from_partition_exprs_json,
                     into_partition_exprs: into_partition_exprs_json,
+                    // TODO(weny): allow passing 'wait' from SQL options or QueryContext
                     wait: true,
                 })),
             }),
