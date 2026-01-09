@@ -329,8 +329,8 @@ mod tests {
                 schema_infer_max_record: Some(2000),
                 delimiter: b'\t',
                 has_header: false,
-                continue_on_error: true,
-                header: false,
+                continue_on_error: false,
+                header: true,
                 timestamp_format: None,
                 time_format: None,
                 date_format: None
