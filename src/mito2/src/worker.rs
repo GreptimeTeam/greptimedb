@@ -1069,14 +1069,17 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         .await;
                     continue;
                 }
-                DdlRequest::Close(_) => self.handle_close_request(ddl.region_id).await,
+                DdlRequest::Close(_) => {
+                    self.handle_close_request(ddl.region_id, ddl.sender).await;
+                    continue;
+                }
                 DdlRequest::Alter(req) => {
                     self.handle_alter_request(ddl.region_id, req, ddl.sender)
                         .await;
                     continue;
                 }
                 DdlRequest::Flush(req) => {
-                    self.handle_flush_request(ddl.region_id, req, ddl.sender);
+                    self.handle_flush_request(ddl.region_id, req, None, ddl.sender);
                     continue;
                 }
                 DdlRequest::Compact(req) => {

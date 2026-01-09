@@ -1199,9 +1199,9 @@ impl RegionMap {
     }
 
     /// Remove region by id.
-    pub(crate) fn remove_region(&self, region_id: RegionId) {
+    pub(crate) fn remove_region(&self, region_id: RegionId) -> Option<MitoRegionRef> {
         let mut regions = self.regions.write().unwrap();
-        regions.remove(&region_id);
+        regions.remove(&region_id)
     }
 
     /// List all regions.
