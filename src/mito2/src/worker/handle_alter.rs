@@ -240,9 +240,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         current_options.wal_options = WalOptions::Noop;
                     } else {
                         // Enable WAL: restore to default (RaftEngine)
-                        // Note: In distributed mode, this should be allocated by metasrv,
+                        // TODO: In distributed mode, this should be allocated by metasrv,
                         // but for simplicity, we use RaftEngine as default here.
                         // The actual WAL options will be persisted in metasrv.
+                        // We should read the correct WAL options from DatanodeTableValue
+                        // or pass them through the AlterRegionRequest.
                         current_options.wal_options = WalOptions::RaftEngine;
                     }
                 }
