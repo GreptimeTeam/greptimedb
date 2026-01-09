@@ -267,8 +267,6 @@ impl PrefixedS3Connection {
             name: "S3",
             required: [
                 (&self.s3_bucket, "bucket"),
-                (&self.s3_access_key_id, "access key ID"),
-                (&self.s3_secret_access_key, "secret access key"),
                 (&self.s3_region, "region"),
             ]
         )

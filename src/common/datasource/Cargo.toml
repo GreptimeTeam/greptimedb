@@ -42,7 +42,7 @@ snafu.workspace = true
 strum.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
-url = "2.3"
+url.workspace = true
 
 [dev-dependencies]
 common-test-util.workspace = true
