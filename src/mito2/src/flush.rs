@@ -219,6 +219,7 @@ pub enum FlushReason {
     Downgrading,
     /// Enter staging mode.
     EnterStaging,
+    /// Flush when region is closing.
     Closing,
 }
 

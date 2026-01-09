@@ -22,9 +22,18 @@ use crate::config::MitoConfig;
 use crate::test_util::{CreateRequestBuilder, TestEnv, build_rows, put_rows, rows_schema};
 
 #[tokio::test]
-async fn test_close_region_skip_wal() {
+async fn test_close_region_skip_wal_with_pending_data() {
+    test_close_region_skip_wal(true).await;
+}
+
+#[tokio::test]
+async fn test_close_region_skip_wal_without_pending_data() {
+    test_close_region_skip_wal(false).await;
+}
+
+async fn test_close_region_skip_wal(insert: bool) {
     common_telemetry::init_default_ut_logging();
-    let mut env = TestEnv::with_prefix("close-skip-wal").await;
+    let mut env = TestEnv::with_prefix(&format!("close-skip-wal-{}", insert)).await;
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
@@ -42,16 +51,22 @@ async fn test_close_region_skip_wal() {
         .await
         .unwrap();
 
-    let column_schemas = rows_schema(&request);
-    let rows = Rows {
-        schema: column_schemas.clone(),
-        rows: build_rows(0, 3),
-    };
-    put_rows(&engine, region_id, rows).await;
+    if insert {
+        let column_schemas = rows_schema(&request);
+        let rows = Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows(0, 3),
+        };
+        put_rows(&engine, region_id, rows).await;
+    }
 
     // The region should have data in memtable.
     let region = engine.get_region(region_id).unwrap();
-    assert!(!region.version().memtables.is_empty());
+    if insert {
+        assert!(!region.version().memtables.is_empty());
+    } else {
+        assert!(region.version().memtables.is_empty());
+    }
 
     // Close the region. This should trigger a flush.
     engine
@@ -74,7 +89,6 @@ async fn test_close_region_skip_wal() {
         )
         .await
         .unwrap();
-
     let scan_request = ScanRequest::default();
     let stream = engine
         .scan_to_stream(region_id, scan_request)
@@ -85,5 +99,9 @@ async fn test_close_region_skip_wal() {
         .unwrap();
     // If flush was triggered, data should be there even though WAL was skipped.
     let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-    assert_eq!(3, total_rows);
+    if insert {
+        assert_eq!(3, total_rows);
+    } else {
+        assert_eq!(0, total_rows);
+    }
 }
