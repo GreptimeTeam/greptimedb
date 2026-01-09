@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["allocate_region","collect","deallocate_region","dispatch","group","plan","repartition_end","repartition_start","utils"],"struct":["Context","DefaultRepartitionProcedureFactory","PersistentContext","RepartitionData","RepartitionDataOwned","RepartitionProcedure"],"trait":["State"]};

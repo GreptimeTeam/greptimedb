@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["is_partition_column"],"struct":["DensePrimaryKeyFilter","PrimaryKeyFilterInner","SparsePrimaryKeyFilter"]};

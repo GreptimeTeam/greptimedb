@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["State"],"fn":["become_follower","become_leader"],"struct":["FollowerState","LeaderState"],"type":["StateRef"]};

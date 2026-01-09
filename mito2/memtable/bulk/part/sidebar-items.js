@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["INIT_DICT_VALUE_CAPACITY"],"enum":["PrimaryKeyColumnBuilder"],"fn":["convert_bulk_part","new_primary_key_column_builders","record_batch_estimated_size","sort_primary_key_record_batch"],"struct":["BulkPart","BulkPartConverter","BulkPartEncodeMetrics","BulkPartEncoder","BulkPartMeta","EncodedBulkPart","UnorderedPart"]};

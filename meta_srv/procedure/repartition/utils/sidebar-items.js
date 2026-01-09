@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["get_datanode_table_value"]};
