@@ -17,8 +17,8 @@ use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
-use datafusion::arrow::datatypes::DataType;
-use datafusion::logical_expr::ColumnarValue;
+use datafusion::arrow::datatypes::{DataType, Field};
+use datafusion::logical_expr::{ColumnarValue, ReturnFieldArgs};
 use datafusion_common::DataFusionError;
 use datafusion_common::arrow::array::ArrayRef;
 use datafusion_common::config::{ConfigEntry, ConfigExtension, ExtensionOptions};
@@ -115,6 +115,23 @@ pub trait Function: fmt::Display + Sync + Send {
 
     fn aliases(&self) -> &[String] {
         &[]
+    }
+
+    /// Returns the return field for this function given the input fields.
+    ///
+    /// Default implementation extracts data types from input fields and calls
+    /// [`Function::return_type`], creating a generic field with the returned type.
+    fn return_field_from_args(
+        &self,
+        args: ReturnFieldArgs<'_>,
+    ) -> datafusion_common::Result<Arc<Field>> {
+        let input_types = args
+            .arg_fields
+            .iter()
+            .map(|f| f.data_type().clone())
+            .collect::<Vec<_>>();
+        let return_type = self.return_type(&input_types)?;
+        Ok(Arc::new(Field::new(self.name(), return_type, true)))
     }
 }
 

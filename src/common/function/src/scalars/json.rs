@@ -27,6 +27,7 @@ use json_to_string::JsonToStringFunction;
 use parse_json::ParseJsonFunction;
 
 use crate::function_registry::FunctionRegistry;
+use crate::scalars::json::json_get::JsonGetWithType;
 
 pub(crate) struct JsonFunction;
 
@@ -40,6 +41,7 @@ impl JsonFunction {
         registry.register_scalar(JsonGetString::default());
         registry.register_scalar(JsonGetBool::default());
         registry.register_scalar(JsonGetObject::default());
+        registry.register_scalar(JsonGetWithType::default());
 
         registry.register_scalar(JsonIsNull::default());
         registry.register_scalar(JsonIsInt::default());
