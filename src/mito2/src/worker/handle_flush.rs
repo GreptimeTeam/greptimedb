@@ -321,17 +321,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         self.listener.on_flush_success(region_id);
         if flush_on_close {
-            // For flush on close, we need to remove region from region server.
-            region.stop().await;
-            self.regions.remove_region(region_id);
-            // Clean flush status.
-            self.flush_scheduler.on_region_closed(region_id);
-            // Clean compaction status.
-            self.compaction_scheduler.on_region_closed(region_id);
-            // clean index build status.
-            self.index_build_scheduler.on_region_closed(region_id).await;
-            info!("Region {} closed, worker: {}", region_id, self.id);
-            self.region_count.dec();
+            self.remove_region(region_id).await;
+            info!("Region {} closed after flush", region_id);
         }
     }
 

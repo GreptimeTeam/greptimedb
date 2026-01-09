@@ -47,6 +47,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 .memtables
                 .is_empty()
         {
+            info!("Region {} has pending data, waiting for flush", region_id);
             self.handle_flush_request(
                 region_id,
                 RegionFlushRequest {
@@ -59,16 +60,23 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
 
         // WAL configured or memtable is empty, flush is not necessary.
+        self.remove_region(region_id).await;
+        info!("Region {} closed, worker: {}", region_id, self.id);
+        sender.send(Ok(0))
+    }
+
+    /// Remove a region and stop all related tasks.
+    pub(crate) async fn remove_region(&mut self, region_id: RegionId) {
+        let Some(region) = self.regions.remove_region(region_id) else {
+            return;
+        };
         region.stop().await;
-        self.regions.remove_region(region_id);
         // Clean flush status.
         self.flush_scheduler.on_region_closed(region_id);
         // Clean compaction status.
         self.compaction_scheduler.on_region_closed(region_id);
         // clean index build status.
         self.index_build_scheduler.on_region_closed(region_id).await;
-        info!("Region {} closed, worker: {}", region_id, self.id);
         self.region_count.dec();
-        sender.send(Ok(0))
     }
 }
