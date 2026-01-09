@@ -20,6 +20,7 @@ use std::sync::Arc;
 use common_base::readable_size::ReadableSize;
 use common_telemetry::info;
 use common_telemetry::tracing::warn;
+use common_wal::options::WalOptions;
 use humantime_serde::re::humantime;
 use snafu::{ResultExt, ensure};
 use store_api::logstore::LogStore;
@@ -229,6 +230,24 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         );
                     }
                 }
+                SetRegionOption::SkipWal(skip_wal) => {
+                    info!(
+                        "Update region skip_wal: {}, previous: {:?} new: {}",
+                        region.region_id, current_options.wal_options, skip_wal
+                    );
+                    if skip_wal {
+                        // Disable WAL by setting to Noop
+                        current_options.wal_options = WalOptions::Noop;
+                    } else {
+                        // Enable WAL: restore to default (RaftEngine)
+                        // TODO: In distributed mode, this should be allocated by metasrv,
+                        // but for simplicity, we use RaftEngine as default here.
+                        // The actual WAL options will be persisted in metasrv.
+                        // We should read the correct WAL options from DatanodeTableValue
+                        // or pass them through the AlterRegionRequest.
+                        current_options.wal_options = WalOptions::RaftEngine;
+                    }
+                }
             }
         }
         region.version_control.alter_options(current_options);
@@ -263,6 +282,13 @@ fn new_region_options_on_empty_memtable(
                 assert_eq!(FormatType::Flat, new_format);
 
                 current_options.sst_format = Some(new_format);
+            }
+            SetRegionOption::SkipWal(skip_wal) => {
+                if *skip_wal {
+                    current_options.wal_options = WalOptions::Noop;
+                } else {
+                    current_options.wal_options = WalOptions::RaftEngine;
+                }
             }
         }
     }
