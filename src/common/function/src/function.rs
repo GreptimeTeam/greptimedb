@@ -124,7 +124,7 @@ pub trait Function: fmt::Display + Sync + Send {
     fn return_field_from_args(
         &self,
         args: ReturnFieldArgs<'_>,
-    ) -> Result<Arc<Field>, DataFusionError> {
+    ) -> datafusion_common::Result<Arc<Field>> {
         let input_types = args
             .arg_fields
             .iter()

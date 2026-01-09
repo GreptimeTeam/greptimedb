@@ -19,16 +19,18 @@ use std::sync::Arc;
 use arrow::array::{ArrayRef, BinaryViewArray, StringViewArray, StructArray};
 use arrow::compute;
 use arrow::datatypes::{Float64Type, Int64Type, UInt64Type};
+use arrow_schema::Field;
 use datafusion_common::arrow::array::{
     Array, AsArray, BinaryViewBuilder, BooleanBuilder, Float64Builder, Int64Builder,
     StringViewBuilder,
 };
 use datafusion_common::arrow::datatypes::DataType;
-use datafusion_common::{DataFusionError, Result};
+use datafusion_common::{DataFusionError, Result, ScalarValue};
 use datafusion_expr::type_coercion::aggregates::STRINGS;
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
 use datatypes::arrow_array::{int_array_value_at_index, string_array_value_at_index};
 use datatypes::json::JsonStructureSettings;
+use derive_more::Display;
 use jsonpath_rust::JsonPath;
 use serde_json::Value;
 
@@ -211,6 +213,40 @@ impl Default for JsonGet {
     }
 }
 
+struct StringResultBuilder(StringViewBuilder);
+
+impl JsonGetResultBuilder for StringResultBuilder {
+    fn append_value(&mut self, value: JsonResultValue<'_>) -> Result<()> {
+        match value {
+            JsonResultValue::Jsonb(value) => self.0.append_option(jsonb::to_str(&value).ok()),
+            JsonResultValue::JsonStructByColumn(column, i) => {
+                if let Some(v) = string_array_value_at_index(column, i) {
+                    self.0.append_value(v);
+                } else {
+                    self.0
+                        .append_value(arrow_cast::display::array_value_to_string(column, i)?);
+                }
+            }
+            JsonResultValue::JsonStructByValue(value) => {
+                if let Some(s) = value.as_str() {
+                    self.0.append_value(s)
+                } else {
+                    self.0.append_value(value.to_string())
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn append_null(&mut self) {
+        self.0.append_null();
+    }
+
+    fn build(&mut self) -> ArrayRef {
+        Arc::new(self.0.finish())
+    }
+}
+
 #[derive(Default)]
 pub struct JsonGetString(JsonGet);
 
@@ -232,47 +268,32 @@ impl Function for JsonGetString {
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
-        struct StringResultBuilder(StringViewBuilder);
-
-        impl JsonGetResultBuilder for StringResultBuilder {
-            fn append_value(&mut self, value: JsonResultValue<'_>) -> Result<()> {
-                match value {
-                    JsonResultValue::Jsonb(value) => {
-                        self.0.append_option(jsonb::to_str(&value).ok())
-                    }
-                    JsonResultValue::JsonStructByColumn(column, i) => {
-                        if let Some(v) = string_array_value_at_index(column, i) {
-                            self.0.append_value(v);
-                        } else {
-                            self.0
-                                .append_value(arrow_cast::display::array_value_to_string(
-                                    column, i,
-                                )?);
-                        }
-                    }
-                    JsonResultValue::JsonStructByValue(value) => {
-                        if let Some(s) = value.as_str() {
-                            self.0.append_value(s)
-                        } else {
-                            self.0.append_value(value.to_string())
-                        }
-                    }
-                }
-                Ok(())
-            }
-
-            fn append_null(&mut self) {
-                self.0.append_null();
-            }
-
-            fn build(&mut self) -> ArrayRef {
-                Arc::new(self.0.finish())
-            }
-        }
-
         self.0.invoke(args, |len: usize| {
             StringResultBuilder(StringViewBuilder::with_capacity(len))
         })
+    }
+}
+
+struct IntResultBuilder(Int64Builder);
+
+impl JsonGetResultBuilder for IntResultBuilder {
+    fn append_value(&mut self, value: JsonResultValue<'_>) -> Result<()> {
+        match value {
+            JsonResultValue::Jsonb(value) => self.0.append_option(jsonb::to_i64(&value).ok()),
+            JsonResultValue::JsonStructByColumn(column, i) => {
+                self.0.append_option(int_array_value_at_index(column, i))
+            }
+            JsonResultValue::JsonStructByValue(value) => self.0.append_option(value.as_i64()),
+        }
+        Ok(())
+    }
+
+    fn append_null(&mut self) {
+        self.0.append_null();
+    }
+
+    fn build(&mut self) -> ArrayRef {
+        Arc::new(self.0.finish())
     }
 }
 
@@ -297,33 +318,6 @@ impl Function for JsonGetInt {
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
-        struct IntResultBuilder(Int64Builder);
-
-        impl JsonGetResultBuilder for IntResultBuilder {
-            fn append_value(&mut self, value: JsonResultValue<'_>) -> Result<()> {
-                match value {
-                    JsonResultValue::Jsonb(value) => {
-                        self.0.append_option(jsonb::to_i64(&value).ok())
-                    }
-                    JsonResultValue::JsonStructByColumn(column, i) => {
-                        self.0.append_option(int_array_value_at_index(column, i))
-                    }
-                    JsonResultValue::JsonStructByValue(value) => {
-                        self.0.append_option(value.as_i64())
-                    }
-                }
-                Ok(())
-            }
-
-            fn append_null(&mut self) {
-                self.0.append_null();
-            }
-
-            fn build(&mut self) -> ArrayRef {
-                Arc::new(self.0.finish())
-            }
-        }
-
         self.0.invoke(args, |len: usize| {
             IntResultBuilder(Int64Builder::with_capacity(len))
         })
@@ -339,7 +333,7 @@ impl Display for JsonGetInt {
 fn jsonb_get(
     jsons: &BinaryViewArray,
     paths: &StringViewArray,
-    builder: &mut impl JsonGetResultBuilder,
+    builder: &mut dyn JsonGetResultBuilder,
 ) -> Result<()> {
     let size = jsons.len();
     for i in 0..size {
@@ -361,7 +355,7 @@ fn jsonb_get(
 fn json_struct_get(
     jsons: &StructArray,
     paths: &StringViewArray,
-    builder: &mut impl JsonGetResultBuilder,
+    builder: &mut dyn JsonGetResultBuilder,
 ) -> Result<()> {
     let size = jsons.len();
     for i in 0..size {
@@ -498,6 +492,107 @@ fn json_struct_to_value(raw: &str, jsons: &StructArray, i: usize) -> Result<Valu
 impl Display for JsonGetString {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", Self::NAME.to_ascii_uppercase())
+    }
+}
+
+#[derive(Debug, Display)]
+#[display("{}", Self::NAME.to_ascii_uppercase())]
+pub(super) struct JsonGetWithType {
+    signature: Signature,
+}
+
+impl JsonGetWithType {
+    const NAME: &'static str = "json_get";
+}
+
+impl Default for JsonGetWithType {
+    fn default() -> Self {
+        Self {
+            signature: Signature::any(3, Volatility::Immutable),
+        }
+    }
+}
+
+impl Function for JsonGetWithType {
+    fn name(&self) -> &str {
+        Self::NAME
+    }
+
+    fn return_type(&self, _input_types: &[DataType]) -> datafusion_common::Result<DataType> {
+        Err(DataFusionError::Internal(
+            "This method isn't meant to be called".to_string(),
+        ))
+    }
+
+    fn return_field_from_args(
+        &self,
+        args: datafusion_expr::ReturnFieldArgs<'_>,
+    ) -> datafusion_common::Result<Arc<Field>> {
+        match args.scalar_arguments[2] {
+            Some(ScalarValue::Utf8(Some(type_str)))
+            | Some(ScalarValue::Utf8View(Some(type_str)))
+            | Some(ScalarValue::LargeUtf8(Some(type_str))) => {
+                let type_str = type_str.to_ascii_lowercase();
+                match type_str.as_str() {
+                    "bool" => Ok(Arc::new(Field::new(self.name(), DataType::Boolean, true))),
+                    "int" => Ok(Arc::new(Field::new(self.name(), DataType::Int64, true))),
+                    "float" => Ok(Arc::new(Field::new(self.name(), DataType::Float64, true))),
+                    "string" => Ok(Arc::new(Field::new(self.name(), DataType::Utf8, true))),
+                    _ => Err(DataFusionError::Internal(format!(
+                        "Unsupported type: {}",
+                        type_str
+                    ))),
+                }
+            }
+            _ => Err(DataFusionError::Internal(
+                "Invalid argument provided for type".to_string(),
+            )),
+        }
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let [arg0, arg1, _] = extract_args("JSON_GET", &args)?;
+        let len = arg0.len();
+
+        let arg1 = compute::cast(&arg1, &DataType::Utf8View)?;
+        let paths = arg1.as_string_view();
+
+        let mut builder: Box<dyn JsonGetResultBuilder> = match args.return_field.data_type() {
+            DataType::Utf8 => Box::new(StringResultBuilder(StringViewBuilder::with_capacity(len))),
+            DataType::Int64 => Box::new(IntResultBuilder(Int64Builder::with_capacity(len))),
+            _ => {
+                return Err(DataFusionError::Internal(
+                    "Unsupported return type".to_string(),
+                ));
+            }
+        };
+
+        match arg0.data_type() {
+            DataType::Binary | DataType::LargeBinary | DataType::BinaryView => {
+                let arg0 = compute::cast(&arg0, &DataType::BinaryView)?;
+                let jsons = arg0.as_binary_view();
+                jsonb_get(jsons, paths, builder.as_mut())?;
+            }
+            DataType::Struct(_) => {
+                let jsons = arg0.as_struct();
+                json_struct_get(jsons, paths, builder.as_mut())?;
+            }
+            _ => {
+                return Err(DataFusionError::Execution(format!(
+                    "JSON_GET not supported argument type {}",
+                    arg0.data_type(),
+                )));
+            }
+        };
+
+        Ok(ColumnarValue::Array(builder.build()))
     }
 }
 
