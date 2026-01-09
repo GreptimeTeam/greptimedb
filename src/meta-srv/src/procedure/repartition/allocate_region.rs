@@ -119,7 +119,7 @@ impl State for AllocateRegion {
         let _guard = procedure_ctx.provider.acquire_lock(&table_lock).await;
         let new_region_routes =
             Self::generate_region_routes(region_routes, &new_allocated_region_routes);
-        ctx.update_table_route(&table_route_value, new_region_routes)
+        ctx.update_table_route(&table_route_value, new_region_routes, wal_options)
             .await?;
         ctx.invalidate_table_cache().await?;
 

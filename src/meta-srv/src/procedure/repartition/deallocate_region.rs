@@ -98,7 +98,7 @@ impl State for DeallocateRegion {
         let region_routes = table_route_value.region_routes().unwrap();
         let new_region_routes =
             Self::generate_region_routes(region_routes, &pending_deallocate_region_ids);
-        ctx.update_table_route(&table_route_value, new_region_routes)
+        ctx.update_table_route(&table_route_value, new_region_routes, HashMap::new())
             .await?;
         ctx.invalidate_table_cache().await?;
 
