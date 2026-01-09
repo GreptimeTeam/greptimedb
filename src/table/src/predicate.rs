@@ -82,6 +82,10 @@ impl Predicate {
         }
     }
 
+    pub fn set_dyn_filters(&mut self, dyn_filters: Vec<Arc<DynamicFilterPhysicalExpr>>) {
+        self.dyn_filters = dyn_filters;
+    }
+
     /// Returns the logical exprs.
     pub fn exprs(&self) -> &[Expr] {
         &self.exprs
