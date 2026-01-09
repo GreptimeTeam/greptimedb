@@ -62,9 +62,10 @@ impl State for DeallocateRegion {
             .flat_map(|p| p.pending_deallocate_region_ids.iter())
             .cloned()
             .collect::<HashSet<_>>();
+        let dealloc_count = pending_deallocate_region_ids.len();
         info!(
-            "Deallocating regions: {:?} for table: {} during repartition procedure",
-            pending_deallocate_region_ids, table_id
+            "Deallocating regions for repartition, table_id: {}, count: {}, regions: {:?}",
+            table_id, dealloc_count, pending_deallocate_region_ids
         );
 
         let table_lock = TableLock::Write(table_id).into();
@@ -111,7 +112,6 @@ impl State for DeallocateRegion {
 }
 
 impl DeallocateRegion {
-    #[allow(dead_code)]
     async fn deallocate_regions(
         node_manager: &NodeManagerRef,
         leader_region_registry: &LeaderRegionRegistryRef,
@@ -136,7 +136,6 @@ impl DeallocateRegion {
         Ok(())
     }
 
-    #[allow(dead_code)]
     fn filter_deallocatable_region_routes(
         table_id: TableId,
         region_routes: &[RegionRoute],
@@ -161,7 +160,6 @@ impl DeallocateRegion {
             .collect::<Vec<_>>()
     }
 
-    #[allow(dead_code)]
     fn generate_region_routes(
         region_routes: &[RegionRoute],
         pending_deallocate_region_ids: &HashSet<RegionId>,

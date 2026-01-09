@@ -69,6 +69,17 @@ impl State for RepartitionStart {
         );
 
         let plans = Self::build_plan(&table_route, &self.from_exprs, &self.to_exprs)?;
+        let plan_count = plans.len();
+        let total_source_regions: usize = plans.iter().map(|p| p.source_regions.len()).sum();
+        let total_target_regions: usize =
+            plans.iter().map(|p| p.target_partition_exprs.len()).sum();
+        common_telemetry::info!(
+            "Repartition start, table_id: {}, plans: {}, total_source_regions: {}, total_target_regions: {}",
+            table_id,
+            plan_count,
+            total_source_regions,
+            total_target_regions
+        );
 
         if plans.is_empty() {
             return Ok((Box::new(RepartitionEnd), Status::done()));
@@ -86,7 +97,6 @@ impl State for RepartitionStart {
 }
 
 impl RepartitionStart {
-    #[allow(dead_code)]
     fn build_plan(
         physical_route: &PhysicalTableRouteValue,
         from_exprs: &[PartitionExpr],
@@ -106,7 +116,6 @@ impl RepartitionStart {
         ))
     }
 
-    #[allow(dead_code)]
     fn build_plan_entries(
         subtasks: Vec<RepartitionSubtask>,
         source_index: &[RegionDescriptor],

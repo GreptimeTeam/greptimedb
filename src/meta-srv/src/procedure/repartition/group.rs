@@ -56,7 +56,6 @@ use crate::service::mailbox::MailboxRef;
 
 pub type GroupId = Uuid;
 
-#[allow(dead_code)]
 pub struct RepartitionGroupProcedure {
     state: Box<dyn State>,
     context: Context,
@@ -114,6 +113,14 @@ impl Procedure for RepartitionGroupProcedure {
 
     async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
         let state = &mut self.state;
+        let state_name = state.name();
+        // Log state transition
+        common_telemetry::info!(
+            "Repartition group procedure executing state: {}, group id: {}, table id: {}",
+            state_name,
+            self.context.persistent_ctx.group_id,
+            self.context.persistent_ctx.table_id
+        );
 
         match state.next(&mut self.context, _ctx).await {
             Ok((next, status)) => {

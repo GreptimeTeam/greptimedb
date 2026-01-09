@@ -65,6 +65,13 @@ impl State for RemapManifest {
         .await?;
         let table_id = ctx.persistent_ctx.table_id;
         let group_id = ctx.persistent_ctx.group_id;
+        let manifest_count = manifest_paths.len();
+        let input_region_count = ctx.persistent_ctx.sources.len();
+        let target_region_count = ctx.persistent_ctx.targets.len();
+        info!(
+            "Remap manifests finished for repartition, table_id: {}, group_id: {}, input_regions: {}, target_regions: {}, manifest_paths: {}",
+            table_id, group_id, input_region_count, target_region_count, manifest_count
+        );
 
         if manifest_paths.len() != ctx.persistent_ctx.targets.len() {
             warn!(
@@ -156,11 +163,7 @@ impl RemapManifest {
         match receiver.await {
             Ok(msg) => {
                 let reply = HeartbeatMailbox::json_reply(&msg)?;
-                info!(
-                    "Received remap manifest reply: {:?}, elapsed: {:?}",
-                    reply,
-                    now.elapsed()
-                );
+                let elapsed = now.elapsed();
                 let InstructionReply::RemapManifest(reply) = reply else {
                     return error::UnexpectedInstructionReplySnafu {
                         mailbox_message: msg.to_string(),
@@ -168,6 +171,11 @@ impl RemapManifest {
                     }
                     .fail();
                 };
+                let manifest_count = reply.manifest_paths.len();
+                info!(
+                    "Received remap manifest reply for central_region: {}, manifest_paths: {}, elapsed: {:?}",
+                    remap.region_id, manifest_count, elapsed
+                );
 
                 Self::handle_remap_manifest_reply(remap.region_id, reply, &now, peer)
             }

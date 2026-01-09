@@ -56,7 +56,6 @@ impl RepartitionStart {
     /// Ensures that both source and target regions are present in the region routes.
     ///
     /// Both source and target regions must be present in the region routes (target regions should be allocated before repartitioning).
-    #[allow(dead_code)]
     fn ensure_route_present(
         group_id: GroupId,
         region_routes: &[RegionRoute],

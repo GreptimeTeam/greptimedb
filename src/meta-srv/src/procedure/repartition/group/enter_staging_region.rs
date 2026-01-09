@@ -117,7 +117,6 @@ impl EnterStagingRegion {
         Ok(instructions)
     }
 
-    #[allow(dead_code)]
     async fn enter_staging_regions(&self, ctx: &mut Context) -> Result<()> {
         let table_id = ctx.persistent_ctx.table_id;
         let group_id = ctx.persistent_ctx.group_id;
@@ -125,6 +124,8 @@ impl EnterStagingRegion {
         let prepare_result = ctx.persistent_ctx.group_prepare_result.as_ref().unwrap();
         let targets = &ctx.persistent_ctx.targets;
         let instructions = Self::build_enter_staging_instructions(prepare_result, targets)?;
+        let target_region_count = targets.len();
+        let peer_count = instructions.len();
         let operation_timeout =
             ctx.next_operation_timeout()
                 .context(error::ExceededDeadlineSnafu {
@@ -146,8 +147,8 @@ impl EnterStagingRegion {
             })
             .unzip();
         info!(
-            "Sent enter staging regions instructions to peers: {:?} for repartition table {}, group id {}",
-            peers, table_id, group_id
+            "Sent enter staging regions instructions, table_id: {}, group_id: {}, peers: {}, target_regions: {}",
+            table_id, group_id, peer_count, target_region_count
         );
 
         let format_err_msg = |idx: usize, error: &Error| {
@@ -265,11 +266,7 @@ impl EnterStagingRegion {
         match receiver.await {
             Ok(msg) => {
                 let reply = HeartbeatMailbox::json_reply(&msg)?;
-                info!(
-                    "Received enter staging regions reply: {:?}, elapsed: {:?}",
-                    reply,
-                    now.elapsed()
-                );
+                let elapsed = now.elapsed();
                 let InstructionReply::EnterStagingRegions(EnterStagingRegionsReply { replies }) =
                     reply
                 else {
@@ -279,9 +276,22 @@ impl EnterStagingRegion {
                     }
                     .fail();
                 };
+                let total = replies.len();
+                let (mut ready, mut not_ready, mut with_error) = (0, 0, 0);
                 for reply in replies {
+                    if reply.error.is_some() {
+                        with_error += 1;
+                    } else if reply.ready {
+                        ready += 1;
+                    } else {
+                        not_ready += 1;
+                    }
                     Self::handle_enter_staging_region_reply(&reply, &now, peer)?;
                 }
+                info!(
+                    "Received enter staging regions reply, peer: {:?}, total_regions: {}, ready: {}, not_ready: {}, with_error: {}, elapsed: {:?}",
+                    peer, total, ready, not_ready, with_error, elapsed
+                );
 
                 Ok(())
             }

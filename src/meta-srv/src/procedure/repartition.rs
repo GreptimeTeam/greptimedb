@@ -342,6 +342,13 @@ impl Procedure for RepartitionProcedure {
 
     async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
         let state = &mut self.state;
+        let state_name = state.name();
+        // Log state transition
+        common_telemetry::info!(
+            "Repartition procedure executing state: {}, table_id: {}",
+            state_name,
+            self.context.persistent_ctx.table_id
+        );
         match state.next(&mut self.context, _ctx).await {
             Ok((next, status)) => {
                 *state = next;
