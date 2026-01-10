@@ -185,6 +185,19 @@ impl RestrictedOp {
             Self::Or => ParserBinaryOperator::Or,
         }
     }
+
+    fn invert_for_swap(&self) -> Self {
+        match self {
+            Self::Eq => Self::Eq,
+            Self::NotEq => Self::NotEq,
+            Self::Lt => Self::Gt,
+            Self::LtEq => Self::GtEq,
+            Self::Gt => Self::Lt,
+            Self::GtEq => Self::LtEq,
+            Self::And => Self::And,
+            Self::Or => Self::Or,
+        }
+    }
 }
 impl Display for RestrictedOp {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -207,6 +220,32 @@ impl PartitionExpr {
             lhs: Box::new(lhs),
             op,
             rhs: Box::new(rhs),
+        }
+        .canonicalize()
+    }
+
+    /// Canonicalize to `Column op Value` form when possible for consistent equality checks.
+    pub fn canonicalize(self) -> Self {
+        let lhs = Self::canonicalize_operand(*self.lhs);
+        let rhs = Self::canonicalize_operand(*self.rhs);
+        let mut expr = Self {
+            lhs: Box::new(lhs),
+            op: self.op,
+            rhs: Box::new(rhs),
+        };
+
+        if matches!(&*expr.lhs, Operand::Value(_)) && matches!(&*expr.rhs, Operand::Column(_)) {
+            std::mem::swap(&mut expr.lhs, &mut expr.rhs);
+            expr.op = expr.op.invert_for_swap();
+        }
+
+        expr
+    }
+
+    fn canonicalize_operand(operand: Operand) -> Operand {
+        match operand {
+            Operand::Expr(expr) => Operand::Expr(expr.canonicalize()),
+            other => other,
         }
     }
 
@@ -354,7 +393,7 @@ impl PartitionExpr {
 
         let bound: PartitionBound = serde_json::from_str(s).context(error::DeserializeJsonSnafu)?;
         match bound {
-            PartitionBound::Expr(expr) => Ok(Some(expr)),
+            PartitionBound::Expr(expr) => Ok(Some(expr.canonicalize())),
             _ => Ok(None),
         }
     }
@@ -494,7 +533,7 @@ mod tests {
                 .try_as_logical_expr()
                 .unwrap()
                 .to_string(),
-            "Int64(10) < a OR a IS NULL"
+            "a > Int64(10) OR a IS NULL"
         );
 
         // Test Gt with column on LHS
@@ -519,7 +558,7 @@ mod tests {
                 .try_as_logical_expr()
                 .unwrap()
                 .to_string(),
-            "Int64(10) > a OR a IS NULL"
+            "a < Int64(10) OR a IS NULL"
         );
 
         // Test GtEq with column on LHS
