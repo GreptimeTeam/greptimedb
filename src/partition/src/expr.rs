@@ -533,7 +533,7 @@ mod tests {
                 .try_as_logical_expr()
                 .unwrap()
                 .to_string(),
-            "Int64(10) < a OR a IS NULL"
+            "a > Int64(10) OR a IS NULL"
         );
 
         // Test Gt with column on LHS
@@ -558,7 +558,7 @@ mod tests {
                 .try_as_logical_expr()
                 .unwrap()
                 .to_string(),
-            "Int64(10) > a OR a IS NULL"
+            "a < Int64(10) OR a IS NULL"
         );
 
         // Test GtEq with column on LHS
