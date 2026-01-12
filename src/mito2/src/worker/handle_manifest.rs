@@ -520,9 +520,10 @@ async fn edit_region(
                 {
                     // Triggers the filling of the parquet metadata cache.
                     // The parquet file is already downloaded.
+                    let mut cache_metrics = Default::default();
                     let _ = write_cache
                         .file_cache()
-                        .get_parquet_meta_data(index_key)
+                        .get_parquet_meta_data(index_key, &mut cache_metrics)
                         .await;
 
                     listener.on_file_cache_filled(index_key.file_id);

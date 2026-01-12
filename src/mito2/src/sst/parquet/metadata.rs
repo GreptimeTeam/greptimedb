@@ -67,10 +67,7 @@ impl<'a> MetadataLoader<'a> {
         Ok(file_size)
     }
 
-    pub async fn load(
-        &self,
-        cache_metrics: &mut MetadataCacheMetrics,
-    ) -> Result<ParquetMetaData> {
+    pub async fn load(&self, cache_metrics: &mut MetadataCacheMetrics) -> Result<ParquetMetaData> {
         let path = self.file_path;
         let file_size = self.get_file_size().await?;
         let reader =
