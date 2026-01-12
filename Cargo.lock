@@ -8123,6 +8123,7 @@ version = "0.15.5"
 dependencies = [
  "anyhow",
  "bytes",
+ "common-error",
  "common-telemetry",
  "common-test-util",
  "futures",
