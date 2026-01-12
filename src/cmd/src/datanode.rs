@@ -330,7 +330,6 @@ mod tests {
     use common_config::ENV_VAR_SEP;
     use common_test_util::temp_dir::create_named_temp_file;
     use object_store::config::{FileConfig, GcsConfig, ObjectStoreConfig, S3Config};
-    use servers::heartbeat_options::HeartbeatOptions;
 
     use super::*;
     use crate::options::GlobalOptions;
@@ -373,9 +372,6 @@ mod tests {
             addr = "127.0.0.1:3001"
             hostname = "127.0.0.1"
             runtime_size = 8
-
-            [heartbeat]
-            interval = "300ms"
 
             [meta_client]
             metasrv_addrs = ["127.0.0.1:3002"]
@@ -433,13 +429,6 @@ mod tests {
             raft_engine_config.purge_threshold.0
         );
         assert!(!raft_engine_config.sync_write);
-
-        let HeartbeatOptions {
-            interval: heart_beat_interval,
-            ..
-        } = options.heartbeat;
-
-        assert_eq!(300, heart_beat_interval.as_millis());
 
         let MetaClientOptions {
             metasrv_addrs: metasrv_addr,

@@ -71,7 +71,10 @@ async fn test_engine_drop_region_with_format(flat_format: bool) {
     engine
         .handle_request(
             region_id,
-            RegionRequest::Drop(RegionDropRequest { fast_path: false }),
+            RegionRequest::Drop(RegionDropRequest {
+                fast_path: false,
+                force: false,
+            }),
         )
         .await
         .unwrap_err();
@@ -105,7 +108,10 @@ async fn test_engine_drop_region_with_format(flat_format: bool) {
     engine
         .handle_request(
             region_id,
-            RegionRequest::Drop(RegionDropRequest { fast_path: false }),
+            RegionRequest::Drop(RegionDropRequest {
+                fast_path: false,
+                force: false,
+            }),
         )
         .await
         .unwrap();
@@ -249,7 +255,10 @@ async fn test_engine_drop_region_for_custom_store_with_format(flat_format: bool)
     engine
         .handle_request(
             custom_region_id,
-            RegionRequest::Drop(RegionDropRequest { fast_path: false }),
+            RegionRequest::Drop(RegionDropRequest {
+                fast_path: false,
+                force: false,
+            }),
         )
         .await
         .unwrap();

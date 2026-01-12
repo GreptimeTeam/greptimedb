@@ -20,4 +20,4 @@ pub mod procedure;
 
 pub use information_extension::StandaloneInformationExtension;
 pub use metadata::{build_metadata_kv_from_url, build_metadata_kvbackend};
-pub use procedure::build_procedure_manager;
+pub use procedure::{StandaloneRepartitionProcedureFactory, build_procedure_manager};

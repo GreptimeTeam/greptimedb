@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use common_meta::cache_invalidator::{CacheInvalidatorRef, DummyCacheInvalidator};
+use common_meta::distributed_time_constants::BASE_HEARTBEAT_INTERVAL;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
@@ -90,6 +91,8 @@ impl TestEnv {
             cache_invalidator: self.cache_invalidator.clone(),
             leader_region_registry: self.leader_region_registry.clone(),
             topic_stats_registry: self.topic_stats_registry.clone(),
+            heartbeat_interval: BASE_HEARTBEAT_INTERVAL,
+            is_handshake: false,
         }
     }
 }

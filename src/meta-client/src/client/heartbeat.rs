@@ -12,14 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
 use api::v1::meta::heartbeat_client::HeartbeatClient;
 use api::v1::meta::{HeartbeatRequest, HeartbeatResponse, RequestHeader, Role};
 use common_grpc::channel_manager::ChannelManager;
+use common_meta::distributed_time_constants::BASE_HEARTBEAT_INTERVAL;
 use common_meta::util;
-use common_telemetry::info;
 use common_telemetry::tracing_context::TracingContext;
+use common_telemetry::{info, warn};
 use snafu::{OptionExt, ResultExt, ensure};
 use tokio::sync::{RwLock, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
@@ -31,6 +34,52 @@ use crate::client::ask_leader::AskLeader;
 use crate::client::{Id, LeaderProviderRef};
 use crate::error;
 use crate::error::{InvalidResponseHeaderSnafu, Result};
+
+/// Heartbeat configuration received from Metasrv during handshake.
+#[derive(Debug, Clone, Copy)]
+pub struct HeartbeatConfig {
+    pub interval: Duration,
+    pub retry_interval: Duration,
+}
+
+impl Default for HeartbeatConfig {
+    fn default() -> Self {
+        Self {
+            interval: BASE_HEARTBEAT_INTERVAL,
+            retry_interval: BASE_HEARTBEAT_INTERVAL,
+        }
+    }
+}
+
+impl fmt::Display for HeartbeatConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "interval={:?}, retry={:?}",
+            self.interval, self.retry_interval
+        )
+    }
+}
+
+impl HeartbeatConfig {
+    /// Extract configuration from HeartbeatResponse.
+    pub fn from_response(res: &HeartbeatResponse) -> Self {
+        if let Some(cfg) = &res.heartbeat_config {
+            // Metasrv provided complete configuration
+            Self {
+                interval: Duration::from_millis(cfg.heartbeat_interval_ms),
+                retry_interval: Duration::from_millis(cfg.retry_interval_ms),
+            }
+        } else {
+            let fallback = Self::default();
+            warn!(
+                "Metasrv didn't provide heartbeat_config, using default: {}",
+                fallback
+            );
+            fallback
+        }
+    }
+}
 
 pub struct HeartbeatSender {
     id: Id,
@@ -130,7 +179,9 @@ impl Client {
         inner.ask_leader().await
     }
 
-    pub async fn heartbeat(&mut self) -> Result<(HeartbeatSender, HeartbeatStream)> {
+    pub async fn heartbeat(
+        &mut self,
+    ) -> Result<(HeartbeatSender, HeartbeatStream, HeartbeatConfig)> {
         let inner = self.inner.read().await;
         inner.ask_leader().await?;
         inner.heartbeat().await
@@ -198,7 +249,7 @@ impl Inner {
         leader_provider.ask_leader().await
     }
 
-    async fn heartbeat(&self) -> Result<(HeartbeatSender, HeartbeatStream)> {
+    async fn heartbeat(&self) -> Result<(HeartbeatSender, HeartbeatStream, HeartbeatConfig)> {
         ensure!(
             self.is_started(),
             error::IllegalGrpcClientStateSnafu {
@@ -245,14 +296,18 @@ impl Inner {
             .map_err(error::Error::from)?
             .context(error::CreateHeartbeatStreamSnafu)?;
 
+        // Extract heartbeat configuration from handshake response
+        let config = HeartbeatConfig::from_response(&res);
+
         info!(
-            "Success to create heartbeat stream to server: {}, response: {:#?}",
-            leader_addr, res
+            "Handshake successful with Metasrv at {}, received config: {}",
+            leader_addr, config
         );
 
         Ok((
             HeartbeatSender::new(self.id, self.role, sender),
             HeartbeatStream::new(self.id, stream),
+            config,
         ))
     }
 

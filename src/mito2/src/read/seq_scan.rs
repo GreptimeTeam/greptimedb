@@ -90,6 +90,10 @@ impl SeqScan {
     ///
     /// The returned stream is not partitioned and will contains all the data. If want
     /// partitioned scan, use [`RegionScanner::scan_partition`].
+    #[tracing::instrument(
+        skip_all,
+        fields(region_id = %self.stream_ctx.input.mapper.metadata().region_id)
+    )]
     pub fn build_stream(&self) -> Result<SendableRecordBatchStream, BoxedError> {
         let metrics_set = ExecutionPlanMetricsSet::new();
         let streams = (0..self.properties.partitions.len())
@@ -373,6 +377,13 @@ impl SeqScan {
         )))
     }
 
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            region_id = %self.stream_ctx.input.mapper.metadata().region_id,
+            partition = partition
+        )
+    )]
     fn scan_batch_in_partition(
         &self,
         partition: usize,
@@ -473,6 +484,13 @@ impl SeqScan {
         Ok(Box::pin(stream))
     }
 
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            region_id = %self.stream_ctx.input.mapper.metadata().region_id,
+            partition = partition
+        )
+    )]
     fn scan_flat_batch_in_partition(
         &self,
         partition: usize,

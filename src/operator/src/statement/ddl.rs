@@ -16,9 +16,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
+use api::v1::alter_table_expr::Kind;
 use api::v1::meta::CreateFlowTask as PbCreateFlowTask;
 use api::v1::{
-    AlterDatabaseExpr, AlterTableExpr, CreateFlowExpr, CreateTableExpr, CreateViewExpr, column_def,
+    AlterDatabaseExpr, AlterTableExpr, CreateFlowExpr, CreateTableExpr, CreateViewExpr,
+    Repartition, column_def,
 };
 #[cfg(feature = "enterprise")]
 use api::v1::{
@@ -79,18 +81,20 @@ use table::dist_table::DistTable;
 use table::metadata::{self, RawTableInfo, RawTableMeta, TableId, TableInfo, TableType};
 use table::requests::{AlterKind, AlterTableRequest, COMMENT_KEY, TableOptions};
 use table::table_name::TableName;
+use table::table_reference::TableReference;
 
 use crate::error::{
     self, AlterExprToRequestSnafu, BuildDfLogicalPlanSnafu, CatalogSnafu, ColumnDataTypeSnafu,
     ColumnNotFoundSnafu, ConvertSchemaSnafu, CreateLogicalTablesSnafu, CreateTableInfoSnafu,
-    EmptyDdlExprSnafu, ExternalSnafu, ExtractTableNamesSnafu, FlowNotFoundSnafu,
-    InvalidPartitionRuleSnafu, InvalidPartitionSnafu, InvalidSqlSnafu, InvalidTableNameSnafu,
-    InvalidViewNameSnafu, InvalidViewStmtSnafu, NotSupportedSnafu, PartitionExprToPbSnafu, Result,
-    SchemaInUseSnafu, SchemaNotFoundSnafu, SchemaReadOnlySnafu, SubstraitCodecSnafu,
-    TableAlreadyExistsSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
-    UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
+    DeserializePartitionExprSnafu, EmptyDdlExprSnafu, ExternalSnafu, ExtractTableNamesSnafu,
+    FlowNotFoundSnafu, InvalidPartitionRuleSnafu, InvalidPartitionSnafu, InvalidSqlSnafu,
+    InvalidTableNameSnafu, InvalidViewNameSnafu, InvalidViewStmtSnafu, NotSupportedSnafu,
+    PartitionExprToPbSnafu, Result, SchemaInUseSnafu, SchemaNotFoundSnafu, SchemaReadOnlySnafu,
+    SerializePartitionExprSnafu, SubstraitCodecSnafu, TableAlreadyExistsSnafu,
+    TableMetadataManagerSnafu, TableNotFoundSnafu, UnrecognizedTableOptionSnafu,
+    ViewAlreadyExistsSnafu,
 };
-use crate::expr_helper;
+use crate::expr_helper::{self, RepartitionRequest};
 use crate::statement::StatementExecutor;
 use crate::statement::show::create_partitions_stmt;
 
@@ -1262,15 +1266,201 @@ impl StatementExecutor {
             alter_table.alter_operation(),
             AlterTableOperation::Repartition { .. }
         ) {
-            let _request = expr_helper::to_repartition_request(alter_table, &query_context)?;
-            return NotSupportedSnafu {
-                feat: "ALTER TABLE REPARTITION",
-            }
-            .fail();
+            let request = expr_helper::to_repartition_request(alter_table, &query_context)?;
+            return self.repartition_table(request, &query_context).await;
         }
 
         let expr = expr_helper::to_alter_table_expr(alter_table, &query_context)?;
         self.alter_table_inner(expr, query_context).await
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub async fn repartition_table(
+        &self,
+        request: RepartitionRequest,
+        query_context: &QueryContextRef,
+    ) -> Result<Output> {
+        // Check if the schema is read-only.
+        ensure!(
+            !is_readonly_schema(&request.schema_name),
+            SchemaReadOnlySnafu {
+                name: request.schema_name.clone()
+            }
+        );
+
+        let table_ref = TableReference::full(
+            &request.catalog_name,
+            &request.schema_name,
+            &request.table_name,
+        );
+        // Get the table from the catalog.
+        let table = self
+            .catalog_manager
+            .table(
+                &request.catalog_name,
+                &request.schema_name,
+                &request.table_name,
+                Some(query_context),
+            )
+            .await
+            .context(CatalogSnafu)?
+            .with_context(|| TableNotFoundSnafu {
+                table_name: table_ref.to_string(),
+            })?;
+        let table_id = table.table_info().ident.table_id;
+        // Get existing partition expressions from the table route.
+        let (physical_table_id, physical_table_route) = self
+            .table_metadata_manager
+            .table_route_manager()
+            .get_physical_table_route(table_id)
+            .await
+            .context(TableMetadataManagerSnafu)?;
+
+        ensure!(
+            physical_table_id == table_id,
+            NotSupportedSnafu {
+                feat: "REPARTITION on logical tables"
+            }
+        );
+
+        let table_info = table.table_info();
+        // Get partition column names from the table metadata.
+        let existing_partition_columns = table_info.meta.partition_columns().collect::<Vec<_>>();
+        // Repartition requires the table to have partition columns.
+        ensure!(
+            !existing_partition_columns.is_empty(),
+            InvalidPartitionRuleSnafu {
+                reason: format!(
+                    "table {} does not have partition columns, cannot repartition",
+                    table_ref
+                )
+            }
+        );
+
+        // Repartition operations involving columns outside the existing partition columns are not supported.
+        // This restriction ensures repartition only applies to current partition columns.
+        let column_name_and_type = existing_partition_columns
+            .iter()
+            .map(|column| (&column.name, column.data_type.clone()))
+            .collect();
+        let timezone = query_context.timezone();
+        // Convert SQL Exprs to PartitionExprs.
+        let from_partition_exprs = request
+            .from_exprs
+            .iter()
+            .map(|expr| convert_one_expr(expr, &column_name_and_type, &timezone))
+            .collect::<Result<Vec<_>>>()?;
+
+        let into_partition_exprs = request
+            .into_exprs
+            .iter()
+            .map(|expr| convert_one_expr(expr, &column_name_and_type, &timezone))
+            .collect::<Result<Vec<_>>>()?;
+
+        // Parse existing partition expressions from region routes.
+        let mut existing_partition_exprs =
+            Vec::with_capacity(physical_table_route.region_routes.len());
+        for route in &physical_table_route.region_routes {
+            let expr_json = route.region.partition_expr();
+            if !expr_json.is_empty() {
+                match PartitionExpr::from_json_str(&expr_json) {
+                    Ok(Some(expr)) => existing_partition_exprs.push(expr),
+                    Ok(None) => {
+                        // Empty
+                    }
+                    Err(e) => {
+                        return Err(e).context(DeserializePartitionExprSnafu);
+                    }
+                }
+            }
+        }
+
+        // Validate that from_partition_exprs are a subset of existing partition exprs.
+        // We compare PartitionExpr directly since it implements Eq.
+        for from_expr in &from_partition_exprs {
+            ensure!(
+                existing_partition_exprs.contains(from_expr),
+                InvalidPartitionRuleSnafu {
+                    reason: format!(
+                        "partition expression '{}' does not exist in table {}",
+                        from_expr, table_ref
+                    )
+                }
+            );
+        }
+
+        // Build the new partition expressions:
+        // new_exprs = existing_exprs - from_exprs + into_exprs
+        let new_partition_exprs: Vec<PartitionExpr> = existing_partition_exprs
+            .into_iter()
+            .filter(|expr| !from_partition_exprs.contains(expr))
+            .chain(into_partition_exprs.clone().into_iter())
+            .collect();
+        let new_partition_exprs_len = new_partition_exprs.len();
+
+        // Validate the new partition expressions using MultiDimPartitionRule and PartitionChecker.
+        let _ = MultiDimPartitionRule::try_new(
+            existing_partition_columns
+                .iter()
+                .map(|c| c.name.clone())
+                .collect(),
+            vec![],
+            new_partition_exprs,
+            true,
+        )
+        .context(InvalidPartitionSnafu)?;
+
+        info!(
+            "Submitting repartition task for table {} (table_id={}), from {} to {} partitions",
+            table_ref,
+            table_id,
+            from_partition_exprs.len(),
+            new_partition_exprs_len
+        );
+
+        let serialize_exprs = |exprs: Vec<PartitionExpr>| -> Result<Vec<String>> {
+            let mut json_exprs = Vec::with_capacity(exprs.len());
+            for expr in exprs {
+                json_exprs.push(expr.as_json_str().context(SerializePartitionExprSnafu)?);
+            }
+            Ok(json_exprs)
+        };
+        let from_partition_exprs_json = serialize_exprs(from_partition_exprs)?;
+        let into_partition_exprs_json = serialize_exprs(into_partition_exprs)?;
+        let req = SubmitDdlTaskRequest {
+            query_context: query_context.clone(),
+            task: DdlTask::new_alter_table(AlterTableExpr {
+                catalog_name: request.catalog_name.clone(),
+                schema_name: request.schema_name.clone(),
+                table_name: request.table_name.clone(),
+                kind: Some(Kind::Repartition(Repartition {
+                    from_partition_exprs: from_partition_exprs_json,
+                    into_partition_exprs: into_partition_exprs_json,
+                    // TODO(weny): allow passing 'wait' from SQL options or QueryContext
+                    wait: true,
+                })),
+            }),
+        };
+        let invalidate_keys = vec![
+            CacheIdent::TableId(table_id),
+            CacheIdent::TableName(TableName::new(
+                request.catalog_name,
+                request.schema_name,
+                request.table_name,
+            )),
+        ];
+        self.procedure_executor
+            .submit_ddl_task(&ExecutorContext::default(), req)
+            .await
+            .context(error::ExecuteDdlSnafu)?;
+
+        // Invalidates local cache ASAP.
+        self.cache_invalidator
+            .invalidate(&Context::default(), &invalidate_keys)
+            .await
+            .context(error::InvalidateTableCacheSnafu)?;
+
+        Ok(Output::new_with_affected_rows(0))
     }
 
     #[tracing::instrument(skip_all)]
@@ -1837,7 +2027,6 @@ pub fn create_table_info(
         value_indices: vec![],
         engine: create_table.engine.clone(),
         next_column_id: column_schemas.len() as u32,
-        region_numbers: vec![],
         options: table_options,
         created_on: Utc::now(),
         updated_on: Utc::now(),
@@ -2019,6 +2208,7 @@ mod test {
     use sql::dialect::GreptimeDbDialect;
     use sql::parser::{ParseOptions, ParserContext};
     use sql::statements::statement::Statement;
+    use sqlparser::parser::Parser;
 
     use super::*;
     use crate::expr_helper;
@@ -2034,6 +2224,39 @@ mod test {
         assert!(!NAME_PATTERN_REG.is_match("#test"));
         assert!(!NAME_PATTERN_REG.is_match("@"));
         assert!(!NAME_PATTERN_REG.is_match("#"));
+    }
+
+    #[test]
+    fn test_partition_expr_equivalence_with_swapped_operands() {
+        let column_name = "device_id".to_string();
+        let column_name_and_type =
+            HashMap::from([(&column_name, ConcreteDataType::int32_datatype())]);
+        let timezone = Timezone::from_tz_string("UTC").unwrap();
+        let dialect = GreptimeDbDialect {};
+
+        let mut parser = Parser::new(&dialect)
+            .try_with_sql("device_id < 100")
+            .unwrap();
+        let expr_left = parser.parse_expr().unwrap();
+
+        let mut parser = Parser::new(&dialect)
+            .try_with_sql("100 > device_id")
+            .unwrap();
+        let expr_right = parser.parse_expr().unwrap();
+
+        let partition_left =
+            convert_one_expr(&expr_left, &column_name_and_type, &timezone).unwrap();
+        let partition_right =
+            convert_one_expr(&expr_right, &column_name_and_type, &timezone).unwrap();
+
+        assert_eq!(partition_left, partition_right);
+        assert!([partition_left.clone()].contains(&partition_right));
+
+        let mut physical_partition_exprs = vec![partition_left];
+        let mut logical_partition_exprs = vec![partition_right];
+        physical_partition_exprs.sort_unstable();
+        logical_partition_exprs.sort_unstable();
+        assert_eq!(physical_partition_exprs, logical_partition_exprs);
     }
 
     #[tokio::test]

@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
@@ -62,16 +62,54 @@ pub enum TableRouteValue {
     Logical(LogicalTableRouteValue),
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Default)]
+#[derive(Debug, PartialEq, Serialize, Clone, Default)]
 pub struct PhysicalTableRouteValue {
+    // The region routes of the table.
     pub region_routes: Vec<RegionRoute>,
+    // Tracks the highest region number ever allocated for the table.
+    // This value only increases: adding a region updates it if needed,
+    // and dropping regions does not decrease it.
+    pub max_region_number: RegionNumber,
+    // The version of the table route.
     version: u64,
+}
+
+impl<'de> Deserialize<'de> for PhysicalTableRouteValue {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Helper {
+            region_routes: Vec<RegionRoute>,
+            #[serde(default)]
+            max_region_number: Option<RegionNumber>,
+            version: u64,
+        }
+
+        let mut helper = Helper::deserialize(deserializer)?;
+        // If the max region number is not provided, we will calculate it from the region routes.
+        if helper.max_region_number.is_none() {
+            let max_region = helper
+                .region_routes
+                .iter()
+                .map(|r| r.region.id.region_number())
+                .max()
+                .unwrap_or_default();
+            helper.max_region_number = Some(max_region);
+        }
+
+        Ok(PhysicalTableRouteValue {
+            region_routes: helper.region_routes,
+            max_region_number: helper.max_region_number.unwrap_or_default(),
+            version: helper.version,
+        })
+    }
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct LogicalTableRouteValue {
     physical_table_id: TableId,
-    region_ids: Vec<RegionId>,
 }
 
 impl TableRouteValue {
@@ -85,14 +123,7 @@ impl TableRouteValue {
         if table_id == physical_table_id {
             TableRouteValue::physical(region_routes)
         } else {
-            let region_routes = region_routes
-                .into_iter()
-                .map(|region| {
-                    debug_assert_eq!(region.region.id.table_id(), physical_table_id);
-                    RegionId::new(table_id, region.region.id.region_number())
-                })
-                .collect();
-            TableRouteValue::logical(physical_table_id, region_routes)
+            TableRouteValue::logical(physical_table_id)
         }
     }
 
@@ -100,8 +131,8 @@ impl TableRouteValue {
         Self::Physical(PhysicalTableRouteValue::new(region_routes))
     }
 
-    pub fn logical(physical_table_id: TableId, region_ids: Vec<RegionId>) -> Self {
-        Self::Logical(LogicalTableRouteValue::new(physical_table_id, region_ids))
+    pub fn logical(physical_table_id: TableId) -> Self {
+        Self::Logical(LogicalTableRouteValue::new(physical_table_id))
     }
 
     /// Returns a new version [TableRouteValue] with `region_routes`.
@@ -112,9 +143,19 @@ impl TableRouteValue {
                 err_msg: format!("{self:?} is a non-physical TableRouteValue."),
             }
         );
-        let version = self.as_physical_table_route_ref().version;
+        let physical_table_route = self.as_physical_table_route_ref();
+        let original_max_region_number = physical_table_route.max_region_number;
+        let new_max_region_number = region_routes
+            .iter()
+            .map(|r| r.region.id.region_number())
+            .max()
+            .unwrap_or_default();
+        let version = physical_table_route.version;
         Ok(Self::Physical(PhysicalTableRouteValue {
             region_routes,
+            // If region routes are added, we will update the max region number.
+            // If region routes are removed, we will keep the original max region number.
+            max_region_number: original_max_region_number.max(new_max_region_number),
             version: version + 1,
         }))
     }
@@ -167,6 +208,20 @@ impl TableRouteValue {
         Ok(&self.as_physical_table_route_ref().region_routes)
     }
 
+    /// Returns the max region number of this [TableRouteValue::Physical].
+    ///
+    /// # Panic
+    /// If it is not the [`PhysicalTableRouteValue`].
+    pub fn max_region_number(&self) -> Result<RegionNumber> {
+        ensure!(
+            self.is_physical(),
+            UnexpectedLogicalRouteTableSnafu {
+                err_msg: format!("{self:?} is a non-physical TableRouteValue."),
+            }
+        );
+        Ok(self.as_physical_table_route_ref().max_region_number)
+    }
+
     /// Returns the reference of [`PhysicalTableRouteValue`].
     ///
     /// # Panic
@@ -207,11 +262,9 @@ impl TableRouteValue {
                 .iter()
                 .map(|region_route| region_route.region.id.region_number())
                 .collect(),
-            TableRouteValue::Logical(x) => x
-                .region_ids()
-                .iter()
-                .map(|region_id| region_id.region_number())
-                .collect(),
+            TableRouteValue::Logical(_) => {
+                vec![]
+            }
         }
     }
 }
@@ -237,27 +290,26 @@ impl MetadataValue for TableRouteValue {
 
 impl PhysicalTableRouteValue {
     pub fn new(region_routes: Vec<RegionRoute>) -> Self {
+        let max_region_number = region_routes
+            .iter()
+            .map(|r| r.region.id.region_number())
+            .max()
+            .unwrap_or_default();
         Self {
             region_routes,
+            max_region_number,
             version: 0,
         }
     }
 }
 
 impl LogicalTableRouteValue {
-    pub fn new(physical_table_id: TableId, region_ids: Vec<RegionId>) -> Self {
-        Self {
-            physical_table_id,
-            region_ids,
-        }
+    pub fn new(physical_table_id: TableId) -> Self {
+        Self { physical_table_id }
     }
 
     pub fn physical_table_id(&self) -> TableId {
         self.physical_table_id
-    }
-
-    pub fn region_ids(&self) -> &Vec<RegionId> {
-        &self.region_ids
     }
 }
 
@@ -824,6 +876,57 @@ mod tests {
     use crate::rpc::store::PutRequest;
 
     #[test]
+    fn test_update_table_route_max_region_number() {
+        let table_route = PhysicalTableRouteValue::new(vec![
+            RegionRoute {
+                region: Region {
+                    id: RegionId::new(0, 1),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            RegionRoute {
+                region: Region {
+                    id: RegionId::new(0, 2),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ]);
+        assert_eq!(table_route.max_region_number, 2);
+
+        // Shouldn't change the max region number.
+        let new_table_route = TableRouteValue::Physical(table_route)
+            .update(vec![RegionRoute {
+                region: Region {
+                    id: RegionId::new(0, 1),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }])
+            .unwrap();
+        assert_eq!(
+            new_table_route
+                .as_physical_table_route_ref()
+                .max_region_number,
+            2
+        );
+
+        // Should increase the max region number.
+        let new_table_route = new_table_route
+            .update(vec![RegionRoute {
+                region: Region {
+                    id: RegionId::new(0, 3),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }])
+            .unwrap()
+            .into_physical_table_route();
+        assert_eq!(new_table_route.max_region_number, 3);
+    }
+
+    #[test]
     fn test_table_route_compatibility() {
         let old_raw_v = r#"{"region_routes":[{"region":{"id":1,"name":"r1","partition":null,"attrs":{}},"leader_peer":{"id":2,"addr":"a2"},"follower_peers":[]},{"region":{"id":1,"name":"r1","partition":null,"attrs":{}},"leader_peer":{"id":2,"addr":"a2"},"follower_peers":[]}],"version":0}"#;
         let v = TableRouteValue::try_from_raw_value(old_raw_v.as_bytes()).unwrap();
@@ -863,6 +966,7 @@ mod tests {
                     leader_down_since: None,
                 },
             ],
+            max_region_number: 1,
             version: 0,
         });
 
@@ -900,7 +1004,6 @@ mod tests {
         let table_route_manager = TableRouteManager::new(kv.clone());
         let table_route_value = TableRouteValue::Logical(LogicalTableRouteValue {
             physical_table_id: 1023,
-            region_ids: vec![RegionId::new(1023, 1)],
         });
         let (txn, _) = table_route_manager
             .table_route_storage()
@@ -930,14 +1033,12 @@ mod tests {
                 1024,
                 TableRouteValue::Logical(LogicalTableRouteValue {
                     physical_table_id: 1023,
-                    region_ids: vec![RegionId::new(1023, 1)],
                 }),
             ),
             (
                 1025,
                 TableRouteValue::Logical(LogicalTableRouteValue {
                     physical_table_id: 1023,
-                    region_ids: vec![RegionId::new(1023, 2)],
                 }),
             ),
         ];
@@ -976,6 +1077,7 @@ mod tests {
                 }],
                 ..Default::default()
             }],
+            max_region_number: 0,
             version: 0,
         });
 

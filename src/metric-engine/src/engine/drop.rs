@@ -14,6 +14,7 @@
 
 //! Drop a metric region
 
+use common_telemetry::info;
 use snafu::ResultExt;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{AffectedRows, RegionDropRequest, RegionRequest};
@@ -34,6 +35,7 @@ impl MetricEngineInner {
     ) -> Result<AffectedRows> {
         let data_region_id = utils::to_data_region_id(region_id);
         let fast_path = req.fast_path;
+        let force = req.force;
 
         // enclose the guard in a block to prevent the guard from polluting the async context
         let (is_physical_region, is_physical_region_busy) = {
@@ -53,14 +55,16 @@ impl MetricEngineInner {
 
         if is_physical_region {
             // check if there is no logical region relates to this physical region
-            if is_physical_region_busy && !fast_path {
+            if is_physical_region_busy && !force {
                 // reject if there is any present logical region
                 return Err(PhysicalRegionBusySnafu {
                     region_id: data_region_id,
                 }
                 .build());
             }
-
+            if is_physical_region_busy && force {
+                info!("Dropping physical region {} with force", data_region_id);
+            }
             return self.drop_physical_region(data_region_id).await;
         }
 
@@ -102,14 +106,20 @@ impl MetricEngineInner {
         self.mito
             .handle_request(
                 data_region_id,
-                RegionRequest::Drop(RegionDropRequest { fast_path: false }),
+                RegionRequest::Drop(RegionDropRequest {
+                    fast_path: false,
+                    force: false,
+                }),
             )
             .await
             .with_context(|_| CloseMitoRegionSnafu { region_id })?;
         self.mito
             .handle_request(
                 metadata_region_id,
-                RegionRequest::Drop(RegionDropRequest { fast_path: false }),
+                RegionRequest::Drop(RegionDropRequest {
+                    fast_path: false,
+                    force: false,
+                }),
             )
             .await
             .with_context(|_| CloseMitoRegionSnafu { region_id })?;

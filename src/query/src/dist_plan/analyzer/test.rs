@@ -15,7 +15,7 @@
 use std::pin::Pin;
 use std::sync::Arc;
 
-use arrow::datatypes::IntervalDayTime;
+use arrow::datatypes::{DataType, IntervalDayTime, TimeUnit};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::BoxedError;
 use common_function::aggrs::aggr_wrapper::{StateMergeHelper, StateWrapper};
@@ -28,16 +28,20 @@ use datafusion::execution::SessionState;
 use datafusion::functions_aggregate::expr_fn::avg;
 use datafusion::functions_aggregate::min_max::{max, min};
 use datafusion::prelude::SessionContext;
-use datafusion_common::JoinType;
+use datafusion_common::{JoinType, ScalarValue};
 use datafusion_expr::expr::ScalarFunction;
-use datafusion_expr::{AggregateUDF, Expr, LogicalPlanBuilder, col, lit};
+use datafusion_expr::{
+    AggregateUDF, Expr, ExprSchemable as _, LogicalPlanBuilder, Operator, binary_expr, col, lit,
+};
 use datafusion_functions::datetime::date_bin;
+use datafusion_functions::datetime::expr_fn::now;
 use datafusion_sql::TableReference;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
 use futures::Stream;
 use futures::task::{Context, Poll};
 use pretty_assertions::assert_eq;
+use regex::Regex;
 use store_api::data_source::DataSource;
 use store_api::storage::ScanRequest;
 use table::metadata::{
@@ -88,7 +92,6 @@ impl TestTable {
             primary_key_indices: vec![0, 1, 2],
             value_indices: vec![4],
             engine,
-            region_numbers: vec![0, 1],
             next_column_id: 5,
             options: Default::default(),
             created_on: Default::default(),
@@ -164,12 +167,13 @@ fn try_encode_decode_substrait(plan: &LogicalPlan, state: SessionState) {
         .encode(plan, crate::query_engine::DefaultSerializer)
         .unwrap();
     let inner = sub_plan_bytes.clone();
+    let inner_state = state.clone();
     let decoded_plan = futures::executor::block_on(async move {
         substrait::DFLogicalSubstraitConvertor
-            .decode(inner, state)
+            .decode(inner, inner_state)
             .await
     }).inspect_err(|e|{
-use prost::Message;
+        use prost::Message;
         let sub_plan = substrait::substrait_proto_df::proto::Plan::decode(sub_plan_bytes).unwrap();
         common_telemetry::error!("Failed to decode substrait plan: {e},substrait plan: {sub_plan:#?}\nlogical plan: {plan:#?}");
     })
@@ -216,7 +220,7 @@ fn expand_proj_sort_proj() {
         "Projection: t.number, t.pk1 = t.pk2",
         "  Projection: t.number, t.pk1 = t.pk2", // notice both projections added `t.pk1 = t.pk2` column requirement
         "    Sort: t.pk1 = t.pk2 ASC NULLS FIRST",
-        "      Projection: t.number, t.pk1, t.pk3, t.pk1 = t.pk2",
+        "      Projection: t.number, t.pk1, t.pk3, t.pk2 = t.pk1 AS t.pk1 = t.pk2",
         "        Projection: t.number, t.pk1, t.pk2, t.pk3", // notice this projection doesn't add `t.pk1 = t.pk2` column requirement
         "          TableScan: t",
         "]]",
@@ -263,7 +267,7 @@ fn expand_proj_sort_partial_proj() {
         "Projection: t.number, eq_sorted", // notice how `eq_sorted` is added not `t.pk1 = t.pk2`
         "  Projection: t.number, t.pk1 = t.pk2 AS eq_sorted",
         "    Sort: t.pk1 = t.pk2 ASC NULLS FIRST",
-        "      Projection: t.number, t.pk1, t.pk3, t.pk1 = t.pk2",
+        "      Projection: t.number, t.pk1, t.pk3, t.pk2 = t.pk1 AS t.pk1 = t.pk2",
         "        Projection: t.number, t.pk1, t.pk2, t.pk3", // notice this projection doesn't add `t.pk1 = t.pk2` column requirement
         "          TableScan: t",
         "]]",
@@ -777,6 +781,67 @@ fn expand_step_aggr_proj() {
     assert_eq!(expected, result.to_string());
 }
 
+/// Make sure that `SeriesDivide` special handling correctly clean up column requirements from it's previous sort
+#[test]
+fn expand_complex_col_req_sort_pql() {
+    // use logging for better debugging
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "t".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source.clone(), None, vec![])
+        .unwrap()
+        .sort(vec![
+            col("pk1").sort(true, false),
+            col("pk2").sort(true, false),
+            col("pk3").sort(true, false), // make some col req here
+        ])
+        .unwrap()
+        .build()
+        .unwrap();
+    let plan = SeriesDivide::new(
+        vec!["pk1".to_string(), "pk2".to_string(), "pk3".to_string()],
+        "ts".to_string(),
+        plan,
+    );
+    let plan = LogicalPlan::Extension(datafusion_expr::Extension {
+        node: Arc::new(plan),
+    });
+
+    let plan = LogicalPlanBuilder::from(plan)
+        .aggregate(vec![col("pk1"), col("pk2")], vec![min(col("number"))])
+        .unwrap()
+        .sort(vec![
+            col("pk1").sort(true, false),
+            col("pk2").sort(true, false),
+        ])
+        .unwrap()
+        .project(vec![col("pk1"), col("pk2")])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+
+    let expected = [
+        "Projection: t.pk1, t.pk2",
+        "  MergeSort: t.pk1 ASC NULLS LAST, t.pk2 ASC NULLS LAST",
+        "    MergeScan [is_placeholder=false, remote_input=[",
+        "Projection: t.pk1, t.pk2",
+        "  Sort: t.pk1 ASC NULLS LAST, t.pk2 ASC NULLS LAST",
+        "    Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[min(t.number)]]",
+        r#"      PromSeriesDivide: tags=["pk1", "pk2", "pk3"]"#,
+        "        Sort: t.pk1 ASC NULLS LAST, t.pk2 ASC NULLS LAST, t.pk3 ASC NULLS LAST",
+        "          TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
 /// should only expand `Sort`, notice `Sort` before `Aggregate` usually can and
 /// will be optimized out, and dist planner shouldn't handle that case, but
 /// for now, still handle that be expanding the `Sort` node
@@ -1071,6 +1136,102 @@ fn expand_proj_part_col_aggr_sort_limit() {
     ]
     .join("\n");
     assert_eq!(expected, result.to_string());
+}
+
+#[test]
+fn test_simplify_select_now_expression() {
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "t".to_string());
+    let table_provider = Arc::new(DfTableProviderAdapter::new(test_table));
+    let table_source = Arc::new(DefaultTableSource::new(table_provider.clone()));
+    let ctx = SessionContext::new();
+    ctx.register_table(TableReference::bare("t"), table_provider.clone() as _)
+        .unwrap();
+
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source.clone(), None, vec![])
+        .unwrap()
+        .project(vec![now()])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}
+        .analyze(plan.clone(), &config)
+        .unwrap();
+
+    common_telemetry::info!("Analyzed plan: {}", result);
+
+    let result_str = result.to_string();
+    // Normalize timestamp values to make test deterministic
+    let re = Regex::new(r"TimestampNanosecond\(\d+,").unwrap();
+    let normalized = re.replace_all(&result_str, "TimestampNanosecond(<TIME>,");
+
+    let expected = [
+        "Projection: now()",
+        "  MergeScan [is_placeholder=false, remote_input=[",
+        r#"Projection: TimestampNanosecond(<TIME>, Some("+00:00")) AS now()"#,
+        "  TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, normalized);
+}
+
+#[test]
+fn test_simplify_now_expression() {
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "t".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source.clone(), None, vec![])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    // CAST(t.ts AS Timestamp(Millisecond, Some("+00:00")))
+    let ts_cast_type = DataType::Timestamp(TimeUnit::Millisecond, Some("+00:00".into()));
+
+    let ts_expr = col("ts").cast_to(&ts_cast_type, plan.schema()).unwrap();
+
+    // CAST(now() - interval AS Timestamp(Millisecond, Some("+00:00")))
+    let interval = lit(ScalarValue::new_interval_mdn(0, 0, 2700000000000)); // 2700s = 45m
+    let right_expr = binary_expr(now(), Operator::Minus, interval);
+    let right_expr_cast = right_expr.cast_to(&ts_cast_type, plan.schema()).unwrap();
+
+    let filter_expr = ts_expr.lt_eq(right_expr_cast);
+
+    // Projection: t.b, count(Int64(1))
+    //   Aggregate: groupBy=[[my_table.b]], aggr=[[count(my_table.ts) AS count(Int64(1))]]
+    //     Filter: CAST(my_table.ts AS Timestamp(Millisecond, Some("+00:00"))) <= CAST(now() - IntervalMonthDayNano("IntervalMonthDayNano { months: 0, days: 0, nanoseconds: 2700000000000 }") AS Timestamp(Millisecond, Some("+00:00")))
+    //       TableScan: my_table
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .filter(filter_expr)
+        .unwrap()
+        .aggregate(
+            vec![col("pk1")],
+            vec![
+                datafusion::functions_aggregate::expr_fn::count(col("ts")).alias("count(Int64(1))"),
+            ],
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+
+    let plan_str = result.to_string();
+    common_telemetry::info!("Analyzed plan: {}", plan_str);
+
+    // If simplified, "now()" should be replaced by a literal.
+    assert!(
+        !plan_str.contains("now()"),
+        "Plan should be simplified but contains now(): {}",
+        plan_str
+    );
 }
 
 #[test]

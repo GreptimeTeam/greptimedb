@@ -399,8 +399,8 @@ impl InformationSchemaColumnsBuilder {
             self.is_nullables.push(Some("No"));
         }
         self.column_types.push(Some(&data_type));
-        self.column_comments
-            .push(column_schema.column_comment().map(|x| x.as_ref()));
+        let column_comment = column_schema.column_comment().map(|x| x.as_ref());
+        self.column_comments.push(column_comment);
     }
 
     fn finish(&mut self) -> Result<RecordBatch> {

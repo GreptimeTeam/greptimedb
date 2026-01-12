@@ -47,8 +47,10 @@ pub enum Error {
     },
 
     #[snafu(display("Invalid url scheme: {}", scheme))]
-    InvalidUrlScheme {
-        scheme: String,
+    InvalidUrlScheme { scheme: String },
+
+    #[snafu(display("Repartition procedure is not supported in standalone mode"))]
+    NoSupportRepartitionProcedure {
         #[snafu(implicit)]
         location: Location,
     },
@@ -63,6 +65,7 @@ impl ErrorExt for Error {
             Error::External { source, .. } => source.status_code(),
             Error::ParseUrl { .. } => StatusCode::InvalidArguments,
             Error::InvalidUrlScheme { .. } => StatusCode::InvalidArguments,
+            Error::NoSupportRepartitionProcedure { .. } => StatusCode::Unsupported,
         }
     }
 

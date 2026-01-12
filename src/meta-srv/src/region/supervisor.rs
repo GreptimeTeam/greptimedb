@@ -1070,7 +1070,7 @@ pub(crate) mod tests {
         let mut test_create_logical_table_task = test_create_logical_table_task("my_logical_table");
         test_create_logical_table_task.set_table_id(logical_table_id);
         let table_info = test_create_logical_table_task.table_info;
-        let table_route = LogicalTableRouteValue::new(1024, vec![RegionId::new(1025, 0)]);
+        let table_route = LogicalTableRouteValue::new(1024);
         let table_route_value = TableRouteValue::Logical(table_route);
         table_metadata_manager
             .create_table_metadata(table_info, table_route_value, HashMap::new())

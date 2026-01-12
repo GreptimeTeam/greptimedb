@@ -55,7 +55,6 @@ tql eval (0,10,'5s') sum by (abcde) (metric);
 
 tql eval (0,10,'5s') sum by (AbCdE) (metric);
 
--- not allowed by the parser
 tql eval (0,10,'5s') sum by (`AbCdE`) (metric);
 
 drop table metric;

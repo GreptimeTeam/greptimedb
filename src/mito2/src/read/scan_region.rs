@@ -24,6 +24,7 @@ use api::v1::SemanticType;
 use common_error::ext::BoxedError;
 use common_recordbatch::SendableRecordBatchStream;
 use common_recordbatch::filter::SimpleFilterEvaluator;
+use common_telemetry::tracing::Instrument;
 use common_telemetry::{debug, error, tracing, warn};
 use common_time::range::TimestampRange;
 use datafusion_common::Column;
@@ -319,6 +320,7 @@ impl ScanRegion {
     }
 
     /// Returns a [Scanner] to scan the region.
+    #[tracing::instrument(skip_all, fields(region_id = %self.region_id()))]
     pub(crate) async fn scanner(self) -> Result<Scanner> {
         if self.use_series_scan() {
             self.series_scan().await.map(Scanner::Series)
@@ -332,7 +334,11 @@ impl ScanRegion {
     }
 
     /// Returns a [RegionScanner] to scan the region.
-    #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
+    #[tracing::instrument(
+        level = tracing::Level::DEBUG,
+        skip_all,
+        fields(region_id = %self.region_id())
+    )]
     pub(crate) async fn region_scanner(self) -> Result<RegionScannerRef> {
         if self.use_series_scan() {
             self.series_scan()
@@ -348,18 +354,21 @@ impl ScanRegion {
     }
 
     /// Scan sequentially.
+    #[tracing::instrument(skip_all, fields(region_id = %self.region_id()))]
     pub(crate) async fn seq_scan(self) -> Result<SeqScan> {
         let input = self.scan_input().await?.with_compaction(false);
         Ok(SeqScan::new(input))
     }
 
     /// Unordered scan.
+    #[tracing::instrument(skip_all, fields(region_id = %self.region_id()))]
     pub(crate) async fn unordered_scan(self) -> Result<UnorderedScan> {
         let input = self.scan_input().await?;
         Ok(UnorderedScan::new(input))
     }
 
     /// Scans by series.
+    #[tracing::instrument(skip_all, fields(region_id = %self.region_id()))]
     pub(crate) async fn series_scan(self) -> Result<SeriesScan> {
         let input = self.scan_input().await?;
         Ok(SeriesScan::new(input))
@@ -390,6 +399,7 @@ impl ScanRegion {
     }
 
     /// Creates a scan input.
+    #[tracing::instrument(skip_all, fields(region_id = %self.region_id()))]
     async fn scan_input(mut self) -> Result<ScanInput> {
         let sst_min_sequence = self.request.sst_min_sequence.and_then(NonZeroU64::new);
         let time_range = self.build_time_range_predicate();
@@ -907,6 +917,13 @@ impl ScanInput {
     /// Scans sources in parallel.
     ///
     /// # Panics if the input doesn't allow parallel scan.
+    #[tracing::instrument(
+        skip(self, sources, semaphore),
+        fields(
+            region_id = %self.region_metadata().region_id,
+            source_count = sources.len()
+        )
+    )]
     pub(crate) fn create_parallel_sources(
         &self,
         sources: Vec<Source>,
@@ -956,6 +973,13 @@ impl ScanInput {
     }
 
     /// Prunes a file to scan and returns the builder to build readers.
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            region_id = %self.region_metadata().region_id,
+            file_id = %file.file_id()
+        )
+    )]
     pub async fn prune_file(
         &self,
         file: &FileHandle,
@@ -1021,38 +1045,58 @@ impl ScanInput {
     }
 
     /// Scans the input source in another task and sends batches to the sender.
+    #[tracing::instrument(
+        skip(self, input, semaphore, sender),
+        fields(region_id = %self.region_metadata().region_id)
+    )]
     pub(crate) fn spawn_scan_task(
         &self,
         mut input: Source,
         semaphore: Arc<Semaphore>,
         sender: mpsc::Sender<Result<Batch>>,
     ) {
-        common_runtime::spawn_global(async move {
-            loop {
-                // We release the permit before sending result to avoid the task waiting on
-                // the channel with the permit held.
-                let maybe_batch = {
-                    // Safety: We never close the semaphore.
-                    let _permit = semaphore.acquire().await.unwrap();
-                    input.next_batch().await
-                };
-                match maybe_batch {
-                    Ok(Some(batch)) => {
-                        let _ = sender.send(Ok(batch)).await;
-                    }
-                    Ok(None) => break,
-                    Err(e) => {
-                        let _ = sender.send(Err(e)).await;
-                        break;
+        let region_id = self.region_metadata().region_id;
+        let span = tracing::info_span!(
+            "ScanInput::parallel_scan_task",
+            region_id = %region_id,
+            stream_kind = "batch"
+        );
+        common_runtime::spawn_global(
+            async move {
+                loop {
+                    // We release the permit before sending result to avoid the task waiting on
+                    // the channel with the permit held.
+                    let maybe_batch = {
+                        // Safety: We never close the semaphore.
+                        let _permit = semaphore.acquire().await.unwrap();
+                        input.next_batch().await
+                    };
+                    match maybe_batch {
+                        Ok(Some(batch)) => {
+                            let _ = sender.send(Ok(batch)).await;
+                        }
+                        Ok(None) => break,
+                        Err(e) => {
+                            let _ = sender.send(Err(e)).await;
+                            break;
+                        }
                     }
                 }
             }
-        });
+            .instrument(span),
+        );
     }
 
     /// Scans flat sources (RecordBatch streams) in parallel.
     ///
     /// # Panics if the input doesn't allow parallel scan.
+    #[tracing::instrument(
+        skip(self, sources, semaphore),
+        fields(
+            region_id = %self.region_metadata().region_id,
+            source_count = sources.len()
+        )
+    )]
     pub(crate) fn create_parallel_flat_sources(
         &self,
         sources: Vec<BoxedRecordBatchStream>,
@@ -1076,33 +1120,46 @@ impl ScanInput {
     }
 
     /// Spawns a task to scan a flat source (RecordBatch stream) asynchronously.
+    #[tracing::instrument(
+        skip(self, input, semaphore, sender),
+        fields(region_id = %self.region_metadata().region_id)
+    )]
     pub(crate) fn spawn_flat_scan_task(
         &self,
         mut input: BoxedRecordBatchStream,
         semaphore: Arc<Semaphore>,
         sender: mpsc::Sender<Result<RecordBatch>>,
     ) {
-        common_runtime::spawn_global(async move {
-            loop {
-                // We release the permit before sending result to avoid the task waiting on
-                // the channel with the permit held.
-                let maybe_batch = {
-                    // Safety: We never close the semaphore.
-                    let _permit = semaphore.acquire().await.unwrap();
-                    input.next().await
-                };
-                match maybe_batch {
-                    Some(Ok(batch)) => {
-                        let _ = sender.send(Ok(batch)).await;
+        let region_id = self.region_metadata().region_id;
+        let span = tracing::info_span!(
+            "ScanInput::parallel_scan_task",
+            region_id = %region_id,
+            stream_kind = "flat"
+        );
+        common_runtime::spawn_global(
+            async move {
+                loop {
+                    // We release the permit before sending result to avoid the task waiting on
+                    // the channel with the permit held.
+                    let maybe_batch = {
+                        // Safety: We never close the semaphore.
+                        let _permit = semaphore.acquire().await.unwrap();
+                        input.next().await
+                    };
+                    match maybe_batch {
+                        Some(Ok(batch)) => {
+                            let _ = sender.send(Ok(batch)).await;
+                        }
+                        Some(Err(e)) => {
+                            let _ = sender.send(Err(e)).await;
+                            break;
+                        }
+                        None => break,
                     }
-                    Some(Err(e)) => {
-                        let _ = sender.send(Err(e)).await;
-                        break;
-                    }
-                    None => break,
                 }
             }
-        });
+            .instrument(span),
+        );
     }
 
     pub(crate) fn total_rows(&self) -> usize {

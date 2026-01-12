@@ -151,7 +151,7 @@ etcd-client = { version = "0.16.1", features = [
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "a2e5099d72a1cfa8ba41fa4296101eb5f874074a" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "58aeee49267fb1eafa6f9123f9d0c47dd0f62722" }
 hex = "0.4"
 http = "1"
 humantime = "2.1"
@@ -189,7 +189,7 @@ paste = "1.0"
 pin-project = "1.0"
 pretty_assertions = "1.4.0"
 prometheus = { version = "0.13.3", features = ["process"] }
-promql-parser = { version = "0.6", features = ["ser"] }
+promql-parser = { version = "0.7.1", features = ["ser"] }
 prost = { version = "0.13", features = ["no-recursion-limit"] }
 prost-types = "0.13"
 raft-engine = { version = "0.4.1", default-features = false }

@@ -19,6 +19,7 @@ use common_telemetry::{debug, warn};
 use snafu::ensure;
 use tokio::sync::Mutex;
 
+use crate::ddl::allocator::resource_id::ResourceIdAllocator;
 use crate::error::{self, Result};
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::CompareAndPutRequest;
@@ -80,6 +81,25 @@ impl SequenceBuilder {
 
 pub struct Sequence {
     inner: Mutex<Inner>,
+}
+
+#[async_trait::async_trait]
+impl ResourceIdAllocator for Sequence {
+    async fn next(&self) -> Result<u64> {
+        self.next().await
+    }
+
+    async fn peek(&self) -> Result<u64> {
+        self.peek().await
+    }
+
+    async fn jump_to(&self, next: u64) -> Result<()> {
+        self.jump_to(next).await
+    }
+
+    async fn min_max(&self) -> Range<u64> {
+        self.min_max().await
+    }
 }
 
 impl Sequence {

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub(crate) mod executor;
+pub mod executor;
 mod metadata;
 
 use std::collections::HashMap;
@@ -156,7 +156,13 @@ impl DropTableProcedure {
 
     pub async fn on_datanode_drop_regions(&mut self) -> Result<Status> {
         self.executor
-            .on_drop_regions(&self.context, &self.data.physical_region_routes, false)
+            .on_drop_regions(
+                &self.context.node_manager,
+                &self.context.leader_region_registry,
+                &self.data.physical_region_routes,
+                false,
+                false,
+            )
             .await?;
         self.data.state = DropTableState::DeleteTombstone;
         Ok(Status::executing(true))

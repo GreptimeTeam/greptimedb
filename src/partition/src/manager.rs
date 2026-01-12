@@ -199,7 +199,8 @@ impl PartitionRuleManager {
     }
 }
 
-fn create_partitions_from_region_routes(
+/// Creates partitions from region routes.
+pub fn create_partitions_from_region_routes(
     table_id: TableId,
     region_routes: &[RegionRoute],
 ) -> Result<Vec<PartitionInfo>> {

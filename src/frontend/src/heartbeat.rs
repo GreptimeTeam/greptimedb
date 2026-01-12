@@ -42,8 +42,6 @@ use crate::metrics::{HEARTBEAT_RECV_COUNT, HEARTBEAT_SENT_COUNT};
 pub struct HeartbeatTask {
     peer_addr: String,
     meta_client: Arc<MetaClient>,
-    report_interval: Duration,
-    retry_interval: Duration,
     resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
     start_time_ms: u64,
     resource_stat: ResourceStatRef,
@@ -66,8 +64,6 @@ impl HeartbeatTask {
                 addrs::resolve_addr(&opts.grpc.bind_addr, Some(&opts.grpc.server_addr))
             },
             meta_client,
-            report_interval: opts.heartbeat.interval,
-            retry_interval: opts.heartbeat.retry_interval,
             resp_handler_executor,
             start_time_ms: common_time::util::current_time_millis() as u64,
             resource_stat,
@@ -75,27 +71,31 @@ impl HeartbeatTask {
     }
 
     pub async fn start(&self) -> Result<()> {
-        let (req_sender, resp_stream) = self
+        let (req_sender, resp_stream, config) = self
             .meta_client
             .heartbeat()
             .await
             .context(error::CreateMetaHeartbeatStreamSnafu)?;
 
-        info!("A heartbeat connection has been established with metasrv");
+        info!("Heartbeat started with Metasrv config: {}", config);
 
         let (outgoing_tx, outgoing_rx) = mpsc::channel(16);
         let mailbox = Arc::new(HeartbeatMailbox::new(outgoing_tx));
 
-        self.start_handle_resp_stream(resp_stream, mailbox);
+        self.start_handle_resp_stream(resp_stream, mailbox, config.retry_interval);
 
-        self.start_heartbeat_report(req_sender, outgoing_rx);
+        self.start_heartbeat_report(req_sender, outgoing_rx, config.interval);
 
         Ok(())
     }
 
-    fn start_handle_resp_stream(&self, mut resp_stream: HeartbeatStream, mailbox: MailboxRef) {
+    fn start_handle_resp_stream(
+        &self,
+        mut resp_stream: HeartbeatStream,
+        mailbox: MailboxRef,
+        retry_interval: Duration,
+    ) {
         let capture_self = self.clone();
-        let retry_interval = self.retry_interval;
 
         let _handle = common_runtime::spawn_hb(async move {
             loop {
@@ -190,8 +190,8 @@ impl HeartbeatTask {
         &self,
         req_sender: HeartbeatSender,
         mut outgoing_rx: Receiver<OutgoingMessage>,
+        report_interval: Duration,
     ) {
-        let report_interval = self.report_interval;
         let start_time_ms = self.start_time_ms;
         let self_peer = Some(Peer {
             // The node id will be actually calculated from its address (by hashing the address

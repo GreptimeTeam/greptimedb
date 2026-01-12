@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
 
 use crate::error::{self, Result};
+use crate::procedure::repartition::group::update_metadata::UpdateMetadata;
 use crate::procedure::repartition::group::{
     Context, GroupId, GroupPrepareResult, State, region_routes,
 };
@@ -109,7 +110,7 @@ impl RepartitionStart {
             );
         }
         let central_region = sources[0].region_id;
-        let central_region_datanode_id = source_region_routes[0]
+        let central_region_datanode = source_region_routes[0]
             .leader_peer
             .as_ref()
             .context(error::UnexpectedSnafu {
@@ -118,20 +119,14 @@ impl RepartitionStart {
                     central_region
                 ),
             })?
-            .id;
+            .clone();
 
         Ok(GroupPrepareResult {
             source_routes: source_region_routes,
             target_routes: target_region_routes,
             central_region,
-            central_region_datanode_id,
+            central_region_datanode,
         })
-    }
-
-    #[allow(dead_code)]
-    fn next_state() -> (Box<dyn State>, Status) {
-        // TODO(weny): change it later.
-        (Box::new(RepartitionStart), Status::executing(true))
     }
 }
 
@@ -154,7 +149,10 @@ impl State for RepartitionStart {
         _procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
         if ctx.persistent_ctx.group_prepare_result.is_some() {
-            return Ok(Self::next_state());
+            return Ok((
+                Box::new(UpdateMetadata::ApplyStaging),
+                Status::executing(true),
+            ));
         }
         let table_id = ctx.persistent_ctx.table_id;
         let group_id = ctx.persistent_ctx.group_id;
@@ -174,7 +172,10 @@ impl State for RepartitionStart {
             ctx.persistent_ctx.targets.len()
         );
 
-        Ok(Self::next_state())
+        Ok((
+            Box::new(UpdateMetadata::ApplyStaging),
+            Status::executing(true),
+        ))
     }
 
     fn as_any(&self) -> &dyn Any {

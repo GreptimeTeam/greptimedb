@@ -28,7 +28,7 @@ use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner};
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion, TreeNodeVisitor};
 use datafusion_common::{DataFusionError, TableReference};
 use datafusion_expr::{LogicalPlan, UserDefinedLogicalNode};
-use partition::manager::PartitionRuleManagerRef;
+use partition::manager::{PartitionRuleManagerRef, create_partitions_from_region_routes};
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
@@ -40,7 +40,7 @@ use crate::dist_plan::PredicateExtractor;
 use crate::dist_plan::merge_scan::{MergeScanExec, MergeScanLogicalPlan};
 use crate::dist_plan::merge_sort::MergeSortLogicalPlan;
 use crate::dist_plan::region_pruner::ConstraintPruner;
-use crate::error::{CatalogSnafu, TableNotFoundSnafu};
+use crate::error::{CatalogSnafu, PartitionRuleManagerSnafu, TableNotFoundSnafu};
 use crate::region_query::RegionQueryHandlerRef;
 
 /// Planner for convert merge sort logical plan to physical plan
@@ -211,8 +211,16 @@ impl DistExtensionPlanner {
             })?;
 
         let table_info = table.table_info();
-        let all_regions = table_info.region_ids();
-
+        let physical_table_route = self
+            .partition_rule_manager
+            .find_physical_table_route(table_info.table_id())
+            .await
+            .context(PartitionRuleManagerSnafu)?;
+        let all_regions = physical_table_route
+            .region_routes
+            .iter()
+            .map(|r| RegionId::new(table_info.table_id(), r.region.id.region_number()))
+            .collect::<Vec<_>>();
         // Extract partition columns
         let partition_columns: Vec<String> =
             table_info.meta.partition_column_names().cloned().collect();
@@ -256,11 +264,10 @@ impl DistExtensionPlanner {
         }
 
         // Get partition information for the table if partition rule manager is available
-        let partitions = match self
-            .partition_rule_manager
-            .find_table_partitions(table.table_info().table_id())
-            .await
-        {
+        let partitions = match create_partitions_from_region_routes(
+            table_info.table_id(),
+            &physical_table_route.region_routes,
+        ) {
             Ok(partitions) => partitions,
             Err(err) => {
                 common_telemetry::debug!(

@@ -144,6 +144,8 @@ impl ReconcileRegions {
 }
 
 /// Creates a region request builder from a raw table info.
+///
+/// Note: This function is primarily intended for creating logical tables or allocating placeholder regions.
 fn create_region_request_from_raw_table_info(
     raw_table_info: &RawTableInfo,
     physical_table_id: TableId,

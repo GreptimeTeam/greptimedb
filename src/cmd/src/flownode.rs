@@ -358,7 +358,6 @@ impl StartCommand {
         let heartbeat_task = flow::heartbeat::HeartbeatTask::new(
             &opts,
             meta_client.clone(),
-            opts.heartbeat.clone(),
             Arc::new(executor),
             Arc::new(resource_stat),
         );

@@ -161,6 +161,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Unexpected: {err_msg}"))]
+    Unexpected {
+        err_msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -188,6 +195,7 @@ impl ErrorExt for Error {
             Error::ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
             Error::SqlCommon { source, .. } => source.status_code(),
             Error::MissingTableMeta { .. } => StatusCode::Unexpected,
+            Error::Unexpected { .. } => StatusCode::Unexpected,
         }
     }
 

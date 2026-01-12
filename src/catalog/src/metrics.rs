@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub(crate) const METRIC_DB_LABEL: &str = "db";
-
 use lazy_static::lazy_static;
 use prometheus::*;
 
@@ -25,7 +23,7 @@ lazy_static! {
     pub static ref METRIC_CATALOG_MANAGER_TABLE_COUNT: IntGaugeVec = register_int_gauge_vec!(
         "greptime_catalog_table_count",
         "catalog table count",
-        &[METRIC_DB_LABEL]
+        &["db"]
     )
     .unwrap();
     pub static ref METRIC_CATALOG_KV_REMOTE_GET: Histogram =

@@ -1,0 +1,65 @@
+CREATE TABLE ngx_access_log (
+    client STRING,
+    country STRING,
+    access_time TIMESTAMP(9) TIME INDEX
+);
+
+Affected Rows: 0
+
+/* insert some data */
+INSERT INTO
+    ngx_access_log
+VALUES
+    ("client1", "US", "2022-01-01 00:00:00"),
+    ("client2", "US", "2022-01-01 00:00:01"),
+    ("client3", "UK", "2022-01-01 00:00:02"),
+    ("client4", "UK", "2022-01-01 00:00:03"),
+    ("client5", "CN", "2022-01-01 00:00:04"),
+    ("client6", "CN", "2022-01-01 00:00:05"),
+    ("client7", "JP", "2022-01-01 00:00:06"),
+    ("client8", "JP", "2022-01-01 00:00:07"),
+    ("client9", "KR", "2022-01-01 00:00:08"),
+    ("client10", "KR", "2022-01-01 00:00:09");
+
+Affected Rows: 10
+
+-- should not fail with mismatch timezone
+SELECT count(*) FROM (
+SELECT
+    now()
+FROM
+    ngx_access_log);
+
++----------+
+| count(*) |
++----------+
+| 10       |
++----------+
+
+-- SQLNESS REPLACE TimestampNanosecond\(\d+ TimestampNanosecond(NOW
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+EXPLAIN SELECT count(*) FROM (
+SELECT
+    now()
+FROM
+    ngx_access_log);
+
++---------------+-----------------------------------------------------------------------------------+
+| plan_type     | plan                                                                              |
++---------------+-----------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                   |
+|               | Projection: count(Int64(1)) AS count(*)                                           |
+|               |   Aggregate: groupBy=[[]], aggr=[[count(Int64(1))]]                               |
+|               |     Projection: TimestampNanosecond(NOW, Some("+00:00")) AS now() |
+|               |       TableScan: ngx_access_log                                                   |
+|               | ]]                                                                                |
+| physical_plan | CooperativeExec                                                                   |
+|               |   MergeScanExec: REDACTED
+|               |                                                                                   |
++---------------+-----------------------------------------------------------------------------------+
+
+DROP TABLE ngx_access_log;
+
+Affected Rows: 0
+

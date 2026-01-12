@@ -54,7 +54,6 @@ use promql_parser::parser::{
     SubqueryExpr, UnaryExpr, VectorSelector,
 };
 use query::parser::{DEFAULT_LOOKBACK_STRING, PromQuery, QueryLanguageParser};
-use query::promql::planner::normalize_matcher;
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -71,7 +70,7 @@ use crate::error::{
     UnexpectedResultSnafu,
 };
 use crate::http::header::collect_plan_metrics;
-use crate::prom_store::{DATABASE_LABEL, FIELD_NAME_LABEL, METRIC_NAME_LABEL, SCHEMA_LABEL};
+use crate::prom_store::{FIELD_NAME_LABEL, METRIC_NAME_LABEL, is_database_selection_label};
 use crate::prometheus_handler::PrometheusHandlerRef;
 
 /// For [ValueType::Vector] result type
@@ -1241,7 +1240,6 @@ fn find_metric_name_not_equal_matchers(expr: &PromqlExpr) -> Option<Vec<Matcher>
         matchers
             .into_iter()
             .filter(|m| !matches!(m.op, MatchOp::Equal))
-            .map(normalize_matcher)
             .collect::<Vec<_>>()
     })
 }
@@ -1344,7 +1342,7 @@ pub async fn label_values_query(
         field_columns.sort_unstable();
         truncate_results(&mut field_columns, params.limit);
         return PrometheusJsonResponse::success(PrometheusResponse::LabelValues(field_columns));
-    } else if label_name == SCHEMA_LABEL || label_name == DATABASE_LABEL {
+    } else if is_database_selection_label(&label_name) {
         let catalog_manager = handler.catalog_manager();
 
         let mut schema_names = try_call_return_response!(

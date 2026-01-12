@@ -234,7 +234,7 @@ impl QueryEngineState {
         rules.retain(|rule| rule.name() != name);
     }
 
-    /// Optimize the logical plan by the extension anayzer rules.
+    /// Optimize the logical plan by the extension analyzer rules.
     pub fn optimize_by_extension_rules(
         &self,
         plan: DfLogicalPlan,

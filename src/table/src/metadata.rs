@@ -31,7 +31,7 @@ use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use store_api::mito_engine_options::{COMPACTION_TYPE, COMPACTION_TYPE_TWCS, SST_FORMAT_KEY};
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
-use store_api::storage::{ColumnDescriptor, ColumnDescriptorBuilder, ColumnId, RegionId};
+use store_api::storage::{ColumnDescriptor, ColumnDescriptorBuilder, ColumnId};
 
 use crate::error::{self, Result};
 use crate::requests::{
@@ -135,8 +135,6 @@ pub struct TableMeta {
     pub value_indices: Vec<usize>,
     #[builder(default, setter(into))]
     pub engine: String,
-    #[builder(default, setter(into))]
-    pub region_numbers: Vec<u32>,
     pub next_column_id: ColumnId,
     /// Table options.
     #[builder(default)]
@@ -160,7 +158,6 @@ impl TableMetaBuilder {
             primary_key_indices: None,
             value_indices: None,
             engine: None,
-            region_numbers: None,
             next_column_id: None,
             options: None,
             created_on: None,
@@ -194,7 +191,6 @@ impl TableMetaBuilder {
             primary_key_indices: Some(Vec::new()),
             value_indices: Some(Vec::new()),
             engine: None,
-            region_numbers: Some(Vec::new()),
             next_column_id: Some(0),
             options: None,
             created_on: None,
@@ -241,6 +237,12 @@ impl TableMeta {
         self.partition_key_indices
             .iter()
             .map(|idx| &columns_schemas[*idx].name)
+    }
+
+    pub fn partition_columns(&self) -> impl Iterator<Item = &ColumnSchema> {
+        self.partition_key_indices
+            .iter()
+            .map(|idx| &self.schema.column_schemas()[*idx])
     }
 
     /// Returns the new [TableMetaBuilder] after applying given `alter_kind`.
@@ -1088,13 +1090,6 @@ impl TableInfo {
         self.ident.table_id
     }
 
-    pub fn region_ids(&self) -> Vec<RegionId> {
-        self.meta
-            .region_numbers
-            .iter()
-            .map(|id| RegionId::new(self.table_id(), *id))
-            .collect()
-    }
     /// Returns the full table name in the form of `{catalog}.{schema}.{table}`.
     pub fn full_table_name(&self) -> String {
         common_catalog::format_full_table_name(&self.catalog_name, &self.schema_name, &self.name)
@@ -1174,7 +1169,6 @@ pub struct RawTableMeta {
     /// Next column id of a new column.
     /// It's used to ensure all columns with the same name across all regions have the same column id.
     pub next_column_id: ColumnId,
-    pub region_numbers: Vec<u32>,
     pub options: TableOptions,
     pub created_on: DateTime<Utc>,
     pub updated_on: DateTime<Utc>,
@@ -1201,7 +1195,6 @@ impl<'de> Deserialize<'de> for RawTableMeta {
             value_indices: Vec<usize>,
             engine: String,
             next_column_id: u32,
-            region_numbers: Vec<u32>,
             options: TableOptions,
             created_on: DateTime<Utc>,
             updated_on: Option<DateTime<Utc>>,
@@ -1218,7 +1211,6 @@ impl<'de> Deserialize<'de> for RawTableMeta {
             value_indices: h.value_indices,
             engine: h.engine,
             next_column_id: h.next_column_id,
-            region_numbers: h.region_numbers,
             options: h.options,
             created_on: h.created_on,
             updated_on: h.updated_on.unwrap_or(h.created_on),
@@ -1236,7 +1228,6 @@ impl From<TableMeta> for RawTableMeta {
             value_indices: meta.value_indices,
             engine: meta.engine,
             next_column_id: meta.next_column_id,
-            region_numbers: meta.region_numbers,
             options: meta.options,
             created_on: meta.created_on,
             updated_on: meta.updated_on,
@@ -1255,7 +1246,6 @@ impl TryFrom<RawTableMeta> for TableMeta {
             primary_key_indices: raw.primary_key_indices,
             value_indices: raw.value_indices,
             engine: raw.engine,
-            region_numbers: raw.region_numbers,
             next_column_id: raw.next_column_id,
             options: raw.options,
             created_on: raw.created_on,
@@ -1608,8 +1598,6 @@ mod tests {
             .unwrap();
 
         let new_meta = add_columns_to_meta(&meta);
-        assert_eq!(meta.region_numbers, new_meta.region_numbers);
-
         let names: Vec<String> = new_meta
             .schema
             .column_schemas()
@@ -1684,8 +1672,6 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-
-        assert_eq!(meta.region_numbers, new_meta.region_numbers);
 
         let names: Vec<String> = new_meta
             .schema
@@ -2038,8 +2024,6 @@ mod tests {
             .unwrap();
 
         let new_meta = add_columns_to_meta_with_location(&meta);
-        assert_eq!(meta.region_numbers, new_meta.region_numbers);
-
         let names: Vec<String> = new_meta
             .schema
             .column_schemas()
@@ -2090,8 +2074,6 @@ mod tests {
 
         // Add a string column and make it fulltext indexed
         let new_meta = add_columns_to_meta_with_location(&meta);
-        assert_eq!(meta.region_numbers, new_meta.region_numbers);
-
         let alter_kind = AlterKind::SetIndexes {
             options: vec![SetIndexOption::Fulltext {
                 column_name: "my_tag_first".to_string(),

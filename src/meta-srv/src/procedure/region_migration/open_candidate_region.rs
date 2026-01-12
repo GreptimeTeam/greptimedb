@@ -129,7 +129,7 @@ impl OpenCandidateRegion {
                 let guard = ctx
                     .opening_region_keeper
                     .register(candidate.id, *region_id)
-                    .context(error::RegionOpeningRaceSnafu {
+                    .context(error::RegionOperatingRaceSnafu {
                         peer_id: candidate.id,
                         region_id: *region_id,
                     })?;
@@ -302,7 +302,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_matches!(err, Error::RegionOpeningRace { .. });
+        assert_matches!(err, Error::RegionOperatingRace { .. });
         assert!(!err.is_retryable());
     }
 
@@ -425,7 +425,7 @@ mod tests {
         let mut env = TestingEnv::new();
 
         // Prepares table
-        let table_info = new_test_table_info(1024, vec![1]).into();
+        let table_info = new_test_table_info(1024).into();
         let region_routes = vec![RegionRoute {
             region: Region::new_test(region_id),
             leader_peer: Some(Peer::empty(from_peer_id)),

@@ -65,8 +65,9 @@ use store_api::metric_engine_consts::{
     FILE_ENGINE_NAME, LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME,
 };
 use store_api::region_engine::{
-    RegionEngineRef, RegionManifestInfo, RegionRole, RegionStatistic, SetRegionRoleStateResponse,
-    SettableRegionRoleState, SyncRegionFromRequest,
+    RegionEngineRef, RegionManifestInfo, RegionRole, RegionStatistic, RemapManifestsRequest,
+    RemapManifestsResponse, SetRegionRoleStateResponse, SettableRegionRoleState,
+    SyncRegionFromRequest,
 };
 use store_api::region_request::{
     AffectedRows, BatchRegionDdlRequest, RegionCatchupRequest, RegionCloseRequest,
@@ -602,6 +603,25 @@ impl RegionServer {
         self.inner
             .handle_sync_region(engine_with_status.engine(), region_id, request)
             .await
+    }
+
+    /// Remaps manifests from old regions to new regions.
+    pub async fn remap_manifests(
+        &self,
+        request: RemapManifestsRequest,
+    ) -> Result<RemapManifestsResponse> {
+        let region_id = request.region_id;
+        let engine_with_status = self
+            .inner
+            .region_map
+            .get(&region_id)
+            .with_context(|| RegionNotFoundSnafu { region_id })?;
+
+        engine_with_status
+            .engine()
+            .remap_manifests(request)
+            .await
+            .with_context(|_| HandleRegionRequestSnafu { region_id })
     }
 
     fn is_suspended(&self) -> bool {
@@ -1621,7 +1641,10 @@ mod tests {
         let response = mock_region_server
             .handle_request(
                 region_id,
-                RegionRequest::Drop(RegionDropRequest { fast_path: false }),
+                RegionRequest::Drop(RegionDropRequest {
+                    fast_path: false,
+                    force: false,
+                }),
             )
             .await
             .unwrap();
@@ -1719,7 +1742,10 @@ mod tests {
         mock_region_server
             .handle_request(
                 region_id,
-                RegionRequest::Drop(RegionDropRequest { fast_path: false }),
+                RegionRequest::Drop(RegionDropRequest {
+                    fast_path: false,
+                    force: false,
+                }),
             )
             .await
             .unwrap_err();

@@ -77,4 +77,5 @@ common-query.workspace = true
 common-test-util.workspace = true
 datafusion-common.workspace = true
 mito2 = { workspace = true, features = ["test"] }
+partition.workspace = true
 session.workspace = true

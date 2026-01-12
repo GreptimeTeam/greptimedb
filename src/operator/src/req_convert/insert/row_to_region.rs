@@ -14,10 +14,9 @@
 
 use ahash::{HashMap, HashSet};
 use api::v1::RowInsertRequests;
-use api::v1::region::{InsertRequest, InsertRequests as RegionInsertRequests};
+use api::v1::region::InsertRequests as RegionInsertRequests;
 use partition::manager::PartitionRuleManager;
 use snafu::OptionExt;
-use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::{TableId, TableInfoRef};
 
 use crate::error::{Result, TableNotFoundSnafu};
@@ -54,20 +53,10 @@ impl<'a> RowToRegion<'a> {
 
             let table_info = self.get_table_info(&request.table_name)?;
             let table_id = table_info.table_id();
-            let region_numbers = self.region_numbers(&request.table_name)?;
-            let requests = if let Some(region_id) = match region_numbers[..] {
-                [singular] => Some(RegionId::new(table_id, singular)),
-                _ => None,
-            } {
-                vec![InsertRequest {
-                    region_id: region_id.as_u64(),
-                    rows: Some(rows),
-                }]
-            } else {
-                Partitioner::new(self.partition_manager)
-                    .partition_insert_requests(table_info, rows)
-                    .await?
-            };
+
+            let requests = Partitioner::new(self.partition_manager)
+                .partition_insert_requests(table_info, rows)
+                .await?;
 
             if self.instant_table_ids.contains(&table_id) {
                 instant_request.extend(requests);
@@ -89,13 +78,6 @@ impl<'a> RowToRegion<'a> {
     fn get_table_info(&self, table_name: &str) -> Result<&TableInfoRef> {
         self.tables_info
             .get(table_name)
-            .context(TableNotFoundSnafu { table_name })
-    }
-
-    fn region_numbers(&self, table_name: &str) -> Result<&Vec<RegionNumber>> {
-        self.tables_info
-            .get(table_name)
-            .map(|x| &x.meta.region_numbers)
             .context(TableNotFoundSnafu { table_name })
     }
 }

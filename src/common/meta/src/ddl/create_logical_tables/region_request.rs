@@ -22,7 +22,7 @@ use store_api::storage::{RegionId, TableId};
 use table::metadata::RawTableInfo;
 
 use crate::ddl::create_logical_tables::CreateLogicalTablesProcedure;
-use crate::ddl::create_table_template::{
+use crate::ddl::create_table::template::{
     CreateRequestBuilder, build_template, build_template_from_raw_table_info,
 };
 use crate::ddl::utils::region_storage_path;
@@ -97,7 +97,7 @@ pub fn create_region_request_builder(
 
 /// Builds a [CreateRequestBuilder] from a [RawTableInfo].
 ///
-/// Note: **This method is only used for creating logical tables.**
+/// Note: This function is primarily intended for creating logical tables or allocating placeholder regions.
 pub fn create_region_request_builder_from_raw_table_info(
     raw_table_info: &RawTableInfo,
     physical_table_id: TableId,

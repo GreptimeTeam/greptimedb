@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
+use api::v1::meta::{HeartbeatConfig, Role};
 use clap::ValueEnum;
 use common_base::Plugins;
 use common_base::readable_size::ReadableSize;
@@ -26,8 +27,11 @@ use common_config::{Configurable, DEFAULT_DATA_HOME};
 use common_event_recorder::EventRecorderOptions;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
+use common_meta::ddl::allocator::resource_id::ResourceIdAllocatorRef;
 use common_meta::ddl_manager::DdlManagerRef;
-use common_meta::distributed_time_constants::{self, default_distributed_time_constants};
+use common_meta::distributed_time_constants::{
+    self, BASE_HEARTBEAT_INTERVAL, default_distributed_time_constants, frontend_heartbeat_interval,
+};
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackend, ResettableKvBackendRef};
@@ -39,9 +43,8 @@ use common_meta::peer::{Peer, PeerDiscoveryRef};
 use common_meta::reconciliation::manager::ReconciliationManagerRef;
 use common_meta::region_keeper::MemoryRegionKeeperRef;
 use common_meta::region_registry::LeaderRegionRegistryRef;
-use common_meta::sequence::SequenceRef;
 use common_meta::stats::topic::TopicStatsRegistryRef;
-use common_meta::wal_options_allocator::WalOptionsAllocatorRef;
+use common_meta::wal_provider::WalProviderRef;
 use common_options::datanode::DatanodeClientOptions;
 use common_options::memory::MemoryOptions;
 use common_procedure::ProcedureManagerRef;
@@ -117,6 +120,59 @@ impl Default for StatsPersistenceOptions {
         Self {
             ttl: Duration::ZERO,
             interval: Duration::from_mins(10),
+        }
+    }
+}
+
+/// Heartbeat configuration for a single node type.
+#[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
+#[serde(default)]
+pub struct HeartbeatOptions {
+    /// Heartbeat interval.
+    #[serde(with = "humantime_serde")]
+    pub interval: Duration,
+    /// Retry interval when heartbeat connection fails.
+    #[serde(with = "humantime_serde")]
+    pub retry_interval: Duration,
+}
+
+impl Default for HeartbeatOptions {
+    fn default() -> Self {
+        Self {
+            interval: BASE_HEARTBEAT_INTERVAL,
+            retry_interval: BASE_HEARTBEAT_INTERVAL,
+        }
+    }
+}
+
+impl HeartbeatOptions {
+    pub fn datanode_from(base_interval: Duration) -> Self {
+        Self {
+            interval: base_interval,
+            retry_interval: base_interval,
+        }
+    }
+
+    pub fn frontend_from(base_interval: Duration) -> Self {
+        Self {
+            interval: frontend_heartbeat_interval(base_interval),
+            retry_interval: base_interval,
+        }
+    }
+
+    pub fn flownode_from(base_interval: Duration) -> Self {
+        Self {
+            interval: base_interval,
+            retry_interval: base_interval,
+        }
+    }
+}
+
+impl From<HeartbeatOptions> for HeartbeatConfig {
+    fn from(opts: HeartbeatOptions) -> Self {
+        Self {
+            heartbeat_interval_ms: opts.interval.as_millis() as u64,
+            retry_interval_ms: opts.retry_interval.as_millis() as u64,
         }
     }
 }
@@ -379,12 +435,27 @@ pub struct Context {
     pub cache_invalidator: CacheInvalidatorRef,
     pub leader_region_registry: LeaderRegionRegistryRef,
     pub topic_stats_registry: TopicStatsRegistryRef,
+    pub heartbeat_interval: Duration,
+    pub is_handshake: bool,
 }
 
 impl Context {
     pub fn reset_in_memory(&self) {
         self.in_memory.reset();
         self.leader_region_registry.reset();
+    }
+
+    pub fn with_handshake(mut self, is_handshake: bool) -> Self {
+        self.is_handshake = is_handshake;
+        self
+    }
+
+    pub fn heartbeat_options_for(&self, role: Role) -> HeartbeatOptions {
+        match role {
+            Role::Datanode => HeartbeatOptions::datanode_from(self.heartbeat_interval),
+            Role::Frontend => HeartbeatOptions::frontend_from(self.heartbeat_interval),
+            Role::Flownode => HeartbeatOptions::flownode_from(self.heartbeat_interval),
+        }
     }
 }
 
@@ -553,7 +624,7 @@ pub struct Metasrv {
     procedure_manager: ProcedureManagerRef,
     mailbox: MailboxRef,
     ddl_manager: DdlManagerRef,
-    wal_options_allocator: WalOptionsAllocatorRef,
+    wal_provider: WalProviderRef,
     table_metadata_manager: TableMetadataManagerRef,
     runtime_switch_manager: RuntimeSwitchManagerRef,
     memory_region_keeper: MemoryRegionKeeperRef,
@@ -565,7 +636,7 @@ pub struct Metasrv {
     topic_stats_registry: TopicStatsRegistryRef,
     wal_prune_ticker: Option<WalPruneTickerRef>,
     region_flush_ticker: Option<RegionFlushTickerRef>,
-    table_id_sequence: SequenceRef,
+    table_id_allocator: ResourceIdAllocatorRef,
     reconciliation_manager: ReconciliationManagerRef,
     resource_stat: ResourceStatRef,
     gc_ticker: Option<GcTickerRef>,
@@ -613,7 +684,7 @@ impl Metasrv {
 
             // Builds leadership change notifier.
             let mut leadership_change_notifier = LeadershipChangeNotifier::default();
-            leadership_change_notifier.add_listener(self.wal_options_allocator.clone());
+            leadership_change_notifier.add_listener(self.wal_provider.clone());
             leadership_change_notifier
                 .add_listener(Arc::new(ProcedureManagerListenerAdapter(procedure_manager)));
             leadership_change_notifier.add_listener(Arc::new(NodeExpiryListener::new(
@@ -711,8 +782,8 @@ impl Metasrv {
                 "Ensure only one instance of Metasrv is running, as there is no election service."
             );
 
-            if let Err(e) = self.wal_options_allocator.start().await {
-                error!(e; "Failed to start wal options allocator");
+            if let Err(e) = self.wal_provider.start().await {
+                error!(e; "Failed to start wal provider");
             }
             // Always load kv into cached kv store.
             self.leader_cached_kv_backend
@@ -860,8 +931,8 @@ impl Metasrv {
         self.plugins.get::<SubscriptionManagerRef>()
     }
 
-    pub fn table_id_sequence(&self) -> &SequenceRef {
-        &self.table_id_sequence
+    pub fn table_id_allocator(&self) -> &ResourceIdAllocatorRef {
+        &self.table_id_allocator
     }
 
     pub fn reconciliation_manager(&self) -> &ReconciliationManagerRef {
@@ -903,6 +974,8 @@ impl Metasrv {
             cache_invalidator,
             leader_region_registry,
             topic_stats_registry,
+            heartbeat_interval: self.options().heartbeat_interval,
+            is_handshake: false,
         }
     }
 }

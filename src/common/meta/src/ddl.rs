@@ -28,6 +28,7 @@ use crate::node_manager::NodeManagerRef;
 use crate::region_keeper::MemoryRegionKeeperRef;
 use crate::region_registry::LeaderRegionRegistryRef;
 
+pub mod allocator;
 pub mod alter_database;
 pub mod alter_logical_tables;
 pub mod alter_table;
@@ -36,8 +37,7 @@ pub mod create_database;
 pub mod create_flow;
 pub mod create_logical_tables;
 pub mod create_table;
-mod create_table_template;
-pub(crate) use create_table_template::{CreateRequestBuilder, build_template_from_raw_table_info};
+pub(crate) use create_table::{CreateRequestBuilder, build_template_from_raw_table_info};
 pub mod create_view;
 pub mod drop_database;
 pub mod drop_flow;

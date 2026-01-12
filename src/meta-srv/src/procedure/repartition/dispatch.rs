@@ -13,17 +13,40 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::collections::HashMap;
 
 use common_procedure::{Context as ProcedureContext, ProcedureWithId, Status};
 use serde::{Deserialize, Serialize};
+use store_api::storage::RegionId;
 
 use crate::error::Result;
 use crate::procedure::repartition::collect::{Collect, ProcedureMeta};
 use crate::procedure::repartition::group::RepartitionGroupProcedure;
+use crate::procedure::repartition::plan::RegionDescriptor;
 use crate::procedure::repartition::{self, Context, State};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Dispatch;
+
+#[allow(dead_code)]
+fn build_region_mapping(
+    source_regions: &[RegionDescriptor],
+    target_regions: &[RegionDescriptor],
+    transition_map: &[Vec<usize>],
+) -> HashMap<RegionId, Vec<RegionId>> {
+    transition_map
+        .iter()
+        .enumerate()
+        .map(|(source_idx, indices)| {
+            let source_region = source_regions[source_idx].region_id;
+            let target_regions = indices
+                .iter()
+                .map(|&target_idx| target_regions[target_idx].region_id)
+                .collect::<Vec<_>>();
+            (source_region, target_regions)
+        })
+        .collect::<HashMap<RegionId, _>>()
+}
 
 #[async_trait::async_trait]
 #[typetag::serde]
@@ -37,11 +60,19 @@ impl State for Dispatch {
         let mut procedures = Vec::with_capacity(ctx.persistent_ctx.plans.len());
         let mut procedure_metas = Vec::with_capacity(ctx.persistent_ctx.plans.len());
         for (plan_index, plan) in ctx.persistent_ctx.plans.iter().enumerate() {
+            let region_mapping = build_region_mapping(
+                &plan.source_regions,
+                &plan.target_regions,
+                &plan.transition_map,
+            );
             let persistent_ctx = repartition::group::PersistentContext::new(
                 plan.group_id,
                 table_id,
+                ctx.persistent_ctx.catalog_name.clone(),
+                ctx.persistent_ctx.schema_name.clone(),
                 plan.source_regions.clone(),
                 plan.target_regions.clone(),
+                region_mapping,
             );
 
             let group_procedure = RepartitionGroupProcedure::new(persistent_ctx, ctx);

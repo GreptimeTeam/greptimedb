@@ -37,6 +37,7 @@ use common_grpc::flight::{FlightDecoder, FlightMessage};
 use common_query::Output;
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{RecordBatch, RecordBatchStreamWrapper};
+use common_telemetry::tracing::Span;
 use common_telemetry::tracing_context::W3cTrace;
 use common_telemetry::{error, warn};
 use futures::future;
@@ -456,6 +457,7 @@ impl Database {
                     stream,
                     output_ordering: None,
                     metrics: Default::default(),
+                    span: Span::current(),
                 };
                 Ok(Output::new_with_stream(Box::pin(record_batch_stream)))
             }

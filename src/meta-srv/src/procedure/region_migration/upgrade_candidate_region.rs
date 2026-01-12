@@ -23,7 +23,7 @@ use common_meta::instruction::{
 };
 use common_meta::key::topic_region::TopicRegionKey;
 use common_meta::lock_key::RemoteWalLock;
-use common_meta::wal_options_allocator::extract_topic_from_wal_options;
+use common_meta::wal_provider::extract_topic_from_wal_options;
 use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::{error, info};
 use common_wal::options::WalOptions;
@@ -381,7 +381,7 @@ mod tests {
 
     async fn prepare_table_metadata(ctx: &Context, wal_options: HashMap<u32, String>) {
         let region_id = ctx.persistent_ctx.region_ids[0];
-        let table_info = new_test_table_info(region_id.table_id(), vec![1]).into();
+        let table_info = new_test_table_info(region_id.table_id()).into();
         let region_routes = vec![RegionRoute {
             region: Region::new_test(region_id),
             leader_peer: Some(ctx.persistent_ctx.from_peer.clone()),

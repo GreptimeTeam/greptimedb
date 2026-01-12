@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -143,5 +144,9 @@ impl Server for PostgresServer {
 
     fn bind_addr(&self) -> Option<SocketAddr> {
         self.bind_addr
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }

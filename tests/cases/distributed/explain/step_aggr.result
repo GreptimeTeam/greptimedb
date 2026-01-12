@@ -373,7 +373,7 @@ ORDER BY
 |_|_Projection: date_bin(Utf8("2 seconds"),integers.ts) AS time_window, count(integers.i), sum(integers.i), uddsketch_calc(Float64(0.5), uddsketch_state(Int64(128),Float64(0.01),integers.i)), hll_count(hll(integers.i))_|
 |_|_Aggregate: groupBy=[[date_bin(Utf8("2 seconds"),integers.ts)]], aggr=[[__count_merge(__count_state(integers.i)) AS count(integers.i), __sum_merge(__sum_state(integers.i)) AS sum(integers.i), __uddsketch_state_merge(__uddsketch_state_state(Int64(128),Float64(0.01),integers.i)) AS uddsketch_state(Int64(128),Float64(0.01),integers.i), __hll_merge(__hll_state(integers.i)) AS hll(integers.i)]] |
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| Aggregate: groupBy=[[date_bin(CAST(Utf8("2 seconds") AS Interval(MonthDayNano)), integers.ts)]], aggr=[[__count_state(integers.i), __sum_state(integers.i), __uddsketch_state_state(Int64(128), Float64(0.01), CAST(integers.i AS Float64)), __hll_state(CAST(integers.i AS Utf8))]]_|
+|_| Aggregate: groupBy=[[date_bin(IntervalMonthDayNano("IntervalMonthDayNano { months: 0, days: 0, nanoseconds: 2000000000 }"), integers.ts) AS date_bin(Utf8("2 seconds"),integers.ts)]], aggr=[[__count_state(integers.i), __sum_state(integers.i), __uddsketch_state_state(Int64(128), Float64(0.01), CAST(integers.i AS Float64)), __hll_state(CAST(integers.i AS Utf8))]]_|
 |_|_TableScan: integers_|
 |_| ]]_|
 | physical_plan | SortPreservingMergeExec: [time_window@0 ASC NULLS LAST]_|

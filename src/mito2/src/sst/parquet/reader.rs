@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use api::v1::SemanticType;
 use async_trait::async_trait;
 use common_recordbatch::filter::SimpleFilterEvaluator;
-use common_telemetry::{debug, warn};
+use common_telemetry::{debug, tracing, warn};
 use datafusion_expr::Expr;
 use datatypes::arrow::array::ArrayRef;
 use datatypes::arrow::error::ArrowError;
@@ -249,6 +249,13 @@ impl ParquetReaderBuilder {
     /// Builds a [ParquetReader].
     ///
     /// This needs to perform IO operation.
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            region_id = %self.file_handle.region_id(),
+            file_id = %self.file_handle.file_id()
+        )
+    )]
     pub async fn build(&self) -> Result<ParquetReader> {
         let mut metrics = ReaderMetrics::default();
 
@@ -259,6 +266,13 @@ impl ParquetReaderBuilder {
     /// Builds a [FileRangeContext] and collects row groups to read.
     ///
     /// This needs to perform IO operation.
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            region_id = %self.file_handle.region_id(),
+            file_id = %self.file_handle.file_id()
+        )
+    )]
     pub(crate) async fn build_reader_input(
         &self,
         metrics: &mut ReaderMetrics,
@@ -466,6 +480,13 @@ impl ParquetReaderBuilder {
     }
 
     /// Computes row groups to read, along with their respective row selections.
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            region_id = %self.file_handle.region_id(),
+            file_id = %self.file_handle.file_id()
+        )
+    )]
     async fn row_groups_to_read(
         &self,
         read_format: &ReadFormat,
@@ -1420,6 +1441,13 @@ pub struct ParquetReader {
 
 #[async_trait]
 impl BatchReader for ParquetReader {
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            region_id = %self.context.reader_builder().file_handle.region_id(),
+            file_id = %self.context.reader_builder().file_handle.file_id()
+        )
+    )]
     async fn next_batch(&mut self) -> Result<Option<Batch>> {
         let ReaderState::Readable(reader) = &mut self.reader_state else {
             return Ok(None);
@@ -1491,6 +1519,13 @@ impl Drop for ParquetReader {
 
 impl ParquetReader {
     /// Creates a new reader.
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            region_id = %context.reader_builder().file_handle.region_id(),
+            file_id = %context.reader_builder().file_handle.file_id()
+        )
+    )]
     pub(crate) async fn new(
         context: FileRangeContextRef,
         mut selection: RowGroupSelection,

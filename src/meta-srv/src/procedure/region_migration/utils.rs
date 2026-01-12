@@ -390,10 +390,7 @@ mod tests {
             .table_route_storage()
             .build_create_txn(
                 1024,
-                &TableRouteValue::Logical(LogicalTableRouteValue::new(
-                    1024,
-                    vec![RegionId::new(1023, 1)],
-                )),
+                &TableRouteValue::Logical(LogicalTableRouteValue::new(1024)),
             )
             .unwrap();
         kv_backend.txn(txn).await.unwrap();

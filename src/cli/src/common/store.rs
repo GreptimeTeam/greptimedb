@@ -114,7 +114,7 @@ impl StoreConfig {
     pub fn tls_config(&self) -> Option<TlsOption> {
         if self.backend_tls_mode != TlsMode::Disable {
             Some(TlsOption {
-                mode: self.backend_tls_mode.clone(),
+                mode: self.backend_tls_mode,
                 cert_path: self.backend_tls_cert_path.clone(),
                 key_path: self.backend_tls_key_path.clone(),
                 ca_cert_path: self.backend_tls_ca_cert_path.clone(),

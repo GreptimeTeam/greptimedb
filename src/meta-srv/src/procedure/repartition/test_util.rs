@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
@@ -87,9 +88,13 @@ pub fn new_persistent_context(
 ) -> PersistentContext {
     PersistentContext {
         group_id: Uuid::new_v4(),
+        catalog_name: "test_catalog".to_string(),
+        schema_name: "test_schema".to_string(),
         table_id,
         sources,
         targets,
+        region_mapping: HashMap::new(),
         group_prepare_result: None,
+        staging_manifest_paths: HashMap::new(),
     }
 }
