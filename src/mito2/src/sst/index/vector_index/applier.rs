@@ -442,13 +442,6 @@ fn hnsw_key_to_row_offset(
         }
     }
 
-    if left >= total_rows {
-        return ApplyVectorIndexSnafu {
-            reason: "Failed to map HNSW key to row offset".to_string(),
-        }
-        .fail();
-    }
-
     Ok(left)
 }
 
