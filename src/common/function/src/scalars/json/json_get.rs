@@ -1190,7 +1190,7 @@ mod tests {
             r#"{"a": 4, "b": {"c": 6}, "c": 6}"#,
             r#"{"a": 7, "b": 8, "c": {"a": 7}}"#,
         ];
-        let paths = vec!["$.a.b", "$.a", "$.c", "$.payload.code"];
+        let paths = ["$.a.b", "$.a", "$.c", "$.payload.code"];
         let expects = [Some(2), Some(4), None, Some(404)];
 
         for (i, (path, expect)) in paths.iter().zip(expects.iter()).enumerate() {
@@ -1228,7 +1228,7 @@ mod tests {
             r#"{"a": 4.4, "b": {"c": 6.6}, "c": 6.6}"#,
             r#"{"a": 7.7, "b": 8.8, "c": {"a": 7.7}}"#,
         ];
-        let paths = vec!["$.a.b", "$.a", "$.c", "$.payload.result.time_cost"];
+        let paths = ["$.a.b", "$.a", "$.c", "$.payload.result.time_cost"];
         let expects = [Some(2.1), Some(4.4), None, Some(1.234)];
 
         for (i, (path, expect)) in paths.iter().zip(expects.iter()).enumerate() {
@@ -1266,7 +1266,7 @@ mod tests {
             r#"{"a": false, "b": {"c": true}, "c": false}"#,
             r#"{"a": true, "b": false, "c": {"a": true}}"#,
         ];
-        let paths = vec!["$.a.b", "$.a", "$.c", "$.payload.success"];
+        let paths = ["$.a.b", "$.a", "$.c", "$.payload.success"];
         let expects = [Some(true), Some(false), None, Some(false)];
 
         for (i, (path, expect)) in paths.iter().zip(expects.iter()).enumerate() {
