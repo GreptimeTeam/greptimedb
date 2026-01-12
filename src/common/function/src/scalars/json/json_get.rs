@@ -556,7 +556,7 @@ impl Function for JsonGetWithType {
                     "float" | "double" => {
                         Ok(Arc::new(Field::new(self.name(), DataType::Float64, true)))
                     }
-                    "string" => Ok(Arc::new(Field::new(self.name(), DataType::Utf8, true))),
+                    "string" => Ok(Arc::new(Field::new(self.name(), DataType::Utf8View, true))),
                     _ => Err(DataFusionError::Internal(format!(
                         "Unsupported type: {}",
                         type_str
@@ -585,7 +585,7 @@ impl Function for JsonGetWithType {
 
         // mapping datatypes returned from return_field_from_args
         let mut builder: Box<dyn JsonGetResultBuilder> = match args.return_field.data_type() {
-            DataType::Utf8 | DataType::Utf8View => {
+            DataType::Utf8View => {
                 Box::new(StringResultBuilder(StringViewBuilder::with_capacity(len)))
             }
             DataType::Int64 => Box::new(IntResultBuilder(Int64Builder::with_capacity(len))),
