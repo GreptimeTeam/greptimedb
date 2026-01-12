@@ -243,6 +243,8 @@ impl BatchGcProcedure {
     /// Return related regions for the given regions.
     /// The returned map uses the source regions (where those files originally came from) as the key,
     /// and the destination regions (where files are currently stored) as the value.
+    /// If a region is not found in the repartition manager, the returned map still have this region as key,
+    /// just empty value
     async fn find_related_regions(
         &self,
         regions: &[RegionId],
@@ -251,14 +253,15 @@ impl BatchGcProcedure {
         let mut related_regions: HashMap<RegionId, HashSet<RegionId>> = HashMap::new();
         for src_region in regions {
             // TODO(discord9): batch get
-            let Some(dst_regions) = repart_mgr
+            if let Some(dst_regions) = repart_mgr
                 .get_dst_regions(*src_region)
                 .await
                 .context(KvBackendSnafu)?
-            else {
-                continue;
-            };
-            related_regions.insert(*src_region, dst_regions.into_iter().collect());
+            {
+                related_regions.insert(*src_region, dst_regions.into_iter().collect());
+            } else {
+                related_regions.insert(*src_region, Default::default());
+            }
         }
         Ok(related_regions)
     }
@@ -282,28 +285,17 @@ impl BatchGcProcedure {
         &self,
         regions: &[RegionId],
     ) -> Result<(Region2Peers, Peer2Regions)> {
-        let all_involved_regions = self
-            .find_related_regions(regions)
-            .await?
-            .into_iter()
-            .flat_map(|(k, v)| {
-                let mut v = v;
-                v.insert(k);
-                v
-            })
-            .collect::<HashSet<RegionId>>();
-
         let mut region_to_peer = HashMap::new();
         let mut peer_to_regions = HashMap::new();
 
         // Group regions by table ID for batch processing
         let mut table_to_regions: HashMap<TableId, Vec<RegionId>> = HashMap::new();
-        for region_id in all_involved_regions {
+        for region_id in regions {
             let table_id = region_id.table_id();
             table_to_regions
                 .entry(table_id)
                 .or_default()
-                .push(region_id);
+                .push(*region_id);
         }
 
         // Process each table's regions together for efficiency
@@ -341,13 +333,16 @@ impl BatchGcProcedure {
         // Discover routes for all regions involved in GC, including both the
         // primary GC regions and their related regions.
         let mut regions_set: HashSet<RegionId> = self.data.regions.iter().cloned().collect();
+
         regions_set.extend(related_regions.keys().cloned());
         regions_set.extend(related_regions.values().flat_map(|v| v.iter()).cloned());
+
         let regions_to_discover = regions_set.into_iter().collect_vec();
 
         let (region_to_peer, _) = self
             .discover_route_for_regions(&regions_to_discover)
             .await?;
+
         self.data.region_routes = region_to_peer;
 
         Ok(())

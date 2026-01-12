@@ -105,8 +105,10 @@ async fn distributed_with_gc(store_type: &StorageType) -> (TestContext, TempDirG
 
 #[tokio::test]
 async fn test_gc_basic_different_store() {
+    let _ = dotenv::dotenv();
     common_telemetry::init_default_ut_logging();
     let store_type = StorageType::build_storage_types_based_on_env();
+    info!("store type: {:?}", store_type);
     for store in store_type {
         if store == StorageType::File {
             continue; // no point in test gc in fs storage
