@@ -194,7 +194,7 @@ impl GcScheduler {
 
         let all_region_ids: Vec<RegionId> = candidates.iter().map(|(_, c)| c.region_id).collect();
 
-        // Step 2: Create a single GcRegionProcedure for all regions on this datanode
+        // Step 2: Run GC for all regions on this datanode in a single batch
         let (gc_report, fully_listed_regions) = {
             // Partition regions into full listing and fast listing in a single pass
 

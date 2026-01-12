@@ -433,7 +433,7 @@ pub struct GetFileRefs {
     /// List of region IDs to get file references from active FileHandles (in-memory).
     pub query_regions: Vec<RegionId>,
     /// Mapping from the src region IDs (whose file references to look for) to
-    /// the dst region ID (where to read the manifest).
+    /// the dst region IDs (where to read the manifests).
     /// Key: The source region IDs (where files originally came from).
     /// Value: The set of destination region IDs (whose manifests need to be read).
     pub related_regions: HashMap<RegionId, HashSet<RegionId>>,
