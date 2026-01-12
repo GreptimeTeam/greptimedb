@@ -1873,6 +1873,42 @@ async fn test_cast_type_issue_1594(instance: Arc<dyn MockInstance>) {
 }
 
 #[apply(both_instances_cases)]
+async fn test_copy_from_noheader_csvfile(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+
+    // setups
+    assert!(matches!(
+        execute_sql(
+            &instance,
+            "create table no_header(a STRING, b STRING, ts TIMESTAMP TIME INDEX, PRIMARY KEY(a));",
+        )
+        .await
+        .data,
+        OutputData::AffectedRows(0)
+    ));
+
+    let filepath = find_testing_resource("/src/common/datasource/tests/csv/no_heaer.csv");
+
+    let output = try_execute_sql(
+        &instance,
+        &format!(
+            "copy no_header from '{}' WITH(FORMAT='csv', header='false');",
+            &filepath
+        ),
+    )
+    .await;
+
+    assert!(output.is_err());
+    assert!(matches!(
+        output.unwrap_err(),
+        Error::TableOperation {
+            source: _,
+            location: _
+        }
+    ));
+}
+
+#[apply(both_instances_cases)]
 async fn test_information_schema_dot_tables(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
