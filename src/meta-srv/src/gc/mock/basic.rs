@@ -152,7 +152,6 @@ async fn test_handle_tick() {
     );
 
     assert_eq!(*ctx.get_table_to_region_stats_calls.lock().unwrap(), 1);
-    assert_eq!(*ctx.get_file_references_calls.lock().unwrap(), 1);
     assert_eq!(*ctx.gc_regions_calls.lock().unwrap(), 1);
 
     let tracker = scheduler.region_gc_tracker.lock().await;

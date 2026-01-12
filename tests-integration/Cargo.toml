@@ -6,6 +6,7 @@ license.workspace = true
 
 [features]
 dashboard = []
+vector_index = []
 
 [lints]
 workspace = true

@@ -344,6 +344,12 @@ impl FileMeta {
             .contains(&IndexType::BloomFilterIndex)
     }
 
+    /// Returns true if the file has a vector index.
+    #[cfg(feature = "vector_index")]
+    pub fn vector_index_available(&self) -> bool {
+        self.available_indexes.contains(&IndexType::VectorIndex)
+    }
+
     pub fn index_file_size(&self) -> u64 {
         self.index_file_size
     }

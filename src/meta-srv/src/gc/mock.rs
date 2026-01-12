@@ -36,10 +36,9 @@ use store_api::storage::{FileRefsManifest, GcReport, RegionId};
 use table::metadata::TableId;
 use tokio::sync::mpsc::Sender;
 
-use crate::error::{Result, UnexpectedSnafu};
+use crate::error::Result;
 use crate::gc::candidate::GcCandidate;
 use crate::gc::ctx::SchedulerCtx;
-use crate::gc::handler::Region2Peers;
 use crate::gc::options::GcSchedulerOptions;
 use crate::gc::scheduler::{Event, GcScheduler};
 
@@ -67,12 +66,10 @@ pub struct MockSchedulerCtx {
     pub gc_reports: Arc<Mutex<HashMap<RegionId, GcReport>>>,
     pub candidates: Arc<Mutex<Option<HashMap<TableId, Vec<GcCandidate>>>>>,
     pub get_table_to_region_stats_calls: Arc<Mutex<usize>>,
-    pub get_file_references_calls: Arc<Mutex<usize>>,
     pub gc_regions_calls: Arc<Mutex<usize>>,
     // Error injection fields for testing
     pub get_table_to_region_stats_error: Arc<Mutex<Option<crate::error::Error>>>,
     pub get_table_route_error: Arc<Mutex<Option<crate::error::Error>>>,
-    pub get_file_references_error: Arc<Mutex<Option<crate::error::Error>>>,
     pub gc_regions_error: Arc<Mutex<Option<crate::error::Error>>>,
     // Retry testing fields
     pub gc_regions_retry_count: Arc<Mutex<HashMap<RegionId, usize>>>,
@@ -119,55 +116,10 @@ impl MockSchedulerCtx {
         *self.get_table_route_error.lock().unwrap() = Some(error);
     }
 
-    /// Set an error to be returned by `get_file_references`
-    #[allow(dead_code)]
-    pub fn with_get_file_references_error(self, error: crate::error::Error) -> Self {
-        *self.get_file_references_error.lock().unwrap() = Some(error);
-        self
-    }
-
     /// Set an error to be returned by `gc_regions`
     pub fn with_gc_regions_error(self, error: crate::error::Error) -> Self {
         *self.gc_regions_error.lock().unwrap() = Some(error);
         self
-    }
-
-    /// Set a sequence of errors to be returned by `gc_regions` for retry testing
-    pub fn set_gc_regions_error_sequence(&self, errors: Vec<crate::error::Error>) {
-        *self.gc_regions_error_sequence.lock().unwrap() = errors;
-    }
-
-    /// Set success after a specific number of retries for a region
-    pub fn set_gc_regions_success_after_retries(&self, region_id: RegionId, retries: usize) {
-        self.gc_regions_success_after_retries
-            .lock()
-            .unwrap()
-            .insert(region_id, retries);
-    }
-
-    /// Get the retry count for a specific region
-    pub fn get_retry_count(&self, region_id: RegionId) -> usize {
-        self.gc_regions_retry_count
-            .lock()
-            .unwrap()
-            .get(&region_id)
-            .copied()
-            .unwrap_or(0)
-    }
-
-    /// Reset all retry tracking
-    pub fn reset_retry_tracking(&self) {
-        *self.gc_regions_retry_count.lock().unwrap() = HashMap::new();
-        *self.gc_regions_error_sequence.lock().unwrap() = Vec::new();
-        *self.gc_regions_success_after_retries.lock().unwrap() = HashMap::new();
-    }
-
-    /// Set an error to be returned for a specific region
-    pub fn set_gc_regions_error_for_region(&self, region_id: RegionId, error: crate::error::Error) {
-        self.gc_regions_per_region_errors
-            .lock()
-            .unwrap()
-            .insert(region_id, error);
     }
 
     /// Clear per-region errors
@@ -213,39 +165,9 @@ impl SchedulerCtx for MockSchedulerCtx {
             .unwrap_or_else(|| (table_id, PhysicalTableRouteValue::default())))
     }
 
-    async fn get_file_references(
-        &self,
-        query_regions: &[RegionId],
-        _related_regions: HashMap<RegionId, Vec<RegionId>>,
-        region_to_peer: &Region2Peers,
-        _timeout: Duration,
-    ) -> Result<FileRefsManifest> {
-        *self.get_file_references_calls.lock().unwrap() += 1;
-
-        // Check if we should return an injected error
-        if let Some(error) = self.get_file_references_error.lock().unwrap().take() {
-            return Err(error);
-        }
-        if query_regions
-            .iter()
-            .any(|region_id| !region_to_peer.contains_key(region_id))
-        {
-            UnexpectedSnafu {
-                violated: format!(
-                    "region_to_peer{region_to_peer:?} does not contain all region_ids requested: {:?}",
-                    query_regions
-                ),
-            }.fail()?;
-        }
-
-        Ok(self.file_refs.lock().unwrap().clone().unwrap_or_default())
-    }
-
     async fn gc_regions(
         &self,
-        _peer: Peer,
         region_ids: &[RegionId],
-        _file_refs_manifest: &FileRefsManifest,
         _full_file_listing: bool,
         _timeout: Duration,
     ) -> Result<GcReport> {

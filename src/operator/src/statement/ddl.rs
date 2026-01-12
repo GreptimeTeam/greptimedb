@@ -2208,6 +2208,7 @@ mod test {
     use sql::dialect::GreptimeDbDialect;
     use sql::parser::{ParseOptions, ParserContext};
     use sql::statements::statement::Statement;
+    use sqlparser::parser::Parser;
 
     use super::*;
     use crate::expr_helper;
@@ -2223,6 +2224,39 @@ mod test {
         assert!(!NAME_PATTERN_REG.is_match("#test"));
         assert!(!NAME_PATTERN_REG.is_match("@"));
         assert!(!NAME_PATTERN_REG.is_match("#"));
+    }
+
+    #[test]
+    fn test_partition_expr_equivalence_with_swapped_operands() {
+        let column_name = "device_id".to_string();
+        let column_name_and_type =
+            HashMap::from([(&column_name, ConcreteDataType::int32_datatype())]);
+        let timezone = Timezone::from_tz_string("UTC").unwrap();
+        let dialect = GreptimeDbDialect {};
+
+        let mut parser = Parser::new(&dialect)
+            .try_with_sql("device_id < 100")
+            .unwrap();
+        let expr_left = parser.parse_expr().unwrap();
+
+        let mut parser = Parser::new(&dialect)
+            .try_with_sql("100 > device_id")
+            .unwrap();
+        let expr_right = parser.parse_expr().unwrap();
+
+        let partition_left =
+            convert_one_expr(&expr_left, &column_name_and_type, &timezone).unwrap();
+        let partition_right =
+            convert_one_expr(&expr_right, &column_name_and_type, &timezone).unwrap();
+
+        assert_eq!(partition_left, partition_right);
+        assert!([partition_left.clone()].contains(&partition_right));
+
+        let mut physical_partition_exprs = vec![partition_left];
+        let mut logical_partition_exprs = vec![partition_right];
+        physical_partition_exprs.sort_unstable();
+        logical_partition_exprs.sort_unstable();
+        assert_eq!(physical_partition_exprs, logical_partition_exprs);
     }
 
     #[tokio::test]
