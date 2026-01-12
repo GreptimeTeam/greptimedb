@@ -28,7 +28,7 @@ use moka::notification::RemovalCause;
 use moka::policy::EvictionPolicy;
 use object_store::util::join_path;
 use object_store::{ErrorKind, ObjectStore, Reader};
-use parquet::file::metadata::ParquetMetaData;
+use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData};
 use snafu::ResultExt;
 use store_api::storage::{FileId, RegionId};
 use tokio::sync::mpsc::{Sender, UnboundedReceiver};
@@ -571,6 +571,7 @@ impl FileCache {
         &self,
         key: IndexKey,
         cache_metrics: &mut MetadataCacheMetrics,
+        page_index_policy: PageIndexPolicy,
     ) -> Option<ParquetMetaData> {
         // Check if file cache contains the key
         if let Some(index_value) = self.inner.parquet_index.get(&key).await {
@@ -578,7 +579,8 @@ impl FileCache {
             let local_store = self.local_store();
             let file_path = self.inner.cache_file_path(key);
             let file_size = index_value.file_size as u64;
-            let metadata_loader = MetadataLoader::new(local_store, &file_path, file_size);
+            let mut metadata_loader = MetadataLoader::new(local_store, &file_path, file_size);
+            metadata_loader.with_page_index_policy(page_index_policy);
 
             match metadata_loader.load(cache_metrics).await {
                 Ok(metadata) => {

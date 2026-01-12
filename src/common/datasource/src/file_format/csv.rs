@@ -440,14 +440,11 @@ mod tests {
                 .await
                 .unwrap(),
             );
-            let csv_source = CsvSource::new(true, b',', b'"')
-                .with_schema(schema.clone())
-                .with_batch_size(8192);
+            let csv_source = CsvSource::new(schema).with_batch_size(8192);
 
             let stream = file_to_stream(
                 &store,
                 compressed_file_path_str,
-                schema.clone(),
                 csv_source.clone(),
                 None,
                 compression_type,

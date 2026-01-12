@@ -650,7 +650,7 @@ async fn test_last_value_order_by_udaf() {
                         DataType::Timestamp(arrow_schema::TimeUnit::Millisecond, None),
                         true
                     ), // ordering field is added to state fields too
-                    Field::new("is_set", DataType::Boolean, true)
+                    Field::new("last_value[last_value_is_set]", DataType::Boolean, true)
                 ]
                 .into()
             ),
@@ -735,7 +735,7 @@ async fn test_last_value_order_by_udaf() {
                     DataType::Timestamp(arrow_schema::TimeUnit::Millisecond, None),
                     true,
                 ),
-                Field::new("is_set", DataType::Boolean, true),
+                Field::new("last_value[last_value_is_set]", DataType::Boolean, true),
             ]
             .into(),
             vec![

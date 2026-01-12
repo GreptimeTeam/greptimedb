@@ -40,7 +40,6 @@ use datafusion::datasource::physical_plan::{
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::physical_plan::SendableRecordBatchStream;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
-use datatypes::arrow::datatypes::SchemaRef;
 use futures::{StreamExt, TryStreamExt};
 use object_store::ObjectStore;
 use object_store_opendal::OpendalStore;
@@ -303,24 +302,20 @@ where
 pub async fn file_to_stream(
     store: &ObjectStore,
     filename: &str,
-    file_schema: SchemaRef,
     file_source: Arc<dyn FileSource>,
     projection: Option<Vec<usize>>,
     compression_type: CompressionType,
 ) -> Result<DfSendableRecordBatchStream> {
     let df_compression: DfCompressionType = compression_type.into();
-    let config = FileScanConfigBuilder::new(
-        ObjectStoreUrl::local_filesystem(),
-        file_schema,
-        file_source.clone(),
-    )
-    .with_file_group(FileGroup::new(vec![PartitionedFile::new(
-        filename.to_string(),
-        0,
-    )]))
-    .with_projection(projection)
-    .with_file_compression_type(df_compression)
-    .build();
+    let config =
+        FileScanConfigBuilder::new(ObjectStoreUrl::local_filesystem(), file_source.clone())
+            .with_file_group(FileGroup::new(vec![PartitionedFile::new(
+                filename.to_string(),
+                0,
+            )]))
+            .with_projection_indices(projection)
+            .with_file_compression_type(df_compression)
+            .build();
 
     let store = Arc::new(OpendalStore::new(store.clone()));
     let file_opener = file_source

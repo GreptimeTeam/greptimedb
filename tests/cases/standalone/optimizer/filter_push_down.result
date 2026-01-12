@@ -140,7 +140,7 @@ SELECT * FROM integers i1 WHERE NOT EXISTS(SELECT i FROM integers WHERE i=i1.i) 
 
 SELECT i1.i,i2.i FROM integers i1, integers i2 WHERE i1.i=(SELECT i FROM integers WHERE i1.i=i) AND i1.i=i2.i ORDER BY i1.i;
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Error during planning: Correlated scalar subquery must be aggregated to return at most one row
+Error: 3001(EngineExecuteQuery), Error during planning: Correlated scalar subquery must be aggregated to return at most one row
 
 SELECT * FROM (SELECT i1.i AS a, i2.i AS b FROM integers i1, integers i2) a1 WHERE a=b ORDER BY 1;
 

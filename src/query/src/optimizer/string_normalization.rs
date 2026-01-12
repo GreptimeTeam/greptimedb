@@ -143,7 +143,7 @@ mod tests {
             let plan = create_test_plan_with_project(proj);
             let result = StringNormalizationRule.analyze(plan, config).unwrap();
             let expected = format!(
-                "Projection: CAST(Utf8(\"2017-07-23 13:10:11\") AS Timestamp({:#?}, None))\n  TableScan: t",
+                "Projection: CAST(Utf8(\"2017-07-23 13:10:11\") AS Timestamp({}))\n  TableScan: t",
                 time_unit
             );
             assert_eq!(expected, result.to_string());
@@ -162,7 +162,7 @@ mod tests {
             .analyze(int_to_timestamp_plan, config)
             .unwrap();
         let expected = String::from(
-            "Projection: CAST(Int64(158412331400600000) AS Timestamp(Nanosecond, None))\n  TableScan: t",
+            "Projection: CAST(Int64(158412331400600000) AS Timestamp(ns))\n  TableScan: t",
         );
         assert_eq!(expected, result.to_string());
 

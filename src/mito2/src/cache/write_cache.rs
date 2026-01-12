@@ -470,11 +470,12 @@ impl UploadTracker {
 mod tests {
     use common_test_util::temp_dir::create_temp_dir;
     use object_store::ATOMIC_WRITE_DIR;
+    use parquet::file::metadata::PageIndexPolicy;
     use store_api::region_request::PathType;
 
     use super::*;
     use crate::access_layer::OperationType;
-    use crate::cache::test_util::new_fs_store;
+    use crate::cache::test_util::{assert_parquet_metadata_equal, new_fs_store};
     use crate::cache::{CacheManager, CacheStrategy};
     use crate::error::InvalidBatchSnafu;
     use crate::read::Source;
@@ -482,8 +483,7 @@ mod tests {
     use crate::sst::parquet::reader::ParquetReaderBuilder;
     use crate::test_util::TestEnv;
     use crate::test_util::sst_util::{
-        assert_parquet_metadata_eq, new_batch_by_range, new_source, sst_file_handle_with_file_id,
-        sst_region_metadata,
+        new_batch_by_range, new_source, sst_file_handle_with_file_id, sst_region_metadata,
     };
 
     #[tokio::test]
@@ -652,11 +652,12 @@ mod tests {
             handle.clone(),
             mock_store.clone(),
         )
-        .cache(CacheStrategy::EnableAll(cache_manager.clone()));
+        .cache(CacheStrategy::EnableAll(cache_manager.clone()))
+        .page_index_policy(PageIndexPolicy::Optional);
         let reader = builder.build().await.unwrap();
 
         // Check parquet metadata
-        assert_parquet_metadata_eq(write_parquet_metadata, reader.parquet_metadata());
+        assert_parquet_metadata_equal(write_parquet_metadata, reader.parquet_metadata());
     }
 
     #[tokio::test]

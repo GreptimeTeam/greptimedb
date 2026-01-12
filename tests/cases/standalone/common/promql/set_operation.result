@@ -732,7 +732,7 @@ CREATE TABLE IF NOT EXISTS node_network_transmit_bytes_total (
   host STRING NULL,
   job STRING NULL,
   node STRING NULL,
-  region STRING NULL,
+  "region" STRING NULL,
   src_port STRING NULL,
   src STRING NULL,
   src_namespace STRING NULL,

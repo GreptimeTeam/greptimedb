@@ -103,10 +103,11 @@ impl FlightEncoder {
             FlightMessage::RecordBatch(record_batch) => {
                 let (encoded_dictionaries, encoded_batch) = self
                     .data_gen
-                    .encoded_batch(
+                    .encode(
                         &record_batch,
                         &mut self.dictionary_tracker,
                         &self.write_options,
+                        &mut Default::default(),
                     )
                     .expect("DictionaryTracker configured above to not fail on replacement");
 

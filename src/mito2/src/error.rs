@@ -601,14 +601,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid file metadata"))]
-    ConvertMetaData {
-        #[snafu(implicit)]
-        location: Location,
-        #[snafu(source)]
-        error: parquet::errors::ParquetError,
-    },
-
     #[snafu(display("Column not found, column: {column}"))]
     ColumnNotFound {
         column: String,
@@ -1284,7 +1276,6 @@ impl ErrorExt for Error {
             | Join { .. }
             | WorkerStopped { .. }
             | Recv { .. }
-            | ConvertMetaData { .. }
             | DecodeWal { .. }
             | ComputeArrow { .. }
             | BiErrors { .. }
