@@ -468,7 +468,7 @@ impl ParquetReaderBuilder {
 
         // Cache miss, load metadata directly.
         let metadata_loader = MetadataLoader::new(self.object_store.clone(), file_path, file_size);
-        let metadata = metadata_loader.load().await?;
+        let metadata = metadata_loader.load(cache_metrics).await?;
 
         let metadata = Arc::new(metadata);
         // Cache the metadata.
@@ -1154,6 +1154,10 @@ pub(crate) struct MetadataCacheMetrics {
     pub(crate) cache_miss: usize,
     /// Duration to load parquet metadata.
     pub(crate) metadata_load_cost: Duration,
+    /// Number of read operations performed.
+    pub(crate) num_reads: usize,
+    /// Total bytes read from storage.
+    pub(crate) bytes_read: u64,
 }
 
 impl std::fmt::Debug for MetadataCacheMetrics {
@@ -1163,6 +1167,8 @@ impl std::fmt::Debug for MetadataCacheMetrics {
             file_cache_hit,
             cache_miss,
             metadata_load_cost,
+            num_reads,
+            bytes_read,
         } = self;
 
         if self.is_empty() {
@@ -1181,6 +1187,12 @@ impl std::fmt::Debug for MetadataCacheMetrics {
         if *cache_miss > 0 {
             write!(f, ", \"cache_miss\":{}", cache_miss)?;
         }
+        if *num_reads > 0 {
+            write!(f, ", \"num_reads\":{}", num_reads)?;
+        }
+        if *bytes_read > 0 {
+            write!(f, ", \"bytes_read\":{}", bytes_read)?;
+        }
 
         write!(f, "}}")
     }
@@ -1198,6 +1210,8 @@ impl MetadataCacheMetrics {
         self.file_cache_hit += other.file_cache_hit;
         self.cache_miss += other.cache_miss;
         self.metadata_load_cost += other.metadata_load_cost;
+        self.num_reads += other.num_reads;
+        self.bytes_read += other.bytes_read;
     }
 }
 

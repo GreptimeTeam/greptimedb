@@ -43,6 +43,7 @@ use crate::metrics::{
 use crate::region::opener::RegionLoadCacheTask;
 use crate::sst::parquet::helper::fetch_byte_ranges;
 use crate::sst::parquet::metadata::MetadataLoader;
+use crate::sst::parquet::reader::MetadataCacheMetrics;
 
 /// Subdirectory of cached files for write.
 ///
@@ -575,7 +576,9 @@ impl FileCache {
             let file_size = index_value.file_size as u64;
             let metadata_loader = MetadataLoader::new(local_store, &file_path, file_size);
 
-            match metadata_loader.load().await {
+            // We don't need to track metrics when loading from file cache.
+            let mut cache_metrics = MetadataCacheMetrics::default();
+            match metadata_loader.load(&mut cache_metrics).await {
                 Ok(metadata) => {
                     CACHE_HIT
                         .with_label_values(&[key.file_type.metric_label()])
