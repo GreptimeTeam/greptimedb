@@ -128,14 +128,6 @@ impl RepartitionStart {
             central_region_datanode,
         })
     }
-
-    #[allow(dead_code)]
-    fn next_state() -> (Box<dyn State>, Status) {
-        (
-            Box::new(UpdateMetadata::ApplyStaging),
-            Status::executing(true),
-        )
-    }
 }
 
 #[async_trait::async_trait]
@@ -157,7 +149,10 @@ impl State for RepartitionStart {
         _procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
         if ctx.persistent_ctx.group_prepare_result.is_some() {
-            return Ok(Self::next_state());
+            return Ok((
+                Box::new(UpdateMetadata::ApplyStaging),
+                Status::executing(true),
+            ));
         }
         let table_id = ctx.persistent_ctx.table_id;
         let group_id = ctx.persistent_ctx.group_id;
@@ -177,7 +172,10 @@ impl State for RepartitionStart {
             ctx.persistent_ctx.targets.len()
         );
 
-        Ok(Self::next_state())
+        Ok((
+            Box::new(UpdateMetadata::ApplyStaging),
+            Status::executing(true),
+        ))
     }
 
     fn as_any(&self) -> &dyn Any {

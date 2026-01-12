@@ -70,6 +70,7 @@ use crate::metasrv::{
 use crate::peer::MetasrvPeerAllocator;
 use crate::procedure::region_migration::DefaultContextFactory;
 use crate::procedure::region_migration::manager::RegionMigrationManager;
+use crate::procedure::repartition::DefaultRepartitionProcedureFactory;
 use crate::procedure::wal_prune::Context as WalPruneContext;
 use crate::procedure::wal_prune::manager::{WalPruneManager, WalPruneTicker};
 use crate::region::flush_trigger::RegionFlushTrigger;
@@ -400,8 +401,17 @@ impl MetasrvBuilder {
             region_failure_detector_controller,
         };
         let procedure_manager_c = procedure_manager.clone();
-        let ddl_manager = DdlManager::try_new(ddl_context, procedure_manager_c, true)
-            .context(error::InitDdlManagerSnafu)?;
+        let repartition_procedure_factory = Arc::new(DefaultRepartitionProcedureFactory::new(
+            mailbox.clone(),
+            options.grpc.server_addr.clone(),
+        ));
+        let ddl_manager = DdlManager::try_new(
+            ddl_context,
+            procedure_manager_c,
+            repartition_procedure_factory,
+            true,
+        )
+        .context(error::InitDdlManagerSnafu)?;
 
         let ddl_manager = if let Some(configurator) = plugins
             .as_ref()

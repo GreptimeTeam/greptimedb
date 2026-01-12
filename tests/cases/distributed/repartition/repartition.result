@@ -1,0 +1,101 @@
+CREATE TABLE alter_repartition_table(
+  device_id INT,
+  area STRING,
+  ty STRING,
+  ts TIMESTAMP TIME INDEX,
+  PRIMARY KEY(device_id)
+) PARTITION ON COLUMNS (device_id, area) (
+  device_id < 100,
+  device_id >= 100 AND device_id < 200,
+  device_id >= 200
+);
+
+Affected Rows: 0
+
+ALTER TABLE alter_repartition_table REPARTITION (
+  device_id < 100
+) INTO (
+  device_id < 100 AND area < 'South',
+  device_id < 100 AND area >= 'South'
+);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE alter_repartition_table;
+
++-------------------------+--------------------------------------------------------+
+| Table                   | Create Table                                           |
++-------------------------+--------------------------------------------------------+
+| alter_repartition_table | CREATE TABLE IF NOT EXISTS "alter_repartition_table" ( |
+|                         |   "device_id" INT NULL,                                |
+|                         |   "area" STRING NULL,                                  |
+|                         |   "ty" STRING NULL,                                    |
+|                         |   "ts" TIMESTAMP(3) NOT NULL,                          |
+|                         |   TIME INDEX ("ts"),                                   |
+|                         |   PRIMARY KEY ("device_id")                            |
+|                         | )                                                      |
+|                         | PARTITION ON COLUMNS ("device_id", "area") (           |
+|                         |   device_id < 100 AND area < 'South',                  |
+|                         |   device_id >= 100 AND device_id < 200,                |
+|                         |   device_id >= 200,                                    |
+|                         |   device_id < 100 AND area >= 'South'                  |
+|                         | )                                                      |
+|                         | ENGINE=mito                                            |
+|                         |                                                        |
++-------------------------+--------------------------------------------------------+
+
+ALTER TABLE alter_repartition_table MERGE PARTITION (
+  device_id < 100 AND area < 'South',
+  device_id < 100 AND area >= 'South'
+);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE alter_repartition_table;
+
++-------------------------+------------------------------------------------------------------------------+
+| Table                   | Create Table                                                                 |
++-------------------------+------------------------------------------------------------------------------+
+| alter_repartition_table | CREATE TABLE IF NOT EXISTS "alter_repartition_table" (                       |
+|                         |   "device_id" INT NULL,                                                      |
+|                         |   "area" STRING NULL,                                                        |
+|                         |   "ty" STRING NULL,                                                          |
+|                         |   "ts" TIMESTAMP(3) NOT NULL,                                                |
+|                         |   TIME INDEX ("ts"),                                                         |
+|                         |   PRIMARY KEY ("device_id")                                                  |
+|                         | )                                                                            |
+|                         | PARTITION ON COLUMNS ("device_id", "area") (                                 |
+|                         |   device_id < 100 AND area < 'South' OR device_id < 100 AND area >= 'South', |
+|                         |   device_id >= 100 AND device_id < 200,                                      |
+|                         |   device_id >= 200                                                           |
+|                         | )                                                                            |
+|                         | ENGINE=mito                                                                  |
+|                         |                                                                              |
++-------------------------+------------------------------------------------------------------------------+
+
+-- FIXME(weny): Object store is not configured for the test environment,
+-- so staging manifest may not be applied in some cases.
+-- invalid: empty source clause
+ALTER TABLE alter_repartition_table REPARTITION () INTO (
+  device_id < 100
+);
+
+Error: 2000(InvalidSyntax), Invalid SQL syntax: sql parser error: Expected expression inside REPARTITION clause, found: )
+
+-- invalid: more than one INTO clause
+ALTER TABLE alter_repartition_table REPARTITION (
+  device_id < 100
+) INTO (
+  device_id < 50
+), (
+  device_id >= 50
+) INTO (
+  device_id >= 50
+);
+
+Error: 2000(InvalidSyntax), Invalid SQL syntax: sql parser error: Expected end of REPARTITION clause, found: ,
+
+DROP TABLE alter_repartition_table;
+
+Affected Rows: 0
+
