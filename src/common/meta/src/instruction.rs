@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::time::Duration;
 
@@ -432,11 +432,11 @@ where
 pub struct GetFileRefs {
     /// List of region IDs to get file references from active FileHandles (in-memory).
     pub query_regions: Vec<RegionId>,
-    /// Mapping from the source region ID (where to read the manifest) to
-    /// the target region IDs (whose file references to look for).
-    /// Key: The region ID of the manifest.
-    /// Value: The list of region IDs to find references for in that manifest.
-    pub related_regions: HashMap<RegionId, Vec<RegionId>>,
+    /// Mapping from the src region IDs (whose file references to look for) to
+    /// the dst region IDs (where to read the manifests).
+    /// Key: The source region IDs (where files originally came from).
+    /// Value: The set of destination region IDs (whose manifests need to be read).
+    pub related_regions: HashMap<RegionId, HashSet<RegionId>>,
 }
 
 impl Display for GetFileRefs {
