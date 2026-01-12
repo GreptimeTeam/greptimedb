@@ -230,7 +230,7 @@ pub async fn analyze_region_migration_task(
         }
 
         for region_id in region_ids {
-            if !existing_region_ids.contains(&region_id) {
+            if !existing_region_ids.contains(region_id) {
                 result.region_not_found.push(*region_id);
             }
         }
