@@ -99,3 +99,153 @@ DROP TABLE alter_repartition_table;
 
 Affected Rows: 0
 
+-- Metric engine repartition test
+CREATE TABLE metric_physical_table (
+    ts TIMESTAMP TIME INDEX,
+    host STRING,
+    cpu DOUBLE,
+    PRIMARY KEY(host)
+)
+PARTITION ON COLUMNS (host) (
+    host < 'h1',
+    host >= 'h1' AND host < 'h2',
+    host >= 'h2'
+)
+ENGINE = metric
+WITH (
+    physical_metric_table = "true"
+);
+
+Affected Rows: 0
+
+CREATE TABLE logical_table_v1 (
+    ts TIMESTAMP TIME INDEX,
+    host STRING PRIMARY KEY,
+    cpu DOUBLE,
+)
+ENGINE = metric
+WITH (
+    on_physical_table = "metric_physical_table"
+);
+
+Affected Rows: 0
+
+CREATE TABLE logical_table_v2 (
+    ts TIMESTAMP TIME INDEX,
+    host STRING PRIMARY KEY,
+    cpu DOUBLE,
+)
+ENGINE = metric
+WITH (
+    on_physical_table = "metric_physical_table"
+);
+
+Affected Rows: 0
+
+-- Split physical table partition
+ALTER TABLE metric_physical_table SPLIT PARTITION (
+    host < 'h1'
+) INTO (
+    host < 'h0',
+    host >= 'h0' AND host < 'h1'
+);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE metric_physical_table;
+
++-----------------------+------------------------------------------------------+
+| Table                 | Create Table                                         |
++-----------------------+------------------------------------------------------+
+| metric_physical_table | CREATE TABLE IF NOT EXISTS "metric_physical_table" ( |
+|                       |   "ts" TIMESTAMP(3) NOT NULL,                        |
+|                       |   "host" STRING NULL,                                |
+|                       |   "cpu" DOUBLE NULL,                                 |
+|                       |   TIME INDEX ("ts"),                                 |
+|                       |   PRIMARY KEY ("host")                               |
+|                       | )                                                    |
+|                       | PARTITION ON COLUMNS ("host") (                      |
+|                       |   host < 'h0',                                       |
+|                       |   host >= 'h1' AND host < 'h2',                      |
+|                       |   host >= 'h2',                                      |
+|                       |   host >= 'h0' AND host < 'h1'                       |
+|                       | )                                                    |
+|                       | ENGINE=metric                                        |
+|                       | WITH(                                                |
+|                       |   physical_metric_table = 'true'                     |
+|                       | )                                                    |
++-----------------------+------------------------------------------------------+
+
+-- Verify select * works and returns empty
+SELECT * FROM metric_physical_table;
+
+++
+++
+
+SELECT * FROM logical_table_v1;
+
+Error: 3001(EngineExecuteQuery), Failed to decode DataFusion plan: RegionId 4406636445699(1026, 3) not found
+
+SELECT * FROM logical_table_v2;
+
+Error: 3001(EngineExecuteQuery), Failed to decode DataFusion plan: RegionId 4410931412995(1027, 3) not found
+
+-- Merge physical table partition
+ALTER TABLE metric_physical_table MERGE PARTITION (
+    host < 'h0',
+    host >= 'h0' AND host < 'h1'
+);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE metric_physical_table;
+
++-----------------------+------------------------------------------------------+
+| Table                 | Create Table                                         |
++-----------------------+------------------------------------------------------+
+| metric_physical_table | CREATE TABLE IF NOT EXISTS "metric_physical_table" ( |
+|                       |   "ts" TIMESTAMP(3) NOT NULL,                        |
+|                       |   "host" STRING NULL,                                |
+|                       |   "cpu" DOUBLE NULL,                                 |
+|                       |   TIME INDEX ("ts"),                                 |
+|                       |   PRIMARY KEY ("host")                               |
+|                       | )                                                    |
+|                       | PARTITION ON COLUMNS ("host") (                      |
+|                       |   host < 'h0' OR host >= 'h0' AND host < 'h1',       |
+|                       |   host >= 'h1' AND host < 'h2',                      |
+|                       |   host >= 'h2'                                       |
+|                       | )                                                    |
+|                       | ENGINE=metric                                        |
+|                       | WITH(                                                |
+|                       |   physical_metric_table = 'true'                     |
+|                       | )                                                    |
++-----------------------+------------------------------------------------------+
+
+-- Verify select * works and returns empty
+SELECT * FROM metric_physical_table;
+
+++
+++
+
+SELECT * FROM logical_table_v1;
+
+++
+++
+
+SELECT * FROM logical_table_v2;
+
+++
+++
+
+DROP TABLE logical_table_v1;
+
+Affected Rows: 0
+
+DROP TABLE logical_table_v2;
+
+Affected Rows: 0
+
+DROP TABLE metric_physical_table;
+
+Affected Rows: 0
+

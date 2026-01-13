@@ -314,11 +314,8 @@ impl MitoRegion {
 
     /// Sets the dropping state.
     /// You should call this method in the worker loop.
-    pub(crate) fn set_dropping(&self) -> Result<()> {
-        self.compare_exchange_state(
-            RegionLeaderState::Writable,
-            RegionRoleState::Leader(RegionLeaderState::Dropping),
-        )
+    pub(crate) fn set_dropping(&self, expect: RegionLeaderState) -> Result<()> {
+        self.compare_exchange_state(expect, RegionRoleState::Leader(RegionLeaderState::Dropping))
     }
 
     /// Sets the truncating state.

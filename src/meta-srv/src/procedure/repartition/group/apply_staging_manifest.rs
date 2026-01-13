@@ -31,7 +31,7 @@ use store_api::storage::RegionId;
 
 use crate::error::{self, Error, Result};
 use crate::handler::HeartbeatMailbox;
-use crate::procedure::repartition::group::repartition_end::RepartitionEnd;
+use crate::procedure::repartition::group::update_metadata::UpdateMetadata;
 use crate::procedure::repartition::group::utils::{
     HandleMultipleResult, group_region_routes_by_peer, handle_multiple_results,
 };
@@ -52,7 +52,10 @@ impl State for ApplyStagingManifest {
     ) -> Result<(Box<dyn State>, Status)> {
         self.apply_staging_manifests(ctx).await?;
 
-        Ok((Box::new(RepartitionEnd), Status::executing(true)))
+        Ok((
+            Box::new(UpdateMetadata::ExitStaging),
+            Status::executing(true),
+        ))
     }
 
     fn as_any(&self) -> &dyn Any {

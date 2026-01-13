@@ -264,7 +264,7 @@ impl AllocateRegion {
             &raw_table_info.name,
         );
         let table_id = raw_table_info.ident.table_id;
-        let request = build_template_from_raw_table_info(raw_table_info)
+        let request = build_template_from_raw_table_info(raw_table_info, true)
             .context(error::BuildCreateRequestSnafu { table_id })?;
         let builder = CreateRequestBuilder::new(request, None);
         let region_count = region_routes.len();

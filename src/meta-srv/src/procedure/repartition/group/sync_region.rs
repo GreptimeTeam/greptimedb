@@ -17,11 +17,13 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use api::v1::meta::MailboxMessage;
-use common_meta::instruction::{Instruction, InstructionReply, SyncRegionReply, SyncRegionsReply};
+use common_meta::instruction::{
+    FlushRegions, Instruction, InstructionReply, SyncRegionReply, SyncRegionsReply,
+};
 use common_meta::peer::Peer;
 use common_meta::rpc::router::RegionRoute;
 use common_procedure::{Context as ProcedureContext, Status};
-use common_telemetry::info;
+use common_telemetry::{info, warn};
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
@@ -30,7 +32,7 @@ use store_api::storage::RegionId;
 
 use crate::error::{self, Error, Result};
 use crate::handler::HeartbeatMailbox;
-use crate::procedure::repartition::group::remap_manifest::RemapManifest;
+use crate::procedure::repartition::group::update_metadata::UpdateMetadata;
 use crate::procedure::repartition::group::utils::{
     HandleMultipleResult, group_region_routes_by_peer, handle_multiple_results,
 };
@@ -46,16 +48,20 @@ pub struct SyncRegion {
 }
 
 #[async_trait::async_trait]
-#[typetag::serde(name = "repartition_group_sync_region")]
+#[typetag::serde]
 impl State for SyncRegion {
     async fn next(
         &mut self,
         ctx: &mut Context,
         _procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
+        Self::flush_central_region(ctx).await?;
         self.sync_regions(ctx).await?;
 
-        Ok((Box::new(RemapManifest), Status::executing(true)))
+        Ok((
+            Box::new(UpdateMetadata::ApplyStaging),
+            Status::executing(true),
+        ))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -64,6 +70,121 @@ impl State for SyncRegion {
 }
 
 impl SyncRegion {
+    async fn flush_central_region(ctx: &mut Context) -> Result<()> {
+        let operation_timeout =
+            ctx.next_operation_timeout()
+                .context(error::ExceededDeadlineSnafu {
+                    operation: "Flush central region",
+                })?;
+        let prepare_result = ctx.persistent_ctx.group_prepare_result.as_ref().unwrap();
+        let flush_instruction =
+            Instruction::FlushRegions(FlushRegions::sync_single(prepare_result.central_region));
+        let msg = MailboxMessage::json_message(
+            &format!("Flush central region: {:?}", prepare_result.central_region),
+            &format!("Metasrv@{}", ctx.server_addr),
+            &format!(
+                "Datanode-{}@{}",
+                prepare_result.central_region_datanode.id,
+                prepare_result.central_region_datanode.addr
+            ),
+            common_time::util::current_time_millis(),
+            &flush_instruction,
+        )
+        .with_context(|_| error::SerializeToJsonSnafu {
+            input: flush_instruction.to_string(),
+        })?;
+
+        let ch = Channel::Datanode(prepare_result.central_region_datanode.id);
+        let now = Instant::now();
+        let result = ctx.mailbox.send(&ch, msg, operation_timeout).await;
+
+        match result {
+            Ok(receiver) => match receiver.await {
+                Ok(msg) => {
+                    let reply = HeartbeatMailbox::json_reply(&msg)?;
+                    info!(
+                        "Received flush central region reply: {:?}, region: {}, elapsed: {:?}",
+                        reply,
+                        prepare_result.central_region,
+                        now.elapsed()
+                    );
+                    let reply_result = match reply {
+                        InstructionReply::FlushRegions(flush_reply) => {
+                            if flush_reply.results.len() != 1 {
+                                return error::UnexpectedInstructionReplySnafu {
+                                    mailbox_message: msg.to_string(),
+                                    reason: format!(
+                                        "expect {} region flush result, but got {}",
+                                        1,
+                                        flush_reply.results.len()
+                                    ),
+                                }
+                                .fail();
+                            }
+
+                            match flush_reply.overall_success {
+                                true => (true, None),
+                                false => (
+                                    false,
+                                    Some(
+                                        flush_reply
+                                            .results
+                                            .iter()
+                                            .filter_map(|(region_id, result)| match result {
+                                                Ok(_) => None,
+                                                Err(e) => Some(format!("{}: {}", region_id, e)),
+                                            })
+                                            .collect::<Vec<String>>()
+                                            .join("; "),
+                                    ),
+                                ),
+                            }
+                        }
+                        _ => {
+                            return error::UnexpectedInstructionReplySnafu {
+                                mailbox_message: msg.to_string(),
+                                reason: "expect flush region reply",
+                            }
+                            .fail();
+                        }
+                    };
+                    let (result, error) = reply_result;
+
+                    if let Some(error) = error {
+                        warn!(
+                            "Failed to flush central region {:?} on datanode {:?}, error: {}. Skip flush operation.",
+                            prepare_result.central_region,
+                            prepare_result.central_region_datanode,
+                            &error
+                        );
+                    } else if result {
+                        info!(
+                            "The flush central region {:?} on datanode {:?} is successful, elapsed: {:?}",
+                            prepare_result.central_region,
+                            prepare_result.central_region_datanode,
+                            now.elapsed()
+                        );
+                    }
+
+                    Ok(())
+                }
+                Err(Error::MailboxTimeout { .. }) => error::ExceededDeadlineSnafu {
+                    operation: "Flush central region",
+                }
+                .fail(),
+                Err(err) => Err(err),
+            },
+            Err(Error::PusherNotFound { .. }) => {
+                warn!(
+                    "Failed to flush central region({:?}), the datanode({}) is unreachable(PusherNotFound). Skip flush operation.",
+                    prepare_result.central_region, prepare_result.central_region_datanode,
+                );
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
+    }
+
     /// Builds instructions to sync regions on datanodes.
     fn build_sync_region_instructions(
         central_region: RegionId,

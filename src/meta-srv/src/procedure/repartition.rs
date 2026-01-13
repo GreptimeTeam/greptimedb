@@ -47,7 +47,7 @@ use common_procedure::{
     BoxedProcedure, Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
     ProcedureManagerRef, Result as ProcedureResult, Status, StringKey, UserMetadata,
 };
-use common_telemetry::error;
+use common_telemetry::{error, info};
 use partition::expr::PartitionExpr;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
@@ -232,7 +232,10 @@ impl Context {
                 &new_region_routes,
                 table_id,
             )?;
-
+        info!(
+            "Updating table route for table: {}, new region routes: {:?}",
+            table_id, new_region_routes
+        );
         self.table_metadata_manager
             .update_table_route(
                 table_id,

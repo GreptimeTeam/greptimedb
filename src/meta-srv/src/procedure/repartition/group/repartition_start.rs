@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use common_meta::rpc::router::RegionRoute;
 use common_procedure::{Context as ProcedureContext, Status};
@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
 
 use crate::error::{self, Result};
+use crate::procedure::repartition::group::sync_region::SyncRegion;
 use crate::procedure::repartition::group::update_metadata::UpdateMetadata;
 use crate::procedure::repartition::group::{
     Context, GroupId, GroupPrepareResult, State, region_routes,
@@ -170,6 +171,28 @@ impl State for RepartitionStart {
             ctx.persistent_ctx.sources.len(),
             ctx.persistent_ctx.targets.len()
         );
+
+        if ctx.persistent_ctx.sync_region {
+            let prepare_result = ctx.persistent_ctx.group_prepare_result.as_ref().unwrap();
+            let allocated_region_ids: HashSet<_> = ctx
+                .persistent_ctx
+                .allocated_region_ids
+                .iter()
+                .copied()
+                .collect();
+            let region_routes: Vec<_> = prepare_result
+                .target_routes
+                .iter()
+                .filter(|route| allocated_region_ids.contains(&route.region.id))
+                .cloned()
+                .collect();
+            if !region_routes.is_empty() {
+                return Ok((
+                    Box::new(SyncRegion { region_routes }),
+                    Status::executing(true),
+                ));
+            }
+        }
 
         Ok((
             Box::new(UpdateMetadata::ApplyStaging),

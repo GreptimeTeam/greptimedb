@@ -16,6 +16,7 @@ use std::any::Any;
 
 use common_meta::key::table_route::PhysicalTableRouteValue;
 use common_procedure::{Context as ProcedureContext, Status};
+use common_telemetry::debug;
 use partition::expr::PartitionExpr;
 use partition::subtask::{self, RepartitionSubtask};
 use serde::{Deserialize, Serialize};
@@ -168,8 +169,9 @@ impl RepartitionStart {
                     .find_map(|(region_id, existing_expr)| {
                         (existing_expr == &expr_json).then_some(*region_id)
                     })
-                    .with_context(|| error::RepartitionSourceExprMismatchSnafu {
-                        expr: expr_json,
+                    .with_context(|| error::RepartitionSourceExprMismatchSnafu { expr: &expr_json })
+                    .inspect_err(|_| {
+                        debug!("Failed to find matching region for partition expression: {}, existing regions: {:?}", expr_json, existing_regions);
                     })?;
 
                 Ok(RegionDescriptor {

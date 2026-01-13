@@ -41,7 +41,7 @@ use common_procedure::{
     Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
     Result as ProcedureResult, Status, StringKey, UserMetadata,
 };
-use common_telemetry::error;
+use common_telemetry::{error, info};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{RegionId, TableId};
@@ -351,6 +351,7 @@ impl Context {
         new_region_routes: Vec<RegionRoute>,
     ) -> Result<()> {
         let table_id = self.persistent_ctx.table_id;
+        let group_id = self.persistent_ctx.group_id;
         // Safety: prepare result is set in [RepartitionStart] state.
         let prepare_result = self.persistent_ctx.group_prepare_result.as_ref().unwrap();
         let central_region_datanode_table_value = self
@@ -362,6 +363,10 @@ impl Context {
             ..
         } = &central_region_datanode_table_value.region_info;
 
+        info!(
+            "Updating table route for table: {}, group_id: {}, new region routes: {:?}",
+            table_id, group_id, new_region_routes
+        );
         self.table_metadata_manager
             .update_table_route(
                 table_id,

@@ -14,7 +14,7 @@
 
 //! Drop a metric region
 
-use common_telemetry::info;
+use common_telemetry::{debug, info};
 use snafu::ResultExt;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{AffectedRows, RegionDropRequest, RegionRequest};
@@ -46,6 +46,15 @@ impl MetricEngineInner {
                 .physical_region_states()
                 .get(&data_region_id)
             {
+                debug!(
+                    "Physical region {} is busy, there are still some logical regions: {:?}",
+                    data_region_id,
+                    state
+                        .logical_regions()
+                        .iter()
+                        .map(|id| id.to_string())
+                        .collect::<Vec<_>>()
+                );
                 (true, !state.logical_regions().is_empty())
             } else {
                 // the second argument is not used, just pass in a dummy value
