@@ -17,6 +17,7 @@ pub(crate) mod enter_staging_region;
 pub(crate) mod remap_manifest;
 pub(crate) mod repartition_end;
 pub(crate) mod repartition_start;
+pub(crate) mod sync_region;
 pub(crate) mod update_metadata;
 pub(crate) mod utils;
 
@@ -221,9 +222,14 @@ pub struct PersistentContext {
     /// The staging manifest paths of the repartition group.
     /// The value will be set in [RemapManifest](crate::procedure::repartition::group::remap_manifest::RemapManifest) state.
     pub staging_manifest_paths: HashMap<RegionId, String>,
+    /// Whether sync region is needed for this group.
+    pub sync_region: bool,
+    /// The region ids of the newly allocated regions.
+    pub allocated_region_ids: Vec<RegionId>,
 }
 
 impl PersistentContext {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         group_id: GroupId,
         table_id: TableId,
@@ -232,6 +238,8 @@ impl PersistentContext {
         sources: Vec<RegionDescriptor>,
         targets: Vec<RegionDescriptor>,
         region_mapping: HashMap<RegionId, Vec<RegionId>>,
+        sync_region: bool,
+        allocated_region_ids: Vec<RegionId>,
     ) -> Self {
         Self {
             group_id,
@@ -243,6 +251,8 @@ impl PersistentContext {
             region_mapping,
             group_prepare_result: None,
             staging_manifest_paths: HashMap::new(),
+            sync_region,
+            allocated_region_ids,
         }
     }
 

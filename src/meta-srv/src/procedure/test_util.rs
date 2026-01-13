@@ -18,7 +18,8 @@ use api::v1::meta::mailbox_message::Payload;
 use api::v1::meta::{HeartbeatResponse, MailboxMessage};
 use common_meta::instruction::{
     DowngradeRegionReply, DowngradeRegionsReply, EnterStagingRegionReply, EnterStagingRegionsReply,
-    FlushRegionReply, InstructionReply, SimpleReply, UpgradeRegionReply, UpgradeRegionsReply,
+    FlushRegionReply, InstructionReply, SimpleReply, SyncRegionReply, SyncRegionsReply,
+    UpgradeRegionReply, UpgradeRegionsReply,
 };
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::table_route::TableRouteValue;
@@ -248,6 +249,34 @@ pub fn new_enter_staging_region_reply(
                     error,
                 }]),
             ))
+            .unwrap(),
+        )),
+    }
+}
+
+/// Generates a [InstructionReply::SyncRegions] reply.
+pub fn new_sync_region_reply(
+    id: u64,
+    region_id: RegionId,
+    ready: bool,
+    exists: bool,
+    error: Option<String>,
+) -> MailboxMessage {
+    MailboxMessage {
+        id,
+        subject: "mock".to_string(),
+        from: "datanode".to_string(),
+        to: "meta".to_string(),
+        timestamp_millis: current_time_millis(),
+        payload: Some(Payload::Json(
+            serde_json::to_string(&InstructionReply::SyncRegions(SyncRegionsReply::new(vec![
+                SyncRegionReply {
+                    region_id,
+                    ready,
+                    exists,
+                    error,
+                },
+            ])))
             .unwrap(),
         )),
     }

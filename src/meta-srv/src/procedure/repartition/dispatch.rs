@@ -17,6 +17,7 @@ use std::collections::HashMap;
 
 use common_procedure::{Context as ProcedureContext, ProcedureWithId, Status};
 use serde::{Deserialize, Serialize};
+use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
 use store_api::storage::RegionId;
 
 use crate::error::Result;
@@ -57,6 +58,9 @@ impl State for Dispatch {
         _procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
         let table_id = ctx.persistent_ctx.table_id;
+        let table_info_value = ctx.get_table_info_value().await?;
+        let table_engine = table_info_value.table_info.meta.engine;
+        let sync_region = table_engine == METRIC_ENGINE_NAME;
         let mut procedures = Vec::with_capacity(ctx.persistent_ctx.plans.len());
         let mut procedure_metas = Vec::with_capacity(ctx.persistent_ctx.plans.len());
         for (plan_index, plan) in ctx.persistent_ctx.plans.iter().enumerate() {
@@ -73,6 +77,8 @@ impl State for Dispatch {
                 plan.source_regions.clone(),
                 plan.target_regions.clone(),
                 region_mapping,
+                sync_region,
+                plan.allocated_region_ids.clone(),
             );
 
             let group_procedure = RepartitionGroupProcedure::new(persistent_ctx, ctx);

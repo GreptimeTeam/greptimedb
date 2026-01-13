@@ -262,6 +262,13 @@ impl Context {
             .await;
         Ok(())
     }
+
+    /// Returns the next operation timeout.
+    ///
+    /// If the next operation timeout is not set, it will return `None`.
+    pub fn next_operation_timeout(&self) -> Option<std::time::Duration> {
+        Some(std::time::Duration::from_secs(10))
+    }
 }
 
 #[async_trait::async_trait]

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use api::v1::meta::MailboxMessage;
@@ -30,6 +30,7 @@ use snafu::{OptionExt, ResultExt, ensure};
 use crate::error::{self, Error, Result};
 use crate::handler::HeartbeatMailbox;
 use crate::procedure::repartition::group::remap_manifest::RemapManifest;
+use crate::procedure::repartition::group::sync_region::SyncRegion;
 use crate::procedure::repartition::group::utils::{
     HandleMultipleResult, group_region_routes_by_peer, handle_multiple_results,
 };
@@ -49,6 +50,28 @@ impl State for EnterStagingRegion {
         _procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
         self.enter_staging_regions(ctx).await?;
+
+        if ctx.persistent_ctx.sync_region {
+            let prepare_result = ctx.persistent_ctx.group_prepare_result.as_ref().unwrap();
+            let allocated_region_ids: HashSet<_> = ctx
+                .persistent_ctx
+                .allocated_region_ids
+                .iter()
+                .copied()
+                .collect();
+            let region_routes: Vec<_> = prepare_result
+                .target_routes
+                .iter()
+                .filter(|route| allocated_region_ids.contains(&route.region.id))
+                .cloned()
+                .collect();
+            if !region_routes.is_empty() {
+                return Ok((
+                    Box::new(SyncRegion { region_routes }),
+                    Status::executing(true),
+                ));
+            }
+        }
 
         Ok((Box::new(RemapManifest), Status::executing(true)))
     }
