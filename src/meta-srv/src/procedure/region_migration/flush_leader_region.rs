@@ -14,19 +14,15 @@
 
 use std::any::Any;
 
-use api::v1::meta::MailboxMessage;
-use common_meta::instruction::{FlushErrorStrategy, FlushRegions, Instruction, InstructionReply};
 use common_procedure::{Context as ProcedureContext, Status};
-use common_telemetry::{info, warn};
 use serde::{Deserialize, Serialize};
-use snafu::{OptionExt, ResultExt};
+use snafu::OptionExt;
 use tokio::time::Instant;
 
-use crate::error::{self, Error, Result};
-use crate::handler::HeartbeatMailbox;
+use crate::error::{self, Result};
 use crate::procedure::region_migration::update_metadata::UpdateMetadata;
 use crate::procedure::region_migration::{Context, State};
-use crate::service::mailbox::Channel;
+use crate::procedure::utils;
 
 /// Flushes the leader region before downgrading it.
 ///
@@ -61,15 +57,6 @@ impl State for PreFlushRegion {
 }
 
 impl PreFlushRegion {
-    /// Builds flush leader region instruction.
-    fn build_flush_leader_region_instruction(&self, ctx: &Context) -> Instruction {
-        let pc = &ctx.persistent_ctx;
-        Instruction::FlushRegions(FlushRegions::sync_batch(
-            pc.region_ids.clone(),
-            FlushErrorStrategy::TryAll,
-        ))
-    }
-
     /// Tries to flush a leader region.
     ///
     /// Ignore:
@@ -89,109 +76,17 @@ impl PreFlushRegion {
                 .context(error::ExceededDeadlineSnafu {
                     operation: "Flush leader region",
                 })?;
-        let flush_instruction = self.build_flush_leader_region_instruction(ctx);
         let region_ids = &ctx.persistent_ctx.region_ids;
         let leader = &ctx.persistent_ctx.from_peer;
 
-        let msg = MailboxMessage::json_message(
-            &format!("Flush leader region: {:?}", region_ids),
-            &format!("Metasrv@{}", ctx.server_addr()),
-            &format!("Datanode-{}@{}", leader.id, leader.addr),
-            common_time::util::current_time_millis(),
-            &flush_instruction,
+        utils::flush_region(
+            &ctx.mailbox,
+            &ctx.server_addr,
+            region_ids,
+            leader,
+            operation_timeout,
         )
-        .with_context(|_| error::SerializeToJsonSnafu {
-            input: flush_instruction.to_string(),
-        })?;
-
-        let ch = Channel::Datanode(leader.id);
-        let now = Instant::now();
-        let result = ctx.mailbox.send(&ch, msg, operation_timeout).await;
-
-        match result {
-            Ok(receiver) => match receiver.await {
-                Ok(msg) => {
-                    let reply = HeartbeatMailbox::json_reply(&msg)?;
-                    info!(
-                        "Received flush leader region reply: {:?}, region: {:?}, elapsed: {:?}",
-                        reply,
-                        region_ids,
-                        now.elapsed()
-                    );
-
-                    let reply_result = match reply {
-                        InstructionReply::FlushRegions(flush_reply) => {
-                            if flush_reply.results.len() != region_ids.len() {
-                                return error::UnexpectedInstructionReplySnafu {
-                                    mailbox_message: msg.to_string(),
-                                    reason: format!(
-                                        "expect {} region flush result, but got {}",
-                                        region_ids.len(),
-                                        flush_reply.results.len()
-                                    ),
-                                }
-                                .fail();
-                            }
-
-                            match flush_reply.overall_success {
-                                true => (true, None),
-                                false => (
-                                    false,
-                                    Some(
-                                        flush_reply
-                                            .results
-                                            .iter()
-                                            .filter_map(|(region_id, result)| match result {
-                                                Ok(_) => None,
-                                                Err(e) => Some(format!("{}: {}", region_id, e)),
-                                            })
-                                            .collect::<Vec<String>>()
-                                            .join("; "),
-                                    ),
-                                ),
-                            }
-                        }
-                        _ => {
-                            return error::UnexpectedInstructionReplySnafu {
-                                mailbox_message: msg.to_string(),
-                                reason: "expect flush region reply",
-                            }
-                            .fail();
-                        }
-                    };
-                    let (result, error) = reply_result;
-
-                    if let Some(error) = error {
-                        warn!(
-                            "Failed to flush leader regions {:?} on datanode {:?}, error: {}. Skip flush operation.",
-                            region_ids, leader, &error
-                        );
-                    } else if result {
-                        info!(
-                            "The flush leader regions {:?} on datanode {:?} is successful, elapsed: {:?}",
-                            region_ids,
-                            leader,
-                            now.elapsed()
-                        );
-                    }
-
-                    Ok(())
-                }
-                Err(Error::MailboxTimeout { .. }) => error::ExceededDeadlineSnafu {
-                    operation: "Flush leader regions",
-                }
-                .fail(),
-                Err(err) => Err(err),
-            },
-            Err(Error::PusherNotFound { .. }) => {
-                warn!(
-                    "Failed to flush leader regions({:?}), the datanode({}) is unreachable(PusherNotFound). Skip flush operation.",
-                    region_ids, leader
-                );
-                Ok(())
-            }
-            Err(err) => Err(err),
-        }
+        .await
     }
 }
 
@@ -202,11 +97,13 @@ mod tests {
     use store_api::storage::RegionId;
 
     use super::*;
+    use crate::error::Error;
     use crate::procedure::region_migration::test_util::{self, TestingEnv, new_procedure_context};
     use crate::procedure::region_migration::{ContextFactory, PersistentContext};
     use crate::procedure::test_util::{
         new_close_region_reply, new_flush_region_reply_for_region, send_mock_reply,
     };
+    use crate::service::mailbox::Channel;
 
     fn new_persistent_context() -> PersistentContext {
         test_util::new_persistent_context(1, 2, RegionId::new(1024, 1))
