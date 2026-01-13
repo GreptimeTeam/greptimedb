@@ -44,8 +44,8 @@ use crate::read::merge::MergeReaderBuilder;
 use crate::read::range::{RangeBuilderList, RangeMeta};
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{
-    PartitionMetrics, PartitionMetricsList, SplitRecordBatchStream, scan_file_ranges,
-    scan_flat_file_ranges, scan_flat_mem_ranges, scan_mem_ranges,
+    PartitionMetrics, PartitionMetricsList, SplitRecordBatchStream, clear_file_range_builders,
+    scan_file_ranges, scan_flat_file_ranges, scan_flat_mem_ranges, scan_mem_ranges,
     should_split_flat_batches_for_merge,
 };
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
@@ -486,6 +486,9 @@ impl SeqScan {
                 metrics.scan_cost += fetch_start.elapsed();
                 fetch_start = Instant::now();
                 part_metrics.merge_metrics(&metrics);
+
+                // Clear file range builders to release memory
+                clear_file_range_builders(&stream_ctx, &range_builder_list, part_range.identifier);
             }
 
             part_metrics.on_finish();
@@ -577,6 +580,9 @@ impl SeqScan {
                 metrics.scan_cost += fetch_start.elapsed();
                 fetch_start = Instant::now();
                 part_metrics.merge_metrics(&metrics);
+
+                // Clear file range builders to release memory
+                clear_file_range_builders(&stream_ctx, &range_builder_list, part_range.identifier);
             }
 
             part_metrics.on_finish();

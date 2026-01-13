@@ -1493,6 +1493,29 @@ pub(crate) async fn maybe_scan_flat_other_ranges(
     .fail()
 }
 
+/// Clears the file range builders for the given partition range.
+/// This should be called after finishing scanning a partition range to release memory.
+pub(crate) fn clear_file_range_builders(
+    stream_ctx: &StreamContext,
+    range_builder_list: &RangeBuilderList,
+    part_range_id: usize,
+) {
+    let range_meta = &stream_ctx.ranges[part_range_id];
+    let num_memtables = stream_ctx.input.num_memtables();
+
+    // Collect file indices from the range meta
+    // is_file_range_index already checks idx.index >= num_memtables
+    let file_indices = range_meta.row_group_indices.iter().filter_map(|idx| {
+        if stream_ctx.is_file_range_index(*idx) {
+            Some(idx.index - num_memtables)
+        } else {
+            None
+        }
+    });
+
+    range_builder_list.clear_file_builders(file_indices);
+}
+
 /// A stream wrapper that splits record batches from an inner stream.
 pub(crate) struct SplitRecordBatchStream<S> {
     /// The inner stream that yields record batches.

@@ -521,6 +521,17 @@ impl RangeBuilderList {
         let mut file_builders = self.file_builders.lock().unwrap();
         file_builders[index] = Some(builder);
     }
+
+    /// Clears the file builders at the specified file indices.
+    /// `file_indices` are local file indices (not global indices including memtables).
+    pub(crate) fn clear_file_builders(&self, file_indices: impl IntoIterator<Item = usize>) {
+        let mut file_builders = self.file_builders.lock().unwrap();
+        for file_index in file_indices {
+            if file_index < file_builders.len() {
+                file_builders[file_index] = None;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
