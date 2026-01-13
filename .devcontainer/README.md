@@ -22,13 +22,11 @@ The devcontainer automatically forwards these ports:
 - **3001**: HTTP API
 - **4000**: gRPC
 - **4001**: MySQL protocol
-- **4002**: PostgreSQL protocol
+- **4002**: GreptimeDB PostgreSQL-compatible protocol (frontend)
 - **5001**: Meta service
 - **5002**: Meta service (HTTP)
 - **5236**: Prometheus remote write
-- **5432**: PostgreSQL protocol
-- **9090**: Metrics endpoint
-- **9091**: Jaeger UI
+- **5432**: Local PostgreSQL server (for integration testing)
 
 ## Quick Start
 
