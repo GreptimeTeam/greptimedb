@@ -38,6 +38,7 @@ use datafusion::physical_plan::{
     SendableRecordBatchStream, Statistics,
 };
 use datafusion::sql::TableReference;
+use datafusion_expr::col;
 use futures::{Stream, StreamExt, ready};
 use greptime_proto::substrait_extension as pb;
 use prost::Message;
@@ -288,7 +289,14 @@ impl UserDefinedLogicalNodeCore for RangeManipulate {
     }
 
     fn expressions(&self) -> Vec<Expr> {
-        vec![]
+        if self.unfix.is_some() {
+            return vec![];
+        }
+
+        let mut exprs = Vec::with_capacity(1 + self.field_columns.len());
+        exprs.push(col(&self.time_index));
+        exprs.extend(self.field_columns.iter().map(col));
+        exprs
     }
 
     fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {

@@ -31,6 +31,7 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream,
 };
+use datafusion_expr::col;
 use datatypes::arrow::array::TimestampMillisecondArray;
 use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow::record_batch::RecordBatch;
@@ -83,7 +84,15 @@ impl UserDefinedLogicalNodeCore for SeriesNormalize {
     }
 
     fn expressions(&self) -> Vec<datafusion::logical_expr::Expr> {
-        vec![]
+        if self.unfix.is_some() {
+            return vec![];
+        }
+
+        self.tag_columns
+            .iter()
+            .map(col)
+            .chain(std::iter::once(col(&self.time_index_column_name)))
+            .collect()
     }
 
     fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
