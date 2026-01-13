@@ -66,9 +66,7 @@
     5001,
     5002,
     5236,
-    5432,
-    9090,
-    9091
+    5432
   ],
   "portsAttributes": {
     "3001": {
@@ -101,14 +99,6 @@
     },
     "5432": {
       "label": "PostgreSQL Protocol",
-      "onAutoForward": "notify"
-    },
-    "9090": {
-      "label": "Metrics Endpoint",
-      "onAutoForward": "notify"
-    },
-    "9091": {
-      "label": "Jaeger UI",
       "onAutoForward": "notify"
     }
   },

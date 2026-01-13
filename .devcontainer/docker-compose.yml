@@ -21,3 +21,4 @@ services:
       - "5236:5236"  # Prometheus remote write
       - "5432:5432"  # Local PostgreSQL server (for integration testing)
     command: sleep infinity
+    network_mode: host
