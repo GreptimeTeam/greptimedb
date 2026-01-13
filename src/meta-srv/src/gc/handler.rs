@@ -210,7 +210,7 @@ impl GcScheduler {
             "Completed GC for datanode {}: {} regions processed in {} batch(es)",
             peer,
             candidates.len(),
-            (candidates.len() + batch_size - 1) / batch_size
+            (candidates.len() + batch_size - 1).div_ceil(batch_size)
         );
 
         Ok(combined_report)

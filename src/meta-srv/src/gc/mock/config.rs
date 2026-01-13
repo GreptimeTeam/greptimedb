@@ -201,7 +201,6 @@ async fn test_max_regions_per_batch() {
     init_default_ut_logging();
 
     use common_meta::peer::Peer;
-    use store_api::storage::GcReport;
 
     use crate::gc::mock::{MockSchedulerCtx, new_empty_report_with};
 
@@ -253,7 +252,7 @@ async fn test_max_regions_per_batch() {
     };
 
     // Process all candidates for the datanode
-    let report = scheduler
+    let _report = scheduler
         .process_datanode_gc(peer, candidates)
         .await
         .unwrap();
