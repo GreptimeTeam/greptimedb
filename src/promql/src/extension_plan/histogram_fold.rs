@@ -40,6 +40,7 @@ use datafusion::physical_plan::{
     Partitioning, PhysicalExpr, PlanProperties, RecordBatchStream, SendableRecordBatchStream,
 };
 use datafusion::prelude::{Column, Expr};
+use datafusion_expr::col;
 use datatypes::prelude::{ConcreteDataType, DataType as GtDataType};
 use datatypes::value::{OrderedF64, Value, ValueRef};
 use datatypes::vectors::{Helper, MutableVector, VectorRef};
@@ -88,7 +89,38 @@ impl UserDefinedLogicalNodeCore for HistogramFold {
     }
 
     fn expressions(&self) -> Vec<Expr> {
-        vec![]
+        let mut exprs = vec![
+            col(&self.le_column),
+            col(&self.ts_column),
+            col(&self.field_column),
+        ];
+        exprs.extend(self.input.schema().fields().iter().filter_map(|f| {
+            let name = f.name();
+            if name != &self.le_column && name != &self.ts_column && name != &self.field_column {
+                Some(col(name))
+            } else {
+                None
+            }
+        }));
+        exprs
+    }
+
+    fn necessary_children_exprs(&self, output_columns: &[usize]) -> Option<Vec<Vec<usize>>> {
+        let le_column_index = self
+            .input
+            .schema()
+            .index_of_column_by_name(None, &self.le_column)?;
+        let necessary_indices = output_columns
+            .iter()
+            .map(|&output_column| {
+                if output_column < le_column_index {
+                    output_column
+                } else {
+                    output_column + 1
+                }
+            })
+            .collect();
+        Some(vec![necessary_indices])
     }
 
     fn fmt_for_explain(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

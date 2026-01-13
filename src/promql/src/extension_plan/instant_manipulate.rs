@@ -95,6 +95,14 @@ impl UserDefinedLogicalNodeCore for InstantManipulate {
         exprs
     }
 
+    fn necessary_children_exprs(&self, output_columns: &[usize]) -> Option<Vec<Vec<usize>>> {
+        if self.unfix.is_some() {
+            return None;
+        }
+
+        Some(vec![output_columns.to_vec()])
+    }
+
     fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(
             f,

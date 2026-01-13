@@ -31,6 +31,7 @@ use datafusion::physical_plan::{
 };
 use datafusion::prelude::Expr;
 use datafusion::sql::TableReference;
+use datafusion_expr::col;
 use datatypes::arrow::array::{Array, Float64Array, StringArray, TimestampMillisecondArray};
 use datatypes::arrow::compute::{CastOptions, cast_with_options, concat_batches};
 use datatypes::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
@@ -266,7 +267,41 @@ impl UserDefinedLogicalNodeCore for ScalarCalculate {
     }
 
     fn expressions(&self) -> Vec<Expr> {
-        vec![]
+        if self.unfix.is_some() {
+            return vec![];
+        }
+
+        self.tag_columns
+            .iter()
+            .map(col)
+            .chain(std::iter::once(col(&self.time_index)))
+            .chain(std::iter::once(col(&self.field_column)))
+            .collect()
+    }
+
+    fn necessary_children_exprs(&self, output_columns: &[usize]) -> Option<Vec<Vec<usize>>> {
+        if self.unfix.is_some() {
+            return None;
+        }
+
+        let input_schema = self.input.schema();
+        let time_index_idx = input_schema.index_of_column_by_name(None, &self.time_index)?;
+        let field_column_idx = input_schema.index_of_column_by_name(None, &self.field_column)?;
+
+        let mut required = Vec::with_capacity(2);
+        if output_columns.contains(&0) {
+            required.push(time_index_idx);
+        }
+        if output_columns.contains(&1) {
+            required.push(field_column_idx);
+        }
+        if required.is_empty() {
+            required.extend([time_index_idx, field_column_idx]);
+        }
+
+        required.sort_unstable();
+        required.dedup();
+        Some(vec![required])
     }
 
     fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -275,15 +310,9 @@ impl UserDefinedLogicalNodeCore for ScalarCalculate {
 
     fn with_exprs_and_inputs(
         &self,
-        exprs: Vec<Expr>,
+        _exprs: Vec<Expr>,
         inputs: Vec<LogicalPlan>,
     ) -> DataFusionResult<Self> {
-        if !exprs.is_empty() {
-            return Err(DataFusionError::Internal(
-                "ScalarCalculate should not have any expressions".to_string(),
-            ));
-        }
-
         let input: LogicalPlan = inputs.into_iter().next().unwrap();
         let input_schema = input.schema();
 

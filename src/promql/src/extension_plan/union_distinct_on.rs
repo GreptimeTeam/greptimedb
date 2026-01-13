@@ -32,6 +32,7 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, Partitioning, PlanProperties,
     RecordBatchStream, SendableRecordBatchStream, hash_utils,
 };
+use datafusion_expr::col;
 use datatypes::arrow::compute;
 use futures::future::BoxFuture;
 use futures::{Stream, StreamExt, TryStreamExt, ready};
@@ -145,7 +146,15 @@ impl UserDefinedLogicalNodeCore for UnionDistinctOn {
     }
 
     fn expressions(&self) -> Vec<Expr> {
-        vec![]
+        let mut exprs: Vec<Expr> = self.compare_keys.iter().map(col).collect();
+        if !self.compare_keys.iter().any(|key| key == &self.ts_col) {
+            exprs.push(col(&self.ts_col));
+        }
+        exprs
+    }
+
+    fn necessary_children_exprs(&self, output_columns: &[usize]) -> Option<Vec<Vec<usize>>> {
+        Some(vec![output_columns.to_vec(), output_columns.to_vec()])
     }
 
     fn fmt_for_explain(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

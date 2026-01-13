@@ -299,6 +299,32 @@ impl UserDefinedLogicalNodeCore for RangeManipulate {
         exprs
     }
 
+    fn necessary_children_exprs(&self, output_columns: &[usize]) -> Option<Vec<Vec<usize>>> {
+        if self.unfix.is_some() {
+            return None;
+        }
+
+        let input_schema = self.input.schema();
+        let input_len = input_schema.fields().len();
+        let time_index_idx = input_schema.index_of_column_by_name(None, &self.time_index)?;
+
+        let mut required = Vec::with_capacity(output_columns.len());
+        for &idx in output_columns {
+            if idx < input_len {
+                required.push(idx);
+            } else if idx == input_len {
+                // Derived timestamp range column.
+                required.push(time_index_idx);
+            } else {
+                return None;
+            }
+        }
+
+        required.sort_unstable();
+        required.dedup();
+        Some(vec![required])
+    }
+
     fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(
             f,
