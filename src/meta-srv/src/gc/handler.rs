@@ -177,6 +177,9 @@ impl GcScheduler {
 
     /// Process GC for a single datanode with all its candidate regions.
     /// Returns the table reports for this datanode.
+    ///
+    /// When the number of candidates exceeds `max_regions_per_batch`, they are
+    /// split into multiple batches to avoid overwhelming object storage.
     pub(crate) async fn process_datanode_gc(
         &self,
         peer: Peer,
@@ -192,97 +195,117 @@ impl GcScheduler {
             return Ok(Default::default());
         }
 
+        let batch_size = self.config.max_regions_per_batch;
+        let mut combined_report = GcReport::default();
+
+        // Split candidates into batches to avoid overwhelming object storage
+        for batch in candidates.chunks(batch_size) {
+            let batch_report = self
+                .process_datanode_gc_batch(peer.clone(), batch.to_vec())
+                .await?;
+            combined_report.merge(batch_report);
+        }
+
+        info!(
+            "Completed GC for datanode {}: {} regions processed in {} batch(es)",
+            peer,
+            candidates.len(),
+            (candidates.len() + batch_size - 1) / batch_size
+        );
+
+        Ok(combined_report)
+    }
+
+    /// Process a single batch of GC candidates for a datanode.
+    async fn process_datanode_gc_batch(
+        &self,
+        peer: Peer,
+        candidates: Vec<(TableId, GcCandidate)>,
+    ) -> Result<GcReport> {
+        if candidates.is_empty() {
+            return Ok(Default::default());
+        }
+
         let all_region_ids: Vec<RegionId> = candidates.iter().map(|(_, c)| c.region_id).collect();
 
-        // Step 2: Run GC for all regions on this datanode in a single batch
-        let (gc_report, fully_listed_regions) = {
-            // Partition regions into full listing and fast listing in a single pass
+        // Partition regions into full listing and fast listing in a single pass
+        let batch_full_listing_decisions =
+            self.batch_should_use_full_listing(&all_region_ids).await;
 
-            let batch_full_listing_decisions =
-                self.batch_should_use_full_listing(&all_region_ids).await;
+        let need_full_list_regions = batch_full_listing_decisions
+            .iter()
+            .filter_map(
+                |(&region_id, &need_full)| {
+                    if need_full { Some(region_id) } else { None }
+                },
+            )
+            .collect_vec();
+        let fast_list_regions = batch_full_listing_decisions
+            .iter()
+            .filter_map(
+                |(&region_id, &need_full)| {
+                    if !need_full { Some(region_id) } else { None }
+                },
+            )
+            .collect_vec();
 
-            let need_full_list_regions = batch_full_listing_decisions
-                .iter()
-                .filter_map(
-                    |(&region_id, &need_full)| {
-                        if need_full { Some(region_id) } else { None }
-                    },
-                )
-                .collect_vec();
-            let fast_list_regions = batch_full_listing_decisions
-                .iter()
-                .filter_map(
-                    |(&region_id, &need_full)| {
-                        if !need_full { Some(region_id) } else { None }
-                    },
-                )
-                .collect_vec();
+        let mut combined_report = GcReport::default();
 
-            let mut combined_report = GcReport::default();
+        // First process regions that can fast list
+        if !fast_list_regions.is_empty() {
+            match self
+                .ctx
+                .gc_regions(&fast_list_regions, false, self.config.mailbox_timeout)
+                .await
+            {
+                Ok(report) => combined_report.merge(report),
+                Err(e) => {
+                    error!(
+                        "Failed to GC regions {:?} on datanode {}: {}",
+                        fast_list_regions, peer, e
+                    );
 
-            // First process regions that can fast list
-            if !fast_list_regions.is_empty() {
-                match self
-                    .ctx
-                    .gc_regions(&fast_list_regions, false, self.config.mailbox_timeout)
-                    .await
-                {
-                    Ok(report) => combined_report.merge(report),
-                    Err(e) => {
-                        error!(
-                            "Failed to GC regions {:?} on datanode {}: {}",
-                            fast_list_regions, peer, e
-                        );
-
-                        // Add to need_retry_regions since it failed
-                        combined_report
-                            .need_retry_regions
-                            .extend(fast_list_regions.clone().into_iter());
-                    }
+                    // Add to need_retry_regions since it failed
+                    combined_report
+                        .need_retry_regions
+                        .extend(fast_list_regions.clone().into_iter());
                 }
             }
+        }
 
-            if !need_full_list_regions.is_empty() {
-                match self
-                    .ctx
-                    .gc_regions(&need_full_list_regions, true, self.config.mailbox_timeout)
-                    .await
-                {
-                    Ok(report) => combined_report.merge(report),
-                    Err(e) => {
-                        error!(
-                            "Failed to GC regions {:?} on datanode {}: {}",
-                            need_full_list_regions, peer, e
-                        );
+        if !need_full_list_regions.is_empty() {
+            match self
+                .ctx
+                .gc_regions(&need_full_list_regions, true, self.config.mailbox_timeout)
+                .await
+            {
+                Ok(report) => combined_report.merge(report),
+                Err(e) => {
+                    error!(
+                        "Failed to GC regions {:?} on datanode {}: {}",
+                        need_full_list_regions, peer, e
+                    );
 
-                        // Add to need_retry_regions since it failed
-                        combined_report
-                            .need_retry_regions
-                            .extend(need_full_list_regions.clone());
-                    }
+                    // Add to need_retry_regions since it failed
+                    combined_report
+                        .need_retry_regions
+                        .extend(need_full_list_regions.clone());
                 }
             }
-            let fully_listed_regions = need_full_list_regions
-                .into_iter()
-                .filter(|r| !combined_report.need_retry_regions.contains(r))
-                .collect::<HashSet<_>>();
+        }
 
-            (combined_report, fully_listed_regions)
-        };
+        let fully_listed_regions = need_full_list_regions
+            .into_iter()
+            .filter(|r| !combined_report.need_retry_regions.contains(r))
+            .collect::<HashSet<_>>();
 
-        // Step 3: Process the combined GC report and update table reports
+        // Update tracker for processed regions
         for region_id in &all_region_ids {
             self.update_full_listing_time(*region_id, fully_listed_regions.contains(region_id))
                 .await;
         }
 
-        info!(
-            "Completed GC for datanode {}: {} regions processed",
-            peer,
-            all_region_ids.len()
-        );
-
-        Ok(gc_report)
+        Ok(combined_report)
     }
 
     async fn batch_should_use_full_listing(
