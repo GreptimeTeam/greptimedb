@@ -56,8 +56,8 @@
   },
   "mounts": [
     "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind",
-    "source=/home/discord9/.cargo/registry,target=/home/vscode/.cargo/registry,type=bind",
-    "source=/home/discord9/.cargo/git,target=/home/vscode/.cargo/git,type=bind"
+    "source=${localEnv:HOME}/.cargo/registry,target=/home/vscode/.cargo/registry,type=bind",
+    "source=${localEnv:HOME}/.cargo/git,target=/home/vscode/.cargo/git,type=bind"
   ],
   "forwardPorts": [
     3001,

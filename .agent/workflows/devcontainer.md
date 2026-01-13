@@ -52,11 +52,19 @@ devcontainer exec --workspace-folder . bash
 
 ## Starting the Container
 
-Before running any commands, ensure the devcontainer is running:
+Before running any commands, ensure the devcontainer is running. Use this command which will start the container if not running, or do nothing if already running:
 
 ```bash
-devcontainer up --workspace-folder .
+devcontainer up --workspace-folder . 2>/dev/null || devcontainer up --workspace-folder .
 ```
+
+## Error Handling
+
+If `devcontainer exec` fails:
+
+1. **Container not running**: Run `devcontainer up --workspace-folder .` first
+2. **Container needs rebuild**: Run `devcontainer up --workspace-folder . --remove-existing-container --build-no-cache`
+3. **Check container logs**: Run `docker logs <container_id>` to diagnose issues+
 
 ## Important Notes
 
@@ -64,3 +72,4 @@ devcontainer up --workspace-folder .
 - The workspace is mounted at `/workspace` inside the container
 - Cargo caches are shared from the host's `~/.cargo`
 - The target directory is shared, so builds are persistent
+- The container will auto-start if you run `devcontainer exec` and it's not running

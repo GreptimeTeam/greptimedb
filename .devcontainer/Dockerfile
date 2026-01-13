@@ -101,36 +101,8 @@ RUN ETCD_VERSION="v3.5.9" && \
 RUN curl -L "https://dl.min.io/client/mc/release/linux-$(uname -m)/mc" -o /usr/local/bin/mc && \
     chmod +x /usr/local/bin/mc
 
-# Install Rust toolchain and tools as root first
-ENV RUSTUP_HOME=/usr/local/rustup
-ENV CARGO_HOME=/usr/local/cargo
-ENV PATH=/usr/local/cargo/bin:$PATH
-
-# Install Rust with specific toolchain
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --no-modify-path --default-toolchain none -y \
-    && rustup toolchain install nightly-2025-10-01 \
-    && rustup default nightly-2025-10-01 \
-    && rustup component add rustfmt clippy rust-src
-
-# Install cargo-binstall
-RUN curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash || \
-    echo "cargo-binstall installation failed, will use cargo install instead"
-
-# Install essential cargo tools
-RUN if command -v cargo-binstall >/dev/null 2>&1; then \
-        cargo binstall cargo-nextest --no-confirm && \
-        cargo binstall cargo-watch --no-confirm && \
-        cargo binstall cargo-expand --no-confirm && \
-        cargo binstall cargo-edit --no-confirm && \
-        cargo binstall cargo-audit --no-confirm; \
-    else \
-        echo "Installing cargo tools with cargo install (slower but more reliable)..." && \
-        cargo install cargo-nextest --locked && \
-        cargo install cargo-watch --locked && \
-        cargo install cargo-expand --locked && \
-        cargo install cargo-edit --locked && \
-        cargo install cargo-audit --locked; \
-    fi
+# Note: Rust toolchain is installed via devcontainer features
+# See devcontainer.json for the Rust version configuration
 
 # Create a non-root user (vscode is the default for devcontainers)
 ARG USERNAME=vscode
