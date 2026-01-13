@@ -184,11 +184,13 @@ SELECT * FROM metric_physical_table;
 
 SELECT * FROM logical_table_v1;
 
-Error: 3001(EngineExecuteQuery), Failed to decode DataFusion plan: RegionId 4406636445699(1026, 3) not found
+++
+++
 
 SELECT * FROM logical_table_v2;
 
-Error: 3001(EngineExecuteQuery), Failed to decode DataFusion plan: RegionId 4410931412995(1027, 3) not found
+++
+++
 
 -- Merge physical table partition
 ALTER TABLE metric_physical_table MERGE PARTITION (
