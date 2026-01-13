@@ -2,12 +2,7 @@
   "name": "GreptimeDB Development Environment",
   "build": {
     "dockerfile": "Dockerfile",
-    "context": "..",
-    "args": {
-      "HTTP_PROXY": "${localEnv:HTTP_PROXY}",
-      "HTTPS_PROXY": "${localEnv:HTTPS_PROXY}",
-      "NO_PROXY": "${localEnv:NO_PROXY}"
-    }
+    "context": ".."
   },
   "features": {
     "ghcr.io/devcontainers/features/git:1": {},
@@ -39,7 +34,9 @@
       "settings": {
         "rust-analyzer.cargo.features": "all",
         "rust-analyzer.checkOnSave.command": "clippy",
-        "rust-analyzer.checkOnSave.extraArgs": ["--all-targets"],
+        "rust-analyzer.checkOnSave.extraArgs": [
+          "--all-targets"
+        ],
         "rust-analyzer.procMacro.enable": true,
         "rust-analyzer.imports.granularity.group": "module",
         "rust-analyzer.completion.autoimport.enable": true,
@@ -58,7 +55,9 @@
     "PROTOC": "/usr/local/bin/protoc"
   },
   "mounts": [
-    "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"
+    "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind",
+    "source=/home/discord9/.cargo/registry,target=/home/vscode/.cargo/registry,type=bind",
+    "source=/home/discord9/.cargo/git,target=/home/vscode/.cargo/git,type=bind"
   ],
   "forwardPorts": [
     3001,

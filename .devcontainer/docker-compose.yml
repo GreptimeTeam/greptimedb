@@ -5,10 +5,6 @@ services:
     build:
       context: ..
       dockerfile: .devcontainer/Dockerfile
-      args:
-        - HTTP_PROXY=${HTTP_PROXY:-}
-        - HTTPS_PROXY=${HTTPS_PROXY:-}
-        - NO_PROXY=${NO_PROXY:-localhost,127.0.0.1,.local}
     volumes:
       - ../..:/workspace:cached
       - /var/run/docker.sock:/var/run/docker.sock
@@ -16,13 +12,6 @@ services:
       - RUST_BACKTRACE=1
       - CARGO_TERM_COLOR=always
       - PROTOC=/usr/local/bin/protoc
-      # Proxy settings - will use host proxy if available
-      - HTTP_PROXY=${HTTP_PROXY:-}
-      - HTTPS_PROXY=${HTTPS_PROXY:-}
-      - NO_PROXY=${NO_PROXY:-localhost,127.0.0.1,.local}
-      - http_proxy=${http_proxy:-}
-      - https_proxy=${https_proxy:-}
-      - no_proxy=${no_proxy:-localhost,127.0.0.1,.local}
     ports:
       - "3001:3001"  # HTTP API
       - "4000:4000"  # gRPC
