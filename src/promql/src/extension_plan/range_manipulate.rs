@@ -18,7 +18,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use common_telemetry::debug;
+use common_telemetry::{debug, warn};
 use datafusion::arrow::array::{Array, ArrayRef, Int64Array, TimestampMillisecondArray};
 use datafusion::arrow::compute;
 use datafusion::arrow::datatypes::{Field, SchemaRef};
@@ -316,6 +316,10 @@ impl UserDefinedLogicalNodeCore for RangeManipulate {
                 // Derived timestamp range column.
                 required.push(time_index_idx);
             } else {
+                warn!(
+                    "Output column index {} is out of bounds for input schema with length {}",
+                    idx, input_len
+                );
                 return None;
             }
         }

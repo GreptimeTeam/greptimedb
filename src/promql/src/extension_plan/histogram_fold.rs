@@ -106,11 +106,15 @@ impl UserDefinedLogicalNodeCore for HistogramFold {
     }
 
     fn necessary_children_exprs(&self, output_columns: &[usize]) -> Option<Vec<Vec<usize>>> {
-        let le_column_index = self
-            .input
-            .schema()
-            .index_of_column_by_name(None, &self.le_column)?;
-        let necessary_indices = output_columns
+        let input_schema = self.input.schema();
+        let le_column_index = input_schema.index_of_column_by_name(None, &self.le_column)?;
+
+        if output_columns.is_empty() {
+            let indices = (0..input_schema.fields().len()).collect::<Vec<_>>();
+            return Some(vec![indices]);
+        }
+
+        let mut necessary_indices = output_columns
             .iter()
             .map(|&output_column| {
                 if output_column < le_column_index {
@@ -119,7 +123,10 @@ impl UserDefinedLogicalNodeCore for HistogramFold {
                     output_column + 1
                 }
             })
-            .collect();
+            .collect::<Vec<_>>();
+        necessary_indices.push(le_column_index);
+        necessary_indices.sort_unstable();
+        necessary_indices.dedup();
         Some(vec![necessary_indices])
     }
 
@@ -1030,10 +1037,25 @@ mod test {
     use datafusion::common::ToDFSchema;
     use datafusion::datasource::memory::MemorySourceConfig;
     use datafusion::datasource::source::DataSourceExec;
+    use datafusion::logical_expr::EmptyRelation;
     use datafusion::prelude::SessionContext;
     use datatypes::arrow_array::StringArray;
+    use futures::FutureExt;
 
     use super::*;
+
+    fn project_batch(batch: &RecordBatch, indices: &[usize]) -> RecordBatch {
+        let fields = indices
+            .iter()
+            .map(|&idx| batch.schema().field(idx).clone())
+            .collect::<Vec<_>>();
+        let columns = indices
+            .iter()
+            .map(|&idx| batch.column(idx).clone())
+            .collect::<Vec<_>>();
+        let schema = Arc::new(Schema::new(fields));
+        RecordBatch::try_new(schema, columns).unwrap()
+    }
 
     fn prepare_test_data() -> DataSourceExec {
         let schema = Arc::new(Schema::new(vec![
@@ -1220,6 +1242,100 @@ mod test {
 +--------+-------------------+",
         );
         assert_eq!(result_literal, expected);
+    }
+
+    #[tokio::test]
+    async fn pruning_should_keep_le_column_for_exec() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("ts", DataType::Timestamp(TimeUnit::Millisecond, None), true),
+            Field::new("le", DataType::Utf8, true),
+            Field::new("val", DataType::Float64, true),
+        ]));
+        let df_schema = schema.clone().to_dfschema_ref().unwrap();
+        let input = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: df_schema,
+        });
+        let plan = HistogramFold::new(
+            "le".to_string(),
+            "val".to_string(),
+            "ts".to_string(),
+            0.5,
+            input,
+        )
+        .unwrap();
+
+        let output_columns = [0usize, 1usize];
+        let required = plan.necessary_children_exprs(&output_columns).unwrap();
+        let required = &required[0];
+        assert_eq!(required.as_slice(), &[0, 1, 2]);
+
+        let input_batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![0, 0])),
+                Arc::new(StringArray::from(vec!["0.1", "+Inf"])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+            ],
+        )
+        .unwrap();
+        let projected = project_batch(&input_batch, required);
+        let projected_schema = projected.schema();
+        let memory_exec = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![projected]], projected_schema, None).unwrap(),
+        )));
+
+        let fold_exec = plan.to_execution_plan(memory_exec);
+        let session_context = SessionContext::default();
+        let output_batches =
+            datafusion::physical_plan::collect(fold_exec, session_context.task_ctx())
+                .await
+                .unwrap();
+        assert_eq!(output_batches.len(), 1);
+
+        let output_batch = &output_batches[0];
+        assert_eq!(output_batch.num_rows(), 1);
+
+        let ts = output_batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap();
+        assert_eq!(ts.values(), &[0i64]);
+
+        let values = output_batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert!((values.value(0) - 0.1).abs() < 1e-12);
+
+        // Simulate the pre-fix pruning behavior: omit the `le` column from the child input.
+        let le_index = 1usize;
+        let broken_required = output_columns
+            .iter()
+            .map(|&output_column| {
+                if output_column < le_index {
+                    output_column
+                } else {
+                    output_column + 1
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let broken = project_batch(&input_batch, &broken_required);
+        let broken_schema = broken.schema();
+        let broken_exec = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![broken]], broken_schema, None).unwrap(),
+        )));
+        let broken_fold_exec = plan.to_execution_plan(broken_exec);
+        let session_context = SessionContext::default();
+        let broken_result = std::panic::AssertUnwindSafe(async {
+            datafusion::physical_plan::collect(broken_fold_exec, session_context.task_ctx()).await
+        })
+        .catch_unwind()
+        .await;
+        assert!(broken_result.is_err());
     }
 
     #[test]
