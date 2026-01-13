@@ -371,8 +371,9 @@ impl LocalGcWorker {
             // and do it first to make sure we have the latest manifest etc.
             self.list_from_object_store(region_id, manifest.files.len())
                 .await?
-        } else if manifest.is_none() {
-            // if region is already dropped, we have no manifest to refer to, have to do full listing
+        } else if manifest.is_none() && self.full_file_listing {
+            // if region is already dropped, we have no manifest to refer to,
+            // so only do gc if `full_file_listing` is true, otherwise just skip it
             // TODO(discord9): is doing one serial listing enough here?
             self.list_from_object_store(region_id, Self::CONCURRENCY_LIST_PER_FILES)
                 .await?
@@ -425,9 +426,9 @@ impl LocalGcWorker {
         let unused_file_cnt = deletable_files.len();
 
         debug!(
-            "gc: for region{} {region_id}: In manifest files: {}, Tmp ref file cnt: {}, recently removed files: {}, Unused files to delete: {} ",
+            "gc: for region{}{region_id}: In manifest files: {}, Tmp ref file cnt: {}, recently removed files: {}, Unused files to delete: {}",
             if region.is_none() {
-                " (region dropped) "
+                "(region dropped)"
             } else {
                 ""
             },

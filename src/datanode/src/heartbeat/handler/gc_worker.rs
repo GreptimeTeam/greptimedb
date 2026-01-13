@@ -15,7 +15,7 @@
 use common_meta::instruction::{GcRegions, GcRegionsReply, InstructionReply};
 use common_telemetry::{debug, warn};
 use mito2::gc::LocalGcWorker;
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{OptionExt, ResultExt};
 use store_api::storage::{FileRefsManifest, RegionId};
 
 use crate::error::{GcMitoEngineSnafu, InvalidGcArgsSnafu, Result, UnexpectedSnafu};
@@ -111,22 +111,6 @@ impl GcRegionsHandler {
         let region_id = *region_ids.first().with_context(|| InvalidGcArgsSnafu {
             msg: "No region ids provided".to_string(),
         })?;
-
-        // also need to ensure all regions are on this datanode
-        ensure!(
-            region_ids
-                .iter()
-                .all(|rid| mito_engine.find_region(*rid).is_some()),
-            InvalidGcArgsSnafu {
-                msg: format!(
-                    "Some regions are not on current datanode:{:?}",
-                    region_ids
-                        .iter()
-                        .filter(|rid| mito_engine.find_region(**rid).is_none())
-                        .collect::<Vec<_>>()
-                ),
-            }
-        );
 
         // Find the access layer from one of the regions that exists on this datanode
         let access_layer = mito_engine
