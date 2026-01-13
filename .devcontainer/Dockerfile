@@ -133,7 +133,5 @@ ENV RUST_BACKTRACE=1
 ENV CARGO_TERM_COLOR=always
 ENV PROTOC=/usr/local/bin/protoc
 
-# Verify installations
-RUN protoc --version && \
-    rustc --version && \
-    cargo --version
+# Verify protoc installation (Rust is installed via devcontainer features)
+RUN protoc --version
