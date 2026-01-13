@@ -153,8 +153,13 @@ impl UserDefinedLogicalNodeCore for UnionDistinctOn {
         exprs
     }
 
-    fn necessary_children_exprs(&self, output_columns: &[usize]) -> Option<Vec<Vec<usize>>> {
-        Some(vec![output_columns.to_vec(), output_columns.to_vec()])
+    fn necessary_children_exprs(&self, _output_columns: &[usize]) -> Option<Vec<Vec<usize>>> {
+        let left_len = self.left.schema().fields().len();
+        let right_len = self.right.schema().fields().len();
+        Some(vec![
+            (0..left_len).collect::<Vec<_>>(),
+            (0..right_len).collect::<Vec<_>>(),
+        ])
     }
 
     fn fmt_for_explain(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -549,8 +554,42 @@ mod test {
 
     use datafusion::arrow::array::Int32Array;
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    use datafusion::common::ToDFSchema;
+    use datafusion::logical_expr::{EmptyRelation, LogicalPlan};
 
     use super::*;
+
+    #[test]
+    fn pruning_should_keep_all_columns_for_exec() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("ts", DataType::Int32, false),
+            Field::new("k", DataType::Int32, false),
+            Field::new("v", DataType::Int32, false),
+        ]));
+        let df_schema = schema.to_dfschema_ref().unwrap();
+        let left = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: df_schema.clone(),
+        });
+        let right = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: df_schema.clone(),
+        });
+        let plan = UnionDistinctOn::new(
+            left,
+            right,
+            vec!["k".to_string()],
+            "ts".to_string(),
+            df_schema,
+        );
+
+        // Simulate a parent projection requesting only one output column.
+        let output_columns = [2usize];
+        let required = plan.necessary_children_exprs(&output_columns).unwrap();
+        assert_eq!(required.len(), 2);
+        assert_eq!(required[0].as_slice(), &[0, 1, 2]);
+        assert_eq!(required[1].as_slice(), &[0, 1, 2]);
+    }
 
     #[test]
     fn test_interleave_batches() {

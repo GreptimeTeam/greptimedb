@@ -100,7 +100,21 @@ impl UserDefinedLogicalNodeCore for InstantManipulate {
             return None;
         }
 
-        Some(vec![output_columns.to_vec()])
+        let input_schema = self.input.schema();
+        if output_columns.is_empty() {
+            let indices = (0..input_schema.fields().len()).collect::<Vec<_>>();
+            return Some(vec![indices]);
+        }
+
+        let mut required = output_columns.to_vec();
+        required.push(input_schema.index_of_column_by_name(None, &self.time_index_column)?);
+        if let Some(field) = &self.field_column {
+            required.push(input_schema.index_of_column_by_name(None, field)?);
+        }
+
+        required.sort_unstable();
+        required.dedup();
+        Some(vec![required])
     }
 
     fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -688,6 +702,8 @@ impl InstantManipulateStream {
 
 #[cfg(test)]
 mod test {
+    use datafusion::common::ToDFSchema;
+    use datafusion::logical_expr::{EmptyRelation, LogicalPlan};
     use datafusion::prelude::SessionContext;
 
     use super::*;
@@ -727,6 +743,30 @@ mod test {
             .to_string();
 
         assert_eq!(result_literal, expected);
+    }
+
+    #[test]
+    fn pruning_should_keep_time_and_field_columns_for_exec() {
+        let df_schema = prepare_test_data().schema().to_dfschema_ref().unwrap();
+        let input = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: df_schema,
+        });
+        let plan = InstantManipulate::new(
+            0,
+            0,
+            0,
+            0,
+            TIME_INDEX_COLUMN.to_string(),
+            Some("value".to_string()),
+            input,
+        );
+
+        // Simulate a parent projection requesting only the `path` column.
+        let output_columns = [2usize];
+        let required = plan.necessary_children_exprs(&output_columns).unwrap();
+        let required = &required[0];
+        assert_eq!(required.as_slice(), &[0, 1, 2]);
     }
 
     #[tokio::test]
