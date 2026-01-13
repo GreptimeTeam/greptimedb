@@ -1280,6 +1280,11 @@ impl TableMetadataManager {
             region_distribution(current_table_route_value.region_routes()?);
         let new_region_distribution = region_distribution(&new_region_routes);
 
+        let update_topic_region_txn = self.topic_region_manager.build_update_txn(
+            table_id,
+            &region_info.region_wal_options,
+            new_region_wal_options,
+        )?;
         let update_datanode_table_txn = self.datanode_table_manager().build_update_txn(
             table_id,
             region_info,
@@ -1291,13 +1296,16 @@ impl TableMetadataManager {
 
         // Updates the table_route.
         let new_table_route_value = current_table_route_value.update(new_region_routes)?;
-
         let (update_table_route_txn, on_update_table_route_failure) = self
             .table_route_manager()
             .table_route_storage()
             .build_update_txn(table_id, current_table_route_value, &new_table_route_value)?;
 
-        let txn = Txn::merge_all(vec![update_datanode_table_txn, update_table_route_txn]);
+        let txn = Txn::merge_all(vec![
+            update_datanode_table_txn,
+            update_table_route_txn,
+            update_topic_region_txn,
+        ]);
 
         let mut r = self.kv_backend.txn(txn).await?;
 
@@ -1482,6 +1490,7 @@ mod tests {
     use crate::key::table_info::TableInfoValue;
     use crate::key::table_name::TableNameKey;
     use crate::key::table_route::TableRouteValue;
+    use crate::key::topic_region::TopicRegionKey;
     use crate::key::{
         DeserializedValueWithBytes, RegionDistribution, RegionRoleSet, TOPIC_REGION_PREFIX,
         TableMetadataManager, ViewInfoValue,
@@ -2259,6 +2268,218 @@ mod tests {
                 )
                 .await
                 .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_table_route_with_topic_region_mapping() {
+        let mem_kv = Arc::new(MemoryKvBackend::default());
+        let table_metadata_manager = TableMetadataManager::new(mem_kv.clone());
+        let region_route = new_test_region_route();
+        let region_routes = vec![region_route.clone()];
+        let table_info: RawTableInfo = new_test_table_info().into();
+        let table_id = table_info.ident.table_id;
+        let engine = table_info.meta.engine.as_str();
+        let region_storage_path =
+            region_storage_path(&table_info.catalog_name, &table_info.schema_name);
+
+        // Create initial metadata with Kafka WAL options
+        let old_region_wal_options: HashMap<RegionNumber, String> = vec![
+            (
+                1,
+                serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
+                    topic: "topic_1".to_string(),
+                }))
+                .unwrap(),
+            ),
+            (
+                2,
+                serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
+                    topic: "topic_2".to_string(),
+                }))
+                .unwrap(),
+            ),
+        ]
+        .into_iter()
+        .collect();
+
+        create_physical_table_metadata(
+            &table_metadata_manager,
+            table_info.clone(),
+            region_routes.clone(),
+            old_region_wal_options.clone(),
+        )
+        .await
+        .unwrap();
+
+        let current_table_route_value = DeserializedValueWithBytes::from_inner(
+            TableRouteValue::physical(region_routes.clone()),
+        );
+
+        // Verify initial topic region mappings exist
+        let region_id_1 = RegionId::new(table_id, 1);
+        let region_id_2 = RegionId::new(table_id, 2);
+        let topic_1_key = TopicRegionKey::new(region_id_1, "topic_1");
+        let topic_2_key = TopicRegionKey::new(region_id_2, "topic_2");
+        assert!(
+            table_metadata_manager
+                .topic_region_manager
+                .get(topic_1_key.clone())
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            table_metadata_manager
+                .topic_region_manager
+                .get(topic_2_key.clone())
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        // Test 1: Add new region with new topic
+        let new_region_routes = vec![
+            new_region_route(1, 1),
+            new_region_route(2, 2),
+            new_region_route(3, 3), // New region
+        ];
+        let new_region_wal_options: HashMap<RegionNumber, String> = vec![
+            (
+                1,
+                serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
+                    topic: "topic_1".to_string(), // Unchanged
+                }))
+                .unwrap(),
+            ),
+            (
+                2,
+                serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
+                    topic: "topic_2".to_string(), // Unchanged
+                }))
+                .unwrap(),
+            ),
+            (
+                3,
+                serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
+                    topic: "topic_3".to_string(), // New topic
+                }))
+                .unwrap(),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let current_table_route_value_updated = DeserializedValueWithBytes::from_inner(
+            current_table_route_value
+                .inner
+                .update(new_region_routes.clone())
+                .unwrap(),
+        );
+        table_metadata_manager
+            .update_table_route(
+                table_id,
+                RegionInfo {
+                    engine: engine.to_string(),
+                    region_storage_path: region_storage_path.clone(),
+                    region_options: HashMap::new(),
+                    region_wal_options: old_region_wal_options.clone(),
+                },
+                &current_table_route_value,
+                new_region_routes.clone(),
+                &HashMap::new(),
+                &new_region_wal_options,
+            )
+            .await
+            .unwrap();
+        // Verify new topic region mapping was created
+        let region_id_3 = RegionId::new(table_id, 3);
+        let topic_3_key = TopicRegionKey::new(region_id_3, "topic_3");
+        assert!(
+            table_metadata_manager
+                .topic_region_manager
+                .get(topic_3_key)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        // Test 2: Remove a region and change topic for another
+        let newer_region_routes = vec![
+            new_region_route(1, 1),
+            // Region 2 removed
+            // Region 3 now has different topic
+        ];
+        let newer_region_wal_options: HashMap<RegionNumber, String> = vec![
+            (
+                1,
+                serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
+                    topic: "topic_1".to_string(), // Unchanged
+                }))
+                .unwrap(),
+            ),
+            (
+                3,
+                serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
+                    topic: "topic_3_new".to_string(), // Changed topic
+                }))
+                .unwrap(),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        table_metadata_manager
+            .update_table_route(
+                table_id,
+                RegionInfo {
+                    engine: engine.to_string(),
+                    region_storage_path: region_storage_path.clone(),
+                    region_options: HashMap::new(),
+                    region_wal_options: new_region_wal_options.clone(),
+                },
+                &current_table_route_value_updated,
+                newer_region_routes.clone(),
+                &HashMap::new(),
+                &newer_region_wal_options,
+            )
+            .await
+            .unwrap();
+        // Verify region 2 mapping was deleted
+        let topic_2_key_new = TopicRegionKey::new(region_id_2, "topic_2");
+        assert!(
+            table_metadata_manager
+                .topic_region_manager
+                .get(topic_2_key_new)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        // Verify region 3 old topic mapping was deleted
+        let topic_3_key_old = TopicRegionKey::new(region_id_3, "topic_3");
+        assert!(
+            table_metadata_manager
+                .topic_region_manager
+                .get(topic_3_key_old)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        // Verify region 3 new topic mapping was created
+        let topic_3_key_new = TopicRegionKey::new(region_id_3, "topic_3_new");
+        assert!(
+            table_metadata_manager
+                .topic_region_manager
+                .get(topic_3_key_new)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        // Verify region 1 mapping still exists (unchanged)
+        assert!(
+            table_metadata_manager
+                .topic_region_manager
+                .get(topic_1_key)
+                .await
+                .unwrap()
+                .is_some()
         );
     }
 
