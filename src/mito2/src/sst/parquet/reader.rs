@@ -498,7 +498,7 @@ impl ParquetReaderBuilder {
 
         // Cache miss, load metadata directly.
         let metadata_loader = MetadataLoader::new(self.object_store.clone(), file_path, file_size);
-        let metadata = metadata_loader.load().await?;
+        let metadata = metadata_loader.load(cache_metrics).await?;
 
         let metadata = Arc::new(metadata);
         // Cache the metadata.
@@ -649,11 +649,13 @@ impl ParquetReaderBuilder {
                 && all_required_row_groups_searched(output, result)
             {
                 apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_FULLTEXT);
+                metrics.fulltext_index_cache_hit += 1;
                 pruned = true;
                 continue;
             }
 
             // Slow path: apply the index from the file.
+            metrics.fulltext_index_cache_miss += 1;
             let file_size_hint = self.file_handle.meta_ref().index_file_size();
             let apply_res = index_applier
                 .apply_fine(
@@ -721,11 +723,13 @@ impl ParquetReaderBuilder {
                 && all_required_row_groups_searched(output, result)
             {
                 apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_INVERTED);
+                metrics.inverted_index_cache_hit += 1;
                 pruned = true;
                 continue;
             }
 
             // Slow path: apply the index from the file.
+            metrics.inverted_index_cache_miss += 1;
             let file_size_hint = self.file_handle.meta_ref().index_file_size();
             let apply_res = index_applier
                 .apply(
@@ -789,11 +793,13 @@ impl ParquetReaderBuilder {
                 && all_required_row_groups_searched(output, result)
             {
                 apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_BLOOM);
+                metrics.bloom_filter_cache_hit += 1;
                 pruned = true;
                 continue;
             }
 
             // Slow path: apply the index from the file.
+            metrics.bloom_filter_cache_miss += 1;
             let file_size_hint = self.file_handle.meta_ref().index_file_size();
             let rgs = parquet_meta.row_groups().iter().enumerate().map(|(i, rg)| {
                 (
@@ -914,11 +920,13 @@ impl ParquetReaderBuilder {
                 && all_required_row_groups_searched(output, result)
             {
                 apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_FULLTEXT);
+                metrics.fulltext_index_cache_hit += 1;
                 pruned = true;
                 continue;
             }
 
             // Slow path: apply the index from the file.
+            metrics.fulltext_index_cache_miss += 1;
             let file_size_hint = self.file_handle.meta_ref().index_file_size();
             let rgs = parquet_meta.row_groups().iter().enumerate().map(|(i, rg)| {
                 (
@@ -1132,6 +1140,19 @@ pub(crate) struct ReaderFilterMetrics {
     /// Number of rows filtered by precise filter.
     pub(crate) rows_precise_filtered: usize,
 
+    /// Number of index result cache hits for fulltext index.
+    pub(crate) fulltext_index_cache_hit: usize,
+    /// Number of index result cache misses for fulltext index.
+    pub(crate) fulltext_index_cache_miss: usize,
+    /// Number of index result cache hits for inverted index.
+    pub(crate) inverted_index_cache_hit: usize,
+    /// Number of index result cache misses for inverted index.
+    pub(crate) inverted_index_cache_miss: usize,
+    /// Number of index result cache hits for bloom filter index.
+    pub(crate) bloom_filter_cache_hit: usize,
+    /// Number of index result cache misses for bloom filter index.
+    pub(crate) bloom_filter_cache_miss: usize,
+
     /// Optional metrics for inverted index applier.
     pub(crate) inverted_index_apply_metrics: Option<InvertedIndexApplyMetrics>,
     /// Optional metrics for bloom filter index applier.
@@ -1156,6 +1177,13 @@ impl ReaderFilterMetrics {
         self.rows_bloom_filtered += other.rows_bloom_filtered;
         self.rows_vector_filtered += other.rows_vector_filtered;
         self.rows_precise_filtered += other.rows_precise_filtered;
+
+        self.fulltext_index_cache_hit += other.fulltext_index_cache_hit;
+        self.fulltext_index_cache_miss += other.fulltext_index_cache_miss;
+        self.inverted_index_cache_hit += other.inverted_index_cache_hit;
+        self.inverted_index_cache_miss += other.inverted_index_cache_miss;
+        self.bloom_filter_cache_hit += other.bloom_filter_cache_hit;
+        self.bloom_filter_cache_miss += other.bloom_filter_cache_miss;
 
         // Merge optional applier metrics
         if let Some(other_metrics) = &other.inverted_index_apply_metrics {
@@ -1302,6 +1330,10 @@ pub(crate) struct MetadataCacheMetrics {
     pub(crate) cache_miss: usize,
     /// Duration to load parquet metadata.
     pub(crate) metadata_load_cost: Duration,
+    /// Number of read operations performed.
+    pub(crate) num_reads: usize,
+    /// Total bytes read from storage.
+    pub(crate) bytes_read: u64,
 }
 
 impl std::fmt::Debug for MetadataCacheMetrics {
@@ -1311,6 +1343,8 @@ impl std::fmt::Debug for MetadataCacheMetrics {
             file_cache_hit,
             cache_miss,
             metadata_load_cost,
+            num_reads,
+            bytes_read,
         } = self;
 
         if self.is_empty() {
@@ -1329,6 +1363,12 @@ impl std::fmt::Debug for MetadataCacheMetrics {
         if *cache_miss > 0 {
             write!(f, ", \"cache_miss\":{}", cache_miss)?;
         }
+        if *num_reads > 0 {
+            write!(f, ", \"num_reads\":{}", num_reads)?;
+        }
+        if *bytes_read > 0 {
+            write!(f, ", \"bytes_read\":{}", bytes_read)?;
+        }
 
         write!(f, "}}")
     }
@@ -1346,6 +1386,8 @@ impl MetadataCacheMetrics {
         self.file_cache_hit += other.file_cache_hit;
         self.cache_miss += other.cache_miss;
         self.metadata_load_cost += other.metadata_load_cost;
+        self.num_reads += other.num_reads;
+        self.bytes_read += other.bytes_read;
     }
 }
 

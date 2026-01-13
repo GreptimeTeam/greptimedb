@@ -43,6 +43,7 @@ use crate::metrics::{
 use crate::region::opener::RegionLoadCacheTask;
 use crate::sst::parquet::helper::fetch_byte_ranges;
 use crate::sst::parquet::metadata::MetadataLoader;
+use crate::sst::parquet::reader::MetadataCacheMetrics;
 
 /// Subdirectory of cached files for write.
 ///
@@ -566,7 +567,11 @@ impl FileCache {
 
     /// Get the parquet metadata in file cache.
     /// If the file is not in the cache or fail to load metadata, return None.
-    pub(crate) async fn get_parquet_meta_data(&self, key: IndexKey) -> Option<ParquetMetaData> {
+    pub(crate) async fn get_parquet_meta_data(
+        &self,
+        key: IndexKey,
+        cache_metrics: &mut MetadataCacheMetrics,
+    ) -> Option<ParquetMetaData> {
         // Check if file cache contains the key
         if let Some(index_value) = self.inner.parquet_index.get(&key).await {
             // Load metadata from file cache
@@ -575,7 +580,7 @@ impl FileCache {
             let file_size = index_value.file_size as u64;
             let metadata_loader = MetadataLoader::new(local_store, &file_path, file_size);
 
-            match metadata_loader.load().await {
+            match metadata_loader.load(cache_metrics).await {
                 Ok(metadata) => {
                     CACHE_HIT
                         .with_label_values(&[key.file_type.metric_label()])

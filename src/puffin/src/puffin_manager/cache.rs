@@ -25,6 +25,7 @@ pub type PuffinMetadataCacheRef = Arc<PuffinMetadataCache>;
 /// A cache for storing the metadata of the index files.
 pub struct PuffinMetadataCache {
     cache: moka::sync::Cache<String, Arc<FileMetadata>>,
+    cache_bytes: IntGaugeVec,
 }
 
 fn puffin_metadata_weight(k: &str, v: &Arc<FileMetadata>) -> u32 {
@@ -38,13 +39,14 @@ impl PuffinMetadataCache {
             cache: moka::sync::CacheBuilder::new(capacity)
                 .name("puffin_metadata")
                 .weigher(|k: &String, v| puffin_metadata_weight(k, v))
-                .eviction_listener(|k, v, _cause| {
+                .eviction_listener(move |k, v, _cause| {
                     let size = puffin_metadata_weight(&k, &v);
                     cache_bytes
                         .with_label_values(&[PUFFIN_METADATA_TYPE])
                         .sub(size.into());
                 })
                 .build(),
+            cache_bytes: cache_bytes.clone(),
         }
     }
 
@@ -55,6 +57,10 @@ impl PuffinMetadataCache {
 
     /// Puts the metadata into the cache.
     pub fn put_metadata(&self, file_id: String, metadata: Arc<FileMetadata>) {
+        let size = puffin_metadata_weight(&file_id, &metadata);
+        self.cache_bytes
+            .with_label_values(&[PUFFIN_METADATA_TYPE])
+            .add(size.into());
         self.cache.insert(file_id, metadata);
     }
 

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::result::Result as StdResult;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use bytes::Bytes;
 use futures::FutureExt;
@@ -24,6 +25,7 @@ use parquet::file::metadata::{ParquetMetaData, ParquetMetaDataReader};
 use snafu::{IntoError as _, ResultExt};
 
 use crate::error::{self, Result};
+use crate::sst::parquet::reader::MetadataCacheMetrics;
 
 /// The estimated size of the footer and metadata need to read from the end of parquet file.
 const DEFAULT_PREFETCH_SIZE: u64 = 64 * 1024;
@@ -65,24 +67,33 @@ impl<'a> MetadataLoader<'a> {
         Ok(file_size)
     }
 
-    pub async fn load(&self) -> Result<ParquetMetaData> {
+    pub async fn load(&self, cache_metrics: &mut MetadataCacheMetrics) -> Result<ParquetMetaData> {
         let path = self.file_path;
         let file_size = self.get_file_size().await?;
         let reader =
             ParquetMetaDataReader::new().with_prefetch_hint(Some(DEFAULT_PREFETCH_SIZE as usize));
 
+        let num_reads = AtomicUsize::new(0);
+        let bytes_read = AtomicU64::new(0);
         let fetch = ObjectStoreFetch {
             object_store: &self.object_store,
             file_path: self.file_path,
+            num_reads: &num_reads,
+            bytes_read: &bytes_read,
         };
 
-        reader
+        let metadata = reader
             .load_and_finish(fetch, file_size)
             .await
             .map_err(|e| match unbox_external_error(e) {
                 Ok(os_err) => error::OpenDalSnafu {}.into_error(os_err),
                 Err(parquet_err) => error::ReadParquetSnafu { path }.into_error(parquet_err),
-            })
+            })?;
+
+        cache_metrics.num_reads = num_reads.into_inner();
+        cache_metrics.bytes_read = bytes_read.into_inner();
+
+        Ok(metadata)
     }
 }
 
@@ -100,10 +111,13 @@ fn unbox_external_error(e: ParquetError) -> StdResult<object_store::Error, Parqu
 struct ObjectStoreFetch<'a> {
     object_store: &'a ObjectStore,
     file_path: &'a str,
+    num_reads: &'a AtomicUsize,
+    bytes_read: &'a AtomicU64,
 }
 
 impl MetadataFetch for ObjectStoreFetch<'_> {
     fn fetch(&mut self, range: std::ops::Range<u64>) -> BoxFuture<'_, ParquetResult<Bytes>> {
+        let bytes_to_read = range.end - range.start;
         async move {
             let data = self
                 .object_store
@@ -111,6 +125,8 @@ impl MetadataFetch for ObjectStoreFetch<'_> {
                 .range(range)
                 .await
                 .map_err(|e| ParquetError::External(Box::new(e)))?;
+            self.num_reads.fetch_add(1, Ordering::Relaxed);
+            self.bytes_read.fetch_add(bytes_to_read, Ordering::Relaxed);
             Ok(data.to_bytes())
         }
         .boxed()
