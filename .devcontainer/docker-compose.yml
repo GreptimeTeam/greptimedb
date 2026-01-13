@@ -1,0 +1,38 @@
+version: '3.8'
+
+services:
+  greptimedb-dev:
+    build:
+      context: ..
+      dockerfile: .devcontainer/Dockerfile
+      args:
+        - HTTP_PROXY=${HTTP_PROXY:-}
+        - HTTPS_PROXY=${HTTPS_PROXY:-}
+        - NO_PROXY=${NO_PROXY:-localhost,127.0.0.1,.local}
+    volumes:
+      - ../..:/workspace:cached
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - RUST_BACKTRACE=1
+      - CARGO_TERM_COLOR=always
+      - PROTOC=/usr/local/bin/protoc
+      # Proxy settings - will use host proxy if available
+      - HTTP_PROXY=${HTTP_PROXY:-}
+      - HTTPS_PROXY=${HTTPS_PROXY:-}
+      - NO_PROXY=${NO_PROXY:-localhost,127.0.0.1,.local}
+      - http_proxy=${http_proxy:-}
+      - https_proxy=${https_proxy:-}
+      - no_proxy=${no_proxy:-localhost,127.0.0.1,.local}
+    ports:
+      - "3001:3001"  # HTTP API
+      - "4000:4000"  # gRPC
+      - "4001:4001"  # MySQL
+      - "4002:4002"  # PostgreSQL
+      - "5001:5001"  # Meta service
+      - "5002:5002"  # Meta service HTTP
+      - "5236:5236"  # Prometheus remote write
+      - "5432:5432"  # PostgreSQL protocol
+      - "9090:9090"  # Metrics
+      - "9091:9091"  # Jaeger UI
+    command: sleep infinity
+    network_mode: host

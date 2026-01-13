@@ -1,0 +1,121 @@
+{
+  "name": "GreptimeDB Development Environment",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": "..",
+    "args": {
+      "HTTP_PROXY": "${localEnv:HTTP_PROXY}",
+      "HTTPS_PROXY": "${localEnv:HTTPS_PROXY}",
+      "NO_PROXY": "${localEnv:NO_PROXY}"
+    }
+  },
+  "features": {
+    "ghcr.io/devcontainers/features/git:1": {},
+    "ghcr.io/devcontainers/features/github-cli:1": {},
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {},
+    "ghcr.io/devcontainers/features/kubectl-helm-minikube:1": {},
+    "ghcr.io/devcontainers/features/rust:1": {
+      "version": "nightly-2025-10-01",
+      "profile": "complete"
+    }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "vadimcn.vscode-lldb",
+        "serayuzgur.crates",
+        "tamasfe.even-better-toml",
+        "usernamehw.errorlens",
+        "ms-vscode.vscode-json",
+        "redhat.vscode-yaml",
+        "ms-python.python",
+        "ms-python.black-formatter",
+        "ms-python.isort",
+        "ms-python.flake8",
+        "ms-azuretools.vscode-docker",
+        "ms-kubernetes-tools.vscode-kubernetes-tools"
+      ],
+      "settings": {
+        "rust-analyzer.cargo.features": "all",
+        "rust-analyzer.checkOnSave.command": "clippy",
+        "rust-analyzer.checkOnSave.extraArgs": ["--all-targets"],
+        "rust-analyzer.procMacro.enable": true,
+        "rust-analyzer.imports.granularity.group": "module",
+        "rust-analyzer.completion.autoimport.enable": true,
+        "files.watcherExclude": {
+          "**/target/**": true
+        },
+        "search.exclude": {
+          "**/target": true
+        }
+      }
+    }
+  },
+  "containerEnv": {
+    "RUST_BACKTRACE": "1",
+    "CARGO_TERM_COLOR": "always",
+    "PROTOC": "/usr/local/bin/protoc"
+  },
+  "mounts": [
+    "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"
+  ],
+  "forwardPorts": [
+    3001,
+    4000,
+    4001,
+    4002,
+    5001,
+    5002,
+    5236,
+    5432,
+    9090,
+    9091
+  ],
+  "portsAttributes": {
+    "3001": {
+      "label": "GreptimeDB HTTP API",
+      "onAutoForward": "notify"
+    },
+    "4000": {
+      "label": "GreptimeDB gRPC",
+      "onAutoForward": "notify"
+    },
+    "4001": {
+      "label": "GreptimeDB MySQL",
+      "onAutoForward": "notify"
+    },
+    "4002": {
+      "label": "GreptimeDB PostgreSQL",
+      "onAutoForward": "notify"
+    },
+    "5001": {
+      "label": "Meta Service",
+      "onAutoForward": "notify"
+    },
+    "5002": {
+      "label": "Meta Service (HTTP)",
+      "onAutoForward": "notify"
+    },
+    "5236": {
+      "label": "Prometheus Remote Write",
+      "onAutoForward": "notify"
+    },
+    "5432": {
+      "label": "PostgreSQL Protocol",
+      "onAutoForward": "notify"
+    },
+    "9090": {
+      "label": "Metrics Endpoint",
+      "onAutoForward": "notify"
+    },
+    "9091": {
+      "label": "Jaeger UI",
+      "onAutoForward": "notify"
+    }
+  },
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+  "remoteUser": "vscode",
+  "workspaceFolder": "/workspace",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached"
+}
