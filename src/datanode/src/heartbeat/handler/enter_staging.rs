@@ -127,7 +127,8 @@ mod tests {
         let mut mock_region_server = mock_region_server();
         let (mock_engine, _) = MockRegionEngine::new(MITO_ENGINE_NAME);
         mock_region_server.register_engine(mock_engine);
-        let handler_context = HandlerContext::new_for_test(mock_region_server);
+        let kv_backend = Arc::new(common_meta::kv_backend::memory::MemoryKvBackend::new());
+        let handler_context = HandlerContext::new_for_test(mock_region_server, kv_backend);
         let region_id = RegionId::new(1024, 1);
         let replies = EnterStagingRegionsHandler
             .handle(
@@ -156,7 +157,8 @@ mod tests {
                 region_engine.handle_request_mock_fn = Some(Box::new(|_, _| Ok(0)));
             });
         mock_region_server.register_test_region(region_id, mock_engine);
-        let handler_context = HandlerContext::new_for_test(mock_region_server);
+        let kv_backend = Arc::new(common_meta::kv_backend::memory::MemoryKvBackend::new());
+        let handler_context = HandlerContext::new_for_test(mock_region_server, kv_backend);
         let replies = EnterStagingRegionsHandler
             .handle(
                 &handler_context,
@@ -194,7 +196,8 @@ mod tests {
         region_server.register_engine(Arc::new(engine.clone()));
         prepare_region(&region_server).await;
 
-        let handler_context = HandlerContext::new_for_test(region_server);
+        let kv_backend = Arc::new(common_meta::kv_backend::memory::MemoryKvBackend::new());
+        let handler_context = HandlerContext::new_for_test(region_server, kv_backend);
         let replies = EnterStagingRegionsHandler
             .handle(
                 &handler_context,

@@ -184,10 +184,10 @@ impl GcRegionsHandler {
 
         for rid in region_ids {
             let region = mito_engine.find_region(*rid);
-            if access_layer.is_none() {
-                if let Some(r) = &region {
-                    access_layer = Some(r.access_layer());
-                }
+            if access_layer.is_none()
+                && let Some(r) = &region
+            {
+                access_layer = Some(r.access_layer());
             }
             mito_regions.insert(*rid, region);
         }
