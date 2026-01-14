@@ -25,7 +25,7 @@ use crate::procedure::repartition::group::{Context, GroupId, region_routes};
 use crate::procedure::repartition::plan::RegionDescriptor;
 
 impl UpdateMetadata {
-    pub(crate) fn exit_staging_region_routes(
+    fn exit_staging_region_routes(
         group_id: GroupId,
         sources: &[RegionDescriptor],
         targets: &[RegionDescriptor],
@@ -60,7 +60,7 @@ impl UpdateMetadata {
         Ok(region_routes)
     }
 
-    /// Applies the new partition expressions for staging regions.
+    /// Exits the staging regions.
     ///
     /// Abort:
     /// - Table route is not physical.
