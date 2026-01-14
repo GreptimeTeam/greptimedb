@@ -208,9 +208,9 @@ fn decode_dictionary(
 
     let mut rows = Vec::with_capacity(number_rows);
     let keys = dict.keys();
-    for i in 0..number_rows {
-        let dict_index = keys.value(i) as usize;
-        rows.push(decoded_values[dict_index].clone());
+    let dict_indices = keys.values();
+    for &dict_index in dict_indices[..number_rows].iter() {
+        rows.push(decoded_values[dict_index as usize].clone());
     }
 
     Ok(rows)

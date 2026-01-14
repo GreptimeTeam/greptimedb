@@ -563,9 +563,8 @@ pub(crate) fn decode_primary_keys(
 
     // The parquet reader may read the whole dictionary page into the dictionary values, so
     // we may decode many primary keys not in this batch if we decode the values array directly.
-    for i in 0..keys.len() {
-        let current_key = keys.value(i);
-
+    let pk_indices = keys.values();
+    for &current_key in pk_indices.iter().take(keys.len()) {
         // Check if current key is the same as previous key
         if let Some(prev) = prev_key
             && prev == current_key

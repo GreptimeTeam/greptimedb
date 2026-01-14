@@ -1174,9 +1174,8 @@ pub(crate) fn decode_primary_keys_with_counts(
     let mut result: Vec<(CompositeValues, usize)> = Vec::new();
     let mut prev_key: Option<u32> = None;
 
-    for i in 0..keys.len() {
-        let current_key = keys.value(i);
-
+    let pk_indices = keys.values();
+    for &current_key in pk_indices.iter().take(keys.len()) {
         // Checks if current key is the same as previous key
         if let Some(prev) = prev_key
             && prev == current_key
