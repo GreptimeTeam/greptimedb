@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use common_meta::instruction::{GcRegions, GcRegionsReply, InstructionReply};
 use common_meta::key::table_info::TableInfoManager;
+use common_meta::key::table_route::TableRouteManager;
 use common_telemetry::{debug, warn};
 use mito2::access_layer::{AccessLayer, AccessLayerRef};
 use mito2::engine::MitoEngine;
@@ -141,6 +142,8 @@ impl GcRegionsHandler {
         file_ref_manifest: &FileRefsManifest,
         full_file_listing: bool,
     ) -> Result<LocalGcWorker> {
+        debug_assert!(!region_ids.is_empty(), "region_ids should not be empty");
+
         let mito_engine = ctx
             .region_server
             .mito_engine()
@@ -172,37 +175,65 @@ impl GcRegionsHandler {
 
     /// Get the access layer for the given table and region IDs.
     /// It also returns the mito regions if they are found in the engine.
+    ///
+    /// This method also validates:
+    /// 1. Any found region must be a Leader (not Follower)
+    /// 2. Any missing region must not be routed to another datanode
     async fn get_access_layer(
         ctx: &HandlerContext,
         mito_engine: &MitoEngine,
         table_id: u32,
         region_ids: &[RegionId],
     ) -> Result<(AccessLayerRef, BTreeMap<RegionId, Option<MitoRegionRef>>)> {
-        // 1. Try to find an active region for this table to reuse AccessLayer
+        // 1. Try to find active regions for this table
         let mut access_layer = None;
         let mut mito_regions = BTreeMap::new();
 
         for rid in region_ids {
             let region = mito_engine.find_region(*rid);
-            if access_layer.is_none()
-                && let Some(r) = &region
-            {
-                access_layer = Some(r.access_layer());
+
+            if let Some(ref r) = region {
+                // Validation: Check if region is a leader
+                if r.is_follower() {
+                    return Err(UnexpectedSnafu {
+                        violated: format!(
+                            "Region {} is a follower, cannot perform GC on follower regions",
+                            rid
+                        ),
+                    }
+                    .build());
+                }
+
+                if access_layer.is_none() {
+                    access_layer = Some(r.access_layer());
+                }
             }
             mito_regions.insert(*rid, region);
         }
 
-        // 2. If no active region in the batch, try to find ANY active region of this table
+        // 2. Validate that missing regions are not routed to other datanodes
+        let missing_regions: Vec<_> = mito_regions
+            .iter()
+            .filter(|(_, r)| r.is_none())
+            .map(|(rid, _)| *rid)
+            .collect();
+
+        if !missing_regions.is_empty() {
+            Self::validate_regions_not_routed_elsewhere(ctx, table_id, &missing_regions).await?;
+        }
+
+        // 3. If no active region in the batch, try to find ANY active leader region of this table
         if access_layer.is_none() {
             for region in mito_engine.regions() {
                 if region.region_id().table_id() == table_id {
+                    // get access layer regardless of region being leader/follower is ok here
                     access_layer = Some(region.access_layer());
                     break;
                 }
             }
         }
 
-        // 3. Fallback to manual construction
+        // 4. Fallback to manual construction
         let access_layer = if let Some(al) = access_layer {
             al
         } else {
@@ -257,5 +288,83 @@ impl GcRegionsHandler {
             mito_engine.puffin_manager_factory().clone(),
             mito_engine.intermediate_manager().clone(),
         )))
+    }
+
+    /// Validate that the given regions are not routed to other datanodes.
+    ///
+    /// If any region is still active on another datanode (has a leader_peer in route table),
+    /// this function returns an error to prevent accidental deletion of files
+    /// that are still in use.
+    async fn validate_regions_not_routed_elsewhere(
+        ctx: &HandlerContext,
+        table_id: u32,
+        missing_region_ids: &[RegionId],
+    ) -> Result<()> {
+        if missing_region_ids.is_empty() {
+            return Ok(());
+        }
+
+        let table_route_manager = TableRouteManager::new(ctx.kv_backend.clone());
+
+        // Get table route
+        let table_route = match table_route_manager
+            .table_route_storage()
+            .get(table_id)
+            .await
+            .context(GetMetadataSnafu)?
+        {
+            Some(route) => route,
+            None => {
+                // Table route not found, all regions are likely deleted
+                debug!(
+                    "Table route not found for table {}, regions {:?} are considered deleted",
+                    table_id, missing_region_ids
+                );
+                return Ok(());
+            }
+        };
+
+        // Get region routes for physical table
+        let region_routes = match table_route.region_routes() {
+            Ok(routes) => routes,
+            Err(_) => {
+                // Logical table, skip validation
+                debug!(
+                    "Table {} is a logical table, skipping region route validation",
+                    table_id
+                );
+                return Ok(());
+            }
+        };
+
+        // Build a set of region IDs that have a leader peer
+        let regions_with_leader: HashMap<RegionId, _> = region_routes
+            .iter()
+            .filter_map(|route| {
+                route
+                    .leader_peer
+                    .as_ref()
+                    .map(|peer| (route.region.id, peer.clone()))
+            })
+            .collect();
+
+        // Check each missing region
+        for region_id in missing_region_ids {
+            if let Some(leader_peer) = regions_with_leader.get(region_id) {
+                // Region still has a leader on some datanode
+                return Err(UnexpectedSnafu {
+                    violated: format!(
+                        "Region {} is not on this datanode but is routed to datanode {}. \
+                         GC request may have been sent to wrong datanode.",
+                        region_id, leader_peer.id
+                    ),
+                }
+                .build());
+            }
+            // Region not in route table or has no leader - it's truly deleted or being migrated
+            // OK to proceed with GC
+        }
+
+        Ok(())
     }
 }
