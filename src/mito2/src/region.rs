@@ -44,8 +44,8 @@ pub use utils::*;
 
 use crate::access_layer::AccessLayerRef;
 use crate::error::{
-    FlushableRegionStateSnafu, InvalidPartitionExprSnafu, RegionNotFoundSnafu, RegionStateSnafu,
-    RegionTruncatedSnafu, Result, UnexpectedSnafu, UpdateManifestSnafu,
+    InvalidPartitionExprSnafu, RegionNotFoundSnafu, RegionStateSnafu, RegionTruncatedSnafu, Result,
+    UnexpectedSnafu, UpdateManifestSnafu,
 };
 use crate::manifest::action::{
     RegionChange, RegionManifest, RegionMetaAction, RegionMetaActionList,
@@ -1166,31 +1166,30 @@ impl RegionMap {
 
     /// Gets flushable region by region id.
     ///
-    /// Returns error if the region does not exist or is not operable.
-    fn flushable_region(&self, region_id: RegionId) -> Result<MitoRegionRef> {
+    /// Returns error if the region does not exist.
+    /// Returns None if the region exists but not operatable.
+    fn flushable_region(&self, region_id: RegionId) -> Result<Option<MitoRegionRef>> {
         let region = self
             .get_region(region_id)
             .context(RegionNotFoundSnafu { region_id })?;
-        ensure!(
-            region.is_flushable(),
-            FlushableRegionStateSnafu {
-                region_id,
-                state: region.state(),
-            }
-        );
-        Ok(region)
+        if region.is_flushable() {
+            Ok(Some(region))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Gets flushable region by region id.
     ///
-    /// Calls the callback if the region does not exist or is not operable.
+    /// Calls the callback if the region does not exist.
+    /// Returns None if the region exists but not operatable.
     pub(crate) fn flushable_region_or<F: OnFailure>(
         &self,
         region_id: RegionId,
         cb: &mut F,
     ) -> Option<MitoRegionRef> {
         match self.flushable_region(region_id) {
-            Ok(region) => Some(region),
+            Ok(region) => region,
             Err(e) => {
                 cb.on_failure(e);
                 None

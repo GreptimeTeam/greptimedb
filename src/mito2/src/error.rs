@@ -553,18 +553,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(
-        "Region {} is in {:?} state, expect: Leader or Leader(Downgrading)",
-        region_id,
-        state
-    ))]
-    FlushableRegionState {
-        region_id: RegionId,
-        state: RegionRoleState,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Invalid options"))]
     JsonOptions {
         #[snafu(source)]
@@ -1313,7 +1301,6 @@ impl ErrorExt for Error {
             CompatReader { .. } => StatusCode::Unexpected,
             InvalidRegionRequest { source, .. } => source.status_code(),
             RegionState { .. } | UpdateManifest { .. } => StatusCode::RegionNotReady,
-            FlushableRegionState { .. } => StatusCode::RegionNotReady,
             JsonOptions { .. } => StatusCode::InvalidArguments,
             EmptyRegionDir { .. } | EmptyManifestDir { .. } => StatusCode::RegionNotFound,
             ArrowReader { .. } => StatusCode::StorageUnavailable,

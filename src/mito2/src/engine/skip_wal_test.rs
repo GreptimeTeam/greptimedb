@@ -14,7 +14,7 @@
 
 use api::v1::Rows;
 use common_wal::options::{WAL_OPTIONS_KEY, WalOptions};
-use store_api::region_engine::RegionEngine;
+use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{RegionCloseRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 
@@ -104,4 +104,74 @@ async fn test_close_region_skip_wal(insert: bool) {
     } else {
         assert_eq!(0, total_rows);
     }
+}
+
+#[tokio::test]
+async fn test_close_follower_region_skip_wal() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("close-follower-skip-wal").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let mut request = CreateRequestBuilder::new().build();
+
+    // Set skip_wal = true via WalOptions::Noop
+    let wal_options = WalOptions::Noop;
+    request.options.insert(
+        WAL_OPTIONS_KEY.to_string(),
+        serde_json::to_string(&wal_options).unwrap(),
+    );
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+
+    // Set the region to Follower state.
+    engine
+        .set_region_role(region_id, RegionRole::Follower)
+        .unwrap();
+    assert!(region.is_follower());
+
+    // Convert back to Leader before close, because Followers cannot update
+    // the manifest (which is required for flush to complete).
+    engine
+        .set_region_role(region_id, RegionRole::Leader)
+        .unwrap();
+    assert!(!region.is_follower());
+
+    // Close the region. This should trigger a flush.
+    engine
+        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .await
+        .unwrap();
+
+    // After closing, we reopen it and check if data is persisted.
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Open(store_api::region_request::RegionOpenRequest {
+                engine: String::new(),
+                table_dir: request.table_dir.clone(),
+                path_type: store_api::region_request::PathType::Bare,
+                options: request.options.clone(),
+                skip_wal_replay: false,
+                checkpoint: None,
+            }),
+        )
+        .await
+        .unwrap();
+    let scan_request = ScanRequest::default();
+    let stream = engine
+        .scan_to_stream(region_id, scan_request)
+        .await
+        .unwrap();
+    let batches = common_recordbatch::RecordBatches::try_collect(stream)
+        .await
+        .unwrap();
+    // If flush was triggered, data should be there even though WAL was skipped.
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(0, total_rows);
 }
