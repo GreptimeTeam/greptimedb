@@ -18,6 +18,7 @@ use common_meta::heartbeat::handler::{
     HandleControl, HeartbeatResponseHandler, HeartbeatResponseHandlerContext,
 };
 use common_meta::instruction::{Instruction, InstructionReply};
+use common_meta::kv_backend::KvBackendRef;
 use common_telemetry::error;
 use snafu::OptionExt;
 use store_api::storage::GcReport;
@@ -56,6 +57,7 @@ pub struct RegionHeartbeatResponseHandler {
     flush_tasks: TaskTracker<()>,
     open_region_parallelism: usize,
     gc_tasks: TaskTracker<GcReport>,
+    kv_backend: KvBackendRef,
 }
 
 #[async_trait::async_trait]
@@ -70,27 +72,29 @@ pub trait InstructionHandler: Send + Sync {
 
 #[derive(Clone)]
 pub struct HandlerContext {
-    region_server: RegionServer,
-    downgrade_tasks: TaskTracker<()>,
-    flush_tasks: TaskTracker<()>,
-    gc_tasks: TaskTracker<GcReport>,
+    pub region_server: RegionServer,
+    pub downgrade_tasks: TaskTracker<()>,
+    pub flush_tasks: TaskTracker<()>,
+    pub gc_tasks: TaskTracker<GcReport>,
+    pub kv_backend: KvBackendRef,
 }
 
 impl HandlerContext {
     #[cfg(test)]
-    pub fn new_for_test(region_server: RegionServer) -> Self {
+    pub fn new_for_test(region_server: RegionServer, kv_backend: KvBackendRef) -> Self {
         Self {
             region_server,
             downgrade_tasks: TaskTracker::new(),
             flush_tasks: TaskTracker::new(),
             gc_tasks: TaskTracker::new(),
+            kv_backend,
         }
     }
 }
 
 impl RegionHeartbeatResponseHandler {
     /// Returns the [RegionHeartbeatResponseHandler].
-    pub fn new(region_server: RegionServer) -> Self {
+    pub fn new(region_server: RegionServer, kv_backend: KvBackendRef) -> Self {
         Self {
             region_server,
             downgrade_tasks: TaskTracker::new(),
@@ -98,6 +102,7 @@ impl RegionHeartbeatResponseHandler {
             // Default to half of the number of CPUs.
             open_region_parallelism: (num_cpus::get() / 2).max(1),
             gc_tasks: TaskTracker::new(),
+            kv_backend,
         }
     }
 
@@ -254,6 +259,7 @@ impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
                 downgrade_tasks: self.downgrade_tasks.clone(),
                 flush_tasks: self.flush_tasks.clone(),
                 gc_tasks: self.gc_tasks.clone(),
+                kv_backend: self.kv_backend.clone(),
             };
             let _handle = common_runtime::spawn_global(async move {
                 let reply = handler.handle(&context, instruction).await;
@@ -330,7 +336,9 @@ mod tests {
     fn test_is_acceptable() {
         common_telemetry::init_default_ut_logging();
         let region_server = mock_region_server();
-        let heartbeat_handler = RegionHeartbeatResponseHandler::new(region_server.clone());
+        let kv_backend = Arc::new(common_meta::kv_backend::memory::MemoryKvBackend::new());
+        let heartbeat_handler =
+            RegionHeartbeatResponseHandler::new(region_server.clone(), kv_backend);
         let heartbeat_env = HeartbeatResponseTestEnv::new();
         let meta = MessageMeta::new_test(1, "test", "dn-1", "me-0");
 
@@ -409,7 +417,9 @@ mod tests {
         common_telemetry::init_default_ut_logging();
 
         let mut region_server = mock_region_server();
-        let heartbeat_handler = RegionHeartbeatResponseHandler::new(region_server.clone());
+        let kv_backend = Arc::new(common_meta::kv_backend::memory::MemoryKvBackend::new());
+        let heartbeat_handler =
+            RegionHeartbeatResponseHandler::new(region_server.clone(), kv_backend);
 
         let mut engine_env = TestEnv::with_prefix("close-region").await;
         let engine = engine_env.create_engine(MitoConfig::default()).await;
@@ -457,7 +467,9 @@ mod tests {
         common_telemetry::init_default_ut_logging();
 
         let mut region_server = mock_region_server();
-        let heartbeat_handler = RegionHeartbeatResponseHandler::new(region_server.clone());
+        let kv_backend = Arc::new(common_meta::kv_backend::memory::MemoryKvBackend::new());
+        let heartbeat_handler =
+            RegionHeartbeatResponseHandler::new(region_server.clone(), kv_backend);
 
         let mut engine_env = TestEnv::with_prefix("open-region").await;
         let engine = engine_env.create_engine(MitoConfig::default()).await;
@@ -505,7 +517,9 @@ mod tests {
         common_telemetry::init_default_ut_logging();
 
         let mut region_server = mock_region_server();
-        let heartbeat_handler = RegionHeartbeatResponseHandler::new(region_server.clone());
+        let kv_backend = Arc::new(common_meta::kv_backend::memory::MemoryKvBackend::new());
+        let heartbeat_handler =
+            RegionHeartbeatResponseHandler::new(region_server.clone(), kv_backend);
 
         let mut engine_env = TestEnv::with_prefix("open-not-exists-region").await;
         let engine = engine_env.create_engine(MitoConfig::default()).await;
@@ -537,7 +551,9 @@ mod tests {
         common_telemetry::init_default_ut_logging();
 
         let mut region_server = mock_region_server();
-        let heartbeat_handler = RegionHeartbeatResponseHandler::new(region_server.clone());
+        let kv_backend = Arc::new(common_meta::kv_backend::memory::MemoryKvBackend::new());
+        let heartbeat_handler =
+            RegionHeartbeatResponseHandler::new(region_server.clone(), kv_backend);
 
         let mut engine_env = TestEnv::with_prefix("downgrade-region").await;
         let engine = engine_env.create_engine(MitoConfig::default()).await;

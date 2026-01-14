@@ -145,6 +145,8 @@ use crate::region::opener::PartitionExprFetcherRef;
 use crate::request::{RegionEditRequest, WorkerRequest};
 use crate::sst::file::{FileMeta, RegionFileId, RegionIndexId};
 use crate::sst::file_ref::FileReferenceManagerRef;
+use crate::sst::index::intermediate::IntermediateManager;
+use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::wal::entry_distributor::{
     DEFAULT_ENTRY_RECEIVER_BUFFER_SIZE, build_wal_entry_distributor_and_receivers,
 };
@@ -299,6 +301,22 @@ impl MitoEngine {
 
     pub fn gc_limiter(&self) -> GcLimiterRef {
         self.inner.workers.gc_limiter()
+    }
+
+    pub fn object_store_manager(&self) -> &ObjectStoreManagerRef {
+        self.inner.workers.object_store_manager()
+    }
+
+    pub fn puffin_manager_factory(&self) -> &PuffinManagerFactory {
+        self.inner.workers.puffin_manager_factory()
+    }
+
+    pub fn intermediate_manager(&self) -> &IntermediateManager {
+        self.inner.workers.intermediate_manager()
+    }
+
+    pub fn schema_metadata_manager(&self) -> &SchemaMetadataManagerRef {
+        self.inner.workers.schema_metadata_manager()
     }
 
     /// Get all tmp ref files for given region ids, excluding files that's already in manifest.
@@ -463,6 +481,11 @@ impl MitoEngine {
 
     pub fn find_region(&self, region_id: RegionId) -> Option<MitoRegionRef> {
         self.inner.workers.get_region(region_id)
+    }
+
+    /// Returns all regions.
+    pub fn regions(&self) -> Vec<MitoRegionRef> {
+        self.inner.workers.all_regions().collect()
     }
 
     fn encode_manifest_info_to_extensions(

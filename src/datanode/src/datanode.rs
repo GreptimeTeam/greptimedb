@@ -331,6 +331,7 @@ impl DatanodeBuilder {
             &self.opts,
             region_server.clone(),
             meta_client,
+            self.kv_backend.clone(),
             cache_invalidator,
             self.plugins.clone(),
             stat,

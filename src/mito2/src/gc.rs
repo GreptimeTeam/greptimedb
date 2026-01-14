@@ -31,7 +31,7 @@ use common_time::Timestamp;
 use itertools::Itertools;
 use object_store::{Entry, Lister};
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt as _;
+use snafu::{ResultExt as _, ensure};
 use store_api::storage::{FileId, FileRef, FileRefsManifest, GcReport, IndexVersion, RegionId};
 use tokio::sync::{OwnedSemaphorePermit, TryAcquireError};
 use tokio_stream::StreamExt;
@@ -41,7 +41,8 @@ use crate::cache::CacheManagerRef;
 use crate::cache::file_cache::FileType;
 use crate::config::MitoConfig;
 use crate::error::{
-    DurationOutOfRangeSnafu, JoinSnafu, OpenDalSnafu, Result, TooManyGcJobsSnafu, UnexpectedSnafu,
+    DurationOutOfRangeSnafu, InvalidRequestSnafu, JoinSnafu, OpenDalSnafu, Result,
+    TooManyGcJobsSnafu, UnexpectedSnafu,
 };
 use crate::manifest::action::{RegionManifest, RemovedFile};
 use crate::metrics::{GC_DELETE_FILE_CNT, GC_ORPHANED_INDEX_FILES, GC_SKIPPED_UNPARSABLE_FILES};
@@ -228,6 +229,22 @@ impl LocalGcWorker {
         limiter: &GcLimiterRef,
         full_file_listing: bool,
     ) -> Result<Self> {
+        if let Some(first_region_id) = regions_to_gc.keys().next() {
+            let table_id = first_region_id.table_id();
+            for region_id in regions_to_gc.keys() {
+                ensure!(
+                    region_id.table_id() == table_id,
+                    InvalidRequestSnafu {
+                        region_id: *region_id,
+                        reason: format!(
+                            "Region {} does not belong to table {}",
+                            region_id, table_id
+                        ),
+                    }
+                );
+            }
+        }
+
         let permit = limiter.permit()?;
 
         Ok(Self {

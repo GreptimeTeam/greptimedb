@@ -119,7 +119,9 @@ mod tests {
         common_telemetry::init_default_ut_logging();
 
         let mut region_server = mock_region_server();
-        let heartbeat_handler = RegionHeartbeatResponseHandler::new(region_server.clone());
+        let kv_backend = Arc::new(common_meta::kv_backend::memory::MemoryKvBackend::new());
+        let heartbeat_handler =
+            RegionHeartbeatResponseHandler::new(region_server.clone(), kv_backend);
         let mut engine_env = TestEnv::with_prefix("open-regions").await;
         let engine = engine_env.create_engine(MitoConfig::default()).await;
         region_server.register_engine(Arc::new(engine.clone()));
