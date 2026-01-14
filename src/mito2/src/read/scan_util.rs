@@ -225,6 +225,11 @@ pub(crate) struct ScanMetricsSet {
     metadata_cache_metrics: Option<MetadataCacheMetrics>,
     /// Per-file scan metrics, only populated when explain_verbose is true.
     per_file_metrics: Option<HashMap<RegionFileId, FileScanMetrics>>,
+
+    /// Current memory usage for file range builders.
+    build_ranges_mem_size: usize,
+    /// Peak memory usage for file range builders.
+    build_ranges_peak_mem_size: usize,
 }
 
 /// Wrapper for file metrics that compares by total cost in reverse order.
@@ -313,6 +318,8 @@ impl fmt::Debug for ScanMetricsSet {
             fetch_metrics,
             metadata_cache_metrics,
             per_file_metrics,
+            build_ranges_mem_size: _,
+            build_ranges_peak_mem_size,
         } = self;
 
         // Write core metrics
@@ -534,7 +541,10 @@ impl fmt::Debug for ScanMetricsSet {
             write!(f, "}}")?;
         }
 
-        write!(f, ", \"stream_eof\":{stream_eof}}}")
+        write!(
+            f,
+            ", \"build_ranges_peak_mem_size\":{build_ranges_peak_mem_size}, \"stream_eof\":{stream_eof}}}"
+        )
     }
 }
 impl ScanMetricsSet {
@@ -599,6 +609,7 @@ impl ScanMetricsSet {
             scan_cost,
             metadata_cache_metrics,
             fetch_metrics,
+            metadata_mem_size,
         } = other;
 
         self.build_parts_cost += *build_cost;
@@ -653,6 +664,17 @@ impl ScanMetricsSet {
         self.metadata_cache_metrics
             .get_or_insert_with(MetadataCacheMetrics::default)
             .merge_from(metadata_cache_metrics);
+
+        // Track memory usage and update peak.
+        self.build_ranges_mem_size += *metadata_mem_size;
+        if self.build_ranges_mem_size > self.build_ranges_peak_mem_size {
+            self.build_ranges_peak_mem_size = self.build_ranges_mem_size;
+        }
+    }
+
+    /// Subtracts memory usage when clearing file range builders.
+    fn sub_build_ranges_mem_size(&mut self, size: usize) {
+        self.build_ranges_mem_size = self.build_ranges_mem_size.saturating_sub(size);
     }
 
     /// Merges per-file metrics.
@@ -1009,6 +1031,12 @@ impl PartitionMetrics {
     /// Returns a DedupMetricsReport trait object for reporting dedup metrics.
     pub(crate) fn dedup_metrics_reporter(&self) -> Arc<dyn DedupMetricsReport> {
         self.0.clone()
+    }
+
+    /// Subtracts memory usage for building file ranges.
+    pub(crate) fn sub_build_ranges_mem_size(&self, size: usize) {
+        let mut metrics = self.0.metrics.lock().unwrap();
+        metrics.sub_build_ranges_mem_size(size);
     }
 }
 
@@ -1499,6 +1527,7 @@ pub(crate) fn clear_file_range_builders(
     stream_ctx: &StreamContext,
     range_builder_list: &RangeBuilderList,
     part_range_id: usize,
+    part_metrics: &PartitionMetrics,
 ) {
     let range_meta = &stream_ctx.ranges[part_range_id];
     let num_memtables = stream_ctx.input.num_memtables();
@@ -1513,7 +1542,8 @@ pub(crate) fn clear_file_range_builders(
         }
     });
 
-    range_builder_list.clear_file_builders(file_indices);
+    let memory_freed = range_builder_list.clear_file_builders(file_indices);
+    part_metrics.sub_build_ranges_mem_size(memory_freed);
 }
 
 /// A stream wrapper that splits record batches from an inner stream.

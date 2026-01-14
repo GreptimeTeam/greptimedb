@@ -488,7 +488,7 @@ impl SeqScan {
                 part_metrics.merge_metrics(&metrics);
 
                 // Clear file range builders to release memory
-                clear_file_range_builders(&stream_ctx, &range_builder_list, part_range.identifier);
+                clear_file_range_builders(&stream_ctx, &range_builder_list, part_range.identifier, &part_metrics);
             }
 
             part_metrics.on_finish();
@@ -582,7 +582,7 @@ impl SeqScan {
                 part_metrics.merge_metrics(&metrics);
 
                 // Clear file range builders to release memory
-                clear_file_range_builders(&stream_ctx, &range_builder_list, part_range.identifier);
+                clear_file_range_builders(&stream_ctx, &range_builder_list, part_range.identifier, &part_metrics);
             }
 
             part_metrics.on_finish();

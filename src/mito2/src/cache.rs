@@ -14,7 +14,7 @@
 
 //! Cache for the engine.
 
-mod cache_size;
+pub(crate) mod cache_size;
 
 pub(crate) mod file_cache;
 pub(crate) mod index;
