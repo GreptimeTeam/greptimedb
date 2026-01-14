@@ -173,5 +173,5 @@ async fn test_close_follower_region_skip_wal() {
         .unwrap();
     // If flush was triggered, data should be there even though WAL was skipped.
     let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-        assert_eq!(0, total_rows);
+    assert_eq!(0, total_rows);
 }
