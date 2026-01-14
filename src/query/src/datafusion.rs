@@ -316,18 +316,15 @@ impl DatafusionQueryEngine {
             return state
                 .create_physical_plan(logical_plan)
                 .await
-                .context(error::DatafusionSnafu)
-                .map_err(BoxedError::new)
-                .context(QueryExecutionSnafu);
+                .map_err(Into::into);
         }
 
         // analyze first
-        let analyzed_plan = state
-            .analyzer()
-            .execute_and_check(logical_plan.clone(), state.config_options(), |_, _| {})
-            .context(error::DatafusionSnafu)
-            .map_err(BoxedError::new)
-            .context(QueryExecutionSnafu)?;
+        let analyzed_plan = state.analyzer().execute_and_check(
+            logical_plan.clone(),
+            state.config_options(),
+            |_, _| {},
+        )?;
 
         logger.after_analyze = Some(analyzed_plan.clone());
 
@@ -341,10 +338,7 @@ impl DatafusionQueryEngine {
         } else {
             state
                 .optimizer()
-                .optimize(analyzed_plan, state, |_, _| {})
-                .context(error::DatafusionSnafu)
-                .map_err(BoxedError::new)
-                .context(QueryExecutionSnafu)?
+                .optimize(analyzed_plan, state, |_, _| {})?
         };
 
         common_telemetry::debug!("Create physical plan, optimized plan: {optimized_plan}");
@@ -371,19 +365,10 @@ impl DatafusionQueryEngine {
         // Optimized by extension rules
         let optimized_plan = self
             .state
-            .optimize_by_extension_rules(plan.clone(), context)
-            .context(error::DatafusionSnafu)
-            .map_err(BoxedError::new)
-            .context(QueryExecutionSnafu)?;
+            .optimize_by_extension_rules(plan.clone(), context)?;
 
         // Optimized by datafusion optimizer
-        let optimized_plan = self
-            .state
-            .session_state()
-            .optimize(&optimized_plan)
-            .context(error::DatafusionSnafu)
-            .map_err(BoxedError::new)
-            .context(QueryExecutionSnafu)?;
+        let optimized_plan = self.state.session_state().optimize(&optimized_plan)?;
 
         Ok(optimized_plan)
     }
@@ -516,11 +501,7 @@ impl QueryEngine for DatafusionQueryEngine {
     }
 
     fn read_table(&self, table: TableRef) -> Result<DataFrame> {
-        self.state
-            .read_table(table)
-            .context(error::DatafusionSnafu)
-            .map_err(BoxedError::new)
-            .context(QueryExecutionSnafu)
+        self.state.read_table(table).map_err(Into::into)
     }
 
     fn engine_context(&self, query_ctx: QueryContextRef) -> QueryEngineContext {
@@ -543,7 +524,8 @@ impl QueryEngine for DatafusionQueryEngine {
         }
 
         // configure execution options
-        state.config_mut().options_mut().execution.time_zone = query_ctx.timezone().to_string();
+        state.config_mut().options_mut().execution.time_zone =
+            Some(query_ctx.timezone().to_string());
 
         // usually it's impossible to have both `set variable` set by sql client and
         // hint in header by grpc client, so only need to deal with them separately
@@ -619,11 +601,7 @@ impl QueryExecutor for DatafusionQueryEngine {
                 Ok(Box::pin(EmptyRecordBatchStream::new(schema)))
             }
             1 => {
-                let df_stream = plan
-                    .execute(0, task_ctx)
-                    .context(error::DatafusionSnafu)
-                    .map_err(BoxedError::new)
-                    .context(QueryExecutionSnafu)?;
+                let df_stream = plan.execute(0, task_ctx)?;
                 let mut stream = RecordBatchStreamAdapter::try_new_with_span(df_stream, span)
                     .context(error::ConvertDfRecordBatchStreamSnafu)
                     .map_err(BoxedError::new)
@@ -652,11 +630,7 @@ impl QueryExecutor for DatafusionQueryEngine {
                         .output_partitioning()
                         .partition_count()
                 );
-                let df_stream = merged_plan
-                    .execute(0, task_ctx)
-                    .context(error::DatafusionSnafu)
-                    .map_err(BoxedError::new)
-                    .context(QueryExecutionSnafu)?;
+                let df_stream = merged_plan.execute(0, task_ctx)?;
                 let mut stream = RecordBatchStreamAdapter::try_new_with_span(df_stream, span)
                     .context(error::ConvertDfRecordBatchStreamSnafu)
                     .map_err(BoxedError::new)

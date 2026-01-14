@@ -225,7 +225,7 @@ impl QueryContext {
     /// Create a new  datafusion's ConfigOptions instance based on the current QueryContext.
     pub fn create_config_options(&self) -> ConfigOptions {
         let mut config = ConfigOptions::default();
-        config.execution.time_zone = self.timezone().to_string();
+        config.execution.time_zone = Some(self.timezone().to_string());
         config
     }
 

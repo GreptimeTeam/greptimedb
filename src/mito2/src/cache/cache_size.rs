@@ -16,11 +16,13 @@
 
 use std::mem;
 
+use parquet::basic::ColumnOrder;
 use parquet::file::metadata::{
-    FileMetaData, ParquetColumnIndex, ParquetMetaData, ParquetOffsetIndex, RowGroupMetaData,
+    FileMetaData, KeyValue, ParquetColumnIndex, ParquetMetaData, ParquetOffsetIndex,
+    RowGroupMetaData,
 };
-use parquet::file::page_index::index::Index;
-use parquet::format::{ColumnOrder, KeyValue, PageLocation};
+use parquet::file::page_index::column_index::ColumnIndexMetaData as Index;
+use parquet::file::page_index::offset_index::PageLocation;
 use parquet::schema::types::{ColumnDescriptor, SchemaDescriptor, Type};
 
 /// Returns estimated size of [ParquetMetaData].

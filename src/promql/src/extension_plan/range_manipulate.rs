@@ -995,7 +995,7 @@ mod test {
     #[tokio::test]
     async fn interval_30s_range_90s() {
         let expected = String::from(
-            "PrimitiveArray<Timestamp(Millisecond, None)>\n[\n  \
+            "PrimitiveArray<Timestamp(ms)>\n[\n  \
                 1970-01-01T00:00:00,\n  \
                 1970-01-01T00:00:30,\n  \
                 1970-01-01T00:01:00,\n  \
@@ -1015,7 +1015,7 @@ mod test {
                 ranges: [Some(0..1), Some(0..2), Some(0..3), Some(0..4), Some(1..5), Some(2..5), Some(3..6), Some(4..6), Some(5..7), Some(5..8), Some(6..10)] \
             }\nStringArray\n[\n  \"foo\",\n  \"foo\",\n  \"foo\",\n  \"foo\",\n  \"foo\",\n  \"foo\",\n  \"foo\",\n  \"foo\",\n  \"foo\",\n  \"foo\",\n  \"foo\",\n]\n\
             RangeArray { \
-                base array: PrimitiveArray<Timestamp(Millisecond, None)>\n[\n  1970-01-01T00:00:00,\n  1970-01-01T00:00:30,\n  1970-01-01T00:01:00,\n  1970-01-01T00:01:30,\n  1970-01-01T00:02:00,\n  1970-01-01T00:03:00,\n  1970-01-01T00:04:00,\n  1970-01-01T00:04:01,\n  1970-01-01T00:04:31,\n  1970-01-01T00:04:51,\n], \
+                base array: PrimitiveArray<Timestamp(ms)>\n[\n  1970-01-01T00:00:00,\n  1970-01-01T00:00:30,\n  1970-01-01T00:01:00,\n  1970-01-01T00:01:30,\n  1970-01-01T00:02:00,\n  1970-01-01T00:03:00,\n  1970-01-01T00:04:00,\n  1970-01-01T00:04:01,\n  1970-01-01T00:04:31,\n  1970-01-01T00:04:51,\n], \
                 ranges: [Some(0..1), Some(0..2), Some(0..3), Some(0..4), Some(1..5), Some(2..5), Some(3..6), Some(4..6), Some(5..7), Some(5..8), Some(6..10)] \
             }",
         );
@@ -1028,7 +1028,7 @@ mod test {
     #[tokio::test]
     async fn small_empty_range() {
         let expected = String::from(
-            "PrimitiveArray<Timestamp(Millisecond, None)>\n[\n  \
+            "PrimitiveArray<Timestamp(ms)>\n[\n  \
             1970-01-01T00:00:00.001,\n  \
             1970-01-01T00:00:03.001,\n  \
             1970-01-01T00:00:06.001,\n  \
@@ -1041,7 +1041,7 @@ mod test {
             ranges: [Some(0..1), Some(0..0), Some(0..0), Some(0..0)] \
         }\nStringArray\n[\n  \"foo\",\n  \"foo\",\n  \"foo\",\n  \"foo\",\n]\n\
         RangeArray { \
-            base array: PrimitiveArray<Timestamp(Millisecond, None)>\n[\n  1970-01-01T00:00:00,\n  1970-01-01T00:00:30,\n  1970-01-01T00:01:00,\n  1970-01-01T00:01:30,\n  1970-01-01T00:02:00,\n  1970-01-01T00:03:00,\n  1970-01-01T00:04:00,\n  1970-01-01T00:04:01,\n  1970-01-01T00:04:31,\n  1970-01-01T00:04:51,\n], \
+            base array: PrimitiveArray<Timestamp(ms)>\n[\n  1970-01-01T00:00:00,\n  1970-01-01T00:00:30,\n  1970-01-01T00:01:00,\n  1970-01-01T00:01:30,\n  1970-01-01T00:02:00,\n  1970-01-01T00:03:00,\n  1970-01-01T00:04:00,\n  1970-01-01T00:04:01,\n  1970-01-01T00:04:31,\n  1970-01-01T00:04:51,\n], \
             ranges: [Some(0..1), Some(0..0), Some(0..0), Some(0..0)] \
         }",
         );

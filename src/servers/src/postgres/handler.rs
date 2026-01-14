@@ -324,11 +324,12 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
         }
 
         let output = if let Some(plan) = &sql_plan.plan {
+            let values = parameters_to_scalar_values(plan, portal)?;
             let plan = plan
                 .clone()
-                .replace_params_with_values(&ParamValues::List(parameters_to_scalar_values(
-                    plan, portal,
-                )?))
+                .replace_params_with_values(&ParamValues::List(
+                    values.into_iter().map(Into::into).collect(),
+                ))
                 .context(DataFusionSnafu)
                 .map_err(convert_err)?;
             self.query_handler

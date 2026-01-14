@@ -38,7 +38,7 @@ Affected Rows: 3
 
 SELECT AVG(i), AVG(1), AVG(DISTINCT i), AVG(NULL) FROM integers;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Execution error: Function 'avg' user-defined coercion failed with "Error during planning: The function \"avg\" does not support inputs of type Null." No function matches the given name and argument types 'avg(Null)'. You might need to add explicit type casts.
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Execution error: Function 'avg' user-defined coercion failed with "Error during planning: Avg does not support inputs of type Null." No function matches the given name and argument types 'avg(Null)'. You might need to add explicit type casts.
 	Candidate functions:
 	avg(UserDefined)
 

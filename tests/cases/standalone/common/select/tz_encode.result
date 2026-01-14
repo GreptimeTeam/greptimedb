@@ -45,19 +45,19 @@ SELECT
 FROM
     ngx_access_log);
 
-+---------------+-----------------------------------------------------------------------------------+
-| plan_type     | plan                                                                              |
-+---------------+-----------------------------------------------------------------------------------+
-| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                   |
-|               | Projection: count(Int64(1)) AS count(*)                                           |
-|               |   Aggregate: groupBy=[[]], aggr=[[count(Int64(1))]]                               |
-|               |     Projection: TimestampNanosecond(NOW, Some("+00:00")) AS now() |
-|               |       TableScan: ngx_access_log                                                   |
-|               | ]]                                                                                |
-| physical_plan | CooperativeExec                                                                   |
++---------------+-------------------------------------------------------------------------+
+| plan_type     | plan                                                                    |
++---------------+-------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                         |
+|               | Projection: count(Int64(1)) AS count(*)                                 |
+|               |   Aggregate: groupBy=[[]], aggr=[[count(Int64(1))]]                     |
+|               |     Projection: TimestampNanosecond(NOW, None) AS now() |
+|               |       TableScan: ngx_access_log                                         |
+|               | ]]                                                                      |
+| physical_plan | CooperativeExec                                                         |
 |               |   MergeScanExec: REDACTED
-|               |                                                                                   |
-+---------------+-----------------------------------------------------------------------------------+
+|               |                                                                         |
++---------------+-------------------------------------------------------------------------+
 
 DROP TABLE ngx_access_log;
 

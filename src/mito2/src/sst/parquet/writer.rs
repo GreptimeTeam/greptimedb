@@ -55,7 +55,6 @@ use crate::sst::file::RegionFileId;
 use crate::sst::index::{IndexOutput, Indexer, IndexerBuilder};
 use crate::sst::parquet::flat_format::{FlatWriteFormat, time_index_column_index};
 use crate::sst::parquet::format::PrimaryKeyWriteFormat;
-use crate::sst::parquet::helper::parse_parquet_metadata;
 use crate::sst::parquet::{PARQUET_METADATA_KEY, SstInfo, WriteOptions};
 use crate::sst::{
     DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY, FlatSchemaOptions, SeriesEstimator,
@@ -205,14 +204,12 @@ where
             }
             current_writer.flush().await.context(WriteParquetSnafu)?;
 
-            let file_meta = current_writer.close().await.context(WriteParquetSnafu)?;
+            let parquet_metadata = current_writer.close().await.context(WriteParquetSnafu)?;
             let file_size = self.bytes_written.load(Ordering::Relaxed) as u64;
 
             // Safety: num rows > 0 so we must have min/max.
             let time_range = stats.time_range.unwrap();
 
-            // convert FileMetaData to ParquetMetaData
-            let parquet_metadata = parse_parquet_metadata(file_meta)?;
             let max_row_group_uncompressed_size: u64 = parquet_metadata
                 .row_groups()
                 .iter()

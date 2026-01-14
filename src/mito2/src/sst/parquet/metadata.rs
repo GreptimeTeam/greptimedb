@@ -21,7 +21,7 @@ use futures::future::BoxFuture;
 use object_store::ObjectStore;
 use parquet::arrow::async_reader::MetadataFetch;
 use parquet::errors::{ParquetError, Result as ParquetResult};
-use parquet::file::metadata::{ParquetMetaData, ParquetMetaDataReader};
+use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData, ParquetMetaDataReader};
 use snafu::{IntoError as _, ResultExt};
 
 use crate::error::{self, Result};
@@ -37,6 +37,7 @@ pub(crate) struct MetadataLoader<'a> {
     file_path: &'a str,
     // The size of parquet file
     file_size: u64,
+    page_index_policy: PageIndexPolicy,
 }
 
 impl<'a> MetadataLoader<'a> {
@@ -50,7 +51,12 @@ impl<'a> MetadataLoader<'a> {
             object_store,
             file_path,
             file_size,
+            page_index_policy: Default::default(),
         }
+    }
+
+    pub(crate) fn with_page_index_policy(&mut self, page_index_policy: PageIndexPolicy) {
+        self.page_index_policy = page_index_policy;
     }
 
     /// Get the size of parquet file. If file_size is 0, stat the object store to get the size.
@@ -70,8 +76,9 @@ impl<'a> MetadataLoader<'a> {
     pub async fn load(&self, cache_metrics: &mut MetadataCacheMetrics) -> Result<ParquetMetaData> {
         let path = self.file_path;
         let file_size = self.get_file_size().await?;
-        let reader =
-            ParquetMetaDataReader::new().with_prefetch_hint(Some(DEFAULT_PREFETCH_SIZE as usize));
+        let reader = ParquetMetaDataReader::new()
+            .with_prefetch_hint(Some(DEFAULT_PREFETCH_SIZE as usize))
+            .with_page_index_policy(self.page_index_policy);
 
         let num_reads = AtomicUsize::new(0);
         let bytes_read = AtomicU64::new(0);

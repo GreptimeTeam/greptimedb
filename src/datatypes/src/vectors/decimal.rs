@@ -83,8 +83,6 @@ impl Decimal128Vector {
     /// For example:
     /// value = 12345, precision = 3, return error.
     pub fn with_precision_and_scale(self, precision: u8, scale: i8) -> Result<Self> {
-        // validate if precision is too small
-        self.validate_decimal_precision(precision)?;
         let array = self
             .array
             .with_precision_and_scale(precision, scale)
@@ -124,7 +122,7 @@ impl Decimal128Vector {
     }
 
     /// Validate decimal precision, if precision is invalid, return error.
-    fn validate_decimal_precision(&self, precision: u8) -> Result<()> {
+    pub fn validate_decimal_precision(&self, precision: u8) -> Result<()> {
         self.array
             .validate_decimal_precision(precision)
             .context(ValueExceedsPrecisionSnafu { precision })
@@ -564,7 +562,9 @@ pub mod tests {
         let decimal_vector = decimal_builder.finish();
         assert_eq!(decimal_vector.precision(), 38);
         assert_eq!(decimal_vector.scale(), 10);
-        let result = decimal_vector.with_precision_and_scale(3, 2);
+        let result = decimal_vector
+            .with_precision_and_scale(3, 2)
+            .and_then(|x| x.validate_decimal_precision(3));
         assert_eq!(
             "Value exceeds the precision 3 bound",
             result.unwrap_err().to_string()

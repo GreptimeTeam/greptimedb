@@ -104,7 +104,8 @@ mod tests {
                     assert!(matches!(f.signature(),
                                      datafusion_expr::Signature {
                                          type_signature: datafusion_expr::TypeSignature::Uniform(1, valid_types),
-                                         volatility: datafusion_expr::Volatility::Immutable
+                                         volatility: datafusion_expr::Volatility::Immutable,
+                                         ..
                                      } if valid_types == &ConcreteDataType::numerics().into_iter().map(|dt| { use datatypes::data_type::DataType; dt.as_arrow_type() }).collect::<Vec<_>>()));
                 }
 

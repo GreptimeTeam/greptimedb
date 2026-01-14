@@ -33,8 +33,7 @@ use mito_codec::row_converter::build_primary_key_codec;
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, RowSelection};
 use parquet::arrow::{FieldLevels, ProjectionMask, parquet_to_arrow_field_levels};
-use parquet::file::metadata::ParquetMetaData;
-use parquet::format::KeyValue;
+use parquet::file::metadata::{KeyValue, PageIndexPolicy, ParquetMetaData};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::region_request::PathType;
@@ -142,6 +141,7 @@ pub struct ParquetReaderBuilder {
     pre_filter_mode: PreFilterMode,
     /// Whether to decode primary key values eagerly when reading primary key format SSTs.
     decode_primary_key_values: bool,
+    page_index_policy: PageIndexPolicy,
 }
 
 impl ParquetReaderBuilder {
@@ -172,6 +172,7 @@ impl ParquetReaderBuilder {
             compaction: false,
             pre_filter_mode: PreFilterMode::All,
             decode_primary_key_values: false,
+            page_index_policy: Default::default(),
         }
     }
 
@@ -276,6 +277,12 @@ impl ParquetReaderBuilder {
         self
     }
 
+    #[must_use]
+    pub fn page_index_policy(mut self, page_index_policy: PageIndexPolicy) -> Self {
+        self.page_index_policy = page_index_policy;
+        self
+    }
+
     /// Builds a [ParquetReader].
     ///
     /// This needs to perform IO operation.
@@ -314,7 +321,12 @@ impl ParquetReaderBuilder {
 
         // Loads parquet metadata of the file.
         let (parquet_meta, cache_miss) = self
-            .read_parquet_metadata(&file_path, file_size, &mut metrics.metadata_cache_metrics)
+            .read_parquet_metadata(
+                &file_path,
+                file_size,
+                &mut metrics.metadata_cache_metrics,
+                self.page_index_policy,
+            )
             .await?;
         // Decodes region metadata.
         let key_value_meta = parquet_meta.file_metadata().key_value_metadata();
@@ -479,6 +491,7 @@ impl ParquetReaderBuilder {
         file_path: &str,
         file_size: u64,
         cache_metrics: &mut MetadataCacheMetrics,
+        page_index_policy: PageIndexPolicy,
     ) -> Result<(Arc<ParquetMetaData>, bool)> {
         let start = Instant::now();
         let _t = READ_STAGE_ELAPSED
@@ -489,7 +502,7 @@ impl ParquetReaderBuilder {
         // Tries to get from cache with metrics tracking.
         if let Some(metadata) = self
             .cache_strategy
-            .get_parquet_meta_data(file_id, cache_metrics)
+            .get_parquet_meta_data(file_id, cache_metrics, page_index_policy)
             .await
         {
             cache_metrics.metadata_load_cost += start.elapsed();
@@ -497,7 +510,9 @@ impl ParquetReaderBuilder {
         }
 
         // Cache miss, load metadata directly.
-        let metadata_loader = MetadataLoader::new(self.object_store.clone(), file_path, file_size);
+        let mut metadata_loader =
+            MetadataLoader::new(self.object_store.clone(), file_path, file_size);
+        metadata_loader.with_page_index_policy(page_index_policy);
         let metadata = metadata_loader.load(cache_metrics).await?;
 
         let metadata = Arc::new(metadata);
