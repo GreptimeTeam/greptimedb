@@ -226,8 +226,7 @@ impl MetricEngineInner {
         let merged_schema = Self::build_union_schema(&requests);
 
         // Align all rows to the merged schema and collect table_ids
-        let (merged_rows, table_ids, total_affected_rows) =
-            Self::align_requests_to_schema(requests, &merged_schema);
+        let (merged_rows, table_ids) = Self::align_requests_to_schema(requests, &merged_schema);
 
         // Batch-modify all rows (add __table_id and __tsid columns)
         let final_rows = {
@@ -260,7 +259,7 @@ impl MetricEngineInner {
             hint: None,
         };
 
-        Ok((merged_request, total_affected_rows))
+        Ok((merged_request, table_ids.len() as AffectedRows))
     }
 
     /// Builds a union schema containing all columns from all requests.
@@ -279,12 +278,11 @@ impl MetricEngineInner {
     fn align_requests_to_schema(
         requests: Vec<(RegionId, RegionPutRequest)>,
         merged_schema: &[ColumnSchema],
-    ) -> (Vec<Row>, Vec<TableId>, AffectedRows) {
+    ) -> (Vec<Row>, Vec<TableId>) {
         // Pre-calculate total capacity
         let total_rows: usize = requests.iter().map(|(_, req)| req.rows.rows.len()).sum();
         let mut merged_rows = Vec::with_capacity(total_rows);
         let mut table_ids = Vec::with_capacity(total_rows);
-        let mut total_affected_rows: AffectedRows = 0;
 
         let null_value = Value { value_data: None };
 
@@ -297,8 +295,6 @@ impl MetricEngineInner {
                 .map(|(idx, col)| (col.column_name.as_str(), idx))
                 .collect();
 
-            let row_count = request.rows.rows.len();
-            total_affected_rows += row_count as AffectedRows;
             let table_id = logical_region_id.table_id();
 
             for mut row in request.rows.rows {
@@ -317,7 +313,7 @@ impl MetricEngineInner {
             }
         }
 
-        (merged_rows, table_ids, total_affected_rows)
+        (merged_rows, table_ids)
     }
 
     /// Find the physical region id for a logical region.
