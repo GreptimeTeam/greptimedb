@@ -35,6 +35,7 @@ use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, RowSelection};
 use parquet::arrow::{FieldLevels, ProjectionMask, parquet_to_arrow_field_levels};
 use parquet::file::metadata::ParquetMetaData;
 use parquet::format::KeyValue;
+use partition::expr::PartitionExpr;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::region_request::PathType;
@@ -46,8 +47,8 @@ use crate::cache::index::result_cache::PredicateKey;
 #[cfg(feature = "vector_index")]
 use crate::error::ApplyVectorIndexSnafu;
 use crate::error::{
-    ArrowReaderSnafu, InvalidMetadataSnafu, InvalidParquetSnafu, ReadDataPartSnafu,
-    ReadParquetSnafu, Result,
+    ArrowReaderSnafu, InvalidMetaSnafu, InvalidMetadataSnafu, InvalidParquetSnafu,
+    ReadDataPartSnafu, ReadParquetSnafu, Result, SerdeJsonSnafu, SerializePartitionExprSnafu,
 };
 use crate::metrics::{
     PRECISE_FILTER_ROWS_TOTAL, READ_ROW_GROUPS_TOTAL, READ_ROWS_IN_ROW_GROUP_TOTAL,
@@ -68,7 +69,8 @@ use crate::sst::index::inverted_index::applier::{
 #[cfg(feature = "vector_index")]
 use crate::sst::index::vector_index::applier::VectorIndexApplierRef;
 use crate::sst::parquet::file_range::{
-    FileRangeContext, FileRangeContextRef, PreFilterMode, RangeBase, row_group_contains_delete,
+    FileRangeContext, FileRangeContextRef, PartitionFilterContext, PreFilterMode, RangeBase,
+    row_group_contains_delete,
 };
 use crate::sst::parquet::format::{ReadFormat, need_override_sequence};
 use crate::sst::parquet::metadata::MetadataLoader;
@@ -426,6 +428,33 @@ impl ParquetReaderBuilder {
 
         let codec = build_primary_key_codec(read_format.metadata());
 
+        // Compare partition expression and build filter if they are different.
+        let region_partition_expr_str = self
+            .expected_metadata
+            .as_ref()
+            .and_then(|meta| meta.partition_expr.as_ref());
+        let file_partition_expr_ref = self.file_handle.meta_ref().partition_expr.as_ref();
+
+        let partition_filter = if let Some(region_str) = region_partition_expr_str {
+            let region_partition_expr: PartitionExpr =
+                serde_json::from_str(region_str).context(SerdeJsonSnafu)?;
+
+            if Some(&region_partition_expr) != file_partition_expr_ref {
+                let region_partition_physical_expr = region_partition_expr
+                    .try_as_physical_expr(&prune_schema.arrow_schema())
+                    .context(SerializePartitionExprSnafu)?;
+
+                Some(PartitionFilterContext {
+                    file_partition_expr: file_partition_expr_ref.cloned(),
+                    region_partition_physical_expr,
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let context = FileRangeContext::new(
             reader_builder,
             RangeBase {
@@ -437,6 +466,7 @@ impl ParquetReaderBuilder {
                 codec,
                 compat_batch: None,
                 pre_filter_mode: self.pre_filter_mode,
+                partition_filter,
             },
         );
 

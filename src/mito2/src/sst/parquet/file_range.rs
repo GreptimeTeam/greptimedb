@@ -21,14 +21,17 @@ use std::sync::Arc;
 
 use api::v1::{OpType, SemanticType};
 use common_telemetry::error;
+use datafusion::physical_plan::PhysicalExpr;
 use datafusion::physical_plan::expressions::DynamicFilterPhysicalExpr;
 use datatypes::arrow::array::{ArrayRef, BooleanArray};
 use datatypes::arrow::buffer::BooleanBuffer;
 use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::Schema;
 use mito_codec::row_converter::{CompositeValues, PrimaryKeyCodec};
 use parquet::arrow::arrow_reader::RowSelection;
 use parquet::file::metadata::ParquetMetaData;
+use partition::expr::PartitionExpr;
 use snafu::{OptionExt, ResultExt};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
@@ -36,8 +39,8 @@ use store_api::storage::{ColumnId, TimeSeriesRowSelector};
 use table::predicate::Predicate;
 
 use crate::error::{
-    ComputeArrowSnafu, DataTypeMismatchSnafu, DecodeSnafu, DecodeStatsSnafu, RecordBatchSnafu,
-    Result, StatsNotPresentSnafu,
+    ComputeArrowSnafu, DataFusionSnafu, DataTypeMismatchSnafu, DecodeSnafu, DecodeStatsSnafu,
+    NewRecordBatchSnafu, RecordBatchSnafu, Result, StatsNotPresentSnafu, UnexpectedSnafu,
 };
 use crate::read::Batch;
 use crate::read::compat::CompatBatch;
@@ -367,6 +370,12 @@ pub enum PreFilterMode {
     SkipFields,
 }
 
+/// Context for partition expression filtering.
+pub(crate) struct PartitionFilterContext {
+    pub(crate) file_partition_expr: Option<PartitionExpr>,
+    pub(crate) region_partition_physical_expr: Arc<dyn PhysicalExpr>,
+}
+
 /// Common fields for a range to read and filter batches.
 pub(crate) struct RangeBase {
     /// Filters pushed down.
@@ -384,6 +393,8 @@ pub(crate) struct RangeBase {
     pub(crate) compat_batch: Option<CompatBatch>,
     /// Mode to pre-filter columns.
     pub(crate) pre_filter_mode: PreFilterMode,
+    /// Partition filter.
+    pub(crate) partition_filter: Option<PartitionFilterContext>,
 }
 
 impl RangeBase {
@@ -408,6 +419,7 @@ impl RangeBase {
         // Run filter one by one and combine them result
         // TODO(ruihang): run primary key filter first. It may short circuit other filters
         for filter_ctx in &self.filters {
+            // ... (keep existing filter logic) ...
             let filter = match filter_ctx.filter() {
                 MaybeFilter::Filter(f) => f,
                 // Column matches.
@@ -483,9 +495,18 @@ impl RangeBase {
             mask = mask.bitand(&result);
         }
 
-        input.filter(&BooleanArray::from(mask).into())?;
+        // Apply partition filter
+        if let Some(partition_filter) = &self.partition_filter {
+            let partition_mask = self.evaluate_partition_filter(&mut input, partition_filter)?;
+            mask = mask.bitand(&partition_mask);
+        }
 
-        Ok(Some(input))
+        if mask.count_set_bits() == 0 {
+            Ok(None)
+        } else {
+            input.filter(&BooleanArray::from(mask).into())?;
+            Ok(Some(input))
+        }
     }
 
     /// Filters the input RecordBatch by the pushed down predicate and returns RecordBatch.
@@ -500,12 +521,22 @@ impl RangeBase {
         input: RecordBatch,
         skip_fields: bool,
     ) -> Result<Option<RecordBatch>> {
-        let mask = self.compute_filter_mask_flat(&input, skip_fields)?;
+        let mut mask = self.compute_filter_mask_flat(&input, skip_fields)?;
 
         // If mask is None, the entire batch is filtered out
-        let Some(mask) = mask else {
+        let Some(mut mask) = mask else {
             return Ok(None);
         };
+
+        // Apply partition filter
+        if let Some(partition_filter) = &self.partition_filter {
+            let partition_mask = self.evaluate_partition_filter_flat(&input, partition_filter)?;
+            mask = mask.bitand(&partition_mask);
+        }
+
+        if mask.count_set_bits() == 0 {
+            return Ok(None);
+        }
 
         let filtered_batch =
             datatypes::arrow::compute::filter_record_batch(&input, &BooleanArray::from(mask))
@@ -618,5 +649,157 @@ impl RangeBase {
         }
 
         Ok(Some(mask))
+    }
+
+    /// Evaluates the partition filter against the input `Batch`.
+    fn evaluate_partition_filter(
+        &self,
+        input: &mut Batch,
+        partition_filter: &PartitionFilterContext,
+    ) -> Result<BooleanBuffer> {
+        let record_batch = self.build_record_batch_for_pruning(input)?;
+        let columnar_value = partition_filter
+            .region_partition_physical_expr
+            .evaluate(&record_batch)
+            .context(DataFusionSnafu)?;
+        let array = columnar_value
+            .into_array(record_batch.num_rows())
+            .context(DataFusionSnafu)?;
+        let boolean_array =
+            array
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .context(UnexpectedSnafu {
+                    reason: "Failed to downcast to BooleanArray".to_string(),
+                })?;
+
+        Ok(boolean_array.values().clone())
+    }
+
+    /// Evaluates the partition filter against the input `RecordBatch`.
+    fn evaluate_partition_filter_flat(
+        &self,
+        input: &RecordBatch,
+        partition_filter: &PartitionFilterContext,
+    ) -> Result<BooleanBuffer> {
+        let record_batch = self.project_record_batch_for_pruning(input)?;
+        let columnar_value = partition_filter
+            .region_partition_physical_expr
+            .evaluate(&record_batch)
+            .context(DataFusionSnafu)?;
+        let array = columnar_value
+            .into_array(record_batch.num_rows())
+            .context(DataFusionSnafu)?;
+        let boolean_array =
+            array
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .context(UnexpectedSnafu {
+                    reason: "Failed to downcast to BooleanArray".to_string(),
+                })?;
+
+        Ok(boolean_array.values().clone())
+    }
+
+    /// Builds a `RecordBatch` that matches `prune_schema` from the input `Batch`.
+    fn build_record_batch_for_pruning(&self, input: &mut Batch) -> Result<RecordBatch> {
+        let arrow_schema = self.prune_schema.arrow_schema();
+        let mut columns = Vec::with_capacity(arrow_schema.fields().len());
+
+        // Decode primary key if necessary.
+        if input.pk_values().is_none() {
+            input.set_pk_values(
+                self.codec
+                    .decode(input.primary_key())
+                    .context(DecodeSnafu)?,
+            );
+        }
+
+        for field in arrow_schema.fields() {
+            let metadata = self.read_format.metadata();
+            let column_id = metadata.column_by_name(field.name()).map(|c| c.column_id);
+
+            // if we can't find the column id by name, it might be a special column or missing.
+            let Some(column_id) = column_id else {
+                columns.push(datatypes::arrow::array::new_null_array(
+                    field.data_type(),
+                    input.num_rows(),
+                ));
+                continue;
+            };
+
+            // 1. Check if it's a tag.
+            if let Some(pk_index) = metadata.primary_key_index(column_id) {
+                let pk_values = input.pk_values().unwrap();
+                let value = match pk_values {
+                    CompositeValues::Dense(v) => &v[pk_index].1,
+                    CompositeValues::Sparse(v) => v.get_or_null(column_id),
+                };
+                let concrete_type = ConcreteDataType::from_arrow_type(field.data_type());
+                let arrow_scalar = value
+                    .try_to_scalar_value(&concrete_type)
+                    .context(DataTypeMismatchSnafu)?;
+                let array = arrow_scalar
+                    .to_array_of_size(input.num_rows())
+                    .context(DataFusionSnafu)?;
+                columns.push(array);
+            } else if metadata.time_index_column().column_id == column_id {
+                // 2. Check if it's the timestamp column.
+                columns.push(input.timestamps().to_arrow_array());
+            } else if let Some(field_index) = self
+                .read_format
+                .as_primary_key()
+                .and_then(|f| f.field_index_by_id(column_id))
+            {
+                // 3. Check if it's a field column.
+                columns.push(input.fields()[field_index].data.to_arrow_array());
+            } else {
+                // Not found, fill with nulls.
+                columns.push(datatypes::arrow::array::new_null_array(
+                    field.data_type(),
+                    input.num_rows(),
+                ));
+            }
+        }
+
+        RecordBatch::try_new(arrow_schema.clone(), columns).context(NewRecordBatchSnafu)
+    }
+
+    /// Projects the input `RecordBatch` to match `prune_schema`.
+    fn project_record_batch_for_pruning(&self, input: &RecordBatch) -> Result<RecordBatch> {
+        let arrow_schema = self.prune_schema.arrow_schema();
+        let mut columns = Vec::with_capacity(arrow_schema.fields().len());
+
+        let flat_format = self
+            .read_format
+            .as_flat()
+            .context(crate::error::UnexpectedSnafu {
+                reason: "Expected flat format for precise_filter_flat",
+            })?;
+
+        for field in arrow_schema.fields() {
+            let metadata = flat_format.metadata();
+            let column_id = metadata.column_by_name(field.name()).map(|c| c.column_id);
+
+            let Some(column_id) = column_id else {
+                columns.push(datatypes::arrow::array::new_null_array(
+                    field.data_type(),
+                    input.num_rows(),
+                ));
+                continue;
+            };
+
+            if let Some(idx) = flat_format.projected_index_by_id(column_id) {
+                columns.push(input.column(idx).clone());
+            } else {
+                // Not found in projection, fill with nulls.
+                columns.push(datatypes::arrow::array::new_null_array(
+                    field.data_type(),
+                    input.num_rows(),
+                ));
+            }
+        }
+
+        RecordBatch::try_new(arrow_schema.clone(), columns).context(NewRecordBatchSnafu)
     }
 }

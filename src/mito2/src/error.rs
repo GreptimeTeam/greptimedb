@@ -413,6 +413,14 @@ pub enum Error {
         error: datatypes::arrow::error::ArrowError,
     },
 
+    #[snafu(display("DataFusion"))]
+    DataFusion {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: datafusion::error::DataFusionError,
+    },
+
     #[snafu(display("Failed to compute vector"))]
     ComputeVector {
         #[snafu(implicit)]
@@ -1287,6 +1295,7 @@ impl ErrorExt for Error {
             | ConvertMetaData { .. }
             | DecodeWal { .. }
             | ComputeArrow { .. }
+            | DataFusion { .. }
             | BiErrors { .. }
             | StopScheduler { .. }
             | ComputeVector { .. }
