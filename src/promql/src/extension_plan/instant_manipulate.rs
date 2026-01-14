@@ -35,6 +35,7 @@ use datafusion::physical_plan::{
 };
 use datafusion_expr::col;
 use datatypes::arrow::compute;
+use datatypes::arrow::error::Result as ArrowResult;
 use futures::{Stream, StreamExt, ready};
 use greptime_proto::substrait_extension as pb;
 use prost::Message;
@@ -501,12 +502,6 @@ impl InstantManipulateStream {
         let aligned_start = self.start + (max_start - self.start) / self.interval * self.interval;
         let aligned_end = self.end - (self.end - min_end) / self.interval * self.interval;
 
-        if let Some(batch) =
-            self.try_aligned_slice(&input, ts_column, field_column, aligned_start, aligned_end)?
-        {
-            return Ok(batch);
-        }
-
         let mut take_indices = vec![];
 
         let mut cursor = 0;
@@ -577,102 +572,8 @@ impl InstantManipulateStream {
             }
         }
 
-        // If the selected points are a contiguous slice, avoid `take` on all columns:
-        // slice all columns and only replace the time index column.
-        if let Some(start) = take_indices.first().copied() {
-            let start = start as usize;
-            let len = take_indices.len();
-            let contiguous = take_indices
-                .iter()
-                .enumerate()
-                .all(|(i, idx)| *idx == take_indices[0] + i as u64);
-            if contiguous && start + len <= input.num_rows() && len == aligned_ts.len() {
-                let sliced = input.slice(start, len);
-                let mut arrays = sliced.columns().to_vec();
-                arrays[self.time_index] = Arc::new(TimestampMillisecondArray::from(aligned_ts));
-                return RecordBatch::try_new(sliced.schema(), arrays)
-                    .map_err(|e| DataFusionError::ArrowError(Box::new(e), None));
-            }
-        }
-
         // take record batch and replace the time index column
         self.take_record_batch_optional(input, take_indices, aligned_ts)
-    }
-
-    fn try_aligned_slice(
-        &self,
-        record_batch: &RecordBatch,
-        ts_column: &TimestampMillisecondArray,
-        field_column: Option<&Float64Array>,
-        aligned_start: Millisecond,
-        aligned_end: Millisecond,
-    ) -> DataFusionResult<Option<RecordBatch>> {
-        if aligned_start > aligned_end {
-            return Ok(Some(record_batch.slice(0, 0)));
-        }
-
-        if self.interval <= 0 {
-            return Ok(None);
-        }
-
-        let range = aligned_end - aligned_start;
-        if range < 0 || range % self.interval != 0 {
-            return Ok(None);
-        }
-
-        let expected_len = (range / self.interval) + 1;
-        let expected_len: usize = match expected_len.try_into() {
-            Ok(v) => v,
-            Err(_) => return Ok(None),
-        };
-        if expected_len == 0 {
-            return Ok(Some(record_batch.slice(0, 0)));
-        }
-
-        let first_ts = ts_column.value(0);
-        if aligned_start < first_ts {
-            // Needs lookback or timestamp replacement.
-            return Ok(None);
-        }
-
-        let start_delta = aligned_start - first_ts;
-        if start_delta % self.interval != 0 {
-            return Ok(None);
-        }
-
-        let start_idx: usize = match (start_delta / self.interval).try_into() {
-            Ok(v) => v,
-            Err(_) => return Ok(None),
-        };
-        if start_idx >= ts_column.len() {
-            return Ok(None);
-        }
-        if start_idx + expected_len > ts_column.len() {
-            return Ok(None);
-        }
-        let end_idx = start_idx + expected_len - 1;
-
-        if ts_column.value(start_idx) != aligned_start || ts_column.value(end_idx) != aligned_end {
-            return Ok(None);
-        }
-
-        // Ensure no gaps within the slice.
-        for (i, expected_ts) in (aligned_start..=aligned_end)
-            .step_by(self.interval as usize)
-            .enumerate()
-        {
-            if ts_column.value(start_idx + i) != expected_ts {
-                return Ok(None);
-            }
-            if let Some(field_column) = &field_column
-                && field_column.value(start_idx + i).is_nan()
-            {
-                // Needs filtering out NaNs, cannot slice.
-                return Ok(None);
-            }
-        }
-
-        Ok(Some(record_batch.slice(start_idx, expected_len)))
     }
 
     /// Helper function to apply "take" on record batch.
@@ -685,13 +586,11 @@ impl InstantManipulateStream {
         assert_eq!(take_indices.len(), aligned_ts.len());
 
         let indices_array = UInt64Array::from(take_indices);
-        let mut arrays = record_batch.columns().to_vec();
-        for (idx, array) in arrays.iter_mut().enumerate() {
-            if idx == self.time_index {
-                continue;
-            }
-            *array = compute::take(array.as_ref(), &indices_array, None)?;
-        }
+        let mut arrays = record_batch
+            .columns()
+            .iter()
+            .map(|array| compute::take(array, &indices_array, None))
+            .collect::<ArrowResult<Vec<_>>>()?;
         arrays[self.time_index] = Arc::new(TimestampMillisecondArray::from(aligned_ts));
 
         let result = RecordBatch::try_new(record_batch.schema(), arrays)
