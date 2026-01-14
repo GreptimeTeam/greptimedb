@@ -67,9 +67,11 @@ impl MetricEngineInner {
     /// group fails.
     pub async fn put_regions_batch(
         &self,
-        requests: Vec<(RegionId, RegionPutRequest)>,
+        requests: impl ExactSizeIterator<Item = (RegionId, RegionPutRequest)>,
     ) -> Result<AffectedRows> {
-        if requests.is_empty() {
+        let len = requests.len();
+
+        if len == 0 {
             return Ok(0);
         }
 
@@ -78,7 +80,7 @@ impl MetricEngineInner {
             .start_timer();
 
         // Fast path: single request, no batching overhead
-        if requests.len() == 1 {
+        if len == 1 {
             let (logical_id, req) = requests.into_iter().next().unwrap();
             return self.put_logical_region(logical_id, req).await;
         }
@@ -697,7 +699,7 @@ mod tests {
         let affected_rows = env
             .metric()
             .inner
-            .put_regions_batch(build_requests())
+            .put_regions_batch(build_requests().into_iter())
             .await
             .unwrap();
         assert_eq!(affected_rows, 5);
@@ -927,7 +929,11 @@ mod tests {
         ];
 
         // Batch write
-        let affected_rows = engine.inner.put_regions_batch(requests).await.unwrap();
+        let affected_rows = engine
+            .inner
+            .put_regions_batch(requests.into_iter())
+            .await
+            .unwrap();
         assert_eq!(affected_rows, 10);
 
         // Verify physical region contains data from all logical regions
@@ -993,7 +999,7 @@ mod tests {
         ];
 
         // Batch write
-        let result = engine.inner.put_regions_batch(requests).await;
+        let result = engine.inner.put_regions_batch(requests.into_iter()).await;
         assert!(result.is_err());
 
         // Invalid region is detected before any write, so the physical region remains empty.
@@ -1030,7 +1036,11 @@ mod tests {
             },
         )];
 
-        let affected_rows = engine.inner.put_regions_batch(requests).await.unwrap();
+        let affected_rows = engine
+            .inner
+            .put_regions_batch(requests.into_iter())
+            .await
+            .unwrap();
         assert_eq!(affected_rows, 5);
     }
 
@@ -1042,7 +1052,11 @@ mod tests {
 
         // Empty batch should return zero affected rows
         let requests = vec![];
-        let affected_rows = engine.inner.put_regions_batch(requests).await.unwrap();
+        let affected_rows = engine
+            .inner
+            .put_regions_batch(requests.into_iter())
+            .await
+            .unwrap();
 
         assert_eq!(affected_rows, 0);
     }

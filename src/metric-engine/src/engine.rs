@@ -502,7 +502,7 @@ impl MetricEngine {
     /// physical-region groups committed.
     pub async fn put_regions_batch(
         &self,
-        requests: Vec<(RegionId, RegionPutRequest)>,
+        requests: impl ExactSizeIterator<Item = (RegionId, RegionPutRequest)>,
     ) -> Result<AffectedRows> {
         self.inner.put_regions_batch(requests).await
     }
