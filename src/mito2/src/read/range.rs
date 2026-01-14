@@ -518,8 +518,9 @@ impl RangeBuilderList {
                 let builder = input.prune_file(file, reader_metrics).await?;
                 builder.build_ranges(index.row_group_index, &mut ranges);
 
-                // Record memory size of newly built builder.
+                // Record memory size and count of newly built builder.
                 reader_metrics.metadata_mem_size += builder.memory_size();
+                reader_metrics.num_range_builders += 1;
 
                 self.set_file_builder(file_index, Arc::new(builder));
             }
@@ -539,21 +540,23 @@ impl RangeBuilderList {
 
     /// Clears the file builders at the specified file indices.
     /// `file_indices` are local file indices (not global indices including memtables).
-    /// Returns the total memory size of cleared builders.
+    /// Returns (memory_freed, num_cleared).
     pub(crate) fn clear_file_builders(
         &self,
         file_indices: impl IntoIterator<Item = usize>,
-    ) -> usize {
+    ) -> (usize, usize) {
         let mut file_builders = self.file_builders.lock().unwrap();
         let mut memory_freed = 0;
+        let mut num_cleared = 0;
         for file_index in file_indices {
             if file_index < file_builders.len()
                 && let Some(builder) = file_builders[file_index].take()
             {
                 memory_freed += builder.memory_size();
+                num_cleared += 1;
             }
         }
-        memory_freed
+        (memory_freed, num_cleared)
     }
 }
 

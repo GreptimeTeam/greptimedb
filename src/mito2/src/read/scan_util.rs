@@ -230,6 +230,10 @@ pub(crate) struct ScanMetricsSet {
     build_ranges_mem_size: usize,
     /// Peak memory usage for file range builders.
     build_ranges_peak_mem_size: usize,
+    /// Current number of file range builders.
+    num_range_builders: usize,
+    /// Peak number of file range builders.
+    num_range_builders_peak: usize,
 }
 
 /// Wrapper for file metrics that compares by total cost in reverse order.
@@ -320,6 +324,8 @@ impl fmt::Debug for ScanMetricsSet {
             per_file_metrics,
             build_ranges_mem_size: _,
             build_ranges_peak_mem_size,
+            num_range_builders: _,
+            num_range_builders_peak,
         } = self;
 
         // Write core metrics
@@ -543,7 +549,9 @@ impl fmt::Debug for ScanMetricsSet {
 
         write!(
             f,
-            ", \"build_ranges_peak_mem_size\":{build_ranges_peak_mem_size}, \"stream_eof\":{stream_eof}}}"
+            ", \"build_ranges_peak_mem_size\":{build_ranges_peak_mem_size}, \
+             \"num_range_builders_peak\":{num_range_builders_peak}, \
+             \"stream_eof\":{stream_eof}}}"
         )
     }
 }
@@ -610,6 +618,7 @@ impl ScanMetricsSet {
             metadata_cache_metrics,
             fetch_metrics,
             metadata_mem_size,
+            num_range_builders,
         } = other;
 
         self.build_parts_cost += *build_cost;
@@ -670,11 +679,18 @@ impl ScanMetricsSet {
         if self.build_ranges_mem_size > self.build_ranges_peak_mem_size {
             self.build_ranges_peak_mem_size = self.build_ranges_mem_size;
         }
+
+        // Track number of builders and update peak.
+        self.num_range_builders += *num_range_builders;
+        if self.num_range_builders > self.num_range_builders_peak {
+            self.num_range_builders_peak = self.num_range_builders;
+        }
     }
 
-    /// Subtracts memory usage when clearing file range builders.
-    fn sub_build_ranges_mem_size(&mut self, size: usize) {
-        self.build_ranges_mem_size = self.build_ranges_mem_size.saturating_sub(size);
+    /// Subtracts stats when clearing file range builders.
+    fn sub_build_ranges_stats(&mut self, mem_size: usize, num_builders: usize) {
+        self.build_ranges_mem_size = self.build_ranges_mem_size.saturating_sub(mem_size);
+        self.num_range_builders = self.num_range_builders.saturating_sub(num_builders);
     }
 
     /// Merges per-file metrics.
@@ -1033,10 +1049,10 @@ impl PartitionMetrics {
         self.0.clone()
     }
 
-    /// Subtracts memory usage for building file ranges.
-    pub(crate) fn sub_build_ranges_mem_size(&self, size: usize) {
+    /// Subtracts stats for building file ranges.
+    pub(crate) fn sub_build_ranges_stats(&self, mem_size: usize, num_builders: usize) {
         let mut metrics = self.0.metrics.lock().unwrap();
-        metrics.sub_build_ranges_mem_size(size);
+        metrics.sub_build_ranges_stats(mem_size, num_builders);
     }
 }
 
@@ -1542,8 +1558,8 @@ pub(crate) fn clear_file_range_builders(
         }
     });
 
-    let memory_freed = range_builder_list.clear_file_builders(file_indices);
-    part_metrics.sub_build_ranges_mem_size(memory_freed);
+    let (memory_freed, num_cleared) = range_builder_list.clear_file_builders(file_indices);
+    part_metrics.sub_build_ranges_stats(memory_freed, num_cleared);
 }
 
 /// A stream wrapper that splits record batches from an inner stream.
