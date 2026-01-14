@@ -233,7 +233,7 @@ pub(crate) struct ScanMetricsSet {
     /// Current number of file range builders.
     num_range_builders: usize,
     /// Peak number of file range builders.
-    num_range_builders_peak: usize,
+    num_peak_range_builders: usize,
 }
 
 /// Wrapper for file metrics that compares by total cost in reverse order.
@@ -325,7 +325,7 @@ impl fmt::Debug for ScanMetricsSet {
             build_ranges_mem_size: _,
             build_ranges_peak_mem_size,
             num_range_builders: _,
-            num_range_builders_peak,
+            num_peak_range_builders,
         } = self;
 
         // Write core metrics
@@ -550,7 +550,7 @@ impl fmt::Debug for ScanMetricsSet {
         write!(
             f,
             ", \"build_ranges_peak_mem_size\":{build_ranges_peak_mem_size}, \
-             \"num_range_builders_peak\":{num_range_builders_peak}, \
+             \"num_peak_range_builders\":{num_peak_range_builders}, \
              \"stream_eof\":{stream_eof}}}"
         )
     }
@@ -682,8 +682,8 @@ impl ScanMetricsSet {
 
         // Track number of builders and update peak.
         self.num_range_builders += *num_range_builders;
-        if self.num_range_builders > self.num_range_builders_peak {
-            self.num_range_builders_peak = self.num_range_builders;
+        if self.num_range_builders > self.num_peak_range_builders {
+            self.num_peak_range_builders = self.num_range_builders;
         }
     }
 
