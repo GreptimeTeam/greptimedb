@@ -133,6 +133,10 @@ async fn test_full_gc_workflow() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn test_tracker_cleanup() {
+    use std::time::Duration;
+
+    use crate::gc::mock::new_empty_report_with;
+
     init_default_ut_logging();
 
     let table_id = 1;
