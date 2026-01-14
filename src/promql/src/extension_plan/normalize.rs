@@ -31,6 +31,7 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream,
 };
+use datafusion_expr::col;
 use datatypes::arrow::array::TimestampMillisecondArray;
 use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow::record_batch::RecordBatch;
@@ -83,7 +84,38 @@ impl UserDefinedLogicalNodeCore for SeriesNormalize {
     }
 
     fn expressions(&self) -> Vec<datafusion::logical_expr::Expr> {
-        vec![]
+        if self.unfix.is_some() {
+            return vec![];
+        }
+
+        self.tag_columns
+            .iter()
+            .map(col)
+            .chain(std::iter::once(col(&self.time_index_column_name)))
+            .collect()
+    }
+
+    fn necessary_children_exprs(&self, output_columns: &[usize]) -> Option<Vec<Vec<usize>>> {
+        if self.unfix.is_some() {
+            return None;
+        }
+
+        let input_schema = self.input.schema();
+        if output_columns.is_empty() {
+            let indices = (0..input_schema.fields().len()).collect::<Vec<_>>();
+            return Some(vec![indices]);
+        }
+
+        let mut required = Vec::with_capacity(output_columns.len() + 1 + self.tag_columns.len());
+        required.extend_from_slice(output_columns);
+        required.push(input_schema.index_of_column_by_name(None, &self.time_index_column_name)?);
+        for tag in &self.tag_columns {
+            required.push(input_schema.index_of_column_by_name(None, tag)?);
+        }
+
+        required.sort_unstable();
+        required.dedup();
+        Some(vec![required])
     }
 
     fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -429,8 +461,10 @@ mod test {
     use datafusion::arrow::datatypes::{
         ArrowPrimitiveType, DataType, Field, Schema, TimestampMillisecondType,
     };
+    use datafusion::common::ToDFSchema;
     use datafusion::datasource::memory::MemorySourceConfig;
     use datafusion::datasource::source::DataSourceExec;
+    use datafusion::logical_expr::{EmptyRelation, LogicalPlan};
     use datafusion::prelude::SessionContext;
     use datatypes::arrow::array::TimestampMillisecondArray;
     use datatypes::arrow_array::StringArray;
@@ -459,6 +493,23 @@ mod test {
         DataSourceExec::new(Arc::new(
             MemorySourceConfig::try_new(&[vec![data]], schema, None).unwrap(),
         ))
+    }
+
+    #[test]
+    fn pruning_should_keep_time_and_tag_columns_for_exec() {
+        let df_schema = prepare_test_data().schema().to_dfschema_ref().unwrap();
+        let input = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: df_schema,
+        });
+        let plan =
+            SeriesNormalize::new(0, TIME_INDEX_COLUMN, true, vec!["path".to_string()], input);
+
+        // Simulate a parent projection requesting only the `value` column.
+        let output_columns = [1usize];
+        let required = plan.necessary_children_exprs(&output_columns).unwrap();
+        let required = &required[0];
+        assert_eq!(required.as_slice(), &[0, 1, 2]);
     }
 
     #[tokio::test]
