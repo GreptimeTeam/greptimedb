@@ -49,6 +49,15 @@ pub(crate) enum TableIdInput<'a> {
     Batch(&'a [TableId]),
 }
 
+impl<'a> TableIdInput<'a> {
+    fn table_id_for_row(&self, row_idx: usize) -> TableId {
+        match self {
+            TableIdInput::Single(table_id) => *table_id,
+            TableIdInput::Batch(table_ids) => table_ids[row_idx],
+        }
+    }
+}
+
 impl Default for RowModifier {
     fn default() -> Self {
         Self {
@@ -84,7 +93,7 @@ impl RowModifier {
         let mut buffer = vec![];
 
         for (row_index, mut row_iter) in iter.iter_mut().enumerate() {
-            let table_id = Self::table_id_for_row(table_ids, row_index);
+            let table_id = table_ids.table_id_for_row(row_index);
             let (table_id_value, tsid) = Self::fill_internal_columns(table_id, &row_iter);
             let mut values = Vec::with_capacity(num_output_column);
             buffer.clear();
@@ -146,7 +155,7 @@ impl RowModifier {
             options: None,
         });
         for (row_index, row_iter) in iter.iter_mut().enumerate() {
-            let table_id = Self::table_id_for_row(table_ids, row_index);
+            let table_id = table_ids.table_id_for_row(row_index);
             let (table_id_value, tsid) = Self::fill_internal_columns(table_id, &row_iter);
             row_iter.row.values.push(table_id_value);
             row_iter.row.values.push(tsid);
@@ -166,13 +175,6 @@ impl RowModifier {
             .fail();
         }
         Ok(())
-    }
-
-    fn table_id_for_row(table_ids: TableIdInput<'_>, row_index: usize) -> TableId {
-        match table_ids {
-            TableIdInput::Single(table_id) => table_id,
-            TableIdInput::Batch(table_ids) => table_ids[row_index],
-        }
     }
 
     /// Fills internal columns of a row with table name and a hash of tag values.
