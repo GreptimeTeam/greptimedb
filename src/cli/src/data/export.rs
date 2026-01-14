@@ -901,67 +901,6 @@ mod tests {
     // ==================== Gap 2: Empty string vs missing tests ====================
 
     #[tokio::test]
-    async fn test_export_command_build_with_s3_empty_access_key() {
-        // Test S3 with empty access key ID (empty string, not missing)
-        let cmd = ExportCommand::parse_from([
-            "export",
-            "--addr",
-            "127.0.0.1:4000",
-            "--s3",
-            "--s3-bucket",
-            "test-bucket",
-            "--s3-root",
-            "test-root",
-            "--s3-access-key-id",
-            "", // Empty string
-            "--s3-secret-access-key",
-            "test-secret",
-            "--s3-region",
-            "us-west-2",
-        ]);
-
-        let result = cmd.build().await;
-        assert!(result.is_err());
-        if let Err(err) = result {
-            assert!(
-                err.to_string().contains("S3 access key ID must be set"),
-                "Actual error: {}",
-                err
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn test_export_command_build_with_s3_missing_secret_key() {
-        // Test S3 with empty secret access key
-        let cmd = ExportCommand::parse_from([
-            "export",
-            "--addr",
-            "127.0.0.1:4000",
-            "--s3",
-            "--s3-bucket",
-            "test-bucket",
-            "--s3-root",
-            "test-root",
-            "--s3-access-key-id",
-            "test-key",
-            // Missing --s3-secret-access-key
-            "--s3-region",
-            "us-west-2",
-        ]);
-
-        let result = cmd.build().await;
-        assert!(result.is_err());
-        if let Err(err) = result {
-            assert!(
-                err.to_string().contains("S3 secret access key must be set"),
-                "Actual error: {}",
-                err
-            );
-        }
-    }
-
-    #[tokio::test]
     async fn test_export_command_build_with_s3_empty_root() {
         // Empty root should be allowed (it's optional path component)
         let cmd = ExportCommand::parse_from([

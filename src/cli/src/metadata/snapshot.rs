@@ -288,9 +288,16 @@ fn build_object_store_and_resolve_file_path(
 #[cfg(test)]
 mod tests {
     use std::env;
+    use std::sync::Arc;
+    use std::time::Duration;
 
     use clap::Parser;
+    use common_meta::kv_backend::KvBackend;
+    use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_meta::rpc::store::PutRequest;
+    use object_store::ObjectStore;
 
+    use super::*;
     use crate::metadata::snapshot::RestoreCommand;
 
     #[tokio::test]
@@ -333,5 +340,98 @@ mod tests {
         ]);
         let tool = cmd.build().await.unwrap();
         assert_eq!(tool.file_path, file_path.to_string_lossy().to_string());
+    }
+
+    async fn setup_backup_file(object_store: ObjectStore, file_path: &str) {
+        let kv_backend = Arc::new(MemoryKvBackend::default());
+        let manager = MetadataSnapshotManager::new(kv_backend.clone(), object_store);
+        // Put some data into the kv backend
+        kv_backend
+            .put(
+                PutRequest::new()
+                    .with_key(b"test".to_vec())
+                    .with_value(b"test".to_vec()),
+            )
+            .await
+            .unwrap();
+        manager.dump(file_path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_restore_raft_engine_store() {
+        common_telemetry::init_default_ut_logging();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir.path().display().to_string();
+        let object_store = new_fs_object_store(&root).unwrap();
+        setup_backup_file(object_store, "/backup/metadata_snapshot.metadata.fb").await;
+
+        {
+            let cmd = RestoreCommand::parse_from([
+                "",
+                "--file_name",
+                format!("{}/backup/metadata_snapshot.metadata.fb", root).as_str(),
+                "--backend",
+                "raft-engine-store",
+                "--store-addrs",
+                format!("raftengine:///{}/metadata", root).as_str(),
+            ]);
+            let tool = cmd.build().await.unwrap();
+            tool.do_work().await.unwrap();
+        }
+        // Waits for the raft engine release the file lock.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let kv =
+            standalone::build_metadata_kvbackend(format!("{}/metadata", root), Default::default())
+                .unwrap();
+
+        let value = kv.get(b"test").await.unwrap().unwrap().value;
+        assert_eq!(value, b"test");
+    }
+
+    #[tokio::test]
+    async fn test_save_raft_engine_store() {
+        common_telemetry::init_default_ut_logging();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir.path().display().to_string();
+        {
+            let kv = standalone::build_metadata_kvbackend(
+                format!("{}/metadata", root),
+                Default::default(),
+            )
+            .unwrap();
+            kv.put(
+                PutRequest::new()
+                    .with_key(b"test".to_vec())
+                    .with_value(b"test".to_vec()),
+            )
+            .await
+            .unwrap();
+        }
+        // Waits for the raft engine release the file lock.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        {
+            let cmd = SaveCommand::parse_from([
+                "",
+                "--file_name",
+                format!("{}/backup/metadata_snapshot.metadata.fb", root).as_str(),
+                "--backend",
+                "raft-engine-store",
+                "--store-addrs",
+                format!("raftengine:///{}/metadata", root).as_str(),
+            ]);
+            let tool = cmd.build().await.unwrap();
+            tool.do_work().await.unwrap();
+        }
+
+        // Reads the snapshot file from the object store.
+        let object_store = new_fs_object_store(&root).unwrap();
+        let kv_backend = Arc::new(MemoryKvBackend::default());
+        let manager = MetadataSnapshotManager::new(kv_backend.clone(), object_store);
+        manager
+            .restore("/backup/metadata_snapshot.metadata.fb")
+            .await
+            .unwrap();
+        let value = kv_backend.get(b"test").await.unwrap().unwrap().value;
+        assert_eq!(value, b"test");
     }
 }

@@ -37,6 +37,18 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to parse url: {}", url))]
+    ParseUrl {
+        url: String,
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: url::ParseError,
+    },
+
+    #[snafu(display("Invalid url scheme: {}", scheme))]
+    InvalidUrlScheme { scheme: String },
+
     #[snafu(display("Repartition procedure is not supported in standalone mode"))]
     NoSupportRepartitionProcedure {
         #[snafu(implicit)]
@@ -51,6 +63,8 @@ impl ErrorExt for Error {
         match self {
             Error::OpenMetadataKvBackend { source, .. } => source.status_code(),
             Error::External { source, .. } => source.status_code(),
+            Error::ParseUrl { .. } => StatusCode::InvalidArguments,
+            Error::InvalidUrlScheme { .. } => StatusCode::InvalidArguments,
             Error::NoSupportRepartitionProcedure { .. } => StatusCode::Unsupported,
         }
     }
