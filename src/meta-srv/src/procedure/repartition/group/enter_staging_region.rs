@@ -23,7 +23,7 @@ use common_meta::instruction::{
 use common_meta::peer::Peer;
 use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::info;
-use futures::future::join_all;
+use futures::future::{join_all, try_join_all};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
 
@@ -35,6 +35,7 @@ use crate::procedure::repartition::group::utils::{
 };
 use crate::procedure::repartition::group::{Context, GroupPrepareResult, State};
 use crate::procedure::repartition::plan::RegionDescriptor;
+use crate::procedure::utils::{self, ErrorStrategy};
 use crate::service::mailbox::{Channel, MailboxRef};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -48,6 +49,7 @@ impl State for EnterStagingRegion {
         ctx: &mut Context,
         _procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
+        self.flush_pending_deallocate_regions(ctx).await?;
         self.enter_staging_regions(ctx).await?;
 
         Ok((Box::new(RemapManifest), Status::executing(true)))
@@ -327,6 +329,50 @@ impl EnterStagingRegion {
                 ),
             }
         );
+
+        Ok(())
+    }
+
+    async fn flush_pending_deallocate_regions(&self, ctx: &mut Context) -> Result<()> {
+        let pending_deallocate_region_ids = &ctx.persistent_ctx.pending_deallocate_region_ids;
+        if pending_deallocate_region_ids.is_empty() {
+            return Ok(());
+        }
+
+        let table_id = ctx.persistent_ctx.table_id;
+        let group_id = ctx.persistent_ctx.group_id;
+        let operation_timeout =
+            ctx.next_operation_timeout()
+                .context(error::ExceededDeadlineSnafu {
+                    operation: "Flush pending deallocate regions",
+                })?;
+        let result = &ctx.persistent_ctx.group_prepare_result.as_ref().unwrap();
+        let source_routes = result
+            .source_routes
+            .iter()
+            .filter(|route| pending_deallocate_region_ids.contains(&route.region.id))
+            .cloned()
+            .collect::<Vec<_>>();
+        let peer_region_ids_map = group_region_routes_by_peer(&source_routes);
+        info!(
+            "Flushing pending deallocate regions, table_id: {}, group_id: {}, peer_region_ids_map: {:?}",
+            table_id, group_id, peer_region_ids_map
+        );
+        let tasks = peer_region_ids_map
+            .iter()
+            .map(|(peer, region_ids)| {
+                utils::flush_region(
+                    &ctx.mailbox,
+                    &ctx.server_addr,
+                    region_ids,
+                    peer,
+                    operation_timeout,
+                    ErrorStrategy::Retry,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        try_join_all(tasks).await?;
 
         Ok(())
     }

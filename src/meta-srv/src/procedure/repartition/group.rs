@@ -233,6 +233,8 @@ pub struct PersistentContext {
     pub sync_region: bool,
     /// The region ids of the newly allocated regions.
     pub allocated_region_ids: Vec<RegionId>,
+    /// The region ids of the regions that are pending deallocation.
+    pub pending_deallocate_region_ids: Vec<RegionId>,
 }
 
 impl PersistentContext {
@@ -247,6 +249,7 @@ impl PersistentContext {
         region_mapping: HashMap<RegionId, Vec<RegionId>>,
         sync_region: bool,
         allocated_region_ids: Vec<RegionId>,
+        pending_deallocate_region_ids: Vec<RegionId>,
     ) -> Self {
         Self {
             group_id,
@@ -260,6 +263,7 @@ impl PersistentContext {
             staging_manifest_paths: HashMap::new(),
             sync_region,
             allocated_region_ids,
+            pending_deallocate_region_ids,
         }
     }
 

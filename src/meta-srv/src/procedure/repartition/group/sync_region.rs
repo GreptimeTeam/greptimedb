@@ -35,6 +35,7 @@ use crate::procedure::repartition::group::utils::{
     HandleMultipleResult, group_region_routes_by_peer, handle_multiple_results,
 };
 use crate::procedure::repartition::group::{Context, State};
+use crate::procedure::utils::ErrorStrategy;
 use crate::service::mailbox::{Channel, MailboxRef};
 
 const DEFAULT_SYNC_REGION_PARALLELISM: usize = 3;
@@ -82,6 +83,7 @@ impl SyncRegion {
             &[prepare_result.central_region],
             &prepare_result.central_region_datanode,
             operation_timeout,
+            ErrorStrategy::Retry,
         )
         .await
     }

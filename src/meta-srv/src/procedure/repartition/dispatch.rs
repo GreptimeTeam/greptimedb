@@ -80,6 +80,7 @@ impl State for Dispatch {
                 region_mapping,
                 sync_region,
                 plan.allocated_region_ids.clone(),
+                plan.pending_deallocate_region_ids.clone(),
             );
 
             let group_procedure = RepartitionGroupProcedure::new(persistent_ctx, ctx);

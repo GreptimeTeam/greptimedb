@@ -85,6 +85,7 @@ impl PreFlushRegion {
             region_ids,
             leader,
             operation_timeout,
+            utils::ErrorStrategy::Ignore,
         )
         .await
     }
