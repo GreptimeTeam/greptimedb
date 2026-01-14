@@ -5722,7 +5722,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=69499de6d38d9032101fa8a9e10d375e124ca8d3#69499de6d38d9032101fa8a9e10d375e124ca8d3"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=1353b0ada9e17890c7ba0e402ba29b2b57816ff1#1353b0ada9e17890c7ba0e402ba29b2b57816ff1"
 dependencies = [
  "prost 0.14.1",
  "prost-types 0.14.1",
@@ -7492,7 +7492,7 @@ dependencies = [
 [[package]]
 name = "loki-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/loki-proto.git?rev=a73a6b83eeb014645aac527b456816a81bd6b472#a73a6b83eeb014645aac527b456816a81bd6b472"
+source = "git+https://github.com/GreptimeTeam/loki-proto.git?rev=f69c8924c4babe516373e26a4118be82d976629c#f69c8924c4babe516373e26a4118be82d976629c"
 dependencies = [
  "prost 0.14.1",
  "prost-types 0.14.1",
