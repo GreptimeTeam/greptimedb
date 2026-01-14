@@ -129,14 +129,11 @@ pub async fn test_repartition_mito(store_type: StorageType) {
     .await
     .unwrap();
 
-    // FIXME(weny): There are some duplicates in the result.
     let expected = "\
 +----+----------+---------------------+
 | id | city     | ts                  |
 +----+----------+---------------------+
 | 1  | New York | 2022-01-01T00:00:00 |
-| 1  | New York | 2022-01-01T00:00:00 |
-| 5  | London   | 2022-01-01T00:00:00 |
 | 5  | London   | 2022-01-01T00:00:00 |
 | 10 | Paris    | 2022-01-01T00:00:00 |
 | 15 | Tokyo    | 2022-01-01T00:00:00 |
@@ -220,9 +217,7 @@ pub async fn test_repartition_mito(store_type: StorageType) {
 | id | city     | ts                  |
 +----+----------+---------------------+
 | 1  | New York | 2022-01-01T00:00:00 |
-| 1  | New York | 2022-01-01T00:00:00 |
 | 2  | Split1   | 2022-01-02T00:00:00 |
-| 5  | London   | 2022-01-01T00:00:00 |
 | 5  | London   | 2022-01-01T00:00:00 |
 | 7  | Split2   | 2022-01-02T00:00:00 |
 | 10 | Paris    | 2022-01-01T00:00:00 |
