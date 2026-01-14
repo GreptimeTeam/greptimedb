@@ -16,6 +16,7 @@ use std::assert_matches::assert_matches;
 use std::fs;
 
 use api::v1::Rows;
+use common_recordbatch::RecordBatches;
 use datatypes::value::Value;
 use partition::expr::{PartitionExpr, col};
 use store_api::region_engine::{
@@ -26,6 +27,7 @@ use store_api::region_request::{
 };
 use store_api::storage::{FileId, RegionId};
 
+use super::ScanRequest;
 use crate::config::MitoConfig;
 use crate::error::Error;
 use crate::manifest::action::RegionManifest;
@@ -449,5 +451,380 @@ async fn test_apply_staging_manifest_invalid_files_to_add_with_format(flat_forma
     assert_matches!(
         err.into_inner().as_any().downcast_ref::<Error>().unwrap(),
         Error::SerdeJson { .. }
+    );
+}
+
+#[tokio::test]
+async fn test_split_repartition_causes_duplicate_data() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("split-duplicate").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let source_region_id = RegionId::new(1, 1);
+    let target_region_id_1 = RegionId::new(1, 1);
+    let target_region_id_2 = RegionId::new(1, 3);
+
+    // Use field_0 (i64) for partitioning.
+    let source_partition_expr = col("field_0").lt(Value::from(10.00));
+    let target_partition_expr_1 = col("field_0").lt(Value::from(5.00));
+    let target_partition_expr_2 = col("field_0")
+        .gt_eq(Value::from(5.00))
+        .and(col("field_0").lt(Value::from(10.00)));
+
+    let request = CreateRequestBuilder::new()
+        .partition_expr_json(Some(source_partition_expr.as_json_str().unwrap()))
+        .build();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(source_region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Insert 0..10
+    let rows_data = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows(0, 10),
+    };
+    put_rows(&engine, source_region_id, rows_data).await;
+    engine
+        .handle_request(
+            source_region_id,
+            RegionRequest::Flush(RegionFlushRequest {
+                row_group_size: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+    let source_region = engine.get_region(source_region_id).unwrap();
+    let source_manifest = source_region.manifest_ctx.manifest().await;
+    let source_file_count = source_manifest.files.len();
+    assert_eq!(source_file_count, 1);
+
+    engine
+        .handle_request(
+            source_region_id,
+            RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_expr: target_partition_expr_1.as_json_str().unwrap(),
+            }),
+        )
+        .await
+        .unwrap();
+
+    let remap_result = engine
+        .remap_manifests(RemapManifestsRequest {
+            region_id: source_region_id,
+            input_regions: vec![source_region_id],
+            region_mapping: [(
+                source_region_id,
+                vec![target_region_id_1, target_region_id_2],
+            )]
+            .into_iter()
+            .collect(),
+            new_partition_exprs: [
+                (
+                    target_region_id_1,
+                    target_partition_expr_1.as_json_str().unwrap(),
+                ),
+                (
+                    target_region_id_2,
+                    target_partition_expr_2.as_json_str().unwrap(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        })
+        .await
+        .unwrap();
+
+    let request = CreateRequestBuilder::new()
+        .partition_expr_json(Some(target_partition_expr_2.as_json_str().unwrap()))
+        .build();
+    engine
+        .handle_request(target_region_id_2, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    engine
+        .handle_request(
+            target_region_id_2,
+            RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_expr: target_partition_expr_2.as_json_str().unwrap(),
+            }),
+        )
+        .await
+        .unwrap();
+
+    engine
+        .handle_request(
+            target_region_id_2,
+            RegionRequest::ApplyStagingManifest(ApplyStagingManifestRequest {
+                partition_expr: target_partition_expr_2.as_json_str().unwrap(),
+                central_region_id: source_region_id,
+                manifest_path: remap_result.manifest_paths[&target_region_id_2].clone(),
+            }),
+        )
+        .await
+        .unwrap();
+
+    engine
+        .handle_request(
+            target_region_id_1,
+            RegionRequest::ApplyStagingManifest(ApplyStagingManifestRequest {
+                partition_expr: target_partition_expr_1.as_json_str().unwrap(),
+                central_region_id: source_region_id,
+                manifest_path: remap_result.manifest_paths[&target_region_id_1].clone(),
+            }),
+        )
+        .await
+        .unwrap();
+
+    let target_region_1 = engine.get_region(target_region_id_1).unwrap();
+    let target_region_2 = engine.get_region(target_region_id_2).unwrap();
+    let manifest_1 = target_region_1.manifest_ctx.manifest().await;
+    let manifest_2 = target_region_2.manifest_ctx.manifest().await;
+
+    assert_eq!(manifest_1.files.len(), source_file_count);
+    assert_eq!(manifest_2.files.len(), source_file_count);
+
+    // Verify duplication via Scan.
+    let scan_request = ScanRequest::default();
+    let stream = engine
+        .scan_to_stream(target_region_id_1, scan_request)
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+
+    // FIXME(yingwen): partition expr is not applied correctly.
+    // Target region 1 (< 5) contains data from 5..10.
+    let expected = "+-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| 0     | 0.0     | 1970-01-01T00:00:00 |
+| 1     | 1.0     | 1970-01-01T00:00:01 |
+| 2     | 2.0     | 1970-01-01T00:00:02 |
+| 3     | 3.0     | 1970-01-01T00:00:03 |
+| 4     | 4.0     | 1970-01-01T00:00:04 |
+| 5     | 5.0     | 1970-01-01T00:00:05 |
+| 6     | 6.0     | 1970-01-01T00:00:06 |
+| 7     | 7.0     | 1970-01-01T00:00:07 |
+| 8     | 8.0     | 1970-01-01T00:00:08 |
+| 9     | 9.0     | 1970-01-01T00:00:09 |
++-------+---------+---------------------+";
+    assert_eq!(
+        batches.pretty_print().unwrap(),
+        expected,
+        "actual: {}",
+        batches.pretty_print().unwrap()
+    );
+
+    let stream = engine
+        .scan_to_stream(target_region_id_2, ScanRequest::default())
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+
+    // FIXME(yingwen): partition expr is not applied correctly.
+    // Target region 2 (>= 5) also contains data from 0..5.
+    let expected = "+-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| 0     | 0.0     | 1970-01-01T00:00:00 |
+| 1     | 1.0     | 1970-01-01T00:00:01 |
+| 2     | 2.0     | 1970-01-01T00:00:02 |
+| 3     | 3.0     | 1970-01-01T00:00:03 |
+| 4     | 4.0     | 1970-01-01T00:00:04 |
+| 5     | 5.0     | 1970-01-01T00:00:05 |
+| 6     | 6.0     | 1970-01-01T00:00:06 |
+| 7     | 7.0     | 1970-01-01T00:00:07 |
+| 8     | 8.0     | 1970-01-01T00:00:08 |
+| 9     | 9.0     | 1970-01-01T00:00:09 |
++-------+---------+---------------------+";
+    assert_eq!(
+        batches.pretty_print().unwrap(),
+        expected,
+        "actual: {}",
+        batches.pretty_print().unwrap()
+    );
+}
+
+#[tokio::test]
+async fn test_merge_repartition_data_integrity() {
+    common_telemetry::init_default_ut_logging();
+
+    let mut env = TestEnv::with_prefix("merge-data").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    // Merge R1 and R2 into R1.
+    let source_region_id_1 = RegionId::new(1, 1);
+    let source_region_id_2 = RegionId::new(1, 2);
+    // Target is same as Source 1
+    let target_region_id = source_region_id_1;
+
+    let source_partition_expr_1 = col("field_0")
+        .gt_eq(Value::from(0.00))
+        .and(col("field_0").lt(Value::from(10.00)));
+    let source_partition_expr_2 = col("field_0").gt_eq(Value::from(10.00));
+    // Target covers both
+    let target_partition_expr = col("field_0").gt_eq(Value::from(0.00));
+
+    let request = CreateRequestBuilder::new()
+        .partition_expr_json(Some(source_partition_expr_1.as_json_str().unwrap()))
+        .build();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(source_region_id_1, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let request = CreateRequestBuilder::new()
+        .partition_expr_json(Some(source_partition_expr_2.as_json_str().unwrap()))
+        .build();
+    engine
+        .handle_request(source_region_id_2, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Insert data into R1: 0..5
+    let rows_data = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows(0, 5),
+    };
+    put_rows(&engine, source_region_id_1, rows_data).await;
+    engine
+        .handle_request(
+            source_region_id_1,
+            RegionRequest::Flush(RegionFlushRequest {
+                row_group_size: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Insert data into R2: 10..15
+    let rows_data = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows(10, 15),
+    };
+    put_rows(&engine, source_region_id_2, rows_data).await;
+    engine
+        .handle_request(
+            source_region_id_2,
+            RegionRequest::Flush(RegionFlushRequest {
+                row_group_size: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+    let source_region_1 = engine.get_region(source_region_id_1).unwrap();
+    let source_region_2 = engine.get_region(source_region_id_2).unwrap();
+    let source_manifest_1 = source_region_1.manifest_ctx.manifest().await;
+    let source_manifest_2 = source_region_2.manifest_ctx.manifest().await;
+    let source_1_file_count = source_manifest_1.files.len();
+    let source_2_file_count = source_manifest_2.files.len();
+    assert_eq!(source_1_file_count, 1);
+    assert_eq!(source_2_file_count, 1);
+
+    // Enter staging for target (R1)
+    engine
+        .handle_request(
+            target_region_id,
+            RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_expr: target_partition_expr.as_json_str().unwrap(),
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Remap: R1 -> R1, R2 -> R1
+    let remap_result = engine
+        .remap_manifests(RemapManifestsRequest {
+            region_id: target_region_id,
+            input_regions: vec![source_region_id_1, source_region_id_2],
+            region_mapping: [
+                (source_region_id_1, vec![target_region_id]),
+                (source_region_id_2, vec![target_region_id]),
+            ]
+            .into_iter()
+            .collect(),
+            new_partition_exprs: [(
+                target_region_id,
+                target_partition_expr.as_json_str().unwrap(),
+            )]
+            .into_iter()
+            .collect(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(remap_result.manifest_paths.len(), 1);
+
+    let target_region = engine.get_region(target_region_id).unwrap();
+    let manager = target_region.manifest_ctx.manifest_manager.write().await;
+    let manifest_storage = manager.store();
+    let blob_store = manifest_storage.staging_storage().blob_storage();
+
+    let target_manifest_bytes = blob_store
+        .get(&remap_result.manifest_paths[&target_region_id])
+        .await
+        .unwrap();
+    let target_manifest = serde_json::from_slice::<RegionManifest>(&target_manifest_bytes).unwrap();
+
+    assert_eq!(
+        target_manifest.files.len(),
+        source_1_file_count + source_2_file_count,
+        "Target manifest should have all files from both source regions"
+    );
+
+    drop(manager);
+
+    engine
+        .handle_request(
+            target_region_id,
+            RegionRequest::ApplyStagingManifest(ApplyStagingManifestRequest {
+                partition_expr: target_partition_expr.as_json_str().unwrap(),
+                central_region_id: target_region_id,
+                manifest_path: remap_result.manifest_paths[&target_region_id].clone(),
+            }),
+        )
+        .await
+        .unwrap();
+
+    let target_region = engine.get_region(target_region_id).unwrap();
+    let manifest = target_region.manifest_ctx.manifest().await;
+
+    assert_eq!(
+        manifest.files.len(),
+        source_1_file_count + source_2_file_count,
+        "After applying staging manifest, target region should have all files"
+    );
+
+    let scan_request = ScanRequest::default();
+    let stream = engine
+        .scan_to_stream(target_region_id, scan_request)
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+
+    let expected = "+-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| 0     | 0.0     | 1970-01-01T00:00:00 |
+| 1     | 1.0     | 1970-01-01T00:00:01 |
+| 2     | 2.0     | 1970-01-01T00:00:02 |
+| 3     | 3.0     | 1970-01-01T00:00:03 |
+| 4     | 4.0     | 1970-01-01T00:00:04 |
+| 10    | 10.0    | 1970-01-01T00:00:10 |
+| 11    | 11.0    | 1970-01-01T00:00:11 |
+| 12    | 12.0    | 1970-01-01T00:00:12 |
+| 13    | 13.0    | 1970-01-01T00:00:13 |
+| 14    | 14.0    | 1970-01-01T00:00:14 |
++-------+---------+---------------------+";
+    assert_eq!(
+        batches.pretty_print().unwrap(),
+        expected,
+        "actual: {}",
+        batches.pretty_print().unwrap()
     );
 }
