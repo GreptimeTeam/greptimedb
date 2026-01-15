@@ -18,6 +18,7 @@ use api::v1::{
     ColumnSchema, PrimaryKeyEncoding as PrimaryKeyEncodingProto, Row, Rows, Value, WriteHint,
 };
 use common_telemetry::{error, info};
+use fxhash::FxHashMap;
 use snafu::{OptionExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::region_request::{
@@ -287,7 +288,10 @@ impl MetricEngineInner {
         let null_value = Value { value_data: None };
 
         for (logical_region_id, request) in requests {
-            let col_name_to_idx: HashMap<&str, usize> = request
+            let table_id = logical_region_id.table_id();
+
+            // Build column name to index mapping once per request
+            let col_name_to_idx: FxHashMap<&str, usize> = request
                 .rows
                 .schema
                 .iter()
@@ -295,16 +299,26 @@ impl MetricEngineInner {
                 .map(|(idx, col)| (col.column_name.as_str(), idx))
                 .collect();
 
-            let table_id = logical_region_id.table_id();
+            // Build column mapping array once per request
+            // col_mapping[i] = Some(idx) means merged_schema[i] is at request.schema[idx]
+            // col_mapping[i] = None means merged_schema[i] doesn't exist in request.schema
+            let col_mapping: Vec<Option<usize>> = merged_schema
+                .iter()
+                .map(|merged_col| {
+                    col_name_to_idx
+                        .get(merged_col.column_name.as_str())
+                        .copied()
+                })
+                .collect();
 
+            // Apply the mapping to all rows
             for mut row in request.rows.rows {
                 let mut aligned_values = Vec::with_capacity(merged_schema.len());
-                for col in merged_schema {
-                    if let Some(&idx) = col_name_to_idx.get(col.column_name.as_str()) {
-                        aligned_values.push(std::mem::take(&mut row.values[idx]));
-                    } else {
-                        aligned_values.push(null_value.clone());
-                    }
+                for &opt_idx in &col_mapping {
+                    aligned_values.push(match opt_idx {
+                        Some(idx) => std::mem::take(&mut row.values[idx]),
+                        None => null_value.clone(),
+                    });
                 }
                 merged_rows.push(Row {
                     values: aligned_values,
