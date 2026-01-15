@@ -26,16 +26,17 @@ use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_telemetry::{debug, tracing, warn};
 use datafusion_expr::Expr;
 use datatypes::arrow::array::ArrayRef;
+use datatypes::arrow::datatypes::Field;
 use datatypes::arrow::error::ArrowError;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
+use datatypes::prelude::DataType;
 use mito_codec::row_converter::build_primary_key_codec;
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, RowSelection};
 use parquet::arrow::{FieldLevels, ProjectionMask, parquet_to_arrow_field_levels};
 use parquet::file::metadata::ParquetMetaData;
 use parquet::format::KeyValue;
-use partition::expr::PartitionExpr;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::region_request::PathType;
@@ -48,7 +49,7 @@ use crate::cache::index::result_cache::PredicateKey;
 use crate::error::ApplyVectorIndexSnafu;
 use crate::error::{
     ArrowReaderSnafu, InvalidMetadataSnafu, InvalidParquetSnafu, ReadDataPartSnafu,
-    ReadParquetSnafu, Result, SerdeJsonSnafu, SerializePartitionExprSnafu,
+    ReadParquetSnafu, Result, SerializePartitionExprSnafu,
 };
 use crate::metrics::{
     PRECISE_FILTER_ROWS_TOTAL, READ_ROW_GROUPS_TOTAL, READ_ROWS_IN_ROW_GROUP_TOTAL,
@@ -78,6 +79,7 @@ use crate::sst::parquet::row_group::{InMemoryRowGroup, ParquetFetchMetrics};
 use crate::sst::parquet::row_selection::RowGroupSelection;
 use crate::sst::parquet::stats::RowGroupPruningStats;
 use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, PARQUET_METADATA_KEY};
+use crate::sst::tag_maybe_to_dictionary_field;
 
 const INDEX_TYPE_FULLTEXT: &str = "fulltext";
 const INDEX_TYPE_INVERTED: &str = "inverted";
@@ -436,35 +438,62 @@ impl ParquetReaderBuilder {
         let file_partition_expr_ref = self.file_handle.meta_ref().partition_expr.as_ref();
 
         let partition_filter = if let Some(region_str) = region_partition_expr_str {
-            let region_partition_expr: PartitionExpr =
-                serde_json::from_str(region_str).context(SerdeJsonSnafu)?;
+            match crate::region::parse_partition_expr(Some(region_str))? {
+                Some(region_partition_expr)
+                    if Some(&region_partition_expr) != file_partition_expr_ref =>
+                {
+                    // Collect columns referenced by the partition expression.
+                    let mut referenced_columns = std::collections::HashSet::new();
+                    region_partition_expr.collect_column_names(&mut referenced_columns);
 
-            if Some(&region_partition_expr) != file_partition_expr_ref {
-                // Collect columns referenced by the partition expression.
-                let mut referenced_columns = std::collections::HashSet::new();
-                region_partition_expr.collect_column_names(&mut referenced_columns);
+                    // Build a partition_schema containing only referenced columns.
+                    let use_dictionary_tags = read_format.as_flat().is_some();
+                    let partition_schema = Arc::new(datatypes::schema::Schema::new(
+                        prune_schema
+                            .column_schemas()
+                            .iter()
+                            .filter(|col| referenced_columns.contains(&col.name))
+                            .map(|col| {
+                                if use_dictionary_tags {
+                                    if let Some(column_meta) =
+                                        read_format.metadata().column_by_name(&col.name)
+                                    {
+                                        if column_meta.semantic_type == SemanticType::Tag
+                                            && col.data_type.is_string()
+                                        {
+                                            let field = Arc::new(Field::new(
+                                                &col.name,
+                                                col.data_type.as_arrow_type(),
+                                                col.is_nullable(),
+                                            ));
+                                            let dict_field = tag_maybe_to_dictionary_field(
+                                                &col.data_type,
+                                                &field,
+                                            );
+                                            let mut column = col.clone();
+                                            column.data_type = ConcreteDataType::from_arrow_type(
+                                                dict_field.data_type(),
+                                            );
+                                            return column;
+                                        }
+                                    }
+                                }
+                                col.clone()
+                            })
+                            .collect::<Vec<_>>(),
+                    ));
 
-                // Build a partition_schema containing only referenced columns.
-                let partition_schema = Arc::new(datatypes::schema::Schema::new(
-                    prune_schema
-                        .column_schemas()
-                        .iter()
-                        .filter(|col| referenced_columns.contains(&col.name))
-                        .cloned()
-                        .collect::<Vec<_>>(),
-                ));
+                    let region_partition_physical_expr = region_partition_expr
+                        .try_as_physical_expr(&partition_schema.arrow_schema())
+                        .context(SerializePartitionExprSnafu)?;
 
-                let region_partition_physical_expr = region_partition_expr
-                    .try_as_physical_expr(&partition_schema.arrow_schema())
-                    .context(SerializePartitionExprSnafu)?;
-
-                Some(PartitionFilterContext {
-                    file_partition_expr: file_partition_expr_ref.cloned(),
-                    region_partition_physical_expr,
-                    partition_schema,
-                })
-            } else {
-                None
+                    Some(PartitionFilterContext {
+                        file_partition_expr: file_partition_expr_ref.cloned(),
+                        region_partition_physical_expr,
+                        partition_schema,
+                    })
+                }
+                _ => None,
             }
         } else {
             None

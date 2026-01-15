@@ -595,8 +595,6 @@ async fn test_split_repartition_causes_duplicate_data() {
         .unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
 
-    // FIXME(yingwen): partition expr is not applied correctly.
-    // Target region 1 (< 5) contains data from 5..10.
     let expected = "+-------+---------+---------------------+
 | tag_0 | field_0 | ts                  |
 +-------+---------+---------------------+
@@ -605,11 +603,6 @@ async fn test_split_repartition_causes_duplicate_data() {
 | 2     | 2.0     | 1970-01-01T00:00:02 |
 | 3     | 3.0     | 1970-01-01T00:00:03 |
 | 4     | 4.0     | 1970-01-01T00:00:04 |
-| 5     | 5.0     | 1970-01-01T00:00:05 |
-| 6     | 6.0     | 1970-01-01T00:00:06 |
-| 7     | 7.0     | 1970-01-01T00:00:07 |
-| 8     | 8.0     | 1970-01-01T00:00:08 |
-| 9     | 9.0     | 1970-01-01T00:00:09 |
 +-------+---------+---------------------+";
     assert_eq!(
         batches.pretty_print().unwrap(),
@@ -624,16 +617,9 @@ async fn test_split_repartition_causes_duplicate_data() {
         .unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
 
-    // FIXME(yingwen): partition expr is not applied correctly.
-    // Target region 2 (>= 5) also contains data from 0..5.
     let expected = "+-------+---------+---------------------+
 | tag_0 | field_0 | ts                  |
 +-------+---------+---------------------+
-| 0     | 0.0     | 1970-01-01T00:00:00 |
-| 1     | 1.0     | 1970-01-01T00:00:01 |
-| 2     | 2.0     | 1970-01-01T00:00:02 |
-| 3     | 3.0     | 1970-01-01T00:00:03 |
-| 4     | 4.0     | 1970-01-01T00:00:04 |
 | 5     | 5.0     | 1970-01-01T00:00:05 |
 | 6     | 6.0     | 1970-01-01T00:00:06 |
 | 7     | 7.0     | 1970-01-01T00:00:07 |

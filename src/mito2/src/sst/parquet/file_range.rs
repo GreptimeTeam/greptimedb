@@ -304,6 +304,11 @@ impl FileRangeContext {
         &self.base.filters
     }
 
+    /// Returns true if a partition filter is configured.
+    pub(crate) fn has_partition_filter(&self) -> bool {
+        self.base.partition_filter.is_some()
+    }
+
     /// Returns the format helper.
     pub(crate) fn read_format(&self) -> &ReadFormat {
         &self.base.read_format
@@ -326,11 +331,13 @@ impl FileRangeContext {
 
     /// TRY THE BEST to perform pushed down predicate precisely on the input batch.
     /// Return the filtered batch. If the entire batch is filtered out, return None.
+    /// If a partition expr filter is configured, it is also applied.
     pub(crate) fn precise_filter(&self, input: Batch, skip_fields: bool) -> Result<Option<Batch>> {
         self.base.precise_filter(input, skip_fields)
     }
 
     /// Filters the input RecordBatch by the pushed down predicate and returns RecordBatch.
+    /// If a partition expr filter is configured, it is also applied.
     pub(crate) fn precise_filter_flat(
         &self,
         input: RecordBatch,
@@ -554,6 +561,7 @@ impl RangeBase {
     }
 
     /// Computes the filter mask for the input RecordBatch based on pushed down predicates.
+    /// If a partition expr filter is configured, it is applied later in `precise_filter_flat`.
     ///
     /// Returns `None` if the entire batch is filtered out, otherwise returns the boolean mask.
     ///
