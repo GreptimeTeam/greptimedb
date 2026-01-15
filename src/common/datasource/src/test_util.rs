@@ -104,6 +104,7 @@ pub async fn setup_stream_to_json_test(origin_path: &str, threshold: impl Fn(usi
         schema.clone(),
         FileCompressionType::UNCOMPRESSED,
         Arc::new(object_store_opendal::OpendalStore::new(store.clone())),
+        true,
     );
 
     let size = store.read(origin_path).await.unwrap().len();
@@ -154,11 +155,13 @@ pub async fn setup_stream_to_csv_test(
     let config = scan_config(None, origin_path, csv_source.clone());
     let size = store.read(origin_path).await.unwrap().len();
 
-    let csv_opener = csv_source.create_file_opener(
-        Arc::new(object_store_opendal::OpendalStore::new(store.clone())),
-        &config,
-        0,
-    );
+    let csv_opener = csv_source
+        .create_file_opener(
+            Arc::new(object_store_opendal::OpendalStore::new(store.clone())),
+            &config,
+            0,
+        )
+        .unwrap();
     let stream = FileStream::new(&config, 0, csv_opener, &ExecutionPlanMetricsSet::new()).unwrap();
 
     let (tmp_store, dir) = test_tmp_store("test_stream_to_csv");

@@ -24,15 +24,10 @@ EXPLAIN SELECT * FROM integers WHERE i IN ((SELECT i FROM integers)) ORDER BY i;
 |_| ]]_|
 | physical_plan | SortPreservingMergeExec: [i@0 ASC NULLS LAST]_|
 |_|_SortExec: expr=[i@0 ASC NULLS LAST], preserve_partitioning=[true]_|
-|_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_REDACTED
-|_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED
-|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
-|_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED
-|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -60,16 +55,11 @@ EXPLAIN SELECT * FROM integers i1 WHERE EXISTS(SELECT i FROM integers WHERE i=i1
 |_| ]]_|
 | physical_plan | SortPreservingMergeExec: [i@0 ASC NULLS LAST]_|
 |_|_SortExec: expr=[i@0 ASC NULLS LAST], preserve_partitioning=[true]_|
-|_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_REDACTED
-|_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED
-|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
-|_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED
 |_|_ProjectionExec: expr=[i@0 as i]_|
-|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -109,13 +99,10 @@ order by t.i desc;
 |_|_SortExec: expr=[i@0 DESC], preserve_partitioning=[true]_|
 |_|_CrossJoinExec_|
 |_|_CoalescePartitionsExec_|
-|_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_FilterExec: i@0 IS NOT NULL_|
 |_|_ProjectionExec: expr=[i@0 as i]_|
-|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
 |_|_ProjectionExec: expr=[]_|
-|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -187,12 +174,9 @@ EXPLAIN SELECT * FROM integers i1 WHERE EXISTS(SELECT i FROM integers WHERE i=i1
 |_| ]]_|
 | physical_plan | SortPreservingMergeExec: [i@0 ASC NULLS LAST]_|
 |_|_SortExec: expr=[i@0 ASC NULLS LAST], preserve_partitioning=[true]_|
-|_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_REDACTED
-|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
 |_|_ProjectionExec: expr=[i@0 as i]_|
-|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -221,13 +205,10 @@ EXPLAIN SELECT * FROM integers i1 WHERE EXISTS(SELECT count(i) FROM integers WHE
 |_| ]]_|
 | physical_plan | SortPreservingMergeExec: [i@0 ASC NULLS LAST]_|
 |_|_SortExec: expr=[i@0 ASC NULLS LAST], preserve_partitioning=[true]_|
-|_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_REDACTED
-|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
 |_|_AggregateExec: mode=SinglePartitioned, gby=[i@0 as i], aggr=[]_|
 |_|_ProjectionExec: expr=[i@0 as i]_|
-|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -302,8 +283,6 @@ EXPLAIN SELECT x FROM (SELECT a AS x FROM t) sq ORDER BY x;
 |_|_TableScan: t_|
 |_| ]]_|
 | physical_plan | SortPreservingMergeExec: [x@0 ASC NULLS LAST]_|
-|_|_CooperativeExec_|
-|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -343,8 +322,6 @@ EXPLAIN SELECT x, COUNT(*) AS c FROM (SELECT a AS x FROM t) sq GROUP BY x ORDER 
 |_|_TableScan: t_|
 |_| ]]_|
 | physical_plan | SortPreservingMergeExec: [x@0 ASC NULLS LAST]_|
-|_|_CooperativeExec_|
-|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -382,7 +359,6 @@ EXPLAIN SELECT DISTINCT x FROM (SELECT a AS x FROM t) sq ORDER BY x;
 | physical_plan | SortPreservingMergeExec: [x@0 ASC NULLS LAST]_|
 |_|_SortExec: expr=[x@0 ASC NULLS LAST], preserve_partitioning=[true]_|
 |_|_AggregateExec: mode=SinglePartitioned, gby=[x@0 as x], aggr=[]_|
-|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -417,8 +393,6 @@ EXPLAIN SELECT sq.x FROM (SELECT a AS x FROM t) sq ORDER BY sq.x;
 |_|_TableScan: t_|
 |_| ]]_|
 | physical_plan | SortPreservingMergeExec: [x@0 ASC NULLS LAST]_|
-|_|_CooperativeExec_|
-|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -455,8 +429,6 @@ EXPLAIN SELECT y FROM (SELECT x AS y FROM (SELECT a AS x FROM t) sq1) sq2 ORDER 
 |_|_TableScan: t_|
 |_| ]]_|
 | physical_plan | SortPreservingMergeExec: [y@0 ASC NULLS LAST]_|
-|_|_CooperativeExec_|
-|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -495,8 +467,6 @@ EXPLAIN SELECT x, x + 1 AS y FROM (SELECT a AS x FROM t) sq ORDER BY x;
 |_|_TableScan: t_|
 |_| ]]_|
 | physical_plan | SortPreservingMergeExec: [x@0 ASC NULLS LAST]_|
-|_|_CooperativeExec_|
-|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -537,9 +507,7 @@ EXPLAIN SELECT a FROM ((SELECT a FROM t1) UNION ALL (SELECT a FROM t2)) u ORDER 
 | physical_plan | SortPreservingMergeExec: [a@0 ASC NULLS LAST]_|
 |_|_SortExec: expr=[a@0 ASC NULLS LAST], preserve_partitioning=[true]_|
 |_|_InterleaveExec_|
-|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
-|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -584,11 +552,8 @@ ORDER BY u1.a;
 |_| ]]_|
 | physical_plan | SortPreservingMergeExec: [a@0 ASC NULLS LAST]_|
 |_|_SortExec: expr=[a@0 ASC NULLS LAST], preserve_partitioning=[true]_|
-|_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_REDACTED
-|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
-|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -654,9 +619,7 @@ EXPLAIN SELECT x FROM (SELECT a AS x FROM t) sq ORDER BY x LIMIT 2;
 |_|_TableScan: t_|
 |_| ]]_|
 | physical_plan | SortPreservingMergeExec: [x@0 ASC NULLS LAST], fetch=2_|
-|_|_CooperativeExec_|
 |_|_SortExec: TopK(fetch=2), expr=[x@0 ASC NULLS LAST], preserve_partitioning=[true]_|
-|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+

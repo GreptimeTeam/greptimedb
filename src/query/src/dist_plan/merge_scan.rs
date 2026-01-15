@@ -139,7 +139,7 @@ pub struct MergeScanExec {
     arrow_schema: ArrowSchemaRef,
     region_query_handler: RegionQueryHandlerRef,
     metric: ExecutionPlanMetricsSet,
-    properties: PlanProperties,
+    properties: Arc<PlanProperties>,
     /// Metrics from sub stages
     sub_stage_metrics: Arc<Mutex<HashMap<RegionId, RecordBatchMetrics>>>,
     /// Metrics for each partition
@@ -226,12 +226,12 @@ impl MergeScanExec {
             .collect();
         let partitioning = Partitioning::Hash(partition_exprs, target_partition);
 
-        let properties = PlanProperties::new(
+        let properties = Arc::new(PlanProperties::new(
             eq_properties,
             partitioning,
             EmissionType::Incremental,
             Boundedness::Bounded,
-        );
+        ));
         Ok(Self {
             table,
             regions,
@@ -453,12 +453,12 @@ impl MergeScanExec {
             arrow_schema: self.arrow_schema.clone(),
             region_query_handler: self.region_query_handler.clone(),
             metric: self.metric.clone(),
-            properties: PlanProperties::new(
+            properties: Arc::new(PlanProperties::new(
                 self.properties.eq_properties.clone(),
                 Partitioning::Hash(overlaps, self.target_partition),
                 self.properties.emission_type,
                 self.properties.boundedness,
-            ),
+            )),
             sub_stage_metrics: self.sub_stage_metrics.clone(),
             partition_metrics: self.partition_metrics.clone(),
             query_ctx: self.query_ctx.clone(),
@@ -584,7 +584,7 @@ impl ExecutionPlan for MergeScanExec {
         self.arrow_schema.clone()
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
     }
 

@@ -91,10 +91,7 @@ pub fn has_primary_key_option(column_def: &ColumnDef) -> bool {
     column_def
         .options
         .iter()
-        .any(|options| match options.option {
-            ColumnOption::Unique { is_primary, .. } => is_primary,
-            _ => false,
-        })
+        .any(|options| matches!(options.option, ColumnOption::PrimaryKey(..)))
 }
 
 /// Create a `ColumnSchema` from `Column`.
@@ -198,15 +195,10 @@ pub fn sql_column_def_to_grpc_column_def(
         .context(ConvertToGrpcDataTypeSnafu)?
         .to_parts();
 
-    let is_primary_key = col.options.iter().any(|o| {
-        matches!(
-            o.option,
-            ColumnOption::Unique {
-                is_primary: true,
-                ..
-            }
-        )
-    });
+    let is_primary_key = col
+        .options
+        .iter()
+        .any(|o| matches!(o.option, ColumnOption::PrimaryKey(..)));
 
     let semantic_type = if is_primary_key {
         SemanticType::Tag
@@ -375,7 +367,7 @@ mod tests {
     use datatypes::schema::{
         COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE, FulltextAnalyzer,
     };
-    use sqlparser::ast::{ColumnOptionDef, Expr};
+    use sqlparser::ast::{ColumnOptionDef, Expr, PrimaryKeyConstraint};
 
     use super::*;
     use crate::ast::TimezoneInfo;
@@ -505,10 +497,14 @@ mod tests {
             data_type: SqlDataType::Double(ExactNumberInfo::None),
             options: vec![ColumnOptionDef {
                 name: None,
-                option: ColumnOption::Unique {
-                    is_primary: true,
+                option: ColumnOption::PrimaryKey(PrimaryKeyConstraint {
+                    name: None,
+                    index_name: None,
+                    index_type: None,
+                    columns: vec![],
+                    index_options: vec![],
                     characteristics: None,
-                },
+                }),
             }],
         };
 
@@ -583,10 +579,14 @@ mod tests {
             data_type: SqlDataType::Double(ExactNumberInfo::None),
             options: vec![ColumnOptionDef {
                 name: None,
-                option: ColumnOption::Unique {
-                    is_primary: true,
+                option: ColumnOption::PrimaryKey(PrimaryKeyConstraint {
+                    name: None,
+                    index_name: None,
+                    index_type: None,
+                    columns: vec![],
+                    index_options: vec![],
                     characteristics: None,
-                },
+                }),
             }],
         };
         assert!(has_primary_key_option(&column_def));

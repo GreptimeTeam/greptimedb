@@ -71,7 +71,6 @@ EXPLAIN ANALYZE SELECT * FROM test ORDER BY t LIMIT 5;
 |_|_|_|
 | 1_| 0_|_SortPreservingMergeExec: [t@1 ASC NULLS LAST], fetch=5 REDACTED
 |_|_|_WindowedSortExec: expr=t@1 ASC NULLS LAST num_ranges=REDACTED fetch=5 REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":4, "mem_ranges":1, "files":3, "file_ranges":3} REDACTED
 |_|_|_|
 |_|_| Total rows: 5_|
@@ -106,7 +105,6 @@ EXPLAIN ANALYZE SELECT * FROM test ORDER BY t DESC LIMIT 5;
 | 1_| 0_|_SortPreservingMergeExec: [t@1 DESC], fetch=5 REDACTED
 |_|_|_WindowedSortExec: expr=t@1 DESC num_ranges=REDACTED fetch=5 REDACTED
 |_|_|_PartSortExec: expr=t@1 DESC num_ranges=REDACTED limit=5 REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":4, "mem_ranges":1, "files":3, "file_ranges":3} REDACTED
 |_|_|_|
 |_|_| Total rows: 5_|
@@ -141,7 +139,6 @@ EXPLAIN ANALYZE SELECT * FROM test where i > 2 ORDER BY t LIMIT 4;
 | 1_| 0_|_SortPreservingMergeExec: [t@1 ASC NULLS LAST], fetch=4 REDACTED
 |_|_|_WindowedSortExec: expr=t@1 ASC NULLS LAST num_ranges=REDACTED fetch=4 REDACTED
 |_|_|_FilterExec: i@0 > 2 REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":4, "mem_ranges":1, "files":3, "file_ranges":3} REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
@@ -177,7 +174,6 @@ EXPLAIN ANALYZE SELECT * FROM test where i > 2 ORDER BY t DESC LIMIT 4;
 |_|_|_WindowedSortExec: expr=t@1 DESC num_ranges=REDACTED fetch=4 REDACTED
 |_|_|_PartSortExec: expr=t@1 DESC num_ranges=REDACTED limit=4 REDACTED
 |_|_|_FilterExec: i@0 > 2 REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":4, "mem_ranges":1, "files":3, "file_ranges":3} REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
@@ -212,7 +208,6 @@ EXPLAIN ANALYZE SELECT * FROM test where t > 8 ORDER BY t DESC LIMIT 4;
 | 1_| 0_|_SortPreservingMergeExec: [t@1 DESC], fetch=4 REDACTED
 |_|_|_WindowedSortExec: expr=t@1 DESC num_ranges=REDACTED fetch=4 REDACTED
 |_|_|_PartSortExec: expr=t@1 DESC num_ranges=REDACTED limit=4 REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":2, "mem_ranges":1, "files":1, "file_ranges":1} REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
@@ -296,7 +291,6 @@ EXPLAIN ANALYZE SELECT * FROM test_pk ORDER BY t LIMIT 5;
 | 1_| 0_|_SortPreservingMergeExec: [t@2 ASC NULLS LAST], fetch=5 REDACTED
 |_|_|_WindowedSortExec: expr=t@2 ASC NULLS LAST num_ranges=REDACTED fetch=5 REDACTED
 |_|_|_PartSortExec: expr=t@2 ASC NULLS LAST num_ranges=REDACTED limit=5 REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":4, "mem_ranges":1, "files":3, "file_ranges":3} REDACTED
 |_|_|_|
 |_|_| Total rows: 5_|
@@ -320,7 +314,6 @@ EXPLAIN ANALYZE VERBOSE SELECT * FROM test_pk ORDER BY t LIMIT 5;
 | 1_| 0_|_SortPreservingMergeExec: [t@2 ASC NULLS LAST], fetch=5 REDACTED
 |_|_|_WindowedSortExec: expr=t@2 ASC NULLS LAST num_ranges=REDACTED fetch=5 REDACTED
 |_|_|_PartSortExec: expr=t@2 ASC NULLS LAST num_ranges=REDACTED limit=5 REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":4, "mem_ranges":1, "REDACTED
 |_|_|_|
 |_|_| Total rows: 5_|
@@ -355,7 +348,6 @@ EXPLAIN ANALYZE SELECT * FROM test_pk ORDER BY t DESC LIMIT 5;
 | 1_| 0_|_SortPreservingMergeExec: [t@2 DESC], fetch=5 REDACTED
 |_|_|_WindowedSortExec: expr=t@2 DESC num_ranges=REDACTED fetch=5 REDACTED
 |_|_|_PartSortExec: expr=t@2 DESC num_ranges=REDACTED limit=5 REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":4, "mem_ranges":1, "files":3, "file_ranges":3} REDACTED
 |_|_|_|
 |_|_| Total rows: 5_|
@@ -391,7 +383,6 @@ EXPLAIN ANALYZE SELECT * FROM test_pk where pk > 7 ORDER BY t LIMIT 5;
 | 1_| 0_|_SortPreservingMergeExec: [t@2 ASC NULLS LAST], fetch=5 REDACTED
 |_|_|_WindowedSortExec: expr=t@2 ASC NULLS LAST num_ranges=REDACTED fetch=5 REDACTED
 |_|_|_PartSortExec: expr=t@2 ASC NULLS LAST num_ranges=REDACTED limit=5 REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":4, "mem_ranges":1, "files":3, "file_ranges":3} REDACTED
 |_|_|_|
 |_|_| Total rows: 5_|
@@ -415,7 +406,6 @@ EXPLAIN ANALYZE VERBOSE SELECT * FROM test_pk where pk > 7 ORDER BY t LIMIT 5;
 | 1_| 0_|_SortPreservingMergeExec: [t@2 ASC NULLS LAST], fetch=5 REDACTED
 |_|_|_WindowedSortExec: expr=t@2 ASC NULLS LAST num_ranges=REDACTED fetch=5 REDACTED
 |_|_|_PartSortExec: expr=t@2 ASC NULLS LAST num_ranges=REDACTED limit=5 REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":4, "mem_ranges":1, "REDACTED
 |_|_|_|
 |_|_| Total rows: 5_|

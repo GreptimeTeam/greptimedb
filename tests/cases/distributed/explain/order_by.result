@@ -129,7 +129,6 @@ EXPLAIN ANALYZE SELECT i, t AS alias_ts FROM test_pk ORDER BY t DESC LIMIT 5;
 |_|_|_WindowedSortExec: expr=t@1 DESC num_ranges=REDACTED fetch=5 REDACTED
 |_|_|_PartSortExec: expr=t@1 DESC num_ranges=REDACTED limit=5 REDACTED
 |_|_|_ProjectionExec: expr=[i@0 as i, t@1 as t, t@1 as test_pk.t__temp__0] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
 |_|_|_|
 |_|_| Total rows: 5_|
@@ -153,7 +152,6 @@ EXPLAIN ANALYZE SELECT i, t AS alias_ts FROM test_pk ORDER BY alias_ts DESC LIMI
 |_|_|_SortPreservingMergeExec: [t@1 DESC], fetch=5 REDACTED
 |_|_|_WindowedSortExec: expr=t@1 DESC num_ranges=REDACTED fetch=5 REDACTED
 |_|_|_PartSortExec: expr=t@1 DESC num_ranges=REDACTED limit=5 REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
 |_|_|_|
 |_|_| Total rows: 5_|

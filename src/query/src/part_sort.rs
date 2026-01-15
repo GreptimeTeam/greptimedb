@@ -114,7 +114,7 @@ pub struct PartSortExec {
     /// Execution metrics
     metrics: ExecutionPlanMetricsSet,
     partition_ranges: Vec<Vec<PartitionRange>>,
-    properties: PlanProperties,
+    properties: Arc<PlanProperties>,
     /// Filter matching the state of the sort for dynamic filter pushdown.
     /// If `limit` is `Some`, this will also be set and a TopK operator may be used.
     /// If `limit` is `None`, this will be `None`.
@@ -132,12 +132,12 @@ impl PartSortExec {
 
         let metrics = ExecutionPlanMetricsSet::new();
         let properties = input.properties();
-        let properties = PlanProperties::new(
+        let properties = Arc::new(PlanProperties::new(
             input.equivalence_properties().clone(),
             input.output_partitioning().clone(),
             properties.emission_type,
             properties.boundedness,
-        );
+        ));
 
         let filter = limit
             .is_some()
@@ -220,7 +220,7 @@ impl ExecutionPlan for PartSortExec {
         self.input.schema()
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
     }
 

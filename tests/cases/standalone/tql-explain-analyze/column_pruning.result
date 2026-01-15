@@ -40,13 +40,11 @@ TQL ANALYZE (0, 10, '5s') sum(promql_column_pruning);
 | 1_| 0_|_SortPreservingMergeExec: [ts@0 ASC NULLS LAST] REDACTED
 |_|_|_SortExec: expr=[ts@0 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
 |_|_|_AggregateExec: mode=FinalPartitioned, gby=[ts@0 as ts], aggr=[sum(promql_column_pruning.greptime_value)] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[ts@0 as ts], aggr=[sum(promql_column_pruning.greptime_value)] REDACTED
 |_|_|_ProjectionExec: expr=[ts@0 as ts, greptime_value@4 as greptime_value] REDACTED
 |_|_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["job", "instance", "region"] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
 |_|_| Total rows: 3_|
@@ -70,16 +68,13 @@ TQL ANALYZE (0, 10, '5s') sum(rate(promql_column_pruning[5s]));
 | 1_| 0_|_SortPreservingMergeExec: [ts@0 ASC NULLS LAST] REDACTED
 |_|_|_SortExec: expr=[ts@0 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
 |_|_|_AggregateExec: mode=FinalPartitioned, gby=[ts@0 as ts], aggr=[sum(prom_rate(ts_range,greptime_value,ts,Int64(5000)))] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[ts@0 as ts], aggr=[sum(prom_rate(ts_range,greptime_value,ts,Int64(5000)))] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: prom_rate(ts_range,greptime_value,ts,Int64(5000))@1 IS NOT NULL REDACTED
 |_|_|_ProjectionExec: expr=[ts@0 as ts, prom_rate(ts_range@5, greptime_value@4, ts@0, 5000) as prom_rate(ts_range,greptime_value,ts,Int64(5000))] REDACTED
 |_|_|_PromRangeManipulateExec: req range=[0..10000], interval=[5000], eval range=[5000], time index=[ts] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[ts], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["job", "instance", "region"] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|

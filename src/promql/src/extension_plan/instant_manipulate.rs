@@ -293,7 +293,7 @@ impl ExecutionPlan for InstantManipulateExec {
         self.input.schema()
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         self.input.properties()
     }
 
