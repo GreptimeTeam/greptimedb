@@ -337,32 +337,35 @@ impl GcRegionsHandler {
             }
         };
 
-        // Build a set of region IDs that have a leader peer
-        let regions_with_leader: HashMap<RegionId, _> = region_routes
+        let region_routes_map: HashMap<RegionId, _> = region_routes
             .iter()
-            .filter_map(|route| {
-                route
-                    .leader_peer
-                    .as_ref()
-                    .map(|peer| (route.region.id, peer.clone()))
-            })
+            .map(|route| (route.region.id, route))
             .collect();
 
         // Check each missing region
         for region_id in missing_region_ids {
-            if let Some(leader_peer) = regions_with_leader.get(region_id) {
-                // Region still has a leader on some datanode
+            if let Some(route) = region_routes_map.get(region_id) {
+                if let Some(leader_peer) = &route.leader_peer {
+                    // Region still has a leader on some datanode.
+                    return Err(UnexpectedSnafu {
+                        violated: format!(
+                            "Region {} is not on this datanode but is routed to datanode {}. \
+                             GC request may have been sent to wrong datanode.",
+                            region_id, leader_peer.id
+                        ),
+                    }
+                    .build());
+                }
+
                 return Err(UnexpectedSnafu {
                     violated: format!(
-                        "Region {} is not on this datanode but is routed to datanode {}. \
-                         GC request may have been sent to wrong datanode.",
-                        region_id, leader_peer.id
+                        "Region {} has no leader in route table; refusing GC without explicit tombstone/deleted state.",
+                        region_id
                     ),
                 }
                 .build());
             }
-            // Region not in route table or has no leader - it's truly deleted or being migrated
-            // OK to proceed with GC
+            // Region not in route table: treat as deleted and allow GC.
         }
 
         Ok(())

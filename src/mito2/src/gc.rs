@@ -358,6 +358,14 @@ impl LocalGcWorker {
             }
         );
 
+        ensure!(
+            region.is_some() || self.full_file_listing,
+            InvalidRequestSnafu {
+                region_id,
+                reason: "region not found and full_file_listing is false; refusing GC without full listing".to_string(),
+            }
+        );
+
         let manifest = if let Some(region) = &region {
             let manifest = region.manifest_ctx.manifest().await;
             // If the manifest version does not match, skip GC for this region to avoid deleting files that are still in use.
