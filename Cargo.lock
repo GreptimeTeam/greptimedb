@@ -6527,7 +6527,7 @@ dependencies = [
  "rand_chacha 0.9.0",
  "regex",
  "regex-automata",
- "roaring 0.10.12",
+ "roaring",
  "serde",
  "serde_json",
  "snafu 0.8.6",
@@ -8061,7 +8061,7 @@ dependencies = [
  "rand 0.9.1",
  "rayon",
  "regex",
- "roaring 0.10.12",
+ "roaring",
  "rskafka",
  "rstest 0.25.0",
  "rstest_reuse",
@@ -9194,7 +9194,7 @@ checksum = "e2355d85b9a3786f481747ced0e0ff2ba35213a1f9bd406ed906554d7af805a1"
 [[package]]
 name = "otel-arrow-rust"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/otel-arrow?rev=452821e455b16e9a397a09d299340e197eb91571#452821e455b16e9a397a09d299340e197eb91571"
+source = "git+https://github.com/GreptimeTeam/otel-arrow?rev=5da284414e9b14f678344b51e5292229e4b5f8d2#5da284414e9b14f678344b51e5292229e4b5f8d2"
 dependencies = [
  "ahash 0.8.12",
  "arrow 56.2.0",
@@ -9210,7 +9210,6 @@ dependencies = [
  "prost-build 0.14.1",
  "rand 0.9.1",
  "replace_with",
- "roaring 0.11.3",
  "serde",
  "smallvec",
  "snafu 0.8.6",
@@ -9223,7 +9222,7 @@ dependencies = [
 [[package]]
 name = "otlp-derive"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/otel-arrow?rev=452821e455b16e9a397a09d299340e197eb91571#452821e455b16e9a397a09d299340e197eb91571"
+source = "git+https://github.com/GreptimeTeam/otel-arrow?rev=5da284414e9b14f678344b51e5292229e4b5f8d2#5da284414e9b14f678344b51e5292229e4b5f8d2"
 dependencies = [
  "convert_case 0.8.0",
  "otlp-model",
@@ -9235,7 +9234,7 @@ dependencies = [
 [[package]]
 name = "otlp-model"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/otel-arrow?rev=452821e455b16e9a397a09d299340e197eb91571#452821e455b16e9a397a09d299340e197eb91571"
+source = "git+https://github.com/GreptimeTeam/otel-arrow?rev=5da284414e9b14f678344b51e5292229e4b5f8d2#5da284414e9b14f678344b51e5292229e4b5f8d2"
 dependencies = [
  "tonic-prost-build",
 ]
@@ -11243,16 +11242,6 @@ name = "roaring"
 version = "0.10.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19e8d2cfa184d94d0726d650a9f4a1be7f9b76ac9fdb954219878dc00c1c1e7b"
-dependencies = [
- "bytemuck",
- "byteorder",
-]
-
-[[package]]
-name = "roaring"
-version = "0.11.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ba9ce64a8f45d7fc86358410bb1a82e8c987504c0d4900e9141d69a9f26c885"
 dependencies = [
  "bytemuck",
  "byteorder",
