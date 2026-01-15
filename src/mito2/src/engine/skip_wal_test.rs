@@ -135,13 +135,6 @@ async fn test_close_follower_region_skip_wal() {
         .unwrap();
     assert!(region.is_follower());
 
-    // Convert back to Leader before close, because Followers cannot update
-    // the manifest (which is required for flush to complete).
-    engine
-        .set_region_role(region_id, RegionRole::Leader)
-        .unwrap();
-    assert!(!region.is_follower());
-
     // Close the region. This should trigger a flush.
     engine
         .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
