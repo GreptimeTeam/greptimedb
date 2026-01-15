@@ -600,9 +600,9 @@ impl ScanRegion {
                     region_id: metadata.region_id,
                     reason: format!("projection index {} is out of bound", idx),
                 })?;
-            if seen.insert(column.column_id) {
-                read_column_ids.push(column.column_id);
-            }
+            // keep the projection order
+            seen.insert(column.column_id);
+            read_column_ids.push(column.column_id);
         }
 
         if projection.is_empty() {
