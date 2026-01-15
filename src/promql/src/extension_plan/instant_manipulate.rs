@@ -33,6 +33,7 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream, Statistics,
 };
+use datafusion_expr::col;
 use datatypes::arrow::compute;
 use datatypes::arrow::error::Result as ArrowResult;
 use futures::{Stream, StreamExt, ready};
@@ -84,7 +85,37 @@ impl UserDefinedLogicalNodeCore for InstantManipulate {
     }
 
     fn expressions(&self) -> Vec<Expr> {
-        vec![]
+        if self.unfix.is_some() {
+            return vec![];
+        }
+
+        let mut exprs = vec![col(&self.time_index_column)];
+        if let Some(field) = &self.field_column {
+            exprs.push(col(field));
+        }
+        exprs
+    }
+
+    fn necessary_children_exprs(&self, output_columns: &[usize]) -> Option<Vec<Vec<usize>>> {
+        if self.unfix.is_some() {
+            return None;
+        }
+
+        let input_schema = self.input.schema();
+        if output_columns.is_empty() {
+            let indices = (0..input_schema.fields().len()).collect::<Vec<_>>();
+            return Some(vec![indices]);
+        }
+
+        let mut required = output_columns.to_vec();
+        required.push(input_schema.index_of_column_by_name(None, &self.time_index_column)?);
+        if let Some(field) = &self.field_column {
+            required.push(input_schema.index_of_column_by_name(None, field)?);
+        }
+
+        required.sort_unstable();
+        required.dedup();
+        Some(vec![required])
     }
 
     fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -440,8 +471,6 @@ impl InstantManipulateStream {
     // refer to Go version: https://github.com/prometheus/prometheus/blob/e934d0f01158a1d55fa0ebb035346b195fcc1260/promql/engine.go#L1571
     // and the function `vectorSelectorSingle`
     pub fn manipulate(&self, input: RecordBatch) -> DataFusionResult<RecordBatch> {
-        let mut take_indices = vec![];
-
         let ts_column = input
             .column(self.time_index)
             .as_any()
@@ -472,6 +501,8 @@ impl InstantManipulateStream {
 
         let aligned_start = self.start + (max_start - self.start) / self.interval * self.interval;
         let aligned_end = self.end - (self.end - min_end) / self.interval * self.interval;
+
+        let mut take_indices = vec![];
 
         let mut cursor = 0;
 
@@ -570,6 +601,8 @@ impl InstantManipulateStream {
 
 #[cfg(test)]
 mod test {
+    use datafusion::common::ToDFSchema;
+    use datafusion::logical_expr::{EmptyRelation, LogicalPlan};
     use datafusion::prelude::SessionContext;
 
     use super::*;
@@ -609,6 +642,30 @@ mod test {
             .to_string();
 
         assert_eq!(result_literal, expected);
+    }
+
+    #[test]
+    fn pruning_should_keep_time_and_field_columns_for_exec() {
+        let df_schema = prepare_test_data().schema().to_dfschema_ref().unwrap();
+        let input = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: df_schema,
+        });
+        let plan = InstantManipulate::new(
+            0,
+            0,
+            0,
+            0,
+            TIME_INDEX_COLUMN.to_string(),
+            Some("value".to_string()),
+            input,
+        );
+
+        // Simulate a parent projection requesting only the `path` column.
+        let output_columns = [2usize];
+        let required = plan.necessary_children_exprs(&output_columns).unwrap();
+        let required = &required[0];
+        assert_eq!(required.as_slice(), &[0, 1, 2]);
     }
 
     #[tokio::test]

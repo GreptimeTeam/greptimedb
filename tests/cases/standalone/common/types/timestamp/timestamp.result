@@ -75,31 +75,31 @@ SELECT MAX(t) FROM timestamp;
 
 SELECT SUM(t) FROM timestamp;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Execution error: Function 'sum' user-defined coercion failed with "Execution error: Sum not supported for Timestamp(Millisecond, None)" No function matches the given name and argument types 'sum(Timestamp(Millisecond, None))'. You might need to add explicit type casts.
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Execution error: Function 'sum' user-defined coercion failed with "Execution error: Sum not supported for Timestamp(ms)" No function matches the given name and argument types 'sum(Timestamp(ms))'. You might need to add explicit type casts.
 	Candidate functions:
 	sum(UserDefined)
 
 SELECT AVG(t) FROM timestamp;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Execution error: Function 'avg' user-defined coercion failed with "Error during planning: The function \"avg\" does not support inputs of type Timestamp(Millisecond, None)." No function matches the given name and argument types 'avg(Timestamp(Millisecond, None))'. You might need to add explicit type casts.
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Execution error: Function 'avg' user-defined coercion failed with "Error during planning: Avg does not support inputs of type Timestamp(ms)." No function matches the given name and argument types 'avg(Timestamp(ms))'. You might need to add explicit type casts.
 	Candidate functions:
 	avg(UserDefined)
 
 SELECT t+t FROM timestamp;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Cannot get result type for temporal operation Timestamp(Millisecond, None) + Timestamp(Millisecond, None): Invalid argument error: Invalid timestamp arithmetic operation: Timestamp(Millisecond, None) + Timestamp(Millisecond, None)
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Cannot get result type for temporal operation Timestamp(ms) + Timestamp(ms): Invalid argument error: Invalid timestamp arithmetic operation: Timestamp(ms) + Timestamp(ms)
 
 SELECT t*t FROM timestamp;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Cannot get result type for temporal operation Timestamp(Millisecond, None) * Timestamp(Millisecond, None): Invalid argument error: Invalid timestamp arithmetic operation: Timestamp(Millisecond, None) * Timestamp(Millisecond, None)
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Cannot get result type for temporal operation Timestamp(ms) * Timestamp(ms): Invalid argument error: Invalid timestamp arithmetic operation: Timestamp(ms) * Timestamp(ms)
 
 SELECT t/t FROM timestamp;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Cannot get result type for temporal operation Timestamp(Millisecond, None) / Timestamp(Millisecond, None): Invalid argument error: Invalid timestamp arithmetic operation: Timestamp(Millisecond, None) / Timestamp(Millisecond, None)
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Cannot get result type for temporal operation Timestamp(ms) / Timestamp(ms): Invalid argument error: Invalid timestamp arithmetic operation: Timestamp(ms) / Timestamp(ms)
 
 SELECT t%t FROM timestamp;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Cannot get result type for temporal operation Timestamp(Millisecond, None) % Timestamp(Millisecond, None): Invalid argument error: Invalid timestamp arithmetic operation: Timestamp(Millisecond, None) % Timestamp(Millisecond, None)
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Cannot get result type for temporal operation Timestamp(ms) % Timestamp(ms): Invalid argument error: Invalid timestamp arithmetic operation: Timestamp(ms) % Timestamp(ms)
 
 SELECT t-t FROM timestamp;
 
@@ -166,11 +166,11 @@ SELECT t::TIME FROM timestamp WHERE EXTRACT(YEAR from t)=2007 ORDER BY 1;
 
 SELECT (DATE '1992-01-01')::TIMESTAMP;
 
-+---------------------------------------------------------------------+
-| arrow_cast(Utf8("1992-01-01"),Utf8("Timestamp(Millisecond, None)")) |
-+---------------------------------------------------------------------+
-| 1992-01-01T00:00:00                                                 |
-+---------------------------------------------------------------------+
++------------------------------------------------------+
+| arrow_cast(Utf8("1992-01-01"),Utf8("Timestamp(ms)")) |
++------------------------------------------------------+
+| 1992-01-01T00:00:00                                  |
++------------------------------------------------------+
 
 SELECT TIMESTAMP '2008-01-01 00:00:01.5'::VARCHAR;
 
@@ -195,9 +195,9 @@ Affected Rows: 0
 -- SQLNESS PROTOCOL POSTGRES
 SELECT '2025-04-14 20:42:19.021000'::TIMESTAMP - '2025-04-14 20:42:18.103000'::TIMESTAMP;
 
-+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| arrow_cast(Utf8("2025-04-14 20:42:19.021000"),Utf8("Timestamp(Millisecond, None)")) - arrow_cast(Utf8("2025-04-14 20:42:18.103000"),Utf8("Timestamp(Millisecond, None)")) |
-+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| 00:00:00.918000                                                                                                                                                           |
-+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
++---------------------------------------------------------------------------------------------------------------------------------------------+
+| arrow_cast(Utf8("2025-04-14 20:42:19.021000"),Utf8("Timestamp(ms)")) - arrow_cast(Utf8("2025-04-14 20:42:18.103000"),Utf8("Timestamp(ms)")) |
++---------------------------------------------------------------------------------------------------------------------------------------------+
+| 00:00:00.918000                                                                                                                             |
++---------------------------------------------------------------------------------------------------------------------------------------------+
 

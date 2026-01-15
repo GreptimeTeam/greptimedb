@@ -48,7 +48,7 @@ pub mod stats;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_util;
 pub mod util;
-pub mod wal_options_allocator;
+pub mod wal_provider;
 
 // The id of the datanode.
 pub type DatanodeId = u64;

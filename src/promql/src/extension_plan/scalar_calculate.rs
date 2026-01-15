@@ -31,6 +31,7 @@ use datafusion::physical_plan::{
 };
 use datafusion::prelude::Expr;
 use datafusion::sql::TableReference;
+use datafusion_expr::col;
 use datatypes::arrow::array::{Array, Float64Array, StringArray, TimestampMillisecondArray};
 use datatypes::arrow::compute::{CastOptions, cast_with_options, concat_batches};
 use datatypes::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
@@ -266,7 +267,36 @@ impl UserDefinedLogicalNodeCore for ScalarCalculate {
     }
 
     fn expressions(&self) -> Vec<Expr> {
-        vec![]
+        if self.unfix.is_some() {
+            return vec![];
+        }
+
+        self.tag_columns
+            .iter()
+            .map(col)
+            .chain(std::iter::once(col(&self.time_index)))
+            .chain(std::iter::once(col(&self.field_column)))
+            .collect()
+    }
+
+    fn necessary_children_exprs(&self, _output_columns: &[usize]) -> Option<Vec<Vec<usize>>> {
+        if self.unfix.is_some() {
+            return None;
+        }
+
+        let input_schema = self.input.schema();
+        let time_index_idx = input_schema.index_of_column_by_name(None, &self.time_index)?;
+        let field_column_idx = input_schema.index_of_column_by_name(None, &self.field_column)?;
+
+        let mut required = Vec::with_capacity(2 + self.tag_columns.len());
+        required.extend([time_index_idx, field_column_idx]);
+        for tag in &self.tag_columns {
+            required.push(input_schema.index_of_column_by_name(None, tag)?);
+        }
+
+        required.sort_unstable();
+        required.dedup();
+        Some(vec![required])
     }
 
     fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -275,15 +305,9 @@ impl UserDefinedLogicalNodeCore for ScalarCalculate {
 
     fn with_exprs_and_inputs(
         &self,
-        exprs: Vec<Expr>,
+        _exprs: Vec<Expr>,
         inputs: Vec<LogicalPlan>,
     ) -> DataFusionResult<Self> {
-        if !exprs.is_empty() {
-            return Err(DataFusionError::Internal(
-                "ScalarCalculate should not have any expressions".to_string(),
-            ));
-        }
-
         let input: LogicalPlan = inputs.into_iter().next().unwrap();
         let input_schema = input.schema();
 
@@ -623,6 +647,109 @@ mod test {
     use datatypes::arrow::datatypes::TimeUnit;
 
     use super::*;
+
+    fn project_batch(batch: &RecordBatch, indices: &[usize]) -> RecordBatch {
+        let fields = indices
+            .iter()
+            .map(|&idx| batch.schema().field(idx).clone())
+            .collect::<Vec<_>>();
+        let columns = indices
+            .iter()
+            .map(|&idx| batch.column(idx).clone())
+            .collect::<Vec<_>>();
+        let schema = Arc::new(Schema::new(fields));
+        RecordBatch::try_new(schema, columns).unwrap()
+    }
+
+    #[test]
+    fn necessary_children_exprs_preserve_tag_columns() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("ts", DataType::Timestamp(TimeUnit::Millisecond, None), true),
+            Field::new("tag1", DataType::Utf8, true),
+            Field::new("tag2", DataType::Utf8, true),
+            Field::new("val", DataType::Float64, true),
+            Field::new("extra", DataType::Utf8, true),
+        ]));
+        let schema = Arc::new(DFSchema::try_from(schema).unwrap());
+        let input = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema,
+        });
+        let tag_columns = vec!["tag1".to_string(), "tag2".to_string()];
+        let plan = ScalarCalculate::new(0, 1, 1, input, "ts", &tag_columns, "val", None).unwrap();
+
+        let required = plan.necessary_children_exprs(&[0, 1]).unwrap();
+        assert_eq!(required, vec![vec![0, 1, 2, 3]]);
+    }
+
+    #[tokio::test]
+    async fn pruning_should_keep_tag_columns_for_exec() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("ts", DataType::Timestamp(TimeUnit::Millisecond, None), true),
+            Field::new("tag1", DataType::Utf8, true),
+            Field::new("tag2", DataType::Utf8, true),
+            Field::new("val", DataType::Float64, true),
+            Field::new("extra", DataType::Utf8, true),
+        ]));
+        let df_schema = Arc::new(DFSchema::try_from(schema.clone()).unwrap());
+        let input = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: df_schema,
+        });
+        let tag_columns = vec!["tag1".to_string(), "tag2".to_string()];
+        let plan =
+            ScalarCalculate::new(0, 15_000, 5000, input, "ts", &tag_columns, "val", None).unwrap();
+
+        let required = plan.necessary_children_exprs(&[0, 1]).unwrap();
+        let required = &required[0];
+
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![
+                    0, 5_000, 10_000, 15_000,
+                ])),
+                Arc::new(StringArray::from(vec!["foo", "foo", "foo", "foo"])),
+                Arc::new(StringArray::from(vec!["bar", "bar", "bar", "bar"])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+                Arc::new(StringArray::from(vec!["x", "x", "x", "x"])),
+            ],
+        )
+        .unwrap();
+
+        let projected_batch = project_batch(&batch, required);
+        let projected_schema = projected_batch.schema();
+        let memory_exec = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![projected_batch]], projected_schema, None).unwrap(),
+        )));
+        let scalar_exec = plan.to_execution_plan(memory_exec).unwrap();
+
+        let session_context = SessionContext::default();
+        let result = datafusion::physical_plan::collect(scalar_exec, session_context.task_ctx())
+            .await
+            .unwrap();
+
+        assert_eq!(result.len(), 1);
+        let batch = &result[0];
+        assert_eq!(batch.num_columns(), 2);
+        assert_eq!(batch.num_rows(), 4);
+        assert_eq!(batch.schema().field(0).name(), "ts");
+        assert_eq!(batch.schema().field(1).name(), "scalar(val)");
+
+        let ts = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap();
+        assert_eq!(ts.values(), &[0i64, 5_000, 10_000, 15_000]);
+
+        let values = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert_eq!(values.values(), &[1.0f64, 2.0, 3.0, 4.0]);
+    }
 
     fn prepare_test_data(series: Vec<RecordBatch>) -> DataSourceExec {
         let schema = Arc::new(Schema::new(vec![

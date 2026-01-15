@@ -35,13 +35,15 @@ use index::result_cache::IndexResultCache;
 use moka::notification::RemovalCause;
 use moka::sync::Cache;
 use object_store::ObjectStore;
-use parquet::file::metadata::ParquetMetaData;
+use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData};
 use puffin::puffin_manager::cache::{PuffinMetadataCache, PuffinMetadataCacheRef};
 use store_api::storage::{ConcreteDataType, FileId, RegionId, TimeSeriesRowSelector};
 
 use crate::cache::cache_size::parquet_meta_size;
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::index::inverted_index::{InvertedIndexCache, InvertedIndexCacheRef};
+#[cfg(feature = "vector_index")]
+use crate::cache::index::vector_index::{VectorIndexCache, VectorIndexCacheRef};
 use crate::cache::write_cache::WriteCacheRef;
 use crate::metrics::{CACHE_BYTES, CACHE_EVICTION, CACHE_HIT, CACHE_MISS};
 use crate::read::Batch;
@@ -83,13 +85,13 @@ impl CacheStrategy {
         &self,
         file_id: RegionFileId,
         metrics: &mut MetadataCacheMetrics,
+        page_index_policy: PageIndexPolicy,
     ) -> Option<Arc<ParquetMetaData>> {
         match self {
-            CacheStrategy::EnableAll(cache_manager) => {
-                cache_manager.get_parquet_meta_data(file_id, metrics).await
-            }
-            CacheStrategy::Compaction(cache_manager) => {
-                cache_manager.get_parquet_meta_data(file_id, metrics).await
+            CacheStrategy::EnableAll(cache_manager) | CacheStrategy::Compaction(cache_manager) => {
+                cache_manager
+                    .get_parquet_meta_data(file_id, metrics, page_index_policy)
+                    .await
             }
             CacheStrategy::Disabled => {
                 metrics.cache_miss += 1;
@@ -247,6 +249,16 @@ impl CacheStrategy {
         }
     }
 
+    /// Calls [CacheManager::vector_index_cache()].
+    /// It returns None if the strategy is [CacheStrategy::Compaction] or [CacheStrategy::Disabled].
+    #[cfg(feature = "vector_index")]
+    pub fn vector_index_cache(&self) -> Option<&VectorIndexCacheRef> {
+        match self {
+            CacheStrategy::EnableAll(cache_manager) => cache_manager.vector_index_cache(),
+            CacheStrategy::Compaction(_) | CacheStrategy::Disabled => None,
+        }
+    }
+
     /// Calls [CacheManager::puffin_metadata_cache()].
     /// It returns None if the strategy is [CacheStrategy::Compaction] or [CacheStrategy::Disabled].
     pub fn puffin_metadata_cache(&self) -> Option<&PuffinMetadataCacheRef> {
@@ -303,6 +315,9 @@ pub struct CacheManager {
     inverted_index_cache: Option<InvertedIndexCacheRef>,
     /// Cache for bloom filter index.
     bloom_filter_index_cache: Option<BloomFilterIndexCacheRef>,
+    /// Cache for vector index.
+    #[cfg(feature = "vector_index")]
+    vector_index_cache: Option<VectorIndexCacheRef>,
     /// Puffin metadata cache.
     puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
     /// Cache for time series selectors.
@@ -325,6 +340,7 @@ impl CacheManager {
         &self,
         file_id: RegionFileId,
         metrics: &mut MetadataCacheMetrics,
+        page_index_policy: PageIndexPolicy,
     ) -> Option<Arc<ParquetMetaData>> {
         // Try to get metadata from sst meta cache
         if let Some(metadata) = self.get_parquet_meta_data_from_mem_cache(file_id) {
@@ -335,7 +351,10 @@ impl CacheManager {
         // Try to get metadata from write cache
         let key = IndexKey::new(file_id.region_id(), file_id.file_id(), FileType::Parquet);
         if let Some(write_cache) = &self.write_cache
-            && let Some(metadata) = write_cache.file_cache().get_parquet_meta_data(key).await
+            && let Some(metadata) = write_cache
+                .file_cache()
+                .get_parquet_meta_data(key, metrics, page_index_policy)
+                .await
         {
             metrics.file_cache_hit += 1;
             let metadata = Arc::new(metadata);
@@ -434,6 +453,11 @@ impl CacheManager {
             cache.invalidate_file(file_id.file_id());
         }
 
+        #[cfg(feature = "vector_index")]
+        if let Some(cache) = &self.vector_index_cache {
+            cache.invalidate_file(file_id.file_id());
+        }
+
         if let Some(cache) = &self.puffin_metadata_cache {
             cache.remove(&file_id.to_string());
         }
@@ -484,6 +508,11 @@ impl CacheManager {
 
     pub(crate) fn bloom_filter_index_cache(&self) -> Option<&BloomFilterIndexCacheRef> {
         self.bloom_filter_index_cache.as_ref()
+    }
+
+    #[cfg(feature = "vector_index")]
+    pub(crate) fn vector_index_cache(&self) -> Option<&VectorIndexCacheRef> {
+        self.vector_index_cache.as_ref()
     }
 
     pub(crate) fn puffin_metadata_cache(&self) -> Option<&PuffinMetadataCacheRef> {
@@ -646,6 +675,9 @@ impl CacheManagerBuilder {
             self.index_content_size,
             self.index_content_page_size,
         );
+        #[cfg(feature = "vector_index")]
+        let vector_index_cache = (self.index_content_size != 0)
+            .then(|| Arc::new(VectorIndexCache::new(self.index_content_size)));
         let index_result_cache = (self.index_result_cache_size != 0)
             .then(|| IndexResultCache::new(self.index_result_cache_size));
         let puffin_metadata_cache =
@@ -672,6 +704,8 @@ impl CacheManagerBuilder {
             write_cache: self.write_cache,
             inverted_index_cache: Some(Arc::new(inverted_index_cache)),
             bloom_filter_index_cache: Some(Arc::new(bloom_filter_index_cache)),
+            #[cfg(feature = "vector_index")]
+            vector_index_cache,
             puffin_metadata_cache: Some(Arc::new(puffin_metadata_cache)),
             selector_result_cache,
             index_result_cache,
@@ -860,7 +894,7 @@ mod tests {
         cache.put_parquet_meta_data(file_id, metadata);
         assert!(
             cache
-                .get_parquet_meta_data(file_id, &mut metrics)
+                .get_parquet_meta_data(file_id, &mut metrics, Default::default())
                 .await
                 .is_none()
         );
@@ -890,7 +924,7 @@ mod tests {
         let file_id = RegionFileId::new(region_id, FileId::random());
         assert!(
             cache
-                .get_parquet_meta_data(file_id, &mut metrics)
+                .get_parquet_meta_data(file_id, &mut metrics, Default::default())
                 .await
                 .is_none()
         );
@@ -898,14 +932,14 @@ mod tests {
         cache.put_parquet_meta_data(file_id, metadata);
         assert!(
             cache
-                .get_parquet_meta_data(file_id, &mut metrics)
+                .get_parquet_meta_data(file_id, &mut metrics, Default::default())
                 .await
                 .is_some()
         );
         cache.remove_parquet_meta_data(file_id);
         assert!(
             cache
-                .get_parquet_meta_data(file_id, &mut metrics)
+                .get_parquet_meta_data(file_id, &mut metrics, Default::default())
                 .await
                 .is_none()
         );

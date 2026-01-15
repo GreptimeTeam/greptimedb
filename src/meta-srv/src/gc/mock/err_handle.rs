@@ -64,6 +64,7 @@ async fn test_gc_regions_failure_handling() {
             region_id,
             HashSet::from([FileRef::new(region_id, FileId::random(), None)]),
         )]),
+        cross_region_refs: HashMap::new(),
     };
 
     let ctx = Arc::new(
@@ -120,10 +121,6 @@ async fn test_gc_regions_failure_handling() {
         *ctx.get_table_to_region_stats_calls.lock().unwrap(),
         1,
         "Expected 1 call to get_table_to_region_stats"
-    );
-    assert!(
-        *ctx.get_file_references_calls.lock().unwrap() >= 1,
-        "Expected at least 1 call to get_file_references"
     );
     assert!(
         *ctx.gc_regions_calls.lock().unwrap() >= 1,
@@ -206,13 +203,6 @@ async fn test_get_file_references_failure() {
         datanode_report.deleted_files[&region_id].is_empty(),
         "Should have empty deleted files due to file refs failure"
     );
-
-    // Should still attempt to get file references (may be called multiple times due to retry logic)
-    assert!(
-        *ctx.get_file_references_calls.lock().unwrap() >= 1,
-        "Expected at least 1 call to get_file_references, got {}",
-        *ctx.get_file_references_calls.lock().unwrap()
-    );
 }
 
 #[tokio::test]
@@ -255,42 +245,22 @@ async fn test_get_table_route_failure() {
         last_tracker_cleanup: Arc::new(tokio::sync::Mutex::new(Instant::now())),
     };
 
-    // Get candidates first
-    let stats = &ctx
-        .table_to_region_stats
-        .lock()
-        .unwrap()
-        .clone()
-        .unwrap_or_default();
-    let candidates = scheduler.select_gc_candidates(stats).await.unwrap();
+    // Test the full workflow to trigger table route failure during aggregation
+    // The table route failure should cause the entire GC cycle to fail
+    let result = scheduler.handle_tick().await;
 
-    // Convert table-based candidates to datanode-based candidates
-    let datanode_to_candidates = HashMap::from([(
-        Peer::new(1, ""),
-        candidates
-            .into_iter()
-            .flat_map(|(table_id, candidates)| candidates.into_iter().map(move |c| (table_id, c)))
-            .collect(),
-    )]);
-
-    // This should handle table route failure gracefully
-    let report = scheduler
-        .parallel_process_datanodes(datanode_to_candidates)
-        .await;
-
-    // Should process the datanode but handle route error gracefully
-    assert_eq!(
-        report.per_datanode_reports.len(),
-        0,
-        "Expected 0 datanode report"
-    );
-    assert_eq!(
-        report.failed_datanodes.len(),
-        1,
-        "Expected 1 failed datanodes (route error handled gracefully)"
-    );
+    // The table route failure should be propagated as an error
     assert!(
-        report.failed_datanodes.contains_key(&1),
-        "Failed datanodes should contain the datanode with route error"
+        result.is_err(),
+        "Expected table route failure to propagate as error"
+    );
+
+    // Verify the error message contains our simulated failure
+    let error = result.unwrap_err();
+    let error_msg = format!("{}", error);
+    assert!(
+        error_msg.contains("Simulated table route failure for testing"),
+        "Error message should contain our simulated failure: {}",
+        error_msg
     );
 }

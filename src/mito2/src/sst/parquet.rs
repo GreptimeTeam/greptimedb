@@ -115,7 +115,7 @@ mod tests {
     use object_store::ObjectStore;
     use parquet::arrow::AsyncArrowWriter;
     use parquet::basic::{Compression, Encoding, ZstdLevel};
-    use parquet::file::metadata::KeyValue;
+    use parquet::file::metadata::{KeyValue, PageIndexPolicy};
     use parquet::file::properties::WriterProperties;
     use store_api::codec::PrimaryKeyEncoding;
     use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
@@ -126,6 +126,7 @@ mod tests {
 
     use super::*;
     use crate::access_layer::{FilePathProvider, Metrics, RegionFilePathFactory, WriteType};
+    use crate::cache::test_util::assert_parquet_metadata_equal;
     use crate::cache::{CacheManager, CacheStrategy, PageKey};
     use crate::config::IndexConfig;
     use crate::read::{BatchBuilder, BatchReader, FlatSource};
@@ -143,9 +144,9 @@ mod tests {
         DEFAULT_WRITE_CONCURRENCY, FlatSchemaOptions, location, to_flat_sst_arrow_schema,
     };
     use crate::test_util::sst_util::{
-        assert_parquet_metadata_eq, build_test_binary_test_region_metadata, new_batch_by_range,
-        new_batch_with_binary, new_batch_with_custom_sequence, new_primary_key, new_source,
-        new_sparse_primary_key, sst_file_handle, sst_file_handle_with_file_id, sst_region_metadata,
+        build_test_binary_test_region_metadata, new_batch_by_range, new_batch_with_binary,
+        new_batch_with_custom_sequence, new_primary_key, new_source, new_sparse_primary_key,
+        sst_file_handle, sst_file_handle_with_file_id, sst_region_metadata,
         sst_region_metadata_with_encoding,
     };
     use crate::test_util::{TestEnv, check_reader_result};
@@ -377,11 +378,12 @@ mod tests {
             PathType::Bare,
             handle.clone(),
             object_store,
-        );
+        )
+        .page_index_policy(PageIndexPolicy::Optional);
         let reader = builder.build().await.unwrap();
         let reader_metadata = reader.parquet_metadata();
 
-        assert_parquet_metadata_eq(writer_metadata, reader_metadata)
+        assert_parquet_metadata_equal(writer_metadata, reader_metadata);
     }
 
     #[tokio::test]

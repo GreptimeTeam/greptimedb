@@ -255,9 +255,9 @@ fn metrics_to_string(metrics: RecordBatchMetrics, format: AnalyzeFormat) -> DfRe
     match format {
         AnalyzeFormat::JSON => Ok(JsonMetrics::from_record_batch_metrics(metrics).to_string()),
         AnalyzeFormat::TEXT => Ok(metrics.to_string()),
-        AnalyzeFormat::GRAPHVIZ => Err(DataFusionError::NotImplemented(
-            "GRAPHVIZ format is not supported for metrics output".to_string(),
-        )),
+        format => Err(DataFusionError::NotImplemented(format!(
+            "AnalyzeFormat {format}",
+        ))),
     }
 }
 

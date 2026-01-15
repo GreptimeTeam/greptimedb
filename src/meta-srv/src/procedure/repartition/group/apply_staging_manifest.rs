@@ -31,7 +31,7 @@ use store_api::storage::RegionId;
 
 use crate::error::{self, Error, Result};
 use crate::handler::HeartbeatMailbox;
-use crate::procedure::repartition::group::update_metadata::UpdateMetadata;
+use crate::procedure::repartition::group::repartition_end::RepartitionEnd;
 use crate::procedure::repartition::group::utils::{
     HandleMultipleResult, group_region_routes_by_peer, handle_multiple_results,
 };
@@ -52,15 +52,17 @@ impl State for ApplyStagingManifest {
     ) -> Result<(Box<dyn State>, Status)> {
         self.apply_staging_manifests(ctx).await?;
 
-        Ok((
-            Box::new(UpdateMetadata::ApplyStaging),
-            Status::executing(true),
-        ))
+        Ok((Box::new(RepartitionEnd), Status::executing(true)))
     }
 
     fn as_any(&self) -> &dyn Any {
         self
     }
+}
+
+struct ApplyStagingManifestInstructions {
+    instructions: HashMap<Peer, Vec<common_meta::instruction::ApplyStagingManifest>>,
+    central_region_instruction: Option<(Peer, common_meta::instruction::ApplyStagingManifest)>,
 }
 
 impl ApplyStagingManifest {
@@ -69,7 +71,7 @@ impl ApplyStagingManifest {
         target_routes: &[RegionRoute],
         targets: &[RegionDescriptor],
         central_region_id: RegionId,
-    ) -> Result<HashMap<Peer, Vec<common_meta::instruction::ApplyStagingManifest>>> {
+    ) -> Result<ApplyStagingManifestInstructions> {
         let target_partition_expr_by_region = targets
             .iter()
             .map(|target| {
@@ -86,7 +88,25 @@ impl ApplyStagingManifest {
         let target_region_routes_by_peer = group_region_routes_by_peer(target_routes);
         let mut instructions = HashMap::with_capacity(target_region_routes_by_peer.len());
 
-        for (peer, region_ids) in target_region_routes_by_peer {
+        let mut central_region_instruction = None;
+        for (peer, mut region_ids) in target_region_routes_by_peer {
+            // If the central region is in the target region ids,
+            // remove it and build the instruction for the central region.
+            if region_ids.contains(&central_region_id) {
+                region_ids.retain(|r| *r != central_region_id);
+                central_region_instruction = Some((
+                    peer.clone(),
+                    common_meta::instruction::ApplyStagingManifest {
+                        region_id: central_region_id,
+                        partition_expr: target_partition_expr_by_region[&central_region_id].clone(),
+                        central_region_id,
+                        manifest_path: staging_manifest_paths[&central_region_id].clone(),
+                    },
+                ));
+                if region_ids.is_empty() {
+                    continue;
+                }
+            }
             let apply_staging_manifests = region_ids
                 .into_iter()
                 .map(|region_id| common_meta::instruction::ApplyStagingManifest {
@@ -99,7 +119,10 @@ impl ApplyStagingManifest {
             instructions.insert(peer.clone(), apply_staging_manifests);
         }
 
-        Ok(instructions)
+        Ok(ApplyStagingManifestInstructions {
+            instructions,
+            central_region_instruction,
+        })
     }
 
     #[allow(dead_code)]
@@ -112,7 +135,10 @@ impl ApplyStagingManifest {
         let targets = &ctx.persistent_ctx.targets;
         let target_routes = &prepare_result.target_routes;
         let central_region_id = prepare_result.central_region;
-        let instructions = Self::build_apply_staging_manifest_instructions(
+        let ApplyStagingManifestInstructions {
+            instructions,
+            central_region_instruction,
+        } = Self::build_apply_staging_manifest_instructions(
             staging_manifest_paths,
             target_routes,
             targets,
@@ -155,8 +181,10 @@ impl ApplyStagingManifest {
         let results = join_all(tasks).await;
         let result = handle_multiple_results(&results);
         match result {
-            HandleMultipleResult::AllSuccessful => Ok(()),
-            HandleMultipleResult::AllRetryable(retryable_errors) => error::RetryLaterSnafu {
+            HandleMultipleResult::AllSuccessful => {
+                // Coninute
+            }
+            HandleMultipleResult::AllRetryable(retryable_errors) => return error::RetryLaterSnafu {
                 reason: format!(
                     "All retryable errors during applying staging manifests for repartition table {}, group id {}: {:?}",
                     table_id, group_id,
@@ -168,7 +196,7 @@ impl ApplyStagingManifest {
                 ),
             }
             .fail(),
-            HandleMultipleResult::AllNonRetryable(non_retryable_errors) => error::UnexpectedSnafu {
+            HandleMultipleResult::AllNonRetryable(non_retryable_errors) => return error::UnexpectedSnafu {
                 violated: format!(
                     "All non retryable errors during applying staging manifests for repartition table {}, group id {}: {:?}",
                     table_id, group_id,
@@ -183,7 +211,7 @@ impl ApplyStagingManifest {
             HandleMultipleResult::PartialRetryable {
                 retryable_errors,
                 non_retryable_errors,
-            } => error::UnexpectedSnafu {
+            } => return error::UnexpectedSnafu {
                 violated: format!(
                     "Partial retryable errors during applying staging manifests for repartition table {}, group id {}: {:?}, non retryable errors: {:?}",
                     table_id, group_id,
@@ -201,6 +229,20 @@ impl ApplyStagingManifest {
             }
             .fail(),
         }
+
+        if let Some((peer, instruction)) = central_region_instruction {
+            info!("Applying staging manifest for central region: {:?}", peer);
+            Self::apply_staging_manifest(
+                &ctx.mailbox,
+                &ctx.server_addr,
+                &peer,
+                &[instruction],
+                operation_timeout,
+            )
+            .await?;
+        }
+
+        Ok(())
     }
 
     async fn apply_staging_manifest(

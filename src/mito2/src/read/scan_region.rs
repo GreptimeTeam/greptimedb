@@ -70,11 +70,15 @@ use crate::sst::index::fulltext_index::applier::FulltextIndexApplierRef;
 use crate::sst::index::fulltext_index::applier::builder::FulltextIndexApplierBuilder;
 use crate::sst::index::inverted_index::applier::InvertedIndexApplierRef;
 use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
+#[cfg(feature = "vector_index")]
+use crate::sst::index::vector_index::applier::{VectorIndexApplier, VectorIndexApplierRef};
 use crate::sst::parquet::file_range::PreFilterMode;
 use crate::sst::parquet::reader::ReaderMetrics;
 
 /// Parallel scan channel size for flat format.
 const FLAT_SCAN_CHANNEL_SIZE: usize = 2;
+#[cfg(feature = "vector_index")]
+const VECTOR_INDEX_OVERFETCH_MULTIPLIER: usize = 2;
 
 /// A scanner scans a region and returns a [SendableRecordBatchStream].
 pub(crate) enum Scanner {
@@ -498,6 +502,16 @@ impl ScanRegion {
             self.build_fulltext_index_applier(&non_field_filters),
             self.build_fulltext_index_applier(&field_filters),
         ];
+        #[cfg(feature = "vector_index")]
+        let vector_index_applier = self.build_vector_index_applier();
+        #[cfg(feature = "vector_index")]
+        let vector_index_k = self.request.vector_search.as_ref().map(|search| {
+            if self.request.filters.is_empty() {
+                search.k
+            } else {
+                search.k.saturating_mul(VECTOR_INDEX_OVERFETCH_MULTIPLIER)
+            }
+        });
         let predicate = PredicateGroup::new(&self.version.metadata, &self.request.filters)?;
 
         if flat_format {
@@ -523,6 +537,10 @@ impl ScanRegion {
             .with_series_row_selector(self.request.series_row_selector)
             .with_distribution(self.request.distribution)
             .with_flat_format(flat_format);
+        #[cfg(feature = "vector_index")]
+        let input = input
+            .with_vector_index_applier(vector_index_applier)
+            .with_vector_index_k(vector_index_k);
 
         #[cfg(feature = "enterprise")]
         let input = if let Some(provider) = self.extension_range_provider {
@@ -667,6 +685,31 @@ impl ScanRegion {
         .flatten()
         .map(Arc::new)
     }
+
+    /// Build the vector index applier from vector search request.
+    #[cfg(feature = "vector_index")]
+    fn build_vector_index_applier(&self) -> Option<VectorIndexApplierRef> {
+        let vector_search = self.request.vector_search.as_ref()?;
+
+        let file_cache = self.cache_strategy.write_cache().map(|w| w.file_cache());
+        let puffin_metadata_cache = self.cache_strategy.puffin_metadata_cache().cloned();
+        let vector_index_cache = self.cache_strategy.vector_index_cache().cloned();
+
+        let applier = VectorIndexApplier::new(
+            self.access_layer.table_dir().to_string(),
+            self.access_layer.path_type(),
+            self.access_layer.object_store().clone(),
+            self.access_layer.puffin_manager_factory().clone(),
+            vector_search.column_id,
+            vector_search.query_vector.clone(),
+            vector_search.metric,
+        )
+        .with_file_cache(file_cache)
+        .with_puffin_metadata_cache(puffin_metadata_cache)
+        .with_vector_index_cache(vector_index_cache);
+
+        Some(Arc::new(applier))
+    }
 }
 
 /// Returns true if the time range of a SST `file` matches the `predicate`.
@@ -708,6 +751,12 @@ pub struct ScanInput {
     inverted_index_appliers: [Option<InvertedIndexApplierRef>; 2],
     bloom_filter_index_appliers: [Option<BloomFilterIndexApplierRef>; 2],
     fulltext_index_appliers: [Option<FulltextIndexApplierRef>; 2],
+    /// Vector index applier for KNN search.
+    #[cfg(feature = "vector_index")]
+    pub(crate) vector_index_applier: Option<VectorIndexApplierRef>,
+    /// Over-fetched k for vector index scan.
+    #[cfg(feature = "vector_index")]
+    pub(crate) vector_index_k: Option<usize>,
     /// Start time of the query.
     pub(crate) query_start: Option<Instant>,
     /// The region is using append mode.
@@ -747,6 +796,10 @@ impl ScanInput {
             inverted_index_appliers: [None, None],
             bloom_filter_index_appliers: [None, None],
             fulltext_index_appliers: [None, None],
+            #[cfg(feature = "vector_index")]
+            vector_index_applier: None,
+            #[cfg(feature = "vector_index")]
+            vector_index_k: None,
             query_start: None,
             append_mode: false,
             filter_deleted: true,
@@ -850,6 +903,25 @@ impl ScanInput {
         appliers: [Option<FulltextIndexApplierRef>; 2],
     ) -> Self {
         self.fulltext_index_appliers = appliers;
+        self
+    }
+
+    /// Sets vector index applier for KNN search.
+    #[cfg(feature = "vector_index")]
+    #[must_use]
+    pub(crate) fn with_vector_index_applier(
+        mut self,
+        applier: Option<VectorIndexApplierRef>,
+    ) -> Self {
+        self.vector_index_applier = applier;
+        self
+    }
+
+    /// Sets over-fetched k for vector index scan.
+    #[cfg(feature = "vector_index")]
+    #[must_use]
+    pub(crate) fn with_vector_index_k(mut self, k: Option<usize>) -> Self {
+        self.vector_index_k = k;
         self
     }
 
@@ -988,7 +1060,7 @@ impl ScanInput {
         let predicate = self.predicate_for_file(file);
         let filter_mode = pre_filter_mode(self.append_mode, self.merge_mode);
         let decode_pk_values = !self.compaction && self.mapper.has_tags();
-        let res = self
+        let reader = self
             .access_layer
             .read_sst(file.clone())
             .predicate(predicate)
@@ -996,7 +1068,15 @@ impl ScanInput {
             .cache(self.cache_strategy.clone())
             .inverted_index_appliers(self.inverted_index_appliers.clone())
             .bloom_filter_index_appliers(self.bloom_filter_index_appliers.clone())
-            .fulltext_index_appliers(self.fulltext_index_appliers.clone())
+            .fulltext_index_appliers(self.fulltext_index_appliers.clone());
+        #[cfg(feature = "vector_index")]
+        let reader = {
+            let mut reader = reader;
+            reader =
+                reader.vector_index_applier(self.vector_index_applier.clone(), self.vector_index_k);
+            reader
+        };
+        let res = reader
             .expected_metadata(Some(self.mapper.metadata().clone()))
             .flat_format(self.flat_format)
             .compaction(self.compaction)
@@ -1418,6 +1498,7 @@ impl StreamContext {
                         .entries(self.input.files.iter().map(|file| FileWrapper { file }))
                         .finish()?;
                 }
+                write!(f, ", \"flat_format\": {}", self.input.flat_format)?;
 
                 #[cfg(feature = "enterprise")]
                 self.format_extension_ranges(f)?;

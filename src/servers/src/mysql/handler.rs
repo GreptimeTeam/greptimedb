@@ -715,7 +715,7 @@ fn replace_params_with_values(
         if let Some(Some(t)) = param_types.get(&format_placeholder(i + 1)) {
             let value = helper::convert_value(param, t)?;
 
-            values.push(value);
+            values.push(value.into());
         }
     }
 
@@ -744,7 +744,7 @@ fn replace_params_with_exprs(
         if let Some(Some(t)) = param_types.get(&format_placeholder(i + 1)) {
             let value = helper::convert_expr_to_scalar_value(param, t)?;
 
-            values.push(value);
+            values.push(value.into());
         }
     }
 

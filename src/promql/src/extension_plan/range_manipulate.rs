@@ -18,7 +18,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use common_telemetry::debug;
+use common_telemetry::{debug, warn};
 use datafusion::arrow::array::{Array, ArrayRef, Int64Array, TimestampMillisecondArray};
 use datafusion::arrow::compute;
 use datafusion::arrow::datatypes::{Field, SchemaRef};
@@ -38,6 +38,7 @@ use datafusion::physical_plan::{
     SendableRecordBatchStream, Statistics,
 };
 use datafusion::sql::TableReference;
+use datafusion_expr::col;
 use futures::{Stream, StreamExt, ready};
 use greptime_proto::substrait_extension as pb;
 use prost::Message;
@@ -288,7 +289,53 @@ impl UserDefinedLogicalNodeCore for RangeManipulate {
     }
 
     fn expressions(&self) -> Vec<Expr> {
-        vec![]
+        if self.unfix.is_some() {
+            return vec![];
+        }
+
+        let mut exprs = Vec::with_capacity(1 + self.field_columns.len());
+        exprs.push(col(&self.time_index));
+        exprs.extend(self.field_columns.iter().map(col));
+        exprs
+    }
+
+    fn necessary_children_exprs(&self, output_columns: &[usize]) -> Option<Vec<Vec<usize>>> {
+        if self.unfix.is_some() {
+            return None;
+        }
+
+        let input_schema = self.input.schema();
+        let input_len = input_schema.fields().len();
+        let time_index_idx = input_schema.index_of_column_by_name(None, &self.time_index)?;
+
+        if output_columns.is_empty() {
+            let indices = (0..input_len).collect::<Vec<_>>();
+            return Some(vec![indices]);
+        }
+
+        let mut required = Vec::with_capacity(output_columns.len() + 1 + self.field_columns.len());
+        required.push(time_index_idx);
+        for value_column in &self.field_columns {
+            required.push(input_schema.index_of_column_by_name(None, value_column)?);
+        }
+        for &idx in output_columns {
+            if idx < input_len {
+                required.push(idx);
+            } else if idx == input_len {
+                // Derived timestamp range column.
+                required.push(time_index_idx);
+            } else {
+                warn!(
+                    "Output column index {} is out of bounds for input schema with length {}",
+                    idx, input_len
+                );
+                return None;
+            }
+        }
+
+        required.sort_unstable();
+        required.dedup();
+        Some(vec![required])
     }
 
     fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -734,15 +781,30 @@ mod test {
     use datafusion::common::ToDFSchema;
     use datafusion::datasource::memory::MemorySourceConfig;
     use datafusion::datasource::source::DataSourceExec;
+    use datafusion::logical_expr::{EmptyRelation, LogicalPlan};
     use datafusion::physical_expr::Partitioning;
     use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
     use datafusion::physical_plan::memory::MemoryStream;
     use datafusion::prelude::SessionContext;
     use datatypes::arrow::array::TimestampMillisecondArray;
+    use futures::FutureExt;
 
     use super::*;
 
     const TIME_INDEX_COLUMN: &str = "timestamp";
+
+    fn project_batch(batch: &RecordBatch, indices: &[usize]) -> RecordBatch {
+        let fields = indices
+            .iter()
+            .map(|&idx| batch.schema().field(idx).clone())
+            .collect::<Vec<_>>();
+        let columns = indices
+            .iter()
+            .map(|&idx| batch.column(idx).clone())
+            .collect::<Vec<_>>();
+        let schema = Arc::new(Schema::new(fields));
+        RecordBatch::try_new(schema, columns).unwrap()
+    }
 
     fn prepare_test_data() -> DataSourceExec {
         let schema = Arc::new(Schema::new(vec![
@@ -845,9 +907,95 @@ mod test {
     }
 
     #[tokio::test]
+    async fn pruning_should_keep_time_and_value_columns_for_exec() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(TIME_INDEX_COLUMN, TimestampMillisecondType::DATA_TYPE, true),
+            Field::new("value_1", DataType::Float64, true),
+            Field::new("value_2", DataType::Float64, true),
+            Field::new("path", DataType::Utf8, true),
+        ]));
+        let df_schema = schema.clone().to_dfschema_ref().unwrap();
+        let input = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: df_schema,
+        });
+        let plan = RangeManipulate::new(
+            0,
+            310_000,
+            30_000,
+            90_000,
+            TIME_INDEX_COLUMN.to_string(),
+            vec!["value_1".to_string(), "value_2".to_string()],
+            input,
+        )
+        .unwrap();
+
+        // Simulate a parent projection requesting only the `path` column.
+        let output_columns = [3usize];
+        let required = plan.necessary_children_exprs(&output_columns).unwrap();
+        let required = &required[0];
+        assert_eq!(required.as_slice(), &[0, 1, 2, 3]);
+
+        let timestamp_column = Arc::new(TimestampMillisecondArray::from(vec![
+            0, 30_000, 60_000, 90_000, 120_000, // every 30s
+            180_000, 240_000, // every 60s
+            241_000, 271_000, 291_000, // others
+        ])) as _;
+        let field_column: ArrayRef = Arc::new(Float64Array::from(vec![1.0; 10])) as _;
+        let path_column = Arc::new(StringArray::from(vec!["foo"; 10])) as _;
+        let input_batch = RecordBatch::try_new(
+            schema,
+            vec![
+                timestamp_column,
+                field_column.clone(),
+                field_column,
+                path_column,
+            ],
+        )
+        .unwrap();
+
+        let projected = project_batch(&input_batch, required);
+        let projected_schema = projected.schema();
+        let memory_exec = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![projected]], projected_schema, None).unwrap(),
+        )));
+        let range_exec = plan.to_execution_plan(memory_exec);
+        let session_context = SessionContext::default();
+        let output_batches =
+            datafusion::physical_plan::collect(range_exec, session_context.task_ctx())
+                .await
+                .unwrap();
+        assert_eq!(output_batches.len(), 1);
+
+        let output_batch = &output_batches[0];
+        let path = output_batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert!(path.iter().all(|v| v == Some("foo")));
+
+        // Simulate the pre-fix pruning behavior: omit the timestamp/value columns from the child.
+        let broken_required = [3usize];
+        let broken = project_batch(&input_batch, &broken_required);
+        let broken_schema = broken.schema();
+        let broken_exec = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![broken]], broken_schema, None).unwrap(),
+        )));
+        let broken_range_exec = plan.to_execution_plan(broken_exec);
+        let session_context = SessionContext::default();
+        let broken_result = std::panic::AssertUnwindSafe(async {
+            datafusion::physical_plan::collect(broken_range_exec, session_context.task_ctx()).await
+        })
+        .catch_unwind()
+        .await;
+        assert!(broken_result.is_err());
+    }
+
+    #[tokio::test]
     async fn interval_30s_range_90s() {
         let expected = String::from(
-            "PrimitiveArray<Timestamp(Millisecond, None)>\n[\n  \
+            "PrimitiveArray<Timestamp(ms)>\n[\n  \
                 1970-01-01T00:00:00,\n  \
                 1970-01-01T00:00:30,\n  \
                 1970-01-01T00:01:00,\n  \
@@ -867,7 +1015,7 @@ mod test {
                 ranges: [Some(0..1), Some(0..2), Some(0..3), Some(0..4), Some(1..5), Some(2..5), Some(3..6), Some(4..6), Some(5..7), Some(5..8), Some(6..10)] \
             }\nStringArray\n[\n  \"foo\",\n  \"foo\",\n  \"foo\",\n  \"foo\",\n  \"foo\",\n  \"foo\",\n  \"foo\",\n  \"foo\",\n  \"foo\",\n  \"foo\",\n  \"foo\",\n]\n\
             RangeArray { \
-                base array: PrimitiveArray<Timestamp(Millisecond, None)>\n[\n  1970-01-01T00:00:00,\n  1970-01-01T00:00:30,\n  1970-01-01T00:01:00,\n  1970-01-01T00:01:30,\n  1970-01-01T00:02:00,\n  1970-01-01T00:03:00,\n  1970-01-01T00:04:00,\n  1970-01-01T00:04:01,\n  1970-01-01T00:04:31,\n  1970-01-01T00:04:51,\n], \
+                base array: PrimitiveArray<Timestamp(ms)>\n[\n  1970-01-01T00:00:00,\n  1970-01-01T00:00:30,\n  1970-01-01T00:01:00,\n  1970-01-01T00:01:30,\n  1970-01-01T00:02:00,\n  1970-01-01T00:03:00,\n  1970-01-01T00:04:00,\n  1970-01-01T00:04:01,\n  1970-01-01T00:04:31,\n  1970-01-01T00:04:51,\n], \
                 ranges: [Some(0..1), Some(0..2), Some(0..3), Some(0..4), Some(1..5), Some(2..5), Some(3..6), Some(4..6), Some(5..7), Some(5..8), Some(6..10)] \
             }",
         );
@@ -880,7 +1028,7 @@ mod test {
     #[tokio::test]
     async fn small_empty_range() {
         let expected = String::from(
-            "PrimitiveArray<Timestamp(Millisecond, None)>\n[\n  \
+            "PrimitiveArray<Timestamp(ms)>\n[\n  \
             1970-01-01T00:00:00.001,\n  \
             1970-01-01T00:00:03.001,\n  \
             1970-01-01T00:00:06.001,\n  \
@@ -893,7 +1041,7 @@ mod test {
             ranges: [Some(0..1), Some(0..0), Some(0..0), Some(0..0)] \
         }\nStringArray\n[\n  \"foo\",\n  \"foo\",\n  \"foo\",\n  \"foo\",\n]\n\
         RangeArray { \
-            base array: PrimitiveArray<Timestamp(Millisecond, None)>\n[\n  1970-01-01T00:00:00,\n  1970-01-01T00:00:30,\n  1970-01-01T00:01:00,\n  1970-01-01T00:01:30,\n  1970-01-01T00:02:00,\n  1970-01-01T00:03:00,\n  1970-01-01T00:04:00,\n  1970-01-01T00:04:01,\n  1970-01-01T00:04:31,\n  1970-01-01T00:04:51,\n], \
+            base array: PrimitiveArray<Timestamp(ms)>\n[\n  1970-01-01T00:00:00,\n  1970-01-01T00:00:30,\n  1970-01-01T00:01:00,\n  1970-01-01T00:01:30,\n  1970-01-01T00:02:00,\n  1970-01-01T00:03:00,\n  1970-01-01T00:04:00,\n  1970-01-01T00:04:01,\n  1970-01-01T00:04:31,\n  1970-01-01T00:04:51,\n], \
             ranges: [Some(0..1), Some(0..0), Some(0..0), Some(0..0)] \
         }",
         );

@@ -1145,10 +1145,11 @@ impl TryFrom<ScalarValue> for Value {
             ScalarValue::List(array) => {
                 // this is for item type
                 let datatype = ConcreteDataType::try_from(&array.value_type())?;
-                let items = ScalarValue::convert_array_to_scalar_vec(array.as_ref())
-                    .context(ConvertArrowArrayToScalarsSnafu)?
+                let scalar_values = ScalarValue::convert_array_to_scalar_vec(array.as_ref())
+                    .context(ConvertArrowArrayToScalarsSnafu)?;
+                let items = scalar_values
                     .into_iter()
-                    .flatten()
+                    .flat_map(|v| v.unwrap_or_else(|| vec![ScalarValue::Null]))
                     .map(|x| x.try_into())
                     .collect::<Result<Vec<Value>>>()?;
                 Value::List(ListValue::new(items, Arc::new(datatype)))
@@ -2996,6 +2997,7 @@ pub(crate) mod tests {
                 let vs = ScalarValue::convert_array_to_scalar_vec(vs.as_ref())
                     .unwrap()
                     .into_iter()
+                    .flatten()
                     .flatten()
                     .collect::<Vec<_>>();
                 assert_eq!(

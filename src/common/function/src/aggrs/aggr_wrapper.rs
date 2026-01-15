@@ -341,6 +341,7 @@ impl AggregateUDFImpl for StateWrapper {
                 name: acc_args.name,
                 is_distinct: acc_args.is_distinct,
                 exprs: acc_args.exprs,
+                expr_fields: acc_args.expr_fields,
             };
             self.inner.accumulator(acc_args)?
         };

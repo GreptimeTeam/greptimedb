@@ -25,7 +25,6 @@ use datafusion_common::arrow::array::{
 };
 use datafusion_common::arrow::datatypes::DataType;
 use datafusion_common::{DataFusionError, Result, ScalarValue};
-use datafusion_expr::type_coercion::aggregates::STRINGS;
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
 use datatypes::arrow_array::{int_array_value_at_index, string_array_value_at_index};
 use datatypes::json::JsonStructureSettings;
@@ -640,7 +639,7 @@ impl Default for JsonGetObject {
                     DataType::LargeBinary,
                     DataType::BinaryView,
                 ],
-                STRINGS.to_vec(),
+                vec![DataType::UInt8, DataType::LargeUtf8, DataType::Utf8View],
             ),
         }
     }

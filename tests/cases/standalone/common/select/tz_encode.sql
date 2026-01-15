@@ -2,7 +2,7 @@
 CREATE TABLE ngx_access_log (
     client STRING,
     country STRING,
-    access_time TIMESTAMP TIME INDEX
+    access_time TIMESTAMP(9) TIME INDEX
 );
 
 /* insert some data */
@@ -21,18 +21,19 @@ VALUES
     ("client10", "KR", "2022-01-01 00:00:09");
 
 -- should not fail with mismatch timezone
--- SQLNESS REPLACE \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{9}Z NOW
+SELECT count(*) FROM (
 SELECT
     now()
 FROM
-    ngx_access_log;
+    ngx_access_log);
 
 -- SQLNESS REPLACE TimestampNanosecond\(\d+ TimestampNanosecond(NOW
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (partitioning.*) REDACTED
-EXPLAIN SELECT
+EXPLAIN SELECT count(*) FROM (
+SELECT
     now()
 FROM
-    ngx_access_log;
+    ngx_access_log);
 
 DROP TABLE ngx_access_log;

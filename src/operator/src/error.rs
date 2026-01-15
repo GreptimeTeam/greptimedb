@@ -736,6 +736,21 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to serialize partition expression"))]
+    SerializePartitionExpr {
+        #[snafu(implicit)]
+        location: Location,
+        source: partition::error::Error,
+    },
+
+    #[snafu(display("Failed to deserialize partition expression"))]
+    DeserializePartitionExpr {
+        #[snafu(source)]
+        source: partition::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid configuration value."))]
     InvalidConfigValue {
         source: session::session_config::Error,
@@ -973,7 +988,10 @@ impl ErrorExt for Error {
             Error::BuildDfLogicalPlan { .. }
             | Error::BuildTableMeta { .. }
             | Error::MissingInsertBody { .. } => StatusCode::Internal,
-            Error::ExecuteAdminFunction { .. } | Error::EncodeJson { .. } => StatusCode::Unexpected,
+            Error::ExecuteAdminFunction { .. }
+            | Error::EncodeJson { .. }
+            | Error::DeserializePartitionExpr { .. }
+            | Error::SerializePartitionExpr { .. } => StatusCode::Unexpected,
             Error::ViewNotFound { .. }
             | Error::ViewInfoNotFound { .. }
             | Error::TableNotFound { .. } => StatusCode::TableNotFound,

@@ -34,7 +34,7 @@ use datafusion::physical_plan::{
     RecordBatchStream, SendableRecordBatchStream,
 };
 use datafusion_common::DFSchema;
-use datafusion_expr::EmptyRelation;
+use datafusion_expr::{EmptyRelation, col};
 use datatypes::arrow;
 use datatypes::arrow::array::{ArrayRef, Float64Array, TimestampMillisecondArray};
 use datatypes::arrow::datatypes::{DataType, Field, SchemaRef, TimeUnit};
@@ -107,7 +107,21 @@ impl UserDefinedLogicalNodeCore for Absent {
     }
 
     fn expressions(&self) -> Vec<Expr> {
-        vec![]
+        if self.unfix.is_some() {
+            return vec![];
+        }
+
+        vec![col(&self.time_index_column)]
+    }
+
+    fn necessary_children_exprs(&self, _output_columns: &[usize]) -> Option<Vec<Vec<usize>>> {
+        if self.unfix.is_some() {
+            return None;
+        }
+
+        let input_schema = self.input.schema();
+        let time_index_idx = input_schema.index_of_column_by_name(None, &self.time_index_column)?;
+        Some(vec![vec![time_index_idx]])
     }
 
     fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::time::Duration;
 
 use common_meta::key::TableMetadataManagerRef;
@@ -105,8 +105,10 @@ async fn distributed_with_gc(store_type: &StorageType) -> (TestContext, TempDirG
 
 #[tokio::test]
 async fn test_gc_basic_different_store() {
+    let _ = dotenv::dotenv();
     common_telemetry::init_default_ut_logging();
     let store_type = StorageType::build_storage_types_based_on_env();
+    info!("store type: {:?}", store_type);
     for store in store_type {
         if store == StorageType::File {
             continue; // no point in test gc in fs storage
@@ -190,17 +192,16 @@ async fn test_gc_basic(store_type: &StorageType) {
     assert_eq!(sst_files_after_compaction.len(), 5); // 4 old + 1 new
 
     // Step 5: Get table route information for GC procedure
-    let (region_routes, regions) =
+    let (_region_routes, regions) =
         get_table_route(metasrv.table_metadata_manager(), table_id).await;
 
     // Step 6: Create and execute BatchGcProcedure
     let procedure = BatchGcProcedure::new(
         metasrv.mailbox().clone(),
+        metasrv.table_metadata_manager().clone(),
         metasrv.options().grpc.server_addr.clone(),
         regions.clone(),
-        false, // full_file_listing
-        region_routes,
-        HashMap::new(),          // related_regions (empty for this simple test)
+        false,                   // full_file_listing
         Duration::from_secs(10), // timeout
     );
 

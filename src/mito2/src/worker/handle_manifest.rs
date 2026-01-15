@@ -21,6 +21,7 @@ use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use common_telemetry::{info, warn};
+use parquet::file::metadata::PageIndexPolicy;
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
@@ -520,9 +521,14 @@ async fn edit_region(
                 {
                     // Triggers the filling of the parquet metadata cache.
                     // The parquet file is already downloaded.
+                    let mut cache_metrics = Default::default();
                     let _ = write_cache
                         .file_cache()
-                        .get_parquet_meta_data(index_key)
+                        .get_parquet_meta_data(
+                            index_key,
+                            &mut cache_metrics,
+                            PageIndexPolicy::Optional,
+                        )
                         .await;
 
                     listener.on_file_cache_filled(index_key.file_id);

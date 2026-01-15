@@ -936,8 +936,8 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
-    #[snafu(display("Failed to build wal options allocator"))]
-    BuildWalOptionsAllocator {
+    #[snafu(display("Failed to build wal provider"))]
+    BuildWalProvider {
         #[snafu(implicit)]
         location: Location,
         source: common_meta::error::Error,
@@ -1038,10 +1038,24 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to serialize partition expression: {}", source))]
+    #[snafu(display("Failed to serialize partition expression"))]
     SerializePartitionExpr {
         #[snafu(source)]
         source: partition::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to deserialize partition expression"))]
+    DeserializePartitionExpr {
+        #[snafu(source)]
+        source: partition::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Empty partition expression"))]
+    EmptyPartitionExpr {
         #[snafu(implicit)]
         location: Location,
     },
@@ -1060,8 +1074,44 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to allocate regions for table: {}", table_id))]
+    AllocateRegions {
+        #[snafu(implicit)]
+        location: Location,
+        table_id: TableId,
+        #[snafu(source)]
+        source: common_meta::error::Error,
+    },
+
     #[snafu(display("Failed to deallocate regions for table: {}", table_id))]
     DeallocateRegions {
+        #[snafu(implicit)]
+        location: Location,
+        table_id: TableId,
+        #[snafu(source)]
+        source: common_meta::error::Error,
+    },
+
+    #[snafu(display("Failed to build create request for table: {}", table_id))]
+    BuildCreateRequest {
+        #[snafu(implicit)]
+        location: Location,
+        table_id: TableId,
+        #[snafu(source)]
+        source: common_meta::error::Error,
+    },
+
+    #[snafu(display("Failed to allocate region routes for table: {}", table_id))]
+    AllocateRegionRoutes {
+        #[snafu(implicit)]
+        location: Location,
+        table_id: TableId,
+        #[snafu(source)]
+        source: common_meta::error::Error,
+    },
+
+    #[snafu(display("Failed to allocate wal options for table: {}", table_id))]
+    AllocateWalOptions {
         #[snafu(implicit)]
         location: Location,
         table_id: TableId,
@@ -1113,7 +1163,7 @@ impl ErrorExt for Error {
             | Error::Join { .. }
             | Error::ChooseItems { .. }
             | Error::FlowStateHandler { .. }
-            | Error::BuildWalOptionsAllocator { .. }
+            | Error::BuildWalProvider { .. }
             | Error::BuildPartitionClient { .. }
             | Error::BuildKafkaClient { .. } => StatusCode::Internal,
 
@@ -1127,7 +1177,8 @@ impl ErrorExt for Error {
             | Error::MailboxChannelClosed { .. }
             | Error::IsNotLeader { .. } => StatusCode::IllegalState,
             Error::RetryLaterWithSource { source, .. } => source.status_code(),
-            Error::SerializePartitionExpr { source, .. } => source.status_code(),
+            Error::SerializePartitionExpr { source, .. }
+            | Error::DeserializePartitionExpr { source, .. } => source.status_code(),
 
             Error::Unsupported { .. } => StatusCode::Unsupported,
 
@@ -1153,7 +1204,8 @@ impl ErrorExt for Error {
             | Error::RepartitionSourceRegionMissing { .. }
             | Error::RepartitionTargetRegionMissing { .. }
             | Error::PartitionExprMismatch { .. }
-            | Error::RepartitionSourceExprMismatch { .. } => StatusCode::InvalidArguments,
+            | Error::RepartitionSourceExprMismatch { .. }
+            | Error::EmptyPartitionExpr { .. } => StatusCode::InvalidArguments,
             Error::LeaseKeyFromUtf8 { .. }
             | Error::LeaseValueFromUtf8 { .. }
             | Error::InvalidRegionKeyFromUtf8 { .. }
@@ -1215,7 +1267,11 @@ impl ErrorExt for Error {
             Error::Other { source, .. } => source.status_code(),
             Error::RepartitionCreateSubtasks { source, .. } => source.status_code(),
             Error::RepartitionSubprocedureStateReceiver { source, .. } => source.status_code(),
+            Error::AllocateRegions { source, .. } => source.status_code(),
             Error::DeallocateRegions { source, .. } => source.status_code(),
+            Error::AllocateRegionRoutes { source, .. } => source.status_code(),
+            Error::AllocateWalOptions { source, .. } => source.status_code(),
+            Error::BuildCreateRequest { source, .. } => source.status_code(),
             Error::NoEnoughAvailableNode { .. } => StatusCode::RuntimeResourcesExhausted,
 
             #[cfg(feature = "pg_kvbackend")]

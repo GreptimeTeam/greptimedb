@@ -30,15 +30,6 @@ pub(crate) struct RegionGcInfo {
     pub(crate) last_full_listing_time: Option<Instant>,
 }
 
-impl RegionGcInfo {
-    pub(crate) fn new(last_gc_time: Instant) -> Self {
-        Self {
-            last_gc_time,
-            last_full_listing_time: None,
-        }
-    }
-}
-
 /// Tracks the last GC time for regions to implement cooldown.
 pub(crate) type RegionGcTracker = HashMap<RegionId, RegionGcInfo>;
 
@@ -46,7 +37,7 @@ impl GcScheduler {
     /// Clean up stale entries from the region GC tracker if enough time has passed.
     /// This removes entries for regions that no longer exist in the current table routes.
     pub(crate) async fn cleanup_tracker_if_needed(&self) -> Result<()> {
-        let mut last_cleanup = *self.last_tracker_cleanup.lock().await;
+        let last_cleanup = *self.last_tracker_cleanup.lock().await;
         let now = Instant::now();
 
         // Check if enough time has passed since last cleanup
@@ -83,25 +74,6 @@ impl GcScheduler {
         );
 
         Ok(())
-    }
-
-    /// Determine if full file listing should be used for a region based on the last full listing time.
-    pub(crate) async fn should_use_full_listing(&self, region_id: RegionId) -> bool {
-        let gc_tracker = self.region_gc_tracker.lock().await;
-        let now = Instant::now();
-
-        if let Some(gc_info) = gc_tracker.get(&region_id) {
-            if let Some(last_full_listing) = gc_info.last_full_listing_time {
-                let elapsed = now.saturating_duration_since(last_full_listing);
-                elapsed >= self.config.full_file_listing_interval
-            } else {
-                // Never did full listing for this region, do it now
-                true
-            }
-        } else {
-            // First time GC for this region, do full listing
-            true
-        }
     }
 
     pub(crate) async fn update_full_listing_time(

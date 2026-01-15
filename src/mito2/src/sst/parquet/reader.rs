@@ -14,6 +14,8 @@
 
 //! Parquet reader.
 
+#[cfg(feature = "vector_index")]
+use std::collections::BTreeSet;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -31,8 +33,7 @@ use mito_codec::row_converter::build_primary_key_codec;
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, RowSelection};
 use parquet::arrow::{FieldLevels, ProjectionMask, parquet_to_arrow_field_levels};
-use parquet::file::metadata::ParquetMetaData;
-use parquet::format::KeyValue;
+use parquet::file::metadata::{KeyValue, PageIndexPolicy, ParquetMetaData};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::region_request::PathType;
@@ -41,6 +42,8 @@ use table::predicate::Predicate;
 
 use crate::cache::CacheStrategy;
 use crate::cache::index::result_cache::PredicateKey;
+#[cfg(feature = "vector_index")]
+use crate::error::ApplyVectorIndexSnafu;
 use crate::error::{
     ArrowReaderSnafu, InvalidMetadataSnafu, InvalidParquetSnafu, ReadDataPartSnafu,
     ReadParquetSnafu, Result,
@@ -61,6 +64,8 @@ use crate::sst::index::fulltext_index::applier::{
 use crate::sst::index::inverted_index::applier::{
     InvertedIndexApplierRef, InvertedIndexApplyMetrics,
 };
+#[cfg(feature = "vector_index")]
+use crate::sst::index::vector_index::applier::VectorIndexApplierRef;
 use crate::sst::parquet::file_range::{
     FileRangeContext, FileRangeContextRef, PreFilterMode, RangeBase, row_group_contains_delete,
 };
@@ -74,6 +79,7 @@ use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, PARQUET_METADATA_KEY};
 const INDEX_TYPE_FULLTEXT: &str = "fulltext";
 const INDEX_TYPE_INVERTED: &str = "inverted";
 const INDEX_TYPE_BLOOM: &str = "bloom filter";
+const INDEX_TYPE_VECTOR: &str = "vector";
 
 macro_rules! handle_index_error {
     ($err:expr, $file_handle:expr, $index_type:expr) => {
@@ -117,6 +123,12 @@ pub struct ParquetReaderBuilder {
     inverted_index_appliers: [Option<InvertedIndexApplierRef>; 2],
     bloom_filter_index_appliers: [Option<BloomFilterIndexApplierRef>; 2],
     fulltext_index_appliers: [Option<FulltextIndexApplierRef>; 2],
+    /// Vector index applier for KNN search.
+    #[cfg(feature = "vector_index")]
+    vector_index_applier: Option<VectorIndexApplierRef>,
+    /// Over-fetched k for vector index scan.
+    #[cfg(feature = "vector_index")]
+    vector_index_k: Option<usize>,
     /// Expected metadata of the region while reading the SST.
     /// This is usually the latest metadata of the region. The reader use
     /// it get the correct column id of a column by name.
@@ -129,6 +141,7 @@ pub struct ParquetReaderBuilder {
     pre_filter_mode: PreFilterMode,
     /// Whether to decode primary key values eagerly when reading primary key format SSTs.
     decode_primary_key_values: bool,
+    page_index_policy: PageIndexPolicy,
 }
 
 impl ParquetReaderBuilder {
@@ -150,11 +163,16 @@ impl ParquetReaderBuilder {
             inverted_index_appliers: [None, None],
             bloom_filter_index_appliers: [None, None],
             fulltext_index_appliers: [None, None],
+            #[cfg(feature = "vector_index")]
+            vector_index_applier: None,
+            #[cfg(feature = "vector_index")]
+            vector_index_k: None,
             expected_metadata: None,
             flat_format: false,
             compaction: false,
             pre_filter_mode: PreFilterMode::All,
             decode_primary_key_values: false,
+            page_index_policy: Default::default(),
         }
     }
 
@@ -211,6 +229,19 @@ impl ParquetReaderBuilder {
         self
     }
 
+    /// Attaches the vector index applier to the builder.
+    #[cfg(feature = "vector_index")]
+    #[must_use]
+    pub(crate) fn vector_index_applier(
+        mut self,
+        applier: Option<VectorIndexApplierRef>,
+        k: Option<usize>,
+    ) -> Self {
+        self.vector_index_applier = applier;
+        self.vector_index_k = k;
+        self
+    }
+
     /// Attaches the expected metadata to the builder.
     #[must_use]
     pub fn expected_metadata(mut self, expected_metadata: Option<RegionMetadataRef>) -> Self {
@@ -243,6 +274,12 @@ impl ParquetReaderBuilder {
     #[must_use]
     pub(crate) fn decode_primary_key_values(mut self, decode: bool) -> Self {
         self.decode_primary_key_values = decode;
+        self
+    }
+
+    #[must_use]
+    pub fn page_index_policy(mut self, page_index_policy: PageIndexPolicy) -> Self {
+        self.page_index_policy = page_index_policy;
         self
     }
 
@@ -284,7 +321,12 @@ impl ParquetReaderBuilder {
 
         // Loads parquet metadata of the file.
         let (parquet_meta, cache_miss) = self
-            .read_parquet_metadata(&file_path, file_size, &mut metrics.metadata_cache_metrics)
+            .read_parquet_metadata(
+                &file_path,
+                file_size,
+                &mut metrics.metadata_cache_metrics,
+                self.page_index_policy,
+            )
             .await?;
         // Decodes region metadata.
         let key_value_meta = parquet_meta.file_metadata().key_value_metadata();
@@ -449,6 +491,7 @@ impl ParquetReaderBuilder {
         file_path: &str,
         file_size: u64,
         cache_metrics: &mut MetadataCacheMetrics,
+        page_index_policy: PageIndexPolicy,
     ) -> Result<(Arc<ParquetMetaData>, bool)> {
         let start = Instant::now();
         let _t = READ_STAGE_ELAPSED
@@ -459,7 +502,7 @@ impl ParquetReaderBuilder {
         // Tries to get from cache with metrics tracking.
         if let Some(metadata) = self
             .cache_strategy
-            .get_parquet_meta_data(file_id, cache_metrics)
+            .get_parquet_meta_data(file_id, cache_metrics, page_index_policy)
             .await
         {
             cache_metrics.metadata_load_cost += start.elapsed();
@@ -467,8 +510,10 @@ impl ParquetReaderBuilder {
         }
 
         // Cache miss, load metadata directly.
-        let metadata_loader = MetadataLoader::new(self.object_store.clone(), file_path, file_size);
-        let metadata = metadata_loader.load().await?;
+        let mut metadata_loader =
+            MetadataLoader::new(self.object_store.clone(), file_path, file_size);
+        metadata_loader.with_page_index_policy(page_index_policy);
+        let metadata = metadata_loader.load(cache_metrics).await?;
 
         let metadata = Arc::new(metadata);
         // Cache the metadata.
@@ -572,6 +617,19 @@ impl ParquetReaderBuilder {
             )
             .await;
         }
+        #[cfg(feature = "vector_index")]
+        {
+            self.prune_row_groups_by_vector_index(
+                row_group_size,
+                num_row_groups,
+                &mut output,
+                metrics,
+            )
+            .await;
+            if output.is_empty() {
+                return output;
+            }
+        }
         output
     }
 
@@ -606,11 +664,13 @@ impl ParquetReaderBuilder {
                 && all_required_row_groups_searched(output, result)
             {
                 apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_FULLTEXT);
+                metrics.fulltext_index_cache_hit += 1;
                 pruned = true;
                 continue;
             }
 
             // Slow path: apply the index from the file.
+            metrics.fulltext_index_cache_miss += 1;
             let file_size_hint = self.file_handle.meta_ref().index_file_size();
             let apply_res = index_applier
                 .apply_fine(
@@ -678,11 +738,13 @@ impl ParquetReaderBuilder {
                 && all_required_row_groups_searched(output, result)
             {
                 apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_INVERTED);
+                metrics.inverted_index_cache_hit += 1;
                 pruned = true;
                 continue;
             }
 
             // Slow path: apply the index from the file.
+            metrics.inverted_index_cache_miss += 1;
             let file_size_hint = self.file_handle.meta_ref().index_file_size();
             let apply_res = index_applier
                 .apply(
@@ -746,11 +808,13 @@ impl ParquetReaderBuilder {
                 && all_required_row_groups_searched(output, result)
             {
                 apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_BLOOM);
+                metrics.bloom_filter_cache_hit += 1;
                 pruned = true;
                 continue;
             }
 
             // Slow path: apply the index from the file.
+            metrics.bloom_filter_cache_miss += 1;
             let file_size_hint = self.file_handle.meta_ref().index_file_size();
             let rgs = parquet_meta.row_groups().iter().enumerate().map(|(i, rg)| {
                 (
@@ -799,6 +863,48 @@ impl ParquetReaderBuilder {
         pruned
     }
 
+    /// Prunes row groups by vector index results.
+    #[cfg(feature = "vector_index")]
+    async fn prune_row_groups_by_vector_index(
+        &self,
+        row_group_size: usize,
+        num_row_groups: usize,
+        output: &mut RowGroupSelection,
+        metrics: &mut ReaderFilterMetrics,
+    ) {
+        let Some(applier) = &self.vector_index_applier else {
+            return;
+        };
+        let Some(k) = self.vector_index_k else {
+            return;
+        };
+        if !self.file_handle.meta_ref().vector_index_available() {
+            return;
+        }
+
+        let file_size_hint = self.file_handle.meta_ref().index_file_size();
+        let apply_res = applier
+            .apply_with_k(self.file_handle.index_id(), Some(file_size_hint), k)
+            .await;
+        let row_ids = match apply_res {
+            Ok(res) => res.row_offsets,
+            Err(err) => {
+                handle_index_error!(err, self.file_handle, INDEX_TYPE_VECTOR);
+                return;
+            }
+        };
+
+        let selection = match vector_selection_from_offsets(row_ids, row_group_size, num_row_groups)
+        {
+            Ok(selection) => selection,
+            Err(err) => {
+                handle_index_error!(err, self.file_handle, INDEX_TYPE_VECTOR);
+                return;
+            }
+        };
+        apply_selection_and_update_metrics(output, &selection, metrics, INDEX_TYPE_VECTOR);
+    }
+
     async fn prune_row_groups_by_fulltext_bloom(
         &self,
         row_group_size: usize,
@@ -829,11 +935,13 @@ impl ParquetReaderBuilder {
                 && all_required_row_groups_searched(output, result)
             {
                 apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_FULLTEXT);
+                metrics.fulltext_index_cache_hit += 1;
                 pruned = true;
                 continue;
             }
 
             // Slow path: apply the index from the file.
+            metrics.fulltext_index_cache_miss += 1;
             let file_size_hint = self.file_handle.meta_ref().index_file_size();
             let rgs = parquet_meta.row_groups().iter().enumerate().map(|(i, rg)| {
                 (
@@ -983,6 +1091,29 @@ fn apply_selection_and_update_metrics(
     *output = intersection;
 }
 
+#[cfg(feature = "vector_index")]
+fn vector_selection_from_offsets(
+    row_offsets: Vec<u64>,
+    row_group_size: usize,
+    num_row_groups: usize,
+) -> Result<RowGroupSelection> {
+    let mut row_ids = BTreeSet::new();
+    for offset in row_offsets {
+        let row_id = u32::try_from(offset).map_err(|_| {
+            ApplyVectorIndexSnafu {
+                reason: format!("Row offset {} exceeds u32::MAX", offset),
+            }
+            .build()
+        })?;
+        row_ids.insert(row_id);
+    }
+    Ok(RowGroupSelection::from_row_ids(
+        row_ids,
+        row_group_size,
+        num_row_groups,
+    ))
+}
+
 fn all_required_row_groups_searched(
     required_row_groups: &RowGroupSelection,
     cached_row_groups: &RowGroupSelection,
@@ -1008,6 +1139,8 @@ pub(crate) struct ReaderFilterMetrics {
     pub(crate) rg_minmax_filtered: usize,
     /// Number of row groups filtered by bloom filter index.
     pub(crate) rg_bloom_filtered: usize,
+    /// Number of row groups filtered by vector index.
+    pub(crate) rg_vector_filtered: usize,
 
     /// Number of rows in row group before filtering.
     pub(crate) rows_total: usize,
@@ -1017,8 +1150,23 @@ pub(crate) struct ReaderFilterMetrics {
     pub(crate) rows_inverted_filtered: usize,
     /// Number of rows in row group filtered by bloom filter index.
     pub(crate) rows_bloom_filtered: usize,
+    /// Number of rows filtered by vector index.
+    pub(crate) rows_vector_filtered: usize,
     /// Number of rows filtered by precise filter.
     pub(crate) rows_precise_filtered: usize,
+
+    /// Number of index result cache hits for fulltext index.
+    pub(crate) fulltext_index_cache_hit: usize,
+    /// Number of index result cache misses for fulltext index.
+    pub(crate) fulltext_index_cache_miss: usize,
+    /// Number of index result cache hits for inverted index.
+    pub(crate) inverted_index_cache_hit: usize,
+    /// Number of index result cache misses for inverted index.
+    pub(crate) inverted_index_cache_miss: usize,
+    /// Number of index result cache hits for bloom filter index.
+    pub(crate) bloom_filter_cache_hit: usize,
+    /// Number of index result cache misses for bloom filter index.
+    pub(crate) bloom_filter_cache_miss: usize,
 
     /// Optional metrics for inverted index applier.
     pub(crate) inverted_index_apply_metrics: Option<InvertedIndexApplyMetrics>,
@@ -1036,12 +1184,21 @@ impl ReaderFilterMetrics {
         self.rg_inverted_filtered += other.rg_inverted_filtered;
         self.rg_minmax_filtered += other.rg_minmax_filtered;
         self.rg_bloom_filtered += other.rg_bloom_filtered;
+        self.rg_vector_filtered += other.rg_vector_filtered;
 
         self.rows_total += other.rows_total;
         self.rows_fulltext_filtered += other.rows_fulltext_filtered;
         self.rows_inverted_filtered += other.rows_inverted_filtered;
         self.rows_bloom_filtered += other.rows_bloom_filtered;
+        self.rows_vector_filtered += other.rows_vector_filtered;
         self.rows_precise_filtered += other.rows_precise_filtered;
+
+        self.fulltext_index_cache_hit += other.fulltext_index_cache_hit;
+        self.fulltext_index_cache_miss += other.fulltext_index_cache_miss;
+        self.inverted_index_cache_hit += other.inverted_index_cache_hit;
+        self.inverted_index_cache_miss += other.inverted_index_cache_miss;
+        self.bloom_filter_cache_hit += other.bloom_filter_cache_hit;
+        self.bloom_filter_cache_miss += other.bloom_filter_cache_miss;
 
         // Merge optional applier metrics
         if let Some(other_metrics) = &other.inverted_index_apply_metrics {
@@ -1078,6 +1235,9 @@ impl ReaderFilterMetrics {
         READ_ROW_GROUPS_TOTAL
             .with_label_values(&["bloom_filter_index_filtered"])
             .inc_by(self.rg_bloom_filtered as u64);
+        READ_ROW_GROUPS_TOTAL
+            .with_label_values(&["vector_index_filtered"])
+            .inc_by(self.rg_vector_filtered as u64);
 
         PRECISE_FILTER_ROWS_TOTAL
             .with_label_values(&["parquet"])
@@ -1094,6 +1254,9 @@ impl ReaderFilterMetrics {
         READ_ROWS_IN_ROW_GROUP_TOTAL
             .with_label_values(&["bloom_filter_index_filtered"])
             .inc_by(self.rows_bloom_filtered as u64);
+        READ_ROWS_IN_ROW_GROUP_TOTAL
+            .with_label_values(&["vector_index_filtered"])
+            .inc_by(self.rows_vector_filtered as u64);
     }
 
     fn update_index_metrics(&mut self, index_type: &str, row_group_count: usize, row_count: usize) {
@@ -1110,8 +1273,64 @@ impl ReaderFilterMetrics {
                 self.rg_bloom_filtered += row_group_count;
                 self.rows_bloom_filtered += row_count;
             }
+            INDEX_TYPE_VECTOR => {
+                self.rg_vector_filtered += row_group_count;
+                self.rows_vector_filtered += row_count;
+            }
             _ => {}
         }
+    }
+}
+
+#[cfg(all(test, feature = "vector_index"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_vector_selection_from_offsets() {
+        let row_group_size = 4;
+        let num_row_groups = 3;
+        let selection =
+            vector_selection_from_offsets(vec![0, 1, 5, 9], row_group_size, num_row_groups)
+                .unwrap();
+
+        assert_eq!(selection.row_group_count(), 3);
+        assert_eq!(selection.row_count(), 4);
+        assert!(selection.contains_non_empty_row_group(0));
+        assert!(selection.contains_non_empty_row_group(1));
+        assert!(selection.contains_non_empty_row_group(2));
+    }
+
+    #[test]
+    fn test_vector_selection_from_offsets_out_of_range() {
+        let row_group_size = 4;
+        let num_row_groups = 2;
+        let selection = vector_selection_from_offsets(
+            vec![0, 7, u64::from(u32::MAX) + 1],
+            row_group_size,
+            num_row_groups,
+        );
+        assert!(selection.is_err());
+    }
+
+    #[test]
+    fn test_vector_selection_updates_metrics() {
+        let row_group_size = 4;
+        let total_rows = 8;
+        let mut output = RowGroupSelection::new(row_group_size, total_rows);
+        let selection = vector_selection_from_offsets(vec![1], row_group_size, 2).unwrap();
+        let mut metrics = ReaderFilterMetrics::default();
+
+        apply_selection_and_update_metrics(
+            &mut output,
+            &selection,
+            &mut metrics,
+            INDEX_TYPE_VECTOR,
+        );
+
+        assert_eq!(metrics.rg_vector_filtered, 1);
+        assert_eq!(metrics.rows_vector_filtered, 7);
+        assert_eq!(output.row_count(), 1);
     }
 }
 
@@ -1126,6 +1345,10 @@ pub(crate) struct MetadataCacheMetrics {
     pub(crate) cache_miss: usize,
     /// Duration to load parquet metadata.
     pub(crate) metadata_load_cost: Duration,
+    /// Number of read operations performed.
+    pub(crate) num_reads: usize,
+    /// Total bytes read from storage.
+    pub(crate) bytes_read: u64,
 }
 
 impl std::fmt::Debug for MetadataCacheMetrics {
@@ -1135,6 +1358,8 @@ impl std::fmt::Debug for MetadataCacheMetrics {
             file_cache_hit,
             cache_miss,
             metadata_load_cost,
+            num_reads,
+            bytes_read,
         } = self;
 
         if self.is_empty() {
@@ -1153,6 +1378,12 @@ impl std::fmt::Debug for MetadataCacheMetrics {
         if *cache_miss > 0 {
             write!(f, ", \"cache_miss\":{}", cache_miss)?;
         }
+        if *num_reads > 0 {
+            write!(f, ", \"num_reads\":{}", num_reads)?;
+        }
+        if *bytes_read > 0 {
+            write!(f, ", \"bytes_read\":{}", bytes_read)?;
+        }
 
         write!(f, "}}")
     }
@@ -1170,6 +1401,8 @@ impl MetadataCacheMetrics {
         self.file_cache_hit += other.file_cache_hit;
         self.cache_miss += other.cache_miss;
         self.metadata_load_cost += other.metadata_load_cost;
+        self.num_reads += other.num_reads;
+        self.bytes_read += other.bytes_read;
     }
 }
 

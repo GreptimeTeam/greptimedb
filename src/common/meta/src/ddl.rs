@@ -28,6 +28,7 @@ use crate::node_manager::NodeManagerRef;
 use crate::region_keeper::MemoryRegionKeeperRef;
 use crate::region_registry::LeaderRegionRegistryRef;
 
+pub mod allocator;
 pub mod alter_database;
 pub mod alter_logical_tables;
 pub mod alter_table;

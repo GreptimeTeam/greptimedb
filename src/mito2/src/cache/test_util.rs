@@ -24,6 +24,7 @@ use object_store::services::Fs;
 use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::metadata::ParquetMetaData;
+use parquet::file::statistics::Statistics;
 
 /// Returns a parquet meta data.
 pub(crate) fn parquet_meta() -> Arc<ParquetMetaData> {
@@ -48,4 +49,61 @@ fn parquet_file_data() -> Vec<u8> {
 pub(crate) fn new_fs_store(path: &str) -> ObjectStore {
     let builder = Fs::default();
     ObjectStore::new(builder.root(path)).unwrap().finish()
+}
+
+pub(crate) fn assert_parquet_metadata_equal(x: Arc<ParquetMetaData>, y: Arc<ParquetMetaData>) {
+    // Normalize the statistics in parquet metadata because the flag "min_max_backwards_compatible"
+    // is not persisted across parquet metadata writer and reader.
+    fn normalize_statistics(metadata: ParquetMetaData) -> ParquetMetaData {
+        let unset_min_max_backwards_compatible_flag = |stats: Statistics| -> Statistics {
+            match stats {
+                Statistics::Boolean(stats) => {
+                    Statistics::Boolean(stats.with_backwards_compatible_min_max(false))
+                }
+                Statistics::Int32(stats) => {
+                    Statistics::Int32(stats.with_backwards_compatible_min_max(false))
+                }
+                Statistics::Int64(stats) => {
+                    Statistics::Int64(stats.with_backwards_compatible_min_max(false))
+                }
+                Statistics::Int96(stats) => {
+                    Statistics::Int96(stats.with_backwards_compatible_min_max(false))
+                }
+                Statistics::Float(stats) => {
+                    Statistics::Float(stats.with_backwards_compatible_min_max(false))
+                }
+                Statistics::Double(stats) => {
+                    Statistics::Double(stats.with_backwards_compatible_min_max(false))
+                }
+                Statistics::ByteArray(stats) => {
+                    Statistics::ByteArray(stats.with_backwards_compatible_min_max(false))
+                }
+                Statistics::FixedLenByteArray(stats) => {
+                    Statistics::FixedLenByteArray(stats.with_backwards_compatible_min_max(false))
+                }
+            }
+        };
+
+        let mut metadata_builder = metadata.into_builder();
+        for rg in metadata_builder.take_row_groups() {
+            let mut rg_builder = rg.into_builder();
+            for col in rg_builder.take_columns() {
+                let stats = col
+                    .statistics()
+                    .cloned()
+                    .map(unset_min_max_backwards_compatible_flag);
+                let mut col_builder = col.into_builder().clear_statistics();
+                if let Some(stats) = stats {
+                    col_builder = col_builder.set_statistics(stats);
+                }
+                rg_builder = rg_builder.add_column_metadata(col_builder.build().unwrap());
+            }
+            metadata_builder = metadata_builder.add_row_group(rg_builder.build().unwrap());
+        }
+        metadata_builder.build()
+    }
+
+    let x = normalize_statistics(Arc::unwrap_or_clone(x));
+    let y = normalize_statistics(Arc::unwrap_or_clone(y));
+    assert_eq!(x, y);
 }

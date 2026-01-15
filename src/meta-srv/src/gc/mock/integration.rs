@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use common_meta::datanode::RegionManifestInfo;
 use common_meta::peer::Peer;
@@ -22,9 +22,7 @@ use common_telemetry::init_default_ut_logging;
 use store_api::region_engine::RegionRole;
 use store_api::storage::{FileId, FileRefsManifest, GcReport, RegionId};
 
-use crate::gc::mock::{
-    MockSchedulerCtx, TEST_REGION_SIZE_200MB, mock_region_stat, new_empty_report_with,
-};
+use crate::gc::mock::{MockSchedulerCtx, TEST_REGION_SIZE_200MB, mock_region_stat};
 use crate::gc::{GcScheduler, GcSchedulerOptions};
 
 // Integration Flow Tests
@@ -124,11 +122,6 @@ async fn test_full_gc_workflow() {
         "Expected 1 call to get_table_to_region_stats"
     );
     assert_eq!(
-        *ctx.get_file_references_calls.lock().unwrap(),
-        1,
-        "Expected 1 call to get_file_references"
-    );
-    assert_eq!(
         *ctx.gc_regions_calls.lock().unwrap(),
         1,
         "Expected 1 call to gc_regions"
@@ -140,6 +133,10 @@ async fn test_full_gc_workflow() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn test_tracker_cleanup() {
+    use std::time::Duration;
+
+    use crate::gc::mock::new_empty_report_with;
+
     init_default_ut_logging();
 
     let table_id = 1;

@@ -601,14 +601,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid file metadata"))]
-    ConvertMetaData {
-        #[snafu(implicit)]
-        location: Location,
-        #[snafu(source)]
-        error: parquet::errors::ParquetError,
-    },
-
     #[snafu(display("Column not found, column: {column}"))]
     ColumnNotFound {
         column: String,
@@ -648,6 +640,14 @@ pub enum Error {
     #[snafu(display("Failed to apply bloom filter index"))]
     ApplyBloomFilterIndex {
         source: index::bloom_filter::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "vector_index")]
+    #[snafu(display("Failed to apply vector index: {}", reason))]
+    ApplyVectorIndex {
+        reason: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -1276,7 +1276,6 @@ impl ErrorExt for Error {
             | Join { .. }
             | WorkerStopped { .. }
             | Recv { .. }
-            | ConvertMetaData { .. }
             | DecodeWal { .. }
             | ComputeArrow { .. }
             | BiErrors { .. }
@@ -1324,6 +1323,8 @@ impl ErrorExt for Error {
             | PushIndexValue { source, .. }
             | ApplyInvertedIndex { source, .. }
             | IndexFinish { source, .. } => source.status_code(),
+            #[cfg(feature = "vector_index")]
+            ApplyVectorIndex { .. } => StatusCode::Internal,
             PuffinReadBlob { source, .. }
             | PuffinAddBlob { source, .. }
             | PuffinInitStager { source, .. }
