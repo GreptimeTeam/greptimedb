@@ -240,7 +240,7 @@ tower = "0.5"
 tower-http = "0.6"
 tracing = "0.1"
 tracing-appender = "0.2"
-tracing-opentelemetry = "0.31.0"
+tracing-opentelemetry = "0.32.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
 typetag = "0.2"
 uuid = { version = "1.17", features = ["serde", "v4", "fast-rng"] }
