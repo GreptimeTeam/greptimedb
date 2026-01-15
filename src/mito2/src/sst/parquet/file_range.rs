@@ -31,7 +31,6 @@ use datatypes::schema::Schema;
 use mito_codec::row_converter::{CompositeValues, PrimaryKeyCodec};
 use parquet::arrow::arrow_reader::RowSelection;
 use parquet::file::metadata::ParquetMetaData;
-use partition::expr::PartitionExpr;
 use snafu::{OptionExt, ResultExt};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
@@ -379,8 +378,6 @@ pub enum PreFilterMode {
 
 /// Context for partition expression filtering.
 pub(crate) struct PartitionFilterContext {
-    #[allow(unused)]
-    pub(crate) file_partition_expr: Option<PartitionExpr>,
     pub(crate) region_partition_physical_expr: Arc<dyn PhysicalExpr>,
     /// Schema containing only columns referenced by the partition expression.
     /// This is used to build a minimal RecordBatch for partition filter evaluation.
@@ -742,13 +739,16 @@ impl RangeBase {
             let metadata = self.read_format.metadata();
             let column_id = metadata.column_by_name(field.name()).map(|c| c.column_id);
 
-            // if we can't find the column id by name, it might be a special column or missing.
+            // Partition pruning schema should be a subset of the input batch schema.
             let Some(column_id) = column_id else {
-                columns.push(datatypes::arrow::array::new_null_array(
-                    field.data_type(),
-                    input.num_rows(),
-                ));
-                continue;
+                return UnexpectedSnafu {
+                    reason: format!(
+                        "Partition pruning schema expects column '{}' but it is missing in \
+                         region metadata",
+                        field.name()
+                    ),
+                }
+                .fail();
             };
 
             // 1. Check if it's a tag.
@@ -777,11 +777,15 @@ impl RangeBase {
                 // 3. Check if it's a field column.
                 columns.push(input.fields()[field_index].data.to_arrow_array());
             } else {
-                // Not found, fill with nulls.
-                columns.push(datatypes::arrow::array::new_null_array(
-                    field.data_type(),
-                    input.num_rows(),
-                ));
+                return UnexpectedSnafu {
+                    reason: format!(
+                        "Partition pruning schema expects column '{}' (id {}) but it is not \
+                         present in input batch",
+                        field.name(),
+                        column_id
+                    ),
+                }
+                .fail();
             }
         }
 
@@ -812,21 +816,28 @@ impl RangeBase {
             let column_id = metadata.column_by_name(field.name()).map(|c| c.column_id);
 
             let Some(column_id) = column_id else {
-                columns.push(datatypes::arrow::array::new_null_array(
-                    field.data_type(),
-                    input.num_rows(),
-                ));
-                continue;
+                return UnexpectedSnafu {
+                    reason: format!(
+                        "Partition pruning schema expects column '{}' but it is missing in \
+                         region metadata",
+                        field.name()
+                    ),
+                }
+                .fail();
             };
 
             if let Some(idx) = flat_format.projected_index_by_id(column_id) {
                 columns.push(input.column(idx).clone());
             } else {
-                // Not found in projection, fill with nulls.
-                columns.push(datatypes::arrow::array::new_null_array(
-                    field.data_type(),
-                    input.num_rows(),
-                ));
+                return UnexpectedSnafu {
+                    reason: format!(
+                        "Partition pruning schema expects column '{}' (id {}) but it is not \
+                         present in projected record batch",
+                        field.name(),
+                        column_id
+                    ),
+                }
+                .fail();
             }
         }
 

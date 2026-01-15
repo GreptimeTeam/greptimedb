@@ -16,7 +16,7 @@
 
 #[cfg(feature = "vector_index")]
 use std::collections::BTreeSet;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -443,7 +443,7 @@ impl ParquetReaderBuilder {
                     if Some(&region_partition_expr) != file_partition_expr_ref =>
                 {
                     // Collect columns referenced by the partition expression.
-                    let mut referenced_columns = std::collections::HashSet::new();
+                    let mut referenced_columns = HashSet::new();
                     region_partition_expr.collect_column_names(&mut referenced_columns);
 
                     // Build a partition_schema containing only referenced columns.
@@ -488,7 +488,6 @@ impl ParquetReaderBuilder {
                         .context(SerializePartitionExprSnafu)?;
 
                     Some(PartitionFilterContext {
-                        file_partition_expr: file_partition_expr_ref.cloned(),
                         region_partition_physical_expr,
                         partition_schema,
                     })
