@@ -47,7 +47,7 @@ use common_procedure::{
     BoxedProcedure, Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
     ProcedureManagerRef, Result as ProcedureResult, Status, StringKey, UserMetadata,
 };
-use common_telemetry::error;
+use common_telemetry::{error, info};
 use partition::expr::PartitionExpr;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
@@ -232,7 +232,10 @@ impl Context {
                 &new_region_routes,
                 table_id,
             )?;
-
+        info!(
+            "Updating table route for table: {}, new region routes: {:?}",
+            table_id, new_region_routes
+        );
         self.table_metadata_manager
             .update_table_route(
                 table_id,
@@ -261,6 +264,13 @@ impl Context {
             .invalidate(&ctx, &[CacheIdent::TableId(table_id)])
             .await;
         Ok(())
+    }
+
+    /// Returns the next operation timeout.
+    ///
+    /// If the next operation timeout is not set, it will return `None`.
+    pub fn next_operation_timeout(&self) -> Option<std::time::Duration> {
+        Some(std::time::Duration::from_secs(10))
     }
 }
 
@@ -335,6 +345,13 @@ impl Procedure for RepartitionProcedure {
 
     async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
         let state = &mut self.state;
+        let state_name = state.name();
+        // Log state transition
+        common_telemetry::info!(
+            "Repartition procedure executing state: {}, table_id: {}",
+            state_name,
+            self.context.persistent_ctx.table_id
+        );
         match state.next(&mut self.context, _ctx).await {
             Ok((next, status)) => {
                 *state = next;

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub(crate) mod apply_staging_region;
+pub(crate) mod exit_staging_region;
 pub(crate) mod rollback_staging_region;
 
 use std::any::Any;
@@ -28,11 +29,14 @@ use crate::procedure::repartition::group::repartition_end::RepartitionEnd;
 use crate::procedure::repartition::group::{Context, State};
 
 #[derive(Debug, Serialize, Deserialize)]
+#[allow(clippy::enum_variant_names)]
 pub enum UpdateMetadata {
     /// Applies the new partition expressions for staging regions.
     ApplyStaging,
     /// Rolls back the new partition expressions for staging regions.
     RollbackStaging,
+    /// Exits the staging regions.
+    ExitStaging,
 }
 
 #[async_trait::async_trait]
@@ -62,7 +66,18 @@ impl State for UpdateMetadata {
 
                 if let Err(err) = ctx.invalidate_table_cache().await {
                     warn!(
-                        "Failed to broadcast the invalidate table cache message during the rollback staging regions, error: {err:?}"
+                        err;
+                        "Failed to broadcast the invalidate table cache message during the rollback staging regions"
+                    );
+                };
+                Ok((Box::new(RepartitionEnd), Status::executing(false)))
+            }
+            UpdateMetadata::ExitStaging => {
+                self.exit_staging_regions(ctx).await?;
+                if let Err(err) = ctx.invalidate_table_cache().await {
+                    warn!(
+                        err;
+                        "Failed to broadcast the invalidate table cache message during the exit staging regions"
                     );
                 };
                 Ok((Box::new(RepartitionEnd), Status::executing(false)))

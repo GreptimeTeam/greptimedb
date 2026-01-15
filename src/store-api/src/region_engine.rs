@@ -638,7 +638,7 @@ impl RegionStatistic {
 }
 
 /// Request to sync the region from a manifest or a region.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum SyncRegionFromRequest {
     /// Syncs the region using manifest information.
     /// Used in leader-follower manifest sync scenarios.

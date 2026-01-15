@@ -96,5 +96,8 @@ pub fn new_persistent_context(
         region_mapping: HashMap::new(),
         group_prepare_result: None,
         staging_manifest_paths: HashMap::new(),
+        sync_region: false,
+        allocated_region_ids: vec![],
+        pending_deallocate_region_ids: vec![],
     }
 }

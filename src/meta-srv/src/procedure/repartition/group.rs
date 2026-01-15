@@ -17,6 +17,7 @@ pub(crate) mod enter_staging_region;
 pub(crate) mod remap_manifest;
 pub(crate) mod repartition_end;
 pub(crate) mod repartition_start;
+pub(crate) mod sync_region;
 pub(crate) mod update_metadata;
 pub(crate) mod utils;
 
@@ -40,7 +41,7 @@ use common_procedure::{
     Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
     Result as ProcedureResult, Status, StringKey, UserMetadata,
 };
-use common_telemetry::error;
+use common_telemetry::{error, info};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{RegionId, TableId};
@@ -55,7 +56,6 @@ use crate::service::mailbox::MailboxRef;
 
 pub type GroupId = Uuid;
 
-#[allow(dead_code)]
 pub struct RepartitionGroupProcedure {
     state: Box<dyn State>,
     context: Context,
@@ -113,6 +113,14 @@ impl Procedure for RepartitionGroupProcedure {
 
     async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
         let state = &mut self.state;
+        let state_name = state.name();
+        // Log state transition
+        common_telemetry::info!(
+            "Repartition group procedure executing state: {}, group id: {}, table id: {}",
+            state_name,
+            self.context.persistent_ctx.group_id,
+            self.context.persistent_ctx.table_id
+        );
 
         match state.next(&mut self.context, _ctx).await {
             Ok((next, status)) => {
@@ -221,9 +229,16 @@ pub struct PersistentContext {
     /// The staging manifest paths of the repartition group.
     /// The value will be set in [RemapManifest](crate::procedure::repartition::group::remap_manifest::RemapManifest) state.
     pub staging_manifest_paths: HashMap<RegionId, String>,
+    /// Whether sync region is needed for this group.
+    pub sync_region: bool,
+    /// The region ids of the newly allocated regions.
+    pub allocated_region_ids: Vec<RegionId>,
+    /// The region ids of the regions that are pending deallocation.
+    pub pending_deallocate_region_ids: Vec<RegionId>,
 }
 
 impl PersistentContext {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         group_id: GroupId,
         table_id: TableId,
@@ -232,6 +247,9 @@ impl PersistentContext {
         sources: Vec<RegionDescriptor>,
         targets: Vec<RegionDescriptor>,
         region_mapping: HashMap<RegionId, Vec<RegionId>>,
+        sync_region: bool,
+        allocated_region_ids: Vec<RegionId>,
+        pending_deallocate_region_ids: Vec<RegionId>,
     ) -> Self {
         Self {
             group_id,
@@ -243,6 +261,9 @@ impl PersistentContext {
             region_mapping,
             group_prepare_result: None,
             staging_manifest_paths: HashMap::new(),
+            sync_region,
+            allocated_region_ids,
+            pending_deallocate_region_ids,
         }
     }
 
@@ -334,6 +355,7 @@ impl Context {
         new_region_routes: Vec<RegionRoute>,
     ) -> Result<()> {
         let table_id = self.persistent_ctx.table_id;
+        let group_id = self.persistent_ctx.group_id;
         // Safety: prepare result is set in [RepartitionStart] state.
         let prepare_result = self.persistent_ctx.group_prepare_result.as_ref().unwrap();
         let central_region_datanode_table_value = self
@@ -345,6 +367,10 @@ impl Context {
             ..
         } = &central_region_datanode_table_value.region_info;
 
+        info!(
+            "Updating table route for table: {}, group_id: {}, new region routes: {:?}",
+            table_id, group_id, new_region_routes
+        );
         self.table_metadata_manager
             .update_table_route(
                 table_id,

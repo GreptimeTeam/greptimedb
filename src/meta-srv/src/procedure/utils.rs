@@ -12,6 +12,185 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::time::Duration;
+
+use api::v1::meta::MailboxMessage;
+use common_meta::instruction::{FlushErrorStrategy, FlushRegions, Instruction, InstructionReply};
+use common_meta::peer::Peer;
+use common_telemetry::{info, warn};
+use snafu::ResultExt;
+use store_api::storage::RegionId;
+use tokio::time::Instant;
+
+use crate::error::{self, Error, Result};
+use crate::handler::HeartbeatMailbox;
+use crate::service::mailbox::{Channel, MailboxRef};
+
+pub(crate) enum ErrorStrategy {
+    Ignore,
+    Retry,
+}
+
+fn handle_flush_region_reply(
+    reply: &InstructionReply,
+    region_ids: &[RegionId],
+    msg: &MailboxMessage,
+) -> Result<(bool, Option<String>)> {
+    let result = match reply {
+        InstructionReply::FlushRegions(flush_reply) => {
+            if flush_reply.results.len() != region_ids.len() {
+                return error::UnexpectedInstructionReplySnafu {
+                    mailbox_message: msg.to_string(),
+                    reason: format!(
+                        "expect {} region flush result, but got {}",
+                        region_ids.len(),
+                        flush_reply.results.len()
+                    ),
+                }
+                .fail();
+            }
+
+            match flush_reply.overall_success {
+                true => (true, None),
+                false => (
+                    false,
+                    Some(
+                        flush_reply
+                            .results
+                            .iter()
+                            .filter_map(|(region_id, result)| match result {
+                                Ok(_) => None,
+                                Err(e) => Some(format!("{}: {:?}", region_id, e)),
+                            })
+                            .collect::<Vec<String>>()
+                            .join("; "),
+                    ),
+                ),
+            }
+        }
+        _ => {
+            return error::UnexpectedInstructionReplySnafu {
+                mailbox_message: msg.to_string(),
+                reason: "expect flush region reply",
+            }
+            .fail();
+        }
+    };
+
+    Ok(result)
+}
+
+/// Flushes the regions on the datanode.
+///
+/// Retry Or Ignore:
+/// - [PusherNotFound](error::Error::PusherNotFound), The datanode is unreachable.
+/// - Failed to flush region on the Datanode.
+///
+/// Abort:
+/// - [MailboxTimeout](error::Error::MailboxTimeout), Timeout.
+/// - [UnexpectedInstructionReply](error::Error::UnexpectedInstructionReply).
+/// - [ExceededDeadline](error::Error::ExceededDeadline)
+/// - Invalid JSON.
+pub(crate) async fn flush_region(
+    mailbox: &MailboxRef,
+    server_addr: &str,
+    region_ids: &[RegionId],
+    datanode: &Peer,
+    timeout: Duration,
+    error_strategy: ErrorStrategy,
+) -> Result<()> {
+    let flush_instruction = Instruction::FlushRegions(FlushRegions::sync_batch(
+        region_ids.to_vec(),
+        FlushErrorStrategy::TryAll,
+    ));
+
+    let msg = MailboxMessage::json_message(
+        &format!("Flush regions: {:?}", region_ids),
+        &format!("Metasrv@{}", server_addr),
+        &format!("Datanode-{}@{}", datanode.id, datanode.addr),
+        common_time::util::current_time_millis(),
+        &flush_instruction,
+    )
+    .with_context(|_| error::SerializeToJsonSnafu {
+        input: flush_instruction.to_string(),
+    })?;
+
+    let ch = Channel::Datanode(datanode.id);
+    let now = Instant::now();
+    let receiver = mailbox.send(&ch, msg, timeout).await;
+    let receiver = match receiver {
+        Ok(receiver) => receiver,
+        Err(error::Error::PusherNotFound { .. }) => match error_strategy {
+            ErrorStrategy::Ignore => {
+                warn!(
+                    "Failed to flush regions({:?}), the datanode({}) is unreachable(PusherNotFound). Skip flush operation.",
+                    region_ids, datanode
+                );
+                return Ok(());
+            }
+            ErrorStrategy::Retry => error::RetryLaterSnafu {
+                reason: format!(
+                    "Pusher not found for flush regions on datanode {:?}, elapsed: {:?}",
+                    datanode,
+                    now.elapsed()
+                ),
+            }
+            .fail()?,
+        },
+        Err(err) => {
+            return Err(err);
+        }
+    };
+
+    match receiver.await {
+        Ok(msg) => {
+            let reply = HeartbeatMailbox::json_reply(&msg)?;
+            info!(
+                "Received flush region reply: {:?}, regions: {:?}, elapsed: {:?}",
+                reply,
+                region_ids,
+                now.elapsed()
+            );
+            let (result, error) = handle_flush_region_reply(&reply, region_ids, &msg)?;
+            if let Some(error) = error {
+                match error_strategy {
+                    ErrorStrategy::Ignore => {
+                        warn!(
+                            "Failed to flush regions {:?}, the datanode({}) error is ignored: {}",
+                            region_ids, datanode, error
+                        );
+                    }
+                    ErrorStrategy::Retry => {
+                        return error::RetryLaterSnafu {
+                            reason: format!(
+                                "Failed to flush regions {:?}, the datanode({}) error is retried: {}",
+                                region_ids,
+                                datanode,
+                                error,
+                            ),
+                        }
+                        .fail()?;
+                    }
+                }
+            } else if result {
+                info!(
+                    "The flush regions {:?} on datanode {:?} is successful, elapsed: {:?}",
+                    region_ids,
+                    datanode,
+                    now.elapsed()
+                );
+            }
+
+            Ok(())
+        }
+        Err(Error::MailboxTimeout { .. }) => error::ExceededDeadlineSnafu {
+            operation: "Flush regions",
+        }
+        .fail(),
+        Err(err) => Err(err),
+    }
+}
+
 #[cfg(any(test, feature = "mock"))]
 pub mod mock {
     use std::io::Error;
