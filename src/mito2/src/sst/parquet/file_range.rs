@@ -372,8 +372,12 @@ pub enum PreFilterMode {
 
 /// Context for partition expression filtering.
 pub(crate) struct PartitionFilterContext {
+    #[allow(unused)]
     pub(crate) file_partition_expr: Option<PartitionExpr>,
     pub(crate) region_partition_physical_expr: Arc<dyn PhysicalExpr>,
+    /// Schema containing only columns referenced by the partition expression.
+    /// This is used to build a minimal RecordBatch for partition filter evaluation.
+    pub(crate) partition_schema: Arc<Schema>,
 }
 
 /// Common fields for a range to read and filter batches.
@@ -521,7 +525,7 @@ impl RangeBase {
         input: RecordBatch,
         skip_fields: bool,
     ) -> Result<Option<RecordBatch>> {
-        let mut mask = self.compute_filter_mask_flat(&input, skip_fields)?;
+        let mask = self.compute_filter_mask_flat(&input, skip_fields)?;
 
         // If mask is None, the entire batch is filtered out
         let Some(mut mask) = mask else {
@@ -657,7 +661,9 @@ impl RangeBase {
         input: &mut Batch,
         partition_filter: &PartitionFilterContext,
     ) -> Result<BooleanBuffer> {
-        let record_batch = self.build_record_batch_for_pruning(input)?;
+        // Use partition_schema which only contains columns referenced by the partition expression.
+        let record_batch =
+            self.build_record_batch_for_pruning(input, &partition_filter.partition_schema)?;
         let columnar_value = partition_filter
             .region_partition_physical_expr
             .evaluate(&record_batch)
@@ -682,7 +688,9 @@ impl RangeBase {
         input: &RecordBatch,
         partition_filter: &PartitionFilterContext,
     ) -> Result<BooleanBuffer> {
-        let record_batch = self.project_record_batch_for_pruning(input)?;
+        // Use partition_schema which only contains columns referenced by the partition expression.
+        let record_batch =
+            self.project_record_batch_for_pruning(input, &partition_filter.partition_schema)?;
         let columnar_value = partition_filter
             .region_partition_physical_expr
             .evaluate(&record_batch)
@@ -701,9 +709,16 @@ impl RangeBase {
         Ok(boolean_array.values().clone())
     }
 
-    /// Builds a `RecordBatch` that matches `prune_schema` from the input `Batch`.
-    fn build_record_batch_for_pruning(&self, input: &mut Batch) -> Result<RecordBatch> {
-        let arrow_schema = self.prune_schema.arrow_schema();
+    /// Builds a `RecordBatch` from the input `Batch` matching the given schema.
+    ///
+    /// This is used for partition expression evaluation. The schema should only contain
+    /// the columns referenced by the partition expression to minimize overhead.
+    fn build_record_batch_for_pruning(
+        &self,
+        input: &mut Batch,
+        schema: &Arc<Schema>,
+    ) -> Result<RecordBatch> {
+        let arrow_schema = schema.arrow_schema();
         let mut columns = Vec::with_capacity(arrow_schema.fields().len());
 
         // Decode primary key if necessary.
@@ -765,9 +780,16 @@ impl RangeBase {
         RecordBatch::try_new(arrow_schema.clone(), columns).context(NewRecordBatchSnafu)
     }
 
-    /// Projects the input `RecordBatch` to match `prune_schema`.
-    fn project_record_batch_for_pruning(&self, input: &RecordBatch) -> Result<RecordBatch> {
-        let arrow_schema = self.prune_schema.arrow_schema();
+    /// Projects the input `RecordBatch` to match the given schema.
+    ///
+    /// This is used for partition expression evaluation. The schema should only contain
+    /// the columns referenced by the partition expression to minimize overhead.
+    fn project_record_batch_for_pruning(
+        &self,
+        input: &RecordBatch,
+        schema: &Arc<Schema>,
+    ) -> Result<RecordBatch> {
+        let arrow_schema = schema.arrow_schema();
         let mut columns = Vec::with_capacity(arrow_schema.fields().len());
 
         let flat_format = self

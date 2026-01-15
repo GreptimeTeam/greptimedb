@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
 use std::fmt::{Debug, Display, Formatter};
 use std::sync::Arc;
 
@@ -404,6 +405,24 @@ impl PartitionExpr {
             expression: self.as_json_str()?,
             ..Default::default()
         })
+    }
+
+    /// Collects all column names referenced by this expression.
+    pub fn collect_column_names(&self, columns: &mut HashSet<String>) {
+        Self::collect_operand_columns(&self.lhs, columns);
+        Self::collect_operand_columns(&self.rhs, columns);
+    }
+
+    fn collect_operand_columns(operand: &Operand, columns: &mut HashSet<String>) {
+        match operand {
+            Operand::Column(c) => {
+                columns.insert(c.clone());
+            }
+            Operand::Expr(e) => {
+                e.collect_column_names(columns);
+            }
+            Operand::Value(_) => {}
+        }
     }
 }
 

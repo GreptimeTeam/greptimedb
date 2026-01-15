@@ -47,8 +47,8 @@ use crate::cache::index::result_cache::PredicateKey;
 #[cfg(feature = "vector_index")]
 use crate::error::ApplyVectorIndexSnafu;
 use crate::error::{
-    ArrowReaderSnafu, InvalidMetaSnafu, InvalidMetadataSnafu, InvalidParquetSnafu,
-    ReadDataPartSnafu, ReadParquetSnafu, Result, SerdeJsonSnafu, SerializePartitionExprSnafu,
+    ArrowReaderSnafu, InvalidMetadataSnafu, InvalidParquetSnafu, ReadDataPartSnafu,
+    ReadParquetSnafu, Result, SerdeJsonSnafu, SerializePartitionExprSnafu,
 };
 use crate::metrics::{
     PRECISE_FILTER_ROWS_TOTAL, READ_ROW_GROUPS_TOTAL, READ_ROWS_IN_ROW_GROUP_TOTAL,
@@ -440,13 +440,28 @@ impl ParquetReaderBuilder {
                 serde_json::from_str(region_str).context(SerdeJsonSnafu)?;
 
             if Some(&region_partition_expr) != file_partition_expr_ref {
+                // Collect columns referenced by the partition expression.
+                let mut referenced_columns = std::collections::HashSet::new();
+                region_partition_expr.collect_column_names(&mut referenced_columns);
+
+                // Build a partition_schema containing only referenced columns.
+                let partition_schema = Arc::new(datatypes::schema::Schema::new(
+                    prune_schema
+                        .column_schemas()
+                        .iter()
+                        .filter(|col| referenced_columns.contains(&col.name))
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                ));
+
                 let region_partition_physical_expr = region_partition_expr
-                    .try_as_physical_expr(&prune_schema.arrow_schema())
+                    .try_as_physical_expr(&partition_schema.arrow_schema())
                     .context(SerializePartitionExprSnafu)?;
 
                 Some(PartitionFilterContext {
                     file_partition_expr: file_partition_expr_ref.cloned(),
                     region_partition_physical_expr,
+                    partition_schema,
                 })
             } else {
                 None
