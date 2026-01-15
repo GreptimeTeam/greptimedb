@@ -80,14 +80,11 @@ EXPLAIN SELECT a % 2, b FROM test UNION SELECT a % 2 AS k, b FROM test ORDER BY 
 |               | ]]                                                                                                        |
 | physical_plan | CoalescePartitionsExec                                                                                    |
 |               |   AggregateExec: mode=FinalPartitioned, gby=[test.a % Int64(2)@0 as test.a % Int64(2), b@1 as b], aggr=[] |
-|               |     CoalesceBatchesExec: target_batch_size=8192                                                           |
-|               |       RepartitionExec: REDACTED
-|               |         AggregateExec: mode=Partial, gby=[test.a % Int64(2)@0 as test.a % Int64(2), b@1 as b], aggr=[]    |
-|               |           InterleaveExec                                                                                  |
-|               |             CooperativeExec                                                                               |
-|               |               MergeScanExec: REDACTED
-|               |             CooperativeExec                                                                               |
-|               |               MergeScanExec: REDACTED
+|               |     RepartitionExec: REDACTED
+|               |       AggregateExec: mode=Partial, gby=[test.a % Int64(2)@0 as test.a % Int64(2), b@1 as b], aggr=[]      |
+|               |         InterleaveExec                                                                                    |
+|               |           MergeScanExec: REDACTED
+|               |           MergeScanExec: REDACTED
 |               |                                                                                                           |
 +---------------+-----------------------------------------------------------------------------------------------------------+
 

@@ -114,6 +114,7 @@ impl ParserContext<'_> {
             match cte.content {
                 CteContent::Sql(body) => sql_cte_tables.push(Cte {
                     alias: TableAlias {
+                        explicit: false,
                         name: cte.name,
                         columns: cte
                             .columns

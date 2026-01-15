@@ -23,7 +23,7 @@ use datafusion::config::ConfigOptions;
 use datafusion::error::Result as DfResult;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::ExecutionPlan;
-use datafusion::physical_plan::filter::FilterExec;
+use datafusion::physical_plan::filter::{FilterExec, FilterExecBuilder};
 use datafusion_common::ScalarValue;
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_expr::ColumnarValue;
@@ -205,9 +205,10 @@ impl PhysicalOptimizerRule for MatchesConstantTermOptimizer {
                     })?;
 
                     if new_pred.transformed {
-                        let exec = FilterExec::try_new(new_pred.data, filter.input().clone())?
-                            .with_default_selectivity(filter.default_selectivity())?
-                            .with_projection(filter.projection().cloned())?;
+                        let exec = FilterExecBuilder::new(new_pred.data, filter.input().clone())
+                            .with_default_selectivity(filter.default_selectivity())
+                            .apply_projection_by_ref(filter.projection().as_ref())
+                            .and_then(|x| x.build())?;
                         return Ok(Transformed::yes(Arc::new(exec) as _));
                     }
                 }

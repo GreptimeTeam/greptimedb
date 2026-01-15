@@ -110,9 +110,7 @@ TQL ANALYZE (0, 10, '5s') histogram_quantile(0.5, tsid_no_aggr_histogram_bucket)
 +-+-+-+
 | 0_| 0_|_HistogramFoldExec: le=@2, field=@0, quantile=0.5 REDACTED
 |_|_|_SortExec: expr=[job@1 ASC NULLS LAST, ts@3 ASC NULLS LAST, CAST(le@2 AS Float64) ASC NULLS LAST], preserve_partitioning=[true] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[val@0 as val, job@1 as job, le@2 as le, ts@4 as ts] REDACTED

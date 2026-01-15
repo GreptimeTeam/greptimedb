@@ -1,11 +1,11 @@
 CREATE TABLE numbers_input_show (
-    number INT,
+    "number" INT,
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(number),
     TIME INDEX(ts)
 );
 create table out_num_cnt_show (
-    number INT,
+    "number" INT,
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP TIME INDEX,    
     PRIMARY KEY(number),
 );
@@ -130,13 +130,13 @@ drop table out_num_cnt_show;
 drop table numbers_input_show;
 
 CREATE TABLE numbers_input_show (
-    number INT,
+    "number" INT,
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(number),
     TIME INDEX(ts)
 );
 create table out_num_cnt_show (
-    number INT,
+    "number" INT,
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP TIME INDEX,    
     PRIMARY KEY(number),
 );

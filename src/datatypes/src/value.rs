@@ -1229,7 +1229,8 @@ impl TryFrom<ScalarValue> for Value {
             | ScalarValue::Utf8View(_)
             | ScalarValue::BinaryView(_)
             | ScalarValue::Map(_)
-            | ScalarValue::Date64(_) => {
+            | ScalarValue::Date64(_)
+            | ScalarValue::RunEndEncoded(_, _, _) => {
                 return error::UnsupportedArrowTypeSnafu {
                     arrow_type: v.data_type(),
                 }

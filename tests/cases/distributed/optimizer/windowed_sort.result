@@ -73,7 +73,6 @@ ORDER BY
 | 1_| 0_|_ProjectionExec: expr=[collect_time_utc@0 as collect_time, peak_current@1 as peak_current] REDACTED
 |_|_|_SortPreservingMergeExec: [collect_time_utc@0 ASC NULLS LAST] REDACTED
 |_|_|_SortExec: expr=[collect_time_utc@0 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
 |_|_|_|
 |_|_| Total rows: 8_|
@@ -124,7 +123,6 @@ ORDER BY
 | 1_| 0_|_ProjectionExec: expr=[collect_time_utc@0 as collect_time_0, peak_current@1 as peak_current] REDACTED
 |_|_|_SortPreservingMergeExec: [collect_time_utc@0 ASC NULLS LAST] REDACTED
 |_|_|_SortExec: expr=[collect_time_utc@0 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
 |_|_|_|
 |_|_| Total rows: 8_|
@@ -178,7 +176,6 @@ ORDER BY
 |_|_|_SortPreservingMergeExec: [collect_time@0 DESC] REDACTED
 |_|_|_WindowedSortExec: expr=collect_time@0 DESC num_ranges=REDACTED REDACTED
 |_|_|_PartSortExec: expr=collect_time@0 DESC num_ranges=REDACTED REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
 |_|_|_|
 |_|_| Total rows: 8_|
@@ -233,7 +230,6 @@ ORDER BY
 |_|_|_WindowedSortExec: expr=collect_time@1 DESC num_ranges=REDACTED REDACTED
 |_|_|_PartSortExec: expr=collect_time@1 DESC num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[collect_time_utc@1 as collect_time_utc, collect_time@0 as collect_time, peak_current@2 as peak_current] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
 |_|_|_|
 |_|_| Total rows: 8_|

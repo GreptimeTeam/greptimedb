@@ -170,8 +170,10 @@ Error: 2000(InvalidSyntax), expected type vector in call to function 'rad', got 
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 20, '5s') deg(angles{unit="radians"}) + rad(angles{unit="degrees"});
 
-++
-++
++------+----+-------------------------------------+
+| unit | ts | lhs.degrees(val) + rhs.radians(val) |
++------+----+-------------------------------------+
++------+----+-------------------------------------+
 
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 20, '5s') deg(pi() * 2);

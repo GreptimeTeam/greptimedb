@@ -59,7 +59,7 @@ pub struct RegionScanExec {
     /// The expected output ordering for the plan.
     output_ordering: Option<Vec<PhysicalSortExpr>>,
     metric: ExecutionPlanMetricsSet,
-    properties: PlanProperties,
+    properties: Arc<PlanProperties>,
     append_mode: bool,
     total_rows: usize,
     is_partition_set: bool,
@@ -206,12 +206,12 @@ impl RegionScanExec {
             }
         };
 
-        let properties = PlanProperties::new(
+        let properties = Arc::new(PlanProperties::new(
             eq_props,
             partitioning,
             EmissionType::Incremental,
             Boundedness::Bounded,
-        );
+        ));
         let append_mode = scanner_props.append_mode();
         let total_rows = scanner_props.total_rows();
         Ok(Self {
@@ -269,7 +269,7 @@ impl RegionScanExec {
             warn!("Setting partition ranges more than once for RegionScanExec");
         }
 
-        let mut properties = self.properties.clone();
+        let mut properties = self.properties.as_ref().clone();
         let new_partitioning = match properties.partitioning {
             Partitioning::Hash(ref columns, _) => {
                 Partitioning::Hash(columns.clone(), target_partitions)
@@ -292,7 +292,7 @@ impl RegionScanExec {
             arrow_schema: self.arrow_schema.clone(),
             output_ordering: self.output_ordering.clone(),
             metric: self.metric.clone(),
-            properties,
+            properties: Arc::new(properties),
             append_mode: self.append_mode,
             total_rows: self.total_rows,
             is_partition_set: true,
@@ -349,7 +349,7 @@ impl ExecutionPlan for RegionScanExec {
         self.arrow_schema.clone()
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
     }
 

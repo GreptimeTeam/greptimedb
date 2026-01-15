@@ -56,7 +56,7 @@ fn build_record_batch_stream(
 
     let config =
         FileScanConfigBuilder::new(ObjectStoreUrl::local_filesystem(), file_source.clone())
-            .with_projection_indices(scan_plan_config.projection.cloned())
+            .with_projection_indices(scan_plan_config.projection.cloned())?
             .with_limit(limit)
             .with_file_group(FileGroup::new(files))
             .build();
@@ -65,7 +65,7 @@ fn build_record_batch_stream(
         scan_plan_config.store.clone(),
     ));
 
-    let file_opener = file_source.create_file_opener(store, &config, 0);
+    let file_opener = config.file_source().create_file_opener(store, &config, 0)?;
     let stream = FileStream::new(
         &config,
         0, // partition: hard-code
@@ -146,7 +146,7 @@ fn new_parquet_stream_with_exec_plan(
     let file_scan_config =
         FileScanConfigBuilder::new(ObjectStoreUrl::local_filesystem(), Arc::new(parquet_source))
             .with_file_group(file_group)
-            .with_projection_indices(projection.cloned())
+            .with_projection_indices(projection.cloned())?
             .with_limit(*limit)
             .build();
 

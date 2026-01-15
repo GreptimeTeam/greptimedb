@@ -160,7 +160,6 @@ TQL ANALYZE (0, 10, '5s') rate(test[10s]);
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[j@0 as j, prom_rate(j_range,i,test.j,Int64(10000))@1 as prom_rate(j_range,i,j,Int64(10000)), k@2 as k, l@3 as l] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: prom_rate(j_range,i,test.j,Int64(10000))@1 IS NOT NULL REDACTED
 |_|_|_ProjectionExec: expr=[j@1 as j, prom_rate(j_range@4, i@0, j@1, 10000) as prom_rate(j_range,i,test.j,Int64(10000)), k@2 as k, l@3 as l] REDACTED
 |_|_|_PromRangeManipulateExec: req range=[0..10000], interval=[5000], eval range=[10000], time index=[j] REDACTED
@@ -170,7 +169,6 @@ TQL ANALYZE (0, 10, '5s') rate(test[10s]);
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
 | 1_| 1_|_ProjectionExec: expr=[j@0 as j, prom_rate(j_range,i,test.j,Int64(10000))@1 as prom_rate(j_range,i,j,Int64(10000)), k@2 as k, l@3 as l] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: prom_rate(j_range,i,test.j,Int64(10000))@1 IS NOT NULL REDACTED
 |_|_|_ProjectionExec: expr=[j@1 as j, prom_rate(j_range@4, i@0, j@1, 10000) as prom_rate(j_range,i,test.j,Int64(10000)), k@2 as k, l@3 as l] REDACTED
 |_|_|_PromRangeManipulateExec: req range=[0..10000], interval=[5000], eval range=[10000], time index=[j] REDACTED

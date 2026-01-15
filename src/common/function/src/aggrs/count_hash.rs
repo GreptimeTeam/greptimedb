@@ -428,7 +428,7 @@ impl Accumulator for CountHashAccumulator {
             &self.random_state,
             &mut self.batch_hashes,
         )?;
-        for hash in hashes.as_slice() {
+        for hash in hashes {
             self.values.insert(*hash);
         }
         Ok(())

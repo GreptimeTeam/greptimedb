@@ -334,7 +334,8 @@ impl Categorizer {
             Expr::Unnest(_)
             | Expr::GroupingSet(_)
             | Expr::Placeholder(_)
-            | Expr::OuterReferenceColumn(_, _) => Commutativity::Unimplemented,
+            | Expr::OuterReferenceColumn(_, _)
+            | Expr::SetComparison(_) => Commutativity::Unimplemented,
         }
     }
 

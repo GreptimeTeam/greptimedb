@@ -203,8 +203,8 @@ pub enum Error {
         error: parquet::errors::ParquetError,
     },
 
-    #[snafu(display("Failed to build file stream"))]
-    BuildFileStream {
+    #[snafu(transparent)]
+    DataFusion {
         #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
@@ -241,8 +241,9 @@ impl ErrorExt for Error {
             | ReadRecordBatch { .. }
             | WriteRecordBatch { .. }
             | EncodeRecordBatch { .. }
-            | BuildFileStream { .. }
             | OrcReader { .. } => StatusCode::Unexpected,
+
+            DataFusion { .. } => StatusCode::Internal,
         }
     }
 

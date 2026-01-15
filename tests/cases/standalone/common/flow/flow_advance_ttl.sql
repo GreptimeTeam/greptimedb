@@ -1,6 +1,6 @@
 -- test ttl = instant
 CREATE TABLE distinct_basic (
-    number INT,
+    "number" INT,
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(number),
     TIME INDEX(ts)
@@ -65,7 +65,7 @@ DROP TABLE out_distinct_basic;
 
 -- test ttl = 5s
 CREATE TABLE distinct_basic (
-    number INT,
+    "number" INT,
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(number),
     TIME INDEX(ts)

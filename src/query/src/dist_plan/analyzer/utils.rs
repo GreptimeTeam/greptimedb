@@ -46,7 +46,7 @@ pub(crate) struct PatchOptimizerContext {
 }
 
 impl OptimizerConfig for PatchOptimizerContext {
-    fn query_execution_start_time(&self) -> DateTime<Utc> {
+    fn query_execution_start_time(&self) -> Option<DateTime<Utc>> {
         self.inner.query_execution_start_time()
     }
 

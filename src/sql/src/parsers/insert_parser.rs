@@ -23,8 +23,11 @@ use crate::statements::statement::Statement;
 /// INSERT/REPLACE statement parser implementation
 impl ParserContext<'_> {
     pub(crate) fn parse_insert(&mut self) -> Result<Statement> {
-        let _ = self.parser.next_token();
-        let spstatement = self.parser.parse_insert().context(error::SyntaxSnafu)?;
+        let token = self.parser.next_token();
+        let spstatement = self
+            .parser
+            .parse_insert(token)
+            .context(error::SyntaxSnafu)?;
 
         match spstatement {
             SpStatement::Insert { .. } => {
@@ -38,8 +41,11 @@ impl ParserContext<'_> {
     }
 
     pub(crate) fn parse_replace(&mut self) -> Result<Statement> {
-        let _ = self.parser.next_token();
-        let spstatement = self.parser.parse_insert().context(error::SyntaxSnafu)?;
+        let token = self.parser.next_token();
+        let spstatement = self
+            .parser
+            .parse_insert(token)
+            .context(error::SyntaxSnafu)?;
 
         match spstatement {
             SpStatement::Insert(mut insert_stmt) => {

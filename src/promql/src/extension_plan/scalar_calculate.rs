@@ -94,7 +94,7 @@ impl ScalarCalculate {
         let qualifier = table_name.map(TableReference::bare);
         let schema = DFSchema::new_with_metadata(
             vec![
-                (qualifier.clone(), Arc::new(ts_field)),
+                (qualifier.clone(), ts_field),
                 (qualifier, Arc::new(val_field)),
             ],
             input_schema.metadata().clone(),
@@ -139,12 +139,12 @@ impl ScalarCalculate {
             .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
         let schema = Arc::new(Schema::new(fields));
         let properties = exec_input.properties();
-        let properties = PlanProperties::new(
+        let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(schema.clone()),
             Partitioning::UnknownPartitioning(1),
             properties.emission_type,
             properties.boundedness,
-        );
+        ));
         Ok(Arc::new(ScalarCalculateExec {
             start: self.start,
             end: self.end,
@@ -384,7 +384,7 @@ struct ScalarCalculateExec {
     input: Arc<dyn ExecutionPlan>,
     tag_columns: Vec<String>,
     metric: ExecutionPlanMetricsSet,
-    properties: PlanProperties,
+    properties: Arc<PlanProperties>,
 }
 
 impl ExecutionPlan for ScalarCalculateExec {
@@ -396,7 +396,7 @@ impl ExecutionPlan for ScalarCalculateExec {
         self.schema.clone()
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
     }
 
@@ -769,12 +769,12 @@ mod test {
             Field::new("ts", DataType::Timestamp(TimeUnit::Millisecond, None), true),
             Field::new("val", DataType::Float64, true),
         ]));
-        let properties = PlanProperties::new(
+        let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(schema.clone()),
             Partitioning::UnknownPartitioning(1),
             EmissionType::Incremental,
             Boundedness::Bounded,
-        );
+        ));
         let scalar_exec = Arc::new(ScalarCalculateExec {
             start: 0,
             end: 15_000,

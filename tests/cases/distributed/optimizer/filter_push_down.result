@@ -110,7 +110,6 @@ SELECT * FROM integers WHERE i NOT IN ((SELECT i FROM integers WHERE i=1)) ORDER
 +---+-------------------------+
 | 2 | 1970-01-01T00:00:00.002 |
 | 3 | 1970-01-01T00:00:00.003 |
-|   | 1970-01-01T00:00:00.004 |
 +---+-------------------------+
 
 SELECT * FROM integers WHERE i IN ((SELECT i FROM integers)) AND i<3 ORDER BY i;

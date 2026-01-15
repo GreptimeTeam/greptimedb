@@ -307,8 +307,8 @@ impl ExecutionPlan for UnionDistinctOnExec {
         vec![Distribution::SinglePartition, Distribution::SinglePartition]
     }
 
-    fn properties(&self) -> &PlanProperties {
-        self.properties.as_ref()
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.properties
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {

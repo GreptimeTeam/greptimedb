@@ -25,7 +25,10 @@ use datatypes::arrow::datatypes::{DataType as ArrowDataType, IntervalUnit};
 use datatypes::data_type::ConcreteDataType;
 use itertools::Itertools;
 use snafu::{OptionExt, ResultExt, ensure};
-use sqlparser::ast::{ColumnOption, ColumnOptionDef, DataType, Expr};
+use sqlparser::ast::{
+    ColumnOption, ColumnOptionDef, DataType, Expr, KeyOrIndexDisplay, NullsDistinctOption,
+    PrimaryKeyConstraint, UniqueConstraint,
+};
 use sqlparser::dialect::keywords::Keyword;
 use sqlparser::keywords::ALL_KEYWORDS;
 use sqlparser::parser::IsOptional::Mandatory;
@@ -717,15 +720,25 @@ impl<'a> ParserContext<'a> {
                 parser.parse_expr().context(SyntaxSnafu)?,
             )))
         } else if parser.parse_keywords(&[Keyword::PRIMARY, Keyword::KEY]) {
-            Ok(Some(ColumnOption::Unique {
-                is_primary: true,
+            Ok(Some(ColumnOption::PrimaryKey(PrimaryKeyConstraint {
+                name: None,
+                index_name: None,
+                index_type: None,
+                columns: vec![],
+                index_options: vec![],
                 characteristics: None,
-            }))
+            })))
         } else if parser.parse_keyword(Keyword::UNIQUE) {
-            Ok(Some(ColumnOption::Unique {
-                is_primary: false,
+            Ok(Some(ColumnOption::Unique(UniqueConstraint {
+                name: None,
+                index_name: None,
+                index_type_display: KeyOrIndexDisplay::None,
+                index_type: None,
+                columns: vec![],
+                index_options: vec![],
                 characteristics: None,
-            }))
+                nulls_distinct: NullsDistinctOption::None,
+            })))
         } else if parser.parse_keywords(&[Keyword::TIME, Keyword::INDEX]) {
             // Use a DialectSpecific option for time index
             Ok(Some(ColumnOption::DialectSpecific(vec![
