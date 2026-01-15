@@ -39,7 +39,8 @@ use table::predicate::Predicate;
 
 use crate::error::{
     ComputeArrowSnafu, DataFusionSnafu, DataTypeMismatchSnafu, DecodeSnafu, DecodeStatsSnafu,
-    NewRecordBatchSnafu, RecordBatchSnafu, Result, StatsNotPresentSnafu, UnexpectedSnafu,
+    EvalPartitionFilterSnafu, NewRecordBatchSnafu, RecordBatchSnafu, Result, StatsNotPresentSnafu,
+    UnexpectedSnafu,
 };
 use crate::read::Batch;
 use crate::read::compat::CompatBatch;
@@ -671,10 +672,10 @@ impl RangeBase {
         let columnar_value = partition_filter
             .region_partition_physical_expr
             .evaluate(&record_batch)
-            .context(DataFusionSnafu)?;
+            .context(EvalPartitionFilterSnafu)?;
         let array = columnar_value
             .into_array(record_batch.num_rows())
-            .context(DataFusionSnafu)?;
+            .context(EvalPartitionFilterSnafu)?;
         let boolean_array =
             array
                 .as_any()
@@ -698,10 +699,10 @@ impl RangeBase {
         let columnar_value = partition_filter
             .region_partition_physical_expr
             .evaluate(&record_batch)
-            .context(DataFusionSnafu)?;
+            .context(EvalPartitionFilterSnafu)?;
         let array = columnar_value
             .into_array(record_batch.num_rows())
-            .context(DataFusionSnafu)?;
+            .context(EvalPartitionFilterSnafu)?;
         let boolean_array =
             array
                 .as_any()
@@ -763,7 +764,7 @@ impl RangeBase {
                     .context(DataTypeMismatchSnafu)?;
                 let array = arrow_scalar
                     .to_array_of_size(input.num_rows())
-                    .context(DataFusionSnafu)?;
+                    .context(EvalPartitionFilterSnafu)?;
                 columns.push(array);
             } else if metadata.time_index_column().column_id == column_id {
                 // 2. Check if it's the timestamp column.
