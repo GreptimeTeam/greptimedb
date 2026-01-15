@@ -288,6 +288,7 @@ fn build_object_store_and_resolve_file_path(
 #[cfg(test)]
 mod tests {
     use std::env;
+    use std::path::Path;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -301,7 +302,11 @@ mod tests {
     use crate::metadata::snapshot::RestoreCommand;
 
     fn create_raftengine_url(path: &std::path::Path) -> String {
-        format!("raftengine:///{}", path.display())
+        let mut path = path.to_string_lossy().replace('\\', "/");
+        if !path.starts_with('/') {
+            path = format!("/{}", path);
+        }
+        format!("raftengine://{}", path)
     }
 
     #[tokio::test]
@@ -450,5 +455,21 @@ mod tests {
             .unwrap();
         let value = kv_backend.get(b"test").await.unwrap().unwrap().value;
         assert_eq!(value, b"test");
+    }
+
+    #[test]
+    fn test_path() {
+        let path = "C:\\Users\\user\\AppData\\Local\\Temp\\.tmpuPiVuB\\metadata";
+        let path = Path::new(path);
+        let url = create_raftengine_url(path);
+        assert_eq!(
+            url,
+            "raftengine:///C:/Users/user/AppData/Local/Temp/.tmpuPiVuB/metadata"
+        );
+        let url = url::Url::parse(&url).unwrap();
+        assert_eq!(
+            url.path(),
+            "/C:/Users/user/AppData/Local/Temp/.tmpuPiVuB/metadata"
+        );
     }
 }

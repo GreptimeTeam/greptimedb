@@ -72,3 +72,4 @@ common-test-util.workspace = true
 common-version.workspace = true
 serde.workspace = true
 tempfile.workspace = true
+url.workspace = true
