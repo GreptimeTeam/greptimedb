@@ -181,7 +181,7 @@ opentelemetry-proto = { version = "0.31", features = [
     "logs",
 ] }
 ordered-float = { version = "4.3", features = ["serde"] }
-otel-arrow-rust = { git = "https://github.com/GreptimeTeam/otel-arrow", rev = "5da284414e9b14f678344b51e5292229e4b5f8d2", features = [
+otel-arrow-rust = { git = "https://github.com/GreptimeTeam/otel-arrow", rev = "452821e455b16e9a397a09d299340e197eb91571", features = [
     "server",
 ] }
 parking_lot = "0.12"
