@@ -38,7 +38,7 @@ use store_api::storage::{ColumnId, TimeSeriesRowSelector};
 use table::predicate::Predicate;
 
 use crate::error::{
-    ComputeArrowSnafu, DataFusionSnafu, DataTypeMismatchSnafu, DecodeSnafu, DecodeStatsSnafu,
+    ComputeArrowSnafu, DataTypeMismatchSnafu, DecodeSnafu, DecodeStatsSnafu,
     EvalPartitionFilterSnafu, NewRecordBatchSnafu, RecordBatchSnafu, Result, StatsNotPresentSnafu,
     UnexpectedSnafu,
 };
