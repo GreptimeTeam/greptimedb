@@ -427,7 +427,6 @@ impl RangeBase {
         // Run filter one by one and combine them result
         // TODO(ruihang): run primary key filter first. It may short circuit other filters
         for filter_ctx in &self.filters {
-            // ... (keep existing filter logic) ...
             let filter = match filter_ctx.filter() {
                 MaybeFilter::Filter(f) => f,
                 // Column matches.
@@ -558,7 +557,7 @@ impl RangeBase {
     }
 
     /// Computes the filter mask for the input RecordBatch based on pushed down predicates.
-    /// If a partition expr filter is configured, it is applied later in `precise_filter_flat`.
+    /// If a partition expr filter is configured, it is applied later in `precise_filter_flat` but **NOT** in this function.
     ///
     /// Returns `None` if the entire batch is filtered out, otherwise returns the boolean mask.
     ///
@@ -695,7 +694,7 @@ impl RangeBase {
     ) -> Result<BooleanBuffer> {
         // Use partition_schema which only contains columns referenced by the partition expression.
         let record_batch =
-            self.project_record_batch_for_pruning(input, &partition_filter.partition_schema)?;
+            self.project_record_batch_for_pruning_flat(input, &partition_filter.partition_schema)?;
         let columnar_value = partition_filter
             .region_partition_physical_expr
             .evaluate(&record_batch)
@@ -796,7 +795,7 @@ impl RangeBase {
     ///
     /// This is used for partition expression evaluation. The schema should only contain
     /// the columns referenced by the partition expression to minimize overhead.
-    fn project_record_batch_for_pruning(
+    fn project_record_batch_for_pruning_flat(
         &self,
         input: &RecordBatch,
         schema: &Arc<Schema>,
