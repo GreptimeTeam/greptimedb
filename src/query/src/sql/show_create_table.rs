@@ -40,7 +40,7 @@ use table::requests::{
 
 use crate::error::{
     ConvertSqlTypeSnafu, ConvertSqlValueSnafu, GetFulltextOptionsSnafu,
-    GetSkippingIndexOptionsSnafu, Result, SqlSnafu,
+    GetSkippingIndexOptionsSnafu, GetVectorIndexOptionsSnafu, Result, SqlSnafu,
 };
 
 /// Generates CREATE TABLE options from given table metadata and schema-level options.
@@ -159,6 +159,23 @@ fn create_column(column_schema: &ColumnSchema, quote_style: char) -> Result<Colu
             ),
         ]);
         extensions.skipping_index_options = Some(map.into());
+    }
+
+    if let Some(opt) = column_schema
+        .vector_index_options()
+        .context(GetVectorIndexOptionsSnafu)?
+    {
+        let map = HashMap::from([
+            ("engine".to_string(), opt.engine.to_string()),
+            ("metric".to_string(), opt.metric.to_string()),
+            ("connectivity".to_string(), opt.connectivity.to_string()),
+            ("expansion_add".to_string(), opt.expansion_add.to_string()),
+            (
+                "expansion_search".to_string(),
+                opt.expansion_search.to_string(),
+            ),
+        ]);
+        extensions.vector_index_options = Some(map.into());
     }
 
     if column_schema.is_inverted_indexed() {

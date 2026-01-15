@@ -18,7 +18,7 @@ use arrow_schema::extension::{EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_K
 use datatypes::schema::{
     COMMENT_KEY, ColumnDefaultConstraint, ColumnSchema, FULLTEXT_KEY, FulltextAnalyzer,
     FulltextBackend, FulltextOptions, INVERTED_INDEX_KEY, Metadata, SKIPPING_INDEX_KEY,
-    SkippingIndexOptions, SkippingIndexType,
+    SkippingIndexOptions, SkippingIndexType, VECTOR_INDEX_KEY,
 };
 use greptime_proto::v1::{
     Analyzer, FulltextBackend as PbFulltextBackend, SkippingIndexType as PbSkippingIndexType,
@@ -35,11 +35,14 @@ const FULLTEXT_GRPC_KEY: &str = "fulltext";
 const INVERTED_INDEX_GRPC_KEY: &str = "inverted_index";
 /// Key used to store skip index options in gRPC column options.
 const SKIPPING_INDEX_GRPC_KEY: &str = "skipping_index";
+/// Key used to store vector index options in gRPC column options.
+const VECTOR_INDEX_GRPC_KEY: &str = "vector_index";
 
-const COLUMN_OPTION_MAPPINGS: [(&str, &str); 5] = [
+const COLUMN_OPTION_MAPPINGS: [(&str, &str); 6] = [
     (FULLTEXT_GRPC_KEY, FULLTEXT_KEY),
     (INVERTED_INDEX_GRPC_KEY, INVERTED_INDEX_KEY),
     (SKIPPING_INDEX_GRPC_KEY, SKIPPING_INDEX_KEY),
+    (VECTOR_INDEX_GRPC_KEY, VECTOR_INDEX_KEY),
     (EXTENSION_TYPE_NAME_KEY, EXTENSION_TYPE_NAME_KEY),
     (EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_METADATA_KEY),
 ];
@@ -76,6 +79,9 @@ pub fn try_as_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
         }
         if let Some(skipping_index) = options.options.get(SKIPPING_INDEX_GRPC_KEY) {
             metadata.insert(SKIPPING_INDEX_KEY.to_string(), skipping_index.to_owned());
+        }
+        if let Some(vector_index) = options.options.get(VECTOR_INDEX_GRPC_KEY) {
+            metadata.insert(VECTOR_INDEX_KEY.to_string(), vector_index.to_owned());
         }
         if let Some(extension_name) = options.options.get(EXTENSION_TYPE_NAME_KEY) {
             metadata.insert(EXTENSION_TYPE_NAME_KEY.to_string(), extension_name.clone());
@@ -172,6 +178,11 @@ pub fn options_from_column_schema(column_schema: &ColumnSchema) -> Option<Column
             .options
             .insert(SKIPPING_INDEX_GRPC_KEY.to_string(), skipping_index.clone());
     }
+    if let Some(vector_index) = column_schema.metadata().get(VECTOR_INDEX_KEY) {
+        options
+            .options
+            .insert(VECTOR_INDEX_GRPC_KEY.to_string(), vector_index.clone());
+    }
     if let Some(extension_name) = column_schema.metadata().get(EXTENSION_TYPE_NAME_KEY) {
         options
             .options
@@ -259,7 +270,10 @@ pub fn as_skipping_index_type(skipping_index_type: PbSkippingIndexType) -> Skipp
 mod tests {
 
     use datatypes::data_type::ConcreteDataType;
-    use datatypes::schema::{FulltextAnalyzer, FulltextBackend};
+    use datatypes::schema::{
+        FulltextAnalyzer, FulltextBackend, VectorDistanceMetric, VectorIndexOptions,
+    };
+    use serde_json::json;
 
     use super::*;
     use crate::v1::ColumnDataType;
@@ -283,6 +297,10 @@ mod tests {
                         "{\"enable\":true}".to_string(),
                     ),
                     (INVERTED_INDEX_GRPC_KEY.to_string(), "true".to_string()),
+                    (
+                        VECTOR_INDEX_GRPC_KEY.to_string(),
+                        "{\"engine\":\"usearch\",\"metric\":\"l2sq\",\"connectivity\":16,\"expansion-add\":128,\"expansion-search\":64}".to_string(),
+                    ),
                 ]),
             }),
         };
@@ -305,6 +323,8 @@ mod tests {
             }
         );
         assert!(schema.is_inverted_indexed());
+        let vector_options = schema.vector_index_options().unwrap().unwrap();
+        assert_eq!(vector_options.metric, VectorDistanceMetric::L2sq);
     }
 
     #[test]
@@ -333,6 +353,29 @@ mod tests {
             options.options.get(INVERTED_INDEX_GRPC_KEY).unwrap(),
             "true"
         );
+    }
+
+    #[test]
+    fn test_vector_index_options_roundtrip() {
+        let schema = ColumnSchema::new("test", ConcreteDataType::vector_datatype(4), true)
+            .with_vector_index_options(&VectorIndexOptions::default())
+            .unwrap();
+        let column_def = try_as_column_def(&schema, false).unwrap();
+        let roundtrip = try_as_column_schema(&column_def).unwrap();
+        let options = roundtrip.vector_index_options().unwrap().unwrap();
+        assert_eq!(options.metric, VectorDistanceMetric::L2sq);
+
+        let options = column_def.options.unwrap();
+        let raw = options.options.get(VECTOR_INDEX_GRPC_KEY).unwrap();
+        let json_value: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let expected = json!({
+            "engine": "usearch",
+            "metric": "l2sq",
+            "connectivity": 16,
+            "expansion-add": 128,
+            "expansion-search": 64
+        });
+        assert_eq!(json_value, expected);
     }
 
     #[test]
