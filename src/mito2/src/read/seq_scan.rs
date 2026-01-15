@@ -41,11 +41,11 @@ use crate::read::flat_dedup::{FlatDedupReader, FlatLastNonNull, FlatLastRow};
 use crate::read::flat_merge::FlatMergeReader;
 use crate::read::last_row::LastRowReader;
 use crate::read::merge::MergeReaderBuilder;
-use crate::read::range::{RangeBuilderList, RangeMeta};
+use crate::read::range::{RangeBuilderList, RangeMeta, file_range_counts};
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{
-    PartitionMetrics, PartitionMetricsList, SplitRecordBatchStream, clear_file_range_builders,
-    scan_file_ranges, scan_flat_file_ranges, scan_flat_mem_ranges, scan_mem_ranges,
+    PartitionMetrics, PartitionMetricsList, SplitRecordBatchStream, scan_file_ranges,
+    scan_flat_file_ranges, scan_flat_mem_ranges, scan_mem_ranges,
     should_split_flat_batches_for_merge,
 };
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
@@ -170,9 +170,15 @@ impl SeqScan {
         part_metrics: &PartitionMetrics,
     ) -> Result<BoxedBatchReader> {
         let mut sources = Vec::new();
-        let range_builder_list = Arc::new(RangeBuilderList::new(
+        let counts = file_range_counts(
             stream_ctx.input.num_memtables(),
             stream_ctx.input.num_files(),
+            &stream_ctx.ranges,
+            partition_ranges.iter(),
+        );
+        let range_builder_list = Arc::new(RangeBuilderList::new(
+            stream_ctx.input.num_memtables(),
+            counts,
         ));
         for part_range in partition_ranges {
             build_sources(
@@ -204,9 +210,15 @@ impl SeqScan {
         part_metrics: &PartitionMetrics,
     ) -> Result<BoxedRecordBatchStream> {
         let mut sources = Vec::new();
-        let range_builder_list = Arc::new(RangeBuilderList::new(
+        let counts = file_range_counts(
             stream_ctx.input.num_memtables(),
             stream_ctx.input.num_files(),
+            &stream_ctx.ranges,
+            partition_ranges.iter(),
+        );
+        let range_builder_list = Arc::new(RangeBuilderList::new(
+            stream_ctx.input.num_memtables(),
+            counts,
         ));
         for part_range in partition_ranges {
             build_flat_sources(
@@ -414,9 +426,15 @@ impl SeqScan {
             // build part cost.
             let mut fetch_start = Instant::now();
 
-            let range_builder_list = Arc::new(RangeBuilderList::new(
+            let counts = file_range_counts(
                 stream_ctx.input.num_memtables(),
                 stream_ctx.input.num_files(),
+                &stream_ctx.ranges,
+                partition_ranges.iter(),
+            );
+            let range_builder_list = Arc::new(RangeBuilderList::new(
+                stream_ctx.input.num_memtables(),
+                counts,
             ));
             let _mapper = stream_ctx.input.mapper.as_primary_key().context(UnexpectedSnafu {
                 reason: "Unexpected format",
@@ -486,9 +504,6 @@ impl SeqScan {
                 metrics.scan_cost += fetch_start.elapsed();
                 fetch_start = Instant::now();
                 part_metrics.merge_metrics(&metrics);
-
-                // Clear file range builders to release memory
-                clear_file_range_builders(&stream_ctx, &range_builder_list, part_range.identifier, &part_metrics);
             }
 
             part_metrics.on_finish();
@@ -532,9 +547,15 @@ impl SeqScan {
             // build part cost.
             let mut fetch_start = Instant::now();
 
-            let range_builder_list = Arc::new(RangeBuilderList::new(
+            let counts = file_range_counts(
                 stream_ctx.input.num_memtables(),
                 stream_ctx.input.num_files(),
+                &stream_ctx.ranges,
+                partition_ranges.iter(),
+            );
+            let range_builder_list = Arc::new(RangeBuilderList::new(
+                stream_ctx.input.num_memtables(),
+                counts,
             ));
             // Scans each part.
             for part_range in partition_ranges {
@@ -580,9 +601,6 @@ impl SeqScan {
                 metrics.scan_cost += fetch_start.elapsed();
                 fetch_start = Instant::now();
                 part_metrics.merge_metrics(&metrics);
-
-                // Clear file range builders to release memory
-                clear_file_range_builders(&stream_ctx, &range_builder_list, part_range.identifier, &part_metrics);
             }
 
             part_metrics.on_finish();

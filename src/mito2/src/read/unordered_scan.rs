@@ -34,11 +34,11 @@ use store_api::region_engine::{
 };
 
 use crate::error::{PartitionOutOfRangeSnafu, Result};
-use crate::read::range::RangeBuilderList;
+use crate::read::range::{RangeBuilderList, file_range_counts};
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{
-    PartitionMetrics, PartitionMetricsList, clear_file_range_builders, scan_file_ranges,
-    scan_flat_file_ranges, scan_flat_mem_ranges, scan_mem_ranges,
+    PartitionMetrics, PartitionMetricsList, scan_file_ranges, scan_flat_file_ranges,
+    scan_flat_mem_ranges, scan_mem_ranges,
 };
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
 use crate::read::{Batch, ScannerMetrics, scan_util};
@@ -305,9 +305,15 @@ impl UnorderedScan {
         let stream = try_stream! {
             part_metrics.on_first_poll();
 
-            let range_builder_list = Arc::new(RangeBuilderList::new(
+            let counts = file_range_counts(
                 stream_ctx.input.num_memtables(),
                 stream_ctx.input.num_files(),
+                &stream_ctx.ranges,
+                part_ranges.iter(),
+            );
+            let range_builder_list = Arc::new(RangeBuilderList::new(
+                stream_ctx.input.num_memtables(),
+                counts,
             ));
             // Scans each part.
             for part_range in part_ranges {
@@ -362,9 +368,6 @@ impl UnorderedScan {
 
                 metrics.scan_cost += fetch_start.elapsed();
                 part_metrics.merge_metrics(&metrics);
-
-                // Clear file range builders to release memory
-                clear_file_range_builders(&stream_ctx, &range_builder_list, part_range.identifier, &part_metrics);
             }
 
             part_metrics.on_finish();
@@ -398,9 +401,15 @@ impl UnorderedScan {
         let stream = try_stream! {
             part_metrics.on_first_poll();
 
-            let range_builder_list = Arc::new(RangeBuilderList::new(
+            let counts = file_range_counts(
                 stream_ctx.input.num_memtables(),
                 stream_ctx.input.num_files(),
+                &stream_ctx.ranges,
+                part_ranges.iter(),
+            );
+            let range_builder_list = Arc::new(RangeBuilderList::new(
+                stream_ctx.input.num_memtables(),
+                counts,
             ));
             // Scans each part.
             for part_range in part_ranges {
@@ -433,9 +442,6 @@ impl UnorderedScan {
 
                 metrics.scan_cost += fetch_start.elapsed();
                 part_metrics.merge_metrics(&metrics);
-
-                // Clear file range builders to release memory
-                clear_file_range_builders(&stream_ctx, &range_builder_list, part_range.identifier, &part_metrics);
             }
 
             part_metrics.on_finish();

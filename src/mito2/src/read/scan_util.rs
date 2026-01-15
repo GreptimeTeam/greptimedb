@@ -687,12 +687,6 @@ impl ScanMetricsSet {
         }
     }
 
-    /// Subtracts stats when clearing file range builders.
-    fn sub_build_ranges_stats(&mut self, mem_size: usize, num_builders: usize) {
-        self.build_ranges_mem_size = self.build_ranges_mem_size.saturating_sub(mem_size);
-        self.num_range_builders = self.num_range_builders.saturating_sub(num_builders);
-    }
-
     /// Merges per-file metrics.
     fn merge_per_file_metrics(&mut self, other: &HashMap<RegionFileId, FileScanMetrics>) {
         let self_file_metrics = self.per_file_metrics.get_or_insert_with(HashMap::new);
@@ -1047,12 +1041,6 @@ impl PartitionMetrics {
     /// Returns a DedupMetricsReport trait object for reporting dedup metrics.
     pub(crate) fn dedup_metrics_reporter(&self) -> Arc<dyn DedupMetricsReport> {
         self.0.clone()
-    }
-
-    /// Subtracts stats for building file ranges.
-    pub(crate) fn sub_build_ranges_stats(&self, mem_size: usize, num_builders: usize) {
-        let mut metrics = self.0.metrics.lock().unwrap();
-        metrics.sub_build_ranges_stats(mem_size, num_builders);
     }
 }
 
@@ -1535,31 +1523,6 @@ pub(crate) async fn maybe_scan_flat_other_ranges(
         reason: "no other ranges scannable in flat format",
     }
     .fail()
-}
-
-/// Clears the file range builders for the given partition range.
-/// This should be called after finishing scanning a partition range to release memory.
-pub(crate) fn clear_file_range_builders(
-    stream_ctx: &StreamContext,
-    range_builder_list: &RangeBuilderList,
-    part_range_id: usize,
-    part_metrics: &PartitionMetrics,
-) {
-    let range_meta = &stream_ctx.ranges[part_range_id];
-    let num_memtables = stream_ctx.input.num_memtables();
-
-    // Collect file indices from the range meta
-    // is_file_range_index already checks idx.index >= num_memtables
-    let file_indices = range_meta.row_group_indices.iter().filter_map(|idx| {
-        if stream_ctx.is_file_range_index(*idx) {
-            Some(idx.index - num_memtables)
-        } else {
-            None
-        }
-    });
-
-    let (memory_freed, num_cleared) = range_builder_list.clear_file_builders(file_indices);
-    part_metrics.sub_build_ranges_stats(memory_freed, num_cleared);
 }
 
 /// A stream wrapper that splits record batches from an inner stream.
