@@ -68,7 +68,6 @@ meta-srv.workspace = true
 metric-engine.workspace = true
 mito2.workspace = true
 moka.workspace = true
-nu-ansi-term = "0.46"
 object-store.workspace = true
 parquet = { workspace = true, features = ["object_store"] }
 plugins.workspace = true
