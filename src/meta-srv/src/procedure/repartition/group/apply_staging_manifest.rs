@@ -310,6 +310,7 @@ impl ApplyStagingManifest {
                 };
                 let total = replies.len();
                 let (mut ready, mut not_ready, mut with_error) = (0, 0, 0);
+                let region_ids = replies.iter().map(|r| r.region_id).collect::<Vec<_>>();
                 for reply in replies {
                     if reply.error.is_some() {
                         with_error += 1;
@@ -322,13 +323,7 @@ impl ApplyStagingManifest {
                 }
                 info!(
                     "Received apply staging manifests reply, peer: {:?}, total_regions: {}, regions:{:?}, ready: {}, not_ready: {}, with_error: {}, elapsed: {:?}",
-                    peer,
-                    total,
-                    replies.iter().map(|r| r.region_id).collect::<Vec<_>>(),
-                    ready,
-                    not_ready,
-                    with_error,
-                    elapsed
+                    peer, total, region_ids, ready, not_ready, with_error, elapsed
                 );
 
                 Ok(())
