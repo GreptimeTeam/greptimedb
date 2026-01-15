@@ -358,6 +358,7 @@ impl EnterStagingRegion {
             "Flushing pending deallocate regions, table_id: {}, group_id: {}, peer_region_ids_map: {:?}",
             table_id, group_id, peer_region_ids_map
         );
+        let now = Instant::now();
         let tasks = peer_region_ids_map
             .iter()
             .map(|(peer, region_ids)| {
@@ -373,6 +374,16 @@ impl EnterStagingRegion {
             .collect::<Vec<_>>();
 
         try_join_all(tasks).await?;
+        info!(
+            "Flushed pending deallocate regions: {:?}, table_id: {}, group_id: {}, elapsed: {:?}",
+            source_routes
+                .iter()
+                .map(|route| route.region.id)
+                .collect::<Vec<_>>(),
+            table_id,
+            group_id,
+            now.elapsed()
+        );
 
         Ok(())
     }

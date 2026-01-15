@@ -321,8 +321,14 @@ impl ApplyStagingManifest {
                     Self::handle_apply_staging_manifest_reply(&reply, &now, peer)?;
                 }
                 info!(
-                    "Received apply staging manifests reply, peer: {:?}, total_regions: {}, ready: {}, not_ready: {}, with_error: {}, elapsed: {:?}",
-                    peer, total, ready, not_ready, with_error, elapsed
+                    "Received apply staging manifests reply, peer: {:?}, total_regions: {}, regions:{:?}, ready: {}, not_ready: {}, with_error: {}, elapsed: {:?}",
+                    peer,
+                    total,
+                    replies.iter().map(|r| r.region_id).collect::<Vec<_>>(),
+                    ready,
+                    not_ready,
+                    with_error,
+                    elapsed
                 );
 
                 Ok(())

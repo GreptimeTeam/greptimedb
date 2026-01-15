@@ -86,7 +86,7 @@ impl SyncRegionHandler {
                     region_id,
                     ready: false,
                     exists: true,
-                    error: Some(e.to_string()),
+                    error: Some(format!("{:?}", e)),
                 }
             }
         }

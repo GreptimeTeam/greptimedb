@@ -66,7 +66,8 @@ impl State for UpdateMetadata {
 
                 if let Err(err) = ctx.invalidate_table_cache().await {
                     warn!(
-                        "Failed to broadcast the invalidate table cache message during the rollback staging regions, error: {err:?}"
+                        err;
+                        "Failed to broadcast the invalidate table cache message during the rollback staging regions"
                     );
                 };
                 Ok((Box::new(RepartitionEnd), Status::executing(false)))
@@ -75,7 +76,8 @@ impl State for UpdateMetadata {
                 self.exit_staging_regions(ctx).await?;
                 if let Err(err) = ctx.invalidate_table_cache().await {
                     warn!(
-                        "Failed to broadcast the invalidate table cache message during the exit staging regions, error: {err:?}"
+                        err;
+                        "Failed to broadcast the invalidate table cache message during the exit staging regions"
                     );
                 };
                 Ok((Box::new(RepartitionEnd), Status::executing(false)))
