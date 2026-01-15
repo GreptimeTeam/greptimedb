@@ -447,14 +447,14 @@ impl ParquetReaderBuilder {
                     region_partition_expr.collect_column_names(&mut referenced_columns);
 
                     // Build a partition_schema containing only referenced columns.
-                    let use_dictionary_tags = read_format.as_flat().is_some();
+                    let is_flat = read_format.as_flat().is_some();
                     let partition_schema = Arc::new(datatypes::schema::Schema::new(
                         prune_schema
                             .column_schemas()
                             .iter()
                             .filter(|col| referenced_columns.contains(&col.name))
                             .map(|col| {
-                                if use_dictionary_tags
+                                if is_flat
                                     && let Some(column_meta) =
                                         read_format.metadata().column_by_name(&col.name)
                                     && column_meta.semantic_type == SemanticType::Tag

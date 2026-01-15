@@ -503,6 +503,10 @@ impl RangeBase {
             mask = mask.bitand(&result);
         }
 
+        if mask.count_set_bits() == 0 {
+            return Ok(None);
+        }
+
         // Apply partition filter
         if let Some(partition_filter) = &self.partition_filter {
             match self.evaluate_partition_filter(&mut input, partition_filter) {
