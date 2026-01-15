@@ -273,6 +273,10 @@ impl ExecutionPlan for SeriesNormalizeExec {
     }
 
     fn required_input_distribution(&self) -> Vec<Distribution> {
+        if self.tag_columns.is_empty() {
+            return vec![Distribution::SinglePartition];
+        }
+
         let schema = self.input.schema();
         vec![Distribution::HashPartitioned(
             self.tag_columns

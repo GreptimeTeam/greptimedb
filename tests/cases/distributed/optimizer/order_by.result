@@ -2,103 +2,98 @@
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 explain select * from numbers;
 
-+---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                                                                                                    |
-+---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                         |
-|               | Projection: numbers.number                                                                                                                                              |
-|               |   TableScan: numbers                                                                                                                                                    |
-|               | ]]                                                                                                                                                                      |
-| physical_plan | CooperativeExec                                                                                                                                                         |
++---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                  |
++---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                       |
+|               | Projection: numbers.number                                                                                                                                            |
+|               |   TableScan: numbers                                                                                                                                                  |
+|               | ]]                                                                                                                                                                    |
+| physical_plan | CooperativeExec                                                                                                                                                       |
 |               |   RepartitionExec: partitioning=REDACTED
-|               |     CooperativeExec                                                                                                                                                     |
-|               |       StreamScanAdapter: [<SendableRecordBatchStream>], schema: [Schema { fields: [Field { name: "number", data_type: UInt32 }], metadata: {"greptime:version": "0"} }] |
-|               |                                                                                                                                                                         |
-+---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+|               |     StreamScanAdapter: [<SendableRecordBatchStream>], schema: [Schema { fields: [Field { name: "number", data_type: UInt32 }], metadata: {"greptime:version": "0"} }] |
+|               |                                                                                                                                                                       |
++---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 explain select * from numbers order by number desc;
 
-+---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                                                                                                        |
-+---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                             |
-|               | Sort: numbers.number DESC NULLS FIRST                                                                                                                                       |
-|               |   Projection: numbers.number                                                                                                                                                |
-|               |     TableScan: numbers                                                                                                                                                      |
-|               | ]]                                                                                                                                                                          |
-| physical_plan | SortPreservingMergeExec: [number@0 DESC]                                                                                                                                    |
-|               |   CooperativeExec                                                                                                                                                           |
-|               |     SortExec: expr=[number@0 DESC], preserve_partitioning=[true]                                                                                                            |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                      |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                           |
+|               | Sort: numbers.number DESC NULLS FIRST                                                                                                                                     |
+|               |   Projection: numbers.number                                                                                                                                              |
+|               |     TableScan: numbers                                                                                                                                                    |
+|               | ]]                                                                                                                                                                        |
+| physical_plan | SortPreservingMergeExec: [number@0 DESC]                                                                                                                                  |
+|               |   CooperativeExec                                                                                                                                                         |
+|               |     SortExec: expr=[number@0 DESC], preserve_partitioning=[true]                                                                                                          |
 |               |       RepartitionExec: partitioning=REDACTED
-|               |         CooperativeExec                                                                                                                                                     |
-|               |           StreamScanAdapter: [<SendableRecordBatchStream>], schema: [Schema { fields: [Field { name: "number", data_type: UInt32 }], metadata: {"greptime:version": "0"} }] |
-|               |                                                                                                                                                                             |
-+---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+|               |         StreamScanAdapter: [<SendableRecordBatchStream>], schema: [Schema { fields: [Field { name: "number", data_type: UInt32 }], metadata: {"greptime:version": "0"} }] |
+|               |                                                                                                                                                                           |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 explain select * from numbers order by number asc;
 
-+---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                                                                                                        |
-+---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                             |
-|               | Sort: numbers.number ASC NULLS LAST                                                                                                                                         |
-|               |   Projection: numbers.number                                                                                                                                                |
-|               |     TableScan: numbers                                                                                                                                                      |
-|               | ]]                                                                                                                                                                          |
-| physical_plan | SortPreservingMergeExec: [number@0 ASC NULLS LAST]                                                                                                                          |
-|               |   CooperativeExec                                                                                                                                                           |
-|               |     SortExec: expr=[number@0 ASC NULLS LAST], preserve_partitioning=[true]                                                                                                  |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                      |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                           |
+|               | Sort: numbers.number ASC NULLS LAST                                                                                                                                       |
+|               |   Projection: numbers.number                                                                                                                                              |
+|               |     TableScan: numbers                                                                                                                                                    |
+|               | ]]                                                                                                                                                                        |
+| physical_plan | SortPreservingMergeExec: [number@0 ASC NULLS LAST]                                                                                                                        |
+|               |   CooperativeExec                                                                                                                                                         |
+|               |     SortExec: expr=[number@0 ASC NULLS LAST], preserve_partitioning=[true]                                                                                                |
 |               |       RepartitionExec: partitioning=REDACTED
-|               |         CooperativeExec                                                                                                                                                     |
-|               |           StreamScanAdapter: [<SendableRecordBatchStream>], schema: [Schema { fields: [Field { name: "number", data_type: UInt32 }], metadata: {"greptime:version": "0"} }] |
-|               |                                                                                                                                                                             |
-+---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+|               |         StreamScanAdapter: [<SendableRecordBatchStream>], schema: [Schema { fields: [Field { name: "number", data_type: UInt32 }], metadata: {"greptime:version": "0"} }] |
+|               |                                                                                                                                                                           |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 explain select * from numbers order by number desc limit 10;
 
-+---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                                                                                                        |
-+---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                             |
-|               | Limit: skip=0, fetch=10                                                                                                                                                     |
-|               |   Sort: numbers.number DESC NULLS FIRST                                                                                                                                     |
-|               |     Projection: numbers.number                                                                                                                                              |
-|               |       TableScan: numbers                                                                                                                                                    |
-|               | ]]                                                                                                                                                                          |
-| physical_plan | SortPreservingMergeExec: [number@0 DESC], fetch=10                                                                                                                          |
-|               |   CooperativeExec                                                                                                                                                           |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                      |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                           |
+|               | Limit: skip=0, fetch=10                                                                                                                                                   |
+|               |   Sort: numbers.number DESC NULLS FIRST                                                                                                                                   |
+|               |     Projection: numbers.number                                                                                                                                            |
+|               |       TableScan: numbers                                                                                                                                                  |
+|               | ]]                                                                                                                                                                        |
+| physical_plan | SortPreservingMergeExec: [number@0 DESC], fetch=10                                                                                                                        |
+|               |   CooperativeExec                                                                                                                                                         |
 |               |     RepartitionExec: partitioning=REDACTED
-|               |       SortExec: TopK(fetch=10), expr=[number@0 DESC], preserve_partitioning=[false]                                                                                         |
-|               |         CooperativeExec                                                                                                                                                     |
-|               |           StreamScanAdapter: [<SendableRecordBatchStream>], schema: [Schema { fields: [Field { name: "number", data_type: UInt32 }], metadata: {"greptime:version": "0"} }] |
-|               |                                                                                                                                                                             |
-+---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+|               |       SortExec: TopK(fetch=10), expr=[number@0 DESC], preserve_partitioning=[false]                                                                                       |
+|               |         StreamScanAdapter: [<SendableRecordBatchStream>], schema: [Schema { fields: [Field { name: "number", data_type: UInt32 }], metadata: {"greptime:version": "0"} }] |
+|               |                                                                                                                                                                           |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 explain select * from numbers order by number asc limit 10;
 
-+---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                                                                                                        |
-+---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                             |
-|               | Limit: skip=0, fetch=10                                                                                                                                                     |
-|               |   Sort: numbers.number ASC NULLS LAST                                                                                                                                       |
-|               |     Projection: numbers.number                                                                                                                                              |
-|               |       TableScan: numbers                                                                                                                                                    |
-|               | ]]                                                                                                                                                                          |
-| physical_plan | SortPreservingMergeExec: [number@0 ASC NULLS LAST], fetch=10                                                                                                                |
-|               |   CooperativeExec                                                                                                                                                           |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                      |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                           |
+|               | Limit: skip=0, fetch=10                                                                                                                                                   |
+|               |   Sort: numbers.number ASC NULLS LAST                                                                                                                                     |
+|               |     Projection: numbers.number                                                                                                                                            |
+|               |       TableScan: numbers                                                                                                                                                  |
+|               | ]]                                                                                                                                                                        |
+| physical_plan | SortPreservingMergeExec: [number@0 ASC NULLS LAST], fetch=10                                                                                                              |
+|               |   CooperativeExec                                                                                                                                                         |
 |               |     RepartitionExec: partitioning=REDACTED
-|               |       SortExec: TopK(fetch=10), expr=[number@0 ASC NULLS LAST], preserve_partitioning=[false]                                                                               |
-|               |         CooperativeExec                                                                                                                                                     |
-|               |           StreamScanAdapter: [<SendableRecordBatchStream>], schema: [Schema { fields: [Field { name: "number", data_type: UInt32 }], metadata: {"greptime:version": "0"} }] |
-|               |                                                                                                                                                                             |
-+---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+|               |       SortExec: TopK(fetch=10), expr=[number@0 ASC NULLS LAST], preserve_partitioning=[false]                                                                             |
+|               |         StreamScanAdapter: [<SendableRecordBatchStream>], schema: [Schema { fields: [Field { name: "number", data_type: UInt32 }], metadata: {"greptime:version": "0"} }] |
+|               |                                                                                                                                                                           |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 

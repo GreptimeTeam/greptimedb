@@ -964,15 +964,15 @@ mod tests {
             exprs: vec![LogExpr::ScalarFunc {
                 name: "date_trunc".to_string(),
                 args: vec![
-                    LogExpr::NamedIdent("timestamp".to_string()),
                     LogExpr::Literal("day".to_string()),
+                    LogExpr::NamedIdent("timestamp".to_string()),
                 ],
                 alias: Some("time_bucket".to_string()),
             }],
         };
 
         let plan = planner.query_to_plan(log_query).await.unwrap();
-        let expected = "Projection: date_trunc(greptime.public.test_table.timestamp, Utf8(\"day\")) AS time_bucket [time_bucket:Timestamp(Nanosecond, None);N]\
+        let expected = "Projection: date_trunc(Utf8(\"day\"), greptime.public.test_table.timestamp) AS time_bucket [time_bucket:Timestamp(Millisecond, None)]\
         \n  Limit: skip=0, fetch=100 [message:Utf8, timestamp:Timestamp(Millisecond, None), host:Utf8;N, is_active:Boolean;N]\
         \n    Filter: greptime.public.test_table.timestamp >= Utf8(\"2021-01-01T00:00:00Z\") AND greptime.public.test_table.timestamp <= Utf8(\"2021-01-02T00:00:00Z\") [message:Utf8, timestamp:Timestamp(Millisecond, None), host:Utf8;N, is_active:Boolean;N]\
         \n      TableScan: greptime.public.test_table [message:Utf8, timestamp:Timestamp(Millisecond, None), host:Utf8;N, is_active:Boolean;N]";

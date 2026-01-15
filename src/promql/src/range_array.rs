@@ -14,9 +14,6 @@
 
 //！An extended "array" based on [DictionaryArray].
 
-use std::sync::Arc;
-
-use datafusion::arrow::buffer::NullBuffer;
 use datafusion::arrow::datatypes::Field;
 use datatypes::arrow::array::{Array, ArrayData, ArrayRef, DictionaryArray, Int64Array};
 use datatypes::arrow::datatypes::{DataType, Int64Type};
@@ -222,52 +219,6 @@ impl RangeArray {
             .keys()
             .into_iter()
             .map(|compound| compound.map(unpack))
-    }
-}
-
-impl Array for RangeArray {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
-    fn into_data(self) -> ArrayData {
-        self.array.into_data()
-    }
-
-    fn to_data(&self) -> ArrayData {
-        self.array.to_data()
-    }
-
-    fn slice(&self, offset: usize, length: usize) -> ArrayRef {
-        Arc::new(self.array.slice(offset, length))
-    }
-
-    fn nulls(&self) -> Option<&NullBuffer> {
-        self.array.nulls()
-    }
-
-    fn data_type(&self) -> &DataType {
-        self.array.data_type()
-    }
-
-    fn len(&self) -> usize {
-        self.len()
-    }
-
-    fn is_empty(&self) -> bool {
-        self.is_empty()
-    }
-
-    fn offset(&self) -> usize {
-        self.array.offset()
-    }
-
-    fn get_buffer_memory_size(&self) -> usize {
-        self.array.get_buffer_memory_size()
-    }
-
-    fn get_array_memory_size(&self) -> usize {
-        self.array.get_array_memory_size()
     }
 }
 

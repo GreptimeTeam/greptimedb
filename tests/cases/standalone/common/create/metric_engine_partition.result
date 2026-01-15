@@ -149,7 +149,6 @@ select host, count(*) from logical_table_2 GROUP BY host ORDER BY host;
 |_|_SortExec: expr=[host@0 ASC NULLS LAST], preserve_partitioning=[true]_|
 |_|_ProjectionExec: expr=[host@0 as host, count(Int64(1))@1 as count(*)]_|
 |_|_AggregateExec: mode=SinglePartitioned, gby=[host@0 as host], aggr=[count(Int64(1))]_|
-|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -187,10 +186,8 @@ select ts, count(*) from logical_table_2 GROUP BY ts ORDER BY ts;
 |_|_SortExec: expr=[ts@0 ASC NULLS LAST], preserve_partitioning=[true]_|
 |_|_ProjectionExec: expr=[ts@0 as ts, count(Int64(1))@1 as count(*)]_|
 |_|_AggregateExec: mode=FinalPartitioned, gby=[ts@0 as ts], aggr=[count(Int64(1))]_|
-|_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: REDACTED
 |_|_AggregateExec: mode=Partial, gby=[ts@0 as ts], aggr=[count(Int64(1))]_|
-|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -284,10 +281,8 @@ select a, count(*) from logical_table_3 GROUP BY a ORDER BY a;
 |_|_SortExec: expr=[a@0 ASC NULLS LAST], preserve_partitioning=[true]_|
 |_|_ProjectionExec: expr=[a@0 as a, count(Int64(1))@1 as count(*)]_|
 |_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a], aggr=[count(Int64(1))]_|
-|_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: REDACTED
 |_|_AggregateExec: mode=Partial, gby=[a@0 as a], aggr=[count(Int64(1))]_|
-|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -356,7 +351,7 @@ EXPLAIN select count(*) from logical_table_4;
 | plan_type_| plan_|
 +-+-+
 | logical_plan_| Projection: count(Int64(1)) AS count(*)_|
-|_|_Aggregate: groupBy=[[]], aggr=[[__count_merge(__count_state(logical_table_4.ts)) AS count(Int64(1))]]_|
+|_|_Aggregate: groupBy=[[]], aggr=[[__count_merge(__count_state(logical_table_4.ts)) AS count(Int64(1))]] |
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
 |_| Aggregate: groupBy=[[]], aggr=[[__count_state(logical_table_4.ts)]]_|
 |_|_TableScan: logical_table_4_|
@@ -365,7 +360,6 @@ EXPLAIN select count(*) from logical_table_4;
 |_|_AggregateExec: mode=Final, gby=[], aggr=[count(Int64(1))]_|
 |_|_CoalescePartitionsExec_|
 |_|_AggregateExec: mode=Partial, gby=[], aggr=[count(Int64(1))]_|
-|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -403,10 +397,8 @@ select ts, count(*) from logical_table_4 GROUP BY ts ORDER BY ts;
 |_|_SortExec: expr=[ts@0 ASC NULLS LAST], preserve_partitioning=[true]_|
 |_|_ProjectionExec: expr=[ts@0 as ts, count(Int64(1))@1 as count(*)]_|
 |_|_AggregateExec: mode=FinalPartitioned, gby=[ts@0 as ts], aggr=[count(Int64(1))]_|
-|_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: REDACTED
 |_|_AggregateExec: mode=Partial, gby=[ts@0 as ts], aggr=[count(Int64(1))]_|
-|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+

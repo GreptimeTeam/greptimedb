@@ -313,16 +313,13 @@ pub async fn file_to_stream(
                 filename.to_string(),
                 0,
             )]))
-            .with_projection_indices(projection)
+            .with_projection_indices(projection)?
             .with_file_compression_type(df_compression)
             .build();
 
     let store = Arc::new(OpendalStore::new(store.clone()));
-    let file_opener = file_source
-        .with_projection(&config)
-        .create_file_opener(store, &config, 0);
-    let stream = FileStream::new(&config, 0, file_opener, &ExecutionPlanMetricsSet::new())
-        .context(error::BuildFileStreamSnafu)?;
+    let file_opener = config.file_source().create_file_opener(store, &config, 0)?;
+    let stream = FileStream::new(&config, 0, file_opener, &ExecutionPlanMetricsSet::new())?;
 
     Ok(Box::pin(stream))
 }

@@ -49,11 +49,11 @@ SELECT INTERVAL '1 year 2 months 3 days 4 hours' - INTERVAL '1 year';
 
 SELECT INTERVAL '6 years' * 2;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Cannot coerce arithmetic expression Interval(MonthDayNano) * Int64 to valid types
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Cannot get result type for temporal operation Interval(MonthDayNano) * Int64: Invalid argument error: Invalid interval arithmetic operation: Interval(MonthDayNano) * Interval(MonthDayNano)
 
 SELECT INTERVAL '6 years' / 2;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Cannot coerce arithmetic expression Interval(MonthDayNano) / Int64 to valid types
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Cannot get result type for temporal operation Interval(MonthDayNano) / Int64: Invalid argument error: Invalid interval arithmetic operation: Interval(MonthDayNano) / Interval(MonthDayNano)
 
 SELECT INTERVAL '6 years' = INTERVAL '72 months';
 
@@ -70,11 +70,6 @@ SELECT arrow_typeof(INTERVAL '1 month');
 +---------------------------------------------------------------------------------------------------+
 | Interval(MonthDayNano)                                                                            |
 +---------------------------------------------------------------------------------------------------+
-
--- INTERVAL + TIME CONSTANT
-SELECT current_time() + INTERVAL '1 hour';
-
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Cannot coerce arithmetic expression Time64(ns) + Interval(MonthDayNano) to valid types
 
 -- table with interval type test
 -- breaking change from #5422 table do not support interval type will raise an error

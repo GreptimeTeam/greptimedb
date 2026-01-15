@@ -319,28 +319,23 @@ WHERE a = 10 OR b= 'z';
 | 0_| 0_|_CooperativeExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_FilterExec: a@0 = 10 OR b@1 = z REDACTED
+| 1_| 0_|_FilterExec: a@0 = 10 OR b@1 = z REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
 |_|_|_|
-| 1_| 1_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_FilterExec: a@0 = 10 OR b@1 = z REDACTED
+| 1_| 1_|_FilterExec: a@0 = 10 OR b@1 = z REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
 |_|_|_|
-| 1_| 2_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_FilterExec: a@0 = 10 OR b@1 = z REDACTED
+| 1_| 2_|_FilterExec: a@0 = 10 OR b@1 = z REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
 |_|_|_|
-| 1_| 3_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_FilterExec: a@0 = 10 OR b@1 = z REDACTED
+| 1_| 3_|_FilterExec: a@0 = 10 OR b@1 = z REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
 |_|_|_|
-| 1_| 4_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_FilterExec: a@0 = 10 OR b@1 = z REDACTED
+| 1_| 4_|_FilterExec: a@0 = 10 OR b@1 = z REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
 |_|_|_|
@@ -363,28 +358,23 @@ WHERE a = 10 OR ts > 1;
 | 0_| 0_|_CooperativeExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_FilterExec: a@0 = 10 OR ts@2 > 1 REDACTED
+| 1_| 0_|_FilterExec: a@0 = 10 OR ts@2 > 1 REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
 |_|_|_|
-| 1_| 1_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_FilterExec: a@0 = 10 OR ts@2 > 1 REDACTED
+| 1_| 1_|_FilterExec: a@0 = 10 OR ts@2 > 1 REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
 |_|_|_|
-| 1_| 2_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_FilterExec: a@0 = 10 OR ts@2 > 1 REDACTED
+| 1_| 2_|_FilterExec: a@0 = 10 OR ts@2 > 1 REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
 |_|_|_|
-| 1_| 3_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_FilterExec: a@0 = 10 OR ts@2 > 1 REDACTED
+| 1_| 3_|_FilterExec: a@0 = 10 OR ts@2 > 1 REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
 |_|_|_|
-| 1_| 4_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_FilterExec: a@0 = 10 OR ts@2 > 1 REDACTED
+| 1_| 4_|_FilterExec: a@0 = 10 OR ts@2 > 1 REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
 |_|_|_|
@@ -407,28 +397,23 @@ WHERE a = 10 OR (ts > 1 AND b ='h');
 | 0_| 0_|_CooperativeExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_FilterExec: a@0 = 10 OR ts@2 > 1 AND b@1 = h REDACTED
+| 1_| 0_|_FilterExec: a@0 = 10 OR ts@2 > 1 AND b@1 = h REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
 |_|_|_|
-| 1_| 1_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_FilterExec: a@0 = 10 OR ts@2 > 1 AND b@1 = h REDACTED
+| 1_| 1_|_FilterExec: a@0 = 10 OR ts@2 > 1 AND b@1 = h REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
 |_|_|_|
-| 1_| 2_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_FilterExec: a@0 = 10 OR ts@2 > 1 AND b@1 = h REDACTED
+| 1_| 2_|_FilterExec: a@0 = 10 OR ts@2 > 1 AND b@1 = h REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
 |_|_|_|
-| 1_| 3_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_FilterExec: a@0 = 10 OR ts@2 > 1 AND b@1 = h REDACTED
+| 1_| 3_|_FilterExec: a@0 = 10 OR ts@2 > 1 AND b@1 = h REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
 |_|_|_|
-| 1_| 4_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_FilterExec: a@0 = 10 OR ts@2 > 1 AND b@1 = h REDACTED
+| 1_| 4_|_FilterExec: a@0 = 10 OR ts@2 > 1 AND b@1 = h REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
 |_|_|_|
