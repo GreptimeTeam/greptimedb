@@ -454,37 +454,32 @@ impl ParquetReaderBuilder {
                             .iter()
                             .filter(|col| referenced_columns.contains(&col.name))
                             .map(|col| {
-                                if use_dictionary_tags {
-                                    if let Some(column_meta) =
+                                if use_dictionary_tags
+                                    && let Some(column_meta) =
                                         read_format.metadata().column_by_name(&col.name)
-                                    {
-                                        if column_meta.semantic_type == SemanticType::Tag
-                                            && col.data_type.is_string()
-                                        {
-                                            let field = Arc::new(Field::new(
-                                                &col.name,
-                                                col.data_type.as_arrow_type(),
-                                                col.is_nullable(),
-                                            ));
-                                            let dict_field = tag_maybe_to_dictionary_field(
-                                                &col.data_type,
-                                                &field,
-                                            );
-                                            let mut column = col.clone();
-                                            column.data_type = ConcreteDataType::from_arrow_type(
-                                                dict_field.data_type(),
-                                            );
-                                            return column;
-                                        }
-                                    }
+                                    && column_meta.semantic_type == SemanticType::Tag
+                                    && col.data_type.is_string()
+                                {
+                                    let field = Arc::new(Field::new(
+                                        &col.name,
+                                        col.data_type.as_arrow_type(),
+                                        col.is_nullable(),
+                                    ));
+                                    let dict_field =
+                                        tag_maybe_to_dictionary_field(&col.data_type, &field);
+                                    let mut column = col.clone();
+                                    column.data_type =
+                                        ConcreteDataType::from_arrow_type(dict_field.data_type());
+                                    return column;
                                 }
+
                                 col.clone()
                             })
                             .collect::<Vec<_>>(),
                     ));
 
                     let region_partition_physical_expr = region_partition_expr
-                        .try_as_physical_expr(&partition_schema.arrow_schema())
+                        .try_as_physical_expr(partition_schema.arrow_schema())
                         .context(SerializePartitionExprSnafu)?;
 
                     Some(PartitionFilterContext {

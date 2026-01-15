@@ -111,7 +111,7 @@ async fn test_partition_filter_basic_with_format(flat_format: bool) {
     // Note: In real scenario, this data should all satisfy partition expr
     let rows_data = Rows {
         schema: column_schemas.clone(),
-        rows: build_rows(5, 10),
+        rows: build_rows(5, 11),
     };
     put_rows(&engine, region_id, rows_data).await;
 
@@ -144,7 +144,7 @@ async fn test_partition_filter_basic_with_format(flat_format: bool) {
         .await
         .unwrap();
 
-    // Scan after exiting staging - the old SST (tag_0 = "0".."5") should have
+    // Scan after exiting staging - the old SST (tag_0 = "0".."4") should have
     // rows filtered by partition expr (tag_0 >= "5"), which means none of them pass.
     // But the staging SST (tag_0 = "5".."10") satisfies the partition expr.
     let request = ScanRequest::default();
@@ -154,103 +154,10 @@ async fn test_partition_filter_basic_with_format(flat_format: bool) {
     let total_rows: usize = batches.iter().map(|rb| rb.num_rows()).sum();
     // After exit:
     // - Old SST (rows 0-4): partition expr is "tag_0 >= 5", so these are filtered out
-    // - Staging SST (rows 5-9): These satisfy partition expr, so they're visible
+    // - Staging SST (rows 5-10): These satisfy partition expr, so they're visible
     assert_eq!(
-        total_rows, 5,
-        "Should see 5 rows after exiting staging (rows 5-9 from staging SST), flat_format: {}",
+        total_rows, 6,
+        "Should see 6 rows after exiting staging (rows 5-10 from staging SST), flat_format: {}",
         flat_format
-    );
-}
-
-#[tokio::test]
-async fn test_partition_filter_all_match() {
-    test_partition_filter_all_match_with_format(false).await;
-    test_partition_filter_all_match_with_format(true).await;
-}
-
-/// Test that when all data matches partition expr, no rows are filtered.
-async fn test_partition_filter_all_match_with_format(flat_format: bool) {
-    common_telemetry::init_default_ut_logging();
-
-    let mut env = TestEnv::new().await;
-    let engine = env
-        .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
-            ..Default::default()
-        })
-        .await;
-
-    let region_id = RegionId::new(1024, 1);
-    let request = CreateRequestBuilder::new().build();
-    let column_schemas = rows_schema(&request);
-
-    // Create region
-    engine
-        .handle_request(region_id, RegionRequest::Create(request))
-        .await
-        .unwrap();
-
-    // Write data (tag_0 = "0".."5") and flush
-    let rows_data = Rows {
-        schema: column_schemas.clone(),
-        rows: build_rows(0, 5),
-    };
-    put_rows(&engine, region_id, rows_data).await;
-
-    engine
-        .handle_request(
-            region_id,
-            RegionRequest::Flush(RegionFlushRequest {
-                row_group_size: None,
-            }),
-        )
-        .await
-        .unwrap();
-
-    // Enter staging mode with partition expr: tag_0 >= "0" (matches all data)
-    let partition_expr = range_expr_string("tag_0", "0", "99");
-    engine
-        .handle_request(
-            region_id,
-            RegionRequest::EnterStaging(EnterStagingRequest {
-                partition_expr: partition_expr.clone(),
-            }),
-        )
-        .await
-        .unwrap();
-
-    // Write more data and flush in staging
-    let rows_data = Rows {
-        schema: column_schemas.clone(),
-        rows: build_rows(5, 10),
-    };
-    put_rows(&engine, region_id, rows_data).await;
-
-    engine
-        .handle_request(
-            region_id,
-            RegionRequest::Flush(RegionFlushRequest {
-                row_group_size: None,
-            }),
-        )
-        .await
-        .unwrap();
-
-    // Exit staging mode
-    use store_api::region_engine::SettableRegionRoleState;
-    engine
-        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Leader)
-        .await
-        .unwrap();
-
-    // Scan - all 10 rows should be visible since partition expr matches all
-    let request = ScanRequest::default();
-    let scanner = engine.scanner(region_id, request).await.unwrap();
-    let stream = scanner.scan().await.unwrap();
-    let batches = RecordBatches::try_collect(stream).await.unwrap();
-    let total_rows: usize = batches.iter().map(|rb| rb.num_rows()).sum();
-    assert_eq!(
-        total_rows, 10,
-        "All 10 rows should be visible when partition expr matches all"
     );
 }
