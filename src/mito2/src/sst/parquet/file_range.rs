@@ -412,7 +412,7 @@ pub(crate) struct TagDecodeState {
 }
 
 impl TagDecodeState {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             decoded_pks: None,
             decoded_tag_cache: HashMap::new(),
