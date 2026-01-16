@@ -296,6 +296,7 @@ async fn test_sum_udaf() {
     .unwrap();
     assert_eq!(&res.lower_state, &expected_lower_plan);
 
+    let merge_input_fields = vec![Arc::new(Field::new("number", DataType::Int64, true))];
     let expected_merge_plan = LogicalPlan::Aggregate(
         Aggregate::try_new(
             Arc::new(expected_lower_plan),
@@ -319,7 +320,7 @@ async fn test_sum_udaf() {
                                 .build()
                                 .unwrap(),
                             ),
-                            vec![DataType::Int64],
+                            merge_input_fields,
                         )
                         .unwrap()
                         .into(),
@@ -459,6 +460,7 @@ async fn test_avg_udaf() {
         )])
     );
 
+    let merge_input_fields = vec![Arc::new(Field::new("number", DataType::Float64, true))];
     let expected_merge_fn = MergeWrapper::new(
         avg.clone(),
         Arc::new(
@@ -474,7 +476,7 @@ async fn test_avg_udaf() {
             .unwrap(),
         ),
         // coerced to float64
-        vec![DataType::Float64],
+        merge_input_fields,
     )
     .unwrap();
 
@@ -668,13 +670,15 @@ async fn test_last_value_order_by_udaf() {
         .unwrap();
     let aggr_func_expr = &aggr_exec.aggr_expr()[0];
 
+    let merge_input_fields = vec![Arc::new(Field::new(
+        "ts",
+        DataType::Timestamp(arrow_schema::TimeUnit::Millisecond, None),
+        false,
+    ))];
     let expected_merge_fn = MergeWrapper::new(
         last_value.clone(),
         aggr_func_expr.clone(),
-        vec![DataType::Timestamp(
-            arrow_schema::TimeUnit::Millisecond,
-            None,
-        )],
+        merge_input_fields,
     )
     .unwrap();
 
