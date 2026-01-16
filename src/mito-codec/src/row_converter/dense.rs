@@ -430,6 +430,52 @@ impl DensePrimaryKeyCodec {
         &self.ordered_primary_key_columns[pos].1
     }
 
+    /// Advances `deserializer` to the start of value at `pos`.
+    ///
+    /// Returns the offset of the value at `pos` in `bytes`.
+    fn advance_to_value_at(
+        &self,
+        bytes: &[u8],
+        pos: usize,
+        offsets_buf: &mut Vec<usize>,
+        deserializer: &mut Deserializer<&[u8]>,
+    ) -> Result<usize> {
+        if pos < offsets_buf.len() {
+            // We computed the offset before.
+            let offset = offsets_buf[pos];
+            deserializer.advance(offset);
+            return Ok(offset);
+        }
+
+        if offsets_buf.is_empty() {
+            let mut offset = 0;
+            // Skip values before `pos`.
+            for i in 0..pos {
+                // Offset to skip before reading value i.
+                offsets_buf.push(offset);
+                let skip = self.field_at(i).skip_deserialize(bytes, deserializer)?;
+                offset += skip;
+            }
+            // Offset to skip before reading this value.
+            offsets_buf.push(offset);
+            Ok(offset)
+        } else {
+            // Offsets are not enough.
+            let value_start = offsets_buf.len() - 1;
+            // Advances to decode value at `value_start`.
+            let mut offset = offsets_buf[value_start];
+            deserializer.advance(offset);
+            for i in value_start..pos {
+                // Skip value i.
+                let skip = self.field_at(i).skip_deserialize(bytes, deserializer)?;
+                // Offset for the value at i + 1.
+                offset += skip;
+                offsets_buf.push(offset);
+            }
+            Ok(offset)
+        }
+    }
+
     /// Decode value at `pos` in `bytes`.
     ///
     /// The i-th element in offsets buffer is how many bytes to skip in order to read value at `pos`.
@@ -440,42 +486,7 @@ impl DensePrimaryKeyCodec {
         offsets_buf: &mut Vec<usize>,
     ) -> Result<Value> {
         let mut deserializer = Deserializer::new(bytes);
-        if pos < offsets_buf.len() {
-            // We computed the offset before.
-            let to_skip = offsets_buf[pos];
-            deserializer.advance(to_skip);
-            return self.field_at(pos).deserialize(&mut deserializer);
-        }
-
-        if offsets_buf.is_empty() {
-            let mut offset = 0;
-            // Skip values before `pos`.
-            for i in 0..pos {
-                // Offset to skip before reading value i.
-                offsets_buf.push(offset);
-                let skip = self
-                    .field_at(i)
-                    .skip_deserialize(bytes, &mut deserializer)?;
-                offset += skip;
-            }
-            // Offset to skip before reading this value.
-            offsets_buf.push(offset);
-        } else {
-            // Offsets are not enough.
-            let value_start = offsets_buf.len() - 1;
-            // Advances to decode value at `value_start`.
-            let mut offset = offsets_buf[value_start];
-            deserializer.advance(offset);
-            for i in value_start..pos {
-                // Skip value i.
-                let skip = self
-                    .field_at(i)
-                    .skip_deserialize(bytes, &mut deserializer)?;
-                // Offset for the value at i + 1.
-                offset += skip;
-                offsets_buf.push(offset);
-            }
-        }
+        self.advance_to_value_at(bytes, pos, offsets_buf, &mut deserializer)?;
 
         self.field_at(pos).deserialize(&mut deserializer)
     }
@@ -491,43 +502,7 @@ impl DensePrimaryKeyCodec {
         offsets_buf: &mut Vec<usize>,
     ) -> Result<&'a [u8]> {
         let mut deserializer = Deserializer::new(bytes);
-
-        let offset = if pos < offsets_buf.len() {
-            // We computed the offset before.
-            let to_skip = offsets_buf[pos];
-            deserializer.advance(to_skip);
-            to_skip
-        } else if offsets_buf.is_empty() {
-            let mut offset = 0;
-            // Skip values before `pos`.
-            for i in 0..pos {
-                // Offset to skip before reading value i.
-                offsets_buf.push(offset);
-                let skip = self
-                    .field_at(i)
-                    .skip_deserialize(bytes, &mut deserializer)?;
-                offset += skip;
-            }
-            // Offset to skip before reading this value.
-            offsets_buf.push(offset);
-            offset
-        } else {
-            // Offsets are not enough.
-            let value_start = offsets_buf.len() - 1;
-            // Advances to decode value at `value_start`.
-            let mut offset = offsets_buf[value_start];
-            deserializer.advance(offset);
-            for i in value_start..pos {
-                // Skip value i.
-                let skip = self
-                    .field_at(i)
-                    .skip_deserialize(bytes, &mut deserializer)?;
-                // Offset for the value at i + 1.
-                offset += skip;
-                offsets_buf.push(offset);
-            }
-            offset
-        };
+        let offset = self.advance_to_value_at(bytes, pos, offsets_buf, &mut deserializer)?;
 
         let len = self
             .field_at(pos)
