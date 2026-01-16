@@ -48,6 +48,7 @@ pub struct FlatProjectionMapper {
     /// The mapper won't deduplicate the column ids.
     ///
     /// Note that this doesn't contain the `__table_id` and `__tsid`.
+    #[allow(unused)]
     read_column_ids: Vec<ColumnId>,
     /// Ids and DataTypes of columns of the expected batch.
     /// We can use this to check if the batch is compatible with the expected schema.
@@ -178,6 +179,7 @@ impl FlatProjectionMapper {
 
     /// Returns ids of projected columns that we need to read
     /// from memtables and SSTs.
+    #[cfg(test)]
     pub(crate) fn column_ids(&self) -> &[ColumnId] {
         &self.read_column_ids
     }

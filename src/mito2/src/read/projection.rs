@@ -204,17 +204,18 @@ impl PrimaryKeyProjectionMapper {
 
         let mut column_schemas = Vec::with_capacity(projection.len());
         for idx in &projection {
-            // For each projection index, we get the column id for projection.
-            let column = metadata
-                .column_metadatas
-                .get(*idx)
-                .context(InvalidRequestSnafu {
-                    region_id: metadata.region_id,
-                    reason: format!("projection index {} is out of bound", idx),
-                })?;
-
-            // Safety: idx is valid.
-            column_schemas.push(metadata.schema.column_schemas()[*idx].clone());
+            // For each projection index, we get the column schema for projection
+            column_schemas.push(
+                metadata
+                    .schema
+                    .column_schemas()
+                    .get(*idx)
+                    .context(InvalidRequestSnafu {
+                        region_id: metadata.region_id,
+                        reason: format!("projection index {} is out of bound", idx),
+                    })?
+                    .clone(),
+            );
         }
 
         let codec = build_primary_key_codec(metadata);
@@ -299,6 +300,7 @@ impl PrimaryKeyProjectionMapper {
 
     /// Returns ids of projected columns that we need to read
     /// from memtables and SSTs.
+
     pub(crate) fn column_ids(&self) -> &[ColumnId] {
         &self.read_column_ids
     }
