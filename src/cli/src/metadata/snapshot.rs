@@ -288,6 +288,7 @@ fn build_object_store_and_resolve_file_path(
 #[cfg(test)]
 mod tests {
     use std::env;
+    use std::path::Path;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -299,6 +300,14 @@ mod tests {
 
     use super::*;
     use crate::metadata::snapshot::RestoreCommand;
+
+    fn create_raftengine_url(path: &std::path::Path) -> String {
+        let mut path = path.to_string_lossy().replace('\\', "/");
+        if !path.starts_with('/') {
+            path = format!("/{}", path);
+        }
+        format!("raftengine://{}", path)
+    }
 
     #[tokio::test]
     async fn test_cmd_resolve_file_path() {
@@ -364,25 +373,32 @@ mod tests {
         let root = temp_dir.path().display().to_string();
         let object_store = new_fs_object_store(&root).unwrap();
         setup_backup_file(object_store, "/backup/metadata_snapshot.metadata.fb").await;
-
+        let metadata_path = temp_dir.path().join("metadata");
         {
             let cmd = RestoreCommand::parse_from([
                 "",
                 "--file_name",
-                format!("{}/backup/metadata_snapshot.metadata.fb", root).as_str(),
+                temp_dir
+                    .path()
+                    .join("backup")
+                    .join("metadata_snapshot.metadata.fb")
+                    .to_str()
+                    .unwrap(),
                 "--backend",
                 "raft-engine-store",
                 "--store-addrs",
-                format!("raftengine:///{}/metadata", root).as_str(),
+                &create_raftengine_url(&metadata_path),
             ]);
             let tool = cmd.build().await.unwrap();
             tool.do_work().await.unwrap();
         }
         // Waits for the raft engine release the file lock.
         tokio::time::sleep(Duration::from_secs(1)).await;
-        let kv =
-            standalone::build_metadata_kvbackend(format!("{}/metadata", root), Default::default())
-                .unwrap();
+        let kv = standalone::build_metadata_kvbackend(
+            metadata_path.display().to_string(),
+            Default::default(),
+        )
+        .unwrap();
 
         let value = kv.get(b"test").await.unwrap().unwrap().value;
         assert_eq!(value, b"test");
@@ -393,9 +409,10 @@ mod tests {
         common_telemetry::init_default_ut_logging();
         let temp_dir = tempfile::tempdir().unwrap();
         let root = temp_dir.path().display().to_string();
+        let metadata_path = temp_dir.path().join("metadata");
         {
             let kv = standalone::build_metadata_kvbackend(
-                format!("{}/metadata", root),
+                metadata_path.to_string_lossy().to_string(),
                 Default::default(),
             )
             .unwrap();
@@ -413,11 +430,16 @@ mod tests {
             let cmd = SaveCommand::parse_from([
                 "",
                 "--file_name",
-                format!("{}/backup/metadata_snapshot.metadata.fb", root).as_str(),
+                temp_dir
+                    .path()
+                    .join("backup")
+                    .join("metadata_snapshot.metadata.fb")
+                    .to_str()
+                    .unwrap(),
                 "--backend",
                 "raft-engine-store",
                 "--store-addrs",
-                format!("raftengine:///{}/metadata", root).as_str(),
+                &create_raftengine_url(&metadata_path),
             ]);
             let tool = cmd.build().await.unwrap();
             tool.do_work().await.unwrap();
@@ -433,5 +455,21 @@ mod tests {
             .unwrap();
         let value = kv_backend.get(b"test").await.unwrap().unwrap().value;
         assert_eq!(value, b"test");
+    }
+
+    #[test]
+    fn test_path() {
+        let path = "C:\\Users\\user\\AppData\\Local\\Temp\\.tmpuPiVuB\\metadata";
+        let path = Path::new(path);
+        let url = create_raftengine_url(path);
+        assert_eq!(
+            url,
+            "raftengine:///C:/Users/user/AppData/Local/Temp/.tmpuPiVuB/metadata"
+        );
+        let url = url::Url::parse(&url).unwrap();
+        assert_eq!(
+            url.path(),
+            "/C:/Users/user/AppData/Local/Temp/.tmpuPiVuB/metadata"
+        );
     }
 }

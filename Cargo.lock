@@ -2031,6 +2031,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing-appender",
+ "url",
 ]
 
 [[package]]
