@@ -144,12 +144,22 @@ struct CompiledPrimaryKeyFilter {
 enum CompiledFastPath {
     Eq(Vec<u8>),
     NotEq(Vec<u8>),
+    Lt(Vec<u8>),
+    LtEq(Vec<u8>),
+    Gt(Vec<u8>),
+    GtEq(Vec<u8>),
     InList(Vec<Vec<u8>>),
 }
 
 impl CompiledFastPath {
     fn try_new(filter: &SimpleFilterEvaluator, data_type: &ConcreteDataType) -> Option<Self> {
         let field = SortField::new(data_type.clone());
+        // Safety guard: memcomparable defines a total order for floats that doesn't necessarily
+        // match DataFusion/Arrow float comparison semantics (e.g. `-0.0 == 0.0`).
+        if field.encode_data_type().is_float() {
+            return None;
+        }
+
         let encoded = |value: &Value| -> Option<Vec<u8>> {
             let mut buf = Vec::new();
             let mut serializer = Serializer::new(&mut buf);
@@ -167,6 +177,26 @@ impl CompiledFastPath {
         if filter.is_not_eq() {
             let value = filter.literal_value()?;
             return Some(Self::NotEq(encoded(&value)?));
+        }
+
+        if filter.is_lt() {
+            let value = filter.literal_value()?;
+            return Some(Self::Lt(encoded(&value)?));
+        }
+
+        if filter.is_lt_eq() {
+            let value = filter.literal_value()?;
+            return Some(Self::LtEq(encoded(&value)?));
+        }
+
+        if filter.is_gt() {
+            let value = filter.literal_value()?;
+            return Some(Self::Gt(encoded(&value)?));
+        }
+
+        if filter.is_gt_eq() {
+            let value = filter.literal_value()?;
+            return Some(Self::GtEq(encoded(&value)?));
         }
 
         if filter.is_or_eq_chain() {
@@ -202,6 +232,18 @@ impl CompiledFastPath {
             }
             CompiledFastPath::NotEq(encoded_literal) => {
                 encoded_literal.first() != Some(&0) && encoded_value != &encoded_literal[..]
+            }
+            CompiledFastPath::Lt(encoded_literal) => {
+                encoded_literal.first() != Some(&0) && encoded_value < &encoded_literal[..]
+            }
+            CompiledFastPath::LtEq(encoded_literal) => {
+                encoded_literal.first() != Some(&0) && encoded_value <= &encoded_literal[..]
+            }
+            CompiledFastPath::Gt(encoded_literal) => {
+                encoded_literal.first() != Some(&0) && encoded_value > &encoded_literal[..]
+            }
+            CompiledFastPath::GtEq(encoded_literal) => {
+                encoded_literal.first() != Some(&0) && encoded_value >= &encoded_literal[..]
             }
             CompiledFastPath::InList(encoded_literals) => {
                 encoded_literals.iter().any(|lit| encoded_value == &lit[..])
@@ -337,7 +379,7 @@ mod tests {
     use datafusion_expr::{BinaryExpr, Expr, Literal, Operator};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
-    use datatypes::value::ValueRef;
+    use datatypes::value::{OrderedFloat, ValueRef};
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::{ColumnId, RegionId};
 
@@ -402,9 +444,17 @@ mod tests {
     }
 
     fn create_filter(column_name: &str, value: &str) -> SimpleFilterEvaluator {
+        create_filter_with_op(column_name, Operator::Eq, value)
+    }
+
+    fn create_filter_with_op<T: Literal>(
+        column_name: &str,
+        op: Operator,
+        value: T,
+    ) -> SimpleFilterEvaluator {
         let expr = Expr::BinaryExpr(BinaryExpr {
             left: Box::new(Expr::Column(Column::from_name(column_name))),
-            op: Operator::Eq,
+            op,
             right: Box::new(value.lit()),
         });
         SimpleFilterEvaluator::try_new(&expr).unwrap()
@@ -507,6 +557,79 @@ mod tests {
         let pk = encode_dense_pk(&metadata, create_test_row());
         let codec = DensePrimaryKeyCodec::new(&metadata);
         let mut filter = DensePrimaryKeyFilter::new(metadata, filters, codec);
+        assert!(filter.matches(&pk));
+    }
+
+    #[test]
+    fn test_dense_primary_key_filter_order_ops() {
+        let metadata = setup_metadata();
+        let pk = encode_dense_pk(&metadata, create_test_row());
+        let codec = DensePrimaryKeyCodec::new(&metadata);
+
+        let cases = [
+            (Operator::Gt, "greptime-frontend-6989d9899-22221", true),
+            (Operator::GtEq, "greptime-frontend-6989d9899-22222", true),
+            (Operator::Lt, "greptime-frontend-6989d9899-22223", true),
+            (Operator::LtEq, "greptime-frontend-6989d9899-22221", false),
+        ];
+
+        for (op, value, expected) in cases {
+            let filters = Arc::new(vec![create_filter_with_op("pod", op, value)]);
+            let mut filter = DensePrimaryKeyFilter::new(metadata.clone(), filters, codec.clone());
+            assert_eq!(expected, filter.matches(&pk));
+        }
+    }
+
+    #[test]
+    fn test_sparse_primary_key_filter_order_ops() {
+        let metadata = setup_metadata();
+        let pk = encode_sparse_pk(&metadata, create_test_row());
+        let codec = SparsePrimaryKeyCodec::new(&metadata);
+
+        let cases = [
+            (Operator::Gt, "greptime-frontend-6989d9899-22221", true),
+            (Operator::GtEq, "greptime-frontend-6989d9899-22222", true),
+            (Operator::Lt, "greptime-frontend-6989d9899-22223", true),
+            (Operator::LtEq, "greptime-frontend-6989d9899-22221", false),
+        ];
+
+        for (op, value, expected) in cases {
+            let filters = Arc::new(vec![create_filter_with_op("pod", op, value)]);
+            let mut filter = SparsePrimaryKeyFilter::new(metadata.clone(), filters, codec.clone());
+            assert_eq!(expected, filter.matches(&pk));
+        }
+    }
+
+    #[test]
+    fn test_dense_primary_key_filter_float_eq_fallback() {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("f", ConcreteDataType::float64_datatype(), true),
+                semantic_type: SemanticType::Tag,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    greptime_timestamp(),
+                    ConcreteDataType::timestamp_nanosecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 2,
+            })
+            .primary_key(vec![1]);
+        let metadata = Arc::new(builder.build().unwrap());
+
+        let codec = DensePrimaryKeyCodec::new(&metadata);
+        let mut pk = Vec::new();
+        codec
+            .encode_to_vec([ValueRef::Float64(OrderedFloat(-0.0))].into_iter(), &mut pk)
+            .unwrap();
+
+        let filters = Arc::new(vec![create_filter_with_op("f", Operator::Eq, 0.0_f64)]);
+        let mut filter = DensePrimaryKeyFilter::new(metadata, filters, codec);
+
         assert!(filter.matches(&pk));
     }
 }

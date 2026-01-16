@@ -87,9 +87,17 @@ fn create_test_row() -> Vec<(ColumnId, ValueRef<'static>)> {
 }
 
 fn create_eq_filter(column_name: &str, value: &str) -> SimpleFilterEvaluator {
+    create_filter_with_op(column_name, Operator::Eq, value)
+}
+
+fn create_filter_with_op<T: Literal>(
+    column_name: &str,
+    op: Operator,
+    value: T,
+) -> SimpleFilterEvaluator {
     let expr = Expr::BinaryExpr(BinaryExpr {
         left: Box::new(Expr::Column(Column::from_name(column_name))),
-        op: Operator::Eq,
+        op,
         right: Box::new(value.lit()),
     });
     SimpleFilterEvaluator::try_new(&expr).unwrap()
@@ -209,6 +217,9 @@ fn bench_primary_key_filter(c: &mut Criterion) {
     let row = create_test_row();
 
     let eq_filter = create_eq_filter("pod", "greptime-frontend-6989d9899-22222");
+    let gt_filter = create_filter_with_op("pod", Operator::Gt, "greptime-frontend-6989d9899-22221");
+    let lt_eq_filter =
+        create_filter_with_op("pod", Operator::LtEq, "greptime-frontend-6989d9899-22222");
     let or_filter = create_or_eq_filter(
         "pod",
         &[
@@ -223,7 +234,12 @@ fn bench_primary_key_filter(c: &mut Criterion) {
         ],
     );
 
-    let cases = [("eq", eq_filter), ("or_eq", or_filter)];
+    let cases = [
+        ("eq", eq_filter),
+        ("gt", gt_filter),
+        ("lt_eq", lt_eq_filter),
+        ("or_eq", or_filter),
+    ];
 
     for (case_name, filter) in cases {
         let filters = Arc::new(vec![filter]);

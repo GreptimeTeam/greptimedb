@@ -181,6 +181,22 @@ impl SimpleFilterEvaluator {
         matches!(self.op, Operator::NotEq)
     }
 
+    pub fn is_lt(&self) -> bool {
+        matches!(self.op, Operator::Lt)
+    }
+
+    pub fn is_lt_eq(&self) -> bool {
+        matches!(self.op, Operator::LtEq)
+    }
+
+    pub fn is_gt(&self) -> bool {
+        matches!(self.op, Operator::Gt)
+    }
+
+    pub fn is_gt_eq(&self) -> bool {
+        matches!(self.op, Operator::GtEq)
+    }
+
     /// Returns true if this filter represents an `OR` chain of equality comparisons, e.g.
     /// `col = lit1 OR col = lit2 ...`.
     pub fn is_or_eq_chain(&self) -> bool {
