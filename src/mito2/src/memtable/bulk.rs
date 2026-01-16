@@ -73,7 +73,7 @@ const DEFAULT_ENCODE_ROW_THRESHOLD_FACTOR: usize = 4;
 
 /// Row threshold for encoding parts. Configurable via `GREPTIME_BULK_ENCODE_ROW_THRESHOLD`.
 /// When estimated rows exceed this threshold, parts are encoded as EncodedBulkPart.
-static ENCODE_ROW_THRESHOLD: LazyLock<usize> = LazyLock::new(|| {
+pub(crate) static ENCODE_ROW_THRESHOLD: LazyLock<usize> = LazyLock::new(|| {
     env_usize(
         "GREPTIME_BULK_ENCODE_ROW_THRESHOLD",
         DEFAULT_ENCODE_ROW_THRESHOLD_FACTOR * DEFAULT_ROW_GROUP_SIZE,

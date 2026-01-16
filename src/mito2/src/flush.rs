@@ -40,6 +40,7 @@ use crate::error::{
     RegionTruncatedSnafu, Result,
 };
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
+use crate::memtable::bulk::ENCODE_ROW_THRESHOLD;
 use crate::memtable::{
     BoxedRecordBatchIterator, EncodedRange, IterBuilder, MemtableRanges, RangesOptions,
 };
@@ -765,6 +766,7 @@ fn memtable_flat_sources(
     options: &RegionOptions,
     field_column_start: usize,
 ) -> Result<FlatSources> {
+    common_telemetry::info!("memtable_flat_sources start");
     let MemtableRanges { ranges } = mem_ranges;
     let mut flat_sources = FlatSources {
         sources: SmallVec::new(),
@@ -772,6 +774,8 @@ fn memtable_flat_sources(
     };
 
     if ranges.len() == 1 {
+        common_telemetry::info!("Only has one flat range");
+
         let only_range = ranges.into_values().next().unwrap();
         let max_sequence = only_range.stats().max_sequence();
         if let Some(encoded) = only_range.encoded() {
@@ -791,10 +795,20 @@ fn memtable_flat_sources(
                 .push((FlatSource::Iter(iter), max_sequence));
         };
     } else {
-        // Calculate total rows from all ranges for min_flush_rows calculation
-        let total_rows: usize = ranges.values().map(|r| r.stats().num_rows()).sum();
-        let min_flush_rows = total_rows / 8;
-        let min_flush_rows = min_flush_rows.max(DEFAULT_ROW_GROUP_SIZE);
+        let min_flush_rows = *ENCODE_ROW_THRESHOLD;
+        // Calculate total rows from non-encoded ranges.
+        let total_rows: usize = ranges
+            .values()
+            .filter(|r| r.encoded().is_none())
+            .map(|r| r.num_rows())
+            .sum();
+        common_telemetry::info!(
+            "memtable_flat_sources flush flat multiple ranges, total_rows: {}, min_flush_rows: {}, num ranges: {}",
+            total_rows,
+            min_flush_rows,
+            ranges.len()
+        );
+        let mut rows_remaining = total_rows;
         let mut last_iter_rows = 0;
         let num_ranges = ranges.len();
         let mut input_iters = Vec::with_capacity(num_ranges);
@@ -808,10 +822,24 @@ fn memtable_flat_sources(
 
             let iter = range.build_record_batch_iter(None)?;
             input_iters.push(iter);
-            last_iter_rows += range.num_rows();
+            let range_rows = range.num_rows();
+            last_iter_rows += range_rows;
+            rows_remaining -= range_rows;
             current_ranges.push(range);
 
-            if last_iter_rows > min_flush_rows {
+            // Flush if we have enough rows, but don't flush if the remaining rows
+            // would be less than DEFAULT_ROW_GROUP_SIZE (to avoid small last files).
+            if last_iter_rows > min_flush_rows
+                && (rows_remaining == 0 || rows_remaining >= DEFAULT_ROW_GROUP_SIZE)
+            {
+                common_telemetry::info!(
+                    "flush flat sources, flush one file, last iter rows: {}, min_flush_rows: {}, num_iters: {}, rows_remaining: {}",
+                    last_iter_rows,
+                    min_flush_rows,
+                    input_iters.len(),
+                    rows_remaining,
+                );
+
                 // Calculate max_sequence from all merged ranges
                 let max_sequence = current_ranges
                     .iter()
@@ -837,6 +865,13 @@ fn memtable_flat_sources(
 
         // Handle remaining iters.
         if !input_iters.is_empty() {
+            common_telemetry::info!(
+                "flush flat remaining sources, flush one file, last iter rows: {}, min_flush_rows: {}, num_iters: {}, rows_remaining: {}",
+                last_iter_rows,
+                min_flush_rows,
+                input_iters.len(),
+                rows_remaining,
+            );
             let max_sequence = current_ranges
                 .iter()
                 .map(|r| r.stats().max_sequence())
@@ -856,6 +891,11 @@ fn memtable_flat_sources(
                 .push((FlatSource::Iter(maybe_dedup), max_sequence));
         }
     }
+    common_telemetry::info!(
+        "memtable_flat_sources end, num encoded: {}, num sources: {}",
+        flat_sources.encoded.len(),
+        flat_sources.sources.len()
+    );
 
     Ok(flat_sources)
 }
