@@ -49,7 +49,8 @@ use store_api::region_engine::{
     SyncRegionFromResponse,
 };
 use store_api::region_request::{
-    BatchRegionDdlRequest, RegionCatchupRequest, RegionOpenRequest, RegionRequest,
+    AffectedRows, BatchRegionDdlRequest, RegionCatchupRequest, RegionOpenRequest, RegionPutRequest,
+    RegionRequest,
 };
 use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 
@@ -494,6 +495,16 @@ impl MetricEngine {
 
     pub fn mito(&self) -> MitoEngine {
         self.inner.mito.clone()
+    }
+
+    /// Batch put operation for multiple logical regions.
+    /// Requests are grouped by physical region; a failure can leave earlier
+    /// physical-region groups committed.
+    pub async fn put_regions_batch(
+        &self,
+        requests: impl ExactSizeIterator<Item = (RegionId, RegionPutRequest)>,
+    ) -> Result<AffectedRows> {
+        self.inner.put_regions_batch(requests).await
     }
 
     /// Returns all logical regions associated with the physical region.
