@@ -300,7 +300,6 @@ impl PrimaryKeyProjectionMapper {
 
     /// Returns ids of projected columns that we need to read
     /// from memtables and SSTs.
-
     pub(crate) fn column_ids(&self) -> &[ColumnId] {
         &self.read_column_ids
     }

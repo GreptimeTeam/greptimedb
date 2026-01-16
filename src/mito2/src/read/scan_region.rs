@@ -616,7 +616,7 @@ impl ScanRegion {
             }
         }
 
-        let mut extra_ids = HashSet::new();
+        let mut extra_names = HashSet::new();
         let mut columns = HashSet::new();
 
         for expr in &self.request.filters {
@@ -624,32 +624,20 @@ impl ScanRegion {
             if expr_to_columns(expr, &mut columns).is_err() {
                 continue;
             }
-            for column in &columns {
-                if let Some(column_meta) = metadata.column_by_name(&column.name) {
-                    let column_id = column_meta.column_id;
-                    if !seen.contains(&column_id) {
-                        extra_ids.insert(column_id);
-                    }
-                }
-            }
+            extra_names.extend(columns.iter().map(|column| column.name.clone()));
         }
 
         if let Some(expr) = predicate.region_partition_expr() {
-            let mut names: HashSet<String> = HashSet::new();
-            expr.collect_column_names(&mut names);
-            for name in names {
-                if let Some(column_meta) = metadata.column_by_name(&name) {
-                    let column_id = column_meta.column_id;
-                    if !seen.contains(&column_id) {
-                        extra_ids.insert(column_id);
-                    }
-                }
-            }
+            expr.collect_column_names(&mut extra_names);
         }
 
-        for column in &metadata.column_metadatas {
-            if extra_ids.contains(&column.column_id) {
-                read_column_ids.push(column.column_id);
+        if !extra_names.is_empty() {
+            for column in &metadata.column_metadatas {
+                if extra_names.contains(column.column_schema.name.as_str())
+                    && !seen.contains(&column.column_id)
+                {
+                    read_column_ids.push(column.column_id);
+                }
             }
         }
         Ok(read_column_ids)
@@ -1794,5 +1782,31 @@ mod tests {
             .unwrap();
         // Empty projection should still read the time index column (id 2 in this test schema).
         assert_eq!(vec![2], read_ids);
+    }
+
+    #[tokio::test]
+    async fn test_build_read_column_ids_keeps_projection_order() {
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let version = new_version(metadata.clone());
+        let env = SchedulerEnv::new().await;
+        let request = ScanRequest {
+            projection: Some(vec![4, 1]),
+            filters: vec![col("v0").gt(lit(1))],
+            ..Default::default()
+        };
+        let scan_region = ScanRegion::new(
+            version,
+            env.access_layer.clone(),
+            request,
+            CacheStrategy::Disabled,
+        );
+        let predicate =
+            PredicateGroup::new(metadata.as_ref(), &scan_region.request.filters).unwrap();
+        let projection = scan_region.request.projection.as_ref().unwrap();
+        let read_ids = scan_region
+            .build_read_column_ids(projection, &predicate)
+            .unwrap();
+        // Projection order preserved, extra columns appended in schema order.
+        assert_eq!(vec![4, 1, 3], read_ids);
     }
 }
