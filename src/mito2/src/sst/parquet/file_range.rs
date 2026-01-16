@@ -406,6 +406,20 @@ pub(crate) struct RangeBase {
     pub(crate) partition_filter: Option<PartitionFilterContext>,
 }
 
+pub(crate) struct TagDecodeState {
+    decoded_pks: Option<DecodedPrimaryKeys>,
+    decoded_tag_cache: HashMap<ColumnId, ArrayRef>,
+}
+
+impl TagDecodeState {
+    fn new() -> Self {
+        Self {
+            decoded_pks: None,
+            decoded_tag_cache: HashMap::new(),
+        }
+    }
+}
+
 impl RangeBase {
     /// TRY THE BEST to perform pushed down predicate precisely on the input batch.
     /// Return the filtered batch. If the entire batch is filtered out, return None.
@@ -509,7 +523,12 @@ impl RangeBase {
 
         // Apply partition filter
         if let Some(partition_filter) = &self.partition_filter {
-            match self.evaluate_partition_filter(&mut input, partition_filter) {
+            let partition_result = self
+                .build_record_batch_for_pruning(&mut input, &partition_filter.partition_schema)
+                .and_then(|record_batch| {
+                    self.evaluate_partition_filter(&record_batch, partition_filter)
+                });
+            match partition_result {
                 Ok(partition_mask) => {
                     mask = mask.bitand(&partition_mask);
                 }
@@ -542,7 +561,8 @@ impl RangeBase {
         input: RecordBatch,
         skip_fields: bool,
     ) -> Result<Option<RecordBatch>> {
-        let mask = self.compute_filter_mask_flat(&input, skip_fields)?;
+        let mut tag_decode_state = TagDecodeState::new();
+        let mask = self.compute_filter_mask_flat(&input, skip_fields, &mut tag_decode_state)?;
 
         // If mask is None, the entire batch is filtered out
         let Some(mut mask) = mask else {
@@ -551,7 +571,16 @@ impl RangeBase {
 
         // Apply partition filter
         if let Some(partition_filter) = &self.partition_filter {
-            match self.evaluate_partition_filter_flat(&input, partition_filter) {
+            let partition_result = self
+                .project_record_batch_for_pruning_flat(
+                    &input,
+                    &partition_filter.partition_schema,
+                    &mut tag_decode_state,
+                )
+                .and_then(|record_batch| {
+                    self.evaluate_partition_filter(&record_batch, partition_filter)
+                });
+            match partition_result {
                 Ok(partition_mask) => {
                     mask = mask.bitand(&partition_mask);
                 }
@@ -591,6 +620,7 @@ impl RangeBase {
         &self,
         input: &RecordBatch,
         skip_fields: bool,
+        tag_decode_state: &mut TagDecodeState,
     ) -> Result<Option<BooleanBuffer>> {
         let mut mask = BooleanBuffer::new_set(input.num_rows());
 
@@ -600,11 +630,7 @@ impl RangeBase {
             .context(crate::error::UnexpectedSnafu {
                 reason: "Expected flat format for precise_filter_flat",
             })?;
-
-        // Decodes primary keys once if we have any tag filters not in projection
-        let mut decoded_pks: Option<DecodedPrimaryKeys> = None;
-        // Cache decoded tag arrays by column id to avoid redundant decoding
-        let mut decoded_tag_cache: HashMap<ColumnId, ArrayRef> = HashMap::new();
+        let metadata = flat_format.metadata();
 
         // Run filter one by one and combine them result
         for filter_ctx in &self.filters {
@@ -629,47 +655,16 @@ impl RangeBase {
                 mask = mask.bitand(&result);
             } else if filter_ctx.semantic_type() == SemanticType::Tag {
                 // Column not found in projection, it may be a tag column.
-                // Decodes primary keys if not already decoded.
-                if decoded_pks.is_none() {
-                    decoded_pks = Some(decode_primary_keys(self.codec.as_ref(), input)?);
-                }
-
-                let metadata = flat_format.metadata();
                 let column_id = filter_ctx.column_id();
 
-                // Check cache first
-                let tag_column = if let Some(cached_column) = decoded_tag_cache.get(&column_id) {
-                    cached_column.clone()
-                } else {
-                    // For dense encoding, we need pk_index. For sparse encoding, pk_index is None.
-                    let pk_index = if self.codec.encoding() == PrimaryKeyEncoding::Sparse {
-                        None
-                    } else {
-                        metadata.primary_key_index(column_id)
-                    };
-                    let column_index = metadata.column_index_by_id(column_id);
-
-                    if let (Some(column_index), Some(decoded)) =
-                        (column_index, decoded_pks.as_ref())
-                    {
-                        let column_metadata = &metadata.column_metadatas[column_index];
-                        let tag_column = decoded.get_tag_column(
-                            column_id,
-                            pk_index,
-                            &column_metadata.column_schema.data_type,
-                        )?;
-                        // Cache the decoded tag column
-                        decoded_tag_cache.insert(column_id, tag_column.clone());
-                        tag_column
-                    } else {
-                        continue;
-                    }
-                };
-
-                let result = filter
-                    .evaluate_array(&tag_column)
-                    .context(RecordBatchSnafu)?;
-                mask = mask.bitand(&result);
+                if let Some(tag_column) =
+                    self.maybe_decode_tag_column(metadata, column_id, input, tag_decode_state)?
+                {
+                    let result = filter
+                        .evaluate_array(&tag_column)
+                        .context(RecordBatchSnafu)?;
+                    mask = mask.bitand(&result);
+                }
             } else if filter_ctx.semantic_type() == SemanticType::Timestamp {
                 let time_index_pos = time_index_column_index(input.num_columns());
                 let column = &input.columns()[time_index_pos];
@@ -682,45 +677,60 @@ impl RangeBase {
         Ok(Some(mask))
     }
 
-    /// Evaluates the partition filter against the input `Batch`.
-    fn evaluate_partition_filter(
+    /// Returns the decoded tag column for `column_id`, or `None` if it's not a tag.
+    fn maybe_decode_tag_column(
         &self,
-        input: &mut Batch,
-        partition_filter: &PartitionFilterContext,
-    ) -> Result<BooleanBuffer> {
-        // Use partition_schema which only contains columns referenced by the partition expression.
-        let record_batch =
-            self.build_record_batch_for_pruning(input, &partition_filter.partition_schema)?;
-        let columnar_value = partition_filter
-            .region_partition_physical_expr
-            .evaluate(&record_batch)
-            .context(EvalPartitionFilterSnafu)?;
-        let array = columnar_value
-            .into_array(record_batch.num_rows())
-            .context(EvalPartitionFilterSnafu)?;
-        let boolean_array =
-            array
-                .as_any()
-                .downcast_ref::<BooleanArray>()
-                .context(UnexpectedSnafu {
-                    reason: "Failed to downcast to BooleanArray".to_string(),
-                })?;
+        metadata: &RegionMetadataRef,
+        column_id: ColumnId,
+        input: &RecordBatch,
+        tag_decode_state: &mut TagDecodeState,
+    ) -> Result<Option<ArrayRef>> {
+        let Some(pk_index) = metadata.primary_key_index(column_id) else {
+            return Ok(None);
+        };
 
-        Ok(boolean_array.values().clone())
+        if let Some(cached_column) = tag_decode_state.decoded_tag_cache.get(&column_id) {
+            return Ok(Some(cached_column.clone()));
+        }
+
+        if tag_decode_state.decoded_pks.is_none() {
+            tag_decode_state.decoded_pks = Some(decode_primary_keys(self.codec.as_ref(), input)?);
+        }
+
+        let pk_index = if self.codec.encoding() == PrimaryKeyEncoding::Sparse {
+            None
+        } else {
+            Some(pk_index)
+        };
+        let Some(column_index) = metadata.column_index_by_id(column_id) else {
+            return Ok(None);
+        };
+        let Some(decoded) = tag_decode_state.decoded_pks.as_ref() else {
+            return Ok(None);
+        };
+
+        let column_metadata = &metadata.column_metadatas[column_index];
+        let tag_column = decoded.get_tag_column(
+            column_id,
+            pk_index,
+            &column_metadata.column_schema.data_type,
+        )?;
+        tag_decode_state
+            .decoded_tag_cache
+            .insert(column_id, tag_column.clone());
+
+        Ok(Some(tag_column))
     }
 
     /// Evaluates the partition filter against the input `RecordBatch`.
-    fn evaluate_partition_filter_flat(
+    fn evaluate_partition_filter(
         &self,
-        input: &RecordBatch,
+        record_batch: &RecordBatch,
         partition_filter: &PartitionFilterContext,
     ) -> Result<BooleanBuffer> {
-        // Use partition_schema which only contains columns referenced by the partition expression.
-        let record_batch =
-            self.project_record_batch_for_pruning_flat(input, &partition_filter.partition_schema)?;
         let columnar_value = partition_filter
             .region_partition_physical_expr
-            .evaluate(&record_batch)
+            .evaluate(record_batch)
             .context(EvalPartitionFilterSnafu)?;
         let array = columnar_value
             .into_array(record_batch.num_rows())
@@ -822,6 +832,7 @@ impl RangeBase {
         &self,
         input: &RecordBatch,
         schema: &Arc<Schema>,
+        tag_decode_state: &mut TagDecodeState,
     ) -> Result<RecordBatch> {
         let arrow_schema = schema.arrow_schema();
         let mut columns = Vec::with_capacity(arrow_schema.fields().len());
@@ -832,9 +843,9 @@ impl RangeBase {
             .context(crate::error::UnexpectedSnafu {
                 reason: "Expected flat format for precise_filter_flat",
             })?;
+        let metadata = flat_format.metadata();
 
         for field in arrow_schema.fields() {
-            let metadata = flat_format.metadata();
             let column_id = metadata.column_by_name(field.name()).map(|c| c.column_id);
 
             let Some(column_id) = column_id else {
@@ -850,17 +861,31 @@ impl RangeBase {
 
             if let Some(idx) = flat_format.projected_index_by_id(column_id) {
                 columns.push(input.column(idx).clone());
-            } else {
-                return UnexpectedSnafu {
-                    reason: format!(
-                        "Partition pruning schema expects column '{}' (id {}) but it is not \
-                         present in projected record batch",
-                        field.name(),
-                        column_id
-                    ),
-                }
-                .fail();
+                continue;
             }
+
+            if metadata.time_index_column().column_id == column_id {
+                let time_index_pos = time_index_column_index(input.num_columns());
+                columns.push(input.column(time_index_pos).clone());
+                continue;
+            }
+
+            if let Some(tag_column) =
+                self.maybe_decode_tag_column(metadata, column_id, input, tag_decode_state)?
+            {
+                columns.push(tag_column);
+                continue;
+            }
+
+            return UnexpectedSnafu {
+                reason: format!(
+                    "Partition pruning schema expects column '{}' (id {}) but it is not \
+                     present in projected record batch",
+                    field.name(),
+                    column_id
+                ),
+            }
+            .fail();
         }
 
         RecordBatch::try_new(arrow_schema.clone(), columns).context(NewRecordBatchSnafu)

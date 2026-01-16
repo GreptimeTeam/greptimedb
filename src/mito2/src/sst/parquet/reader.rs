@@ -430,68 +430,7 @@ impl ParquetReaderBuilder {
 
         let codec = build_primary_key_codec(read_format.metadata());
 
-        // Compare partition expression and build filter if they are different.
-        let region_partition_expr_str = self
-            .expected_metadata
-            .as_ref()
-            .and_then(|meta| meta.partition_expr.as_ref());
-        let file_partition_expr_ref = self.file_handle.meta_ref().partition_expr.as_ref();
-
-        let partition_filter = if let Some(region_str) = region_partition_expr_str {
-            match crate::region::parse_partition_expr(Some(region_str))? {
-                Some(region_partition_expr)
-                    if Some(&region_partition_expr) != file_partition_expr_ref =>
-                {
-                    // Collect columns referenced by the partition expression.
-                    let mut referenced_columns = HashSet::new();
-                    region_partition_expr.collect_column_names(&mut referenced_columns);
-
-                    // Build a partition_schema containing only referenced columns.
-                    let is_flat = read_format.as_flat().is_some();
-                    let partition_schema = Arc::new(datatypes::schema::Schema::new(
-                        prune_schema
-                            .column_schemas()
-                            .iter()
-                            .filter(|col| referenced_columns.contains(&col.name))
-                            .map(|col| {
-                                if is_flat
-                                    && let Some(column_meta) =
-                                        read_format.metadata().column_by_name(&col.name)
-                                    && column_meta.semantic_type == SemanticType::Tag
-                                    && col.data_type.is_string()
-                                {
-                                    let field = Arc::new(Field::new(
-                                        &col.name,
-                                        col.data_type.as_arrow_type(),
-                                        col.is_nullable(),
-                                    ));
-                                    let dict_field =
-                                        tag_maybe_to_dictionary_field(&col.data_type, &field);
-                                    let mut column = col.clone();
-                                    column.data_type =
-                                        ConcreteDataType::from_arrow_type(dict_field.data_type());
-                                    return column;
-                                }
-
-                                col.clone()
-                            })
-                            .collect::<Vec<_>>(),
-                    ));
-
-                    let region_partition_physical_expr = region_partition_expr
-                        .try_as_physical_expr(partition_schema.arrow_schema())
-                        .context(SerializePartitionExprSnafu)?;
-
-                    Some(PartitionFilterContext {
-                        region_partition_physical_expr,
-                        partition_schema,
-                    })
-                }
-                _ => None,
-            }
-        } else {
-            None
-        };
+        let partition_filter = self.build_partition_filter(&read_format, &prune_schema)?;
 
         let context = FileRangeContext::new(
             reader_builder,
@@ -511,6 +450,76 @@ impl ParquetReaderBuilder {
         metrics.build_cost += start.elapsed();
 
         Ok((context, selection))
+    }
+
+    /// Compare partition expressions from expected metadata and file metadata,
+    /// and build a partition filter if they differ.
+    fn build_partition_filter(
+        &self,
+        read_format: &ReadFormat,
+        prune_schema: &Arc<datatypes::schema::Schema>,
+    ) -> Result<Option<PartitionFilterContext>> {
+        let region_partition_expr_str = self
+            .expected_metadata
+            .as_ref()
+            .and_then(|meta| meta.partition_expr.as_ref());
+        let file_partition_expr_ref = self.file_handle.meta_ref().partition_expr.as_ref();
+
+        let Some(region_str) = region_partition_expr_str else {
+            return Ok(None);
+        };
+
+        let Some(region_partition_expr) = crate::region::parse_partition_expr(Some(region_str))?
+        else {
+            return Ok(None);
+        };
+
+        if Some(&region_partition_expr) == file_partition_expr_ref {
+            return Ok(None);
+        }
+
+        // Collect columns referenced by the partition expression.
+        let mut referenced_columns = HashSet::new();
+        region_partition_expr.collect_column_names(&mut referenced_columns);
+
+        // Build a partition_schema containing only referenced columns.
+        let is_flat = read_format.as_flat().is_some();
+        let partition_schema = Arc::new(datatypes::schema::Schema::new(
+            prune_schema
+                .column_schemas()
+                .iter()
+                .filter(|col| referenced_columns.contains(&col.name))
+                .map(|col| {
+                    if is_flat
+                        && let Some(column_meta) = read_format.metadata().column_by_name(&col.name)
+                        && column_meta.semantic_type == SemanticType::Tag
+                        && col.data_type.is_string()
+                    {
+                        let field = Arc::new(Field::new(
+                            &col.name,
+                            col.data_type.as_arrow_type(),
+                            col.is_nullable(),
+                        ));
+                        let dict_field = tag_maybe_to_dictionary_field(&col.data_type, &field);
+                        let mut column = col.clone();
+                        column.data_type =
+                            ConcreteDataType::from_arrow_type(dict_field.data_type());
+                        return column;
+                    }
+
+                    col.clone()
+                })
+                .collect::<Vec<_>>(),
+        ));
+
+        let region_partition_physical_expr = region_partition_expr
+            .try_as_physical_expr(partition_schema.arrow_schema())
+            .context(SerializePartitionExprSnafu)?;
+
+        Ok(Some(PartitionFilterContext {
+            region_partition_physical_expr,
+            partition_schema,
+        }))
     }
 
     /// Decodes region metadata from key value.
