@@ -480,6 +480,61 @@ impl DensePrimaryKeyCodec {
         self.field_at(pos).deserialize(&mut deserializer)
     }
 
+    /// Returns the encoded bytes at `pos` in `bytes`.
+    ///
+    /// The i-th element in offsets buffer is how many bytes to skip in order to read value at
+    /// `pos`.
+    pub fn encoded_value_at<'a>(
+        &self,
+        bytes: &'a [u8],
+        pos: usize,
+        offsets_buf: &mut Vec<usize>,
+    ) -> Result<&'a [u8]> {
+        let mut deserializer = Deserializer::new(bytes);
+
+        let offset = if pos < offsets_buf.len() {
+            // We computed the offset before.
+            let to_skip = offsets_buf[pos];
+            deserializer.advance(to_skip);
+            to_skip
+        } else if offsets_buf.is_empty() {
+            let mut offset = 0;
+            // Skip values before `pos`.
+            for i in 0..pos {
+                // Offset to skip before reading value i.
+                offsets_buf.push(offset);
+                let skip = self
+                    .field_at(i)
+                    .skip_deserialize(bytes, &mut deserializer)?;
+                offset += skip;
+            }
+            // Offset to skip before reading this value.
+            offsets_buf.push(offset);
+            offset
+        } else {
+            // Offsets are not enough.
+            let value_start = offsets_buf.len() - 1;
+            // Advances to decode value at `value_start`.
+            let mut offset = offsets_buf[value_start];
+            deserializer.advance(offset);
+            for i in value_start..pos {
+                // Skip value i.
+                let skip = self
+                    .field_at(i)
+                    .skip_deserialize(bytes, &mut deserializer)?;
+                // Offset for the value at i + 1.
+                offset += skip;
+                offsets_buf.push(offset);
+            }
+            offset
+        };
+
+        let len = self
+            .field_at(pos)
+            .skip_deserialize(bytes, &mut deserializer)?;
+        Ok(&bytes[offset..offset + len])
+    }
+
     pub fn estimated_size(&self) -> usize {
         self.ordered_primary_key_columns
             .iter()

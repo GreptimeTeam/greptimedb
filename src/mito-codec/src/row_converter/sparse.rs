@@ -296,6 +296,29 @@ impl SparsePrimaryKeyCodec {
         let field = self.get_field(column_id).unwrap();
         field.deserialize(&mut deserializer)
     }
+
+    /// Returns the encoded bytes of the given `column_id` in `pk`.
+    ///
+    /// Returns `Ok(None)` if the `column_id` is missing in `pk`.
+    pub fn encoded_value_for_column<'a>(
+        &self,
+        pk: &'a [u8],
+        offsets_map: &mut HashMap<u32, usize>,
+        column_id: ColumnId,
+    ) -> Result<Option<&'a [u8]>> {
+        let Some(offset) = self.has_column(pk, offsets_map, column_id) else {
+            return Ok(None);
+        };
+
+        let Some(field) = self.get_field(column_id) else {
+            return Ok(None);
+        };
+
+        let mut deserializer = Deserializer::new(pk);
+        deserializer.advance(offset);
+        let len = field.skip_deserialize(pk, &mut deserializer)?;
+        Ok(Some(&pk[offset..offset + len]))
+    }
 }
 
 impl PrimaryKeyCodec for SparsePrimaryKeyCodec {

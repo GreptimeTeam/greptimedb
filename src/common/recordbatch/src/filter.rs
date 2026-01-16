@@ -32,6 +32,7 @@ use datatypes::arrow::compute::filter_record_batch;
 use datatypes::arrow::datatypes::{DataType, UInt32Type};
 use datatypes::arrow::error::ArrowError;
 use datatypes::compute::or_kleene;
+use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
 use regex::Regex;
 use snafu::ResultExt;
@@ -170,6 +171,40 @@ impl SimpleFilterEvaluator {
     /// Get the name of the referenced column.
     pub fn column_name(&self) -> &str {
         &self.column_name
+    }
+
+    pub fn is_eq(&self) -> bool {
+        matches!(self.op, Operator::Eq)
+    }
+
+    pub fn is_not_eq(&self) -> bool {
+        matches!(self.op, Operator::NotEq)
+    }
+
+    /// Returns true if this filter represents an `OR` chain of equality comparisons, e.g.
+    /// `col = lit1 OR col = lit2 ...`.
+    pub fn is_or_eq_chain(&self) -> bool {
+        matches!(self.op, Operator::Or)
+    }
+
+    /// Returns the literal as a [`Value`]. It returns `None` if the literal can't be converted.
+    pub fn literal_value(&self) -> Option<Value> {
+        let array = self.literal.get().0;
+        let scalar = ScalarValue::try_from_array(array, 0).ok()?;
+        Value::try_from(scalar).ok()
+    }
+
+    /// Returns the literal list as a list of [`Value`]s. It returns `None` if any literal can't be
+    /// converted.
+    pub fn literal_list_values(&self) -> Option<Vec<Value>> {
+        self.literal_list
+            .iter()
+            .map(|scalar| {
+                let array = scalar.get().0;
+                let scalar = ScalarValue::try_from_array(array, 0).ok()?;
+                Value::try_from(scalar).ok()
+            })
+            .collect()
     }
 
     pub fn evaluate_scalar(&self, input: &ScalarValue) -> Result<bool> {
