@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
 use std::fmt::{Debug, Display, Formatter};
 use std::sync::Arc;
 
@@ -405,6 +406,24 @@ impl PartitionExpr {
             ..Default::default()
         })
     }
+
+    /// Collects all column names referenced by this expression.
+    pub fn collect_column_names(&self, columns: &mut HashSet<String>) {
+        Self::collect_operand_columns(&self.lhs, columns);
+        Self::collect_operand_columns(&self.rhs, columns);
+    }
+
+    fn collect_operand_columns(operand: &Operand, columns: &mut HashSet<String>) {
+        match operand {
+            Operand::Column(c) => {
+                columns.insert(c.clone());
+            }
+            Operand::Expr(e) => {
+                e.collect_column_names(columns);
+            }
+            Operand::Value(_) => {}
+        }
+    }
 }
 
 impl Display for PartitionExpr {
@@ -619,5 +638,46 @@ mod tests {
         let json = r#"{"Value":{"UInt32":10}}"#;
         let expr5 = PartitionExpr::from_json_str(json).unwrap();
         assert!(expr5.is_none());
+    }
+
+    #[test]
+    fn test_collect_column_names() {
+        // Simple expression: col_a = 1 should give {col_a}
+        let expr = col("a").eq(Value::Int64(1));
+        let mut columns = HashSet::new();
+        expr.collect_column_names(&mut columns);
+        assert_eq!(columns.len(), 1);
+        assert!(columns.contains("a"));
+
+        // Compound AND with same column: col_a >= 0 AND col_a < 10 should give {col_a}
+        let expr = col("a")
+            .gt_eq(Value::Int64(0))
+            .and(col("a").lt(Value::Int64(10)));
+        let mut columns = HashSet::new();
+        expr.collect_column_names(&mut columns);
+        assert_eq!(columns.len(), 1);
+        assert!(columns.contains("a"));
+
+        // Multiple columns: col_a >= 0 AND col_b < 10 should give {col_a, col_b}
+        let expr = col("a")
+            .gt_eq(Value::Int64(0))
+            .and(col("b").lt(Value::Int64(10)));
+        let mut columns = HashSet::new();
+        expr.collect_column_names(&mut columns);
+        assert_eq!(columns.len(), 2);
+        assert!(columns.contains("a"));
+        assert!(columns.contains("b"));
+
+        // Nested expression: (col_a >= 0 AND col_b < 10) AND col_c = 5
+        let expr = col("a")
+            .gt_eq(Value::Int64(0))
+            .and(col("b").lt(Value::Int64(10)))
+            .and(col("c").eq(Value::Int64(5)));
+        let mut columns = HashSet::new();
+        expr.collect_column_names(&mut columns);
+        assert_eq!(columns.len(), 3);
+        assert!(columns.contains("a"));
+        assert!(columns.contains("b"));
+        assert!(columns.contains("c"));
     }
 }

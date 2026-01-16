@@ -423,9 +423,12 @@ impl ScanRegion {
 
         // The mapper always computes projected column ids as the schema of SSTs may change.
         let mapper = match &self.request.projection {
-            Some(p) => {
-                ProjectionMapper::new(&self.version.metadata, p.iter().copied(), flat_format)?
-            }
+            Some(p) => ProjectionMapper::new_with_read_columns(
+                &self.version.metadata,
+                p.iter().copied(),
+                flat_format,
+                read_column_ids.clone(),
+            )?,
             None => ProjectionMapper::all(&self.version.metadata, flat_format)?,
         };
 
@@ -582,6 +585,7 @@ impl ScanRegion {
         build_time_range_predicate(&time_index.column_schema.name, unit, &self.request.filters)
     }
 
+    /// Return all columns id to read according to the projection and filters.
     fn build_read_column_ids(
         &self,
         projection: &[usize],
@@ -631,7 +635,7 @@ impl ScanRegion {
         }
 
         if let Some(expr) = predicate.region_partition_expr() {
-            let mut names = HashSet::new();
+            let mut names: HashSet<String> = HashSet::new();
             expr.collect_column_names(&mut names);
             for name in names {
                 if let Some(column_meta) = metadata.column_by_name(&name) {

@@ -65,6 +65,29 @@ impl ProjectionMapper {
         }
     }
 
+    /// Returns a new mapper with output projection and explicit read columns.
+    pub fn new_with_read_columns(
+        metadata: &RegionMetadataRef,
+        projection: impl Iterator<Item = usize>,
+        flat_format: bool,
+        read_column_ids: Vec<ColumnId>,
+    ) -> Result<Self> {
+        let projection: Vec<_> = projection.collect();
+        if flat_format {
+            Ok(ProjectionMapper::Flat(
+                FlatProjectionMapper::new_with_read_columns(metadata, projection, read_column_ids)?,
+            ))
+        } else {
+            Ok(ProjectionMapper::PrimaryKey(
+                PrimaryKeyProjectionMapper::new_with_read_columns(
+                    metadata,
+                    projection,
+                    read_column_ids,
+                )?,
+            ))
+        }
+    }
+
     /// Returns a new mapper without projection.
     pub fn all(metadata: &RegionMetadataRef, flat_format: bool) -> Result<Self> {
         if flat_format {
@@ -147,10 +170,9 @@ pub struct PrimaryKeyProjectionMapper {
     codec: Arc<dyn PrimaryKeyCodec>,
     /// Schema for converted [RecordBatch].
     output_schema: SchemaRef,
-    /// Ids of columns to project. It keeps ids in the same order as the `projection`
-    /// indices to build the mapper.
-    column_ids: Vec<ColumnId>,
-    /// Ids and DataTypes of field columns in the [Batch].
+    /// Ids of columns to read from memtables and SSTs.
+    read_column_ids: Vec<ColumnId>,
+    /// Ids and DataTypes of field columns in the read [Batch].
     batch_fields: Vec<(ColumnId, ConcreteDataType)>,
     /// `true` If the original projection is empty.
     is_empty_projection: bool,
@@ -165,16 +187,21 @@ impl PrimaryKeyProjectionMapper {
         metadata: &RegionMetadataRef,
         projection: impl Iterator<Item = usize>,
     ) -> Result<PrimaryKeyProjectionMapper> {
-        let mut projection: Vec<_> = projection.collect();
+        let projection: Vec<_> = projection.collect();
+        let read_column_ids = read_column_ids_from_projection(metadata, &projection)?;
+        Self::new_with_read_columns(metadata, projection, read_column_ids)
+    }
+
+    /// Returns a new mapper with output projection and explicit read columns.
+    pub fn new_with_read_columns(
+        metadata: &RegionMetadataRef,
+        projection: Vec<usize>,
+        read_column_ids: Vec<ColumnId>,
+    ) -> Result<PrimaryKeyProjectionMapper> {
         // If the original projection is empty.
         let is_empty_projection = projection.is_empty();
-        if is_empty_projection {
-            // If the projection is empty, we still read the time index column.
-            projection.push(metadata.time_index_column_pos());
-        }
 
         let mut column_schemas = Vec::with_capacity(projection.len());
-        let mut column_ids = Vec::with_capacity(projection.len());
         for idx in &projection {
             // For each projection index, we get the column id for projection.
             let column = metadata
@@ -185,30 +212,20 @@ impl PrimaryKeyProjectionMapper {
                     reason: format!("projection index {} is out of bound", idx),
                 })?;
 
-            column_ids.push(column.column_id);
             // Safety: idx is valid.
             column_schemas.push(metadata.schema.column_schemas()[*idx].clone());
         }
 
         let codec = build_primary_key_codec(metadata);
-        if is_empty_projection {
-            // If projection is empty, we don't output any column.
-            return Ok(PrimaryKeyProjectionMapper {
-                metadata: metadata.clone(),
-                batch_indices: vec![],
-                has_tags: false,
-                codec,
-                output_schema: Arc::new(Schema::new(vec![])),
-                column_ids,
-                batch_fields: vec![],
-                is_empty_projection,
-            });
-        }
-
-        // Safety: Columns come from existing schema.
-        let output_schema = Arc::new(Schema::new(column_schemas));
-        // Get fields in each batch.
-        let batch_fields = Batch::projected_fields(metadata, &column_ids);
+        // If projection is empty, we don't output any column.
+        let output_schema = if is_empty_projection {
+            Arc::new(Schema::new(vec![]))
+        } else {
+            // Safety: Columns come from existing schema.
+            Arc::new(Schema::new(column_schemas))
+        };
+        // Get fields in each read batch.
+        let batch_fields = Batch::projected_fields(metadata, &read_column_ids);
 
         // Field column id to its index in batch.
         let field_id_to_index: HashMap<_, _> = batch_fields
@@ -219,28 +236,37 @@ impl PrimaryKeyProjectionMapper {
         // For each projected column, compute its index in batches.
         let mut batch_indices = Vec::with_capacity(projection.len());
         let mut has_tags = false;
-        for idx in &projection {
-            // Safety: idx is valid.
-            let column = &metadata.column_metadatas[*idx];
-            // Get column index in a batch by its semantic type and column id.
-            let batch_index = match column.semantic_type {
-                SemanticType::Tag => {
-                    // Safety: It is a primary key column.
-                    let index = metadata.primary_key_index(column.column_id).unwrap();
-                    // We need to output a tag.
-                    has_tags = true;
-                    // We always read all primary key so the column always exists and the tag
-                    // index is always valid.
-                    BatchIndex::Tag((index, column.column_id))
-                }
-                SemanticType::Timestamp => BatchIndex::Timestamp,
-                SemanticType::Field => {
-                    // Safety: It is a field column so it should be in `field_id_to_index`.
-                    let index = field_id_to_index[&column.column_id];
-                    BatchIndex::Field(index)
-                }
-            };
-            batch_indices.push(batch_index);
+        if !is_empty_projection {
+            for idx in &projection {
+                // Safety: idx is valid.
+                let column = &metadata.column_metadatas[*idx];
+                // Get column index in a batch by its semantic type and column id.
+                let batch_index = match column.semantic_type {
+                    SemanticType::Tag => {
+                        // Safety: It is a primary key column.
+                        let index = metadata.primary_key_index(column.column_id).unwrap();
+                        // We need to output a tag.
+                        has_tags = true;
+                        // We always read all primary key so the column always exists and the tag
+                        // index is always valid.
+                        BatchIndex::Tag((index, column.column_id))
+                    }
+                    SemanticType::Timestamp => BatchIndex::Timestamp,
+                    SemanticType::Field => {
+                        let index = *field_id_to_index.get(&column.column_id).context(
+                            InvalidRequestSnafu {
+                                region_id: metadata.region_id,
+                                reason: format!(
+                                    "field column {} is missing in read projection",
+                                    column.column_schema.name
+                                ),
+                            },
+                        )?;
+                        BatchIndex::Field(index)
+                    }
+                };
+                batch_indices.push(batch_index);
+            }
         }
 
         Ok(PrimaryKeyProjectionMapper {
@@ -249,7 +275,7 @@ impl PrimaryKeyProjectionMapper {
             has_tags,
             codec,
             output_schema,
-            column_ids,
+            read_column_ids,
             batch_fields,
             is_empty_projection,
         })
@@ -273,7 +299,7 @@ impl PrimaryKeyProjectionMapper {
     /// Returns ids of projected columns that we need to read
     /// from memtables and SSTs.
     pub(crate) fn column_ids(&self) -> &[ColumnId] {
-        &self.column_ids
+        &self.read_column_ids
     }
 
     /// Returns ids of fields in [Batch]es the mapper expects to convert.
@@ -296,6 +322,7 @@ impl PrimaryKeyProjectionMapper {
     /// Converts a [Batch] to a [RecordBatch].
     ///
     /// The batch must match the `projection` using to build the mapper.
+    /// TODO(discord9): handle batch have exact fields other than projected
     pub(crate) fn convert(
         &self,
         batch: &Batch,
@@ -359,6 +386,29 @@ impl PrimaryKeyProjectionMapper {
 
         RecordBatch::new(self.output_schema.clone(), columns)
     }
+}
+
+fn read_column_ids_from_projection(
+    metadata: &RegionMetadataRef,
+    projection: &[usize],
+) -> Result<Vec<ColumnId>> {
+    let mut column_ids = Vec::with_capacity(projection.len().max(1));
+    if projection.is_empty() {
+        column_ids.push(metadata.time_index_column().column_id);
+        return Ok(column_ids);
+    }
+
+    for idx in projection {
+        let column = metadata
+            .column_metadatas
+            .get(*idx)
+            .context(InvalidRequestSnafu {
+                region_id: metadata.region_id,
+                reason: format!("projection index {} is out of bound", idx),
+            })?;
+        column_ids.push(column.column_id);
+    }
+    Ok(column_ids)
 }
 
 /// Index of a vector in a [Batch].
@@ -582,6 +632,43 @@ mod tests {
     }
 
     #[test]
+    fn test_projection_mapper_read_superset() {
+        let metadata = Arc::new(
+            TestRegionMetadataBuilder::default()
+                .num_tags(2)
+                .num_fields(2)
+                .build(),
+        );
+        // Output columns v1, k0. Read also includes v0.
+        let mapper = ProjectionMapper::new_with_read_columns(
+            &metadata,
+            [4, 1].into_iter(),
+            false,
+            vec![4, 1, 3],
+        )
+        .unwrap();
+        assert_eq!([4, 1, 3], mapper.column_ids());
+
+        let batch = new_batch(0, &[1, 2], &[(3, 3), (4, 4)], 3);
+        let cache = CacheManager::builder().vector_cache_size(1024).build();
+        let cache = CacheStrategy::EnableAll(Arc::new(cache));
+        let record_batch = mapper
+            .as_primary_key()
+            .unwrap()
+            .convert(&batch, &cache)
+            .unwrap();
+        let expect = "\
++----+----+
+| v1 | k0 |
++----+----+
+| 4  | 1  |
+| 4  | 1  |
+| 4  | 1  |
++----+----+";
+        assert_eq!(expect, print_record_batch(record_batch));
+    }
+
+    #[test]
     fn test_projection_mapper_empty_projection() {
         let metadata = Arc::new(
             TestRegionMetadataBuilder::default()
@@ -782,6 +869,37 @@ mod tests {
     }
 
     #[test]
+    fn test_flat_projection_mapper_read_superset() {
+        let metadata = Arc::new(
+            TestRegionMetadataBuilder::default()
+                .num_tags(2)
+                .num_fields(2)
+                .build(),
+        );
+        // Output columns v1, k0. Read also includes v0.
+        let mapper = ProjectionMapper::new_with_read_columns(
+            &metadata,
+            [4, 1].into_iter(),
+            true,
+            vec![4, 1, 3],
+        )
+        .unwrap();
+        assert_eq!([4, 1, 3], mapper.column_ids());
+
+        let batch = new_flat_batch(None, &[(1, 1)], &[(3, 3), (4, 4)], 3);
+        let record_batch = mapper.as_flat().unwrap().convert(&batch).unwrap();
+        let expect = "\
++----+----+
+| v1 | k0 |
++----+----+
+| 4  | 1  |
+| 4  | 1  |
+| 4  | 1  |
++----+----+";
+        assert_eq!(expect, print_record_batch(record_batch));
+    }
+
+    #[test]
     fn test_flat_projection_mapper_empty_projection() {
         let metadata = Arc::new(
             TestRegionMetadataBuilder::default()
@@ -794,7 +912,10 @@ mod tests {
         assert_eq!([0], mapper.column_ids()); // Should still read the time index column
         assert!(mapper.output_schema().is_empty());
         let flat_mapper = mapper.as_flat().unwrap();
-        assert!(flat_mapper.batch_schema().is_empty());
+        assert_eq!(
+            [(0, ConcreteDataType::timestamp_millisecond_datatype())],
+            flat_mapper.batch_schema()
+        );
 
         let batch = new_flat_batch(Some(0), &[], &[], 3);
         let record_batch = flat_mapper.convert(&batch).unwrap();
