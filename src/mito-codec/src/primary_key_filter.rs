@@ -171,35 +171,23 @@ impl CompiledFastPath {
 
         if filter.is_eq() {
             let value = filter.literal_value()?;
-            return Some(Self::Eq(encoded(&value)?));
-        }
-
-        if filter.is_not_eq() {
+            Some(Self::Eq(encoded(&value)?))
+        } else if filter.is_not_eq() {
             let value = filter.literal_value()?;
-            return Some(Self::NotEq(encoded(&value)?));
-        }
-
-        if filter.is_lt() {
+            Some(Self::NotEq(encoded(&value)?))
+        } else if filter.is_lt() {
             let value = filter.literal_value()?;
-            return Some(Self::Lt(encoded(&value)?));
-        }
-
-        if filter.is_lt_eq() {
+            Some(Self::Lt(encoded(&value)?))
+        } else if filter.is_lt_eq() {
             let value = filter.literal_value()?;
-            return Some(Self::LtEq(encoded(&value)?));
-        }
-
-        if filter.is_gt() {
+            Some(Self::LtEq(encoded(&value)?))
+        } else if filter.is_gt() {
             let value = filter.literal_value()?;
-            return Some(Self::Gt(encoded(&value)?));
-        }
-
-        if filter.is_gt_eq() {
+            Some(Self::Gt(encoded(&value)?))
+        } else if filter.is_gt_eq() {
             let value = filter.literal_value()?;
-            return Some(Self::GtEq(encoded(&value)?));
-        }
-
-        if filter.is_or_eq_chain() {
+            Some(Self::GtEq(encoded(&value)?))
+        } else if filter.is_or_eq_chain() {
             let values = filter.literal_list_values()?;
             let mut list = Vec::with_capacity(values.len());
             for value in values {
@@ -210,10 +198,10 @@ impl CompiledFastPath {
                 }
                 list.push(bytes);
             }
-            return Some(Self::InList(list));
+            Some(Self::InList(list))
+        } else {
+            None
         }
-
-        None
     }
 
     fn matches(&self, encoded_value: Option<&[u8]>) -> bool {
