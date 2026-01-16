@@ -138,9 +138,21 @@ impl FlatProjectionMapper {
                         .column_id_to_projected_index
                         .get(id)
                         .copied()
-                        .unwrap()
+                        .with_context(|| {
+                            let name = metadata
+                                .column_by_id(*id)
+                                .map(|column| column.column_schema.name.clone())
+                                .unwrap_or_else(|| id.to_string());
+                            InvalidRequestSnafu {
+                                region_id: metadata.region_id,
+                                reason: format!(
+                                    "output column {} is missing in read projection",
+                                    name
+                                ),
+                            }
+                        })
                 })
-                .collect()
+                .collect::<Result<Vec<_>>>()?
         };
 
         Ok(FlatProjectionMapper {
