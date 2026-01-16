@@ -75,7 +75,8 @@ impl procedure_service_server::ProcedureService for Metasrv {
             header,
             query_context,
             task,
-            ..
+            wait,
+            timeout_secs,
         } = request.into_inner();
 
         let header = header.context(error::MissingRequestHeaderSnafu)?;
@@ -97,6 +98,8 @@ impl procedure_service_server::ProcedureService for Metasrv {
                 },
                 SubmitDdlTaskRequest {
                     query_context: Arc::new(query_context),
+                    wait,
+                    timeout: Duration::from_secs(timeout_secs.into()),
                     task,
                 },
             )

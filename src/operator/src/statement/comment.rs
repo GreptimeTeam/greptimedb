@@ -40,10 +40,8 @@ impl StatementExecutor {
     pub async fn comment(&self, stmt: Comment, query_ctx: QueryContextRef) -> Result<Output> {
         let comment_on_task = self.create_comment_on_task_from_stmt(stmt, &query_ctx)?;
 
-        let request = SubmitDdlTaskRequest {
-            task: DdlTask::new_comment_on(comment_on_task),
-            query_context: query_ctx,
-        };
+        let request =
+            SubmitDdlTaskRequest::new(query_ctx, DdlTask::new_comment_on(comment_on_task));
 
         self.procedure_executor
             .submit_ddl_task(&ExecutorContext::default(), request)
@@ -59,10 +57,8 @@ impl StatementExecutor {
     ) -> Result<Output> {
         let comment_on_task = self.create_comment_on_task_from_expr(expr)?;
 
-        let request = SubmitDdlTaskRequest {
-            task: DdlTask::new_comment_on(comment_on_task),
-            query_context: query_ctx,
-        };
+        let request =
+            SubmitDdlTaskRequest::new(query_ctx, DdlTask::new_comment_on(comment_on_task));
 
         self.procedure_executor
             .submit_ddl_task(&ExecutorContext::default(), request)

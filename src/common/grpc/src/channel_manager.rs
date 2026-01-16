@@ -418,6 +418,12 @@ impl ChannelConfig {
         self
     }
 
+    /// Unset the timeout to each request.
+    pub fn unset_timeout(mut self) -> Self {
+        self.timeout = None;
+        self
+    }
+
     /// A timeout to connecting to the uri.
     ///
     /// Defaults to no timeout.

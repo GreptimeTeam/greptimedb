@@ -30,7 +30,6 @@ use tonic::Streaming;
 use tonic::codec::CompressionEncoding;
 use tonic::transport::Channel;
 
-use crate::client::ask_leader::AskLeader;
 use crate::client::{Id, LeaderProviderRef};
 use crate::error;
 use crate::error::{InvalidResponseHeaderSnafu, Result};
@@ -149,23 +148,9 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(id: Id, role: Role, channel_manager: ChannelManager, max_retry: usize) -> Self {
-        let inner = Arc::new(RwLock::new(Inner::new(
-            id,
-            role,
-            channel_manager,
-            max_retry,
-        )));
+    pub fn new(id: Id, role: Role, channel_manager: ChannelManager) -> Self {
+        let inner = Arc::new(RwLock::new(Inner::new(id, role, channel_manager)));
         Self { inner }
-    }
-
-    pub async fn start<U, A>(&mut self, urls: A) -> Result<()>
-    where
-        U: AsRef<str>,
-        A: AsRef<[U]>,
-    {
-        let mut inner = self.inner.write().await;
-        inner.start(urls)
     }
 
     /// Start the client with a [LeaderProvider].
@@ -194,17 +179,15 @@ struct Inner {
     role: Role,
     channel_manager: ChannelManager,
     leader_provider: Option<LeaderProviderRef>,
-    max_retry: usize,
 }
 
 impl Inner {
-    fn new(id: Id, role: Role, channel_manager: ChannelManager, max_retry: usize) -> Self {
+    fn new(id: Id, role: Role, channel_manager: ChannelManager) -> Self {
         Self {
             id,
             role,
             channel_manager,
             leader_provider: None,
-            max_retry,
         }
     }
 
@@ -217,26 +200,6 @@ impl Inner {
         );
         self.leader_provider = Some(leader_provider);
         Ok(())
-    }
-
-    fn start<U, A>(&mut self, urls: A) -> Result<()>
-    where
-        U: AsRef<str>,
-        A: AsRef<[U]>,
-    {
-        let peers = urls
-            .as_ref()
-            .iter()
-            .map(|url| url.as_ref().to_string())
-            .collect::<Vec<_>>();
-        let ask_leader = AskLeader::new(
-            self.id,
-            self.role,
-            peers,
-            self.channel_manager.clone(),
-            self.max_retry,
-        );
-        self.start_with(Arc::new(ask_leader))
     }
 
     async fn ask_leader(&self) -> Result<String> {
@@ -332,15 +295,20 @@ impl Inner {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::client::AskLeader;
 
     #[tokio::test]
     async fn test_already_start() {
-        let mut client = Client::new(0, Role::Datanode, ChannelManager::default(), 3);
-        client
-            .start(&["127.0.0.1:1000", "127.0.0.1:1001"])
-            .await
-            .unwrap();
-        let res = client.start(&["127.0.0.1:1002"]).await;
+        let client = Client::new(0, Role::Datanode, ChannelManager::default());
+        let leader_provider = Arc::new(AskLeader::new(
+            0,
+            Role::Datanode,
+            vec!["127.0.0.1:1000".to_string(), "127.0.0.1:1001".to_string()],
+            ChannelManager::default(),
+            3,
+        ));
+        client.start_with(leader_provider.clone()).await.unwrap();
+        let res = client.start_with(leader_provider).await;
         assert!(res.is_err());
         assert!(matches!(
             res.err(),

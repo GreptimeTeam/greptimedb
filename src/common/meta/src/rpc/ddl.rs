@@ -17,6 +17,7 @@ pub mod trigger;
 
 use std::collections::{HashMap, HashSet};
 use std::result;
+use std::time::Duration;
 
 use api::helper::{from_pb_time_ranges, to_pb_time_ranges};
 use api::v1::alter_database_expr::Kind as PbAlterDatabaseKind;
@@ -293,7 +294,31 @@ impl TryFrom<Task> for DdlTask {
 #[derive(Clone)]
 pub struct SubmitDdlTaskRequest {
     pub query_context: QueryContextRef,
+    pub wait: bool,
+    pub timeout: Duration,
     pub task: DdlTask,
+}
+
+impl SubmitDdlTaskRequest {
+    /// The default constructor for [`SubmitDdlTaskRequest`].
+    pub fn new(query_context: QueryContextRef, task: DdlTask) -> Self {
+        Self {
+            query_context,
+            wait: Self::default_wait(),
+            timeout: Self::default_timeout(),
+            task,
+        }
+    }
+
+    /// The default timeout for a DDL task.
+    pub fn default_timeout() -> Duration {
+        Duration::from_secs(60)
+    }
+
+    /// The default wait for a DDL task.
+    pub fn default_wait() -> bool {
+        true
+    }
 }
 
 impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
@@ -346,6 +371,8 @@ impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
         Ok(Self {
             header: None,
             query_context: Some((*request.query_context).clone().into()),
+            timeout_secs: request.timeout.as_secs() as u32,
+            wait: request.wait,
             task: Some(task),
         })
     }

@@ -550,7 +550,7 @@ mod tests {
                 .is_ok()
         );
 
-        let meta_client = Arc::new(MetaClient::default());
+        let meta_client = Arc::new(MetaClient::new(0, api::v1::meta::Role::Frontend));
         let client = FrontendClient::from_meta_client(
             meta_client,
             None,

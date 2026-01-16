@@ -105,8 +105,12 @@ pub async fn create_meta_client(
         .http2_keep_alive_timeout(HEARTBEAT_CHANNEL_KEEP_ALIVE_TIMEOUT_SECS);
 
     if let MetaClientType::Frontend = client_type {
-        let ddl_config = base_config.clone().timeout(meta_client_options.ddl_timeout);
-        builder = builder.ddl_channel_manager(ChannelManager::with_config(ddl_config, None));
+        // Unset the timeout in the DDL channel manager,
+        // delegating timeout control to each individual request rather than the channel manager itself.
+        let ddl_config = base_config.clone().unset_timeout();
+        builder = builder
+            .ddl_timeout(meta_client_options.ddl_timeout)
+            .ddl_channel_manager(ChannelManager::with_config(ddl_config, None));
         if let Some(plugins) = plugins {
             let region_follower = plugins.get::<RegionFollowerClientRef>();
             if let Some(region_follower) = region_follower {

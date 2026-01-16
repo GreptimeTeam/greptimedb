@@ -27,11 +27,10 @@ use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{error, info, warn};
 use snafu::{ResultExt, ensure};
 use tokio::sync::RwLock;
-use tonic::Status;
 use tonic::codec::CompressionEncoding;
 use tonic::transport::Channel;
+use tonic::{Request, Status};
 
-use crate::client::ask_leader::AskLeader;
 use crate::client::{Id, LeaderProviderRef, util};
 use crate::error;
 use crate::error::Result;
@@ -42,25 +41,23 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(id: Id, role: Role, channel_manager: ChannelManager, max_retry: usize) -> Self {
+    pub fn new(
+        id: Id,
+        role: Role,
+        channel_manager: ChannelManager,
+        max_retry: usize,
+        timeout: Duration,
+    ) -> Self {
         let inner = Arc::new(RwLock::new(Inner {
             id,
             role,
             channel_manager,
             leader_provider: None,
             max_retry,
+            timeout,
         }));
 
         Self { inner }
-    }
-
-    pub async fn start<U, A>(&mut self, urls: A) -> Result<()>
-    where
-        U: AsRef<str>,
-        A: AsRef<[U]>,
-    {
-        let mut inner = self.inner.write().await;
-        inner.start(urls)
     }
 
     /// Start the client with a [LeaderProvider].
@@ -117,6 +114,8 @@ struct Inner {
     channel_manager: ChannelManager,
     leader_provider: Option<LeaderProviderRef>,
     max_retry: usize,
+    /// Request timeout.
+    timeout: Duration,
 }
 
 impl Inner {
@@ -129,26 +128,6 @@ impl Inner {
         );
         self.leader_provider = Some(leader_provider);
         Ok(())
-    }
-
-    fn start<U, A>(&mut self, urls: A) -> Result<()>
-    where
-        U: AsRef<str>,
-        A: AsRef<[U]>,
-    {
-        let peers = urls
-            .as_ref()
-            .iter()
-            .map(|url| url.as_ref().to_string())
-            .collect::<Vec<_>>();
-        let ask_leader = AskLeader::new(
-            self.id,
-            self.role,
-            peers,
-            self.channel_manager.clone(),
-            self.max_retry,
-        );
-        self.start_with(Arc::new(ask_leader))
     }
 
     fn make_client(&self, addr: impl AsRef<str>) -> Result<ProcedureServiceClient<Channel>> {
@@ -250,7 +229,8 @@ impl Inner {
         self.with_retry(
             "migrate region",
             move |mut client| {
-                let req = req.clone();
+                let mut req = Request::new(req.clone());
+                req.set_timeout(self.timeout);
 
                 async move { client.migrate(req).await.map(|res| res.into_inner()) }
             },
@@ -270,7 +250,8 @@ impl Inner {
         self.with_retry(
             "reconcile",
             move |mut client| {
-                let req = req.clone();
+                let mut req = Request::new(req.clone());
+                req.set_timeout(self.timeout);
 
                 async move { client.reconcile(req).await.map(|res| res.into_inner()) }
             },
@@ -294,7 +275,8 @@ impl Inner {
         self.with_retry(
             "query procedure state",
             move |mut client| {
-                let req = req.clone();
+                let mut req = Request::new(req.clone());
+                req.set_timeout(self.timeout);
 
                 async move { client.query(req).await.map(|res| res.into_inner()) }
             },
@@ -309,11 +291,13 @@ impl Inner {
             self.role,
             TracingContext::from_current_span().to_w3c(),
         );
+        let timeout = Duration::from_secs(req.timeout_secs.into());
 
         self.with_retry(
             "submit ddl task",
             move |mut client| {
-                let req = req.clone();
+                let mut req = Request::new(req.clone());
+                req.set_timeout(timeout);
                 async move { client.ddl(req).await.map(|res| res.into_inner()) }
             },
             |resp: &DdlTaskResponse| &resp.header,
@@ -332,7 +316,8 @@ impl Inner {
         self.with_retry(
             "list procedure",
             move |mut client| {
-                let req = req.clone();
+                let mut req = Request::new(req.clone());
+                req.set_timeout(self.timeout);
                 async move { client.details(req).await.map(|res| res.into_inner()) }
             },
             |resp: &ProcedureDetailResponse| &resp.header,
