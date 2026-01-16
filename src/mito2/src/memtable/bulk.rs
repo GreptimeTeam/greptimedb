@@ -23,8 +23,16 @@ mod row_group_reader;
 
 use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::Instant;
+
+/// Reads an environment variable as usize, returning default if not set or invalid.
+fn env_usize(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
 
 use datatypes::arrow::datatypes::SchemaRef;
 use mito_codec::key_values::KeyValue;
@@ -53,8 +61,36 @@ use crate::sst::parquet::format::FIXED_POS_COLUMN_NUM;
 use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, DEFAULT_ROW_GROUP_SIZE};
 use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
 
-/// Threshold for triggering merge of parts.
-const MERGE_THRESHOLD: usize = 8;
+/// Default merge threshold for triggering compaction.
+const DEFAULT_MERGE_THRESHOLD: usize = 8;
+
+/// Threshold for triggering merge of parts. Configurable via `GREPTIME_BULK_MERGE_THRESHOLD`.
+static MERGE_THRESHOLD: LazyLock<usize> =
+    LazyLock::new(|| env_usize("GREPTIME_BULK_MERGE_THRESHOLD", DEFAULT_MERGE_THRESHOLD));
+
+/// Default row threshold multiplier for encoding (4 * DEFAULT_ROW_GROUP_SIZE).
+const DEFAULT_ENCODE_ROW_THRESHOLD_FACTOR: usize = 4;
+
+/// Row threshold for encoding parts. Configurable via `GREPTIME_BULK_ENCODE_ROW_THRESHOLD`.
+/// When estimated rows exceed this threshold, parts are encoded as EncodedBulkPart.
+static ENCODE_ROW_THRESHOLD: LazyLock<usize> = LazyLock::new(|| {
+    env_usize(
+        "GREPTIME_BULK_ENCODE_ROW_THRESHOLD",
+        DEFAULT_ENCODE_ROW_THRESHOLD_FACTOR * DEFAULT_ROW_GROUP_SIZE,
+    )
+});
+
+/// Default bytes threshold for encoding (64MB).
+const DEFAULT_ENCODE_BYTES_THRESHOLD: usize = 64 * 1024 * 1024;
+
+/// Bytes threshold for encoding parts. Configurable via `GREPTIME_BULK_ENCODE_BYTES_THRESHOLD`.
+/// When estimated bytes exceed this threshold, parts are encoded as EncodedBulkPart.
+static ENCODE_BYTES_THRESHOLD: LazyLock<usize> = LazyLock::new(|| {
+    env_usize(
+        "GREPTIME_BULK_ENCODE_BYTES_THRESHOLD",
+        DEFAULT_ENCODE_BYTES_THRESHOLD,
+    )
+});
 
 /// Result of merging parts - either a MultiBulkPart or an EncodedBulkPart
 enum MergedPart {
@@ -109,7 +145,7 @@ impl BulkParts {
             }
 
             // Short-circuit: stop counting if either threshold is reached
-            if bulk_count >= MERGE_THRESHOLD || encoded_count >= MERGE_THRESHOLD {
+            if bulk_count >= *MERGE_THRESHOLD || encoded_count >= *MERGE_THRESHOLD {
                 return true;
             }
         }
@@ -145,12 +181,12 @@ impl BulkParts {
         let mut groups = Vec::new();
 
         // Process bulk parts if threshold met
-        if bulk_indices.len() >= MERGE_THRESHOLD {
+        if bulk_indices.len() >= *MERGE_THRESHOLD {
             groups.extend(self.collect_and_group_parts(bulk_indices));
         }
 
         // Process encoded parts if threshold met
-        if encoded_indices.len() >= MERGE_THRESHOLD {
+        if encoded_indices.len() >= *MERGE_THRESHOLD {
             groups.extend(self.collect_and_group_parts(encoded_indices));
         }
 
@@ -166,7 +202,7 @@ impl BulkParts {
         indices.sort_unstable_by_key(|(_, num_rows)| *num_rows);
 
         // Compute group size: total_parts / MERGE_THRESHOLD, clamped to [16, 64]
-        let group_size = (indices.len() / MERGE_THRESHOLD).clamp(16, 64);
+        let group_size = (indices.len() / *MERGE_THRESHOLD).clamp(16, 64);
 
         // Group into chunks and collect parts
         indices
@@ -892,6 +928,15 @@ impl PartToMerge {
         matches!(self, PartToMerge::Encoded { .. })
     }
 
+    /// Gets the estimated size in bytes of this part.
+    fn estimated_size(&self) -> usize {
+        match self {
+            PartToMerge::Bulk { part, .. } => part.estimated_size(),
+            PartToMerge::Multi { part, .. } => part.estimated_size(),
+            PartToMerge::Encoded { part, .. } => part.size_bytes(),
+        }
+    }
+
     /// Converts this part to `MemtableStats`.
     fn to_memtable_stats(&self, region_metadata: &RegionMetadataRef) -> MemtableStats {
         match self {
@@ -1027,6 +1072,7 @@ impl MemtableCompactor {
 
         // Collects statistics from parts before creating iterators
         let estimated_total_rows: usize = parts_to_merge.iter().map(|p| p.num_rows()).sum();
+        let estimated_total_bytes: usize = parts_to_merge.iter().map(|p| p.estimated_size()).sum();
         let estimated_series_count = parts_to_merge
             .iter()
             .map(|p| p.series_count())
@@ -1080,9 +1126,26 @@ impl MemtableCompactor {
             Box::new(merged_iter)
         };
 
-        // If estimated total rows is less than DEFAULT_ROW_GROUP_SIZE, collect into MultiBulkPart
-        // Note: actual row count after dedup may be less than estimated
-        if estimated_total_rows < DEFAULT_ROW_GROUP_SIZE {
+        // Encode as EncodedBulkPart if rows exceed row threshold OR bytes exceed bytes threshold
+        if estimated_total_rows > *ENCODE_ROW_THRESHOLD
+            || estimated_total_bytes > *ENCODE_BYTES_THRESHOLD
+        {
+            let encoder = BulkPartEncoder::new(metadata.clone(), DEFAULT_ROW_GROUP_SIZE)?;
+            let mut metrics = BulkPartEncodeMetrics::default();
+            let encoded_part = encoder.encode_record_batch_iter(
+                boxed_iter,
+                arrow_schema.clone(),
+                min_timestamp,
+                max_timestamp,
+                max_sequence,
+                &mut metrics,
+            )?;
+
+            common_telemetry::trace!("merge_parts_group metrics: {:?}", metrics);
+
+            Ok(encoded_part.map(MergedPart::Encoded))
+        } else {
+            // Otherwise, collect into MultiBulkPart
             let mut batches = Vec::new();
             let mut actual_total_rows = 0;
 
@@ -1110,24 +1173,8 @@ impl MemtableCompactor {
                 multi_part.num_batches()
             );
 
-            return Ok(Some(MergedPart::Multi(multi_part)));
+            Ok(Some(MergedPart::Multi(multi_part)))
         }
-
-        // Otherwise, encode as EncodedBulkPart directly from iterator
-        let encoder = BulkPartEncoder::new(metadata.clone(), DEFAULT_ROW_GROUP_SIZE)?;
-        let mut metrics = BulkPartEncodeMetrics::default();
-        let encoded_part = encoder.encode_record_batch_iter(
-            boxed_iter,
-            arrow_schema.clone(),
-            min_timestamp,
-            max_timestamp,
-            max_sequence,
-            &mut metrics,
-        )?;
-
-        common_telemetry::trace!("merge_parts_group metrics: {:?}", metrics);
-
-        Ok(encoded_part.map(MergedPart::Encoded))
     }
 }
 
@@ -1845,8 +1892,8 @@ mod tests {
     fn test_should_merge_parts_below_threshold() {
         let mut bulk_parts = BulkParts::default();
 
-        // Add 7 bulk parts (below MERGE_THRESHOLD of 8)
-        for i in 0..MERGE_THRESHOLD - 1 {
+        // Add 7 bulk parts (below DEFAULT_MERGE_THRESHOLD of 8)
+        for i in 0..DEFAULT_MERGE_THRESHOLD - 1 {
             let part = create_bulk_part_with_converter(
                 &format!("key_{}", i),
                 i as u32,
@@ -1866,7 +1913,7 @@ mod tests {
     fn test_should_merge_parts_at_threshold() {
         let mut bulk_parts = BulkParts::default();
 
-        // Add 8 bulk parts (at MERGE_THRESHOLD)
+        // Add 8 bulk parts (at DEFAULT_MERGE_THRESHOLD)
         for i in 0..8 {
             let part = create_bulk_part_with_converter(
                 &format!("key_{}", i),
@@ -1968,10 +2015,10 @@ mod tests {
         // Disable unordered_part for this test
         memtable.set_unordered_part_threshold(0);
 
-        // Write enough bulk parts to trigger merge (MERGE_THRESHOLD = 8)
+        // Write enough bulk parts to trigger merge (DEFAULT_MERGE_THRESHOLD = 8)
         // Each part has small number of rows so total < DEFAULT_ROW_GROUP_SIZE
         // This will result in MultiBulkPart after compaction
-        for i in 0..MERGE_THRESHOLD {
+        for i in 0..DEFAULT_MERGE_THRESHOLD {
             let part = create_bulk_part_with_converter(
                 &format!("key_{}", i),
                 i as u32,
