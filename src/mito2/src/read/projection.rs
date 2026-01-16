@@ -117,7 +117,6 @@ impl ProjectionMapper {
 
     /// Returns ids of projected columns that we need to read
     /// from memtables and SSTs.
-    #[cfg(test)]
     pub(crate) fn column_ids(&self) -> &[ColumnId] {
         match self {
             ProjectionMapper::PrimaryKey(m) => m.column_ids(),

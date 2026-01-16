@@ -179,7 +179,6 @@ impl FlatProjectionMapper {
 
     /// Returns ids of projected columns that we need to read
     /// from memtables and SSTs.
-    #[cfg(test)]
     pub(crate) fn column_ids(&self) -> &[ColumnId] {
         &self.read_column_ids
     }

@@ -740,19 +740,19 @@ impl CompactionSstReaderBuilder<'_> {
     }
 
     fn build_scan_input(self, flat_format: bool) -> Result<ScanInput> {
-        let mut scan_input = ScanInput::new(
-            self.sst_layer,
-            ProjectionMapper::all(&self.metadata, flat_format)?,
-        )
-        .with_files(self.inputs.to_vec())
-        .with_append_mode(self.append_mode)
-        // We use special cache strategy for compaction.
-        .with_cache(CacheStrategy::Compaction(self.cache))
-        .with_filter_deleted(self.filter_deleted)
-        // We ignore file not found error during compaction.
-        .with_ignore_file_not_found(true)
-        .with_merge_mode(self.merge_mode)
-        .with_flat_format(flat_format);
+        let mapper = ProjectionMapper::all(&self.metadata, flat_format)?;
+        let read_column_ids = mapper.column_ids().to_vec();
+        let mut scan_input = ScanInput::new(self.sst_layer, mapper)
+            .with_read_column_ids(read_column_ids)
+            .with_files(self.inputs.to_vec())
+            .with_append_mode(self.append_mode)
+            // We use special cache strategy for compaction.
+            .with_cache(CacheStrategy::Compaction(self.cache))
+            .with_filter_deleted(self.filter_deleted)
+            // We ignore file not found error during compaction.
+            .with_ignore_file_not_found(true)
+            .with_merge_mode(self.merge_mode)
+            .with_flat_format(flat_format);
 
         // This serves as a workaround of https://github.com/GreptimeTeam/greptimedb/issues/3944
         // by converting time ranges into predicate.
