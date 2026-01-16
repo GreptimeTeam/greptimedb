@@ -722,6 +722,59 @@ mod tests {
     }
 
     #[test]
+    fn test_encoded_value_at() {
+        let data_types = [
+            ConcreteDataType::string_datatype(),
+            ConcreteDataType::int32_datatype(),
+            ConcreteDataType::string_datatype(),
+        ];
+        let encoder = DensePrimaryKeyCodec::with_fields(
+            data_types
+                .iter()
+                .enumerate()
+                .map(|(idx, t)| (idx as ColumnId, SortField::new(t.clone())))
+                .collect::<Vec<_>>(),
+        );
+        let row = [Value::String("hello".into()), Value::Int32(42), Value::Null];
+        let value_ref = row.iter().map(|v| v.as_value_ref()).collect::<Vec<_>>();
+        let encoded_pk = encoder.encode(value_ref.iter().cloned()).unwrap();
+
+        let mut offsets = Vec::new();
+        let mut combined = Vec::new();
+        for (pos, value) in row.iter().enumerate() {
+            let encoded_value = encoder
+                .encoded_value_at(&encoded_pk, pos, &mut offsets)
+                .unwrap();
+            combined.extend_from_slice(encoded_value);
+
+            let field = SortField::new(data_types[pos].clone());
+            let mut expected = Vec::new();
+            let mut serializer = Serializer::new(&mut expected);
+            field
+                .serialize(&mut serializer, &value.as_value_ref())
+                .unwrap();
+            assert_eq!(encoded_value, expected.as_slice());
+        }
+        assert_eq!(combined, encoded_pk);
+        assert_eq!(offsets.len(), row.len());
+
+        // Verify the offsets buffer can be reused for random access.
+        for (pos, value) in row.iter().enumerate().rev() {
+            let encoded_value = encoder
+                .encoded_value_at(&encoded_pk, pos, &mut offsets)
+                .unwrap();
+
+            let field = SortField::new(data_types[pos].clone());
+            let mut expected = Vec::new();
+            let mut serializer = Serializer::new(&mut expected);
+            field
+                .serialize(&mut serializer, &value.as_value_ref())
+                .unwrap();
+            assert_eq!(encoded_value, expected.as_slice());
+        }
+    }
+
+    #[test]
     fn test_memcmp_dictionary() {
         // Test Dictionary<i32, string>
         check_encode_and_decode(
