@@ -276,13 +276,12 @@ impl Helper {
             ArrowDataType::Null => Arc::new(NullVector::try_from_arrow_array(array)?),
             ArrowDataType::Boolean => Arc::new(BooleanVector::try_from_arrow_array(array)?),
             ArrowDataType::Binary => Arc::new(BinaryVector::try_from_arrow_array(array)?),
-            ArrowDataType::LargeBinary
-            | ArrowDataType::FixedSizeBinary(_)
-            | ArrowDataType::BinaryView => {
+            ArrowDataType::LargeBinary | ArrowDataType::FixedSizeBinary(_) => {
                 let array = arrow::compute::cast(array.as_ref(), &ArrowDataType::Binary)
                     .context(crate::error::ArrowComputeSnafu)?;
                 Arc::new(BinaryVector::try_from_arrow_array(array)?)
             }
+            ArrowDataType::BinaryView => Arc::new(BinaryVector::try_from_arrow_array(array)?),
             ArrowDataType::Int8 => Arc::new(Int8Vector::try_from_arrow_array(array)?),
             ArrowDataType::Int16 => Arc::new(Int16Vector::try_from_arrow_array(array)?),
             ArrowDataType::Int32 => Arc::new(Int32Vector::try_from_arrow_array(array)?),
@@ -295,11 +294,7 @@ impl Helper {
             ArrowDataType::Float64 => Arc::new(Float64Vector::try_from_arrow_array(array)?),
             ArrowDataType::Utf8 => Arc::new(StringVector::try_from_arrow_array(array)?),
             ArrowDataType::LargeUtf8 => Arc::new(StringVector::try_from_arrow_array(array)?),
-            ArrowDataType::Utf8View => {
-                let array = arrow::compute::cast(array.as_ref(), &ArrowDataType::Utf8)
-                    .context(crate::error::ArrowComputeSnafu)?;
-                Arc::new(StringVector::try_from_arrow_array(array)?)
-            }
+            ArrowDataType::Utf8View => Arc::new(StringVector::try_from_arrow_array(array)?),
             ArrowDataType::Date32 => Arc::new(DateVector::try_from_arrow_array(array)?),
             ArrowDataType::List(_) => Arc::new(ListVector::try_from_arrow_array(array)?),
             ArrowDataType::Timestamp(unit, _) => match unit {

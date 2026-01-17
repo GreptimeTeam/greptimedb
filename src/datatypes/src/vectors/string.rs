@@ -19,7 +19,8 @@ use arrow::array::{Array, ArrayBuilder, ArrayIter, ArrayRef};
 use snafu::ResultExt;
 
 use crate::arrow_array::{
-    LargeStringArray, MutableLargeStringArray, MutableStringArray, StringArray,
+    LargeStringArray, MutableLargeStringArray, MutableStringArray, MutableStringViewArray,
+    StringArray, StringViewArray,
 };
 use crate::data_type::ConcreteDataType;
 use crate::error::{self, Result};
@@ -33,6 +34,7 @@ use crate::vectors::{self, MutableVector, Validity, Vector, VectorRef};
 enum StringArrayData {
     String(StringArray),
     LargeString(LargeStringArray),
+    StringView(StringViewArray),
 }
 
 /// Vector of strings.
@@ -46,6 +48,7 @@ impl StringVector {
         match &self.array {
             StringArrayData::String(array) => array,
             StringArrayData::LargeString(array) => array,
+            StringArrayData::StringView(array) => array,
         }
     }
 
@@ -60,6 +63,13 @@ impl StringVector {
     pub fn from_large_string_array(array: LargeStringArray) -> Self {
         Self {
             array: StringArrayData::LargeString(array),
+        }
+    }
+
+    /// Create a StringVector from a StringViewArray
+    pub fn from_string_view_array(array: StringViewArray) -> Self {
+        Self {
+            array: StringArrayData::StringView(array),
         }
     }
 
@@ -79,6 +89,12 @@ impl From<StringArray> for StringVector {
 impl From<LargeStringArray> for StringVector {
     fn from(array: LargeStringArray) -> Self {
         Self::from_large_string_array(array)
+    }
+}
+
+impl From<StringViewArray> for StringVector {
+    fn from(array: StringViewArray) -> Self {
+        Self::from_string_view_array(array)
     }
 }
 
@@ -120,7 +136,11 @@ impl From<Vec<&str>> for StringVector {
 
 impl Vector for StringVector {
     fn data_type(&self) -> ConcreteDataType {
-        ConcreteDataType::string_datatype()
+        match &self.array {
+            StringArrayData::String(_) => ConcreteDataType::string_datatype(),
+            StringArrayData::LargeString(_) => ConcreteDataType::large_string_datatype(),
+            StringArrayData::StringView(_) => ConcreteDataType::utf8_view_datatype(),
+        }
     }
 
     fn vector_type_name(&self) -> String {
@@ -135,6 +155,7 @@ impl Vector for StringVector {
         match &self.array {
             StringArrayData::String(array) => array.len(),
             StringArrayData::LargeString(array) => array.len(),
+            StringArrayData::StringView(array) => array.len(),
         }
     }
 
@@ -142,6 +163,7 @@ impl Vector for StringVector {
         match &self.array {
             StringArrayData::String(array) => Arc::new(array.clone()),
             StringArrayData::LargeString(array) => Arc::new(array.clone()),
+            StringArrayData::StringView(array) => Arc::new(array.clone()),
         }
     }
 
@@ -149,6 +171,7 @@ impl Vector for StringVector {
         match &self.array {
             StringArrayData::String(array) => Box::new(array.clone()),
             StringArrayData::LargeString(array) => Box::new(array.clone()),
+            StringArrayData::StringView(array) => Box::new(array.clone()),
         }
     }
 
@@ -156,6 +179,7 @@ impl Vector for StringVector {
         match &self.array {
             StringArrayData::String(array) => vectors::impl_validity_for_vector!(array),
             StringArrayData::LargeString(array) => vectors::impl_validity_for_vector!(array),
+            StringArrayData::StringView(array) => vectors::impl_validity_for_vector!(array),
         }
     }
 
@@ -163,6 +187,7 @@ impl Vector for StringVector {
         match &self.array {
             StringArrayData::String(array) => array.get_buffer_memory_size(),
             StringArrayData::LargeString(array) => array.get_buffer_memory_size(),
+            StringArrayData::StringView(array) => array.get_buffer_memory_size(),
         }
     }
 
@@ -170,6 +195,7 @@ impl Vector for StringVector {
         match &self.array {
             StringArrayData::String(array) => array.null_count(),
             StringArrayData::LargeString(array) => array.null_count(),
+            StringArrayData::StringView(array) => array.null_count(),
         }
     }
 
@@ -177,6 +203,7 @@ impl Vector for StringVector {
         match &self.array {
             StringArrayData::String(array) => array.is_null(row),
             StringArrayData::LargeString(array) => array.is_null(row),
+            StringArrayData::StringView(array) => array.is_null(row),
         }
     }
 
@@ -188,6 +215,9 @@ impl Vector for StringVector {
             StringArrayData::LargeString(array) => {
                 Arc::new(Self::from_large_string_array(array.slice(offset, length)))
             }
+            StringArrayData::StringView(array) => {
+                Arc::new(Self::from_string_view_array(array.slice(offset, length)))
+            }
         }
     }
 
@@ -195,6 +225,7 @@ impl Vector for StringVector {
         match &self.array {
             StringArrayData::String(array) => vectors::impl_get_for_vector!(array, index),
             StringArrayData::LargeString(array) => vectors::impl_get_for_vector!(array, index),
+            StringArrayData::StringView(array) => vectors::impl_get_for_vector!(array, index),
         }
     }
 
@@ -202,6 +233,7 @@ impl Vector for StringVector {
         match &self.array {
             StringArrayData::String(array) => vectors::impl_get_ref_for_vector!(array, index),
             StringArrayData::LargeString(array) => vectors::impl_get_ref_for_vector!(array, index),
+            StringArrayData::StringView(array) => vectors::impl_get_ref_for_vector!(array, index),
         }
     }
 }
@@ -209,6 +241,7 @@ impl Vector for StringVector {
 pub enum StringIter<'a> {
     String(ArrayIter<&'a StringArray>),
     LargeString(ArrayIter<&'a LargeStringArray>),
+    StringView(ArrayIter<&'a StringViewArray>),
 }
 
 impl<'a> Iterator for StringIter<'a> {
@@ -218,6 +251,7 @@ impl<'a> Iterator for StringIter<'a> {
         match self {
             StringIter::String(iter) => iter.next(),
             StringIter::LargeString(iter) => iter.next(),
+            StringIter::StringView(iter) => iter.next(),
         }
     }
 }
@@ -244,6 +278,13 @@ impl ScalarVector for StringVector {
                     None
                 }
             }
+            StringArrayData::StringView(array) => {
+                if array.is_valid(idx) {
+                    Some(array.value(idx))
+                } else {
+                    None
+                }
+            }
         }
     }
 
@@ -251,6 +292,7 @@ impl ScalarVector for StringVector {
         match &self.array {
             StringArrayData::String(array) => StringIter::String(array.iter()),
             StringArrayData::LargeString(array) => StringIter::LargeString(array.iter()),
+            StringArrayData::StringView(array) => StringIter::StringView(array.iter()),
         }
     }
 }
@@ -259,6 +301,7 @@ impl ScalarVector for StringVector {
 enum MutableStringArrayData {
     String(MutableStringArray),
     LargeString(MutableLargeStringArray),
+    StringView(MutableStringViewArray),
 }
 
 pub struct StringVectorBuilder {
@@ -286,6 +329,13 @@ impl StringVectorBuilder {
         }
     }
 
+    /// Create a builder for view strings
+    pub fn new_view() -> Self {
+        Self {
+            mutable_array: MutableStringArrayData::StringView(MutableStringViewArray::new()),
+        }
+    }
+
     /// Create a builder for regular strings with capacity
     pub fn with_string_capacity(capacity: usize) -> Self {
         Self {
@@ -303,17 +353,31 @@ impl StringVectorBuilder {
             ),
         }
     }
+
+    /// Create a builder for view strings with capacity
+    pub fn with_view_capacity(capacity: usize) -> Self {
+        Self {
+            mutable_array: MutableStringArrayData::StringView(
+                MutableStringViewArray::with_capacity(capacity),
+            ),
+        }
+    }
 }
 
 impl MutableVector for StringVectorBuilder {
     fn data_type(&self) -> ConcreteDataType {
-        ConcreteDataType::string_datatype()
+        match &self.mutable_array {
+            MutableStringArrayData::String(_) => ConcreteDataType::string_datatype(),
+            MutableStringArrayData::LargeString(_) => ConcreteDataType::large_string_datatype(),
+            MutableStringArrayData::StringView(_) => ConcreteDataType::utf8_view_datatype(),
+        }
     }
 
     fn len(&self) -> usize {
         match &self.mutable_array {
             MutableStringArrayData::String(array) => array.len(),
             MutableStringArrayData::LargeString(array) => array.len(),
+            MutableStringArrayData::StringView(array) => array.len(),
         }
     }
 
@@ -337,10 +401,12 @@ impl MutableVector for StringVectorBuilder {
             Some(v) => match &mut self.mutable_array {
                 MutableStringArrayData::String(array) => array.append_value(v),
                 MutableStringArrayData::LargeString(array) => array.append_value(v),
+                MutableStringArrayData::StringView(array) => array.append_value(v),
             },
             None => match &mut self.mutable_array {
                 MutableStringArrayData::String(array) => array.append_null(),
                 MutableStringArrayData::LargeString(array) => array.append_null(),
+                MutableStringArrayData::StringView(array) => array.append_null(),
             },
         }
         Ok(())
@@ -354,6 +420,7 @@ impl MutableVector for StringVectorBuilder {
         match &mut self.mutable_array {
             MutableStringArrayData::String(array) => array.append_null(),
             MutableStringArrayData::LargeString(array) => array.append_null(),
+            MutableStringArrayData::StringView(array) => array.append_null(),
         }
     }
 }
@@ -374,10 +441,12 @@ impl ScalarVectorBuilder for StringVectorBuilder {
             Some(v) => match &mut self.mutable_array {
                 MutableStringArrayData::String(array) => array.append_value(v),
                 MutableStringArrayData::LargeString(array) => array.append_value(v),
+                MutableStringArrayData::StringView(array) => array.append_value(v),
             },
             None => match &mut self.mutable_array {
                 MutableStringArrayData::String(array) => array.append_null(),
                 MutableStringArrayData::LargeString(array) => array.append_null(),
+                MutableStringArrayData::StringView(array) => array.append_null(),
             },
         }
     }
@@ -390,6 +459,9 @@ impl ScalarVectorBuilder for StringVectorBuilder {
             MutableStringArrayData::LargeString(array) => {
                 StringVector::from_large_string_array(array.finish())
             }
+            MutableStringArrayData::StringView(array) => {
+                StringVector::from_string_view_array(array.finish())
+            }
         }
     }
 
@@ -400,6 +472,9 @@ impl ScalarVectorBuilder for StringVectorBuilder {
             }
             MutableStringArrayData::LargeString(array) => {
                 StringVector::from_large_string_array(array.finish_cloned())
+            }
+            MutableStringArrayData::StringView(array) => {
+                StringVector::from_string_view_array(array.finish_cloned())
             }
         }
     }
@@ -425,6 +500,10 @@ impl StringVector {
         } else if let Some(large_string_array) = array.as_any().downcast_ref::<LargeStringArray>() {
             Ok(StringVector::from_large_string_array(
                 large_string_array.clone(),
+            ))
+        } else if let Some(string_view_array) = array.as_any().downcast_ref::<StringViewArray>() {
+            Ok(StringVector::from_string_view_array(
+                string_view_array.clone(),
             ))
         } else {
             Err(crate::error::UnsupportedArrowTypeSnafu {
@@ -468,6 +547,20 @@ mod tests {
         assert_eq!(None, iter.next().unwrap());
         assert_eq!("world", iter.next().unwrap().unwrap());
         assert_eq!(None, iter.next());
+    }
+
+    #[test]
+    fn test_string_view_vector_build_get() {
+        let mut builder = StringVectorBuilder::with_view_capacity(4);
+        builder.push(Some("hello"));
+        builder.push(None);
+        builder.push(Some("world"));
+        let vector = builder.finish();
+
+        assert_eq!(ConcreteDataType::utf8_view_datatype(), vector.data_type());
+
+        let arrow_arr = vector.to_arrow_array();
+        assert_eq!(&DataType::Utf8View, arrow_arr.data_type());
     }
 
     #[test]

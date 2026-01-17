@@ -26,10 +26,14 @@ use common_time::{Duration, Timestamp};
 
 pub type BinaryArray = arrow::array::BinaryArray;
 pub type MutableBinaryArray = arrow::array::BinaryBuilder;
+pub type BinaryViewArray = arrow::array::BinaryViewArray;
+pub type MutableBinaryViewArray = arrow::array::BinaryViewBuilder;
 pub type StringArray = arrow::array::StringArray;
 pub type MutableStringArray = arrow::array::StringBuilder;
 pub type LargeStringArray = arrow::array::LargeStringArray;
 pub type MutableLargeStringArray = arrow::array::LargeStringBuilder;
+pub type StringViewArray = arrow::array::StringViewArray;
+pub type MutableStringViewArray = arrow::array::StringViewBuilder;
 
 /// Get the [Timestamp] value at index `i` of the timestamp array.
 ///

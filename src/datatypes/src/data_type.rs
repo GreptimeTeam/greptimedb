@@ -456,11 +456,12 @@ impl TryFrom<&ArrowDataType> for ConcreteDataType {
             ArrowDataType::Date32 => Self::date_datatype(),
             ArrowDataType::Timestamp(u, _) => ConcreteDataType::from_arrow_time_unit(u),
             ArrowDataType::Interval(u) => ConcreteDataType::from_arrow_interval_unit(u),
-            ArrowDataType::Binary | ArrowDataType::LargeBinary | ArrowDataType::BinaryView => {
-                Self::binary_datatype()
-            }
-            ArrowDataType::Utf8 | ArrowDataType::Utf8View => Self::string_datatype(),
-            ArrowDataType::LargeUtf8 => Self::large_string_datatype(),
+            ArrowDataType::Binary => Self::Binary(BinaryType::binary()),
+            ArrowDataType::BinaryView => Self::Binary(BinaryType::binary_view()),
+            ArrowDataType::LargeBinary => Self::Binary(BinaryType::binary()),
+            ArrowDataType::Utf8 => Self::String(StringType::utf8()),
+            ArrowDataType::Utf8View => Self::String(StringType::utf8_view()),
+            ArrowDataType::LargeUtf8 => Self::String(StringType::large_utf8()),
             ArrowDataType::List(field) => Self::List(ListType::new(Arc::new(
                 ConcreteDataType::from_arrow_type(field.data_type()),
             ))),
@@ -524,6 +525,14 @@ impl_new_concrete_type_functions!(
 impl ConcreteDataType {
     pub fn large_string_datatype() -> Self {
         ConcreteDataType::String(StringType::large_utf8())
+    }
+
+    pub fn utf8_view_datatype() -> Self {
+        ConcreteDataType::String(StringType::utf8_view())
+    }
+
+    pub fn binary_view_datatype() -> Self {
+        ConcreteDataType::Binary(BinaryType::binary_view())
     }
 
     pub fn timestamp_second_datatype() -> Self {
@@ -785,6 +794,12 @@ mod tests {
             ConcreteDataType::from_arrow_type(&ArrowDataType::Utf8),
             ConcreteDataType::String(_)
         ));
+        let utf8_view_string_type = ConcreteDataType::from_arrow_type(&ArrowDataType::Utf8View);
+        assert!(matches!(utf8_view_string_type, ConcreteDataType::String(_)));
+        assert_eq!(
+            ArrowDataType::Utf8View,
+            utf8_view_string_type.as_arrow_type()
+        );
         // Test LargeUtf8 mapping to large String type
         let large_string_type = ConcreteDataType::from_arrow_type(&ArrowDataType::LargeUtf8);
         assert!(matches!(large_string_type, ConcreteDataType::String(_)));
@@ -805,6 +820,19 @@ mod tests {
             ConcreteDataType::from_arrow_type(&ArrowDataType::Date32),
             ConcreteDataType::Date(_)
         ));
+    }
+
+    #[test]
+    fn test_view_round_trip() {
+        let utf8_view_arrow = ArrowDataType::Utf8View;
+        let concrete_type = ConcreteDataType::from_arrow_type(&utf8_view_arrow);
+        let back_to_arrow = concrete_type.as_arrow_type();
+        assert_eq!(utf8_view_arrow, back_to_arrow);
+
+        let binary_view_arrow = ArrowDataType::BinaryView;
+        let concrete_type = ConcreteDataType::from_arrow_type(&binary_view_arrow);
+        let back_to_arrow = concrete_type.as_arrow_type();
+        assert_eq!(binary_view_arrow, back_to_arrow);
     }
 
     #[test]
@@ -834,6 +862,11 @@ mod tests {
         } else {
             panic!("Expected both to be String types");
         }
+
+        // View strings should be distinct from Utf8 and LargeUtf8.
+        let view_concrete = ConcreteDataType::from_arrow_type(&ArrowDataType::Utf8View);
+        assert_ne!(utf8_concrete, view_concrete);
+        assert_ne!(large_utf8_concrete, view_concrete);
 
         // They should be different types
         assert_ne!(utf8_concrete, large_utf8_concrete);
