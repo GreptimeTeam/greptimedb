@@ -16,13 +16,30 @@
 
 use std::collections::HashMap;
 
+use api::v1::SemanticType;
+use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::ColumnSchema;
 use store_api::metadata::ColumnMetadata;
+use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 use store_api::storage::RegionId;
+use store_api::storage::consts::ReservedColumnId;
 
 use crate::engine::MetricEngineInner;
 use crate::error::Result;
 
 impl MetricEngineInner {
+    fn tsid_column_metadata() -> ColumnMetadata {
+        ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                DATA_SCHEMA_TSID_COLUMN_NAME,
+                ConcreteDataType::uint64_datatype(),
+                false,
+            ),
+            semantic_type: SemanticType::Tag,
+            column_id: ReservedColumnId::tsid(),
+        }
+    }
+
     /// Load column metadata of a logical region.
     ///
     /// The return value is ordered on column name.
@@ -54,6 +71,7 @@ impl MetricEngineInner {
             .await?
             .into_iter()
             .map(|(_, column_metadata)| column_metadata)
+            .chain(std::iter::once(Self::tsid_column_metadata()))
             .collect::<Vec<_>>();
 
         // Update cache

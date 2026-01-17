@@ -38,7 +38,16 @@ impl<'a> TableToRegion<'a> {
     pub async fn convert(&self, request: TableDeleteRequest) -> Result<RegionDeleteRequests> {
         let row_count = row_count(&request.key_column_values)?;
         let schema = column_schema(self.table_info, &request.key_column_values)?;
-        let rows = api::helper::vectors_to_rows(request.key_column_values.values(), row_count);
+        let vectors = schema
+            .iter()
+            .map(|col| {
+                request
+                    .key_column_values
+                    .get(&col.column_name)
+                    .expect("schema column must exist in delete request")
+            })
+            .collect::<Vec<_>>();
+        let rows = api::helper::vectors_to_rows(vectors.into_iter(), row_count);
         let rows = Rows { schema, rows };
 
         let requests = Partitioner::new(self.partition_manager)

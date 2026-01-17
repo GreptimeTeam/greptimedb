@@ -27,6 +27,7 @@ use futures_util::future;
 use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt, ensure};
+use store_api::metric_engine_consts::is_metric_engine_internal_column;
 use table::TableRef;
 use table::requests::DeleteRequest as TableDeleteRequest;
 
@@ -99,9 +100,12 @@ impl Deleter {
 
     pub async fn handle_table_delete(
         &self,
-        request: TableDeleteRequest,
+        mut request: TableDeleteRequest,
         ctx: QueryContextRef,
     ) -> Result<AffectedRows> {
+        request
+            .key_column_values
+            .retain(|col, _| !is_metric_engine_internal_column(col));
         let catalog = request.catalog_name.as_str();
         let schema = request.schema_name.as_str();
         let table = request.table_name.as_str();
@@ -227,6 +231,7 @@ impl Deleter {
             .table_info()
             .meta
             .row_key_column_names()
+            .filter(|name| !is_metric_engine_internal_column(name))
             .cloned()
             .chain(iter::once(time_index))
             .collect();

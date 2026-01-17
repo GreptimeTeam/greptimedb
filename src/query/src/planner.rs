@@ -40,6 +40,7 @@ use sql::statements::explain::ExplainStatement;
 use sql::statements::query::Query;
 use sql::statements::statement::Statement;
 use sql::statements::tql::Tql;
+use store_api::metric_engine_consts::is_metric_engine_internal_column;
 
 use crate::error::{
     CteColumnSchemaMismatchSnafu, PlanSqlSnafu, QueryPlanSnafu, Result, SqlSnafu,
@@ -232,7 +233,35 @@ impl DfLogicalPlanner {
             .optimize_by_extension_rules(plan, &context)?;
         common_telemetry::debug!("Logical planner, optimize result: {plan}");
 
-        Ok(plan)
+        Self::strip_metric_engine_internal_columns(plan)
+    }
+
+    fn strip_metric_engine_internal_columns(plan: LogicalPlan) -> Result<LogicalPlan> {
+        let schema = plan.schema();
+        if !schema
+            .fields()
+            .iter()
+            .any(|field| is_metric_engine_internal_column(field.name()))
+        {
+            return Ok(plan);
+        }
+
+        let project_exprs = schema
+            .fields()
+            .iter()
+            .filter(|field| !is_metric_engine_internal_column(field.name()))
+            .map(|field| col(field.name()))
+            .collect::<Vec<_>>();
+
+        if project_exprs.is_empty() {
+            return Ok(plan);
+        }
+
+        LogicalPlanBuilder::from(plan)
+            .project(project_exprs)
+            .context(PlanSqlSnafu)?
+            .build()
+            .context(PlanSqlSnafu)
     }
 
     /// Generate a relational expression from a SQL expression

@@ -19,7 +19,9 @@ use common_telemetry::{debug, error, tracing};
 use datafusion::logical_expr::{self, Expr};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadataBuilder, RegionMetadataRef};
-use store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME;
+use store_api::metric_engine_consts::{
+    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, is_metric_engine_internal_column,
+};
 use store_api::region_engine::{RegionEngine, RegionScannerRef};
 use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 
@@ -218,7 +220,10 @@ impl MetricEngineInner {
             .get_metadata(data_region_id)
             .await
             .context(MitoReadOperationSnafu)?;
-        for name in logical_columns {
+        for name in logical_columns
+            .into_iter()
+            .filter(|name| !is_metric_engine_internal_column(name))
+        {
             // Safety: logical columns is a strict subset of physical columns
             projection.push(physical_metadata.column_index_by_name(&name).unwrap());
         }
@@ -338,7 +343,7 @@ mod test {
             .await
             .unwrap();
 
-        assert_eq!(scan_req.projection.unwrap(), vec![11, 10, 9, 8, 0, 1, 4]);
+        assert_eq!(scan_req.projection.unwrap(), vec![11, 10, 9, 8, 3, 0, 1]);
         assert_eq!(scan_req.filters.len(), 1);
         assert_eq!(
             scan_req.filters[0],

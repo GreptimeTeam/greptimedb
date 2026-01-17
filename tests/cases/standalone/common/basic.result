@@ -1,3 +1,7 @@
+USE public;
+
+Affected Rows: 0
+
 CREATE TABLE system_metrics (
     host STRING,
     idc STRING,

@@ -553,6 +553,7 @@ async fn test_on_part_duplicate_alter_request() {
     assert_eq!(
         table1_cols,
         vec![
+            "__tsid".to_string(),
             "col_0".to_string(),
             "cpu".to_string(),
             "host".to_string(),
@@ -572,6 +573,7 @@ async fn test_on_part_duplicate_alter_request() {
     assert_eq!(
         table2_cols,
         vec![
+            "__tsid".to_string(),
             "col_0".to_string(),
             "cpu".to_string(),
             "host".to_string(),

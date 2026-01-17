@@ -150,7 +150,7 @@ fn create_region_request_from_raw_table_info(
     raw_table_info: &RawTableInfo,
     physical_table_id: TableId,
 ) -> Result<CreateRequestBuilder> {
-    let template = build_template_from_raw_table_info(raw_table_info, false)?;
+    let template = build_template_from_raw_table_info(raw_table_info, true)?;
     Ok(CreateRequestBuilder::new(template, Some(physical_table_id)))
 }
 

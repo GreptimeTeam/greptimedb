@@ -138,6 +138,13 @@ struct PromPlannerContext {
     time_index_column: Option<String>,
     field_columns: Vec<String>,
     tag_columns: Vec<String>,
+    /// Metric engine internal series identifier column (`__tsid`).
+    ///
+    /// This column is optional: it is present only when the underlying table schema contains
+    /// [`DATA_SCHEMA_TSID_COLUMN_NAME`] with `UInt64` type. The planner uses it internally as the
+    /// series key for plans like [`SeriesDivide`] when available, and strips it from the final
+    /// output.
+    tsid_column: Option<String>,
     /// The matcher for field columns `__field__`.
     field_column_matcher: Option<Vec<Matcher>>,
     /// The matcher for selectors (normal matchers).
@@ -164,6 +171,7 @@ impl PromPlannerContext {
         self.time_index_column = None;
         self.field_columns = vec![];
         self.tag_columns = vec![];
+        self.tsid_column = None;
         self.field_column_matcher = None;
         self.selector_matcher.clear();
         self.schema_name = None;
@@ -204,11 +212,14 @@ impl PromPlanner {
             .await?;
 
         // Apply alias if provided
-        if let Some(alias_name) = alias {
-            planner.apply_alias_projection(plan, alias_name)
+        let plan = if let Some(alias_name) = alias {
+            planner.apply_alias_projection(plan, alias_name)?
         } else {
-            Ok(plan)
-        }
+            plan
+        };
+
+        // Never leak internal series identifier to output.
+        planner.strip_tsid_column(plan)
     }
 
     #[cfg(test)]
@@ -342,18 +353,41 @@ impl PromPlanner {
         } = aggr_expr;
 
         let input = self.prom_expr_to_plan(expr, query_engine_state).await?;
+        let input_has_tsid = input.schema().fields().iter().any(|field| {
+            field.name() == DATA_SCHEMA_TSID_COLUMN_NAME
+                && field.data_type() == &ArrowDataType::UInt64
+        });
 
         match (*op).id() {
             token::T_TOPK | token::T_BOTTOMK => {
                 self.prom_topk_bottomk_to_plan(aggr_expr, input).await
             }
             _ => {
+                let input_tag_columns = self.ctx.tag_columns.clone();
                 // calculate columns to group by
                 // Need to append time index column into group by columns
                 let mut group_exprs = self.agg_modifier_to_col(input.schema(), modifier, true)?;
                 // convert op and value columns to aggregate exprs
-                let (aggr_exprs, prev_field_exprs) =
+                let (mut aggr_exprs, prev_field_exprs) =
                     self.create_aggregate_exprs(*op, param, &input)?;
+
+                let keep_tsid = op.id() != token::T_COUNT_VALUES
+                    && input_has_tsid
+                    && input_tag_columns.iter().collect::<HashSet<_>>()
+                        == self.ctx.tag_columns.iter().collect::<HashSet<_>>();
+
+                if keep_tsid {
+                    aggr_exprs.push(
+                        first_value(
+                            DfExpr::Column(Column::from_name(DATA_SCHEMA_TSID_COLUMN_NAME)),
+                            vec![],
+                        )
+                        .alias(DATA_SCHEMA_TSID_COLUMN_NAME),
+                    );
+                    self.ctx.tsid_column = Some(DATA_SCHEMA_TSID_COLUMN_NAME.to_string());
+                } else {
+                    self.ctx.tsid_column = None;
+                }
 
                 // create plan
                 let builder = LogicalPlanBuilder::from(input);
@@ -404,6 +438,12 @@ impl PromPlanner {
             ..
         } = aggr_expr;
 
+        let input_has_tsid = input.schema().fields().iter().any(|field| {
+            field.name() == DATA_SCHEMA_TSID_COLUMN_NAME
+                && field.data_type() == &ArrowDataType::UInt64
+        });
+        self.ctx.tsid_column = input_has_tsid.then_some(DATA_SCHEMA_TSID_COLUMN_NAME.to_string());
+
         let group_exprs = self.agg_modifier_to_col(input.schema(), modifier, false)?;
 
         let val = Self::get_param_as_literal_expr(param, Some(*op), Some(ArrowDataType::Float64))?;
@@ -452,6 +492,13 @@ impl PromPlanner {
             .create_field_column_exprs()?
             .into_iter()
             .chain(self.create_tag_column_exprs()?)
+            .chain(
+                self.ctx
+                    .tsid_column
+                    .as_ref()
+                    .map(|_| DfExpr::Column(Column::from_name(DATA_SCHEMA_TSID_COLUMN_NAME)))
+                    .into_iter(),
+            )
             .chain(Some(self.create_time_index_column_expr()?));
 
         LogicalPlanBuilder::from(input)
@@ -1147,6 +1194,15 @@ impl PromPlanner {
                 .into_iter()
                 .map(|col| DfExpr::Column(Column::new_unqualified(col)))
                 .chain(self.create_tag_column_exprs()?)
+                .chain(
+                    self.ctx
+                        .tsid_column
+                        .as_ref()
+                        .map(|_| {
+                            DfExpr::Column(Column::new_unqualified(DATA_SCHEMA_TSID_COLUMN_NAME))
+                        })
+                        .into_iter(),
+                )
                 .chain(Some(self.create_time_index_column_expr()?))
                 .collect::<Vec<_>>();
 
@@ -1159,8 +1215,23 @@ impl PromPlanner {
         }
 
         // make sort plan
+        let series_key_columns = if self.ctx.tsid_column.is_some() {
+            vec![DATA_SCHEMA_TSID_COLUMN_NAME.to_string()]
+        } else {
+            self.ctx.tag_columns.clone()
+        };
+
+        let sort_exprs = if self.ctx.tsid_column.is_some() {
+            vec![
+                DfExpr::Column(Column::from_name(DATA_SCHEMA_TSID_COLUMN_NAME)).sort(true, true),
+                self.create_time_index_column_expr()?.sort(true, true),
+            ]
+        } else {
+            self.create_tag_and_time_index_column_sort_exprs()?
+        };
+
         let sort_plan = LogicalPlanBuilder::from(table_scan)
-            .sort(self.create_tag_and_time_index_column_sort_exprs()?)
+            .sort(sort_exprs)
             .context(DataFusionPlanningSnafu)?
             .build()
             .context(DataFusionPlanningSnafu)?;
@@ -1175,7 +1246,7 @@ impl PromPlanner {
                 })?;
         let divide_plan = LogicalPlan::Extension(Extension {
             node: Arc::new(SeriesDivide::new(
-                self.ctx.tag_columns.clone(),
+                series_key_columns.clone(),
                 time_index_column,
                 sort_plan,
             )),
@@ -1194,7 +1265,7 @@ impl PromPlanner {
                     table: table_ref.to_quoted_string(),
                 })?,
             is_range_selector,
-            self.ctx.tag_columns.clone(),
+            series_key_columns,
             divide_plan,
         );
         let logical_plan = LogicalPlan::Extension(Extension {
@@ -1486,6 +1557,18 @@ impl PromPlanner {
                 .iter()
                 .map(|col| DfExpr::Column(Column::new(Some(table_ref.clone()), col.clone())))
                 .chain(self.create_tag_column_exprs()?)
+                .chain(
+                    self.ctx
+                        .tsid_column
+                        .as_ref()
+                        .map(|_| {
+                            DfExpr::Column(Column::new(
+                                Some(table_ref.clone()),
+                                DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
+                            ))
+                        })
+                        .into_iter(),
+                )
                 .chain(Some(DfExpr::Alias(Alias {
                     expr: Box::new(DfExpr::Cast(Cast {
                         expr: Box::new(self.create_time_index_column_expr()?),
@@ -1571,6 +1654,15 @@ impl PromPlanner {
             .collect();
         self.ctx.tag_columns = tags;
 
+        // Set internal tsid column if available from underlying storage engine.
+        self.ctx.tsid_column = table
+            .schema()
+            .column_schema_by_name(DATA_SCHEMA_TSID_COLUMN_NAME)
+            .and_then(|col| {
+                matches!(col.data_type, ConcreteDataType::UInt64(_))
+                    .then_some(DATA_SCHEMA_TSID_COLUMN_NAME.to_string())
+            });
+
         Ok(None)
     }
 
@@ -1581,6 +1673,7 @@ impl PromPlanner {
         self.ctx.reset_table_name_and_schema();
         self.ctx.tag_columns = vec![];
         self.ctx.field_columns = vec![DEFAULT_FIELD_COLUMN.to_string()];
+        self.ctx.tsid_column = None;
 
         // The table doesn't have any data, so we set start to 0 and end to -1.
         let plan = LogicalPlan::Extension(Extension {
@@ -2988,6 +3081,7 @@ impl PromPlanner {
             .chain([left_time_index.clone()])
             .collect::<Vec<_>>();
         self.ctx.time_index_column = Some(left_time_index.clone());
+        self.ctx.tsid_column = left_context.tsid_column.clone();
 
         // alias right time index column if necessary
         if left_context.time_index_column != right_context.time_index_column {
@@ -3127,6 +3221,16 @@ impl PromPlanner {
         // Take the name of first field column. The length is checked above.
         let left_field_col = left_context.field_columns.first().unwrap();
         let right_field_col = right_context.field_columns.first().unwrap();
+        let left_has_tsid = left
+            .schema()
+            .fields()
+            .iter()
+            .any(|field| field.name() == DATA_SCHEMA_TSID_COLUMN_NAME);
+        let right_has_tsid = right
+            .schema()
+            .fields()
+            .iter()
+            .any(|field| field.name() == DATA_SCHEMA_TSID_COLUMN_NAME);
 
         // step 0: fill all columns in output schema
         let mut all_columns_set = left
@@ -3136,6 +3240,11 @@ impl PromPlanner {
             .chain(right.schema().fields().iter())
             .map(|field| field.name().clone())
             .collect::<HashSet<_>>();
+        // Keep `__tsid` only when both sides contain it, otherwise it may break schema alignment
+        // (e.g. `unknown_metric or some_metric`).
+        if !(left_has_tsid && right_has_tsid) {
+            all_columns_set.remove(DATA_SCHEMA_TSID_COLUMN_NAME);
+        }
         // remove time index column
         all_columns_set.remove(&left_time_index_column);
         all_columns_set.remove(&right_time_index_column);
@@ -3243,6 +3352,8 @@ impl PromPlanner {
         self.ctx.time_index_column = Some(left_time_index_column);
         self.ctx.tag_columns = all_tags.into_iter().collect();
         self.ctx.field_columns = vec![left_field_col.clone()];
+        self.ctx.tsid_column =
+            (left_has_tsid && right_has_tsid).then_some(DATA_SCHEMA_TSID_COLUMN_NAME.to_string());
 
         Ok(result)
     }
@@ -3347,6 +3458,30 @@ impl PromPlanner {
             args: vec![date_part.lit(), input_expr],
         });
         Ok(fn_expr)
+    }
+
+    fn strip_tsid_column(&self, plan: LogicalPlan) -> Result<LogicalPlan> {
+        let schema = plan.schema();
+        if !schema
+            .fields()
+            .iter()
+            .any(|field| field.name() == DATA_SCHEMA_TSID_COLUMN_NAME)
+        {
+            return Ok(plan);
+        }
+
+        let project_exprs = schema
+            .fields()
+            .iter()
+            .filter(|field| field.name() != DATA_SCHEMA_TSID_COLUMN_NAME)
+            .map(|field| Ok(DfExpr::Column(Column::from_name(field.name().clone()))))
+            .collect::<Result<Vec<_>>>()?;
+
+        LogicalPlanBuilder::from(plan)
+            .project(project_exprs)
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)
     }
 
     /// Apply an alias to the query result by adding a projection with the alias name
@@ -3484,6 +3619,84 @@ mod test {
             let table_meta = TableMetaBuilder::empty()
                 .schema(schema)
                 .primary_key_indices((0..num_tag).collect())
+                .value_indices((num_tag + 1..num_tag + 1 + num_field).collect())
+                .next_column_id(1024)
+                .build()
+                .unwrap();
+            let table_info = TableInfoBuilder::default()
+                .name(table_name.clone())
+                .meta(table_meta)
+                .build()
+                .unwrap();
+            let table = EmptyTable::from_table_info(&table_info);
+
+            assert!(
+                catalog_list
+                    .register_table_sync(RegisterTableRequest {
+                        catalog: DEFAULT_CATALOG_NAME.to_string(),
+                        schema: schema_name.clone(),
+                        table_name: table_name.clone(),
+                        table_id: 1024,
+                        table,
+                    })
+                    .is_ok()
+            );
+        }
+
+        DfTableSourceProvider::new(
+            catalog_list,
+            false,
+            QueryContext::arc(),
+            DummyDecoder::arc(),
+            false,
+        )
+    }
+
+    async fn build_test_table_provider_with_tsid(
+        table_name_tuples: &[(String, String)],
+        num_tag: usize,
+        num_field: usize,
+    ) -> DfTableSourceProvider {
+        let catalog_list = MemoryCatalogManager::with_default_setup();
+        for (schema_name, table_name) in table_name_tuples {
+            let mut columns = vec![];
+            for i in 0..num_tag {
+                columns.push(ColumnSchema::new(
+                    format!("tag_{i}"),
+                    ConcreteDataType::string_datatype(),
+                    false,
+                ));
+            }
+            columns.push(
+                ColumnSchema::new(
+                    "timestamp".to_string(),
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                )
+                .with_time_index(true),
+            );
+            for i in 0..num_field {
+                columns.push(ColumnSchema::new(
+                    format!("field_{i}"),
+                    ConcreteDataType::float64_datatype(),
+                    true,
+                ));
+            }
+            columns.push(ColumnSchema::new(
+                DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
+                ConcreteDataType::uint64_datatype(),
+                false,
+            ));
+
+            let schema = Arc::new(Schema::new(columns));
+
+            let tsid_idx = num_tag + 1 + num_field;
+            let mut primary_key_indices = (0..num_tag).collect::<Vec<_>>();
+            primary_key_indices.push(tsid_idx);
+
+            let table_meta = TableMetaBuilder::empty()
+                .schema(schema)
+                .primary_key_indices(primary_key_indices)
                 .value_indices((num_tag + 1..num_tag + 1 + num_field).collect())
                 .next_column_id(1024)
                 .build()
@@ -3874,6 +4087,135 @@ mod test {
     #[tokio::test]
     async fn aggregate_sum() {
         do_aggregate_expr_plan("sum", "sum").await;
+    }
+
+    #[tokio::test]
+    async fn tsid_is_used_for_series_divide_when_available() {
+        let prom_expr = parser::parse("some_metric").unwrap();
+        let eval_stmt = EvalStmt {
+            expr: prom_expr,
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+
+        let table_provider = build_test_table_provider_with_tsid(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            1,
+            1,
+        )
+        .await;
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(plan_str.contains("PromSeriesDivide: tags=[\"__tsid\"]"));
+        assert!(plan_str.contains("__tsid ASC NULLS FIRST"));
+        assert!(
+            !plan
+                .schema()
+                .fields()
+                .iter()
+                .any(|field| field.name() == DATA_SCHEMA_TSID_COLUMN_NAME)
+        );
+    }
+
+    #[tokio::test]
+    async fn tsid_is_carried_only_when_aggregate_preserves_label_set() {
+        let prom_expr = parser::parse("sum by (tag_0) (some_metric)").unwrap();
+        let eval_stmt = EvalStmt {
+            expr: prom_expr,
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+
+        let table_provider = build_test_table_provider_with_tsid(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            1,
+            1,
+        )
+        .await;
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(plan_str.contains("first_value") && plan_str.contains("__tsid"));
+        assert!(
+            !plan
+                .schema()
+                .fields()
+                .iter()
+                .any(|field| field.name() == DATA_SCHEMA_TSID_COLUMN_NAME)
+        );
+
+        // Merging aggregate: label set is reduced, tsid should not be carried.
+        let prom_expr = parser::parse("sum(some_metric)").unwrap();
+        let eval_stmt = EvalStmt {
+            expr: prom_expr,
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+        let table_provider = build_test_table_provider_with_tsid(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            1,
+            1,
+        )
+        .await;
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(!plan_str.contains("first_value"));
+    }
+
+    #[tokio::test]
+    async fn or_operator_with_unknown_metric_does_not_require_tsid() {
+        let prom_expr = parser::parse("unknown_metric or some_metric").unwrap();
+        let eval_stmt = EvalStmt {
+            expr: prom_expr,
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+
+        let table_provider = build_test_table_provider_with_tsid(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            1,
+            1,
+        )
+        .await;
+
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+
+        assert!(
+            !plan
+                .schema()
+                .fields()
+                .iter()
+                .any(|field| field.name() == DATA_SCHEMA_TSID_COLUMN_NAME)
+        );
     }
 
     #[tokio::test]
