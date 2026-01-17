@@ -17,9 +17,7 @@ use std::ops::Deref;
 use common_telemetry::{info, warn};
 use itertools::Itertools;
 use snafu::OptionExt;
-use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
-use store_api::storage::consts::ReservedColumnId;
-use table::metadata::{RawTableInfo, TableId};
+use table::metadata::TableId;
 use table::table_name::TableName;
 
 use crate::cache_invalidator::Context;
@@ -29,20 +27,6 @@ use crate::error::{Result, TableInfoNotFoundSnafu};
 use crate::instruction::CacheIdent;
 
 impl CreateLogicalTablesProcedure {
-    pub(crate) fn add_tsid_column_to_logical_tables(&mut self) {
-        for (task, table_id_already_exists) in self
-            .data
-            .tasks
-            .iter_mut()
-            .zip(self.data.table_ids_already_exists.iter())
-        {
-            if table_id_already_exists.is_some() {
-                continue;
-            }
-            add_tsid_column_to_raw_table_info(&mut task.table_info);
-        }
-    }
-
     pub(crate) async fn update_physical_table_metadata(&mut self) -> Result<()> {
         if self.data.physical_columns.is_empty() {
             warn!(
@@ -142,60 +126,5 @@ impl CreateLogicalTablesProcedure {
         );
 
         Ok(table_ids)
-    }
-}
-
-fn add_tsid_column_to_raw_table_info(table_info: &mut RawTableInfo) {
-    if table_info
-        .meta
-        .schema
-        .column_schemas
-        .iter()
-        .any(|col| col.name == DATA_SCHEMA_TSID_COLUMN_NAME)
-    {
-        return;
-    }
-
-    let should_update_column_ids =
-        table_info.meta.column_ids.len() == table_info.meta.schema.column_schemas.len();
-    let column_index = table_info.meta.schema.column_schemas.len();
-    table_info
-        .meta
-        .schema
-        .column_schemas
-        .push(datatypes::schema::ColumnSchema::new(
-            DATA_SCHEMA_TSID_COLUMN_NAME,
-            datatypes::prelude::ConcreteDataType::uint64_datatype(),
-            false,
-        ));
-    table_info.meta.primary_key_indices.push(column_index);
-    if should_update_column_ids {
-        table_info.meta.column_ids.push(ReservedColumnId::tsid());
-    }
-    table_info.sort_columns();
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ddl::test_util::test_create_logical_table_task;
-
-    #[test]
-    fn add_tsid_preserves_column_ids_when_present() {
-        let mut task = test_create_logical_table_task("foo");
-        let schema_len = task.table_info.meta.schema.column_schemas.len();
-        task.table_info.meta.column_ids = (0..schema_len as u32).collect();
-
-        add_tsid_column_to_raw_table_info(&mut task.table_info);
-
-        assert_eq!(
-            task.table_info.meta.column_ids.len(),
-            task.table_info.meta.schema.column_schemas.len()
-        );
-        let name_to_ids = task.table_info.name_to_ids().unwrap();
-        assert_eq!(
-            name_to_ids.get(DATA_SCHEMA_TSID_COLUMN_NAME),
-            Some(&ReservedColumnId::tsid())
-        );
     }
 }

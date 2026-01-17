@@ -138,7 +138,6 @@ impl CreateLogicalTablesProcedure {
     /// Abort(not-retry):
     /// - Failed to create table metadata.
     pub async fn on_create_metadata(&mut self) -> Result<Status> {
-        self.add_tsid_column_to_logical_tables();
         self.update_physical_table_metadata().await?;
         let table_ids = self.create_logical_tables_metadata().await?;
 

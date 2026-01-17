@@ -432,8 +432,7 @@ EXPLAIN select * from logical_table_4;
 | plan_type_| plan_|
 +-+-+
 | logical_plan_| MergeScan [is_placeholder=false, remote_input=[_|
-|_| Projection: logical_table_4.another_partition_key, logical_table_4.cpu, logical_table_4.host, logical_table_4.one_partition_key, logical_table_4.ts_|
-|_|_Projection: logical_table_4.__tsid, logical_table_4.another_partition_key, logical_table_4.cpu, logical_table_4.host, logical_table_4.one_partition_key, logical_table_4.ts |
+|_| Projection: logical_table_4.another_partition_key, logical_table_4.cpu, logical_table_4.host, logical_table_4.one_partition_key, logical_table_4.ts |
 |_|_TableScan: logical_table_4_|
 |_| ]]_|
 | physical_plan | CooperativeExec_|

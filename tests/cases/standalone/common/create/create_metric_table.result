@@ -101,7 +101,6 @@ DESC TABLE t1;
 +--------+----------------------+-----+------+---------+---------------+
 | Column | Type                 | Key | Null | Default | Semantic Type |
 +--------+----------------------+-----+------+---------+---------------+
-| __tsid | UInt64               | PRI | NO   |         | TAG           |
 | host   | String               | PRI | YES  |         | TAG           |
 | ts     | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
 | val    | Float64              |     | YES  |         | FIELD         |
@@ -112,7 +111,6 @@ DESC TABLE t2;
 +--------+----------------------+-----+------+---------+---------------+
 | Column | Type                 | Key | Null | Default | Semantic Type |
 +--------+----------------------+-----+------+---------+---------------+
-| __tsid | UInt64               | PRI | NO   |         | TAG           |
 | job    | String               | PRI | YES  |         | TAG           |
 | ts     | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
 | val    | Float64              |     | YES  |         | FIELD         |

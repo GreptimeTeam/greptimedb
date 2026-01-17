@@ -73,7 +73,8 @@ use promql_parser::parser::{
 use regex::{self, Regex};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::{
-    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
+    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME, LOGICAL_TABLE_METADATA_KEY,
+    METRIC_ENGINE_NAME,
 };
 use table::table::adapter::DfTableProviderAdapter;
 
@@ -1527,7 +1528,7 @@ impl PromPlanner {
             .await
             .context(CatalogSnafu)?;
 
-        let is_time_index_ms = provider
+        let logical_table = provider
             .as_any()
             .downcast_ref::<DefaultTableSource>()
             .context(UnknownTableSnafu)?
@@ -1535,19 +1536,145 @@ impl PromPlanner {
             .as_any()
             .downcast_ref::<DfTableProviderAdapter>()
             .context(UnknownTableSnafu)?
-            .table()
+            .table();
+
+        let mut scan_table_ref = table_ref.clone();
+        let mut scan_provider = provider;
+        let mut table_id_filter: Option<u32> = None;
+
+        // If it's a metric engine logical table, scan its physical table directly and filter by
+        // `__table_id = logical_table_id` to get access to internal columns like `__tsid`.
+        if logical_table.table_info().meta.engine == METRIC_ENGINE_NAME
+            && let Some(physical_table_name) = logical_table
+                .table_info()
+                .meta
+                .options
+                .extra_options
+                .get(LOGICAL_TABLE_METADATA_KEY)
+        {
+            let physical_table_ref = if let Some(schema_name) = &self.ctx.schema_name {
+                TableReference::partial(schema_name.as_str(), physical_table_name.as_str())
+            } else {
+                TableReference::bare(physical_table_name.as_str())
+            };
+
+            let physical_provider = match self
+                .table_provider
+                .resolve_table(physical_table_ref.clone())
+                .await
+            {
+                Ok(provider) => provider,
+                Err(e) if e.status_code() == StatusCode::TableNotFound => {
+                    // Fall back to scanning the logical table. It still works, but without
+                    // `__tsid` optimization.
+                    scan_provider.clone()
+                }
+                Err(e) => return Err(e).context(CatalogSnafu),
+            };
+
+            if !Arc::ptr_eq(&physical_provider, &scan_provider) {
+                // Only rewrite when internal columns exist in physical schema.
+                let physical_table = physical_provider
+                    .as_any()
+                    .downcast_ref::<DefaultTableSource>()
+                    .context(UnknownTableSnafu)?
+                    .table_provider
+                    .as_any()
+                    .downcast_ref::<DfTableProviderAdapter>()
+                    .context(UnknownTableSnafu)?
+                    .table();
+
+                let has_table_id = physical_table
+                    .schema()
+                    .column_schema_by_name(DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
+                    .is_some();
+                let has_tsid = physical_table
+                    .schema()
+                    .column_schema_by_name(DATA_SCHEMA_TSID_COLUMN_NAME)
+                    .is_some_and(|col| matches!(col.data_type, ConcreteDataType::UInt64(_)));
+
+                if has_table_id && has_tsid {
+                    scan_table_ref = physical_table_ref;
+                    scan_provider = physical_provider;
+                    table_id_filter = Some(logical_table.table_info().ident.table_id);
+                }
+            }
+        }
+
+        let scan_table = scan_provider
+            .as_any()
+            .downcast_ref::<DefaultTableSource>()
+            .context(UnknownTableSnafu)?
+            .table_provider
+            .as_any()
+            .downcast_ref::<DfTableProviderAdapter>()
+            .context(UnknownTableSnafu)?
+            .table();
+
+        let use_tsid = table_id_filter.is_some()
+            && scan_table
+                .schema()
+                .column_schema_by_name(DATA_SCHEMA_TSID_COLUMN_NAME)
+                .is_some_and(|col| matches!(col.data_type, ConcreteDataType::UInt64(_)));
+        self.ctx.tsid_column = use_tsid.then_some(DATA_SCHEMA_TSID_COLUMN_NAME.to_string());
+
+        let is_time_index_ms = scan_table
             .schema()
             .timestamp_column()
             .with_context(|| TimeIndexNotFoundSnafu {
-                table: table_ref.to_quoted_string(),
+                table: scan_table_ref.to_quoted_string(),
             })?
             .data_type
             == ConcreteDataType::timestamp_millisecond_datatype();
 
-        let mut scan_plan = LogicalPlanBuilder::scan(table_ref.clone(), provider, None)
-            .context(DataFusionPlanningSnafu)?
-            .build()
-            .context(DataFusionPlanningSnafu)?;
+        let scan_projection = if table_id_filter.is_some() {
+            let mut required_columns = HashSet::new();
+            required_columns.insert(DATA_SCHEMA_TABLE_ID_COLUMN_NAME.to_string());
+            required_columns.insert(self.ctx.time_index_column.clone().with_context(|| {
+                TimeIndexNotFoundSnafu {
+                    table: scan_table_ref.to_quoted_string(),
+                }
+            })?);
+            for col in &self.ctx.tag_columns {
+                required_columns.insert(col.clone());
+            }
+            for col in &self.ctx.field_columns {
+                required_columns.insert(col.clone());
+            }
+            if use_tsid {
+                required_columns.insert(DATA_SCHEMA_TSID_COLUMN_NAME.to_string());
+            }
+
+            let arrow_schema = scan_table.schema().arrow_schema().clone();
+            Some(
+                arrow_schema
+                    .fields()
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, field)| required_columns.contains(field.name().as_str()))
+                    .map(|(idx, _)| idx)
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            None
+        };
+
+        let mut scan_plan =
+            LogicalPlanBuilder::scan(scan_table_ref.clone(), scan_provider, scan_projection)
+                .context(DataFusionPlanningSnafu)?
+                .build()
+                .context(DataFusionPlanningSnafu)?;
+
+        if let Some(table_id) = table_id_filter {
+            scan_plan = LogicalPlanBuilder::from(scan_plan)
+                .filter(
+                    DfExpr::Column(Column::from_name(DATA_SCHEMA_TABLE_ID_COLUMN_NAME))
+                        .eq(lit(table_id)),
+                )
+                .context(DataFusionPlanningSnafu)?
+                .build()
+                .context(DataFusionPlanningSnafu)?;
+        }
 
         if !is_time_index_ms {
             // cast to ms if time_index not in Millisecond precision
@@ -1555,7 +1682,7 @@ impl PromPlanner {
                 .ctx
                 .field_columns
                 .iter()
-                .map(|col| DfExpr::Column(Column::new(Some(table_ref.clone()), col.clone())))
+                .map(|col| DfExpr::Column(Column::new(Some(scan_table_ref.clone()), col.clone())))
                 .chain(self.create_tag_column_exprs()?)
                 .chain(
                     self.ctx
@@ -1563,7 +1690,7 @@ impl PromPlanner {
                         .as_ref()
                         .map(|_| {
                             DfExpr::Column(Column::new(
-                                Some(table_ref.clone()),
+                                Some(scan_table_ref.clone()),
                                 DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
                             ))
                         })
@@ -1574,13 +1701,13 @@ impl PromPlanner {
                         expr: Box::new(self.create_time_index_column_expr()?),
                         data_type: ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
                     })),
-                    relation: Some(table_ref.clone()),
+                    relation: Some(scan_table_ref.clone()),
                     name: self
                         .ctx
                         .time_index_column
                         .as_ref()
                         .with_context(|| TimeIndexNotFoundSnafu {
-                            table: table_ref.to_quoted_string(),
+                            table: scan_table_ref.to_quoted_string(),
                         })?
                         .clone(),
                     metadata: None,
@@ -1588,6 +1715,27 @@ impl PromPlanner {
                 .collect::<Vec<_>>();
             scan_plan = LogicalPlanBuilder::from(scan_plan)
                 .project(expr)
+                .context(DataFusionPlanningSnafu)?
+                .build()
+                .context(DataFusionPlanningSnafu)?;
+        } else if table_id_filter.is_some() {
+            // Drop the internal `__table_id` column after filtering.
+            let project_exprs = self
+                .create_field_column_exprs()?
+                .into_iter()
+                .chain(self.create_tag_column_exprs()?)
+                .chain(
+                    self.ctx
+                        .tsid_column
+                        .as_ref()
+                        .map(|_| DfExpr::Column(Column::from_name(DATA_SCHEMA_TSID_COLUMN_NAME)))
+                        .into_iter(),
+                )
+                .chain(Some(self.create_time_index_column_expr()?))
+                .collect::<Vec<_>>();
+
+            scan_plan = LogicalPlanBuilder::from(scan_plan)
+                .project(project_exprs)
                 .context(DataFusionPlanningSnafu)?
                 .build()
                 .context(DataFusionPlanningSnafu)?;
@@ -1654,14 +1802,7 @@ impl PromPlanner {
             .collect();
         self.ctx.tag_columns = tags;
 
-        // Set internal tsid column if available from underlying storage engine.
-        self.ctx.tsid_column = table
-            .schema()
-            .column_schema_by_name(DATA_SCHEMA_TSID_COLUMN_NAME)
-            .and_then(|col| {
-                matches!(col.data_type, ConcreteDataType::UInt64(_))
-                    .then_some(DATA_SCHEMA_TSID_COLUMN_NAME.to_string())
-            });
+        self.ctx.tsid_column = None;
 
         Ok(None)
     }
@@ -3658,7 +3799,80 @@ mod test {
         num_field: usize,
     ) -> DfTableSourceProvider {
         let catalog_list = MemoryCatalogManager::with_default_setup();
-        for (schema_name, table_name) in table_name_tuples {
+
+        let physical_table_name = "phy";
+        let physical_table_id = 999u32;
+
+        // Register a metric engine physical table with internal columns.
+        {
+            let mut columns = vec![
+                ColumnSchema::new(
+                    DATA_SCHEMA_TABLE_ID_COLUMN_NAME.to_string(),
+                    ConcreteDataType::uint32_datatype(),
+                    false,
+                ),
+                ColumnSchema::new(
+                    DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
+                    ConcreteDataType::uint64_datatype(),
+                    false,
+                ),
+            ];
+            for i in 0..num_tag {
+                columns.push(ColumnSchema::new(
+                    format!("tag_{i}"),
+                    ConcreteDataType::string_datatype(),
+                    false,
+                ));
+            }
+            columns.push(
+                ColumnSchema::new(
+                    "timestamp".to_string(),
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                )
+                .with_time_index(true),
+            );
+            for i in 0..num_field {
+                columns.push(ColumnSchema::new(
+                    format!("field_{i}"),
+                    ConcreteDataType::float64_datatype(),
+                    true,
+                ));
+            }
+
+            let schema = Arc::new(Schema::new(columns));
+            let primary_key_indices = (0..(2 + num_tag)).collect::<Vec<_>>();
+            let table_meta = TableMetaBuilder::empty()
+                .schema(schema)
+                .primary_key_indices(primary_key_indices)
+                .value_indices((2 + num_tag..2 + num_tag + 1 + num_field).collect())
+                .engine(METRIC_ENGINE_NAME.to_string())
+                .next_column_id(1024)
+                .build()
+                .unwrap();
+            let table_info = TableInfoBuilder::default()
+                .table_id(physical_table_id)
+                .name(physical_table_name)
+                .meta(table_meta)
+                .build()
+                .unwrap();
+            let table = EmptyTable::from_table_info(&table_info);
+
+            assert!(
+                catalog_list
+                    .register_table_sync(RegisterTableRequest {
+                        catalog: DEFAULT_CATALOG_NAME.to_string(),
+                        schema: DEFAULT_SCHEMA_NAME.to_string(),
+                        table_name: physical_table_name.to_string(),
+                        table_id: physical_table_id,
+                        table,
+                    })
+                    .is_ok()
+            );
+        }
+
+        // Register metric engine logical tables without `__tsid`, referencing the physical table.
+        for (idx, (schema_name, table_name)) in table_name_tuples.iter().enumerate() {
             let mut columns = vec![];
             for i in 0..num_tag {
                 columns.push(ColumnSchema::new(
@@ -3682,26 +3896,25 @@ mod test {
                     true,
                 ));
             }
-            columns.push(ColumnSchema::new(
-                DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
-                ConcreteDataType::uint64_datatype(),
-                false,
-            ));
 
             let schema = Arc::new(Schema::new(columns));
-
-            let tsid_idx = num_tag + 1 + num_field;
-            let mut primary_key_indices = (0..num_tag).collect::<Vec<_>>();
-            primary_key_indices.push(tsid_idx);
-
+            let mut options = table::requests::TableOptions::default();
+            options.extra_options.insert(
+                LOGICAL_TABLE_METADATA_KEY.to_string(),
+                physical_table_name.to_string(),
+            );
+            let table_id = 1024u32 + idx as u32;
             let table_meta = TableMetaBuilder::empty()
                 .schema(schema)
-                .primary_key_indices(primary_key_indices)
+                .primary_key_indices((0..num_tag).collect())
                 .value_indices((num_tag + 1..num_tag + 1 + num_field).collect())
+                .engine(METRIC_ENGINE_NAME.to_string())
+                .options(options)
                 .next_column_id(1024)
                 .build()
                 .unwrap();
             let table_info = TableInfoBuilder::default()
+                .table_id(table_id)
                 .name(table_name.clone())
                 .meta(table_meta)
                 .build()
@@ -3714,7 +3927,7 @@ mod test {
                         catalog: DEFAULT_CATALOG_NAME.to_string(),
                         schema: schema_name.clone(),
                         table_name: table_name.clone(),
-                        table_id: 1024,
+                        table_id,
                         table,
                     })
                     .is_ok()
@@ -4123,6 +4336,89 @@ mod test {
                 .iter()
                 .any(|field| field.name() == DATA_SCHEMA_TSID_COLUMN_NAME)
         );
+    }
+
+    #[tokio::test]
+    async fn tsid_is_not_used_when_physical_table_is_missing() {
+        let prom_expr = parser::parse("some_metric").unwrap();
+        let eval_stmt = EvalStmt {
+            expr: prom_expr,
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+
+        let catalog_list = MemoryCatalogManager::with_default_setup();
+
+        // Register a metric engine logical table referencing a missing physical table.
+        let mut columns = vec![ColumnSchema::new(
+            "tag_0".to_string(),
+            ConcreteDataType::string_datatype(),
+            false,
+        )];
+        columns.push(
+            ColumnSchema::new(
+                "timestamp".to_string(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+        );
+        columns.push(ColumnSchema::new(
+            "field_0".to_string(),
+            ConcreteDataType::float64_datatype(),
+            true,
+        ));
+        let schema = Arc::new(Schema::new(columns));
+        let mut options = table::requests::TableOptions::default();
+        options
+            .extra_options
+            .insert(LOGICAL_TABLE_METADATA_KEY.to_string(), "phy".to_string());
+        let table_meta = TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .value_indices(vec![2])
+            .engine(METRIC_ENGINE_NAME.to_string())
+            .options(options)
+            .next_column_id(1024)
+            .build()
+            .unwrap();
+        let table_info = TableInfoBuilder::default()
+            .table_id(1024)
+            .name("some_metric")
+            .meta(table_meta)
+            .build()
+            .unwrap();
+        let table = EmptyTable::from_table_info(&table_info);
+        catalog_list
+            .register_table_sync(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: "some_metric".to_string(),
+                table_id: 1024,
+                table,
+            })
+            .unwrap();
+
+        let table_provider = DfTableSourceProvider::new(
+            catalog_list,
+            false,
+            QueryContext::arc(),
+            DummyDecoder::arc(),
+            false,
+        );
+
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(plan_str.contains("PromSeriesDivide: tags=[\"tag_0\"]"));
+        assert!(!plan_str.contains("PromSeriesDivide: tags=[\"__tsid\"]"));
     }
 
     #[tokio::test]

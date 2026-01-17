@@ -343,7 +343,7 @@ mod test {
             .await
             .unwrap();
 
-        assert_eq!(scan_req.projection.unwrap(), vec![11, 10, 9, 8, 3, 0, 1]);
+        assert_eq!(scan_req.projection.unwrap(), vec![11, 10, 9, 8, 0, 1, 4]);
         assert_eq!(scan_req.filters.len(), 1);
         assert_eq!(
             scan_req.filters[0],
