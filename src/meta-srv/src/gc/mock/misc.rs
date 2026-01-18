@@ -70,7 +70,7 @@ async fn test_empty_file_refs_manifest() {
     )]);
 
     let report = scheduler
-        .parallel_process_datanodes(datanode_to_candidates)
+        .parallel_process_datanodes(datanode_to_candidates, HashMap::new(), HashMap::new())
         .await;
 
     assert_eq!(report.per_datanode_reports.len(), 1);
@@ -147,7 +147,7 @@ async fn test_multiple_regions_per_table() {
     )]);
 
     let report = scheduler
-        .parallel_process_datanodes(datanode_to_candidates)
+        .parallel_process_datanodes(datanode_to_candidates, HashMap::new(), HashMap::new())
         .await;
 
     assert_eq!(report.per_datanode_reports.len(), 1);

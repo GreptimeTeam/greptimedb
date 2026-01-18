@@ -96,7 +96,7 @@ async fn test_concurrent_table_processing_limits() {
     )]);
 
     let report = scheduler
-        .parallel_process_datanodes(datanode_to_candidates)
+        .parallel_process_datanodes(datanode_to_candidates, HashMap::new(), HashMap::new())
         .await;
 
     // Should process all datanodes
@@ -168,7 +168,7 @@ async fn test_datanode_processes_tables_with_partial_gc_failures() {
     )]);
 
     let report = scheduler
-        .parallel_process_datanodes(datanode_to_candidates)
+        .parallel_process_datanodes(datanode_to_candidates, HashMap::new(), HashMap::new())
         .await;
 
     // Should have one datanode with mixed results
@@ -260,6 +260,8 @@ async fn test_region_gc_concurrency_limit() {
         .process_datanode_gc(
             peer,
             candidates.into_iter().map(|c| (table_id, c)).collect(),
+            HashSet::new(),
+            HashMap::new(),
         )
         .await
         .unwrap();
@@ -371,7 +373,7 @@ async fn test_region_gc_concurrency_with_partial_failures() {
     )]);
 
     let report = scheduler
-        .parallel_process_datanodes(datanode_to_candidates)
+        .parallel_process_datanodes(datanode_to_candidates, HashMap::new(), HashMap::new())
         .await;
 
     let report = report.per_datanode_reports.get(&peer.id).unwrap();
@@ -501,7 +503,7 @@ async fn test_region_gc_concurrency_with_retryable_errors() {
         candidates.into_iter().map(|c| (table_id, c)).collect(),
     )]);
     let report = scheduler
-        .parallel_process_datanodes(datanode_to_candidates)
+        .parallel_process_datanodes(datanode_to_candidates, HashMap::new(), HashMap::new())
         .await;
 
     let report = report.per_datanode_reports.get(&peer.id).unwrap();
