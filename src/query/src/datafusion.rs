@@ -46,7 +46,6 @@ use futures_util::StreamExt;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt, ensure};
 use sqlparser::ast::AnalyzeFormat;
-use store_api::metric_engine_consts::is_metric_engine_internal_column;
 use table::TableRef;
 use table::requests::{DeleteRequest, InsertRequest};
 use tracing::Span;
@@ -201,7 +200,6 @@ impl DatafusionQueryEngine {
         let rowkey_columns = table_info
             .meta
             .row_key_column_names()
-            .filter(|name| !is_metric_engine_internal_column(name))
             .collect::<Vec<&String>>();
         let column_vectors = column_vectors
             .into_iter()

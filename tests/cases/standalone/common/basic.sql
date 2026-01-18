@@ -1,5 +1,3 @@
-USE public;
-
 CREATE TABLE system_metrics (
     host STRING,
     idc STRING,

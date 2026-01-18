@@ -34,7 +34,6 @@ use datafusion_expr::LogicalPlan;
 use openmetrics_parser::{MetricsExposition, PrometheusType, PrometheusValue};
 use snafu::{OptionExt, ResultExt};
 use snap::raw::{Decoder, Encoder};
-use store_api::metric_engine_consts::is_metric_engine_internal_column;
 
 use crate::error::{self, Result};
 use crate::row_writer::{self, MultiTableData};
@@ -270,9 +269,7 @@ fn collect_timeseries_ids(table_name: &str, recordbatch: &RecordBatch) -> Vec<Ti
     let columns = column_names
         .enumerate()
         .filter(|(_, column_name)| {
-            *column_name != greptime_timestamp()
-                && *column_name != greptime_value()
-                && !is_metric_engine_internal_column(column_name.as_str())
+            *column_name != greptime_timestamp() && *column_name != greptime_value()
         })
         .map(|(i, column_name)| {
             (

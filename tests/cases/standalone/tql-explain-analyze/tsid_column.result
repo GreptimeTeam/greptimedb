@@ -47,10 +47,10 @@ TQL ANALYZE (0, 10, '5s') sum(tsid_metric);
 |_|_|_|
 | 1_| 0_|_SortPreservingMergeExec: [ts@0 ASC NULLS LAST] REDACTED
 |_|_|_SortExec: expr=[ts@0 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
-|_|_|_AggregateExec: mode=FinalPartitioned, gby=[ts@0 as ts], aggr=[sum(tsid_physical.val)] REDACTED
+|_|_|_AggregateExec: mode=FinalPartitioned, gby=[ts@0 as ts], aggr=[sum(tsid_metric.val)] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_AggregateExec: mode=Partial, gby=[ts@1 as ts], aggr=[sum(tsid_physical.val)] REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[ts@1 as ts], aggr=[sum(tsid_metric.val)] REDACTED
 |_|_|_ProjectionExec: expr=[val@0 as val, ts@2 as ts] REDACTED
 |_|_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
@@ -81,10 +81,10 @@ TQL ANALYZE (0, 10, '5s') sum by (job, instance) (tsid_metric);
 |_|_|_|
 | 1_| 0_|_SortPreservingMergeExec: [job@0 ASC NULLS LAST, instance@1 ASC NULLS LAST, ts@2 ASC NULLS LAST] REDACTED
 |_|_|_SortExec: expr=[job@0 ASC NULLS LAST, instance@1 ASC NULLS LAST, ts@2 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
-|_|_|_AggregateExec: mode=FinalPartitioned, gby=[job@0 as job, instance@1 as instance, ts@2 as ts], aggr=[sum(tsid_physical.val), __tsid] REDACTED
+|_|_|_AggregateExec: mode=FinalPartitioned, gby=[job@0 as job, instance@1 as instance, ts@2 as ts], aggr=[sum(tsid_metric.val), __tsid] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_AggregateExec: mode=Partial, gby=[job@2 as job, instance@1 as instance, ts@4 as ts], aggr=[sum(tsid_physical.val), __tsid] REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[job@2 as job, instance@1 as instance, ts@4 as ts], aggr=[sum(tsid_metric.val), __tsid] REDACTED
 |_|_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
 |_|_|_SortExec: expr=[__tsid@3 ASC, ts@4 ASC], preserve_partitioning=[true] REDACTED

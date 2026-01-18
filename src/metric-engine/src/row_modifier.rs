@@ -111,7 +111,7 @@ impl RowModifier {
                 .encode_to_vec(internal_columns.into_iter(), &mut buffer)
                 .context(EncodePrimaryKeySnafu)?;
             self.codec
-                .encode_to_vec(row_iter.user_primary_keys(), &mut buffer)
+                .encode_to_vec(row_iter.primary_keys(), &mut buffer)
                 .context(EncodePrimaryKeySnafu)?;
 
             values.push(ValueData::BinaryValue(buffer.clone()).into());
@@ -138,50 +138,27 @@ impl RowModifier {
     /// Modifies rows with dense primary key encoding.
     /// It adds two columns(`__table_id`, `__tsid`) to the row.
     fn modify_rows_dense(&self, mut iter: RowsIter, table_ids: TableIdInput<'_>) -> Result<Rows> {
-        let table_id_index = iter
-            .rows
-            .schema
-            .iter()
-            .position(|col| col.column_name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME);
-        let tsid_index = iter
-            .rows
-            .schema
-            .iter()
-            .position(|col| col.column_name == DATA_SCHEMA_TSID_COLUMN_NAME);
-
-        if table_id_index.is_none() {
-            iter.rows.schema.push(ColumnSchema {
-                column_name: DATA_SCHEMA_TABLE_ID_COLUMN_NAME.to_string(),
-                datatype: ColumnDataType::Uint32 as i32,
-                semantic_type: SemanticType::Tag as _,
-                datatype_extension: None,
-                options: None,
-            });
-        }
-        if tsid_index.is_none() {
-            iter.rows.schema.push(ColumnSchema {
-                column_name: DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
-                datatype: ColumnDataType::Uint64 as i32,
-                semantic_type: SemanticType::Tag as _,
-                datatype_extension: None,
-                options: None,
-            });
-        }
-
+        // add table_name column
+        iter.rows.schema.push(ColumnSchema {
+            column_name: DATA_SCHEMA_TABLE_ID_COLUMN_NAME.to_string(),
+            datatype: ColumnDataType::Uint32 as i32,
+            semantic_type: SemanticType::Tag as _,
+            datatype_extension: None,
+            options: None,
+        });
+        // add tsid column
+        iter.rows.schema.push(ColumnSchema {
+            column_name: DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
+            datatype: ColumnDataType::Uint64 as i32,
+            semantic_type: SemanticType::Tag as _,
+            datatype_extension: None,
+            options: None,
+        });
         for (row_index, row_iter) in iter.iter_mut().enumerate() {
             let table_id = table_ids.table_id_for_row(row_index);
             let (table_id_value, tsid) = Self::fill_internal_columns(table_id, &row_iter);
-            if let Some(table_id_index) = table_id_index {
-                row_iter.row.values[table_id_index] = table_id_value;
-            } else {
-                row_iter.row.values.push(table_id_value);
-            }
-
-            if let Some(tsid_index) = tsid_index {
-                row_iter.row.values[tsid_index] = tsid;
-            } else {
-                row_iter.row.values.push(tsid);
-            }
+            row_iter.row.values.push(table_id_value);
+            row_iter.row.values.push(tsid);
         }
 
         Ok(iter.rows)
@@ -205,15 +182,7 @@ impl RowModifier {
         let ts_id = if !iter.has_null_labels() {
             // No null labels in row, we can safely reuse the precomputed label name hash.
             let mut ts_id_gen = TsidGenerator::new(iter.index.label_name_hash);
-            for (name, value) in iter.primary_keys_with_name() {
-                // Internal columns are not part of TSID generation.
-                // They may appear when request rows are derived from scans that include them.
-                if matches!(
-                    name.as_str(),
-                    DATA_SCHEMA_TABLE_ID_COLUMN_NAME | DATA_SCHEMA_TSID_COLUMN_NAME
-                ) {
-                    continue;
-                }
+            for (_, value) in iter.primary_keys_with_name() {
                 // The type is checked before. So only null is ignored.
                 if let Some(ValueData::StringValue(string)) = &value.value_data {
                     ts_id_gen.write_str(string);
@@ -230,13 +199,6 @@ impl RowModifier {
             let mut hasher = TsidGenerator::default();
             // 1. Find out label names with non-null values and get the hash.
             for (name, value) in iter.primary_keys_with_name() {
-                // Internal columns are not part of TSID generation.
-                if matches!(
-                    name.as_str(),
-                    DATA_SCHEMA_TABLE_ID_COLUMN_NAME | DATA_SCHEMA_TSID_COLUMN_NAME
-                ) {
-                    continue;
-                }
                 // The type is checked before. So only null is ignored.
                 if let Some(ValueData::StringValue(_)) = &value.value_data {
                     hasher.write_str(name);
@@ -246,14 +208,7 @@ impl RowModifier {
 
             // 2. Use label name hash as seed and continue with label values.
             let mut final_hasher = TsidGenerator::new(label_name_hash);
-            for (name, value) in iter.primary_keys_with_name() {
-                // Internal columns are not part of TSID generation.
-                if matches!(
-                    name.as_str(),
-                    DATA_SCHEMA_TABLE_ID_COLUMN_NAME | DATA_SCHEMA_TSID_COLUMN_NAME
-                ) {
-                    continue;
-                }
+            for (_, value) in iter.primary_keys_with_name() {
                 if let Some(ValueData::StringValue(value)) = &value.value_data {
                     final_hasher.write_str(value);
                 }
@@ -413,13 +368,6 @@ pub struct RowIter<'a> {
 }
 
 impl RowIter<'_> {
-    fn is_internal_column(&self, idx: &ValueIndex) -> bool {
-        matches!(
-            self.schema[idx.index].column_name.as_str(),
-            DATA_SCHEMA_TABLE_ID_COLUMN_NAME | DATA_SCHEMA_TSID_COLUMN_NAME
-        )
-    }
-
     /// Returns the primary keys with their names.
     fn primary_keys_with_name(&self) -> impl Iterator<Item = (&String, &Value)> {
         self.index.indices[..self.index.num_primary_key_column]
@@ -436,9 +384,7 @@ impl RowIter<'_> {
     fn has_null_labels(&self) -> bool {
         self.index.indices[..self.index.num_primary_key_column]
             .iter()
-            .any(|idx| {
-                !self.is_internal_column(idx) && self.row.values[idx.index].value_data.is_none()
-            })
+            .any(|idx| self.row.values[idx.index].value_data.is_none())
     }
 
     /// Returns the primary keys.
@@ -454,13 +400,6 @@ impl RowIter<'_> {
                     ),
                 )
             })
-    }
-
-    /// Returns the primary keys excluding reserved internal columns.
-    pub fn user_primary_keys(&self) -> impl Iterator<Item = (ColumnId, ValueRef<'_>)> {
-        self.primary_keys().filter(|(column_id, _)| {
-            *column_id != ReservedColumnId::table_id() && *column_id != ReservedColumnId::tsid()
-        })
     }
 
     /// Returns the remaining columns.
@@ -550,59 +489,6 @@ mod tests {
             ValueData::BinaryValue(encoded_primary_key).into()
         );
         assert_eq!(result.schema, expected_sparse_schema());
-    }
-
-    #[test]
-    fn test_encode_sparse_ignores_input_tsid_column() {
-        let name_to_column_id = test_name_to_column_id();
-        let encoder = RowModifier::default();
-        let table_id = 1025;
-
-        let rows_without_tsid = Rows {
-            schema: test_schema(),
-            rows: vec![test_row("greptimedb", "127.0.0.1")],
-        };
-
-        let mut schema_with_tsid = test_schema();
-        schema_with_tsid.push(ColumnSchema {
-            column_name: DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
-            datatype: ColumnDataType::Uint64 as i32,
-            semantic_type: SemanticType::Tag as _,
-            datatype_extension: None,
-            options: None,
-        });
-        let rows_with_tsid = Rows {
-            schema: schema_with_tsid,
-            rows: vec![Row {
-                values: vec![
-                    ValueData::StringValue("greptimedb".to_string()).into(),
-                    ValueData::StringValue("127.0.0.1".to_string()).into(),
-                    ValueData::U64Value(123).into(),
-                ],
-            }],
-        };
-
-        let result_without_tsid = encoder
-            .modify_rows(
-                RowsIter::new(rows_without_tsid, &name_to_column_id),
-                TableIdInput::Single(table_id),
-                PrimaryKeyEncoding::Sparse,
-            )
-            .unwrap();
-        let result_with_tsid = encoder
-            .modify_rows(
-                RowsIter::new(rows_with_tsid, &name_to_column_id),
-                TableIdInput::Single(table_id),
-                PrimaryKeyEncoding::Sparse,
-            )
-            .unwrap();
-
-        assert_eq!(result_without_tsid.schema, expected_sparse_schema());
-        assert_eq!(result_with_tsid.schema, expected_sparse_schema());
-        assert_eq!(
-            result_without_tsid.rows[0].values,
-            result_with_tsid.rows[0].values
-        );
     }
 
     fn expected_sparse_schema() -> Vec<ColumnSchema> {

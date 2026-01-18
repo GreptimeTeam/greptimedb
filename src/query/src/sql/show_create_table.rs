@@ -250,9 +250,8 @@ fn create_table_constraints(
             column: Ident::with_quote(quote_style, column_name),
         });
     }
-    let primary_key_columns = primary_key_columns_for_show_create(table_meta, engine);
-    if !primary_key_columns.is_empty() {
-        let columns = primary_key_columns
+    if !table_meta.primary_key_indices.is_empty() {
+        let columns = primary_key_columns_for_show_create(table_meta, engine)
             .into_iter()
             .map(|name| Ident::with_quote(quote_style, name))
             .collect();
@@ -315,7 +314,6 @@ mod tests {
     use datatypes::schema::{
         FulltextOptions, Schema, SchemaRef, SkippingIndexOptions, VectorIndexOptions,
     };
-    use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
     use table::metadata::*;
     use table::requests::{
         FILE_TABLE_FORMAT_KEY, FILE_TABLE_LOCATION_KEY, FILE_TABLE_META_KEY, TableOptions,
@@ -483,52 +481,5 @@ WITH(
 )"#,
             sql
         );
-    }
-
-    #[test]
-    fn test_show_create_metric_table_empty_primary_key_is_omitted() {
-        let schema = vec![
-            ColumnSchema::new(
-                "greptime_timestamp",
-                ConcreteDataType::timestamp_millisecond_datatype(),
-                false,
-            )
-            .with_time_index(true),
-            ColumnSchema::new("greptime_value", ConcreteDataType::float64_datatype(), true),
-            ColumnSchema::new(
-                DATA_SCHEMA_TSID_COLUMN_NAME,
-                ConcreteDataType::uint64_datatype(),
-                false,
-            ),
-        ];
-        let table_schema = SchemaRef::new(Schema::new(schema));
-        let meta = TableMetaBuilder::empty()
-            .schema(table_schema)
-            .primary_key_indices(vec![2])
-            .value_indices(vec![0, 1])
-            .engine("metric".to_string())
-            .next_column_id(0)
-            .options(Default::default())
-            .created_on(Default::default())
-            .build()
-            .unwrap();
-
-        let info = Arc::new(
-            TableInfoBuilder::default()
-                .table_id(1024)
-                .table_version(0 as TableVersion)
-                .name("test_metric_table")
-                .schema_name("public".to_string())
-                .catalog_name("greptime".to_string())
-                .desc(None)
-                .table_type(TableType::Base)
-                .meta(meta)
-                .build()
-                .unwrap(),
-        );
-
-        let stmt = create_table_stmt(&info, None, '"').unwrap();
-        let sql = format!("\n{}", stmt);
-        assert!(!sql.contains("PRIMARY KEY"));
     }
 }

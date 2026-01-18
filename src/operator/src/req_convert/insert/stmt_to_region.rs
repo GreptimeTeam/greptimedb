@@ -36,7 +36,6 @@ use snafu::{OptionExt, ResultExt, ensure};
 use sql::ast::ObjectNamePartExt;
 use sql::statements::insert::Insert;
 use sqlparser::ast::{ObjectName, Value as SqlValue};
-use store_api::metric_engine_consts::is_metric_engine_internal_column;
 use table::TableRef;
 use table::metadata::TableInfoRef;
 
@@ -384,7 +383,6 @@ fn column_names<'a>(stmt: &'a Insert, table_schema: &'a SchemaRef) -> Vec<&'a St
         table_schema
             .column_schemas()
             .iter()
-            .filter(|column| !is_metric_engine_internal_column(&column.name))
             .map(|column| &column.name)
             .collect()
     }
