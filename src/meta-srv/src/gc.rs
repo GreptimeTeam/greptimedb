@@ -19,6 +19,7 @@ use store_api::storage::RegionId;
 
 mod candidate;
 mod ctx;
+mod dropped;
 mod handler;
 #[cfg(test)]
 mod mock;

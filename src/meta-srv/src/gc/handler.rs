@@ -16,7 +16,6 @@ use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use common_meta::datanode::{RegionManifestInfo, RegionStat};
-use common_meta::key::table_repart::TableRepartValue;
 use common_meta::peer::Peer;
 use common_telemetry::{debug, error, info, warn};
 use futures::StreamExt;
@@ -29,69 +28,62 @@ use table::metadata::TableId;
 use crate::error::Result;
 use crate::gc::Region2Peers;
 use crate::gc::candidate::GcCandidate;
+use crate::gc::dropped::DroppedRegionCollector;
 use crate::gc::scheduler::{GcJobReport, GcScheduler};
 use crate::gc::tracker::RegionGcInfo;
 
 impl GcScheduler {
-    /// Iterate through all region stats, find region that might need gc, and send gc instruction to
-    /// the corresponding datanode with improved parallel processing and retry logic.
     pub(crate) async fn trigger_gc(&self) -> Result<GcJobReport> {
         let start_time = Instant::now();
         info!("Starting GC cycle");
 
-        // Step 1: Get all region statistics
         let table_to_region_stats = self.ctx.get_table_to_region_stats().await?;
         info!(
             "Fetched region stats for {} tables",
             table_to_region_stats.len()
         );
 
-        // Step 2: Select GC candidates based on our scoring algorithm
         let per_table_candidates = self.select_gc_candidates(&table_to_region_stats).await?;
 
-        let active_region_ids = table_to_region_stats
+        let active_region_ids: HashSet<RegionId> = table_to_region_stats
             .values()
             .flat_map(|stats| stats.iter().map(|stat| stat.id))
-            .collect::<HashSet<_>>();
+            .collect();
 
-        let table_reparts = self.ctx.get_table_reparts().await?;
-        let dropped_regions = self.collect_dropped_regions(table_reparts, &active_region_ids);
-        let dropped_regions = self
-            .filter_dropped_regions_by_cooldown(dropped_regions)
-            .await;
+        let dropped_collector =
+            DroppedRegionCollector::new(self.ctx.as_ref(), &self.config, &self.region_gc_tracker);
+        let dropped_assignment = dropped_collector
+            .collect_and_assign(&active_region_ids)
+            .await?;
 
-        if per_table_candidates.is_empty() && dropped_regions.is_empty() {
+        if per_table_candidates.is_empty() && dropped_assignment.regions_by_peer.is_empty() {
             info!("No GC candidates found, skipping GC cycle");
             return Ok(Default::default());
         }
 
-        // Step 3: Aggregate candidates by datanode
         let mut datanode_to_candidates = self
             .aggregate_candidates_by_datanode(per_table_candidates)
             .await?;
 
-        let (dropped_by_peer, force_full_listing_by_peer, region_routes_override_by_peer) =
-            self.assign_dropped_regions(&dropped_regions).await?;
-        self.merge_dropped_regions(&mut datanode_to_candidates, dropped_by_peer);
+        self.merge_dropped_regions(&mut datanode_to_candidates, &dropped_assignment);
 
         if datanode_to_candidates.is_empty() {
             info!("No valid datanode candidates found, skipping GC cycle");
             return Ok(Default::default());
         }
 
-        // Step 4: Process datanodes concurrently with limited parallelism
         let report = self
             .parallel_process_datanodes(
                 datanode_to_candidates,
-                force_full_listing_by_peer,
-                region_routes_override_by_peer,
+                dropped_assignment.force_full_listing,
+                dropped_assignment.region_routes_override,
             )
             .await;
 
         let duration = start_time.elapsed();
         info!(
             "Finished GC cycle. Processed {} datanodes ({} failed). Duration: {:?}",
-            report.per_datanode_reports.len(), // Reuse field for datanode count
+            report.per_datanode_reports.len(),
             report.failed_datanodes.len(),
             duration
         );
@@ -100,163 +92,19 @@ impl GcScheduler {
         Ok(report)
     }
 
-    fn collect_dropped_regions(
-        &self,
-        table_reparts: Vec<(TableId, TableRepartValue)>,
-        active_region_ids: &HashSet<RegionId>,
-    ) -> HashMap<TableId, HashMap<RegionId, HashSet<RegionId>>> {
-        let mut dropped_regions: HashMap<TableId, HashMap<RegionId, HashSet<RegionId>>> =
-            HashMap::new();
-
-        for (table_id, repart) in table_reparts {
-            if repart.src_to_dst.is_empty() {
-                continue;
-            }
-
-            let entry = dropped_regions.entry(table_id).or_default();
-            for (src_region, dst_regions) in repart.src_to_dst {
-                if active_region_ids.contains(&src_region) {
-                    continue;
-                }
-                entry.insert(src_region, dst_regions.into_iter().collect());
-            }
-        }
-
-        dropped_regions
-    }
-
-    /// Filter out dropped regions that are still in their cooldown period.
-    async fn filter_dropped_regions_by_cooldown(
-        &self,
-        dropped_regions: HashMap<TableId, HashMap<RegionId, HashSet<RegionId>>>,
-    ) -> HashMap<TableId, HashMap<RegionId, HashSet<RegionId>>> {
-        if dropped_regions.is_empty() {
-            return dropped_regions;
-        }
-
-        let now = Instant::now();
-        let tracker = self.region_gc_tracker.lock().await;
-        let mut filtered = HashMap::new();
-
-        for (table_id, regions) in dropped_regions {
-            let mut kept = HashMap::new();
-            for (region_id, dst_regions) in regions {
-                if let Some(gc_info) = tracker.get(&region_id)
-                    && now.saturating_duration_since(gc_info.last_gc_time)
-                        < self.config.gc_cooldown_period
-                {
-                    debug!("Skipping dropped region {} due to cooldown", region_id);
-                    continue;
-                }
-                kept.insert(region_id, dst_regions);
-            }
-
-            if !kept.is_empty() {
-                filtered.insert(table_id, kept);
-            }
-        }
-
-        filtered
-    }
-
-    async fn assign_dropped_regions(
-        &self,
-        dropped_regions: &HashMap<TableId, HashMap<RegionId, HashSet<RegionId>>>,
-    ) -> Result<(
-        HashMap<Peer, Vec<(TableId, RegionId)>>,
-        HashMap<Peer, HashSet<RegionId>>,
-        HashMap<Peer, Region2Peers>,
-    )> {
-        let mut dropped_by_peer: HashMap<Peer, Vec<(u32, RegionId)>> = HashMap::new();
-        let mut force_full_listing_by_peer: HashMap<Peer, HashSet<RegionId>> = HashMap::new();
-        let mut region_routes_override_by_peer: HashMap<Peer, Region2Peers> = HashMap::new();
-
-        for (table_id, regions) in dropped_regions {
-            let (phy_table_id, table_route) = match self.ctx.get_table_route(*table_id).await {
-                Ok(route) => route,
-                Err(e) => {
-                    warn!(
-                        "Failed to get table route for table {}: {}, skipping dropped regions",
-                        table_id, e
-                    );
-                    continue;
-                }
-            };
-
-            if phy_table_id != *table_id {
-                continue;
-            }
-
-            let active_region_ids = table_route
-                .region_routes
-                .iter()
-                .map(|r| r.region.id)
-                .collect::<HashSet<_>>();
-
-            let mut leader_peers = table_route
-                .region_routes
-                .iter()
-                .filter_map(|r| r.leader_peer.clone())
-                .collect::<Vec<_>>();
-            leader_peers.sort_by_key(|peer| peer.id);
-            leader_peers.dedup_by_key(|peer| peer.id);
-
-            if leader_peers.is_empty() {
-                warn!(
-                    "No leader peers found for table {}, skipping dropped regions",
-                    table_id
-                );
-                continue;
-            }
-
-            for (region_id, _dst_regions) in regions {
-                if active_region_ids.contains(region_id) {
-                    debug!(
-                        "Skipping dropped region {} since it still exists in table route",
-                        region_id
-                    );
-                    continue;
-                }
-
-                let selected_idx = (region_id.as_u64() as usize) % leader_peers.len();
-                let peer = leader_peers[selected_idx].clone();
-
-                dropped_by_peer
-                    .entry(peer.clone())
-                    .or_default()
-                    .push((*table_id, *region_id));
-                force_full_listing_by_peer
-                    .entry(peer.clone())
-                    .or_default()
-                    .insert(*region_id);
-                region_routes_override_by_peer
-                    .entry(peer.clone())
-                    .or_default()
-                    .insert(*region_id, (peer, Vec::new()));
-            }
-        }
-
-        Ok((
-            dropped_by_peer,
-            force_full_listing_by_peer,
-            region_routes_override_by_peer,
-        ))
-    }
-
     fn merge_dropped_regions(
         &self,
         datanode_to_candidates: &mut HashMap<Peer, Vec<(TableId, GcCandidate)>>,
-        dropped_by_peer: HashMap<Peer, Vec<(TableId, RegionId)>>,
+        assignment: &crate::gc::dropped::DroppedRegionAssignment,
     ) {
-        for (peer, regions) in dropped_by_peer {
-            let entry = datanode_to_candidates.entry(peer).or_default();
-            for (table_id, region_id) in regions {
-                entry.push((table_id, dropped_candidate(region_id)));
+        for (peer, dropped_infos) in &assignment.regions_by_peer {
+            let entry = datanode_to_candidates.entry(peer.clone()).or_default();
+            for info in dropped_infos {
+                entry.push((info.table_id, dropped_candidate(info.region_id)));
             }
         }
     }
 
-    /// Aggregate GC candidates by their corresponding datanode peer.
     pub(crate) async fn aggregate_candidates_by_datanode(
         &self,
         per_table_candidates: HashMap<TableId, Vec<GcCandidate>>,
