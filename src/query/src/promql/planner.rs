@@ -74,7 +74,7 @@ use regex::{self, Regex};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::{
     DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME, LOGICAL_TABLE_METADATA_KEY,
-    METRIC_ENGINE_NAME,
+    METRIC_ENGINE_NAME, is_metric_engine_internal_column,
 };
 use table::table::adapter::DfTableProviderAdapter;
 
@@ -1298,6 +1298,9 @@ impl PromPlanner {
                 }
                 let mut exprs = Vec::with_capacity(labels.labels.len());
                 for label in &labels.labels {
+                    if is_metric_engine_internal_column(label) {
+                        continue;
+                    }
                     // nonexistence label will be ignored
                     if let Some(column_name) = Self::find_case_sensitive_column(input_schema, label)
                     {
@@ -1320,6 +1323,10 @@ impl PromPlanner {
                     .iter()
                     .map(|f| f.name())
                     .collect::<BTreeSet<_>>();
+
+                // Exclude metric engine internal columns (not PromQL labels) from the implicit
+                // "without" label set.
+                all_fields.retain(|col| !is_metric_engine_internal_column(col.as_str()));
 
                 // remove "without"-ed fields
                 // nonexistence label will be ignored
@@ -1431,6 +1438,9 @@ impl PromPlanner {
     }
 
     fn find_case_sensitive_column(schema: &DFSchemaRef, column: &str) -> Option<String> {
+        if is_metric_engine_internal_column(column) {
+            return None;
+        }
         schema
             .fields()
             .iter()
@@ -4338,6 +4348,194 @@ mod test {
         let plan_str = plan.display_indent_schema().to_string();
         assert!(plan_str.contains("TableScan: some_metric"));
         assert!(!plan_str.contains("TableScan: phy"));
+    }
+
+    #[tokio::test]
+    async fn sum_without_does_not_group_by_tsid() {
+        let prom_expr = parser::parse("sum without (tag_0) (some_metric)").unwrap();
+        let eval_stmt = EvalStmt {
+            expr: prom_expr,
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+
+        let table_provider = build_test_table_provider_with_tsid(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            1,
+            1,
+        )
+        .await;
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(plan_str.contains("PromSeriesDivide: tags=[\"__tsid\"]"));
+
+        let aggr_line = plan_str
+            .lines()
+            .find(|line| line.contains("Aggregate: groupBy="))
+            .unwrap();
+        assert!(!aggr_line.contains(DATA_SCHEMA_TSID_COLUMN_NAME));
+    }
+
+    #[tokio::test]
+    async fn topk_without_does_not_partition_by_tsid() {
+        let prom_expr = parser::parse("topk without (tag_0) (1, some_metric)").unwrap();
+        let eval_stmt = EvalStmt {
+            expr: prom_expr,
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+
+        let table_provider = build_test_table_provider_with_tsid(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            1,
+            1,
+        )
+        .await;
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(plan_str.contains("PromSeriesDivide: tags=[\"__tsid\"]"));
+
+        let window_line = plan_str
+            .lines()
+            .find(|line| line.contains("WindowAggr: windowExpr=[[row_number()"))
+            .unwrap();
+        let partition_by = window_line
+            .split("PARTITION BY [")
+            .nth(1)
+            .and_then(|s| s.split("] ORDER BY").next())
+            .unwrap();
+        assert!(!partition_by.contains(DATA_SCHEMA_TSID_COLUMN_NAME));
+    }
+
+    #[tokio::test]
+    async fn sum_by_does_not_group_by_tsid() {
+        let prom_expr = parser::parse("sum by (__tsid) (some_metric)").unwrap();
+        let eval_stmt = EvalStmt {
+            expr: prom_expr,
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+
+        let table_provider = build_test_table_provider_with_tsid(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            1,
+            1,
+        )
+        .await;
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(plan_str.contains("PromSeriesDivide: tags=[\"__tsid\"]"));
+
+        let aggr_line = plan_str
+            .lines()
+            .find(|line| line.contains("Aggregate: groupBy="))
+            .unwrap();
+        assert!(!aggr_line.contains(DATA_SCHEMA_TSID_COLUMN_NAME));
+    }
+
+    #[tokio::test]
+    async fn topk_by_does_not_partition_by_tsid() {
+        let prom_expr = parser::parse("topk by (__tsid) (1, some_metric)").unwrap();
+        let eval_stmt = EvalStmt {
+            expr: prom_expr,
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+
+        let table_provider = build_test_table_provider_with_tsid(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            1,
+            1,
+        )
+        .await;
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(plan_str.contains("PromSeriesDivide: tags=[\"__tsid\"]"));
+
+        let window_line = plan_str
+            .lines()
+            .find(|line| line.contains("WindowAggr: windowExpr=[[row_number()"))
+            .unwrap();
+        let partition_by = window_line
+            .split("PARTITION BY [")
+            .nth(1)
+            .and_then(|s| s.split("] ORDER BY").next())
+            .unwrap();
+        assert!(!partition_by.contains(DATA_SCHEMA_TSID_COLUMN_NAME));
+    }
+
+    #[tokio::test]
+    async fn selector_matcher_on_tsid_does_not_use_internal_column() {
+        let prom_expr = parser::parse(r#"some_metric{__tsid="123"}"#).unwrap();
+        let eval_stmt = EvalStmt {
+            expr: prom_expr,
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+
+        let table_provider = build_test_table_provider_with_tsid(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            1,
+            1,
+        )
+        .await;
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+
+        fn collect_filter_cols(plan: &LogicalPlan, out: &mut HashSet<Column>) {
+            if let LogicalPlan::Filter(filter) = plan {
+                datafusion_expr::utils::expr_to_columns(&filter.predicate, out).unwrap();
+            }
+            for input in plan.inputs() {
+                collect_filter_cols(input, out);
+            }
+        }
+
+        let mut filter_cols = HashSet::new();
+        collect_filter_cols(&plan, &mut filter_cols);
+        assert!(
+            !filter_cols
+                .iter()
+                .any(|c| c.name == DATA_SCHEMA_TSID_COLUMN_NAME)
+        );
     }
 
     #[tokio::test]
