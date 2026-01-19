@@ -394,7 +394,8 @@ impl Inserter {
             instant_requests,
         } = requests;
 
-        // Mirror requests for source table to flownode asynchronously
+        // Mirror requests for source table to flownode asynchronously.
+        // This includes both normal AND instant TTL data for continuous queries.
         let flow_mirror_task = FlowMirrorTask::new(
             &self.table_flownode_set_cache,
             normal_requests
@@ -404,6 +405,13 @@ impl Inserter {
         )
         .await?;
         flow_mirror_task.detach(self.node_manager.clone())?;
+
+        // Filter expired rows from normal_requests AFTER flownode mirroring
+        // but BEFORE datanode writes. Instant requests are already excluded from datanodes.
+        let normal_requests = crate::req_convert::insert::filter_normal_requests_by_ttl(
+            normal_requests,
+            table_infos,
+        )?;
 
         // Write requests to datanode and wait for response
         let write_tasks = self
