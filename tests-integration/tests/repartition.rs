@@ -21,6 +21,7 @@ use common_test_util::temp_dir::create_temp_dir;
 use common_wal::config::DatanodeWalConfig;
 use frontend::error::Result as FrontendResult;
 use frontend::instance::Instance;
+use mito2::gc::GcConfig;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{QueryContext, QueryContextRef};
 use tests_integration::cluster::GreptimeDbClusterBuilder;
@@ -40,6 +41,15 @@ macro_rules! repartition_tests {
                             $crate::repartition::test_repartition_mito(store_type).await
                         }
                     }
+
+                    #[tokio::test(flavor = "multi_thread")]
+                    async fn [< test_repartition_metric >]() {
+                        let store_type = tests_integration::test_util::StorageType::$service;
+                        if store_type.test_on() {
+                            common_telemetry::init_default_ut_logging();
+                            $crate::repartition::test_repartition_metric(store_type).await
+                        }
+                    }
                 }
             }
         )*
@@ -57,6 +67,10 @@ pub async fn test_repartition_mito(store_type: StorageType) {
         .with_store_config(store_config)
         .with_shared_home_dir(Arc::new(home_dir))
         .with_datanode_wal_config(DatanodeWalConfig::Noop)
+        .with_datanode_gc_config(GcConfig {
+            enable: true,
+            ..Default::default()
+        })
         .build(true)
         .await;
 
@@ -279,6 +293,236 @@ pub async fn test_repartition_mito(store_type: StorageType) {
     run_sql(
         instance,
         "DROP TABLE `repartition_mito_table`",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+}
+
+pub async fn test_repartition_metric(store_type: StorageType) {
+    let cluster_name = "test_repartition_metric";
+    let (store_config, _guard) = get_test_store_config(&store_type);
+    let datanodes = 3u64;
+    let home_dir = create_temp_dir("test_repartition_metric_data_home");
+    let builder = GreptimeDbClusterBuilder::new(cluster_name).await;
+    let cluster = builder
+        .with_datanodes(datanodes as u32)
+        .with_store_config(store_config)
+        .with_shared_home_dir(Arc::new(home_dir))
+        .with_datanode_wal_config(DatanodeWalConfig::Noop)
+        .with_datanode_gc_config(GcConfig {
+            enable: true,
+            ..Default::default()
+        })
+        .build(true)
+        .await;
+
+    let query_ctx = QueryContext::arc();
+    let instance = cluster.fe_instance();
+
+    let sql = r#"
+        CREATE TABLE `repart_phy_metric`(
+          `ts` TIMESTAMP TIME INDEX,
+          `val` DOUBLE,
+          `host` STRING PRIMARY KEY
+        ) PARTITION ON COLUMNS (`host`) (
+          `host` < 'm',
+          `host` >= 'm'
+        ) ENGINE = metric WITH ("physical_metric_table" = "");
+    "#;
+    run_sql(instance, sql, query_ctx.clone()).await.unwrap();
+
+    let sql = r#"
+        CREATE TABLE `repart_log_metric`(
+          `ts` TIMESTAMP TIME INDEX,
+          `val` DOUBLE,
+          `host` STRING PRIMARY KEY
+        ) ENGINE = metric WITH ("on_physical_table" = "repart_phy_metric");
+    "#;
+    run_sql(instance, sql, query_ctx.clone()).await.unwrap();
+
+    let sql = r#"
+        INSERT INTO `repart_log_metric` (`host`, `ts`, `val`) VALUES
+          ('a_host', '2022-01-01 00:00:00', 1),
+          ('z_host', '2022-01-01 00:00:00', 2);
+    "#;
+    run_sql(instance, sql, query_ctx.clone()).await.unwrap();
+
+    let result = run_sql(
+        instance,
+        "SELECT * FROM `repart_log_metric` ORDER BY `host`",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    let expected = "\
++--------+---------------------+-----+
+| host   | ts                  | val |
++--------+---------------------+-----+
+| a_host | 2022-01-01T00:00:00 | 1.0 |
+| z_host | 2022-01-01T00:00:00 | 2.0 |
++--------+---------------------+-----+";
+    check_output_stream(result.data, expected).await;
+
+    let sql = r#"
+        ALTER TABLE `repart_phy_metric` SPLIT PARTITION (
+          `host` < 'm'
+        ) INTO (
+          `host` < 'g',
+          `host` >= 'g' AND `host` < 'm'
+        );
+    "#;
+    run_sql(instance, sql, query_ctx.clone()).await.unwrap();
+
+    let result = run_sql(
+        instance,
+        "SHOW CREATE TABLE `repart_phy_metric`",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    let expected_create_table_after_split = r#"+-------------------+--------------------------------------------------+
+| Table             | Create Table                                     |
++-------------------+--------------------------------------------------+
+| repart_phy_metric | CREATE TABLE IF NOT EXISTS "repart_phy_metric" ( |
+|                   |   "ts" TIMESTAMP(3) NOT NULL,                    |
+|                   |   "val" DOUBLE NULL,                             |
+|                   |   "host" STRING NULL,                            |
+|                   |   TIME INDEX ("ts"),                             |
+|                   |   PRIMARY KEY ("host")                           |
+|                   | )                                                |
+|                   | PARTITION ON COLUMNS ("host") (                  |
+|                   |   host < 'g',                                    |
+|                   |   host >= 'm',                                   |
+|                   |   host >= 'g' AND host < 'm'                     |
+|                   | )                                                |
+|                   | ENGINE=metric                                    |
+|                   | WITH(                                            |
+|                   |   physical_metric_table = ''                     |
+|                   | )                                                |
++-------------------+--------------------------------------------------+"#;
+    check_output_stream(result.data, expected_create_table_after_split).await;
+
+    let result = run_sql(
+        instance,
+        "SELECT * FROM `repart_log_metric` ORDER BY `host`",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    // FIXME(weny): fix the result.
+    let expected = "\
++--------+---------------------+-----+
+| host   | ts                  | val |
++--------+---------------------+-----+
+| a_host | 2022-01-01T00:00:00 | 1.0 |
+| z_host | 2022-01-01T00:00:00 | 2.0 |
++--------+---------------------+-----+";
+    check_output_stream(result.data, expected).await;
+
+    let sql = r#"INSERT INTO `repart_log_metric` (`host`, `ts`, `val`) VALUES ('b_host', '2022-01-02 00:00:00', 3.0);"#;
+    run_sql(instance, sql, query_ctx.clone()).await.unwrap();
+    let sql = r#"INSERT INTO `repart_log_metric` (`host`, `ts`, `val`) VALUES ('h_host', '2022-01-02 00:00:00', 4.0);"#;
+    run_sql(instance, sql, query_ctx.clone()).await.unwrap();
+
+    let result = run_sql(
+        instance,
+        "SELECT * FROM `repart_log_metric` WHERE `host` IN ('b_host', 'h_host') ORDER BY `host`",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    let expected = "\
++--------+---------------------+-----+
+| host   | ts                  | val |
++--------+---------------------+-----+
+| b_host | 2022-01-02T00:00:00 | 3.0 |
+| h_host | 2022-01-02T00:00:00 | 4.0 |
++--------+---------------------+-----+";
+    check_output_stream(result.data, expected).await;
+
+    let sql = r#"
+        ALTER TABLE `repart_phy_metric` MERGE PARTITION (
+          `host` < 'g',
+          `host` >= 'g' AND `host` < 'm'
+        );
+    "#;
+    run_sql(instance, sql, query_ctx.clone()).await.unwrap();
+
+    let result = run_sql(
+        instance,
+        "SHOW CREATE TABLE `repart_phy_metric`",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    let expected_create_table_after_merge = r#"+-------------------+--------------------------------------------------+
+| Table             | Create Table                                     |
++-------------------+--------------------------------------------------+
+| repart_phy_metric | CREATE TABLE IF NOT EXISTS "repart_phy_metric" ( |
+|                   |   "ts" TIMESTAMP(3) NOT NULL,                    |
+|                   |   "val" DOUBLE NULL,                             |
+|                   |   "host" STRING NULL,                            |
+|                   |   TIME INDEX ("ts"),                             |
+|                   |   PRIMARY KEY ("host")                           |
+|                   | )                                                |
+|                   | PARTITION ON COLUMNS ("host") (                  |
+|                   |   host < 'g' OR host >= 'g' AND host < 'm',      |
+|                   |   host >= 'm'                                    |
+|                   | )                                                |
+|                   | ENGINE=metric                                    |
+|                   | WITH(                                            |
+|                   |   physical_metric_table = ''                     |
+|                   | )                                                |
++-------------------+--------------------------------------------------+"#;
+    check_output_stream(result.data, expected_create_table_after_merge).await;
+
+    let result = run_sql(
+        instance,
+        "SELECT * FROM `repart_log_metric` ORDER BY `host`",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    let expected = "\
++--------+---------------------+-----+
+| host   | ts                  | val |
++--------+---------------------+-----+
+| a_host | 2022-01-01T00:00:00 | 1.0 |
+| b_host | 2022-01-02T00:00:00 | 3.0 |
+| h_host | 2022-01-02T00:00:00 | 4.0 |
+| z_host | 2022-01-01T00:00:00 | 2.0 |
++--------+---------------------+-----+";
+    check_output_stream(result.data, expected).await;
+
+    let sql = r#"INSERT INTO `repart_log_metric` (`host`, `ts`, `val`) VALUES ('c_host', '2022-01-03 00:00:00', 5.0);"#;
+    run_sql(instance, sql, query_ctx.clone()).await.unwrap();
+
+    let result = run_sql(
+        instance,
+        "SELECT * FROM `repart_log_metric` WHERE `host` = 'c_host'",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    let expected = "\
++--------+---------------------+-----+
+| host   | ts                  | val |
++--------+---------------------+-----+
+| c_host | 2022-01-03T00:00:00 | 5.0 |
++--------+---------------------+-----+";
+    check_output_stream(result.data, expected).await;
+
+    run_sql(
+        instance,
+        "DROP TABLE `repart_log_metric`",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    run_sql(
+        instance,
+        "DROP TABLE `repart_phy_metric`",
         query_ctx.clone(),
     )
     .await
