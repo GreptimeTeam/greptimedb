@@ -54,7 +54,7 @@ impl State for DeallocateRegion {
             .sum::<usize>();
         if region_to_deallocate == 0 {
             ctx.update_deallocate_region_elapsed(timer.elapsed());
-            return Ok((Box::new(RepartitionEnd), Status::done()));
+            return Ok((Box::new(RepartitionEnd), Status::executing(false)));
         }
 
         let table_id = ctx.persistent_ctx.table_id;
@@ -107,7 +107,7 @@ impl State for DeallocateRegion {
         ctx.invalidate_table_cache().await?;
 
         ctx.update_deallocate_region_elapsed(timer.elapsed());
-        Ok((Box::new(RepartitionEnd), Status::executing(false)))
+        Ok((Box::new(RepartitionEnd), Status::executing(true)))
     }
 
     fn as_any(&self) -> &dyn Any {
