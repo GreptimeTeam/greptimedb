@@ -157,15 +157,34 @@ impl Display for Metrics {
             + self.allocate_region_elapsed
             + self.finish_groups_elapsed
             + self.deallocate_region_elapsed;
-        write!(
-            f,
-            "total: {:?}, build_plan_elapsed: {:?}, allocate_region_elapsed: {:?}, finish_groups_elapsed: {:?}, deallocate_region_elapsed: {:?}",
-            total,
-            self.build_plan_elapsed,
-            self.allocate_region_elapsed,
-            self.finish_groups_elapsed,
-            self.deallocate_region_elapsed,
-        )
+        write!(f, "total: {:?}", total)?;
+        let mut parts = Vec::with_capacity(4);
+        if self.build_plan_elapsed > Duration::ZERO {
+            parts.push(format!("build_plan_elapsed: {:?}", self.build_plan_elapsed));
+        }
+        if self.allocate_region_elapsed > Duration::ZERO {
+            parts.push(format!(
+                "allocate_region_elapsed: {:?}",
+                self.allocate_region_elapsed
+            ));
+        }
+        if self.finish_groups_elapsed > Duration::ZERO {
+            parts.push(format!(
+                "finish_groups_elapsed: {:?}",
+                self.finish_groups_elapsed
+            ));
+        }
+        if self.deallocate_region_elapsed > Duration::ZERO {
+            parts.push(format!(
+                "deallocate_region_elapsed: {:?}",
+                self.deallocate_region_elapsed
+            ));
+        }
+
+        if !parts.is_empty() {
+            write!(f, ", {}", parts.join(", "))?;
+        }
+        Ok(())
     }
 }
 

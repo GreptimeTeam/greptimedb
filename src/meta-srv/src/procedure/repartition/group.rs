@@ -76,40 +76,40 @@ impl Display for Metrics {
             + self.remap_manifest_elapsed
             + self.update_metadata_elapsed;
         write!(f, "total: {:?}", total)?;
+        let mut parts = Vec::with_capacity(5);
         if self.flush_pending_deallocate_regions_elapsed > Duration::ZERO {
-            write!(
-                f,
-                ", flush_pending_deallocate_regions_elapsed: {:?}",
+            parts.push(format!(
+                "flush_pending_deallocate_regions_elapsed: {:?}",
                 self.flush_pending_deallocate_regions_elapsed
-            )?;
+            ));
         }
         if self.enter_staging_region_elapsed > Duration::ZERO {
-            write!(
-                f,
-                ", enter_staging_region_elapsed: {:?}",
+            parts.push(format!(
+                "enter_staging_region_elapsed: {:?}",
                 self.enter_staging_region_elapsed
-            )?;
+            ));
         }
         if self.apply_staging_manifest_elapsed > Duration::ZERO {
-            write!(
-                f,
-                ", apply_staging_manifest_elapsed: {:?}",
+            parts.push(format!(
+                "apply_staging_manifest_elapsed: {:?}",
                 self.apply_staging_manifest_elapsed
-            )?;
+            ));
         }
         if self.remap_manifest_elapsed > Duration::ZERO {
-            write!(
-                f,
-                ", remap_manifest_elapsed: {:?}",
+            parts.push(format!(
+                "remap_manifest_elapsed: {:?}",
                 self.remap_manifest_elapsed
-            )?;
+            ));
         }
         if self.update_metadata_elapsed > Duration::ZERO {
-            write!(
-                f,
-                ", update_metadata_elapsed: {:?}",
+            parts.push(format!(
+                "update_metadata_elapsed: {:?}",
                 self.update_metadata_elapsed
-            )?;
+            ));
+        }
+
+        if !parts.is_empty() {
+            write!(f, ", {}", parts.join(", "))?;
         }
         Ok(())
     }
