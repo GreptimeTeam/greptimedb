@@ -176,17 +176,18 @@ impl GcRegionsHandler {
     /// Get the access layer for the given table and region IDs.
     /// It also returns the mito regions if they are found in the engine.
     ///
-    /// This method also validates:
+    /// This method validates:
     /// 1. Any found region must be a Leader (not Follower)
     /// 2. Any missing region must not be routed to another datanode
+    ///
+    /// The AccessLayer is always constructed from table metadata for consistency.
     async fn get_access_layer(
         ctx: &HandlerContext,
         mito_engine: &MitoEngine,
         table_id: u32,
         region_ids: &[RegionId],
     ) -> Result<(AccessLayerRef, BTreeMap<RegionId, Option<MitoRegionRef>>)> {
-        // 1. Try to find active regions for this table
-        let mut access_layer = None;
+        // 1. Collect mito regions and validate Leader status
         let mut mito_regions = BTreeMap::new();
 
         for rid in region_ids {
@@ -203,10 +204,6 @@ impl GcRegionsHandler {
                     }
                     .build());
                 }
-
-                if access_layer.is_none() {
-                    access_layer = Some(r.access_layer());
-                }
             }
             mito_regions.insert(*rid, region);
         }
@@ -222,23 +219,8 @@ impl GcRegionsHandler {
             Self::validate_regions_not_routed_elsewhere(ctx, table_id, &missing_regions).await?;
         }
 
-        // 3. If no active region in the batch, try to find ANY active leader region of this table
-        if access_layer.is_none() {
-            for region in mito_engine.regions() {
-                if region.region_id().table_id() == table_id {
-                    // get access layer regardless of region being leader/follower is ok here
-                    access_layer = Some(region.access_layer());
-                    break;
-                }
-            }
-        }
-
-        // 4. Fallback to manual construction
-        let access_layer = if let Some(al) = access_layer {
-            al
-        } else {
-            Self::construct_access_layer(ctx, mito_engine, table_id).await?
-        };
+        // 3. Construct AccessLayer directly from table metadata
+        let access_layer = Self::construct_access_layer(ctx, mito_engine, table_id).await?;
 
         Ok((access_layer, mito_regions))
     }

@@ -107,6 +107,7 @@ impl MockSchedulerCtx {
         self
     }
 
+    #[allow(dead_code)]
     pub fn with_table_reparts(self, table_reparts: HashMap<TableId, TableRepartValue>) -> Self {
         *self.table_reparts.lock().unwrap() = table_reparts;
         self

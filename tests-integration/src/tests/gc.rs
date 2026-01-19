@@ -203,6 +203,7 @@ async fn test_gc_basic(store_type: &StorageType) {
         regions.clone(),
         false,                   // full_file_listing
         Duration::from_secs(10), // timeout
+        Default::default(),
     );
 
     // Submit the procedure to the procedure manager
