@@ -7,8 +7,6 @@ KUBERNETES_VERSION="${KUBERNETES_VERSION:-v1.32.0}"
 ENABLE_STANDALONE_MODE="${ENABLE_STANDALONE_MODE:-true}"
 DEFAULT_INSTALL_NAMESPACE=${DEFAULT_INSTALL_NAMESPACE:-default}
 GREPTIMEDB_IMAGE_TAG=${GREPTIMEDB_IMAGE_TAG:-latest}
-GREPTIMEDB_OPERATOR_IMAGE_TAG=${GREPTIMEDB_OPERATOR_IMAGE_TAG:-v0.5.1}
-GREPTIMEDB_INITIALIZER_IMAGE_TAG="${GREPTIMEDB_OPERATOR_IMAGE_TAG}"
 GREPTIME_CHART="https://greptimeteam.github.io/helm-charts/"
 ETCD_CHART="oci://registry-1.docker.io/bitnamicharts/etcd"
 ETCD_CHART_VERSION="${ETCD_CHART_VERSION:-12.0.8}"
@@ -78,7 +76,6 @@ function deploy_greptimedb_cluster() {
   helm upgrade --install "$cluster_name" greptime/greptimedb-cluster \
     --create-namespace \
     --set image.tag="$GREPTIMEDB_IMAGE_TAG" \
-    --set initializer.tag="$GREPTIMEDB_INITIALIZER_IMAGE_TAG" \
     --set "meta.backendStorage.etcd.endpoints[0]=etcd.$install_namespace.svc.cluster.local:2379" \
     --set meta.backendStorage.etcd.storeKeyPrefix="$cluster_name" \
     -n "$install_namespace"
@@ -134,7 +131,6 @@ function deploy_greptimedb_cluster_with_s3_storage() {
   helm upgrade --install "$cluster_name" greptime/greptimedb-cluster -n "$install_namespace" \
     --create-namespace \
     --set image.tag="$GREPTIMEDB_IMAGE_TAG" \
-    --set initializer.tag="$GREPTIMEDB_INITIALIZER_IMAGE_TAG" \
     --set "meta.backendStorage.etcd.endpoints[0]=etcd.$install_namespace.svc.cluster.local:2379" \
     --set meta.backendStorage.etcd.storeKeyPrefix="$cluster_name" \
     --set objectStorage.s3.bucket="$AWS_CI_TEST_BUCKET" \
