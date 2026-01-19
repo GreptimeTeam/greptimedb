@@ -103,13 +103,13 @@ impl<'a> Partitioner<'a> {
             ttl,
             &now,
         ).context(TtlFilterSnafu {
-            table_name: table_info.name.to_string(),
+            table_name: table_info.name.clone(),
         })?;
 
         // Track metrics
         if filtered_count > 0 {
             crate::metrics::DIST_INGEST_ROWS_FILTERED_TTL_COUNTER
-                .with_label_values(&[&table_info.name.to_string()])
+                .with_label_values(&[&table_info.name])
                 .inc_by(filtered_count as u64);
         }
 

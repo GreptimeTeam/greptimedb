@@ -1026,7 +1026,7 @@ impl ErrorExt for Error {
             | Error::SplitInsert { source, .. }
             | Error::SplitDelete { source, .. }
             | Error::FindRegionLeader { source, .. } => source.status_code(),
-            Error::TtlFilter { .. } => StatusCode::Internal,
+            Error::TtlFilter { source, .. } => source.status_code(),
             Error::UnrecognizedTableOption { .. } => StatusCode::InvalidArguments,
             Error::ReadObject { .. }
             | Error::ReadParquetMetadata { .. }
