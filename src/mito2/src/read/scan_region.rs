@@ -533,7 +533,6 @@ impl ScanRegion {
         }
 
         let input = ScanInput::new(self.access_layer, mapper)
-            .with_read_column_ids(read_column_ids)
             .with_time_range(Some(time_range))
             .with_predicate(predicate)
             .with_memtables(mem_range_builders)
@@ -597,15 +596,16 @@ impl ScanRegion {
         let mut seen = HashSet::new();
 
         for idx in projection {
-            let column = metadata
-                .column_metadatas
-                .get(*idx)
-                .context(InvalidRequestSnafu {
-                    region_id: metadata.region_id,
-                    reason: format!("projection index {} is out of bound", idx),
-                })?;
-            // keep the projection order
+            let column =
+                metadata
+                    .column_metadatas
+                    .get(*idx)
+                    .with_context(|| InvalidRequestSnafu {
+                        region_id: metadata.region_id,
+                        reason: format!("projection index {} is out of bound", idx),
+                    })?;
             seen.insert(column.column_id);
+            // keep the projection order
             read_column_ids.push(column.column_id);
         }
 
@@ -866,8 +866,8 @@ impl ScanInput {
     pub(crate) fn new(access_layer: AccessLayerRef, mapper: ProjectionMapper) -> ScanInput {
         ScanInput {
             access_layer,
+            read_column_ids: mapper.column_ids().to_vec(),
             mapper: Arc::new(mapper),
-            read_column_ids: Vec::new(),
             time_range: None,
             predicate: PredicateGroup::default(),
             region_partition_expr: None,
@@ -909,13 +909,6 @@ impl ScanInput {
     pub(crate) fn with_predicate(mut self, predicate: PredicateGroup) -> Self {
         self.region_partition_expr = predicate.region_partition_expr().cloned();
         self.predicate = predicate;
-        self
-    }
-
-    /// Sets column ids to read from memtables and SSTs.
-    #[must_use]
-    pub(crate) fn with_read_column_ids(mut self, read_column_ids: Vec<ColumnId>) -> Self {
-        self.read_column_ids = read_column_ids;
         self
     }
 

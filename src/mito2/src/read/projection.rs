@@ -209,7 +209,7 @@ impl PrimaryKeyProjectionMapper {
                     .schema
                     .column_schemas()
                     .get(*idx)
-                    .context(InvalidRequestSnafu {
+                    .with_context(|| InvalidRequestSnafu {
                         region_id: metadata.region_id,
                         reason: format!("projection index {} is out of bound", idx),
                     })?
@@ -402,7 +402,7 @@ pub(crate) fn read_column_ids_from_projection(
         let column = metadata
             .column_metadatas
             .get(*idx)
-            .context(InvalidRequestSnafu {
+            .with_context(|| InvalidRequestSnafu {
                 region_id: metadata.region_id,
                 reason: format!("projection index {} is out of bound", idx),
             })?;

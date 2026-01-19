@@ -92,13 +92,14 @@ impl FlatProjectionMapper {
         let mut output_column_ids = Vec::with_capacity(projection.len());
         for idx in &projection {
             // For each projection index, we get the column id for projection.
-            let column = metadata
-                .column_metadatas
-                .get(*idx)
-                .context(InvalidRequestSnafu {
-                    region_id: metadata.region_id,
-                    reason: format!("projection index {} is out of bound", idx),
-                })?;
+            let column =
+                metadata
+                    .column_metadatas
+                    .get(*idx)
+                    .with_context(|| InvalidRequestSnafu {
+                        region_id: metadata.region_id,
+                        reason: format!("projection index {} is out of bound", idx),
+                    })?;
 
             output_column_ids.push(column.column_id);
             // Safety: idx is valid.

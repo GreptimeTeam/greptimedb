@@ -741,9 +741,7 @@ impl CompactionSstReaderBuilder<'_> {
 
     fn build_scan_input(self, flat_format: bool) -> Result<ScanInput> {
         let mapper = ProjectionMapper::all(&self.metadata, flat_format)?;
-        let read_column_ids = mapper.column_ids().to_vec();
         let mut scan_input = ScanInput::new(self.sst_layer, mapper)
-            .with_read_column_ids(read_column_ids)
             .with_files(self.inputs.to_vec())
             .with_append_mode(self.append_mode)
             // We use special cache strategy for compaction.

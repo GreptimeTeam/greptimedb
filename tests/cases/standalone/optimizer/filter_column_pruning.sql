@@ -33,14 +33,14 @@ SELECT cpu_usage FROM filter_prune_test WHERE host = 'host1' ORDER BY ts;
 EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host = 'host1' ORDER BY ts;
 
 -- Filter on multiple columns (host, region) but only select value columns
-SELECT cpu_usage, mem_usage FROM filter_prune_test WHERE host = 'host1' AND `region` = 'us-east' ORDER BY ts;
+SELECT mem_usage, cpu_usage FROM filter_prune_test WHERE host = 'host1' AND `region` = 'us-east' ORDER BY ts;
 
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
-EXPLAIN ANALYZE VERBOSE SELECT cpu_usage, mem_usage FROM filter_prune_test WHERE host = 'host1' AND `region` = 'us-east' ORDER BY ts;
+EXPLAIN ANALYZE VERBOSE SELECT mem_usage, cpu_usage FROM filter_prune_test WHERE host = 'host1' AND `region` = 'us-east' ORDER BY ts;
 
 -- Filter on value column (cpu_usage) not in projection
 SELECT host, `region` FROM filter_prune_test WHERE cpu_usage > 20.0 ORDER BY ts;
@@ -158,7 +158,7 @@ SELECT cpu_usage FROM filter_prune_test WHERE host = 'host1' ORDER BY ts;
 EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host = 'host1' ORDER BY ts;
 
 -- Filter on multiple columns (host, region) but only select value columns
-SELECT cpu_usage, mem_usage FROM filter_prune_test WHERE host = 'host1' AND `region` = 'us-east' ORDER BY ts;
+SELECT mem_usage, cpu_usage FROM filter_prune_test WHERE host = 'host1' AND `region` = 'us-east' ORDER BY ts;
 
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
@@ -166,7 +166,7 @@ SELECT cpu_usage, mem_usage FROM filter_prune_test WHERE host = 'host1' AND `reg
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE \"files\":\s\[\{.* \"file\":REDACTED
-EXPLAIN ANALYZE VERBOSE SELECT cpu_usage, mem_usage FROM filter_prune_test WHERE host = 'host1' AND `region` = 'us-east' ORDER BY ts;
+EXPLAIN ANALYZE VERBOSE SELECT mem_usage, cpu_usage FROM filter_prune_test WHERE host = 'host1' AND `region` = 'us-east' ORDER BY ts;
 
 -- Filter on value column (cpu_usage) not in projection
 SELECT host, `region` FROM filter_prune_test WHERE cpu_usage > 20.0 ORDER BY ts;
