@@ -95,7 +95,6 @@ function deploy_greptimedb_cluster() {
     fi
   done
 
-  # Expose greptimedb cluster to local access.
   # Expose greptimedb cluster to local access and check if port-forward is available.
   kubectl -n "$install_namespace" port-forward svc/"$cluster_name"-frontend \
     14000:4000 \
