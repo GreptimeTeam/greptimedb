@@ -638,6 +638,13 @@ impl ScanRegion {
                 {
                     read_column_ids.push(column.column_id);
                 }
+                extra_names.remove(column.column_schema.name.as_str());
+            }
+            if !extra_names.is_empty() {
+                warn!(
+                    "Some columns in filters are not found in region {}: {:?}",
+                    metadata.region_id, extra_names
+                );
             }
         }
         Ok(read_column_ids)

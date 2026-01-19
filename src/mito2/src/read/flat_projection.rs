@@ -29,6 +29,7 @@ use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
 
 use crate::error::{InvalidRequestSnafu, Result};
+use crate::read::projection::read_column_ids_from_projection;
 use crate::sst::parquet::flat_format::sst_column_id_indices;
 use crate::sst::parquet::format::FormatProjection;
 use crate::sst::{
@@ -48,7 +49,6 @@ pub struct FlatProjectionMapper {
     /// The mapper won't deduplicate the column ids.
     ///
     /// Note that this doesn't contain the `__table_id` and `__tsid`.
-    #[allow(unused)]
     read_column_ids: Vec<ColumnId>,
     /// Ids and DataTypes of columns of the expected batch.
     /// We can use this to check if the batch is compatible with the expected schema.
@@ -271,29 +271,6 @@ impl FlatProjectionMapper {
 
         RecordBatch::new(self.output_schema.clone(), columns)
     }
-}
-
-fn read_column_ids_from_projection(
-    metadata: &RegionMetadataRef,
-    projection: &[usize],
-) -> Result<Vec<ColumnId>> {
-    let mut column_ids = Vec::with_capacity(projection.len().max(1));
-    if projection.is_empty() {
-        column_ids.push(metadata.time_index_column().column_id);
-        return Ok(column_ids);
-    }
-
-    for idx in projection {
-        let column = metadata
-            .column_metadatas
-            .get(*idx)
-            .context(InvalidRequestSnafu {
-                region_id: metadata.region_id,
-                reason: format!("projection index {} is out of bound", idx),
-            })?;
-        column_ids.push(column.column_id);
-    }
-    Ok(column_ids)
 }
 
 /// Returns ids and datatypes of columns of the output batch after applying the `projection`.

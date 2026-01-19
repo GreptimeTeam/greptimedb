@@ -323,7 +323,6 @@ impl PrimaryKeyProjectionMapper {
     /// Converts a [Batch] to a [RecordBatch].
     ///
     /// The batch must match the `projection` using to build the mapper.
-    /// TODO(discord9): handle batch have exact fields other than projected
     pub(crate) fn convert(
         &self,
         batch: &Batch,
@@ -389,7 +388,7 @@ impl PrimaryKeyProjectionMapper {
     }
 }
 
-fn read_column_ids_from_projection(
+pub(crate) fn read_column_ids_from_projection(
     metadata: &RegionMetadataRef,
     projection: &[usize],
 ) -> Result<Vec<ColumnId>> {
