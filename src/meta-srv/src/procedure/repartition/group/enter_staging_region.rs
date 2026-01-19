@@ -49,8 +49,17 @@ impl State for EnterStagingRegion {
         ctx: &mut Context,
         _procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
-        self.flush_pending_deallocate_regions(ctx).await?;
-        self.enter_staging_regions(ctx).await?;
+        {
+            let timer = Instant::now();
+            self.flush_pending_deallocate_regions(ctx).await?;
+            ctx.update_flush_pending_deallocate_regions_elapsed(timer.elapsed());
+        }
+
+        {
+            let timer = Instant::now();
+            self.enter_staging_regions(ctx).await?;
+            ctx.update_enter_staging_region_elapsed(timer.elapsed());
+        }
 
         Ok((Box::new(RemapManifest), Status::executing(true)))
     }

@@ -17,6 +17,7 @@ pub(crate) mod exit_staging_region;
 pub(crate) mod rollback_staging_region;
 
 use std::any::Any;
+use std::time::Instant;
 
 use common_meta::lock_key::TableLock;
 use common_procedure::{Context as ProcedureContext, Status};
@@ -47,6 +48,7 @@ impl State for UpdateMetadata {
         ctx: &mut Context,
         procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
+        let timer = Instant::now();
         let table_lock = TableLock::Write(ctx.persistent_ctx.table_id).into();
         let _guard = procedure_ctx.provider.acquire_lock(&table_lock).await;
         match self {
@@ -59,6 +61,7 @@ impl State for UpdateMetadata {
                         "Failed to broadcast the invalidate table cache message during the apply staging regions, error: {err:?}"
                     );
                 };
+                ctx.update_update_metadata_elapsed(timer.elapsed());
                 Ok((Box::new(EnterStagingRegion), Status::executing(false)))
             }
             UpdateMetadata::RollbackStaging => {
@@ -80,6 +83,7 @@ impl State for UpdateMetadata {
                         "Failed to broadcast the invalidate table cache message during the exit staging regions"
                     );
                 };
+                ctx.update_update_metadata_elapsed(timer.elapsed());
                 Ok((Box::new(RepartitionEnd), Status::executing(false)))
             }
         }

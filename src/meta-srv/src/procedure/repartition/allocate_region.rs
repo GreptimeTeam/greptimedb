@@ -30,6 +30,7 @@ use snafu::{OptionExt, ResultExt};
 use store_api::storage::{RegionNumber, TableId};
 use table::metadata::RawTableInfo;
 use table::table_reference::TableReference;
+use tokio::time::Instant;
 
 use crate::error::{self, Result};
 use crate::procedure::repartition::dispatch::Dispatch;
@@ -52,6 +53,7 @@ impl State for AllocateRegion {
         ctx: &mut Context,
         procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
+        let timer = Instant::now();
         let table_id = ctx.persistent_ctx.table_id;
         let table_route_value = ctx.get_table_route_value().await?;
         // Safety: it is physical table route value.
@@ -75,6 +77,7 @@ impl State for AllocateRegion {
         // If no region to allocate, directly dispatch the plan.
         if Self::count_regions_to_allocate(&repartition_plan_entries) == 0 {
             ctx.persistent_ctx.plans = repartition_plan_entries;
+            ctx.update_allocate_region_elapsed(timer.elapsed());
             return Ok((Box::new(Dispatch), Status::executing(true)));
         }
 
@@ -144,6 +147,7 @@ impl State for AllocateRegion {
         ctx.invalidate_table_cache().await?;
 
         ctx.persistent_ctx.plans = repartition_plan_entries;
+        ctx.update_allocate_region_elapsed(timer.elapsed());
         Ok((Box::new(Dispatch), Status::executing(true)))
     }
 

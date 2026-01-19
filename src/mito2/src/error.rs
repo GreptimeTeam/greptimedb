@@ -413,6 +413,14 @@ pub enum Error {
         error: datatypes::arrow::error::ArrowError,
     },
 
+    #[snafu(display("Failed to evaluate partition filter"))]
+    EvalPartitionFilter {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: datafusion::error::DataFusionError,
+    },
+
     #[snafu(display("Failed to compute vector"))]
     ComputeVector {
         #[snafu(implicit)]
@@ -1266,6 +1274,7 @@ impl ErrorExt for Error {
             | Recv { .. }
             | DecodeWal { .. }
             | ComputeArrow { .. }
+            | EvalPartitionFilter { .. }
             | BiErrors { .. }
             | StopScheduler { .. }
             | ComputeVector { .. }

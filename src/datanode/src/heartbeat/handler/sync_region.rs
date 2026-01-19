@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use common_meta::instruction::{InstructionReply, SyncRegion, SyncRegionReply, SyncRegionsReply};
-use common_telemetry::{error, info, warn};
+use common_telemetry::{debug, error, info, warn};
 use futures::future::join_all;
 
 use crate::heartbeat::handler::{HandlerContext, InstructionHandler};
@@ -33,10 +33,12 @@ impl InstructionHandler for SyncRegionHandler {
         ctx: &HandlerContext,
         regions: Self::Instruction,
     ) -> Option<InstructionReply> {
+        info!("Received sync region instructions: {:?}", regions);
         let futures = regions
             .into_iter()
             .map(|sync_region| Self::handle_sync_region(ctx, sync_region));
         let results = join_all(futures).await;
+        debug!("Sync region results: {:?}", results);
 
         Some(InstructionReply::SyncRegions(SyncRegionsReply::new(
             results,

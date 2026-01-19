@@ -296,6 +296,29 @@ impl SparsePrimaryKeyCodec {
         let field = self.get_field(column_id).unwrap();
         field.deserialize(&mut deserializer)
     }
+
+    /// Returns the encoded bytes of the given `column_id` in `pk`.
+    ///
+    /// Returns `Ok(None)` if the `column_id` is missing in `pk`.
+    pub fn encoded_value_for_column<'a>(
+        &self,
+        pk: &'a [u8],
+        offsets_map: &mut HashMap<u32, usize>,
+        column_id: ColumnId,
+    ) -> Result<Option<&'a [u8]>> {
+        let Some(offset) = self.has_column(pk, offsets_map, column_id) else {
+            return Ok(None);
+        };
+
+        let Some(field) = self.get_field(column_id) else {
+            return Ok(None);
+        };
+
+        let mut deserializer = Deserializer::new(pk);
+        deserializer.advance(offset);
+        let len = field.skip_deserialize(pk, &mut deserializer)?;
+        Ok(Some(&pk[offset..offset + len]))
+    }
 }
 
 impl PrimaryKeyCodec for SparsePrimaryKeyCodec {
@@ -691,6 +714,57 @@ mod tests {
                 .1
                 .clone();
             assert_eq!(value.as_value_ref(), expected_value);
+        }
+    }
+
+    #[test]
+    fn test_encoded_value_for_column() {
+        let region_metadata = test_region_metadata();
+        let codec = SparsePrimaryKeyCodec::new(&region_metadata);
+        let mut buffer = Vec::new();
+        let row = test_row();
+        codec
+            .encode_to_vec(row.clone().into_iter(), &mut buffer)
+            .unwrap();
+        assert!(!buffer.is_empty());
+
+        let mut offsets_map = HashMap::new();
+        for column_id in [
+            RESERVED_COLUMN_ID_TABLE_ID,
+            RESERVED_COLUMN_ID_TSID,
+            1,
+            2,
+            3,
+            4,
+            5,
+        ] {
+            let encoded_value = codec
+                .encoded_value_for_column(&buffer, &mut offsets_map, column_id)
+                .unwrap()
+                .unwrap();
+            let expected_value = row
+                .iter()
+                .find(|(id, _)| *id == column_id)
+                .unwrap()
+                .1
+                .clone();
+            let data_type = match column_id {
+                RESERVED_COLUMN_ID_TABLE_ID => ConcreteDataType::uint32_datatype(),
+                RESERVED_COLUMN_ID_TSID => ConcreteDataType::uint64_datatype(),
+                _ => ConcreteDataType::string_datatype(),
+            };
+            let field = SortField::new(data_type);
+            let mut expected_encoded = Vec::new();
+            let mut serializer = Serializer::new(&mut expected_encoded);
+            field.serialize(&mut serializer, &expected_value).unwrap();
+            assert_eq!(encoded_value, expected_encoded.as_slice());
+        }
+
+        for column_id in [6_u32, 7_u32, 999_u32] {
+            let encoded_value = codec
+                .encoded_value_for_column(&buffer, &mut offsets_map, column_id)
+                .unwrap();
+            assert!(encoded_value.is_none());
         }
     }
 }

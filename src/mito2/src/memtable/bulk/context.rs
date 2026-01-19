@@ -98,6 +98,7 @@ impl BulkIterContext {
                 // we don't need to compat batch since all batch in memtable have the same schema.
                 compat_batch: None,
                 pre_filter_mode,
+                partition_filter: None,
             },
             predicate,
         })
