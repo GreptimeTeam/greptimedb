@@ -60,11 +60,9 @@ function deploy_greptimedb_operator() {
   # Use the latest chart and image.
   helm upgrade --install greptimedb-operator greptime/greptimedb-operator \
     --create-namespace \
-    --set image.tag="$GREPTIMEDB_OPERATOR_IMAGE_TAG" \
-    -n "$DEFAULT_INSTALL_NAMESPACE"
-
-  # Wait for greptimedb-operator to be ready.
-  kubectl rollout status deployment/greptimedb-operator -n "$DEFAULT_INSTALL_NAMESPACE"
+    -n "$DEFAULT_INSTALL_NAMESPACE" \
+    --wait \
+    --wait-for-jobs
 }
 
 # Deploy greptimedb cluster by using local storage.
