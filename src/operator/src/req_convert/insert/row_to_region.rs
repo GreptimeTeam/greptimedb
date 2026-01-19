@@ -131,7 +131,7 @@ pub fn filter_normal_requests_by_ttl(
         let now = Timestamp::current_time(time_unit);
 
         // Filter expired rows from each region's rows
-        for rows_data in &mut request.rows {
+        if let Some(rows_data) = &mut request.rows {
             let (filtered_rows, filtered_count) = filter_expired_rows(
                 std::mem::take(&mut rows_data.rows),
                 timestamp_index,
@@ -139,7 +139,7 @@ pub fn filter_normal_requests_by_ttl(
                 &now,
             )
             .context(TtlFilterSnafu {
-                table_name: table_info.name.to_string(),
+                table_name: table_info.name.clone(),
             })?;
 
             rows_data.rows = filtered_rows;

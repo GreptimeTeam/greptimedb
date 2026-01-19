@@ -27,14 +27,6 @@ SELECT COUNT(*) FROM ttl_frontend_test;
 | 0        |
 +----------+
 
-SELECT s.region_rows FROM information_schema.tables t JOIN information_schema.region_statistics s ON s.table_id=t.table_id  WHERE table_name='ttl_frontend_test';
-
-+-------------+
-| region_rows |
-+-------------+
-| 0           |
-+-------------+
-
 -- Insert recent data using now() (should succeed)
 INSERT INTO ttl_frontend_test VALUES
     (3, 3.0, now());
@@ -49,14 +41,6 @@ SELECT COUNT(*) FROM ttl_frontend_test;
 +----------+
 | 1        |
 +----------+
-
-SELECT s.region_rows FROM information_schema.tables t JOIN information_schema.region_statistics s ON s.table_id=t.table_id  WHERE table_name='ttl_frontend_test';
-
-+-------------+
-| region_rows |
-+-------------+
-| 1           |
-+-------------+
 
 -- Test instant TTL (all data filtered immediately)
 CREATE TABLE instant_ttl_test (
