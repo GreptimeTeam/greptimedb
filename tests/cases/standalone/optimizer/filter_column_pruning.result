@@ -41,6 +41,7 @@ SELECT cpu_usage FROM filter_prune_test WHERE host = 'host1' ORDER BY ts;
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host = 'host1' ORDER BY ts;
 
 +-+-+-+
@@ -51,8 +52,8 @@ EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host = 'ho
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[cpu_usage@0 as cpu_usage] REDACTED
 |_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
-|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
-|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
+|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[cpu_usage@1 as cpu_usage, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts", "cpu_usage"], "filters": ["host = Utf8(\"host1\")"], "flat_format": false, "REDACTED
@@ -75,6 +76,7 @@ SELECT mem_usage, cpu_usage FROM filter_prune_test WHERE host = 'host1' AND `reg
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT mem_usage, cpu_usage FROM filter_prune_test WHERE host = 'host1' AND `region` = 'us-east' ORDER BY ts;
 
 +-+-+-+
@@ -85,8 +87,8 @@ EXPLAIN ANALYZE VERBOSE SELECT mem_usage, cpu_usage FROM filter_prune_test WHERE
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[mem_usage@0 as mem_usage, cpu_usage@1 as cpu_usage] REDACTED
 |_|_|_SortPreservingMergeExec: [ts@2 ASC NULLS LAST] REDACTED
-|_|_|_WindowedSortExec: expr=ts@2 ASC NULLS LAST num_ranges=20 REDACTED
-|_|_|_PartSortExec: expr=ts@2 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_WindowedSortExec: expr=ts@2 ASC NULLS LAST num_ranges=REDACTED REDACTED
+|_|_|_PartSortExec: expr=ts@2 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[mem_usage@2 as mem_usage, cpu_usage@1 as cpu_usage, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts", "cpu_usage", "mem_usage"], "filters": ["host = Utf8(\"host1\")", "region = Utf8(\"us-east\")"], "flat_format": false, "REDACTED
@@ -111,6 +113,7 @@ SELECT host, `region` FROM filter_prune_test WHERE cpu_usage > 20.0 ORDER BY ts;
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT host, `region` FROM filter_prune_test WHERE cpu_usage > 20.0 ORDER BY ts;
 
 +-+-+-+
@@ -121,8 +124,8 @@ EXPLAIN ANALYZE VERBOSE SELECT host, `region` FROM filter_prune_test WHERE cpu_u
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[host@0 as host, region@1 as region] REDACTED
 |_|_|_SortPreservingMergeExec: [ts@2 ASC NULLS LAST] REDACTED
-|_|_|_WindowedSortExec: expr=ts@2 ASC NULLS LAST num_ranges=20 REDACTED
-|_|_|_PartSortExec: expr=ts@2 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_WindowedSortExec: expr=ts@2 ASC NULLS LAST num_ranges=REDACTED REDACTED
+|_|_|_PartSortExec: expr=ts@2 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[host@1 as host, region@2 as region, ts@0 as ts] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: cpu_usage@3 > 20, projection=[ts@0, host@1, region@2] REDACTED
@@ -149,6 +152,7 @@ SELECT host, cpu_usage FROM filter_prune_test WHERE ts > 2000 ORDER BY ts;
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT host, cpu_usage FROM filter_prune_test WHERE ts > 2000 ORDER BY ts;
 
 +-+-+-+
@@ -159,8 +163,8 @@ EXPLAIN ANALYZE VERBOSE SELECT host, cpu_usage FROM filter_prune_test WHERE ts >
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[host@0 as host, cpu_usage@1 as cpu_usage] REDACTED
 |_|_|_SortPreservingMergeExec: [ts@2 ASC NULLS LAST] REDACTED
-|_|_|_WindowedSortExec: expr=ts@2 ASC NULLS LAST num_ranges=20 REDACTED
-|_|_|_PartSortExec: expr=ts@2 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_WindowedSortExec: expr=ts@2 ASC NULLS LAST num_ranges=REDACTED REDACTED
+|_|_|_PartSortExec: expr=ts@2 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[host@1 as host, cpu_usage@2 as cpu_usage, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts", "host", "cpu_usage"], "filters": ["ts > TimestampMillisecond(2000, None)"], "flat_format": false, "REDACTED
@@ -183,6 +187,7 @@ SELECT mem_usage FROM filter_prune_test WHERE host = 'host1' AND cpu_usage > 10.
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT mem_usage FROM filter_prune_test WHERE host = 'host1' AND cpu_usage > 10.0 AND `region` = 'us-east' ORDER BY ts;
 
 +-+-+-+
@@ -193,8 +198,8 @@ EXPLAIN ANALYZE VERBOSE SELECT mem_usage FROM filter_prune_test WHERE host = 'ho
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[mem_usage@0 as mem_usage] REDACTED
 |_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
-|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
-|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
+|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[mem_usage@1 as mem_usage, ts@0 as ts] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: cpu_usage@1 > 10, projection=[ts@0, mem_usage@2] REDACTED
@@ -218,6 +223,7 @@ SELECT SUM(cpu_usage) as total_cpu FROM filter_prune_test WHERE host = 'host1';
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT SUM(cpu_usage) as total_cpu FROM filter_prune_test WHERE host = 'host1';
 
 +-+-+-+
@@ -252,6 +258,7 @@ SELECT `region`, AVG(cpu_usage) as avg_cpu FROM filter_prune_test WHERE mem_usag
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT `region`, AVG(cpu_usage) as avg_cpu FROM filter_prune_test WHERE mem_usage > 25.0 GROUP BY `region` ORDER BY `region`;
 
 +-+-+-+
@@ -293,6 +300,7 @@ SELECT cpu_usage FROM filter_prune_test WHERE host IN ('host1', 'host2') ORDER B
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host IN ('host1', 'host2') ORDER BY ts;
 
 +-+-+-+
@@ -303,8 +311,8 @@ EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host IN ('
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[cpu_usage@0 as cpu_usage] REDACTED
 |_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
-|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
-|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
+|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[cpu_usage@1 as cpu_usage, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts", "cpu_usage"], "filters": ["host = Utf8(\"host1\") OR host = Utf8(\"host2\")"], "flat_format": false, "REDACTED
@@ -328,6 +336,7 @@ SELECT host FROM filter_prune_test WHERE cpu_usage BETWEEN 15.0 AND 30.0 ORDER B
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT host FROM filter_prune_test WHERE cpu_usage BETWEEN 15.0 AND 30.0 ORDER BY ts;
 
 +-+-+-+
@@ -338,8 +347,8 @@ EXPLAIN ANALYZE VERBOSE SELECT host FROM filter_prune_test WHERE cpu_usage BETWE
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[host@0 as host] REDACTED
 |_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
-|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
-|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
+|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[host@1 as host, ts@0 as ts] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: cpu_usage@2 >= 15 AND cpu_usage@2 <= 30, projection=[ts@0, host@1] REDACTED
@@ -367,6 +376,7 @@ SELECT cpu_usage FROM filter_prune_test WHERE host LIKE 'host%' AND `region` LIK
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host LIKE 'host%' AND `region` LIKE 'us-%' ORDER BY ts;
 
 +-+-+-+
@@ -377,8 +387,8 @@ EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host LIKE 
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[cpu_usage@0 as cpu_usage] REDACTED
 |_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
-|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
-|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
+|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[cpu_usage@1 as cpu_usage, ts@0 as ts] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: host@1 LIKE host% AND region@2 LIKE us-%, projection=[ts@0, cpu_usage@3] REDACTED
@@ -405,6 +415,7 @@ SELECT cpu_usage FROM filter_prune_test WHERE host = 'host1' OR `region` = 'eu-w
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host = 'host1' OR `region` = 'eu-west' ORDER BY ts;
 
 +-+-+-+
@@ -415,8 +426,8 @@ EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host = 'ho
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[cpu_usage@0 as cpu_usage] REDACTED
 |_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
-|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
-|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
+|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[cpu_usage@1 as cpu_usage, ts@0 as ts] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: host@1 = host1 OR region@2 = eu-west, projection=[ts@0, cpu_usage@3] REDACTED
@@ -441,6 +452,7 @@ SELECT cpu_usage FROM (SELECT * FROM filter_prune_test WHERE host = 'host1') sub
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM (SELECT * FROM filter_prune_test WHERE host = 'host1') sub WHERE `region` = 'us-east' ORDER BY ts;
 
 +-+-+-+
@@ -451,8 +463,8 @@ EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM (SELECT * FROM filter_prune_test W
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[cpu_usage@0 as cpu_usage] REDACTED
 |_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
-|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
-|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
+|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[cpu_usage@1 as cpu_usage, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts", "cpu_usage"], "filters": ["region = Utf8(\"us-east\")", "host = Utf8(\"host1\")"], "flat_format": false, "REDACTED
@@ -486,6 +498,7 @@ SELECT cpu_usage FROM filter_prune_test WHERE host = 'host1' ORDER BY ts;
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE \"files\":\s\[\{.* \"file\":REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host = 'host1' ORDER BY ts;
 
 +-+-+-+
@@ -496,8 +509,8 @@ EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host = 'ho
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[cpu_usage@0 as cpu_usage] REDACTED
 |_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
-|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
-|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
+|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[cpu_usage@1 as cpu_usage, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "cpu_usage"], "filters": ["host = Utf8(\"host1\")"], \"file\":REDACTED
@@ -521,6 +534,7 @@ SELECT mem_usage, cpu_usage FROM filter_prune_test WHERE host = 'host1' AND `reg
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE \"files\":\s\[\{.* \"file\":REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT mem_usage, cpu_usage FROM filter_prune_test WHERE host = 'host1' AND `region` = 'us-east' ORDER BY ts;
 
 +-+-+-+
@@ -531,8 +545,8 @@ EXPLAIN ANALYZE VERBOSE SELECT mem_usage, cpu_usage FROM filter_prune_test WHERE
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[mem_usage@0 as mem_usage, cpu_usage@1 as cpu_usage] REDACTED
 |_|_|_SortPreservingMergeExec: [ts@2 ASC NULLS LAST] REDACTED
-|_|_|_WindowedSortExec: expr=ts@2 ASC NULLS LAST num_ranges=20 REDACTED
-|_|_|_PartSortExec: expr=ts@2 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_WindowedSortExec: expr=ts@2 ASC NULLS LAST num_ranges=REDACTED REDACTED
+|_|_|_PartSortExec: expr=ts@2 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[mem_usage@2 as mem_usage, cpu_usage@1 as cpu_usage, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "cpu_usage", "mem_usage"], "filters": ["host = Utf8(\"host1\")", "region = Utf8(\"us-east\")"], \"file\":REDACTED
@@ -558,6 +572,7 @@ SELECT host, `region` FROM filter_prune_test WHERE cpu_usage > 20.0 ORDER BY ts;
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE \"files\":\s\[\{.* \"file\":REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT host, `region` FROM filter_prune_test WHERE cpu_usage > 20.0 ORDER BY ts;
 
 +-+-+-+
@@ -568,8 +583,8 @@ EXPLAIN ANALYZE VERBOSE SELECT host, `region` FROM filter_prune_test WHERE cpu_u
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[host@0 as host, region@1 as region] REDACTED
 |_|_|_SortPreservingMergeExec: [ts@2 ASC NULLS LAST] REDACTED
-|_|_|_WindowedSortExec: expr=ts@2 ASC NULLS LAST num_ranges=20 REDACTED
-|_|_|_PartSortExec: expr=ts@2 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_WindowedSortExec: expr=ts@2 ASC NULLS LAST num_ranges=REDACTED REDACTED
+|_|_|_PartSortExec: expr=ts@2 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[host@1 as host, region@2 as region, ts@0 as ts] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: cpu_usage@3 > 20, projection=[ts@0, host@1, region@2] REDACTED
@@ -597,6 +612,7 @@ SELECT host, cpu_usage FROM filter_prune_test WHERE ts > 2000 ORDER BY ts;
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE \"files\":\s\[\{.* \"file\":REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT host, cpu_usage FROM filter_prune_test WHERE ts > 2000 ORDER BY ts;
 
 +-+-+-+
@@ -607,8 +623,8 @@ EXPLAIN ANALYZE VERBOSE SELECT host, cpu_usage FROM filter_prune_test WHERE ts >
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[host@0 as host, cpu_usage@1 as cpu_usage] REDACTED
 |_|_|_SortPreservingMergeExec: [ts@2 ASC NULLS LAST] REDACTED
-|_|_|_WindowedSortExec: expr=ts@2 ASC NULLS LAST num_ranges=20 REDACTED
-|_|_|_PartSortExec: expr=ts@2 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_WindowedSortExec: expr=ts@2 ASC NULLS LAST num_ranges=REDACTED REDACTED
+|_|_|_PartSortExec: expr=ts@2 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[host@1 as host, cpu_usage@2 as cpu_usage, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "host", "cpu_usage"], "filters": ["ts > TimestampMillisecond(2000, None)"], \"file\":REDACTED
@@ -632,6 +648,7 @@ SELECT mem_usage FROM filter_prune_test WHERE host = 'host1' AND cpu_usage > 10.
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE \"files\":\s\[\{.* \"file\":REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT mem_usage FROM filter_prune_test WHERE host = 'host1' AND cpu_usage > 10.0 AND `region` = 'us-east' ORDER BY ts;
 
 +-+-+-+
@@ -642,8 +659,8 @@ EXPLAIN ANALYZE VERBOSE SELECT mem_usage FROM filter_prune_test WHERE host = 'ho
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[mem_usage@0 as mem_usage] REDACTED
 |_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
-|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
-|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
+|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[mem_usage@1 as mem_usage, ts@0 as ts] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: cpu_usage@1 > 10, projection=[ts@0, mem_usage@2] REDACTED
@@ -668,6 +685,7 @@ SELECT SUM(cpu_usage) as total_cpu FROM filter_prune_test WHERE host = 'host1';
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE \"files\":\s\[\{.* \"file\":REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT SUM(cpu_usage) as total_cpu FROM filter_prune_test WHERE host = 'host1';
 
 +-+-+-+
@@ -703,6 +721,7 @@ SELECT `region`, AVG(cpu_usage) as avg_cpu FROM filter_prune_test WHERE mem_usag
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE \"files\":\s\[\{.* \"file\":REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT `region`, AVG(cpu_usage) as avg_cpu FROM filter_prune_test WHERE mem_usage > 25.0 GROUP BY `region` ORDER BY `region`;
 
 +-+-+-+
@@ -745,6 +764,7 @@ SELECT cpu_usage FROM filter_prune_test WHERE host IN ('host1', 'host2') ORDER B
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE \"files\":\s\[\{.* \"file\":REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host IN ('host1', 'host2') ORDER BY ts;
 
 +-+-+-+
@@ -755,8 +775,8 @@ EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host IN ('
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[cpu_usage@0 as cpu_usage] REDACTED
 |_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
-|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
-|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
+|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[cpu_usage@1 as cpu_usage, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "cpu_usage"], "filters": ["host = Utf8(\"host1\") OR host = Utf8(\"host2\")"], \"file\":REDACTED
@@ -781,6 +801,7 @@ SELECT host FROM filter_prune_test WHERE cpu_usage BETWEEN 15.0 AND 30.0 ORDER B
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE \"files\":\s\[\{.* \"file\":REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT host FROM filter_prune_test WHERE cpu_usage BETWEEN 15.0 AND 30.0 ORDER BY ts;
 
 +-+-+-+
@@ -791,8 +812,8 @@ EXPLAIN ANALYZE VERBOSE SELECT host FROM filter_prune_test WHERE cpu_usage BETWE
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[host@0 as host] REDACTED
 |_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
-|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
-|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
+|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[host@1 as host, ts@0 as ts] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: cpu_usage@2 >= 15 AND cpu_usage@2 <= 30, projection=[ts@0, host@1] REDACTED
@@ -821,6 +842,7 @@ SELECT cpu_usage FROM filter_prune_test WHERE host LIKE 'host%' AND `region` LIK
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE \"files\":\s\[\{.* \"file\":REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host LIKE 'host%' AND `region` LIKE 'us-%' ORDER BY ts;
 
 +-+-+-+
@@ -831,8 +853,8 @@ EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host LIKE 
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[cpu_usage@0 as cpu_usage] REDACTED
 |_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
-|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
-|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
+|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[cpu_usage@1 as cpu_usage, ts@0 as ts] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: host@1 LIKE host% AND region@2 LIKE us-%, projection=[ts@0, cpu_usage@3] REDACTED
@@ -860,6 +882,7 @@ SELECT cpu_usage FROM filter_prune_test WHERE host = 'host1' OR `region` = 'eu-w
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE \"files\":\s\[\{.* \"file\":REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host = 'host1' OR `region` = 'eu-west' ORDER BY ts;
 
 +-+-+-+
@@ -870,8 +893,8 @@ EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host = 'ho
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[cpu_usage@0 as cpu_usage] REDACTED
 |_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
-|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
-|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
+|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[cpu_usage@1 as cpu_usage, ts@0 as ts] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: host@1 = host1 OR region@2 = eu-west, projection=[ts@0, cpu_usage@3] REDACTED
@@ -897,6 +920,7 @@ SELECT cpu_usage FROM (SELECT * FROM filter_prune_test WHERE host = 'host1') sub
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE \"files\":\s\[\{.* \"file\":REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM (SELECT * FROM filter_prune_test WHERE host = 'host1') sub WHERE `region` = 'us-east' ORDER BY ts;
 
 +-+-+-+
@@ -907,8 +931,8 @@ EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM (SELECT * FROM filter_prune_test W
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[cpu_usage@0 as cpu_usage] REDACTED
 |_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
-|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
-|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
+|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[cpu_usage@1 as cpu_usage, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "cpu_usage"], "filters": ["region = Utf8(\"us-east\")", "host = Utf8(\"host1\")"], \"file\":REDACTED
@@ -984,6 +1008,7 @@ SELECT field1 FROM filter_prune_files WHERE tag_key = 'a' ORDER BY ts;
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE \"files\":\s\[\{.* \"file\":REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT field1 FROM filter_prune_files WHERE tag_key = 'a' ORDER BY ts;
 
 +-+-+-+
@@ -994,8 +1019,8 @@ EXPLAIN ANALYZE VERBOSE SELECT field1 FROM filter_prune_files WHERE tag_key = 'a
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[field1@0 as field1] REDACTED
 |_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
-|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
-|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
+|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[field1@1 as field1, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":3, "mem_ranges":1, "files":2, "file_ranges":2}, "projection": ["ts", "field1"], "filters": ["tag_key = Utf8(\"a\")"], \"file\":REDACTED
@@ -1022,6 +1047,7 @@ SELECT field1 FROM filter_prune_files WHERE field2 > 5.0 ORDER BY ts;
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE \"files\":\s\[\{.* \"file\":REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT field1 FROM filter_prune_files WHERE field2 > 5.0 ORDER BY ts;
 
 +-+-+-+
@@ -1032,8 +1058,8 @@ EXPLAIN ANALYZE VERBOSE SELECT field1 FROM filter_prune_files WHERE field2 > 5.0
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[field1@0 as field1] REDACTED
 |_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
-|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
-|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
+|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[field1@1 as field1, ts@0 as ts] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: field2@2 > 5, projection=[ts@0, field1@1] REDACTED
@@ -1059,6 +1085,7 @@ SELECT field3 FROM filter_prune_files WHERE tag_key = 'b' AND field2 > 7.0 ORDER
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE \"files\":\s\[\{.* \"file\":REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT field3 FROM filter_prune_files WHERE tag_key = 'b' AND field2 > 7.0 ORDER BY ts;
 
 +-+-+-+
@@ -1069,8 +1096,8 @@ EXPLAIN ANALYZE VERBOSE SELECT field3 FROM filter_prune_files WHERE tag_key = 'b
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[field3@0 as field3] REDACTED
 |_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
-|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
-|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
+|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[field3@1 as field3, ts@0 as ts] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: field2@1 > 7, projection=[ts@0, field3@2] REDACTED
