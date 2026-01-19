@@ -299,6 +299,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to filter TTL expired rows for table {}", table_name))]
+    TtlFilter {
+        table_name: String,
+        source: crate::req_convert::common::ttl_filter::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to find leader for region"))]
     FindRegionLeader {
         source: partition::error::Error,
@@ -1018,6 +1026,7 @@ impl ErrorExt for Error {
             | Error::SplitInsert { source, .. }
             | Error::SplitDelete { source, .. }
             | Error::FindRegionLeader { source, .. } => source.status_code(),
+            Error::TtlFilter { .. } => StatusCode::Internal,
             Error::UnrecognizedTableOption { .. } => StatusCode::InvalidArguments,
             Error::ReadObject { .. }
             | Error::ReadParquetMetadata { .. }
