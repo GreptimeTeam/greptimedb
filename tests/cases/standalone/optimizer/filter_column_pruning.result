@@ -1,0 +1,1086 @@
+-- Tests for scenarios where filter column is not in the projection (SELECT list)
+-- This tests the query optimizer's ability to handle column pruning when:
+-- 1. A column is used in WHERE clause but not in SELECT
+-- 2. Multiple columns are used in WHERE but only subset in SELECT
+-- 3. Aggregations with filters on non-projected columns
+CREATE TABLE filter_prune_test (
+    ts TIMESTAMP TIME INDEX,
+    host STRING,
+    `region` STRING,
+    cpu_usage DOUBLE,
+    mem_usage DOUBLE,
+    disk_usage DOUBLE,
+    PRIMARY KEY (host, `region`)
+);
+
+Affected Rows: 0
+
+INSERT INTO filter_prune_test VALUES
+    (1000, 'host1', 'us-east', 10.5, 20.0, 30.5),
+    (2000, 'host1', 'us-east', 15.5, 25.0, 35.5),
+    (3000, 'host1', 'us-west', 20.5, 30.0, 40.5),
+    (4000, 'host2', 'us-east', 25.5, 35.0, 45.5),
+    (5000, 'host2', 'us-west', 30.5, 40.0, 50.5),
+    (6000, 'host3', 'eu-west', 35.5, 45.0, 55.5);
+
+Affected Rows: 6
+
+-- Basic case: filter column (host) not in SELECT projection
+SELECT cpu_usage FROM filter_prune_test WHERE host = 'host1' ORDER BY ts;
+
++-----------+
+| cpu_usage |
++-----------+
+| 10.5      |
+| 15.5      |
+| 20.5      |
++-----------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host = 'host1' ORDER BY ts;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[cpu_usage@0 as cpu_usage] REDACTED
+|_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
+|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_ProjectionExec: expr=[cpu_usage@1 as cpu_usage, ts@0 as ts] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts", "cpu_usage"], "filters": ["host = Utf8(\"host1\")"], "flat_format": false, "REDACTED
+|_|_|_|
+|_|_| Total rows: 3_|
++-+-+-+
+
+-- Filter on multiple columns (host, region) but only select value columns
+SELECT cpu_usage, mem_usage FROM filter_prune_test WHERE host = 'host1' AND `region` = 'us-east' ORDER BY ts;
+
++-----------+-----------+
+| cpu_usage | mem_usage |
++-----------+-----------+
+| 10.5      | 20.0      |
+| 15.5      | 25.0      |
++-----------+-----------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN ANALYZE VERBOSE SELECT cpu_usage, mem_usage FROM filter_prune_test WHERE host = 'host1' AND `region` = 'us-east' ORDER BY ts;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[cpu_usage@0 as cpu_usage, mem_usage@1 as mem_usage] REDACTED
+|_|_|_SortPreservingMergeExec: [ts@2 ASC NULLS LAST] REDACTED
+|_|_|_WindowedSortExec: expr=ts@2 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_PartSortExec: expr=ts@2 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_ProjectionExec: expr=[cpu_usage@1 as cpu_usage, mem_usage@2 as mem_usage, ts@0 as ts] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts", "cpu_usage", "mem_usage"], "filters": ["host = Utf8(\"host1\")", "region = Utf8(\"us-east\")"], "flat_format": false, "REDACTED
+|_|_|_|
+|_|_| Total rows: 2_|
++-+-+-+
+
+-- Filter on value column (cpu_usage) not in projection
+SELECT host, `region` FROM filter_prune_test WHERE cpu_usage > 20.0 ORDER BY ts;
+
++-------+---------+
+| host  | region  |
++-------+---------+
+| host1 | us-west |
+| host2 | us-east |
+| host2 | us-west |
+| host3 | eu-west |
++-------+---------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN ANALYZE VERBOSE SELECT host, `region` FROM filter_prune_test WHERE cpu_usage > 20.0 ORDER BY ts;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[host@0 as host, region@1 as region] REDACTED
+|_|_|_SortPreservingMergeExec: [ts@2 ASC NULLS LAST] REDACTED
+|_|_|_WindowedSortExec: expr=ts@2 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_PartSortExec: expr=ts@2 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_ProjectionExec: expr=[host@1 as host, region@2 as region, ts@0 as ts] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_FilterExec: cpu_usage@3 > 20, projection=[ts@0, host@1, region@2] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts", "host", "region", "cpu_usage"], "filters": ["cpu_usage > Float64(20)"], "flat_format": false, "REDACTED
+|_|_|_|
+|_|_| Total rows: 4_|
++-+-+-+
+
+-- Filter on time index but time index not in projection
+SELECT host, cpu_usage FROM filter_prune_test WHERE ts > 2000 ORDER BY ts;
+
++-------+-----------+
+| host  | cpu_usage |
++-------+-----------+
+| host1 | 20.5      |
+| host2 | 25.5      |
+| host2 | 30.5      |
+| host3 | 35.5      |
++-------+-----------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN ANALYZE VERBOSE SELECT host, cpu_usage FROM filter_prune_test WHERE ts > 2000 ORDER BY ts;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[host@0 as host, cpu_usage@1 as cpu_usage] REDACTED
+|_|_|_SortPreservingMergeExec: [ts@2 ASC NULLS LAST] REDACTED
+|_|_|_WindowedSortExec: expr=ts@2 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_PartSortExec: expr=ts@2 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_ProjectionExec: expr=[host@1 as host, cpu_usage@2 as cpu_usage, ts@0 as ts] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts", "host", "cpu_usage"], "filters": ["ts > TimestampMillisecond(2000, None)"], "flat_format": false, "REDACTED
+|_|_|_|
+|_|_| Total rows: 4_|
++-+-+-+
+
+-- Complex filter: multiple columns in WHERE, only one in SELECT
+SELECT mem_usage FROM filter_prune_test WHERE host = 'host1' AND cpu_usage > 10.0 AND `region` = 'us-east' ORDER BY ts;
+
++-----------+
+| mem_usage |
++-----------+
+| 20.0      |
+| 25.0      |
++-----------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN ANALYZE VERBOSE SELECT mem_usage FROM filter_prune_test WHERE host = 'host1' AND cpu_usage > 10.0 AND `region` = 'us-east' ORDER BY ts;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[mem_usage@0 as mem_usage] REDACTED
+|_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
+|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_ProjectionExec: expr=[mem_usage@1 as mem_usage, ts@0 as ts] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_FilterExec: cpu_usage@1 > 10, projection=[ts@0, mem_usage@2] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts", "cpu_usage", "mem_usage"], "filters": ["host = Utf8(\"host1\")", "cpu_usage > Float64(10)", "region = Utf8(\"us-east\")"], "flat_format": false, "REDACTED
+|_|_|_|
+|_|_| Total rows: 2_|
++-+-+-+
+
+-- Aggregation with filter on non-projected column
+SELECT SUM(cpu_usage) as total_cpu FROM filter_prune_test WHERE host = 'host1';
+
++-----------+
+| total_cpu |
++-----------+
+| 46.5      |
++-----------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN ANALYZE VERBOSE SELECT SUM(cpu_usage) as total_cpu FROM filter_prune_test WHERE host = 'host1';
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[sum(filter_prune_test.cpu_usage)@0 as total_cpu] REDACTED
+|_|_|_AggregateExec: mode=Final, gby=[], aggr=[sum(filter_prune_test.cpu_usage)] REDACTED
+|_|_|_CoalescePartitionsExec REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[], aggr=[sum(filter_prune_test.cpu_usage)] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["cpu_usage"], "filters": ["host = Utf8(\"host1\")"], "flat_format": false, "REDACTED
+|_|_|_|
+|_|_| Total rows: 1_|
++-+-+-+
+
+-- GROUP BY with filter on column not in projection or grouping
+SELECT `region`, AVG(cpu_usage) as avg_cpu FROM filter_prune_test WHERE mem_usage > 25.0 GROUP BY `region` ORDER BY `region`;
+
++---------+---------+
+| region  | avg_cpu |
++---------+---------+
+| eu-west | 35.5    |
+| us-east | 25.5    |
+| us-west | 25.5    |
++---------+---------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN ANALYZE VERBOSE SELECT `region`, AVG(cpu_usage) as avg_cpu FROM filter_prune_test WHERE mem_usage > 25.0 GROUP BY `region` ORDER BY `region`;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_SortPreservingMergeExec: [region@0 ASC NULLS LAST] REDACTED
+|_|_|_SortExec: expr=[region@0 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
+|_|_|_ProjectionExec: expr=[region@0 as region, avg(filter_prune_test.cpu_usage)@1 as avg_cpu] REDACTED
+|_|_|_AggregateExec: mode=FinalPartitioned, gby=[region@0 as region], aggr=[avg(filter_prune_test.cpu_usage)] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_RepartitionExec: partitioning=Hash([region@0], 20), input_partitions=20 REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[region@0 as region], aggr=[avg(filter_prune_test.cpu_usage)] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_FilterExec: mem_usage@2 > 25, projection=[region@0, cpu_usage@1] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["region", "cpu_usage", "mem_usage"], "filters": ["mem_usage > Float64(25)"], "flat_format": false, "REDACTED
+|_|_|_|
+|_|_| Total rows: 3_|
++-+-+-+
+
+-- Filter with IN clause on non-projected column
+SELECT cpu_usage FROM filter_prune_test WHERE host IN ('host1', 'host2') ORDER BY ts;
+
++-----------+
+| cpu_usage |
++-----------+
+| 10.5      |
+| 15.5      |
+| 20.5      |
+| 25.5      |
+| 30.5      |
++-----------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host IN ('host1', 'host2') ORDER BY ts;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[cpu_usage@0 as cpu_usage] REDACTED
+|_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
+|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_ProjectionExec: expr=[cpu_usage@1 as cpu_usage, ts@0 as ts] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts", "cpu_usage"], "filters": ["host = Utf8(\"host1\") OR host = Utf8(\"host2\")"], "flat_format": false, "REDACTED
+|_|_|_|
+|_|_| Total rows: 5_|
++-+-+-+
+
+-- Filter with BETWEEN on non-projected column
+SELECT host FROM filter_prune_test WHERE cpu_usage BETWEEN 15.0 AND 30.0 ORDER BY ts;
+
++-------+
+| host  |
++-------+
+| host1 |
+| host1 |
+| host2 |
++-------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN ANALYZE VERBOSE SELECT host FROM filter_prune_test WHERE cpu_usage BETWEEN 15.0 AND 30.0 ORDER BY ts;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[host@0 as host] REDACTED
+|_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
+|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_ProjectionExec: expr=[host@1 as host, ts@0 as ts] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_FilterExec: cpu_usage@2 >= 15 AND cpu_usage@2 <= 30, projection=[ts@0, host@1] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts", "host", "cpu_usage"], "filters": ["cpu_usage >= Float64(15)", "cpu_usage <= Float64(30)"], "flat_format": false, "REDACTED
+|_|_|_|
+|_|_| Total rows: 3_|
++-+-+-+
+
+-- Filter with LIKE on non-projected column
+SELECT cpu_usage FROM filter_prune_test WHERE host LIKE 'host%' AND `region` LIKE 'us-%' ORDER BY ts;
+
++-----------+
+| cpu_usage |
++-----------+
+| 10.5      |
+| 15.5      |
+| 20.5      |
+| 25.5      |
+| 30.5      |
++-----------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host LIKE 'host%' AND `region` LIKE 'us-%' ORDER BY ts;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[cpu_usage@0 as cpu_usage] REDACTED
+|_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
+|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_ProjectionExec: expr=[cpu_usage@1 as cpu_usage, ts@0 as ts] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_FilterExec: host@1 LIKE host% AND region@2 LIKE us-%, projection=[ts@0, cpu_usage@3] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts", "host", "region", "cpu_usage"], "filters": ["host LIKE Utf8(\"host%\")", "region LIKE Utf8(\"us-%\")"], "flat_format": false, "REDACTED
+|_|_|_|
+|_|_| Total rows: 5_|
++-+-+-+
+
+-- Filter with OR conditions on non-projected columns
+SELECT cpu_usage FROM filter_prune_test WHERE host = 'host1' OR `region` = 'eu-west' ORDER BY ts;
+
++-----------+
+| cpu_usage |
++-----------+
+| 10.5      |
+| 15.5      |
+| 20.5      |
+| 35.5      |
++-----------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host = 'host1' OR `region` = 'eu-west' ORDER BY ts;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[cpu_usage@0 as cpu_usage] REDACTED
+|_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
+|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_ProjectionExec: expr=[cpu_usage@1 as cpu_usage, ts@0 as ts] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_FilterExec: host@1 = host1 OR region@2 = eu-west, projection=[ts@0, cpu_usage@3] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts", "host", "region", "cpu_usage"], "filters": ["host = Utf8(\"host1\") OR region = Utf8(\"eu-west\")"], "flat_format": false, "REDACTED
+|_|_|_|
+|_|_| Total rows: 4_|
++-+-+-+
+
+-- Subquery with filter on non-projected column
+SELECT cpu_usage FROM (SELECT * FROM filter_prune_test WHERE host = 'host1') sub WHERE `region` = 'us-east' ORDER BY ts;
+
++-----------+
+| cpu_usage |
++-----------+
+| 10.5      |
+| 15.5      |
++-----------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM (SELECT * FROM filter_prune_test WHERE host = 'host1') sub WHERE `region` = 'us-east' ORDER BY ts;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[cpu_usage@0 as cpu_usage] REDACTED
+|_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
+|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_ProjectionExec: expr=[cpu_usage@1 as cpu_usage, ts@0 as ts] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts", "cpu_usage"], "filters": ["region = Utf8(\"us-east\")", "host = Utf8(\"host1\")"], "flat_format": false, "REDACTED
+|_|_|_|
+|_|_| Total rows: 2_|
++-+-+-+
+
+-- Repeat with data flushed to verify column pruning works with on-disk data
+ADMIN FLUSH_TABLE('filter_prune_test');
+
++----------------------------------------+
+| ADMIN FLUSH_TABLE('filter_prune_test') |
++----------------------------------------+
+| 0                                      |
++----------------------------------------+
+
+-- Basic case: filter column (host) not in SELECT projection
+SELECT cpu_usage FROM filter_prune_test WHERE host = 'host1' ORDER BY ts;
+
++-----------+
+| cpu_usage |
++-----------+
+| 10.5      |
+| 15.5      |
+| 20.5      |
++-----------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \"files\":\s\[\{.* \"file\":REDACTED
+EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host = 'host1' ORDER BY ts;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[cpu_usage@0 as cpu_usage] REDACTED
+|_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
+|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_ProjectionExec: expr=[cpu_usage@1 as cpu_usage, ts@0 as ts] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "cpu_usage"], "filters": ["host = Utf8(\"host1\")"], \"file\":REDACTED
+|_|_|_|
+|_|_| Total rows: 3_|
++-+-+-+
+
+-- Filter on multiple columns (host, region) but only select value columns
+SELECT cpu_usage, mem_usage FROM filter_prune_test WHERE host = 'host1' AND `region` = 'us-east' ORDER BY ts;
+
++-----------+-----------+
+| cpu_usage | mem_usage |
++-----------+-----------+
+| 10.5      | 20.0      |
+| 15.5      | 25.0      |
++-----------+-----------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \"files\":\s\[\{.* \"file\":REDACTED
+EXPLAIN ANALYZE VERBOSE SELECT cpu_usage, mem_usage FROM filter_prune_test WHERE host = 'host1' AND `region` = 'us-east' ORDER BY ts;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[cpu_usage@0 as cpu_usage, mem_usage@1 as mem_usage] REDACTED
+|_|_|_SortPreservingMergeExec: [ts@2 ASC NULLS LAST] REDACTED
+|_|_|_WindowedSortExec: expr=ts@2 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_PartSortExec: expr=ts@2 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_ProjectionExec: expr=[cpu_usage@1 as cpu_usage, mem_usage@2 as mem_usage, ts@0 as ts] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "cpu_usage", "mem_usage"], "filters": ["host = Utf8(\"host1\")", "region = Utf8(\"us-east\")"], \"file\":REDACTED
+|_|_|_|
+|_|_| Total rows: 2_|
++-+-+-+
+
+-- Filter on value column (cpu_usage) not in projection
+SELECT host, `region` FROM filter_prune_test WHERE cpu_usage > 20.0 ORDER BY ts;
+
++-------+---------+
+| host  | region  |
++-------+---------+
+| host1 | us-west |
+| host2 | us-east |
+| host2 | us-west |
+| host3 | eu-west |
++-------+---------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \"files\":\s\[\{.* \"file\":REDACTED
+EXPLAIN ANALYZE VERBOSE SELECT host, `region` FROM filter_prune_test WHERE cpu_usage > 20.0 ORDER BY ts;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[host@0 as host, region@1 as region] REDACTED
+|_|_|_SortPreservingMergeExec: [ts@2 ASC NULLS LAST] REDACTED
+|_|_|_WindowedSortExec: expr=ts@2 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_PartSortExec: expr=ts@2 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_ProjectionExec: expr=[host@1 as host, region@2 as region, ts@0 as ts] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_FilterExec: cpu_usage@3 > 20, projection=[ts@0, host@1, region@2] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "host", "region", "cpu_usage"], "filters": ["cpu_usage > Float64(20)"], \"file\":REDACTED
+|_|_|_|
+|_|_| Total rows: 4_|
++-+-+-+
+
+-- Filter on time index but time index not in projection
+SELECT host, cpu_usage FROM filter_prune_test WHERE ts > 2000 ORDER BY ts;
+
++-------+-----------+
+| host  | cpu_usage |
++-------+-----------+
+| host1 | 20.5      |
+| host2 | 25.5      |
+| host2 | 30.5      |
+| host3 | 35.5      |
++-------+-----------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \"files\":\s\[\{.* \"file\":REDACTED
+EXPLAIN ANALYZE VERBOSE SELECT host, cpu_usage FROM filter_prune_test WHERE ts > 2000 ORDER BY ts;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[host@0 as host, cpu_usage@1 as cpu_usage] REDACTED
+|_|_|_SortPreservingMergeExec: [ts@2 ASC NULLS LAST] REDACTED
+|_|_|_WindowedSortExec: expr=ts@2 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_PartSortExec: expr=ts@2 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_ProjectionExec: expr=[host@1 as host, cpu_usage@2 as cpu_usage, ts@0 as ts] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "host", "cpu_usage"], "filters": ["ts > TimestampMillisecond(2000, None)"], \"file\":REDACTED
+|_|_|_|
+|_|_| Total rows: 4_|
++-+-+-+
+
+-- Complex filter: multiple columns in WHERE, only one in SELECT
+SELECT mem_usage FROM filter_prune_test WHERE host = 'host1' AND cpu_usage > 10.0 AND `region` = 'us-east' ORDER BY ts;
+
++-----------+
+| mem_usage |
++-----------+
+| 20.0      |
+| 25.0      |
++-----------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \"files\":\s\[\{.* \"file\":REDACTED
+EXPLAIN ANALYZE VERBOSE SELECT mem_usage FROM filter_prune_test WHERE host = 'host1' AND cpu_usage > 10.0 AND `region` = 'us-east' ORDER BY ts;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[mem_usage@0 as mem_usage] REDACTED
+|_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
+|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_ProjectionExec: expr=[mem_usage@1 as mem_usage, ts@0 as ts] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_FilterExec: cpu_usage@1 > 10, projection=[ts@0, mem_usage@2] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "cpu_usage", "mem_usage"], "filters": ["host = Utf8(\"host1\")", "cpu_usage > Float64(10)", "region = Utf8(\"us-east\")"], \"file\":REDACTED
+|_|_|_|
+|_|_| Total rows: 2_|
++-+-+-+
+
+-- Aggregation with filter on non-projected column
+SELECT SUM(cpu_usage) as total_cpu FROM filter_prune_test WHERE host = 'host1';
+
++-----------+
+| total_cpu |
++-----------+
+| 46.5      |
++-----------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \"files\":\s\[\{.* \"file\":REDACTED
+EXPLAIN ANALYZE VERBOSE SELECT SUM(cpu_usage) as total_cpu FROM filter_prune_test WHERE host = 'host1';
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[sum(filter_prune_test.cpu_usage)@0 as total_cpu] REDACTED
+|_|_|_AggregateExec: mode=Final, gby=[], aggr=[sum(filter_prune_test.cpu_usage)] REDACTED
+|_|_|_CoalescePartitionsExec REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[], aggr=[sum(filter_prune_test.cpu_usage)] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["cpu_usage"], "filters": ["host = Utf8(\"host1\")"], \"file\":REDACTED
+|_|_|_|
+|_|_| Total rows: 1_|
++-+-+-+
+
+-- GROUP BY with filter on column not in projection or grouping
+SELECT `region`, AVG(cpu_usage) as avg_cpu FROM filter_prune_test WHERE mem_usage > 25.0 GROUP BY `region` ORDER BY `region`;
+
++---------+---------+
+| region  | avg_cpu |
++---------+---------+
+| eu-west | 35.5    |
+| us-east | 25.5    |
+| us-west | 25.5    |
++---------+---------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \"files\":\s\[\{.* \"file\":REDACTED
+EXPLAIN ANALYZE VERBOSE SELECT `region`, AVG(cpu_usage) as avg_cpu FROM filter_prune_test WHERE mem_usage > 25.0 GROUP BY `region` ORDER BY `region`;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_SortPreservingMergeExec: [region@0 ASC NULLS LAST] REDACTED
+|_|_|_SortExec: expr=[region@0 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
+|_|_|_ProjectionExec: expr=[region@0 as region, avg(filter_prune_test.cpu_usage)@1 as avg_cpu] REDACTED
+|_|_|_AggregateExec: mode=FinalPartitioned, gby=[region@0 as region], aggr=[avg(filter_prune_test.cpu_usage)] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_RepartitionExec: partitioning=Hash([region@0], 20), input_partitions=20 REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[region@0 as region], aggr=[avg(filter_prune_test.cpu_usage)] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_FilterExec: mem_usage@2 > 25, projection=[region@0, cpu_usage@1] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["region", "cpu_usage", "mem_usage"], "filters": ["mem_usage > Float64(25)"], \"file\":REDACTED
+|_|_|_|
+|_|_| Total rows: 3_|
++-+-+-+
+
+-- Filter with IN clause on non-projected column
+SELECT cpu_usage FROM filter_prune_test WHERE host IN ('host1', 'host2') ORDER BY ts;
+
++-----------+
+| cpu_usage |
++-----------+
+| 10.5      |
+| 15.5      |
+| 20.5      |
+| 25.5      |
+| 30.5      |
++-----------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \"files\":\s\[\{.* \"file\":REDACTED
+EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host IN ('host1', 'host2') ORDER BY ts;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[cpu_usage@0 as cpu_usage] REDACTED
+|_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
+|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_ProjectionExec: expr=[cpu_usage@1 as cpu_usage, ts@0 as ts] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "cpu_usage"], "filters": ["host = Utf8(\"host1\") OR host = Utf8(\"host2\")"], \"file\":REDACTED
+|_|_|_|
+|_|_| Total rows: 5_|
++-+-+-+
+
+-- Filter with BETWEEN on non-projected column
+SELECT host FROM filter_prune_test WHERE cpu_usage BETWEEN 15.0 AND 30.0 ORDER BY ts;
+
++-------+
+| host  |
++-------+
+| host1 |
+| host1 |
+| host2 |
++-------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \"files\":\s\[\{.* \"file\":REDACTED
+EXPLAIN ANALYZE VERBOSE SELECT host FROM filter_prune_test WHERE cpu_usage BETWEEN 15.0 AND 30.0 ORDER BY ts;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[host@0 as host] REDACTED
+|_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
+|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_ProjectionExec: expr=[host@1 as host, ts@0 as ts] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_FilterExec: cpu_usage@2 >= 15 AND cpu_usage@2 <= 30, projection=[ts@0, host@1] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "host", "cpu_usage"], "filters": ["cpu_usage >= Float64(15)", "cpu_usage <= Float64(30)"], \"file\":REDACTED
+|_|_|_|
+|_|_| Total rows: 3_|
++-+-+-+
+
+-- Filter with LIKE on non-projected column
+SELECT cpu_usage FROM filter_prune_test WHERE host LIKE 'host%' AND `region` LIKE 'us-%' ORDER BY ts;
+
++-----------+
+| cpu_usage |
++-----------+
+| 10.5      |
+| 15.5      |
+| 20.5      |
+| 25.5      |
+| 30.5      |
++-----------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \"files\":\s\[\{.* \"file\":REDACTED
+EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host LIKE 'host%' AND `region` LIKE 'us-%' ORDER BY ts;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[cpu_usage@0 as cpu_usage] REDACTED
+|_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
+|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_ProjectionExec: expr=[cpu_usage@1 as cpu_usage, ts@0 as ts] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_FilterExec: host@1 LIKE host% AND region@2 LIKE us-%, projection=[ts@0, cpu_usage@3] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "host", "region", "cpu_usage"], "filters": ["host LIKE Utf8(\"host%\")", "region LIKE Utf8(\"us-%\")"], \"file\":REDACTED
+|_|_|_|
+|_|_| Total rows: 5_|
++-+-+-+
+
+-- Filter with OR conditions on non-projected columns
+SELECT cpu_usage FROM filter_prune_test WHERE host = 'host1' OR `region` = 'eu-west' ORDER BY ts;
+
++-----------+
+| cpu_usage |
++-----------+
+| 10.5      |
+| 15.5      |
+| 20.5      |
+| 35.5      |
++-----------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \"files\":\s\[\{.* \"file\":REDACTED
+EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host = 'host1' OR `region` = 'eu-west' ORDER BY ts;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[cpu_usage@0 as cpu_usage] REDACTED
+|_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
+|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_ProjectionExec: expr=[cpu_usage@1 as cpu_usage, ts@0 as ts] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_FilterExec: host@1 = host1 OR region@2 = eu-west, projection=[ts@0, cpu_usage@3] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "host", "region", "cpu_usage"], "filters": ["host = Utf8(\"host1\") OR region = Utf8(\"eu-west\")"], \"file\":REDACTED
+|_|_|_|
+|_|_| Total rows: 4_|
++-+-+-+
+
+-- Subquery with filter on non-projected column
+SELECT cpu_usage FROM (SELECT * FROM filter_prune_test WHERE host = 'host1') sub WHERE `region` = 'us-east' ORDER BY ts;
+
++-----------+
+| cpu_usage |
++-----------+
+| 10.5      |
+| 15.5      |
++-----------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \"files\":\s\[\{.* \"file\":REDACTED
+EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM (SELECT * FROM filter_prune_test WHERE host = 'host1') sub WHERE `region` = 'us-east' ORDER BY ts;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[cpu_usage@0 as cpu_usage] REDACTED
+|_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
+|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_ProjectionExec: expr=[cpu_usage@1 as cpu_usage, ts@0 as ts] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "cpu_usage"], "filters": ["region = Utf8(\"us-east\")", "host = Utf8(\"host1\")"], \"file\":REDACTED
+|_|_|_|
+|_|_| Total rows: 2_|
++-+-+-+
+
+DROP TABLE filter_prune_test;
+
+Affected Rows: 0
+
+-- Test with data flushed to files to verify file-level column pruning
+CREATE TABLE filter_prune_files (
+    ts TIMESTAMP TIME INDEX,
+    tag_key STRING PRIMARY KEY,
+    field1 DOUBLE,
+    field2 DOUBLE,
+    field3 DOUBLE
+);
+
+Affected Rows: 0
+
+INSERT INTO filter_prune_files VALUES
+    (1000, 'a', 1.0, 2.0, 3.0),
+    (2000, 'a', 4.0, 5.0, 6.0),
+    (3000, 'b', 7.0, 8.0, 9.0);
+
+Affected Rows: 3
+
+ADMIN FLUSH_TABLE('filter_prune_files');
+
++-----------------------------------------+
+| ADMIN FLUSH_TABLE('filter_prune_files') |
++-----------------------------------------+
+| 0                                       |
++-----------------------------------------+
+
+-- Second batch goes to files after flush
+INSERT INTO filter_prune_files VALUES
+    (4000, 'b', 10.0, 11.0, 12.0),
+    (5000, 'c', 13.0, 14.0, 15.0);
+
+Affected Rows: 2
+
+ADMIN FLUSH_TABLE('filter_prune_files');
+
++-----------------------------------------+
+| ADMIN FLUSH_TABLE('filter_prune_files') |
++-----------------------------------------+
+| 0                                       |
++-----------------------------------------+
+
+-- Third batch stays in memtable (no flush)
+INSERT INTO filter_prune_files VALUES
+    (6000, 'c', 16.0, 17.0, 18.0),
+    (7000, 'd', 19.0, 20.0, 21.0);
+
+Affected Rows: 2
+
+-- Query after flush and additional memtable writes: filter on tag (not in projection), select only field1
+SELECT field1 FROM filter_prune_files WHERE tag_key = 'a' ORDER BY ts;
+
++--------+
+| field1 |
++--------+
+| 1.0    |
+| 4.0    |
++--------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \"files\":\s\[\{.* \"file\":REDACTED
+EXPLAIN ANALYZE VERBOSE SELECT field1 FROM filter_prune_files WHERE tag_key = 'a' ORDER BY ts;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[field1@0 as field1] REDACTED
+|_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
+|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_ProjectionExec: expr=[field1@1 as field1, ts@0 as ts] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":3, "mem_ranges":1, "files":2, "file_ranges":2}, "projection": ["ts", "field1"], "filters": ["tag_key = Utf8(\"a\")"], \"file\":REDACTED
+|_|_|_|
+|_|_| Total rows: 2_|
++-+-+-+
+
+-- Query: filter on field2 (not in projection), select only field1
+SELECT field1 FROM filter_prune_files WHERE field2 > 5.0 ORDER BY ts;
+
++--------+
+| field1 |
++--------+
+| 7.0    |
+| 10.0   |
+| 13.0   |
+| 16.0   |
+| 19.0   |
++--------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \"files\":\s\[\{.* \"file\":REDACTED
+EXPLAIN ANALYZE VERBOSE SELECT field1 FROM filter_prune_files WHERE field2 > 5.0 ORDER BY ts;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[field1@0 as field1] REDACTED
+|_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
+|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_ProjectionExec: expr=[field1@1 as field1, ts@0 as ts] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_FilterExec: field2@2 > 5, projection=[ts@0, field1@1] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":3, "mem_ranges":1, "files":2, "file_ranges":2}, "projection": ["ts", "field1", "field2"], "filters": ["field2 > Float64(5)"], \"file\":REDACTED
+|_|_|_|
+|_|_| Total rows: 5_|
++-+-+-+
+
+-- Complex: filter on tag and field2, select only field3
+SELECT field3 FROM filter_prune_files WHERE tag_key = 'b' AND field2 > 7.0 ORDER BY ts;
+
++--------+
+| field3 |
++--------+
+| 9.0    |
+| 12.0   |
++--------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \"files\":\s\[\{.* \"file\":REDACTED
+EXPLAIN ANALYZE VERBOSE SELECT field3 FROM filter_prune_files WHERE tag_key = 'b' AND field2 > 7.0 ORDER BY ts;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[field3@0 as field3] REDACTED
+|_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
+|_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=20 REDACTED
+|_|_|_ProjectionExec: expr=[field3@1 as field3, ts@0 as ts] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_FilterExec: field2@1 > 7, projection=[ts@0, field3@2] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":3, "mem_ranges":1, "files":2, "file_ranges":2}, "projection": ["ts", "field2", "field3"], "filters": ["tag_key = Utf8(\"b\")", "field2 > Float64(7)"], \"file\":REDACTED
+|_|_|_|
+|_|_| Total rows: 2_|
++-+-+-+
+
+DROP TABLE filter_prune_files;
+
+Affected Rows: 0
+
