@@ -276,7 +276,7 @@ impl DdlManager {
             into_partition_exprs,
         }: Repartition,
         wait: bool,
-        _timeout: Duration,
+        timeout: Duration,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
 
@@ -288,8 +288,7 @@ impl DdlManager {
                 table_id,
                 from_partition_exprs,
                 into_partition_exprs,
-                // TODO(weny): get timeout from the proto.
-                None,
+                Some(timeout),
             )
             .context(CreateRepartitionProcedureSnafu)?;
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
