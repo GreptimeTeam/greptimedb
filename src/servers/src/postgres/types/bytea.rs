@@ -12,147 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use bytes::BufMut;
-use pgwire::types::ToSqlText;
-use pgwire::types::format::FormatOptions;
-use postgres_types::{IsNull, ToSql, Type};
+pub struct EscapeOutputBytea<'a>(pub(crate) &'a [u8]);
 
-#[derive(Debug)]
-pub struct HexOutputBytea<'a>(pub &'a [u8]);
-impl ToSqlText for HexOutputBytea<'_> {
-    fn to_sql_text(
-        &self,
-        ty: &Type,
-        out: &mut bytes::BytesMut,
-        format_options: &FormatOptions,
-    ) -> std::result::Result<IsNull, Box<dyn std::error::Error + Sync + Send>>
-    where
-        Self: Sized,
-    {
-        let _ = self.0.to_sql_text(ty, out, format_options);
-        Ok(IsNull::No)
-    }
-}
-
-impl ToSql for HexOutputBytea<'_> {
-    fn to_sql(
-        &self,
-        ty: &Type,
-        out: &mut bytes::BytesMut,
-    ) -> std::result::Result<IsNull, Box<dyn std::error::Error + Sync + Send>>
-    where
-        Self: Sized,
-    {
-        self.0.to_sql(ty, out)
-    }
-
-    fn accepts(ty: &Type) -> bool
-    where
-        Self: Sized,
-    {
-        <&[u8] as ToSql>::accepts(ty)
-    }
-
-    fn to_sql_checked(
-        &self,
-        ty: &Type,
-        out: &mut bytes::BytesMut,
-    ) -> std::result::Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
-        self.0.to_sql_checked(ty, out)
-    }
-}
-#[derive(Debug)]
-pub struct EscapeOutputBytea<'a>(pub &'a [u8]);
-impl ToSqlText for EscapeOutputBytea<'_> {
-    fn to_sql_text(
-        &self,
-        _ty: &Type,
-        out: &mut bytes::BytesMut,
-        _format_options: &FormatOptions,
-    ) -> std::result::Result<IsNull, Box<dyn std::error::Error + Sync + Send>>
-    where
-        Self: Sized,
-    {
-        self.0.iter().for_each(|b| match b {
-            0..=31 | 127..=255 => {
-                out.put_slice(b"\\");
-                out.put_slice(format!("{:03o}", b).as_bytes());
+impl<'a> std::fmt::Display for EscapeOutputBytea<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let bytes = self.0;
+        let mut result = String::with_capacity(3 * bytes.len());
+        for byte in bytes {
+            match byte {
+                b'\\' => result.push_str(r#"\\"#),
+                b'\'' => result.push_str(r#"'"),
+                b'\t' => result.push_str(r#"\t"#),
+                b'\r' => result.push_str(r#"\r"#),
+                _ if byte.is_ascii() && !byte.is_ascii_graphic() => result.push(format!(r#"\{:02X}"#, byte)),
+                _ => result.push(byte),
             }
-            92 => out.put_slice(b"\\\\"),
-            32..=126 => out.put_u8(*b),
-        });
-        Ok(IsNull::No)
+        }
+        write!(f, "{}", result)
     }
 }
-impl ToSql for EscapeOutputBytea<'_> {
-    fn to_sql(
-        &self,
-        ty: &Type,
-        out: &mut bytes::BytesMut,
-    ) -> std::result::Result<IsNull, Box<dyn std::error::Error + Sync + Send>>
-    where
-        Self: Sized,
-    {
-        self.0.to_sql(ty, out)
-    }
-
-    fn accepts(ty: &Type) -> bool
-    where
-        Self: Sized,
-    {
-        <&[u8] as ToSql>::accepts(ty)
-    }
-
-    fn to_sql_checked(
-        &self,
-        ty: &Type,
-        out: &mut bytes::BytesMut,
-    ) -> std::result::Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
-        self.0.to_sql_checked(ty, out)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_escape_output_bytea() {
-        let input: &[u8] = &[97, 98, 99, 107, 108, 109, 42, 169, 84];
-        let input = EscapeOutputBytea(input);
-
-        let expected = b"abcklm*\\251T";
-        let mut out = bytes::BytesMut::new();
-        let is_null = input
-            .to_sql_text(&Type::BYTEA, &mut out, &FormatOptions::default())
-            .unwrap();
-        assert!(matches!(is_null, IsNull::No));
-        assert_eq!(&out[..], expected);
-
-        let expected = &[97, 98, 99, 107, 108, 109, 42, 169, 84];
-        let mut out = bytes::BytesMut::new();
-        let is_null = input.to_sql(&Type::BYTEA, &mut out).unwrap();
-        assert!(matches!(is_null, IsNull::No));
-        assert_eq!(&out[..], expected);
-    }
-
-    #[test]
-    fn test_hex_output_bytea() {
-        let input = b"hello, world!";
-        let input = HexOutputBytea(input);
-
-        let expected = b"\\x68656c6c6f2c20776f726c6421";
-        let mut out = bytes::BytesMut::new();
-        let is_null = input
-            .to_sql_text(&Type::BYTEA, &mut out, &FormatOptions::default())
-            .unwrap();
-        assert!(matches!(is_null, IsNull::No));
-        assert_eq!(&out[..], expected);
-
-        let expected = b"hello, world!";
-        let mut out = bytes::BytesMut::new();
-        let is_null = input.to_sql(&Type::BYTEA, &mut out).unwrap();
-        assert!(matches!(is_null, IsNull::No));
-        assert_eq!(&out[..], expected);
-    }
-}
+END

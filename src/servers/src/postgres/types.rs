@@ -28,6 +28,7 @@ use arrow::datatypes::{
     TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
     TimestampSecondType, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
 };
+use arrow_pg::encoder::encode_value;
 use arrow_schema::{DataType, IntervalUnit, TimeUnit};
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime};
 use common_decimal::Decimal128;
@@ -433,13 +434,7 @@ impl RecordBatchRowIterator {
             }
 
             match column.data_type() {
-                DataType::Null => {
-                    encoder.encode_field(&None::<&i8>)?;
-                }
-                DataType::Boolean => {
-                    let array = column.as_boolean();
-                    encoder.encode_field(&array.value(i))?;
-                }
+                // these types are greptimedb specific or custom
                 DataType::UInt8 => {
                     let array = column.as_primitive::<UInt8Type>();
                     let value = array.value(i);
@@ -475,105 +470,6 @@ impl RecordBatchRowIterator {
                     } else {
                         encoder.encode_field(&value.to_string())?;
                     }
-                }
-                DataType::Int8 => {
-                    let array = column.as_primitive::<Int8Type>();
-                    encoder.encode_field(&array.value(i))?;
-                }
-                DataType::Int16 => {
-                    let array = column.as_primitive::<Int16Type>();
-                    encoder.encode_field(&array.value(i))?;
-                }
-                DataType::Int32 => {
-                    let array = column.as_primitive::<Int32Type>();
-                    encoder.encode_field(&array.value(i))?;
-                }
-                DataType::Int64 => {
-                    let array = column.as_primitive::<Int64Type>();
-                    encoder.encode_field(&array.value(i))?;
-                }
-                DataType::Float32 => {
-                    let array = column.as_primitive::<Float32Type>();
-                    encoder.encode_field(&array.value(i))?;
-                }
-                DataType::Float64 => {
-                    let array = column.as_primitive::<Float64Type>();
-                    encoder.encode_field(&array.value(i))?;
-                }
-                DataType::Utf8 => {
-                    let array = column.as_string::<i32>();
-                    let value = array.value(i);
-                    encoder.encode_field(&value)?;
-                }
-                DataType::Utf8View => {
-                    let array = column.as_string_view();
-                    let value = array.value(i);
-                    encoder.encode_field(&value)?;
-                }
-                DataType::LargeUtf8 => {
-                    let array = column.as_string::<i64>();
-                    let value = array.value(i);
-                    encoder.encode_field(&value)?;
-                }
-                DataType::Binary => {
-                    let array = column.as_binary::<i32>();
-                    let v = array.value(i);
-                    encode_bytes(
-                        &self.schema.column_schemas()[j],
-                        v,
-                        encoder,
-                        &self.query_ctx,
-                    )?;
-                }
-                DataType::BinaryView => {
-                    let array = column.as_binary_view();
-                    let v = array.value(i);
-                    encode_bytes(
-                        &self.schema.column_schemas()[j],
-                        v,
-                        encoder,
-                        &self.query_ctx,
-                    )?;
-                }
-                DataType::LargeBinary => {
-                    let array = column.as_binary::<i64>();
-                    let v = array.value(i);
-                    encode_bytes(
-                        &self.schema.column_schemas()[j],
-                        v,
-                        encoder,
-                        &self.query_ctx,
-                    )?;
-                }
-                DataType::Date32 | DataType::Date64 => {
-                    let v = if matches!(column.data_type(), DataType::Date32) {
-                        let array = column.as_primitive::<Date32Type>();
-                        array.value(i)
-                    } else {
-                        let array = column.as_primitive::<Date64Type>();
-                        // `Date64` values are milliseconds representation of `Date32` values,
-                        // according to its specification. So we convert the `Date64` value here to
-                        // the `Date32` value to process them unified.
-                        (array.value(i) / 86_400_000) as i32
-                    };
-                    let v = Date::new(v);
-                    let date = v.to_chrono_date().map(|v| {
-                        let (style, order) =
-                            *self.query_ctx.configuration_parameter().pg_datetime_style();
-                        StylingDate(v, style, order)
-                    });
-                    encoder.encode_field(&date)?;
-                }
-                DataType::Timestamp(_, _) => {
-                    let v = datatypes::arrow_array::timestamp_array_value(column, i);
-                    let datetime = v
-                        .to_chrono_datetime_with_timezone(Some(&self.query_ctx.timezone()))
-                        .map(|v| {
-                            let (style, order) =
-                                *self.query_ctx.configuration_parameter().pg_datetime_style();
-                            StylingDateTime(v, style, order)
-                        });
-                    encoder.encode_field(&datetime)?;
                 }
                 DataType::Interval(interval_unit) => match interval_unit {
                     IntervalUnit::YearMonth => {
@@ -611,22 +507,11 @@ impl RecordBatchRowIterator {
                 DataType::Struct(_) => {
                     encode_struct(&self.query_ctx, Default::default(), encoder)?;
                 }
-                DataType::Time32(_) | DataType::Time64(_) => {
-                    let v = datatypes::arrow_array::time_array_value(column, i);
-                    encoder.encode_field(&v.to_chrono_time())?;
-                }
-                DataType::Decimal128(precision, scale) => {
-                    let array = column.as_primitive::<Decimal128Type>();
-                    let v = Decimal128::new(array.value(i), *precision, *scale);
-                    encoder.encode_field(&v.to_string())?;
-                }
+
                 _ => {
-                    return Err(convert_err(Error::Internal {
-                        err_msg: format!(
-                            "cannot convert datatype {} to postgres",
-                            column.data_type()
-                        ),
-                    }));
+                    // Encode value using arrow-pg
+                    let pg_field = &self.pg_schema[j];
+                    encode_value(encoder, column, i, pg_field)?;
                 }
             }
         }

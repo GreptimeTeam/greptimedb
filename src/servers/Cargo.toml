@@ -83,6 +83,7 @@ object-pool = "0.5"
 once_cell.workspace = true
 openmetrics-parser = "0.4"
 opensrv-mysql = { git = "https://github.com/datafuselabs/opensrv", tag = "v0.10.0" }
+arrow-pg = "0.10.0"
 opentelemetry-proto.workspace = true
 operator.workspace = true
 otel-arrow-rust.workspace = true
