@@ -31,19 +31,19 @@ use sqlparser::keywords::ALL_KEYWORDS;
 use sqlparser::parser::IsOptional::Mandatory;
 use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Token, TokenWithSpan, Word};
-use table::requests::{validate_database_option, validate_table_option};
+use table::requests::validate_database_option;
 
 use crate::ast::{ColumnDef, Ident, ObjectNamePartExt};
 use crate::error::{
     self, InvalidColumnOptionSnafu, InvalidDatabaseOptionSnafu, InvalidIntervalSnafu,
-    InvalidSqlSnafu, InvalidTableOptionSnafu, InvalidTimeIndexSnafu, MissingTimeIndexSnafu, Result,
-    SyntaxSnafu, UnexpectedSnafu, UnsupportedSnafu,
+    InvalidSqlSnafu, InvalidTimeIndexSnafu, MissingTimeIndexSnafu, Result, SyntaxSnafu,
+    UnexpectedSnafu, UnsupportedSnafu,
 };
 use crate::parser::{FLOW, ParserContext};
 use crate::parsers::tql_parser;
 use crate::parsers::utils::{
-    self, validate_column_fulltext_create_option, validate_column_skipping_index_create_option,
-    validate_column_vector_index_create_option,
+    self, parse_with_options, validate_column_fulltext_create_option,
+    validate_column_skipping_index_create_option, validate_column_vector_index_create_option,
 };
 use crate::statements::create::{
     Column, ColumnExtensions, CreateDatabase, CreateExternalTable, CreateFlow, CreateTable,
@@ -447,17 +447,7 @@ impl<'a> ParserContext<'a> {
     }
 
     fn parse_create_table_options(&mut self) -> Result<OptionMap> {
-        let options = self
-            .parser
-            .parse_options(Keyword::WITH)
-            .context(SyntaxSnafu)?
-            .into_iter()
-            .map(parse_option_string)
-            .collect::<Result<HashMap<String, OptionValue>>>()?;
-        for key in options.keys() {
-            ensure!(validate_table_option(key), InvalidTableOptionSnafu { key });
-        }
-        Ok(OptionMap::new(options))
+        parse_with_options(&mut self.parser)
     }
 
     /// "PARTITION ON COLUMNS (...)" clause

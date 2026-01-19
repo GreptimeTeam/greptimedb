@@ -14,6 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::alter_table_expr::Kind;
@@ -54,6 +55,7 @@ use datafusion_expr::LogicalPlan;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, RawSchema, Schema};
 use datatypes::value::Value;
+use humantime::parse_duration;
 use partition::expr::{Operand, PartitionExpr, RestrictedOp};
 use partition::multi_dim::MultiDimPartitionRule;
 use query::parser::QueryStatement;
@@ -64,6 +66,7 @@ use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
 use snafu::{OptionExt, ResultExt, ensure};
 use sql::parser::{ParseOptions, ParserContext};
+use sql::statements::OptionMap;
 #[cfg(feature = "enterprise")]
 use sql::statements::alter::trigger::AlterTrigger;
 use sql::statements::alter::{AlterDatabase, AlterTable, AlterTableOperation};
@@ -79,7 +82,9 @@ use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::TableRef;
 use table::dist_table::DistTable;
 use table::metadata::{self, RawTableInfo, RawTableMeta, TableId, TableInfo, TableType};
-use table::requests::{AlterKind, AlterTableRequest, COMMENT_KEY, TableOptions};
+use table::requests::{
+    AlterKind, AlterTableRequest, COMMENT_KEY, DDL_TIMEOUT, DDL_WAIT, TableOptions,
+};
 use table::table_name::TableName;
 use table::table_reference::TableReference;
 
@@ -97,6 +102,36 @@ use crate::error::{
 use crate::expr_helper::{self, RepartitionRequest};
 use crate::statement::StatementExecutor;
 use crate::statement::show::create_partitions_stmt;
+
+#[derive(Debug, Clone, Copy)]
+struct DdlSubmitOptions {
+    wait: bool,
+    timeout: Duration,
+}
+
+fn parse_ddl_options(options: &OptionMap) -> Result<DdlSubmitOptions> {
+    let wait = match options.get(DDL_WAIT) {
+        Some(value) => value.parse::<bool>().map_err(|_| {
+            InvalidSqlSnafu {
+                err_msg: format!("invalid DDL option '{DDL_WAIT}': '{value}'"),
+            }
+            .build()
+        })?,
+        None => SubmitDdlTaskRequest::default_wait(),
+    };
+
+    let timeout = match options.get(DDL_TIMEOUT) {
+        Some(value) => parse_duration(value).map_err(|err| {
+            InvalidSqlSnafu {
+                err_msg: format!("invalid DDL option '{DDL_TIMEOUT}': '{value}': {err}"),
+            }
+            .build()
+        })?,
+        None => SubmitDdlTaskRequest::default_timeout(),
+    };
+
+    Ok(DdlSubmitOptions { wait, timeout })
+}
 
 impl StatementExecutor {
     pub fn catalog_manager(&self) -> CatalogManagerRef {
@@ -1401,6 +1436,7 @@ impl StatementExecutor {
             new_partition_exprs_len
         );
 
+        let ddl_options = parse_ddl_options(&request.options)?;
         let serialize_exprs = |exprs: Vec<PartitionExpr>| -> Result<Vec<String>> {
             let mut json_exprs = Vec::with_capacity(exprs.len());
             for expr in exprs {
@@ -1410,7 +1446,7 @@ impl StatementExecutor {
         };
         let from_partition_exprs_json = serialize_exprs(from_partition_exprs)?;
         let into_partition_exprs_json = serialize_exprs(into_partition_exprs)?;
-        let req = SubmitDdlTaskRequest::new(
+        let mut req = SubmitDdlTaskRequest::new(
             query_context.clone(),
             DdlTask::new_alter_table(AlterTableExpr {
                 catalog_name: request.catalog_name.clone(),
@@ -1419,11 +1455,11 @@ impl StatementExecutor {
                 kind: Some(Kind::Repartition(Repartition {
                     from_partition_exprs: from_partition_exprs_json,
                     into_partition_exprs: into_partition_exprs_json,
-                    // TODO(weny): allow passing 'wait' from SQL options or QueryContext
-                    wait: true,
                 })),
             }),
         );
+        req.wait = ddl_options.wait;
+        req.timeout = ddl_options.timeout;
         let invalidate_keys = vec![
             CacheIdent::TableId(table_id),
             CacheIdent::TableName(TableName::new(
@@ -1443,6 +1479,7 @@ impl StatementExecutor {
             .await
             .context(error::InvalidateTableCacheSnafu)?;
 
+        // TODO(weny): If wait is false, we need to return the procedure id instead of output.
         Ok(Output::new_with_affected_rows(0))
     }
 
@@ -2182,6 +2219,8 @@ fn convert_value(
 
 #[cfg(test)]
 mod test {
+    use std::time::Duration;
+
     use session::context::{QueryContext, QueryContextBuilder};
     use sql::dialect::GreptimeDbDialect;
     use sql::parser::{ParseOptions, ParserContext};
@@ -2190,6 +2229,17 @@ mod test {
 
     use super::*;
     use crate::expr_helper;
+
+    #[test]
+    fn test_parse_ddl_options() {
+        let options = OptionMap::from([
+            ("timeout".to_string(), "5m".to_string()),
+            ("wait".to_string(), "false".to_string()),
+        ]);
+        let ddl_options = parse_ddl_options(&options).unwrap();
+        assert!(!ddl_options.wait);
+        assert_eq!(Duration::from_secs(300), ddl_options.timeout);
+    }
 
     #[test]
     fn test_name_is_match() {

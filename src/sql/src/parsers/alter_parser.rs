@@ -30,7 +30,8 @@ use crate::error::{self, InvalidColumnOptionSnafu, Result, SetFulltextOptionSnaf
 use crate::parser::ParserContext;
 use crate::parsers::create_parser::INVERTED;
 use crate::parsers::utils::{
-    validate_column_fulltext_create_option, validate_column_skipping_index_create_option,
+    parse_with_options, validate_column_fulltext_create_option,
+    validate_column_skipping_index_create_option,
 };
 use crate::statements::OptionMap;
 use crate::statements::alter::{
@@ -181,7 +182,9 @@ impl ParserContext<'_> {
             }
             unexpected => self.unsupported(unexpected.to_string())?,
         };
-        Ok(AlterTable::new(table_name, alter_operation))
+
+        let options = parse_with_options(&mut self.parser)?;
+        Ok(AlterTable::new(table_name, alter_operation, options))
     }
 
     fn parse_alter_table_unset(&mut self) -> Result<AlterTableOperation> {
@@ -1040,6 +1043,50 @@ ALTER TABLE metrics MERGE PARTITION (
                     "device_id < 100 OR device_id >= 100"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn test_parse_alter_table_merge_partition_with_options() {
+        let sql = r#"
+ALTER TABLE alter_repartition_table MERGE PARTITION (
+  device_id < 100 AND area < 'South',
+  device_id < 100 AND area >= 'South'
+) WITH (
+  TIMEOUT = '5m',
+  WAIT = false
+);"#;
+        let mut result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, result.len());
+
+        let statement = result.remove(0);
+        assert_matches!(statement, Statement::AlterTable { .. });
+        if let Statement::AlterTable(alter_table) = statement {
+            assert_matches!(
+                alter_table.alter_operation(),
+                AlterTableOperation::Repartition { .. }
+            );
+
+            if let AlterTableOperation::Repartition { operation } = alter_table.alter_operation() {
+                assert_eq!(operation.from_exprs.len(), 2);
+                assert_eq!(
+                    operation.from_exprs[0].to_string(),
+                    "device_id < 100 AND area < 'South'"
+                );
+                assert_eq!(
+                    operation.from_exprs[1].to_string(),
+                    "device_id < 100 AND area >= 'South'"
+                );
+                assert_eq!(operation.into_exprs.len(), 1);
+            }
+
+            // Verify WITH options are parsed
+            let options = alter_table.options().to_str_map();
+            assert_eq!(options.get("timeout").unwrap(), &"5m");
+            assert_eq!(options.get("wait").unwrap(), &"false");
+            assert_eq!(options.len(), 2);
         }
     }
 

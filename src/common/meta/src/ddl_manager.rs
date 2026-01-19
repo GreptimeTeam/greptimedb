@@ -170,6 +170,15 @@ pub trait RepartitionProcedureFactory: Send + Sync {
     ) -> std::result::Result<(), BoxedError>;
 }
 
+/// The options for DDL tasks.
+#[derive(Debug, Clone, Copy)]
+pub struct DdlOptions {
+    /// Timeout for the task.
+    pub timeout: Duration,
+    /// Waits for the task to complete.
+    pub wait: bool,
+}
+
 impl DdlManager {
     /// Returns a new [DdlManager] with all Ddl [BoxedProcedureLoader](common_procedure::procedure::BoxedProcedureLoader)s registered.
     pub fn try_new(
@@ -265,8 +274,9 @@ impl DdlManager {
         Repartition {
             from_partition_exprs,
             into_partition_exprs,
-            wait,
         }: Repartition,
+        wait: bool,
+        _timeout: Duration,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
 
@@ -298,6 +308,7 @@ impl DdlManager {
         &self,
         table_id: TableId,
         alter_table_task: AlterTableTask,
+        ddl_options: DdlOptions,
     ) -> Result<(ProcedureId, Option<Output>)> {
         // make alter_table_task mutable so we can call .take() on its field
         let mut alter_table_task = alter_table_task;
@@ -311,7 +322,13 @@ impl DdlManager {
                 alter_table_task.alter_table.table_name,
             );
             return self
-                .submit_repartition_task(table_id, table_name, repartition)
+                .submit_repartition_task(
+                    table_id,
+                    table_name,
+                    repartition,
+                    ddl_options.wait,
+                    ddl_options.timeout,
+                )
                 .await;
         }
 
@@ -566,6 +583,10 @@ impl DdlManager {
             .map(TracingContext::from_w3c)
             .unwrap_or_else(TracingContext::from_current_span)
             .attach(tracing::info_span!("DdlManager::submit_ddl_task"));
+        let ddl_options = DdlOptions {
+            wait: request.wait,
+            timeout: request.timeout,
+        };
         async move {
             debug!("Submitting Ddl task: {:?}", request.task);
             match request.task {
@@ -574,7 +595,7 @@ impl DdlManager {
                 }
                 DropTable(drop_table_task) => handle_drop_table_task(self, drop_table_task).await,
                 AlterTable(alter_table_task) => {
-                    handle_alter_table_task(self, alter_table_task).await
+                    handle_alter_table_task(self, alter_table_task, ddl_options).await
                 }
                 TruncateTable(truncate_table_task) => {
                     handle_truncate_table_task(self, truncate_table_task).await
@@ -660,6 +681,7 @@ async fn handle_truncate_table_task(
 async fn handle_alter_table_task(
     ddl_manager: &DdlManager,
     alter_table_task: AlterTableTask,
+    ddl_options: DdlOptions,
 ) -> Result<SubmitDdlTaskResponse> {
     let table_ref = alter_table_task.table_ref();
 
@@ -692,7 +714,7 @@ async fn handle_alter_table_task(
     );
 
     let (id, _) = ddl_manager
-        .submit_alter_table_task(table_id, alter_table_task)
+        .submit_alter_table_task(table_id, alter_table_task, ddl_options)
         .await?;
 
     info!("Table: {table_id} is altered via procedure_id {id:?}");

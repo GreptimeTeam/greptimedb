@@ -695,18 +695,24 @@ pub struct RepartitionRequest {
     pub table_name: String,
     pub from_exprs: Vec<Expr>,
     pub into_exprs: Vec<Expr>,
+    pub options: OptionMap,
 }
 
 pub(crate) fn to_repartition_request(
     alter_table: AlterTable,
     query_ctx: &QueryContextRef,
 ) -> Result<RepartitionRequest> {
-    let (catalog_name, schema_name, table_name) =
-        table_idents_to_full_name(alter_table.table_name(), query_ctx)
-            .map_err(BoxedError::new)
-            .context(ExternalSnafu)?;
+    let AlterTable {
+        table_name,
+        alter_operation,
+        options,
+    } = alter_table;
 
-    let AlterTableOperation::Repartition { operation } = alter_table.alter_operation else {
+    let (catalog_name, schema_name, table_name) = table_idents_to_full_name(&table_name, query_ctx)
+        .map_err(BoxedError::new)
+        .context(ExternalSnafu)?;
+
+    let AlterTableOperation::Repartition { operation } = alter_operation else {
         return InvalidSqlSnafu {
             err_msg: "expected REPARTITION operation",
         }
@@ -719,6 +725,7 @@ pub(crate) fn to_repartition_request(
         table_name,
         from_exprs: operation.from_exprs,
         into_exprs: operation.into_exprs,
+        options,
     })
 }
 
