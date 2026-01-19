@@ -57,8 +57,7 @@ CREATE TABLE IF NOT EXISTS "cake" (
     PRIMARY KEY ("domain")
 ) ENGINE=mito
 WITH(
-    append_mode = 'true',
-    ttl='7days'
+    append_mode = 'true'
 );
 
 INSERT INTO cake(domain, is_expire, ts) VALUES('happy', false, '2025-03-18 12:55:51.758000');
