@@ -7772,6 +7772,7 @@ dependencies = [
  "meta-srv",
  "rand 0.9.1",
  "serde",
+ "session",
  "snafu 0.8.6",
  "tokio",
  "tokio-stream",
