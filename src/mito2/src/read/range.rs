@@ -596,18 +596,18 @@ impl RangeBuilderList {
     /// Decrements the remaining range count for a file and clears the builder if done.
     fn decrement_and_maybe_clear(&self, file_index: usize, reader_metrics: &mut ReaderMetrics) {
         let mut entries = self.file_entries.lock().unwrap();
-        if let Some(entry) = entries.get_mut(file_index) {
-            if entry.remaining_ranges > 0 {
-                entry.remaining_ranges -= 1;
-                if entry.remaining_ranges == 0 {
-                    if let Some(builder) = entry.builder.take() {
-                        reader_metrics.metadata_mem_size = reader_metrics
-                            .metadata_mem_size
-                            .saturating_sub(builder.memory_size());
-                        reader_metrics.num_range_builders =
-                            reader_metrics.num_range_builders.saturating_sub(1);
-                    }
-                }
+        if let Some(entry) = entries.get_mut(file_index)
+            && entry.remaining_ranges > 0
+        {
+            entry.remaining_ranges -= 1;
+            if entry.remaining_ranges == 0
+                && let Some(builder) = entry.builder.take()
+            {
+                reader_metrics.metadata_mem_size = reader_metrics
+                    .metadata_mem_size
+                    .saturating_sub(builder.memory_size());
+                reader_metrics.num_range_builders =
+                    reader_metrics.num_range_builders.saturating_sub(1);
             }
         }
     }
