@@ -96,11 +96,30 @@ function deploy_greptimedb_cluster() {
   done
 
   # Expose greptimedb cluster to local access.
+  # Expose greptimedb cluster to local access and check if port-forward is available.
   kubectl -n "$install_namespace" port-forward svc/"$cluster_name"-frontend \
     14000:4000 \
     14001:4001 \
     14002:4002 \
-    14003:4003 > /tmp/connections.out &
+    14003:4003 > /tmp/connections.out 2>&1 &
+  PORT_FORWARD_PID=$!
+  
+  # Wait for the port forward to be ready (checks up to 30 seconds)
+  for i in {1..30}; do
+    if nc -z localhost 14000 && nc -z localhost 14001 && nc -z localhost 14002 && nc -z localhost 14003; then
+      echo "Port forward is available."
+      break
+    fi
+    if ! kill -0 $PORT_FORWARD_PID 2>/dev/null; then
+      echo "Port forward process exited unexpectedly."
+      exit 1
+    fi
+    sleep 1
+    if [ "$i" -eq 30 ]; then
+      echo "Port forward did not become available in time."
+      exit 1
+    fi
+  done
 }
 
 # Deploy greptimedb cluster by using S3.
