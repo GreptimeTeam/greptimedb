@@ -224,9 +224,24 @@ pub enum FlushReason {
 }
 
 impl FlushReason {
-    /// Get flush reason as static str.
-    fn as_str(&self) -> &'static str {
-        self.into()
+    /// Canonical string representation (metrics + logs)
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FlushReason::Others => "others",
+            FlushReason::EngineFull => "engine_full",
+            FlushReason::Manual => "manual",
+            FlushReason::Alter => "alter",
+            FlushReason::Periodically => "periodic",
+            FlushReason::Downgrading => "downgrading",
+            FlushReason::EnterStaging => "enter_staging",
+            FlushReason::Closing => "closing",
+        }
+    }
+}
+
+impl std::fmt::Display for FlushReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -1023,7 +1038,10 @@ impl FlushScheduler {
             flush_status.merge_task(task);
             return Ok(());
         }
-
+        info!(
+            "Scheduling flush: region={}, reason={}",
+            region_id, task.reason
+        );
         self.schedule_flush_task(version_control, task)?;
 
         // Add this region to status map.

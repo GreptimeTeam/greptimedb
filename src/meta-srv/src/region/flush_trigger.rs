@@ -133,7 +133,13 @@ impl RegionFlushTrigger {
     /// Starts the region flush trigger.
     pub fn try_start(mut self) -> Result<()> {
         common_runtime::spawn_global(async move { self.run().await });
-        info!("Region flush trigger started");
+        info!(
+            "Region flush trigger started for WAL on server {}. \
+    Flush threshold = {} bytes, checkpoint threshold = {} bytes",
+            self.server_addr,
+            self.flush_trigger_size.as_bytes(),
+            self.checkpoint_trigger_size.as_bytes(),
+        );
         Ok(())
     }
 

@@ -82,15 +82,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 // If flush time of this region is earlier than `min_last_flush_time`, we can flush this region.
                 let task =
                     self.new_flush_task(region, FlushReason::EngineFull, None, self.config.clone());
-
-                info!(
-                    "EngineFull auto-flush triggered for region {}: reason=EngineFull, \
-                 memtable_size={} bytes, row_groups={}",
-                    region.region_id,
-                    region_memtable_size,
-                    version.memtables.num_row_groups()
-                );
-
                 self.flush_scheduler.schedule_flush(
                     region.region_id,
                     &region.version_control,
@@ -224,17 +215,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     None,
                     self.config.clone(),
                 );
-
-                info!(
-                    "Periodic auto-flush triggered for region {}: last_flush={} ms ago, \
-                 memtable_size={} bytes, row_groups={}",
-                    region.region_id,
-                    now - region.last_flush_millis(),
-                    region.version().memtables.mutable_usage()
-                        + region.version().memtables.immutables_usage(),
-                    region.version().memtables.num_row_groups()
-                );
-
                 self.flush_scheduler.schedule_flush(
                     region.region_id,
                     &region.version_control,
