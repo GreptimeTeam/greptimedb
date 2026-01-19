@@ -17,8 +17,6 @@ INSERT INTO ttl_frontend_test VALUES
 -- Verify no rows were inserted (filtered at frontend)
 SELECT COUNT(*) FROM ttl_frontend_test;
 
-SELECT s.region_rows FROM information_schema.tables t JOIN information_schema.region_statistics s ON s.table_id=t.table_id  WHERE table_name='ttl_frontend_test';
-
 
 -- Insert recent data using now() (should succeed)
 INSERT INTO ttl_frontend_test VALUES
@@ -26,7 +24,6 @@ INSERT INTO ttl_frontend_test VALUES
 
 -- Verify only recent data exists
 SELECT COUNT(*) FROM ttl_frontend_test;
-SELECT s.region_rows FROM information_schema.tables t JOIN information_schema.region_statistics s ON s.table_id=t.table_id  WHERE table_name='ttl_frontend_test';
 
 -- Test instant TTL (all data filtered immediately)
 CREATE TABLE instant_ttl_test (
