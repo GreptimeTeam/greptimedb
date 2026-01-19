@@ -13,9 +13,10 @@
 // limitations under the License.
 
 use api::v1::Row;
+use common_macro::stack_trace_debug;
 use common_time::ttl::TimeToLive;
 use common_time::Timestamp;
-use snafu::{ResultExt, Snafu};
+use snafu::{Location, ResultExt, Snafu};
 
 /// Extracts the timestamp value from a row at the given column index.
 /// Returns None if the index is invalid or the value is not a timestamp type.
@@ -102,12 +103,28 @@ pub fn filter_expired_rows(
     Ok((filtered_rows, filtered_count))
 }
 
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
+#[snafu(visibility(pub))]
+#[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Failed to check TTL expiration"))]
     CheckTtl {
         source: common_time::error::Error,
+        #[snafu(implicit)]
+        location: Location,
     },
+}
+
+impl common_error::ext::ErrorExt for Error {
+    fn status_code(&self) -> common_error::status_code::StatusCode {
+        match self {
+            Error::CheckTtl { source, .. } => source.status_code(),
+        }
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 #[cfg(test)]
