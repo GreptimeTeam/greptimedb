@@ -14,6 +14,7 @@
 
 use std::any::Any;
 use std::collections::HashMap;
+use std::time::Instant;
 
 use common_procedure::{Context as ProcedureContext, ProcedureWithId, Status};
 use common_telemetry::info;
@@ -57,6 +58,7 @@ impl State for Dispatch {
         ctx: &mut Context,
         _procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
+        ctx.volatile_ctx.dispatch_start_time = Some(Instant::now());
         let table_id = ctx.persistent_ctx.table_id;
         let table_info_value = ctx.get_table_info_value().await?;
         let table_engine = table_info_value.table_info.meta.engine;
@@ -81,6 +83,7 @@ impl State for Dispatch {
                 sync_region,
                 plan.allocated_region_ids.clone(),
                 plan.pending_deallocate_region_ids.clone(),
+                ctx.persistent_ctx.timeout,
             );
 
             let group_procedure = RepartitionGroupProcedure::new(persistent_ctx, ctx);

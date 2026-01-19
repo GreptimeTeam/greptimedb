@@ -24,7 +24,8 @@ pub mod utils;
 
 use std::any::Any;
 use std::collections::HashMap;
-use std::fmt::Debug;
+use std::fmt::{Debug, Display};
+use std::time::{Duration, Instant};
 
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
@@ -73,9 +74,19 @@ pub struct PersistentContext {
     pub table_name: String,
     pub table_id: TableId,
     pub plans: Vec<RepartitionPlanEntry>,
+    /// The timeout for repartition operations.
+    #[serde(with = "humantime_serde", default = "default_timeout")]
+    pub timeout: Duration,
+}
+
+fn default_timeout() -> Duration {
+    Duration::from_mins(2)
 }
 
 impl PersistentContext {
+    /// Creates a new [PersistentContext] with the given table name, table id and timeout.
+    ///
+    /// If the timeout is not provided, the default timeout will be used.
     pub fn new(
         TableName {
             catalog_name,
@@ -83,6 +94,7 @@ impl PersistentContext {
             table_name,
         }: TableName,
         table_id: TableId,
+        timeout: Option<Duration>,
     ) -> Self {
         Self {
             catalog_name,
@@ -90,6 +102,7 @@ impl PersistentContext {
             table_name,
             table_id,
             plans: vec![],
+            timeout: timeout.unwrap_or_else(default_timeout),
         }
     }
 
@@ -106,6 +119,7 @@ impl PersistentContext {
 #[derive(Clone)]
 pub struct Context {
     pub persistent_ctx: PersistentContext,
+    pub volatile_ctx: VolatileContext,
     pub table_metadata_manager: TableMetadataManagerRef,
     pub memory_region_keeper: MemoryRegionKeeperRef,
     pub node_manager: NodeManagerRef,
@@ -115,6 +129,85 @@ pub struct Context {
     pub cache_invalidator: CacheInvalidatorRef,
     pub region_routes_allocator: RegionRoutesAllocatorRef,
     pub wal_options_allocator: WalOptionsAllocatorRef,
+    pub start_time: Instant,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct VolatileContext {
+    pub metrics: Metrics,
+    pub dispatch_start_time: Option<Instant>,
+}
+
+/// Metrics of repartition.
+#[derive(Debug, Clone, Default)]
+pub struct Metrics {
+    /// Elapsed time of building plan.
+    build_plan_elapsed: Duration,
+    /// Elapsed time of allocating region.
+    allocate_region_elapsed: Duration,
+    /// Elapsed time of finishing groups.
+    finish_groups_elapsed: Duration,
+    /// Elapsed time of deallocating region.
+    deallocate_region_elapsed: Duration,
+}
+
+impl Display for Metrics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let total = self.build_plan_elapsed
+            + self.allocate_region_elapsed
+            + self.finish_groups_elapsed
+            + self.deallocate_region_elapsed;
+        write!(f, "total: {:?}", total)?;
+        let mut parts = Vec::with_capacity(4);
+        if self.build_plan_elapsed > Duration::ZERO {
+            parts.push(format!("build_plan_elapsed: {:?}", self.build_plan_elapsed));
+        }
+        if self.allocate_region_elapsed > Duration::ZERO {
+            parts.push(format!(
+                "allocate_region_elapsed: {:?}",
+                self.allocate_region_elapsed
+            ));
+        }
+        if self.finish_groups_elapsed > Duration::ZERO {
+            parts.push(format!(
+                "finish_groups_elapsed: {:?}",
+                self.finish_groups_elapsed
+            ));
+        }
+        if self.deallocate_region_elapsed > Duration::ZERO {
+            parts.push(format!(
+                "deallocate_region_elapsed: {:?}",
+                self.deallocate_region_elapsed
+            ));
+        }
+
+        if !parts.is_empty() {
+            write!(f, ", {}", parts.join(", "))?;
+        }
+        Ok(())
+    }
+}
+
+impl Metrics {
+    /// Updates the elapsed time of building plan.
+    pub fn update_build_plan_elapsed(&mut self, elapsed: Duration) {
+        self.build_plan_elapsed += elapsed;
+    }
+
+    /// Updates the elapsed time of allocating region.
+    pub fn update_allocate_region_elapsed(&mut self, elapsed: Duration) {
+        self.allocate_region_elapsed += elapsed;
+    }
+
+    /// Updates the elapsed time of finishing groups.
+    pub fn update_finish_groups_elapsed(&mut self, elapsed: Duration) {
+        self.finish_groups_elapsed += elapsed;
+    }
+
+    /// Updates the elapsed time of deallocating region.
+    pub fn update_deallocate_region_elapsed(&mut self, elapsed: Duration) {
+        self.deallocate_region_elapsed += elapsed;
+    }
 }
 
 impl Context {
@@ -135,7 +228,42 @@ impl Context {
             cache_invalidator: ddl_ctx.cache_invalidator.clone(),
             region_routes_allocator: ddl_ctx.table_metadata_allocator.region_routes_allocator(),
             wal_options_allocator: ddl_ctx.table_metadata_allocator.wal_options_allocator(),
+            start_time: Instant::now(),
+            volatile_ctx: VolatileContext::default(),
         }
+    }
+
+    /// Returns the next operation's timeout.
+    pub fn next_operation_timeout(&self) -> Option<Duration> {
+        self.persistent_ctx
+            .timeout
+            .checked_sub(self.start_time.elapsed())
+    }
+
+    /// Updates the elapsed time of building plan.
+    pub fn update_build_plan_elapsed(&mut self, elapsed: Duration) {
+        self.volatile_ctx.metrics.update_build_plan_elapsed(elapsed);
+    }
+
+    /// Updates the elapsed time of allocating region.
+    pub fn update_allocate_region_elapsed(&mut self, elapsed: Duration) {
+        self.volatile_ctx
+            .metrics
+            .update_allocate_region_elapsed(elapsed);
+    }
+
+    /// Updates the elapsed time of finishing groups.
+    pub fn update_finish_groups_elapsed(&mut self, elapsed: Duration) {
+        self.volatile_ctx
+            .metrics
+            .update_finish_groups_elapsed(elapsed);
+    }
+
+    /// Updates the elapsed time of deallocating region.
+    pub fn update_deallocate_region_elapsed(&mut self, elapsed: Duration) {
+        self.volatile_ctx
+            .metrics
+            .update_deallocate_region_elapsed(elapsed);
     }
 
     /// Retrieves the table route value for the given table id.
@@ -264,13 +392,6 @@ impl Context {
             .invalidate(&ctx, &[CacheIdent::TableId(table_id)])
             .await;
         Ok(())
-    }
-
-    /// Returns the next operation timeout.
-    ///
-    /// If the next operation timeout is not set, it will return `None`.
-    pub fn next_operation_timeout(&self) -> Option<std::time::Duration> {
-        Some(std::time::Duration::from_secs(10))
     }
 }
 
@@ -417,8 +538,9 @@ impl RepartitionProcedureFactory for DefaultRepartitionProcedureFactory {
         table_id: TableId,
         from_exprs: Vec<String>,
         to_exprs: Vec<String>,
+        timeout: Option<Duration>,
     ) -> std::result::Result<BoxedProcedure, BoxedError> {
-        let persistent_ctx = PersistentContext::new(table_name, table_id);
+        let persistent_ctx = PersistentContext::new(table_name, table_id, timeout);
         let from_exprs = from_exprs
             .iter()
             .map(|e| {
