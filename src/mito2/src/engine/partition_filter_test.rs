@@ -27,10 +27,10 @@ use crate::test_util::{CreateRequestBuilder, TestEnv, build_rows, put_rows, rows
 
 /// Helper to create a partition expression for testing.
 /// Creates `col_name >= start AND col_name < end`.
-fn range_expr_string(col_name: &str, start: &str, end: &str) -> String {
+fn range_expr_string(col_name: &str, start: f64, end: f64) -> String {
     col(col_name)
-        .gt_eq(Value::String(start.into()))
-        .and(col(col_name).lt(Value::String(end.into())))
+        .gt_eq(Value::Float64(start.into()))
+        .and(col(col_name).lt(Value::Float64(end.into())))
         .as_json_str()
         .unwrap()
 }
@@ -64,7 +64,7 @@ async fn test_partition_filter_basic_with_format(flat_format: bool) {
     let region_id = RegionId::new(1024, 0);
 
     // Create region with initial partition expr: tag_0 >= "0" (covers all data)
-    let initial_partition_expr = range_expr_string("tag_0", "0", "99");
+    let initial_partition_expr = range_expr_string("field_0", 0., 99.);
     let request = CreateRequestBuilder::new()
         .partition_expr_json(Some(initial_partition_expr))
         .build();
@@ -96,7 +96,7 @@ async fn test_partition_filter_basic_with_format(flat_format: bool) {
 
     // Enter staging mode with narrower partition expr: tag_0 >= "5"
     // After staging, region will only accept data where tag_0 >= "5"
-    let new_partition_expr = range_expr_string("tag_0", "5", "99");
+    let new_partition_expr = range_expr_string("field_0", 5., 99.);
     engine
         .handle_request(
             region_id,
@@ -126,7 +126,10 @@ async fn test_partition_filter_basic_with_format(flat_format: bool) {
         .unwrap();
 
     // Scan data in staging mode - should only see initial 5 rows (staging SST not visible)
-    let request = ScanRequest::default();
+    let request = ScanRequest {
+        projection: Some(vec![1]),
+        ..Default::default()
+    };
     let scanner = engine.scanner(region_id, request).await.unwrap();
     let stream = scanner.scan().await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
@@ -146,7 +149,10 @@ async fn test_partition_filter_basic_with_format(flat_format: bool) {
     // Scan after exiting staging - the old SST (tag_0 = "0".."4") should have
     // rows filtered by partition expr (tag_0 >= "5"), which means none of them pass.
     // But the staging SST (tag_0 = "5".."10") satisfies the partition expr.
-    let request = ScanRequest::default();
+    let request = ScanRequest {
+        projection: Some(vec![1]),
+        ..Default::default()
+    };
     let scanner = engine.scanner(region_id, request).await.unwrap();
     let stream = scanner.scan().await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
