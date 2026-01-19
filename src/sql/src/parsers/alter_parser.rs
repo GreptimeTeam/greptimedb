@@ -184,6 +184,7 @@ impl ParserContext<'_> {
         };
 
         let options = parse_with_options(&mut self.parser)?;
+        // TODO(weny): Respect the DDL options (e.g., WAIT and TIMEOUT) after the ALTER TABLE statement.
         Ok(AlterTable::new(table_name, alter_operation, options))
     }
 

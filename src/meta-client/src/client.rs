@@ -193,15 +193,17 @@ impl MetaClientBuilder {
 
     pub fn build(self) -> MetaClient {
         let mgr = self.channel_manager.unwrap_or_default();
+        let heartbeat_channel_manager = self
+            .heartbeat_channel_manager
+            .clone()
+            .unwrap_or_else(|| mgr.clone());
+
         let heartbeat = self.enable_heartbeat.then(|| {
             if self.heartbeat_channel_manager.is_some() {
                 info!("Enable heartbeat channel using the heartbeat channel manager.");
             }
-            let mgr = self
-                .heartbeat_channel_manager
-                .clone()
-                .unwrap_or_else(|| mgr.clone());
-            HeartbeatClient::new(self.id, self.role, mgr)
+
+            HeartbeatClient::new(self.id, self.role, heartbeat_channel_manager.clone())
         });
         let store = self
             .enable_store
@@ -228,8 +230,7 @@ impl MetaClientBuilder {
                 self.id,
                 self.role,
                 DEFAULT_ASK_LEADER_MAX_RETRY,
-                self.heartbeat_channel_manager
-                    .unwrap_or_else(|| mgr.clone()),
+                heartbeat_channel_manager,
             )),
             heartbeat,
             store,
