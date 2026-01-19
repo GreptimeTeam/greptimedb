@@ -444,6 +444,14 @@ impl MetasrvBuilder {
             );
             region_flush_trigger.try_start()?;
 
+            info!(
+                "MetaSrv initialized WAL flush trigger for remote WAL. \
+     server_addr={}, flush_trigger_size={}, checkpoint_trigger_size={}",
+                options.grpc.server_addr,
+                remote_wal_options.flush_trigger_size.as_bytes(),
+                remote_wal_options.checkpoint_trigger_size.as_bytes(),
+            );
+
             Some(Arc::new(region_flush_ticker))
         } else {
             None
