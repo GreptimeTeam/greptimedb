@@ -133,3 +133,23 @@ pub fn is_gdump_active() -> Result<bool> {
     // safety: PROF_GDUMP, if present, is a boolean value.
     unsafe { Ok(tikv_jemalloc_ctl::raw::read::<bool>(PROF_GDUMP).context(error::ReadGdumpSnafu)?) }
 }
+
+/// Symbolicate a jeheap format dump file and return a flamegraph.
+///
+/// This function takes the raw content of a jemalloc heap dump file,
+/// parses it using `parse_jeheap`, and generates a flamegraph SVG.
+///
+/// The symbolication uses the current process's memory mappings.
+pub fn symbolicate_jeheap(dump_content: &[u8]) -> Result<Vec<u8>> {
+    let profile = BufReader::new(dump_content);
+    let stack_profile = parse_jeheap(profile, MAPPINGS.as_deref()).context(ParseJeHeapSnafu)?;
+
+    let mut opts = FlamegraphOptions::default();
+    opts.title = "symbolicated_heap".to_string();
+    opts.count_name = "bytes".to_string();
+    let flamegraph = stack_profile
+        .to_flamegraph(&mut opts)
+        .context(FlamegraphSnafu)?;
+
+    Ok(flamegraph)
+}

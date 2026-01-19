@@ -912,6 +912,7 @@ impl HttpServer {
                         Router::new()
                             .route("/cpu", routing::post(pprof::pprof_handler))
                             .route("/mem", routing::post(mem_prof::mem_prof_handler))
+                            .route("/mem/symbol", routing::post(mem_prof::symbolicate_handler))
                             .route(
                                 "/mem/activate",
                                 routing::post(mem_prof::activate_heap_prof_handler),
