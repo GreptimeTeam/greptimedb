@@ -12,16 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use ahash::{HashMap, HashSet};
 use api::v1::RowInsertRequests;
 use api::v1::region::InsertRequests as RegionInsertRequests;
+use common_time::Timestamp;
 use partition::manager::PartitionRuleManager;
-use snafu::OptionExt;
-use table::metadata::{TableId, TableInfoRef};
+use snafu::{OptionExt, ResultExt};
+use table::metadata::{TableId, TableInfo, TableInfoRef};
 
-use crate::error::{Result, TableNotFoundSnafu};
+use crate::error::{Result, TableNotFoundSnafu, TtlFilterSnafu};
 use crate::insert::InstantAndNormalInsertRequests;
 use crate::req_convert::common::partitioner::Partitioner;
+use crate::req_convert::common::ttl_filter::filter_expired_rows;
 
 pub struct RowToRegion<'a> {
     tables_info: HashMap<String, TableInfoRef>,
@@ -80,4 +84,78 @@ impl<'a> RowToRegion<'a> {
             .get(table_name)
             .context(TableNotFoundSnafu { table_name })
     }
+}
+
+/// Filter expired rows from normal insert requests based on TTL.
+/// This happens AFTER instant classification to preserve instant TTL data for flownodes.
+pub fn filter_normal_requests_by_ttl(
+    requests: RegionInsertRequests,
+    table_infos: &HashMap<TableId, Arc<TableInfo>>,
+) -> Result<RegionInsertRequests> {
+    use store_api::storage::RegionId;
+
+    let mut filtered_requests = Vec::with_capacity(requests.requests.len());
+
+    for mut request in requests.requests {
+        let region_id = RegionId::from_u64(request.region_id);
+        let table_id = region_id.table_id();
+
+        let table_info = table_infos
+            .get(&table_id)
+            .context(TableNotFoundSnafu {
+                table_name: format!("table_id_{}", table_id),
+            })?;
+
+        // Get TTL from table options
+        let ttl = &table_info.meta.options.ttl;
+
+        // Skip filtering if no TTL
+        if ttl.is_none() {
+            filtered_requests.push(request);
+            continue;
+        }
+
+        // Get timestamp column index
+        let Some(timestamp_index) = table_info.meta.schema.timestamp_index() else {
+            // No timestamp column, skip filtering (safe default)
+            filtered_requests.push(request);
+            continue;
+        };
+
+        // Get current time with matching time unit
+        let timestamp_column = &table_info.meta.schema.column_schemas()[timestamp_index];
+        let time_unit = match &timestamp_column.data_type {
+            datatypes::data_type::ConcreteDataType::Timestamp(ts_type) => ts_type.unit(),
+            _ => common_time::timestamp::TimeUnit::Millisecond, // Default fallback
+        };
+        let now = Timestamp::current_time(time_unit);
+
+        // Filter expired rows from each region's rows
+        for rows_data in &mut request.rows {
+            let (filtered_rows, filtered_count) = filter_expired_rows(
+                std::mem::take(&mut rows_data.rows),
+                timestamp_index,
+                ttl,
+                &now,
+            )
+            .context(TtlFilterSnafu {
+                table_name: table_info.name.to_string(),
+            })?;
+
+            rows_data.rows = filtered_rows;
+
+            // Track metrics
+            if filtered_count > 0 {
+                crate::metrics::DIST_INGEST_ROWS_FILTERED_TTL_COUNTER
+                    .with_label_values(&[&table_info.name])
+                    .inc_by(filtered_count as u64);
+            }
+        }
+
+        filtered_requests.push(request);
+    }
+
+    Ok(RegionInsertRequests {
+        requests: filtered_requests,
+    })
 }
