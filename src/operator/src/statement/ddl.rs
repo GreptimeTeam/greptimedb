@@ -47,6 +47,7 @@ use common_meta::rpc::ddl::{
     SubmitDdlTaskResponse,
 };
 use common_query::Output;
+use common_recordbatch::{RecordBatch, RecordBatches};
 use common_sql::convert::sql_value_to_value;
 use common_telemetry::{debug, info, tracing, warn};
 use common_time::{Timestamp, Timezone};
@@ -55,6 +56,7 @@ use datafusion_expr::LogicalPlan;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, RawSchema, Schema};
 use datatypes::value::Value;
+use datatypes::vectors::{StringVector, VectorRef};
 use humantime::parse_duration;
 use partition::expr::{Operand, PartitionExpr, RestrictedOp};
 use partition::multi_dim::MultiDimPartitionRule;
@@ -107,6 +109,21 @@ use crate::statement::show::create_partitions_stmt;
 struct DdlSubmitOptions {
     wait: bool,
     timeout: Duration,
+}
+
+fn build_procedure_id_output(procedure_id: Vec<u8>) -> Result<Output> {
+    let procedure_id = String::from_utf8_lossy(&procedure_id).to_string();
+    let vector: VectorRef = Arc::new(StringVector::from(vec![procedure_id]));
+    let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+        "Procedure ID",
+        vector.data_type(),
+        false,
+    )]));
+    let batch =
+        RecordBatch::new(schema.clone(), vec![vector]).context(error::BuildRecordBatchSnafu)?;
+    let batches =
+        RecordBatches::try_new(schema, vec![batch]).context(error::BuildRecordBatchSnafu)?;
+    Ok(Output::new_with_record_batches(batches))
 }
 
 fn parse_ddl_options(options: &OptionMap) -> Result<DdlSubmitOptions> {
@@ -1460,6 +1477,18 @@ impl StatementExecutor {
         );
         req.wait = ddl_options.wait;
         req.timeout = ddl_options.timeout;
+
+        let response = self
+            .procedure_executor
+            .submit_ddl_task(&ExecutorContext::default(), req)
+            .await
+            .context(error::ExecuteDdlSnafu)?;
+
+        if !ddl_options.wait {
+            return build_procedure_id_output(response.key);
+        }
+
+        // Only invalidate cache if wait is true.
         let invalidate_keys = vec![
             CacheIdent::TableId(table_id),
             CacheIdent::TableName(TableName::new(
@@ -1468,10 +1497,6 @@ impl StatementExecutor {
                 request.table_name,
             )),
         ];
-        self.procedure_executor
-            .submit_ddl_task(&ExecutorContext::default(), req)
-            .await
-            .context(error::ExecuteDdlSnafu)?;
 
         // Invalidates local cache ASAP.
         self.cache_invalidator
@@ -1479,7 +1504,6 @@ impl StatementExecutor {
             .await
             .context(error::InvalidateTableCacheSnafu)?;
 
-        // TODO(weny): If wait is false, we need to return the procedure id instead of output.
         Ok(Output::new_with_affected_rows(0))
     }
 
