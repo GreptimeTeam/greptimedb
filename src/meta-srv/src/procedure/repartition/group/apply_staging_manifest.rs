@@ -50,7 +50,9 @@ impl State for ApplyStagingManifest {
         ctx: &mut Context,
         _procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
+        let timer = Instant::now();
         self.apply_staging_manifests(ctx).await?;
+        ctx.update_apply_staging_manifest_elapsed(timer.elapsed());
 
         Ok((
             Box::new(UpdateMetadata::ExitStaging),

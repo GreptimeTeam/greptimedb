@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use api::v1::Repartition;
 use api::v1::alter_table_expr::Kind;
@@ -159,6 +160,7 @@ pub trait RepartitionProcedureFactory: Send + Sync {
         table_id: TableId,
         from_exprs: Vec<String>,
         to_exprs: Vec<String>,
+        timeout: Option<Duration>,
     ) -> std::result::Result<BoxedProcedure, BoxedError>;
 
     fn register_loaders(
@@ -276,6 +278,8 @@ impl DdlManager {
                 table_id,
                 from_partition_exprs,
                 into_partition_exprs,
+                // TODO(weny): get timeout from the proto.
+                None,
             )
             .context(CreateRepartitionProcedureSnafu)?;
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
@@ -1055,6 +1059,7 @@ async fn handle_comment_on_task(
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
     use common_error::ext::BoxedError;
     use common_procedure::local::LocalManager;
@@ -1112,6 +1117,7 @@ mod tests {
             _table_id: TableId,
             _from_exprs: Vec<String>,
             _to_exprs: Vec<String>,
+            _timeout: Option<Duration>,
         ) -> std::result::Result<BoxedProcedure, BoxedError> {
             unimplemented!()
         }

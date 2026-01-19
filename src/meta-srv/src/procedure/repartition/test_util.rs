@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::memory::MemoryKvBackend;
@@ -25,7 +26,7 @@ use uuid::Uuid;
 
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::metasrv::MetasrvInfo;
-use crate::procedure::repartition::group::{Context, PersistentContext};
+use crate::procedure::repartition::group::{Context, PersistentContext, VolatileContext};
 use crate::procedure::repartition::plan::RegionDescriptor;
 use crate::procedure::test_util::MailboxContext;
 
@@ -71,6 +72,8 @@ impl TestingEnv {
             cache_invalidator,
             mailbox: self.mailbox_ctx.mailbox().clone(),
             server_addr: self.server_addr.clone(),
+            start_time: Instant::now(),
+            volatile_ctx: VolatileContext::default(),
         }
     }
 }
@@ -99,5 +102,6 @@ pub fn new_persistent_context(
         sync_region: false,
         allocated_region_ids: vec![],
         pending_deallocate_region_ids: vec![],
+        timeout: Duration::from_secs(120),
     }
 }

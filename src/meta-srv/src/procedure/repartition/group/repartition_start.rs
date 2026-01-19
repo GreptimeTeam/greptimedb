@@ -14,6 +14,7 @@
 
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 
 use common_meta::rpc::router::RegionRoute;
 use common_procedure::{Context as ProcedureContext, Status};
@@ -148,6 +149,11 @@ impl State for RepartitionStart {
         ctx: &mut Context,
         _procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
+        // Only update `start_time` when `group_prepare_result` is None.
+        if ctx.persistent_ctx.group_prepare_result.is_none() {
+            ctx.start_time = Instant::now();
+        }
+
         if ctx.persistent_ctx.group_prepare_result.is_some() {
             return Ok((
                 Box::new(UpdateMetadata::ApplyStaging),

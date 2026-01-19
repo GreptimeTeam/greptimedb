@@ -27,6 +27,7 @@ use snafu::ResultExt;
 use store_api::storage::{RegionId, TableId};
 use table::table_name::TableName;
 use table::table_reference::TableReference;
+use tokio::time::Instant;
 
 use crate::error::{self, Result};
 use crate::procedure::repartition::group::region_routes;
@@ -44,6 +45,7 @@ impl State for DeallocateRegion {
         ctx: &mut Context,
         procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
+        let timer = Instant::now();
         let region_to_deallocate = ctx
             .persistent_ctx
             .plans
@@ -51,6 +53,7 @@ impl State for DeallocateRegion {
             .map(|p| p.pending_deallocate_region_ids.len())
             .sum::<usize>();
         if region_to_deallocate == 0 {
+            ctx.update_deallocate_region_elapsed(timer.elapsed());
             return Ok((Box::new(RepartitionEnd), Status::done()));
         }
 
@@ -103,6 +106,7 @@ impl State for DeallocateRegion {
             .await?;
         ctx.invalidate_table_cache().await?;
 
+        ctx.update_deallocate_region_elapsed(timer.elapsed());
         Ok((Box::new(RepartitionEnd), Status::executing(false)))
     }
 
