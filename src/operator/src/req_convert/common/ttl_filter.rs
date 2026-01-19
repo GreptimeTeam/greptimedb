@@ -71,6 +71,37 @@ pub fn is_row_expired(
         .context(CheckTtlSnafu)
 }
 
+/// Filters expired rows from a vec of rows based on TTL.
+/// Returns the filtered rows and the count of filtered (removed) rows.
+pub fn filter_expired_rows(
+    rows: Vec<Row>,
+    timestamp_index: usize,
+    ttl: &Option<TimeToLive>,
+    now: &Timestamp,
+) -> Result<(Vec<Row>, usize), Error> {
+    // If no TTL, return all rows unchanged
+    if ttl.is_none() {
+        return Ok((rows, 0));
+    }
+
+    let original_count = rows.len();
+
+    // Filter rows based on TTL
+    let filtered_rows: Vec<Row> = rows
+        .into_iter()
+        .filter(|row| {
+            match is_row_expired(row, timestamp_index, ttl, now) {
+                Ok(expired) => !expired, // Keep non-expired rows
+                Err(_) => true,          // Keep rows we can't validate (safe default)
+            }
+        })
+        .collect();
+
+    let filtered_count = original_count - filtered_rows.len();
+
+    Ok((filtered_rows, filtered_count))
+}
+
 #[derive(Debug, Snafu)]
 pub enum Error {
     #[snafu(display("Failed to check TTL expiration"))]
@@ -257,5 +288,113 @@ mod tests {
 
         // Forever TTL means data never expires
         assert!(!is_row_expired(&row, 1, &ttl, &now).unwrap());
+    }
+
+    #[test]
+    fn test_filter_expired_rows_from_insert_request() {
+        use common_time::ttl::TimeToLive;
+        use std::time::Duration as StdDuration;
+
+        // TTL of 1 hour
+        let ttl = Some(TimeToLive::Duration(StdDuration::from_secs(3600)));
+
+        // Current time: 2 hours (7200s)
+        let now = Timestamp::new(7200, TimeUnit::Second);
+
+        // Create rows: 2 expired, 2 valid
+        let rows = vec![
+            Row {
+                values: vec![
+                    Value {
+                        value_data: Some(ValueData::I64Value(1)),
+                    },
+                    Value {
+                        value_data: Some(ValueData::TimestampSecondValue(3000)),
+                    }, // expired
+                ],
+            },
+            Row {
+                values: vec![
+                    Value {
+                        value_data: Some(ValueData::I64Value(2)),
+                    },
+                    Value {
+                        value_data: Some(ValueData::TimestampSecondValue(5400)),
+                    }, // valid
+                ],
+            },
+            Row {
+                values: vec![
+                    Value {
+                        value_data: Some(ValueData::I64Value(3)),
+                    },
+                    Value {
+                        value_data: Some(ValueData::TimestampSecondValue(2000)),
+                    }, // expired
+                ],
+            },
+            Row {
+                values: vec![
+                    Value {
+                        value_data: Some(ValueData::I64Value(4)),
+                    },
+                    Value {
+                        value_data: Some(ValueData::TimestampSecondValue(6000)),
+                    }, // valid
+                ],
+            },
+        ];
+
+        let timestamp_index = 1;
+
+        let (filtered_rows, filtered_count) =
+            filter_expired_rows(rows, timestamp_index, &ttl, &now).unwrap();
+
+        assert_eq!(filtered_count, 2); // 2 rows filtered
+        assert_eq!(filtered_rows.len(), 2); // 2 rows remaining
+
+        // Check remaining rows are the valid ones (id=2 and id=4)
+        assert_eq!(
+            filtered_rows[0].values[0].value_data,
+            Some(ValueData::I64Value(2))
+        );
+        assert_eq!(
+            filtered_rows[1].values[0].value_data,
+            Some(ValueData::I64Value(4))
+        );
+    }
+
+    #[test]
+    fn test_filter_expired_rows_no_ttl() {
+        let ttl = None;
+        let now = Timestamp::new(7200, TimeUnit::Second);
+
+        let rows = vec![
+            Row {
+                values: vec![
+                    Value {
+                        value_data: Some(ValueData::I64Value(1)),
+                    },
+                    Value {
+                        value_data: Some(ValueData::TimestampSecondValue(100)),
+                    },
+                ],
+            },
+            Row {
+                values: vec![
+                    Value {
+                        value_data: Some(ValueData::I64Value(2)),
+                    },
+                    Value {
+                        value_data: Some(ValueData::TimestampSecondValue(200)),
+                    },
+                ],
+            },
+        ];
+
+        let (filtered_rows, filtered_count) = filter_expired_rows(rows.clone(), 1, &ttl, &now).unwrap();
+
+        assert_eq!(filtered_count, 0); // No rows filtered
+        assert_eq!(filtered_rows.len(), 2); // All rows remain
     }
 }
