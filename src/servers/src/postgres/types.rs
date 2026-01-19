@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod bytea;
-mod datetime;
 mod error;
 mod interval;
 
@@ -52,8 +50,6 @@ use session::context::QueryContextRef;
 use session::session_config::PGByteaOutputValue;
 use snafu::ResultExt;
 
-use self::bytea::{EscapeOutputBytea, HexOutputBytea};
-use self::datetime::{StylingDate, StylingDateTime};
 pub use self::error::{PgErrorCode, PgErrorSeverity};
 use self::interval::PgInterval;
 use crate::SqlPlan;
