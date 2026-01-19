@@ -107,8 +107,7 @@ async fn test_partition_filter_basic_with_format(flat_format: bool) {
         .await
         .unwrap();
 
-    // Write data in staging mode (tag_0 = "5".."10")
-    // Note: In real scenario, this data should all satisfy partition expr
+    // Write data in staging mode (tag_0 = "5".."11")
     let rows_data = Rows {
         schema: column_schemas.clone(),
         rows: build_rows(5, 11),
