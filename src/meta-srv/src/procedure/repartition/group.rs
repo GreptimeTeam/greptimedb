@@ -336,12 +336,8 @@ pub struct PersistentContext {
     /// The region ids of the regions that are pending deallocation.
     pub pending_deallocate_region_ids: Vec<RegionId>,
     /// The timeout for repartition operations.
-    #[serde(with = "humantime_serde", default = "default_timeout")]
+    #[serde(with = "humantime_serde")]
     pub timeout: Duration,
-}
-
-fn default_timeout() -> Duration {
-    Duration::from_mins(5)
 }
 
 impl PersistentContext {
