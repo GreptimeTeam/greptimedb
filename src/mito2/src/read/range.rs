@@ -566,7 +566,7 @@ impl RangeBuilderList {
                 builder.build_ranges(index.row_group_index, &mut ranges);
 
                 // Record memory size and count of newly built builder.
-                reader_metrics.metadata_mem_size += builder.memory_size();
+                reader_metrics.metadata_mem_size += builder.memory_size() as isize;
                 reader_metrics.num_range_builders += 1;
 
                 self.set_file_builder(file_index, Arc::new(builder));
@@ -603,11 +603,8 @@ impl RangeBuilderList {
             if entry.remaining_ranges == 0
                 && let Some(builder) = entry.builder.take()
             {
-                reader_metrics.metadata_mem_size = reader_metrics
-                    .metadata_mem_size
-                    .saturating_sub(builder.memory_size());
-                reader_metrics.num_range_builders =
-                    reader_metrics.num_range_builders.saturating_sub(1);
+                reader_metrics.metadata_mem_size -= builder.memory_size() as isize;
+                reader_metrics.num_range_builders -= 1;
             }
         }
     }

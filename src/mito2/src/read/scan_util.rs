@@ -227,13 +227,13 @@ pub(crate) struct ScanMetricsSet {
     per_file_metrics: Option<HashMap<RegionFileId, FileScanMetrics>>,
 
     /// Current memory usage for file range builders.
-    build_ranges_mem_size: usize,
+    build_ranges_mem_size: isize,
     /// Peak memory usage for file range builders.
-    build_ranges_peak_mem_size: usize,
+    build_ranges_peak_mem_size: isize,
     /// Current number of file range builders.
-    num_range_builders: usize,
+    num_range_builders: isize,
     /// Peak number of file range builders.
-    num_peak_range_builders: usize,
+    num_peak_range_builders: isize,
 }
 
 /// Wrapper for file metrics that compares by total cost in reverse order.
