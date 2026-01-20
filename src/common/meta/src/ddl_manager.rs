@@ -171,11 +171,21 @@ pub trait RepartitionProcedureFactory: Send + Sync {
 }
 
 /// The options for DDL tasks.
+///
+/// Note: These options may not be utilized by all procedures.
+/// At present, they are specifically applied in `RepartitionProcedure`.
 #[derive(Debug, Clone, Copy)]
 pub struct DdlOptions {
-    /// Timeout for the task.
+    /// The timeout will be passed to the procedure.
+    ///
+    /// Note: Each procedure may implement its own timeout handling mechanism.
     pub timeout: Duration,
-    /// Waits for the task to complete.
+    /// The flag that controls whether to wait for the procedure to complete.
+    ///
+    /// If wait is `true`, the procedure will wait for completion(success or failure) and the result will be returned.
+    /// Otherwise, the procedure will be submitted and return the [ProcedureId](common_procedure::ProcedureId) immediately.
+    ///
+    /// Note: The value of `wait` is independent of the `timeout` option. If a procedure ignores the `timeout` and `wait` is set to true, the operation returns until the procedure completes.
     pub wait: bool,
 }
 
