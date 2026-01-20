@@ -766,7 +766,6 @@ fn memtable_flat_sources(
     options: &RegionOptions,
     field_column_start: usize,
 ) -> Result<FlatSources> {
-    common_telemetry::info!("memtable_flat_sources start");
     let MemtableRanges { ranges } = mem_ranges;
     let mut flat_sources = FlatSources {
         sources: SmallVec::new(),
@@ -774,7 +773,7 @@ fn memtable_flat_sources(
     };
 
     if ranges.len() == 1 {
-        common_telemetry::info!("Only has one flat range");
+        debug!("Flushing single flat range");
 
         let only_range = ranges.into_values().next().unwrap();
         let max_sequence = only_range.stats().max_sequence();
@@ -802,11 +801,9 @@ fn memtable_flat_sources(
             .filter(|r| r.encoded().is_none())
             .map(|r| r.num_rows())
             .sum();
-        common_telemetry::info!(
-            "memtable_flat_sources flush flat multiple ranges, total_rows: {}, min_flush_rows: {}, num ranges: {}",
-            total_rows,
-            min_flush_rows,
-            ranges.len()
+        debug!(
+            "Flushing multiple flat ranges, total_rows: {}, min_flush_rows: {}, num_ranges: {}",
+            total_rows, min_flush_rows, ranges.len()
         );
         let mut rows_remaining = total_rows;
         let mut last_iter_rows = 0;
@@ -832,12 +829,9 @@ fn memtable_flat_sources(
             if last_iter_rows > min_flush_rows
                 && (rows_remaining == 0 || rows_remaining >= DEFAULT_ROW_GROUP_SIZE)
             {
-                common_telemetry::info!(
-                    "flush flat sources, flush one file, last iter rows: {}, min_flush_rows: {}, num_iters: {}, rows_remaining: {}",
-                    last_iter_rows,
-                    min_flush_rows,
-                    input_iters.len(),
-                    rows_remaining,
+                debug!(
+                    "Flush batch ready, rows: {}, min_rows: {}, num_iters: {}, remaining: {}",
+                    last_iter_rows, min_flush_rows, input_iters.len(), rows_remaining
                 );
 
                 // Calculate max_sequence from all merged ranges
@@ -865,12 +859,9 @@ fn memtable_flat_sources(
 
         // Handle remaining iters.
         if !input_iters.is_empty() {
-            common_telemetry::info!(
-                "flush flat remaining sources, flush one file, last iter rows: {}, min_flush_rows: {}, num_iters: {}, rows_remaining: {}",
-                last_iter_rows,
-                min_flush_rows,
-                input_iters.len(),
-                rows_remaining,
+            debug!(
+                "Flush remaining batch, rows: {}, min_rows: {}, num_iters: {}, remaining: {}",
+                last_iter_rows, min_flush_rows, input_iters.len(), rows_remaining
             );
             let max_sequence = current_ranges
                 .iter()
@@ -891,11 +882,6 @@ fn memtable_flat_sources(
                 .push((FlatSource::Iter(maybe_dedup), max_sequence));
         }
     }
-    common_telemetry::info!(
-        "memtable_flat_sources end, num encoded: {}, num sources: {}",
-        flat_sources.encoded.len(),
-        flat_sources.sources.len()
-    );
 
     Ok(flat_sources)
 }
@@ -1531,6 +1517,7 @@ mod tests {
         let build_ranges = |append_mode: bool| -> MemtableRanges {
             let memtable = crate::memtable::bulk::BulkMemtable::new(
                 1,
+                crate::memtable::bulk::BulkMemtableConfig::default(),
                 metadata.clone(),
                 None,
                 None,

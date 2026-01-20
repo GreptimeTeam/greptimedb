@@ -92,6 +92,27 @@ static ENCODE_BYTES_THRESHOLD: LazyLock<usize> = LazyLock::new(|| {
     )
 });
 
+/// Configuration for bulk memtable.
+#[derive(Debug, Clone)]
+pub struct BulkMemtableConfig {
+    /// Threshold for triggering merge of parts.
+    pub merge_threshold: usize,
+    /// Row threshold for encoding parts.
+    pub encode_row_threshold: usize,
+    /// Bytes threshold for encoding parts.
+    pub encode_bytes_threshold: usize,
+}
+
+impl Default for BulkMemtableConfig {
+    fn default() -> Self {
+        Self {
+            merge_threshold: *MERGE_THRESHOLD,
+            encode_row_threshold: *ENCODE_ROW_THRESHOLD,
+            encode_bytes_threshold: *ENCODE_BYTES_THRESHOLD,
+        }
+    }
+}
+
 /// Result of merging parts - either a MultiBulkPart or an EncodedBulkPart
 enum MergedPart {
     /// Merged part stored as MultiBulkPart (when rows < DEFAULT_ROW_GROUP_SIZE)
@@ -129,7 +150,7 @@ impl BulkParts {
 
     /// Returns true if bulk parts or encoded parts should be merged.
     /// Uses short-circuit counting to stop early once threshold is reached.
-    fn should_merge_parts(&self) -> bool {
+    fn should_merge_parts(&self, merge_threshold: usize) -> bool {
         let mut bulk_count = 0;
         let mut encoded_count = 0;
 
@@ -145,7 +166,7 @@ impl BulkParts {
             }
 
             // Short-circuit: stop counting if either threshold is reached
-            if bulk_count >= *MERGE_THRESHOLD || encoded_count >= *MERGE_THRESHOLD {
+            if bulk_count >= merge_threshold || encoded_count >= merge_threshold {
                 return true;
             }
         }
@@ -161,7 +182,7 @@ impl BulkParts {
     /// Collects unmerged parts and marks them as being merged.
     /// Only collects parts of types that meet the threshold.
     /// Parts are pre-grouped into chunks for parallel processing.
-    fn collect_parts_to_merge(&mut self) -> CollectedParts {
+    fn collect_parts_to_merge(&mut self, merge_threshold: usize) -> CollectedParts {
         // First pass: collect indices and row counts for each type
         let mut bulk_indices: Vec<(usize, usize)> = Vec::new();
         let mut encoded_indices: Vec<(usize, usize)> = Vec::new();
@@ -181,13 +202,13 @@ impl BulkParts {
         let mut groups = Vec::new();
 
         // Process bulk parts if threshold met
-        if bulk_indices.len() >= *MERGE_THRESHOLD {
-            groups.extend(self.collect_and_group_parts(bulk_indices));
+        if bulk_indices.len() >= merge_threshold {
+            groups.extend(self.collect_and_group_parts(bulk_indices, merge_threshold));
         }
 
         // Process encoded parts if threshold met
-        if encoded_indices.len() >= *MERGE_THRESHOLD {
-            groups.extend(self.collect_and_group_parts(encoded_indices));
+        if encoded_indices.len() >= merge_threshold {
+            groups.extend(self.collect_and_group_parts(encoded_indices, merge_threshold));
         }
 
         CollectedParts { groups }
@@ -197,12 +218,13 @@ impl BulkParts {
     fn collect_and_group_parts(
         &mut self,
         mut indices: Vec<(usize, usize)>,
+        merge_threshold: usize,
     ) -> Vec<Vec<PartToMerge>> {
         // Sort by row count for better grouping
         indices.sort_unstable_by_key(|(_, num_rows)| *num_rows);
 
-        // Compute group size: total_parts / MERGE_THRESHOLD, clamped to [16, 64]
-        let group_size = (indices.len() / *MERGE_THRESHOLD).clamp(16, 64);
+        // Compute group size: total_parts / merge_threshold, clamped to [16, 64]
+        let group_size = (indices.len() / merge_threshold).clamp(16, 64);
 
         // Group into chunks and collect parts
         indices
@@ -312,6 +334,8 @@ impl<'a> Drop for MergingFlagsGuard<'a> {
 /// Memtable that ingests and scans parts directly.
 pub struct BulkMemtable {
     id: MemtableId,
+    /// Configuration for the bulk memtable.
+    config: BulkMemtableConfig,
     parts: Arc<RwLock<BulkParts>>,
     metadata: RegionMetadataRef,
     alloc_tracker: AllocTracker,
@@ -571,6 +595,7 @@ impl Memtable for BulkMemtable {
 
         Arc::new(Self {
             id,
+            config: self.config.clone(),
             parts: Arc::new(RwLock::new(BulkParts::default())),
             metadata: metadata.clone(),
             alloc_tracker: AllocTracker::new(self.alloc_tracker.write_buffer_manager()),
@@ -579,7 +604,11 @@ impl Memtable for BulkMemtable {
             max_sequence: AtomicU64::new(0),
             num_rows: AtomicUsize::new(0),
             flat_arrow_schema,
-            compactor: Arc::new(Mutex::new(MemtableCompactor::new(metadata.region_id, id))),
+            compactor: Arc::new(Mutex::new(MemtableCompactor::new(
+                metadata.region_id,
+                id,
+                self.config.clone(),
+            ))),
             compact_dispatcher: self.compact_dispatcher.clone(),
             append_mode: self.append_mode,
             merge_mode: self.merge_mode,
@@ -594,7 +623,11 @@ impl Memtable for BulkMemtable {
         }
 
         // Unified merge for all parts
-        let should_merge = self.parts.read().unwrap().should_merge_parts();
+        let should_merge = self
+            .parts
+            .read()
+            .unwrap()
+            .should_merge_parts(self.config.merge_threshold);
         if should_merge {
             compactor.merge_parts(
                 &self.flat_arrow_schema,
@@ -613,6 +646,7 @@ impl BulkMemtable {
     /// Creates a new BulkMemtable
     pub fn new(
         id: MemtableId,
+        config: BulkMemtableConfig,
         metadata: RegionMetadataRef,
         write_buffer_manager: Option<WriteBufferManagerRef>,
         compact_dispatcher: Option<Arc<CompactDispatcher>>,
@@ -627,6 +661,7 @@ impl BulkMemtable {
         let region_id = metadata.region_id;
         Self {
             id,
+            config: config.clone(),
             parts: Arc::new(RwLock::new(BulkParts::default())),
             metadata,
             alloc_tracker: AllocTracker::new(write_buffer_manager),
@@ -635,7 +670,7 @@ impl BulkMemtable {
             max_sequence: AtomicU64::new(0),
             num_rows: AtomicUsize::new(0),
             flat_arrow_schema,
-            compactor: Arc::new(Mutex::new(MemtableCompactor::new(region_id, id))),
+            compactor: Arc::new(Mutex::new(MemtableCompactor::new(region_id, id, config))),
             compact_dispatcher,
             append_mode,
             merge_mode,
@@ -691,7 +726,7 @@ impl BulkMemtable {
     /// Returns whether the memtable should be compacted.
     fn should_compact(&self) -> bool {
         let parts = self.parts.read().unwrap();
-        parts.should_merge_parts()
+        parts.should_merge_parts(self.config.merge_threshold)
     }
 
     /// Schedules a compaction task using the CompactDispatcher.
@@ -700,6 +735,7 @@ impl BulkMemtable {
             let task = MemCompactTask {
                 metadata: self.metadata.clone(),
                 parts: self.parts.clone(),
+                config: self.config.clone(),
                 flat_arrow_schema: self.flat_arrow_schema.clone(),
                 compactor: self.compactor.clone(),
                 append_mode: self.append_mode,
@@ -972,14 +1008,17 @@ impl PartToMerge {
 struct MemtableCompactor {
     region_id: RegionId,
     memtable_id: MemtableId,
+    /// Configuration for the bulk memtable.
+    config: BulkMemtableConfig,
 }
 
 impl MemtableCompactor {
     /// Creates a new MemtableCompactor.
-    fn new(region_id: RegionId, memtable_id: MemtableId) -> Self {
+    fn new(region_id: RegionId, memtable_id: MemtableId, config: BulkMemtableConfig) -> Self {
         Self {
             region_id,
             memtable_id,
+            config,
         }
     }
 
@@ -995,7 +1034,10 @@ impl MemtableCompactor {
         let start = Instant::now();
 
         // Collect pre-grouped parts
-        let collected = bulk_parts.write().unwrap().collect_parts_to_merge();
+        let collected = bulk_parts
+            .write()
+            .unwrap()
+            .collect_parts_to_merge(self.config.merge_threshold);
 
         if collected.groups.is_empty() {
             return Ok(());
@@ -1013,11 +1055,24 @@ impl MemtableCompactor {
         let num_groups = collected.groups.len();
         let num_parts: usize = collected.groups.iter().map(|g| g.len()).sum();
 
+        let encode_row_threshold = self.config.encode_row_threshold;
+        let encode_bytes_threshold = self.config.encode_bytes_threshold;
+
         // Merge all groups in parallel
         let merged_parts = collected
             .groups
             .into_par_iter()
-            .map(|group| Self::merge_parts_group(group, arrow_schema, metadata, dedup, merge_mode))
+            .map(|group| {
+                Self::merge_parts_group(
+                    group,
+                    arrow_schema,
+                    metadata,
+                    dedup,
+                    merge_mode,
+                    encode_row_threshold,
+                    encode_bytes_threshold,
+                )
+            })
             .collect::<Result<Vec<Option<MergedPart>>>>()?;
 
         // Install all merged parts
@@ -1048,6 +1103,8 @@ impl MemtableCompactor {
         metadata: &RegionMetadataRef,
         dedup: bool,
         merge_mode: MergeMode,
+        encode_row_threshold: usize,
+        encode_bytes_threshold: usize,
     ) -> Result<Option<MergedPart>> {
         if parts_to_merge.is_empty() {
             return Ok(None);
@@ -1127,8 +1184,8 @@ impl MemtableCompactor {
         };
 
         // Encode as EncodedBulkPart if rows exceed row threshold OR bytes exceed bytes threshold
-        if estimated_total_rows > *ENCODE_ROW_THRESHOLD
-            || estimated_total_bytes > *ENCODE_BYTES_THRESHOLD
+        if estimated_total_rows > encode_row_threshold
+            || estimated_total_bytes > encode_bytes_threshold
         {
             let encoder = BulkPartEncoder::new(metadata.clone(), DEFAULT_ROW_GROUP_SIZE)?;
             let mut metrics = BulkPartEncodeMetrics::default();
@@ -1182,7 +1239,8 @@ impl MemtableCompactor {
 struct MemCompactTask {
     metadata: RegionMetadataRef,
     parts: Arc<RwLock<BulkParts>>,
-
+    /// Configuration for the bulk memtable.
+    config: BulkMemtableConfig,
     /// Cached flat SST arrow schema
     flat_arrow_schema: SchemaRef,
     /// Compactor for merging bulk parts
@@ -1197,7 +1255,11 @@ impl MemCompactTask {
     fn compact(&self) -> Result<()> {
         let mut compactor = self.compactor.lock().unwrap();
 
-        let should_merge = self.parts.read().unwrap().should_merge_parts();
+        let should_merge = self
+            .parts
+            .read()
+            .unwrap()
+            .should_merge_parts(self.config.merge_threshold);
         if should_merge {
             compactor.merge_parts(
                 &self.flat_arrow_schema,
@@ -1246,6 +1308,8 @@ impl CompactDispatcher {
 /// Builder to build a [BulkMemtable].
 #[derive(Debug, Default)]
 pub struct BulkMemtableBuilder {
+    /// Configuration for the bulk memtable.
+    config: BulkMemtableConfig,
     write_buffer_manager: Option<WriteBufferManagerRef>,
     compact_dispatcher: Option<Arc<CompactDispatcher>>,
     append_mode: bool,
@@ -1260,6 +1324,7 @@ impl BulkMemtableBuilder {
         merge_mode: MergeMode,
     ) -> Self {
         Self {
+            config: BulkMemtableConfig::default(),
             write_buffer_manager,
             compact_dispatcher: None,
             append_mode,
@@ -1278,6 +1343,7 @@ impl MemtableBuilder for BulkMemtableBuilder {
     fn build(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef {
         Arc::new(BulkMemtable::new(
             id,
+            self.config.clone(),
             metadata.clone(),
             self.write_buffer_manager.clone(),
             self.compact_dispatcher.clone(),
@@ -1335,8 +1401,15 @@ mod tests {
     #[test]
     fn test_bulk_memtable_write_read() {
         let metadata = metadata_for_test();
-        let memtable =
-            BulkMemtable::new(999, metadata.clone(), None, None, false, MergeMode::LastRow);
+        let memtable = BulkMemtable::new(
+            999,
+            BulkMemtableConfig::default(),
+            metadata.clone(),
+            None,
+            None,
+            false,
+            MergeMode::LastRow,
+        );
         // Disable unordered_part for this test
         memtable.set_unordered_part_threshold(0);
 
@@ -1406,8 +1479,15 @@ mod tests {
     #[test]
     fn test_bulk_memtable_ranges_with_projection() {
         let metadata = metadata_for_test();
-        let memtable =
-            BulkMemtable::new(111, metadata.clone(), None, None, false, MergeMode::LastRow);
+        let memtable = BulkMemtable::new(
+            111,
+            BulkMemtableConfig::default(),
+            metadata.clone(),
+            None,
+            None,
+            false,
+            MergeMode::LastRow,
+        );
 
         let bulk_part = create_bulk_part_with_converter(
             "projection_test",
@@ -1448,8 +1528,15 @@ mod tests {
     #[test]
     fn test_bulk_memtable_unsupported_operations() {
         let metadata = metadata_for_test();
-        let memtable =
-            BulkMemtable::new(111, metadata.clone(), None, None, false, MergeMode::LastRow);
+        let memtable = BulkMemtable::new(
+            111,
+            BulkMemtableConfig::default(),
+            metadata.clone(),
+            None,
+            None,
+            false,
+            MergeMode::LastRow,
+        );
 
         let key_values = build_key_values_with_ts_seq_values(
             &metadata,
@@ -1471,8 +1558,15 @@ mod tests {
     #[test]
     fn test_bulk_memtable_freeze() {
         let metadata = metadata_for_test();
-        let memtable =
-            BulkMemtable::new(222, metadata.clone(), None, None, false, MergeMode::LastRow);
+        let memtable = BulkMemtable::new(
+            222,
+            BulkMemtableConfig::default(),
+            metadata.clone(),
+            None,
+            None,
+            false,
+            MergeMode::LastRow,
+        );
 
         let bulk_part = create_bulk_part_with_converter(
             "freeze_test",
@@ -1493,8 +1587,15 @@ mod tests {
     #[test]
     fn test_bulk_memtable_fork() {
         let metadata = metadata_for_test();
-        let original_memtable =
-            BulkMemtable::new(333, metadata.clone(), None, None, false, MergeMode::LastRow);
+        let original_memtable = BulkMemtable::new(
+            333,
+            BulkMemtableConfig::default(),
+            metadata.clone(),
+            None,
+            None,
+            false,
+            MergeMode::LastRow,
+        );
 
         let bulk_part =
             create_bulk_part_with_converter("fork_test", 15, vec![15000], vec![Some(150.0)], 1500)
@@ -1515,8 +1616,15 @@ mod tests {
     #[test]
     fn test_bulk_memtable_ranges_multiple_parts() {
         let metadata = metadata_for_test();
-        let memtable =
-            BulkMemtable::new(777, metadata.clone(), None, None, false, MergeMode::LastRow);
+        let memtable = BulkMemtable::new(
+            777,
+            BulkMemtableConfig::default(),
+            metadata.clone(),
+            None,
+            None,
+            false,
+            MergeMode::LastRow,
+        );
         // Disable unordered_part for this test
         memtable.set_unordered_part_threshold(0);
 
@@ -1566,8 +1674,15 @@ mod tests {
     #[test]
     fn test_bulk_memtable_ranges_with_sequence_filter() {
         let metadata = metadata_for_test();
-        let memtable =
-            BulkMemtable::new(888, metadata.clone(), None, None, false, MergeMode::LastRow);
+        let memtable = BulkMemtable::new(
+            888,
+            BulkMemtableConfig::default(),
+            metadata.clone(),
+            None,
+            None,
+            false,
+            MergeMode::LastRow,
+        );
 
         let part = create_bulk_part_with_converter(
             "seq_test",
@@ -1601,8 +1716,15 @@ mod tests {
     #[test]
     fn test_bulk_memtable_ranges_with_encoded_parts() {
         let metadata = metadata_for_test();
-        let memtable =
-            BulkMemtable::new(999, metadata.clone(), None, None, false, MergeMode::LastRow);
+        let memtable = BulkMemtable::new(
+            999,
+            BulkMemtableConfig::default(),
+            metadata.clone(),
+            None,
+            None,
+            false,
+            MergeMode::LastRow,
+        );
         // Disable unordered_part for this test
         memtable.set_unordered_part_threshold(0);
 
@@ -1654,6 +1776,7 @@ mod tests {
         let metadata = metadata_for_test();
         let memtable = BulkMemtable::new(
             1001,
+            BulkMemtableConfig::default(),
             metadata.clone(),
             None,
             None,
@@ -1736,6 +1859,7 @@ mod tests {
         let metadata = metadata_for_test();
         let memtable = BulkMemtable::new(
             1002,
+            BulkMemtableConfig::default(),
             metadata.clone(),
             None,
             None,
@@ -1821,6 +1945,7 @@ mod tests {
         let metadata = metadata_for_test();
         let memtable = BulkMemtable::new(
             1003,
+            BulkMemtableConfig::default(),
             metadata.clone(),
             None,
             None,
@@ -1906,7 +2031,7 @@ mod tests {
         }
 
         // Should not trigger merge since we have only 7 parts
-        assert!(!bulk_parts.should_merge_parts());
+        assert!(!bulk_parts.should_merge_parts(DEFAULT_MERGE_THRESHOLD));
     }
 
     #[test]
@@ -1927,7 +2052,7 @@ mod tests {
         }
 
         // Should trigger merge since we have 8 parts
-        assert!(bulk_parts.should_merge_parts());
+        assert!(bulk_parts.should_merge_parts(DEFAULT_MERGE_THRESHOLD));
     }
 
     #[test]
@@ -1948,7 +2073,7 @@ mod tests {
         }
 
         // Should trigger merge since we have 10 parts
-        assert!(bulk_parts.should_merge_parts());
+        assert!(bulk_parts.should_merge_parts(DEFAULT_MERGE_THRESHOLD));
 
         // Mark first 3 parts as merging
         for wrapper in bulk_parts.parts.iter_mut().take(3) {
@@ -1956,7 +2081,7 @@ mod tests {
         }
 
         // Now only 7 parts are available for merging, should not trigger
-        assert!(!bulk_parts.should_merge_parts());
+        assert!(!bulk_parts.should_merge_parts(DEFAULT_MERGE_THRESHOLD));
     }
 
     #[test]
@@ -1983,10 +2108,10 @@ mod tests {
         }
 
         // Should trigger merge since we have 16 parts
-        assert!(bulk_parts.should_merge_parts());
+        assert!(bulk_parts.should_merge_parts(DEFAULT_MERGE_THRESHOLD));
 
         // Collect parts to merge
-        let collected = bulk_parts.collect_parts_to_merge();
+        let collected = bulk_parts.collect_parts_to_merge(DEFAULT_MERGE_THRESHOLD);
 
         // Should have groups
         assert!(!collected.groups.is_empty());
@@ -2006,6 +2131,7 @@ mod tests {
         let metadata = metadata_for_test();
         let memtable = BulkMemtable::new(
             2005,
+            BulkMemtableConfig::default(),
             metadata.clone(),
             None,
             None,
