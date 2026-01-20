@@ -62,6 +62,10 @@ pub struct GcSchedulerOptions {
     /// This removes entries for regions that no longer exist (e.g., after table drops).
     /// Set to a larger value (e.g., 6 hours) since this is just for memory cleanup.
     pub tracker_cleanup_interval: Duration,
+    /// Maximum regions per GC batch sent to a single datanode.
+    /// When processing more regions than this limit, they will be split into multiple batches
+    /// to avoid overloading the object storage with large FileRefsManifest.
+    pub max_regions_per_batch: usize,
 }
 
 impl Default for GcSchedulerOptions {
@@ -82,6 +86,8 @@ impl Default for GcSchedulerOptions {
             full_file_listing_interval: Duration::from_secs(60 * 60 * 24),
             // Clean up stale tracker entries every 6 hours
             tracker_cleanup_interval: Duration::from_secs(60 * 60 * 6),
+            // Limit to 50 regions per batch to avoid overwhelming object storage
+            max_regions_per_batch: 50,
         }
     }
 }
@@ -163,6 +169,13 @@ impl GcSchedulerOptions {
             !self.tracker_cleanup_interval.is_zero(),
             error::InvalidArgumentsSnafu {
                 err_msg: "tracker_cleanup_interval must be greater than 0",
+            }
+        );
+
+        ensure!(
+            self.max_regions_per_batch > 0,
+            error::InvalidArgumentsSnafu {
+                err_msg: "max_regions_per_batch must be greater than 0",
             }
         );
 
