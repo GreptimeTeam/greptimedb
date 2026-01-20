@@ -107,7 +107,7 @@ impl<'a> DroppedRegionCollector<'a> {
             active_region_ids
         };
 
-        let dropped_regions = self.identify_dropped_regions(&table_reparts, &active_region_ids);
+        let dropped_regions = self.identify_dropped_regions(table_reparts, &active_region_ids);
 
         if dropped_regions.is_empty() {
             return Ok(DroppedRegionAssignment::default());

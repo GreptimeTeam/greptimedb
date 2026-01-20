@@ -172,7 +172,25 @@ async fn later_drop_task_without_global_gc(
     dropping_regions: RegionMapRef,
     gc_duration: Duration,
 ) -> bool {
-    let mut force = false;
+    remove_region_with_retry(
+        region_id,
+        region_path,
+        object_store,
+        dropping_regions,
+        gc_duration,
+        false,
+    )
+    .await
+}
+
+async fn remove_region_with_retry(
+    region_id: RegionId,
+    region_path: String,
+    object_store: ObjectStore,
+    dropping_regions: std::sync::Arc<crate::region::RegionMap>,
+    gc_duration: Duration,
+    mut force: bool,
+) -> bool {
     for _ in 0..MAX_RETRY_TIMES {
         let result = remove_region_dir_once(&region_path, &object_store, force).await;
         match result {
@@ -211,29 +229,15 @@ async fn later_drop_task_with_global_gc(
     gc_duration: Duration,
 ) -> bool {
     if path_type == PathType::Metadata {
-        for _ in 0..MAX_RETRY_TIMES {
-            let result = remove_region_dir_once(&region_path, &object_store, true).await;
-            match result {
-                Err(err) => {
-                    warn!(
-                        "Error occurs during trying to GC region dir {}: {}",
-                        region_path, err
-                    );
-                }
-                Ok(true) => {
-                    dropping_regions.remove_region(region_id);
-                    info!("Metadata Region {} is dropped", region_path);
-                    return true;
-                }
-                Ok(false) => (),
-            }
-            sleep(gc_duration).await;
-        }
-        warn!(
-            "Failed to GC metadata region dir {} after {} retries, giving up",
-            region_path, MAX_RETRY_TIMES
-        );
-        false
+        remove_region_with_retry(
+            region_id,
+            region_path,
+            object_store,
+            dropping_regions,
+            gc_duration,
+            true,
+        )
+        .await
     } else {
         // left for global gc
         dropping_regions.remove_region(region_id);
