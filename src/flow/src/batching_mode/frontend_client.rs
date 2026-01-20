@@ -149,7 +149,7 @@ impl FrontendClient {
             chnl_mgr: {
                 let cfg = ChannelConfig::new()
                     .connect_timeout(batch_opts.grpc_conn_timeout)
-                    .timeout(batch_opts.query_timeout);
+                    .timeout(Some(batch_opts.query_timeout));
 
                 let tls_config = load_client_tls_config(batch_opts.frontend_tls.clone())
                     .context(InvalidClientConfigSnafu)?;

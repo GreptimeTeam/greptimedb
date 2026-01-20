@@ -95,19 +95,19 @@ pub async fn create_meta_client(
     };
 
     let base_config = ChannelConfig::new()
-        .timeout(meta_client_options.timeout)
+        .timeout(Some(meta_client_options.timeout))
         .connect_timeout(meta_client_options.connect_timeout)
         .tcp_nodelay(meta_client_options.tcp_nodelay);
     let heartbeat_config = base_config
         .clone()
-        .timeout(HEARTBEAT_TIMEOUT)
+        .timeout(Some(HEARTBEAT_TIMEOUT))
         .http2_keep_alive_interval(HEARTBEAT_CHANNEL_KEEP_ALIVE_INTERVAL_SECS)
         .http2_keep_alive_timeout(HEARTBEAT_CHANNEL_KEEP_ALIVE_TIMEOUT_SECS);
 
     if let MetaClientType::Frontend = client_type {
         // Unset the timeout in the DDL channel manager,
         // delegating timeout control to each individual request rather than the channel manager itself.
-        let ddl_config = base_config.clone().unset_timeout();
+        let ddl_config = base_config.clone().timeout(None);
         builder = builder
             .ddl_timeout(meta_client_options.ddl_timeout)
             .ddl_channel_manager(ChannelManager::with_config(ddl_config, None));

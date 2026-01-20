@@ -33,7 +33,7 @@ fn main() {
 async fn run() {
     let id = 2000u64;
     let config = ChannelConfig::new()
-        .timeout(Duration::from_secs(3))
+        .timeout(Some(Duration::from_secs(3)))
         .connect_timeout(Duration::from_secs(5))
         .tcp_nodelay(true);
     let channel_manager = ChannelManager::with_config(config, None);

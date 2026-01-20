@@ -413,14 +413,8 @@ impl ChannelConfig {
     }
 
     /// A timeout to each request.
-    pub fn timeout(mut self, timeout: Duration) -> Self {
-        self.timeout = Some(timeout);
-        self
-    }
-
-    /// Unset the timeout to each request.
-    pub fn unset_timeout(mut self) -> Self {
-        self.timeout = None;
+    pub fn timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.timeout = timeout;
         self
     }
 
@@ -666,7 +660,7 @@ mod tests {
         );
 
         let cfg = default_cfg
-            .timeout(Duration::from_secs(3))
+            .timeout(Some(Duration::from_secs(3)))
             .connect_timeout(Duration::from_secs(5))
             .concurrency_limit(6)
             .rate_limit(5, Duration::from_secs(1))
@@ -719,7 +713,7 @@ mod tests {
     #[test]
     fn test_build_endpoint() {
         let config = ChannelConfig::new()
-            .timeout(Duration::from_secs(3))
+            .timeout(Some(Duration::from_secs(3)))
             .connect_timeout(Duration::from_secs(5))
             .concurrency_limit(6)
             .rate_limit(5, Duration::from_secs(1))
