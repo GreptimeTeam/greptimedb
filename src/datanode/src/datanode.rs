@@ -244,7 +244,19 @@ impl DatanodeBuilder {
             table_id_schema_cache,
             schema_cache,
         ));
-        let file_ref_manager = Arc::new(FileReferenceManager::new(Some(node_id)));
+
+        let gc_enabled = self.opts.region_engine.iter().any(|engine| {
+            if let RegionEngineConfig::Mito(config) = engine {
+                config.gc.enable
+            } else {
+                false
+            }
+        });
+
+        let file_ref_manager = Arc::new(FileReferenceManager::with_gc_enabled(
+            Some(node_id),
+            gc_enabled,
+        ));
         let region_server = self
             .new_region_server(
                 schema_metadata_manager,

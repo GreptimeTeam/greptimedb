@@ -104,34 +104,45 @@ where
 
         self.region_count.dec();
 
-        // Detaches a background task to delete the region dir
         let object_store = region.access_layer.object_store().clone();
         let dropping_regions = self.dropping_regions.clone();
         let listener = self.listener.clone();
         let intm_manager = self.intermediate_manager.clone();
         let cache_manager = self.cache_manager.clone();
+        let gc_enabled = self.file_ref_manager.is_gc_enabled();
+
         common_runtime::spawn_global(async move {
             let gc_duration = listener
                 .on_later_drop_begin(region_id)
                 .unwrap_or(Duration::from_secs(GC_TASK_INTERVAL_SEC));
-            let removed = later_drop_task(
-                region_id,
-                region_dir.clone(),
-                object_store,
-                dropping_regions,
-                gc_duration,
-            )
-            .await;
+
+            let removed = if gc_enabled {
+                later_drop_task_with_global_gc(
+                    region_id,
+                    region_dir.clone(),
+                    object_store,
+                    dropping_regions,
+                    gc_duration,
+                )
+                .await
+            } else {
+                later_drop_task_without_global_gc(
+                    region_id,
+                    region_dir.clone(),
+                    object_store,
+                    dropping_regions,
+                    gc_duration,
+                )
+                .await
+            };
+
             if let Err(err) = intm_manager.prune_region_dir(&region_id).await {
                 warn!(err; "Failed to prune intermediate region directory, region_id: {}", region_id);
             }
 
-            // Clean manifest cache for the region
             if let Some(write_cache) = cache_manager.write_cache()
                 && let Some(manifest_cache) = write_cache.manifest_cache()
             {
-                // We pass the table dir so we can remove the table dir in manifest cache
-                // when the last region in the same host is dropped.
                 manifest_cache.clean_manifests(&table_dir).await;
             }
 
@@ -152,7 +163,7 @@ where
 /// This task will retry on failure and keep running until finished. Any resource
 /// captured by it will not be released before then. Be sure to only pass weak reference
 /// if something is depended on ref-count mechanism.
-async fn later_drop_task(
+async fn later_drop_task_without_global_gc(
     region_id: RegionId,
     region_path: String,
     object_store: ObjectStore,
@@ -187,6 +198,57 @@ async fn later_drop_task(
     );
 
     false
+}
+
+async fn later_drop_task_with_global_gc(
+    region_id: RegionId,
+    region_path: String,
+    object_store: ObjectStore,
+    dropping_regions: RegionMapRef,
+    _gc_duration: Duration,
+) -> bool {
+    let metadata_dir = join_path(&region_path, "metadata");
+
+    for _ in 0..MAX_RETRY_TIMES {
+        let result = remove_subdirectory_once(&metadata_dir, &object_store, true).await;
+        match result {
+            Err(err) => {
+                warn!(
+                    "Error occurs during trying to GC metadata dir {}: {}",
+                    metadata_dir, err
+                );
+            }
+            Ok(true) => {
+                info!("Metadata dir {} is dropped", metadata_dir);
+                break;
+            }
+            Ok(false) => (),
+        }
+    }
+
+    let empty_check_result = check_and_remove_empty_dir(&region_path, &object_store).await;
+    match empty_check_result {
+        Ok(true) => {
+            dropping_regions.remove_region(region_id);
+            info!("Region {} directory removed (was empty)", region_path);
+            true
+        }
+        Ok(false) => {
+            info!(
+                "Region {} directory not empty, left for global GC",
+                region_path
+            );
+            dropping_regions.remove_region(region_id);
+            true
+        }
+        Err(err) => {
+            warn!(
+                "Failed to check/remove empty region dir {}: {}",
+                region_path, err
+            );
+            false
+        }
+    }
 }
 
 // TODO(ruihang): place the marker in a separate dir
@@ -228,6 +290,76 @@ pub(crate) async fn remove_region_dir_once(
         // then remove the marker with this dir
         object_store
             .remove_all(region_path)
+            .await
+            .context(OpenDalSnafu)?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+async fn remove_subdirectory_once(
+    dir_path: &str,
+    object_store: &ObjectStore,
+    force: bool,
+) -> Result<bool> {
+    let mut has_parquet_file = false;
+    let mut files_to_remove = vec![];
+
+    let dir_exists = object_store.exists(dir_path).await.context(OpenDalSnafu)?;
+    if !dir_exists {
+        return Ok(true);
+    }
+
+    let mut files = object_store
+        .lister_with(dir_path)
+        .await
+        .context(OpenDalSnafu)?;
+
+    while let Some(file) = files.try_next().await.context(OpenDalSnafu)? {
+        if !force && file.path().ends_with(".parquet") {
+            has_parquet_file = true;
+            break;
+        }
+        let meta = file.metadata();
+        if meta.mode() == EntryMode::FILE {
+            files_to_remove.push(file.path().to_string());
+        }
+    }
+
+    if !has_parquet_file {
+        object_store
+            .delete_iter(files_to_remove)
+            .await
+            .context(OpenDalSnafu)?;
+        object_store
+            .remove_all(dir_path)
+            .await
+            .context(OpenDalSnafu)?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+async fn check_and_remove_empty_dir(dir_path: &str, object_store: &ObjectStore) -> Result<bool> {
+    let mut files = object_store
+        .lister_with(dir_path)
+        .await
+        .context(OpenDalSnafu)?;
+
+    let mut has_files = false;
+    while let Some(file) = files.try_next().await.context(OpenDalSnafu)? {
+        let meta = file.metadata();
+        if meta.mode() == EntryMode::FILE {
+            has_files = true;
+            break;
+        }
+    }
+
+    if !has_files {
+        object_store
+            .remove_all(dir_path)
             .await
             .context(OpenDalSnafu)?;
         Ok(true)
