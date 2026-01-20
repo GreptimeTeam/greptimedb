@@ -60,7 +60,7 @@ runs:
     - name: Export kind logs
       if: failure()
       shell: bash
-      run: kind export logs -n greptimedb-operator-e2e /tmp/kind
+      run: kind export logs /tmp/kind
     - name: Upload logs
       if: failure()
       uses: actions/upload-artifact@v4
