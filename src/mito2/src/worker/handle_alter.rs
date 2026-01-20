@@ -249,7 +249,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         }
                         current_options.wal_options = WalOptions::Noop;
                     } else {
-                        // Restore WAL options: priority order:
+                        // Restore WAL options: priority order
                         // 1. Provided wal_options from request
                         // 2. Saved original_wal_options
                         // 3. Fallback to RaftEngine
