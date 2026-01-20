@@ -702,14 +702,18 @@ impl RegionServer {
         region_id: RegionId,
         request: SyncRegionFromRequest,
     ) -> Result<()> {
-        let engine_with_status = self
-            .inner
-            .region_map
-            .get(&region_id)
-            .with_context(|| RegionNotFoundSnafu { region_id })?;
+        let engine = match self.inner.get_engine(region_id, &RegionChange::None)? {
+            CurrentEngine::Engine(engine) => engine,
+            _ => {
+                return UnexpectedSnafu {
+                    violated: "unexpected EarlyReturn engine status for a ready region",
+                }
+                .fail();
+            }
+        };
 
         self.inner
-            .handle_sync_region(engine_with_status.engine(), region_id, request)
+            .handle_sync_region(&engine, region_id, request)
             .await
     }
 
@@ -719,14 +723,17 @@ impl RegionServer {
         request: RemapManifestsRequest,
     ) -> Result<RemapManifestsResponse> {
         let region_id = request.region_id;
-        let engine_with_status = self
-            .inner
-            .region_map
-            .get(&region_id)
-            .with_context(|| RegionNotFoundSnafu { region_id })?;
+        let engine = match self.inner.get_engine(region_id, &RegionChange::None)? {
+            CurrentEngine::Engine(engine) => engine,
+            _ => {
+                return UnexpectedSnafu {
+                    violated: "unexpected EarlyReturn engine status for a ready region",
+                }
+                .fail();
+            }
+        };
 
-        engine_with_status
-            .engine()
+        engine
             .remap_manifests(request)
             .await
             .with_context(|_| HandleRegionRequestSnafu { region_id })
@@ -832,15 +839,6 @@ enum RegionEngineWithStatus {
 impl RegionEngineWithStatus {
     /// Returns [RegionEngineRef].
     pub fn into_engine(self) -> RegionEngineRef {
-        match self {
-            RegionEngineWithStatus::Registering(engine) => engine,
-            RegionEngineWithStatus::Deregistering(engine) => engine,
-            RegionEngineWithStatus::Ready(engine) => engine,
-        }
-    }
-
-    /// Returns [RegionEngineRef] reference.
-    pub fn engine(&self) -> &RegionEngineRef {
         match self {
             RegionEngineWithStatus::Registering(engine) => engine,
             RegionEngineWithStatus::Deregistering(engine) => engine,
