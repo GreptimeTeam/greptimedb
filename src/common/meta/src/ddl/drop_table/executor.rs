@@ -219,6 +219,7 @@ impl DropTableExecutor {
         region_routes: &[RegionRoute],
         fast_path: bool,
         force: bool,
+        partial_drop: bool,
     ) -> Result<()> {
         // Drops leader regions on datanodes.
         let leaders = find_leaders(region_routes);
@@ -243,6 +244,7 @@ impl DropTableExecutor {
                         region_id: region_id.as_u64(),
                         fast_path,
                         force,
+                        partial_drop,
                     })),
                 };
                 let datanode = datanode.clone();

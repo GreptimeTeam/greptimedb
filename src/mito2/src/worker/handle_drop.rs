@@ -41,6 +41,7 @@ where
     pub(crate) async fn handle_drop_request(
         &mut self,
         region_id: RegionId,
+        _partial_drop: bool,
     ) -> Result<AffectedRows> {
         let region = self.regions.writable_region(region_id)?;
 

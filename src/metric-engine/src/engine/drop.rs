@@ -74,7 +74,9 @@ impl MetricEngineInner {
             if is_physical_region_busy && force {
                 info!("Dropping physical region {} with force", data_region_id);
             }
-            return self.drop_physical_region(data_region_id).await;
+            return self
+                .drop_physical_region(data_region_id, req.partial_drop)
+                .await;
         }
 
         if fast_path {
@@ -105,7 +107,11 @@ impl MetricEngineInner {
         }
     }
 
-    async fn drop_physical_region(&self, region_id: RegionId) -> Result<AffectedRows> {
+    async fn drop_physical_region(
+        &self,
+        region_id: RegionId,
+        partial_drop: bool,
+    ) -> Result<AffectedRows> {
         let data_region_id = utils::to_data_region_id(region_id);
         let metadata_region_id = utils::to_metadata_region_id(region_id);
 
@@ -118,6 +124,7 @@ impl MetricEngineInner {
                 RegionRequest::Drop(RegionDropRequest {
                     fast_path: false,
                     force: false,
+                    partial_drop,
                 }),
             )
             .await
@@ -128,6 +135,7 @@ impl MetricEngineInner {
                 RegionRequest::Drop(RegionDropRequest {
                     fast_path: false,
                     force: false,
+                    partial_drop,
                 }),
             )
             .await

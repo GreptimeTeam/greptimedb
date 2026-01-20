@@ -74,6 +74,7 @@ async fn test_engine_drop_region_with_format(flat_format: bool) {
             RegionRequest::Drop(RegionDropRequest {
                 fast_path: false,
                 force: false,
+                partial_drop: false,
             }),
         )
         .await
@@ -111,6 +112,7 @@ async fn test_engine_drop_region_with_format(flat_format: bool) {
             RegionRequest::Drop(RegionDropRequest {
                 fast_path: false,
                 force: false,
+                partial_drop: false,
             }),
         )
         .await
@@ -258,6 +260,7 @@ async fn test_engine_drop_region_for_custom_store_with_format(flat_format: bool)
             RegionRequest::Drop(RegionDropRequest {
                 fast_path: false,
                 force: false,
+                partial_drop: false,
             }),
         )
         .await
