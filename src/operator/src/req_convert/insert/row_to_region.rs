@@ -17,7 +17,7 @@ use std::sync::Arc;
 use ahash::{HashMap, HashSet};
 use api::v1::RowInsertRequests;
 use api::v1::region::InsertRequests as RegionInsertRequests;
-use common_time::Timestamp;
+use common_time::{TimeToLive, Timestamp};
 use partition::manager::PartitionRuleManager;
 use snafu::{OptionExt, ResultExt};
 use table::metadata::{TableId, TableInfo, TableInfoRef};
@@ -111,6 +111,12 @@ pub fn filter_normal_requests_by_ttl(
 
         // Skip filtering if no TTL
         if ttl.is_none() {
+            filtered_requests.push(request);
+            continue;
+        }
+
+        // Skip filtering for instant TTL (designed for flow tasks, not expiration-based)
+        if matches!(ttl, Some(TimeToLive::Instant)) {
             filtered_requests.push(request);
             continue;
         }

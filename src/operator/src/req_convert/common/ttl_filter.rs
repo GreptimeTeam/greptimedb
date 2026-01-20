@@ -74,6 +74,9 @@ pub fn is_row_expired(
 
 /// Filters expired rows from a vec of rows based on TTL.
 /// Returns the filtered rows and the count of filtered (removed) rows.
+///
+/// Note: This function should NOT be called for instant TTL tables.
+/// Instant TTL is designed for flow tasks and should be handled separately.
 pub fn filter_expired_rows(
     rows: Vec<Row>,
     timestamp_index: usize,
@@ -82,6 +85,11 @@ pub fn filter_expired_rows(
 ) -> Result<(Vec<Row>, usize), Error> {
     // If no TTL, return all rows unchanged
     if ttl.is_none() {
+        return Ok((rows, 0));
+    }
+
+    // Instant TTL should be handled separately (not by expiration logic)
+    if matches!(ttl, Some(TimeToLive::Instant)) {
         return Ok((rows, 0));
     }
 
