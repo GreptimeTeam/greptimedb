@@ -23,8 +23,7 @@ use object_store::util::join_path;
 use object_store::{EntryMode, ObjectStore};
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
-use store_api::metric_engine_consts::METADATA_REGION_SUBDIR;
-use store_api::region_request::AffectedRows;
+use store_api::region_request::{AffectedRows, PathType};
 use store_api::storage::RegionId;
 use tokio::time::sleep;
 
@@ -58,6 +57,7 @@ where
         // Writes dropping marker
         // We rarely drop a region so we still operate in the worker loop.
         let region_dir = region.access_layer.build_region_dir(region_id);
+        let path_type = region.access_layer.path_type();
         let table_dir = region.access_layer.table_dir().to_string();
         let marker_path = join_path(&region_dir, DROPPING_MARKER_FILE);
         region
@@ -121,6 +121,7 @@ where
                 later_drop_task_with_global_gc(
                     region_id,
                     region_dir.clone(),
+                    path_type,
                     object_store,
                     dropping_regions,
                     gc_duration,
@@ -204,51 +205,39 @@ async fn later_drop_task_without_global_gc(
 async fn later_drop_task_with_global_gc(
     region_id: RegionId,
     region_path: String,
+    path_type: PathType,
     object_store: ObjectStore,
     dropping_regions: RegionMapRef,
-    _gc_duration: Duration,
+    gc_duration: Duration,
 ) -> bool {
-    let metadata_dir = join_path(&region_path, METADATA_REGION_SUBDIR);
-
-    for _ in 0..MAX_RETRY_TIMES {
-        let result = remove_subdirectory_once(&metadata_dir, &object_store, true).await;
-        match result {
-            Err(err) => {
-                warn!(
-                    "Error occurs during trying to GC metadata dir {}: {}",
-                    metadata_dir, err
-                );
+    if path_type == PathType::Metadata {
+        for _ in 0..MAX_RETRY_TIMES {
+            let result = remove_region_dir_once(&region_path, &object_store, true).await;
+            match result {
+                Err(err) => {
+                    warn!(
+                        "Error occurs during trying to GC region dir {}: {}",
+                        region_path, err
+                    );
+                }
+                Ok(true) => {
+                    dropping_regions.remove_region(region_id);
+                    info!("Metadata Region {} is dropped", region_path);
+                    return true;
+                }
+                Ok(false) => (),
             }
-            Ok(true) => {
-                info!("Metadata dir {} is dropped", metadata_dir);
-                break;
-            }
-            Ok(false) => (),
+            sleep(gc_duration).await;
         }
-    }
-
-    let empty_check_result = check_and_remove_empty_dir(&region_path, &object_store).await;
-    match empty_check_result {
-        Ok(true) => {
-            dropping_regions.remove_region(region_id);
-            info!("Region {} directory removed (was empty)", region_path);
-            true
-        }
-        Ok(false) => {
-            info!(
-                "Region {} directory not empty, left for global GC",
-                region_path
-            );
-            dropping_regions.remove_region(region_id);
-            true
-        }
-        Err(err) => {
-            warn!(
-                "Failed to check/remove empty region dir {}: {}",
-                region_path, err
-            );
-            false
-        }
+        warn!(
+            "Failed to GC metadata region dir {} after {} retries, giving up",
+            region_path, MAX_RETRY_TIMES
+        );
+        false
+    } else {
+        // left for global gc
+        dropping_regions.remove_region(region_id);
+        true
     }
 }
 
@@ -291,77 +280,6 @@ pub(crate) async fn remove_region_dir_once(
         // then remove the marker with this dir
         object_store
             .remove_all(region_path)
-            .await
-            .context(OpenDalSnafu)?;
-        Ok(true)
-    } else {
-        Ok(false)
-    }
-}
-
-async fn remove_subdirectory_once(
-    dir_path: &str,
-    object_store: &ObjectStore,
-    force: bool,
-) -> Result<bool> {
-    let mut has_parquet_file = false;
-    let mut files_to_remove = vec![];
-
-    let dir_exists = object_store.exists(dir_path).await.context(OpenDalSnafu)?;
-    if !dir_exists {
-        return Ok(true);
-    }
-
-    let mut files = object_store
-        .lister_with(dir_path)
-        .await
-        .context(OpenDalSnafu)?;
-
-    while let Some(file) = files.try_next().await.context(OpenDalSnafu)? {
-        if !force && file.path().ends_with(".parquet") {
-            has_parquet_file = true;
-            break;
-        }
-        let meta = file.metadata();
-        if meta.mode() == EntryMode::FILE {
-            files_to_remove.push(file.path().to_string());
-        }
-    }
-
-    if !has_parquet_file {
-        object_store
-            .delete_iter(files_to_remove)
-            .await
-            .context(OpenDalSnafu)?;
-        object_store
-            .remove_all(dir_path)
-            .await
-            .context(OpenDalSnafu)?;
-        Ok(true)
-    } else {
-        Ok(false)
-    }
-}
-
-async fn check_and_remove_empty_dir(dir_path: &str, object_store: &ObjectStore) -> Result<bool> {
-    let mut files = object_store
-        .lister_with(dir_path)
-        .recursive(true) // use recursive to find any files under subdirectories
-        .await
-        .context(OpenDalSnafu)?;
-
-    let mut has_files = false;
-    while let Some(file) = files.try_next().await.context(OpenDalSnafu)? {
-        let meta = file.metadata();
-        if meta.mode() == EntryMode::FILE {
-            has_files = true;
-            break;
-        }
-    }
-
-    if !has_files {
-        object_store
-            .remove_all(dir_path)
             .await
             .context(OpenDalSnafu)?;
         Ok(true)
