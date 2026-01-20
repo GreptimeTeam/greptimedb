@@ -25,7 +25,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use common_catalog::consts::MITO_ENGINE;
 use common_meta::datanode::{RegionManifestInfo, RegionStat};
+use common_meta::key::table_repart::TableRepartValue;
 use common_meta::key::table_route::PhysicalTableRouteValue;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{Region, RegionRoute};
@@ -37,6 +39,7 @@ use table::metadata::TableId;
 use tokio::sync::mpsc::Sender;
 
 use crate::error::Result;
+use crate::gc::Region2Peers;
 use crate::gc::candidate::GcCandidate;
 use crate::gc::ctx::SchedulerCtx;
 use crate::gc::options::GcSchedulerOptions;
@@ -61,6 +64,7 @@ pub fn new_empty_report_with(region_ids: impl IntoIterator<Item = RegionId>) -> 
 #[derive(Debug, Default)]
 pub struct MockSchedulerCtx {
     pub table_to_region_stats: Arc<Mutex<Option<HashMap<TableId, Vec<RegionStat>>>>>,
+    pub table_reparts: Arc<Mutex<HashMap<TableId, TableRepartValue>>>,
     pub table_routes: Arc<Mutex<HashMap<TableId, (TableId, PhysicalTableRouteValue)>>>,
     pub file_refs: Arc<Mutex<Option<FileRefsManifest>>>,
     pub gc_reports: Arc<Mutex<HashMap<RegionId, GcReport>>>,
@@ -101,6 +105,12 @@ impl MockSchedulerCtx {
                 (k, (phy_id, phy))
             })
             .collect();
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn with_table_reparts(self, table_reparts: HashMap<TableId, TableRepartValue>) -> Self {
+        *self.table_reparts.lock().unwrap() = table_reparts;
         self
     }
 
@@ -147,6 +157,16 @@ impl SchedulerCtx for MockSchedulerCtx {
             .unwrap_or_default())
     }
 
+    async fn get_table_reparts(&self) -> Result<Vec<(TableId, TableRepartValue)>> {
+        Ok(self
+            .table_reparts
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(table_id, value)| (*table_id, value.clone()))
+            .collect())
+    }
+
     async fn get_table_route(
         &self,
         table_id: TableId,
@@ -165,11 +185,30 @@ impl SchedulerCtx for MockSchedulerCtx {
             .unwrap_or_else(|| (table_id, PhysicalTableRouteValue::default())))
     }
 
+    async fn batch_get_table_route(
+        &self,
+        table_ids: &[TableId],
+    ) -> Result<HashMap<TableId, PhysicalTableRouteValue>> {
+        let mut result = HashMap::new();
+        for &table_id in table_ids {
+            let route = self
+                .table_routes
+                .lock()
+                .unwrap()
+                .get(&table_id)
+                .cloned()
+                .unwrap_or_else(|| (table_id, PhysicalTableRouteValue::default()));
+            result.insert(table_id, route.1);
+        }
+        Ok(result)
+    }
+
     async fn gc_regions(
         &self,
         region_ids: &[RegionId],
         _full_file_listing: bool,
         _timeout: Duration,
+        _region_routes_override: Region2Peers,
     ) -> Result<GcReport> {
         *self.gc_regions_calls.lock().unwrap() += 1;
 
@@ -368,7 +407,7 @@ fn mock_region_stat(
         },
         rcus: 0,
         wcus: 0,
-        engine: "mito".to_string(),
+        engine: MITO_ENGINE.to_string(),
         num_rows: 0,
         memtable_size: 0,
         manifest_size: 0,

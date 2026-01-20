@@ -97,6 +97,9 @@ impl SyncRegionHandler {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use common_meta::kv_backend::memory::MemoryKvBackend;
     use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
     use store_api::region_engine::{RegionRole, SyncRegionFromRequest};
     use store_api::storage::RegionId;
@@ -111,7 +114,8 @@ mod tests {
         let (mock_engine, _) = MockRegionEngine::new(METRIC_ENGINE_NAME);
         mock_region_server.register_engine(mock_engine);
 
-        let handler_context = HandlerContext::new_for_test(mock_region_server);
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let handler_context = HandlerContext::new_for_test(mock_region_server, kv_backend);
         let handler = SyncRegionHandler;
 
         let region_id = RegionId::new(1024, 1);
@@ -141,7 +145,8 @@ mod tests {
         });
         mock_region_server.register_test_region(region_id, mock_engine);
 
-        let handler_context = HandlerContext::new_for_test(mock_region_server);
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let handler_context = HandlerContext::new_for_test(mock_region_server, kv_backend);
         let handler = SyncRegionHandler;
 
         let sync_region = common_meta::instruction::SyncRegion {
@@ -171,7 +176,8 @@ mod tests {
         });
         mock_region_server.register_test_region(region_id, mock_engine);
 
-        let handler_context = HandlerContext::new_for_test(mock_region_server);
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let handler_context = HandlerContext::new_for_test(mock_region_server, kv_backend);
         let handler = SyncRegionHandler;
 
         let sync_region = common_meta::instruction::SyncRegion {

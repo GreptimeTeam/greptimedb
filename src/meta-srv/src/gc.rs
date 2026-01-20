@@ -19,6 +19,7 @@ use store_api::storage::RegionId;
 
 mod candidate;
 mod ctx;
+mod dropped;
 mod handler;
 #[cfg(test)]
 mod mock;
@@ -32,6 +33,8 @@ pub use options::GcSchedulerOptions;
 pub use procedure::BatchGcProcedure;
 pub(crate) use scheduler::{GcScheduler, GcTickerRef};
 
+/// Mapping from region ID to its associated peers (leader and followers).
 pub type Region2Peers = HashMap<RegionId, (Peer, Vec<Peer>)>;
 
+/// Mapping from leader peer to the set of region IDs it is responsible for.
 pub(crate) type Peer2Regions = HashMap<Peer, HashSet<RegionId>>;

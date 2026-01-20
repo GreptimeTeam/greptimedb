@@ -57,6 +57,13 @@ impl GcScheduler {
             }
         }
 
+        let table_reparts = self.ctx.get_table_reparts().await?;
+        for (_, repart) in table_reparts {
+            for src_region in repart.src_to_dst.keys() {
+                current_regions.insert(*src_region);
+            }
+        }
+
         // Remove stale entries from tracker
         let mut tracker = self.region_gc_tracker.lock().await;
         let initial_count = tracker.len();

@@ -15,61 +15,71 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
+use common_catalog::consts::MITO_ENGINE;
+use common_meta::datanode::{RegionManifestInfo, RegionStat};
 use common_meta::peer::Peer;
 use common_telemetry::{debug, error, info, warn};
 use futures::StreamExt;
 use itertools::Itertools;
+use ordered_float::OrderedFloat;
+use store_api::region_engine::RegionRole;
 use store_api::storage::{GcReport, RegionId};
 use table::metadata::TableId;
 
 use crate::error::Result;
+use crate::gc::Region2Peers;
 use crate::gc::candidate::GcCandidate;
+use crate::gc::dropped::DroppedRegionCollector;
 use crate::gc::scheduler::{GcJobReport, GcScheduler};
 use crate::gc::tracker::RegionGcInfo;
 
 impl GcScheduler {
-    /// Iterate through all region stats, find region that might need gc, and send gc instruction to
-    /// the corresponding datanode with improved parallel processing and retry logic.
     pub(crate) async fn trigger_gc(&self) -> Result<GcJobReport> {
         let start_time = Instant::now();
         info!("Starting GC cycle");
 
-        // Step 1: Get all region statistics
+        // limit gc region scope to regions whose datanode have reported stats(by heartbeat)
         let table_to_region_stats = self.ctx.get_table_to_region_stats().await?;
         info!(
             "Fetched region stats for {} tables",
             table_to_region_stats.len()
         );
 
-        // Step 2: Select GC candidates based on our scoring algorithm
         let per_table_candidates = self.select_gc_candidates(&table_to_region_stats).await?;
 
-        if per_table_candidates.is_empty() {
+        let table_reparts = self.ctx.get_table_reparts().await?;
+        let dropped_collector =
+            DroppedRegionCollector::new(self.ctx.as_ref(), &self.config, &self.region_gc_tracker);
+        let dropped_assignment = dropped_collector.collect_and_assign(&table_reparts).await?;
+
+        if per_table_candidates.is_empty() && dropped_assignment.regions_by_peer.is_empty() {
             info!("No GC candidates found, skipping GC cycle");
             return Ok(Default::default());
         }
 
-        // Step 3: Aggregate candidates by datanode
-        let datanode_to_candidates = self
+        let mut datanode_to_candidates = self
             .aggregate_candidates_by_datanode(per_table_candidates)
             .await?;
 
-        // TODO(discord9): add deleted regions from repartition mapping
+        self.merge_dropped_regions(&mut datanode_to_candidates, &dropped_assignment);
 
         if datanode_to_candidates.is_empty() {
             info!("No valid datanode candidates found, skipping GC cycle");
             return Ok(Default::default());
         }
 
-        // Step 4: Process datanodes concurrently with limited parallelism
         let report = self
-            .parallel_process_datanodes(datanode_to_candidates)
+            .parallel_process_datanodes(
+                datanode_to_candidates,
+                dropped_assignment.force_full_listing,
+                dropped_assignment.region_routes_override,
+            )
             .await;
 
         let duration = start_time.elapsed();
         info!(
             "Finished GC cycle. Processed {} datanodes ({} failed). Duration: {:?}",
-            report.per_datanode_reports.len(), // Reuse field for datanode count
+            report.per_datanode_reports.len(),
             report.failed_datanodes.len(),
             duration
         );
@@ -78,7 +88,19 @@ impl GcScheduler {
         Ok(report)
     }
 
-    /// Aggregate GC candidates by their corresponding datanode peer.
+    fn merge_dropped_regions(
+        &self,
+        datanode_to_candidates: &mut HashMap<Peer, Vec<(TableId, GcCandidate)>>,
+        assignment: &crate::gc::dropped::DroppedRegionAssignment,
+    ) {
+        for (peer, dropped_infos) in &assignment.regions_by_peer {
+            let entry = datanode_to_candidates.entry(peer.clone()).or_default();
+            for info in dropped_infos {
+                entry.push((info.table_id, dropped_candidate(info.region_id)));
+            }
+        }
+    }
+
     pub(crate) async fn aggregate_candidates_by_datanode(
         &self,
         per_table_candidates: HashMap<TableId, Vec<GcCandidate>>,
@@ -134,6 +156,8 @@ impl GcScheduler {
     pub(crate) async fn parallel_process_datanodes(
         &self,
         datanode_to_candidates: HashMap<Peer, Vec<(TableId, GcCandidate)>>,
+        force_full_listing_by_peer: HashMap<Peer, HashSet<RegionId>>,
+        region_routes_override_by_peer: HashMap<Peer, Region2Peers>,
     ) -> GcJobReport {
         let mut report = GcJobReport::default();
 
@@ -146,10 +170,25 @@ impl GcScheduler {
         .map(|(peer, candidates)| {
             let scheduler = self;
             let peer_clone = peer.clone();
+            let force_full_listing = force_full_listing_by_peer
+                .get(&peer)
+                .cloned()
+                .unwrap_or_default();
+            let region_routes_override = region_routes_override_by_peer
+                .get(&peer)
+                .cloned()
+                .unwrap_or_default();
             async move {
                 (
                     peer,
-                    scheduler.process_datanode_gc(peer_clone, candidates).await,
+                    scheduler
+                        .process_datanode_gc(
+                            peer_clone,
+                            candidates,
+                            force_full_listing,
+                            region_routes_override,
+                        )
+                        .await,
                 )
             }
         })
@@ -181,6 +220,8 @@ impl GcScheduler {
         &self,
         peer: Peer,
         candidates: Vec<(TableId, GcCandidate)>,
+        force_full_listing: HashSet<RegionId>,
+        region_routes_override: Region2Peers,
     ) -> Result<GcReport> {
         info!(
             "Starting GC for datanode {} with {} candidate regions",
@@ -198,8 +239,9 @@ impl GcScheduler {
         let (gc_report, fully_listed_regions) = {
             // Partition regions into full listing and fast listing in a single pass
 
-            let batch_full_listing_decisions =
-                self.batch_should_use_full_listing(&all_region_ids).await;
+            let batch_full_listing_decisions = self
+                .batch_should_use_full_listing(&all_region_ids, &force_full_listing)
+                .await;
 
             let need_full_list_regions = batch_full_listing_decisions
                 .iter()
@@ -224,7 +266,12 @@ impl GcScheduler {
             if !fast_list_regions.is_empty() {
                 match self
                     .ctx
-                    .gc_regions(&fast_list_regions, false, self.config.mailbox_timeout)
+                    .gc_regions(
+                        &fast_list_regions,
+                        false,
+                        self.config.mailbox_timeout,
+                        region_routes_override.clone(),
+                    )
                     .await
                 {
                     Ok(report) => combined_report.merge(report),
@@ -245,7 +292,12 @@ impl GcScheduler {
             if !need_full_list_regions.is_empty() {
                 match self
                     .ctx
-                    .gc_regions(&need_full_list_regions, true, self.config.mailbox_timeout)
+                    .gc_regions(
+                        &need_full_list_regions,
+                        true,
+                        self.config.mailbox_timeout,
+                        region_routes_override,
+                    )
                     .await
                 {
                     Ok(report) => combined_report.merge(report),
@@ -288,11 +340,26 @@ impl GcScheduler {
     async fn batch_should_use_full_listing(
         &self,
         region_ids: &[RegionId],
+        force_full_listing: &HashSet<RegionId>,
     ) -> HashMap<RegionId, bool> {
         let mut result = HashMap::new();
         let mut gc_tracker = self.region_gc_tracker.lock().await;
         let now = Instant::now();
         for &region_id in region_ids {
+            if force_full_listing.contains(&region_id) {
+                gc_tracker
+                    .entry(region_id)
+                    .and_modify(|info| {
+                        info.last_full_listing_time = Some(now);
+                        info.last_gc_time = now;
+                    })
+                    .or_insert_with(|| RegionGcInfo {
+                        last_gc_time: now,
+                        last_full_listing_time: Some(now),
+                    });
+                result.insert(region_id, true);
+                continue;
+            }
             let use_full_listing = {
                 if let Some(gc_info) = gc_tracker.get(&region_id) {
                     if let Some(last_full_listing) = gc_info.last_full_listing_time {
@@ -318,5 +385,38 @@ impl GcScheduler {
             result.insert(region_id, use_full_listing);
         }
         result
+    }
+}
+
+fn dropped_candidate(region_id: RegionId) -> GcCandidate {
+    GcCandidate {
+        region_id,
+        score: OrderedFloat(0.0),
+        region_stat: dropped_region_stat(region_id),
+    }
+}
+
+fn dropped_region_stat(region_id: RegionId) -> RegionStat {
+    RegionStat {
+        id: region_id,
+        rcus: 0,
+        wcus: 0,
+        approximate_bytes: 0,
+        engine: MITO_ENGINE.to_string(),
+        role: RegionRole::Leader,
+        num_rows: 0,
+        memtable_size: 0,
+        manifest_size: 0,
+        sst_size: 0,
+        sst_num: 0,
+        index_size: 0,
+        region_manifest: RegionManifestInfo::Mito {
+            manifest_version: 0,
+            flushed_entry_id: 0,
+            file_removed_cnt: 0,
+        },
+        written_bytes: 0,
+        data_topic_latest_entry_id: 0,
+        metadata_topic_latest_entry_id: 0,
     }
 }

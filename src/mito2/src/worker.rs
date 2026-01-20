@@ -150,6 +150,14 @@ pub(crate) struct WorkerGroup {
     file_ref_manager: FileReferenceManagerRef,
     /// Gc limiter to limit concurrent gc jobs.
     gc_limiter: GcLimiterRef,
+    /// Object store manager.
+    object_store_manager: ObjectStoreManagerRef,
+    /// Puffin manager factory.
+    puffin_manager_factory: PuffinManagerFactory,
+    /// Intermediate manager.
+    intermediate_manager: IntermediateManager,
+    /// Schema metadata manager.
+    schema_metadata_manager: SchemaMetadataManagerRef,
 }
 
 impl WorkerGroup {
@@ -260,6 +268,10 @@ impl WorkerGroup {
             cache_manager,
             file_ref_manager,
             gc_limiter,
+            object_store_manager,
+            puffin_manager_factory,
+            intermediate_manager,
+            schema_metadata_manager,
         })
     }
 
@@ -337,6 +349,22 @@ impl WorkerGroup {
         self.workers
             .iter()
             .flat_map(|worker| worker.regions.list_regions())
+    }
+
+    pub(crate) fn object_store_manager(&self) -> &ObjectStoreManagerRef {
+        &self.object_store_manager
+    }
+
+    pub(crate) fn puffin_manager_factory(&self) -> &PuffinManagerFactory {
+        &self.puffin_manager_factory
+    }
+
+    pub(crate) fn intermediate_manager(&self) -> &IntermediateManager {
+        &self.intermediate_manager
+    }
+
+    pub(crate) fn schema_metadata_manager(&self) -> &SchemaMetadataManagerRef {
+        &self.schema_metadata_manager
     }
 }
 
@@ -447,6 +475,10 @@ impl WorkerGroup {
             cache_manager,
             file_ref_manager,
             gc_limiter,
+            object_store_manager,
+            puffin_manager_factory,
+            intermediate_manager,
+            schema_metadata_manager,
         })
     }
 

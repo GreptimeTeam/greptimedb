@@ -42,6 +42,9 @@ pub struct FileReferenceManager {
     node_id: Option<u64>,
     /// TODO(discord9): use no hash hasher since table id is sequential.
     files_per_region: DashMap<RegionId, RegionFileRefs>,
+    /// Whether global GC is enabled.
+    /// This is only meaningful when using object store (not local filesystem).
+    gc_enabled: bool,
 }
 
 pub type FileReferenceManagerRef = Arc<FileReferenceManager>;
@@ -51,7 +54,26 @@ impl FileReferenceManager {
         Self {
             node_id,
             files_per_region: Default::default(),
+            gc_enabled: false,
         }
+    }
+
+    /// Creates a new FileReferenceManager with GC configuration.
+    pub fn with_gc_enabled(node_id: Option<u64>, gc_enabled: bool) -> Self {
+        Self {
+            node_id,
+            files_per_region: Default::default(),
+            gc_enabled,
+        }
+    }
+
+    /// Returns whether global GC is enabled.
+    ///
+    /// This is useful for determining the file deletion strategy:
+    /// - If GC is enabled (and using object store), files are tracked but not immediately deleted
+    /// - If GC is disabled (or using local filesystem), files are deleted immediately
+    pub fn is_gc_enabled(&self) -> bool {
+        self.gc_enabled
     }
 
     fn ref_file_set(&self, region_id: RegionId) -> Option<HashSet<FileRef>> {

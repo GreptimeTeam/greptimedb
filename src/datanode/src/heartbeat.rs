@@ -31,6 +31,7 @@ use common_meta::heartbeat::handler::{
 };
 use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MailboxRef};
 use common_meta::heartbeat::utils::outgoing_message_to_mailbox_message;
+use common_meta::kv_backend::KvBackendRef;
 use common_stat::ResourceStatRef;
 use common_telemetry::{debug, error, info, trace, warn};
 use common_workload::DatanodeWorkloadType;
@@ -79,6 +80,7 @@ impl HeartbeatTask {
         opts: &DatanodeOptions,
         region_server: RegionServer,
         meta_client: MetaClientRef,
+        kv_backend: KvBackendRef,
         cache_invalidator: CacheInvalidatorRef,
         plugins: Plugins,
         resource_stat: ResourceStatRef,
@@ -94,7 +96,7 @@ impl HeartbeatTask {
             Arc::new(ParseMailboxMessageHandler),
             Arc::new(SuspendHandler::new(region_server.suspend_state())),
             Arc::new(
-                RegionHeartbeatResponseHandler::new(region_server.clone())
+                RegionHeartbeatResponseHandler::new(region_server.clone(), kv_backend)
                     .with_open_region_parallelism(opts.init_regions_parallelism),
             ),
             Arc::new(InvalidateCacheHandler::new(cache_invalidator)),

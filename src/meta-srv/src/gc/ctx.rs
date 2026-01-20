@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use common_meta::datanode::RegionStat;
 use common_meta::key::TableMetadataManagerRef;
+use common_meta::key::table_repart::TableRepartValue;
 use common_meta::key::table_route::PhysicalTableRouteValue;
 use common_procedure::{ProcedureManagerRef, ProcedureWithId, watcher};
 use common_telemetry::debug;
@@ -26,6 +27,7 @@ use table::metadata::TableId;
 
 use crate::cluster::MetaPeerClientRef;
 use crate::error::{self, Result, TableMetadataManagerSnafu};
+use crate::gc::Region2Peers;
 use crate::gc::procedure::BatchGcProcedure;
 use crate::service::mailbox::MailboxRef;
 
@@ -33,16 +35,24 @@ use crate::service::mailbox::MailboxRef;
 pub(crate) trait SchedulerCtx: Send + Sync {
     async fn get_table_to_region_stats(&self) -> Result<HashMap<TableId, Vec<RegionStat>>>;
 
+    async fn get_table_reparts(&self) -> Result<Vec<(TableId, TableRepartValue)>>;
+
     async fn get_table_route(
         &self,
         table_id: TableId,
     ) -> Result<(TableId, PhysicalTableRouteValue)>;
+
+    async fn batch_get_table_route(
+        &self,
+        table_ids: &[TableId],
+    ) -> Result<HashMap<TableId, PhysicalTableRouteValue>>;
 
     async fn gc_regions(
         &self,
         region_ids: &[RegionId],
         full_file_listing: bool,
         timeout: Duration,
+        region_routes_override: Region2Peers,
     ) -> Result<GcReport>;
 }
 
@@ -99,6 +109,14 @@ impl SchedulerCtx for DefaultGcSchedulerCtx {
         Ok(table_to_region_stats)
     }
 
+    async fn get_table_reparts(&self) -> Result<Vec<(TableId, TableRepartValue)>> {
+        self.table_metadata_manager
+            .table_repart_manager()
+            .table_reparts()
+            .await
+            .context(TableMetadataManagerSnafu)
+    }
+
     async fn get_table_route(
         &self,
         table_id: TableId,
@@ -110,14 +128,31 @@ impl SchedulerCtx for DefaultGcSchedulerCtx {
             .context(TableMetadataManagerSnafu)
     }
 
+    async fn batch_get_table_route(
+        &self,
+        table_ids: &[TableId],
+    ) -> Result<HashMap<TableId, PhysicalTableRouteValue>> {
+        self.table_metadata_manager
+            .table_route_manager()
+            .batch_get_physical_table_routes(table_ids)
+            .await
+            .context(TableMetadataManagerSnafu)
+    }
+
     async fn gc_regions(
         &self,
         region_ids: &[RegionId],
         full_file_listing: bool,
         timeout: Duration,
+        region_routes_override: Region2Peers,
     ) -> Result<GcReport> {
-        self.gc_regions_inner(region_ids, full_file_listing, timeout)
-            .await
+        self.gc_regions_inner(
+            region_ids,
+            full_file_listing,
+            timeout,
+            region_routes_override,
+        )
+        .await
     }
 }
 
@@ -127,6 +162,7 @@ impl DefaultGcSchedulerCtx {
         region_ids: &[RegionId],
         full_file_listing: bool,
         timeout: Duration,
+        region_routes_override: Region2Peers,
     ) -> Result<GcReport> {
         debug!(
             "Sending GC instruction for {} regions (full_file_listing: {})",
@@ -141,6 +177,7 @@ impl DefaultGcSchedulerCtx {
             region_ids.to_vec(),
             full_file_listing,
             timeout,
+            region_routes_override,
         );
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 

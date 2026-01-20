@@ -15,6 +15,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Display;
 
+use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt as _, ResultExt, ensure};
 use store_api::storage::RegionId;
@@ -28,7 +29,9 @@ use crate::key::{
 };
 use crate::kv_backend::KvBackendRef;
 use crate::kv_backend::txn::Txn;
-use crate::rpc::store::BatchGetRequest;
+use crate::range_stream::{DEFAULT_PAGE_SIZE, PaginationStream};
+use crate::rpc::KeyValue;
+use crate::rpc::store::{BatchGetRequest, RangeRequest};
 
 /// The key stores table repartition metadata.
 /// Specifically, it records the relation between source and destination regions after a repartition operation is completed.
@@ -138,6 +141,13 @@ impl MetadataValue for TableRepartValue {
 pub type TableRepartValueDecodeResult =
     Result<Option<DeserializedValueWithBytes<TableRepartValue>>>;
 
+/// Decodes `KeyValue` to [TableRepartKey] and [TableRepartValue].
+pub fn table_repart_decoder(kv: KeyValue) -> Result<(TableRepartKey, TableRepartValue)> {
+    let key = TableRepartKey::from_bytes(&kv.key)?;
+    let value = TableRepartValue::try_from_raw_value(&kv.value)?;
+    Ok((key, value))
+}
+
 pub struct TableRepartManager {
     kv_backend: KvBackendRef,
 }
@@ -145,6 +155,25 @@ pub struct TableRepartManager {
 impl TableRepartManager {
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self { kv_backend }
+    }
+
+    /// Returns all table repartition entries.
+    pub async fn table_reparts(&self) -> Result<Vec<(TableId, TableRepartValue)>> {
+        let prefix = TableRepartKey::range_prefix();
+        let req = RangeRequest::new().with_prefix(prefix);
+        let stream = PaginationStream::new(
+            self.kv_backend.clone(),
+            req,
+            DEFAULT_PAGE_SIZE,
+            table_repart_decoder,
+        )
+        .into_stream();
+
+        let res = stream.try_collect::<Vec<_>>().await?;
+        Ok(res
+            .into_iter()
+            .map(|(key, value)| (key.table_id, value))
+            .collect())
     }
 
     /// Builds a create table repart transaction,
