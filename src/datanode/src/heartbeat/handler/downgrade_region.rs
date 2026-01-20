@@ -232,6 +232,7 @@ mod tests {
     use common_meta::heartbeat::handler::{HandleControl, HeartbeatResponseHandler};
     use common_meta::heartbeat::mailbox::MessageMeta;
     use common_meta::instruction::{DowngradeRegion, Instruction};
+    use common_meta::kv_backend::memory::MemoryKvBackend;
     use mito2::config::MitoConfig;
     use mito2::engine::MITO_ENGINE_NAME;
     use mito2::test_util::{CreateRequestBuilder, TestEnv};
@@ -255,7 +256,7 @@ mod tests {
         let mut mock_region_server = mock_region_server();
         let (mock_engine, _) = MockRegionEngine::new(MITO_ENGINE_NAME);
         mock_region_server.register_engine(mock_engine);
-        let kv_backend = Arc::new(common_meta::kv_backend::memory::MemoryKvBackend::new());
+        let kv_backend = Arc::new(MemoryKvBackend::new());
         let handler_context = HandlerContext::new_for_test(mock_region_server, kv_backend);
         let region_id = RegionId::new(1024, 1);
         let waits = vec![None, Some(Duration::from_millis(100u64))];
@@ -300,7 +301,7 @@ mod tests {
                 }))
             });
         mock_region_server.register_test_region(region_id, mock_engine);
-        let kv_backend = Arc::new(common_meta::kv_backend::memory::MemoryKvBackend::new());
+        let kv_backend = Arc::new(MemoryKvBackend::new());
         let handler_context = HandlerContext::new_for_test(mock_region_server, kv_backend);
 
         let waits = vec![None, Some(Duration::from_millis(100u64))];
@@ -337,7 +338,7 @@ mod tests {
                 }))
             });
         mock_region_server.register_test_region(region_id, mock_engine);
-        let kv_backend = Arc::new(common_meta::kv_backend::memory::MemoryKvBackend::new());
+        let kv_backend = Arc::new(MemoryKvBackend::new());
         let handler_context = HandlerContext::new_for_test(mock_region_server, kv_backend);
 
         let flush_timeout = Duration::from_millis(100);
@@ -372,7 +373,7 @@ mod tests {
                 }))
             });
         mock_region_server.register_test_region(region_id, mock_engine);
-        let kv_backend = Arc::new(common_meta::kv_backend::memory::MemoryKvBackend::new());
+        let kv_backend = Arc::new(MemoryKvBackend::new());
         let handler_context = HandlerContext::new_for_test(mock_region_server, kv_backend);
 
         let waits = vec![
@@ -436,7 +437,7 @@ mod tests {
                 }))
             });
         mock_region_server.register_test_region(region_id, mock_engine);
-        let kv_backend = Arc::new(common_meta::kv_backend::memory::MemoryKvBackend::new());
+        let kv_backend = Arc::new(MemoryKvBackend::new());
         let handler_context = HandlerContext::new_for_test(mock_region_server, kv_backend);
 
         let waits = vec![
@@ -488,7 +489,7 @@ mod tests {
                     Some(Box::new(|_| Ok(SetRegionRoleStateResponse::NotFound)));
             });
         mock_region_server.register_test_region(region_id, mock_engine);
-        let kv_backend = Arc::new(common_meta::kv_backend::memory::MemoryKvBackend::new());
+        let kv_backend = Arc::new(MemoryKvBackend::new());
         let handler_context = HandlerContext::new_for_test(mock_region_server, kv_backend);
         let reply = DowngradeRegionsHandler
             .handle(
@@ -520,7 +521,7 @@ mod tests {
                 }));
             });
         mock_region_server.register_test_region(region_id, mock_engine);
-        let kv_backend = Arc::new(common_meta::kv_backend::memory::MemoryKvBackend::new());
+        let kv_backend = Arc::new(MemoryKvBackend::new());
         let handler_context = HandlerContext::new_for_test(mock_region_server, kv_backend);
         let reply = DowngradeRegionsHandler
             .handle(
@@ -548,7 +549,7 @@ mod tests {
         common_telemetry::init_default_ut_logging();
 
         let mut region_server = mock_region_server();
-        let kv_backend = Arc::new(common_meta::kv_backend::memory::MemoryKvBackend::new());
+        let kv_backend = Arc::new(MemoryKvBackend::new());
         let heartbeat_handler =
             RegionHeartbeatResponseHandler::new(region_server.clone(), kv_backend);
         let mut engine_env = TestEnv::with_prefix("downgrade-regions").await;

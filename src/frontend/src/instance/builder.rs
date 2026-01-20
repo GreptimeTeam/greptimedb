@@ -92,7 +92,9 @@ impl FrontendBuilder {
         options: &FrontendOptions,
         meta_client: meta_client::MetaClientRef,
     ) -> Self {
-        let kv_backend = Arc::new(common_meta::kv_backend::memory::MemoryKvBackend::new());
+        use common_meta::kv_backend::memory::MemoryKvBackend;
+
+        let kv_backend = Arc::new(MemoryKvBackend::new());
 
         let layered_cache_registry = Arc::new(
             common_meta::cache::LayeredCacheRegistryBuilder::default()

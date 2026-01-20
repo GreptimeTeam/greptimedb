@@ -291,6 +291,7 @@ mod tests {
     use common_meta::instruction::{
         DowngradeRegion, EnterStagingRegion, OpenRegion, UpgradeRegion,
     };
+    use common_meta::kv_backend::memory::MemoryKvBackend;
     use mito2::config::MitoConfig;
     use mito2::engine::MITO_ENGINE_NAME;
     use mito2::test_util::{CreateRequestBuilder, TestEnv};
@@ -336,7 +337,7 @@ mod tests {
     fn test_is_acceptable() {
         common_telemetry::init_default_ut_logging();
         let region_server = mock_region_server();
-        let kv_backend = Arc::new(common_meta::kv_backend::memory::MemoryKvBackend::new());
+        let kv_backend = Arc::new(MemoryKvBackend::new());
         let heartbeat_handler =
             RegionHeartbeatResponseHandler::new(region_server.clone(), kv_backend);
         let heartbeat_env = HeartbeatResponseTestEnv::new();
@@ -417,7 +418,7 @@ mod tests {
         common_telemetry::init_default_ut_logging();
 
         let mut region_server = mock_region_server();
-        let kv_backend = Arc::new(common_meta::kv_backend::memory::MemoryKvBackend::new());
+        let kv_backend = Arc::new(MemoryKvBackend::new());
         let heartbeat_handler =
             RegionHeartbeatResponseHandler::new(region_server.clone(), kv_backend);
 
@@ -467,7 +468,7 @@ mod tests {
         common_telemetry::init_default_ut_logging();
 
         let mut region_server = mock_region_server();
-        let kv_backend = Arc::new(common_meta::kv_backend::memory::MemoryKvBackend::new());
+        let kv_backend = Arc::new(MemoryKvBackend::new());
         let heartbeat_handler =
             RegionHeartbeatResponseHandler::new(region_server.clone(), kv_backend);
 
@@ -517,7 +518,7 @@ mod tests {
         common_telemetry::init_default_ut_logging();
 
         let mut region_server = mock_region_server();
-        let kv_backend = Arc::new(common_meta::kv_backend::memory::MemoryKvBackend::new());
+        let kv_backend = Arc::new(MemoryKvBackend::new());
         let heartbeat_handler =
             RegionHeartbeatResponseHandler::new(region_server.clone(), kv_backend);
 
@@ -551,7 +552,7 @@ mod tests {
         common_telemetry::init_default_ut_logging();
 
         let mut region_server = mock_region_server();
-        let kv_backend = Arc::new(common_meta::kv_backend::memory::MemoryKvBackend::new());
+        let kv_backend = Arc::new(MemoryKvBackend::new());
         let heartbeat_handler =
             RegionHeartbeatResponseHandler::new(region_server.clone(), kv_backend);
 

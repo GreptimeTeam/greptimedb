@@ -25,6 +25,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use common_catalog::consts::MITO_ENGINE;
 use common_meta::datanode::{RegionManifestInfo, RegionStat};
 use common_meta::key::table_repart::TableRepartValue;
 use common_meta::key::table_route::PhysicalTableRouteValue;
@@ -388,7 +389,7 @@ fn mock_region_stat(
         },
         rcus: 0,
         wcus: 0,
-        engine: "mito".to_string(),
+        engine: MITO_ENGINE.to_string(),
         num_rows: 0,
         memtable_size: 0,
         manifest_size: 0,

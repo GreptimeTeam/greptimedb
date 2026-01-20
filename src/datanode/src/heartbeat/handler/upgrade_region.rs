@@ -224,6 +224,7 @@ mod tests {
     use std::time::Duration;
 
     use common_meta::instruction::UpgradeRegion;
+    use common_meta::kv_backend::memory::MemoryKvBackend;
     use mito2::engine::MITO_ENGINE_NAME;
     use store_api::region_engine::RegionRole;
     use store_api::storage::RegionId;
@@ -238,7 +239,7 @@ mod tests {
         let mut mock_region_server = mock_region_server();
         let (mock_engine, _) = MockRegionEngine::new(MITO_ENGINE_NAME);
         mock_region_server.register_engine(mock_engine);
-        let kv_backend = Arc::new(common_meta::kv_backend::memory::MemoryKvBackend::new());
+        let kv_backend = Arc::new(MemoryKvBackend::new());
         let handler_context = HandlerContext::new_for_test(mock_region_server, kv_backend);
 
         let region_id = RegionId::new(1024, 1);
@@ -287,7 +288,7 @@ mod tests {
             });
         mock_region_server.register_test_region(region_id, mock_engine.clone());
         mock_region_server.register_test_region(region_id2, mock_engine);
-        let kv_backend = Arc::new(common_meta::kv_backend::memory::MemoryKvBackend::new());
+        let kv_backend = Arc::new(MemoryKvBackend::new());
         let handler_context = HandlerContext::new_for_test(mock_region_server, kv_backend);
         let replay_timeout = Duration::from_millis(100u64);
         let reply = UpgradeRegionsHandler::new_test()
@@ -332,7 +333,7 @@ mod tests {
                 region_engine.handle_request_delay = Some(Duration::from_secs(100));
             });
         mock_region_server.register_test_region(region_id, mock_engine);
-        let kv_backend = Arc::new(common_meta::kv_backend::memory::MemoryKvBackend::new());
+        let kv_backend = Arc::new(MemoryKvBackend::new());
         let handler_context = HandlerContext::new_for_test(mock_region_server, kv_backend);
         let replay_timeout = Duration::from_millis(100u64);
         let reply = UpgradeRegionsHandler::new_test()
@@ -367,7 +368,7 @@ mod tests {
             });
         mock_region_server.register_test_region(region_id, mock_engine);
         let waits = vec![Duration::from_millis(100u64), Duration::from_millis(100u64)];
-        let kv_backend = Arc::new(common_meta::kv_backend::memory::MemoryKvBackend::new());
+        let kv_backend = Arc::new(MemoryKvBackend::new());
         let handler_context = HandlerContext::new_for_test(mock_region_server, kv_backend);
         for replay_timeout in waits {
             let reply = UpgradeRegionsHandler::new_test()
@@ -423,7 +424,7 @@ mod tests {
                 region_engine.handle_request_delay = Some(Duration::from_millis(100));
             });
         mock_region_server.register_test_region(region_id, mock_engine);
-        let kv_backend = Arc::new(common_meta::kv_backend::memory::MemoryKvBackend::new());
+        let kv_backend = Arc::new(MemoryKvBackend::new());
         let handler_context = HandlerContext::new_for_test(mock_region_server, kv_backend);
         let reply = UpgradeRegionsHandler::new_test()
             .handle(

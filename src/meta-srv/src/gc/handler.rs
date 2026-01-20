@@ -15,6 +15,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
+use common_catalog::consts::MITO_ENGINE;
 use common_meta::datanode::{RegionManifestInfo, RegionStat};
 use common_meta::peer::Peer;
 use common_telemetry::{debug, error, info, warn};
@@ -406,7 +407,7 @@ fn dropped_region_stat(region_id: RegionId) -> RegionStat {
         rcus: 0,
         wcus: 0,
         approximate_bytes: 0,
-        engine: "mito".to_string(),
+        engine: MITO_ENGINE.to_string(),
         role: RegionRole::Leader,
         num_rows: 0,
         memtable_size: 0,
