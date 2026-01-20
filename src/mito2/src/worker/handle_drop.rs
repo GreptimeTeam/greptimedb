@@ -346,6 +346,7 @@ async fn remove_subdirectory_once(
 async fn check_and_remove_empty_dir(dir_path: &str, object_store: &ObjectStore) -> Result<bool> {
     let mut files = object_store
         .lister_with(dir_path)
+        .recursive(true) // use recursive to find any files under subdirectories
         .await
         .context(OpenDalSnafu)?;
 
