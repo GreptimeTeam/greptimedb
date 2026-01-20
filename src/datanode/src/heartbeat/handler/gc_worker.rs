@@ -106,6 +106,9 @@ impl InstructionHandler for GcRegionsHandler {
                         merged_report
                             .deleted_files
                             .extend(report.deleted_files.into_iter());
+                        merged_report
+                            .deleted_indexes
+                            .extend(report.deleted_indexes.into_iter());
                     }
                     Ok(merged_report)
                 }),
@@ -247,6 +250,13 @@ impl GcRegionsHandler {
             .options
             .extra_options
             .get(STORAGE_KEY);
+        let engine = &table_info_value.table_info.meta.engine;
+        let path_type = match engine.as_str() {
+            common_catalog::consts::MITO2_ENGINE => PathType::Bare,
+            common_catalog::consts::MITO_ENGINE => PathType::Bare,
+            common_catalog::consts::METRIC_ENGINE => PathType::Data,
+            _ => PathType::Bare,
+        };
 
         let object_store = if let Some(name) = storage_name {
             mito_engine
@@ -265,7 +275,7 @@ impl GcRegionsHandler {
 
         Ok(Arc::new(AccessLayer::new(
             table_dir,
-            PathType::Bare,
+            path_type,
             object_store,
             mito_engine.puffin_manager_factory().clone(),
             mito_engine.intermediate_manager().clone(),

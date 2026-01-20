@@ -4280,6 +4280,7 @@ dependencies = [
  "cache",
  "client",
  "common-base",
+ "common-catalog",
  "common-config",
  "common-error",
  "common-function",
