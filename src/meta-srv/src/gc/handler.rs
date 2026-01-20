@@ -38,6 +38,7 @@ impl GcScheduler {
         let start_time = Instant::now();
         info!("Starting GC cycle");
 
+        // limit gc region scope to regions whose datanode have reported stats(by heartbeat)
         let table_to_region_stats = self.ctx.get_table_to_region_stats().await?;
         info!(
             "Fetched region stats for {} tables",
@@ -46,16 +47,10 @@ impl GcScheduler {
 
         let per_table_candidates = self.select_gc_candidates(&table_to_region_stats).await?;
 
-        let active_region_ids: HashSet<RegionId> = table_to_region_stats
-            .values()
-            .flat_map(|stats| stats.iter().map(|stat| stat.id))
-            .collect();
-
+        let table_reparts = self.ctx.get_table_reparts().await?;
         let dropped_collector =
             DroppedRegionCollector::new(self.ctx.as_ref(), &self.config, &self.region_gc_tracker);
-        let dropped_assignment = dropped_collector
-            .collect_and_assign(&active_region_ids)
-            .await?;
+        let dropped_assignment = dropped_collector.collect_and_assign(&table_reparts).await?;
 
         if per_table_candidates.is_empty() && dropped_assignment.regions_by_peer.is_empty() {
             info!("No GC candidates found, skipping GC cycle");

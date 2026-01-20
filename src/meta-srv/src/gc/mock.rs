@@ -185,6 +185,24 @@ impl SchedulerCtx for MockSchedulerCtx {
             .unwrap_or_else(|| (table_id, PhysicalTableRouteValue::default())))
     }
 
+    async fn batch_get_table_route(
+        &self,
+        table_ids: &[TableId],
+    ) -> Result<HashMap<TableId, PhysicalTableRouteValue>> {
+        let mut result = HashMap::new();
+        for &table_id in table_ids {
+            let route = self
+                .table_routes
+                .lock()
+                .unwrap()
+                .get(&table_id)
+                .cloned()
+                .unwrap_or_else(|| (table_id, PhysicalTableRouteValue::default()));
+            result.insert(table_id, route.1);
+        }
+        Ok(result)
+    }
+
     async fn gc_regions(
         &self,
         region_ids: &[RegionId],

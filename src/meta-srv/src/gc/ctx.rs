@@ -42,6 +42,11 @@ pub(crate) trait SchedulerCtx: Send + Sync {
         table_id: TableId,
     ) -> Result<(TableId, PhysicalTableRouteValue)>;
 
+    async fn batch_get_table_route(
+        &self,
+        table_ids: &[TableId],
+    ) -> Result<HashMap<TableId, PhysicalTableRouteValue>>;
+
     async fn gc_regions(
         &self,
         region_ids: &[RegionId],
@@ -119,6 +124,17 @@ impl SchedulerCtx for DefaultGcSchedulerCtx {
         self.table_metadata_manager
             .table_route_manager()
             .get_physical_table_route(table_id)
+            .await
+            .context(TableMetadataManagerSnafu)
+    }
+
+    async fn batch_get_table_route(
+        &self,
+        table_ids: &[TableId],
+    ) -> Result<HashMap<TableId, PhysicalTableRouteValue>> {
+        self.table_metadata_manager
+            .table_route_manager()
+            .batch_get_physical_table_routes(table_ids)
             .await
             .context(TableMetadataManagerSnafu)
     }

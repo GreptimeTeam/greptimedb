@@ -87,10 +87,27 @@ impl<'a> DroppedRegionCollector<'a> {
     /// 3. Assigns each dropped region to an available peer for cleanup
     pub async fn collect_and_assign(
         &self,
-        active_region_ids: &HashSet<RegionId>,
+        table_reparts: &[(TableId, TableRepartValue)],
     ) -> Result<DroppedRegionAssignment> {
-        let table_reparts = self.ctx.get_table_reparts().await?;
-        let dropped_regions = self.identify_dropped_regions(table_reparts, active_region_ids);
+        // get active region ids for all tables involved in repartitioning
+        let active_region_ids: HashSet<RegionId> = {
+            let table_ids = table_reparts
+                .iter()
+                .map(|(table_id, _)| *table_id)
+                .collect::<Vec<_>>();
+            let mut active_region_ids = HashSet::new();
+
+            let table_routes = self.ctx.batch_get_table_route(&table_ids).await?;
+            for table_route in table_routes.values() {
+                for region in &table_route.region_routes {
+                    active_region_ids.insert(region.region.id);
+                }
+            }
+
+            active_region_ids
+        };
+
+        let dropped_regions = self.identify_dropped_regions(&table_reparts, &active_region_ids);
 
         if dropped_regions.is_empty() {
             return Ok(DroppedRegionAssignment::default());
@@ -109,7 +126,7 @@ impl<'a> DroppedRegionCollector<'a> {
     /// The `assign_to_peers` step later verifies they're also absent from `table_route`.
     fn identify_dropped_regions(
         &self,
-        table_reparts: Vec<(TableId, TableRepartValue)>,
+        table_reparts: &[(TableId, TableRepartValue)],
         active_region_ids: &HashSet<RegionId>,
     ) -> HashMap<TableId, HashMap<RegionId, HashSet<RegionId>>> {
         let mut dropped_regions: HashMap<TableId, HashMap<RegionId, HashSet<RegionId>>> =
@@ -120,8 +137,8 @@ impl<'a> DroppedRegionCollector<'a> {
                 continue;
             }
 
-            let entry = dropped_regions.entry(table_id).or_default();
-            for (src_region, dst_regions) in repart.src_to_dst {
+            let entry = dropped_regions.entry(*table_id).or_default();
+            for (src_region, dst_regions) in repart.clone().src_to_dst {
                 if !active_region_ids.contains(&src_region) {
                     entry.insert(src_region, dst_regions.into_iter().collect());
                 }
