@@ -131,19 +131,30 @@ pub fn filter_normal_requests_by_ttl(
         };
         let now = Timestamp::current_time(time_unit);
 
+        let Some(rows_data) = &mut request.rows else {
+            continue;
+        };
+
         // Filter expired rows from each region's rows
-        if let Some(rows_data) = &mut request.rows {
-            let (filtered_rows, filtered_count) = filter_expired_rows(
-                std::mem::take(&mut rows_data.rows),
-                timestamp_index,
-                ttl,
-                &now,
-            );
-            rows_data.rows = filtered_rows;
-            // Track metrics
-            if filtered_count > 0 {
-                crate::metrics::DIST_INGEST_ROWS_FILTERED_TTL_COUNTER.inc_by(filtered_count as u64);
-            }
+        let Some((timestamp_index_in_rows, _)) = rows_data
+            .schema
+            .iter()
+            .enumerate()
+            .find(|(_, c)| c.column_name == timestamp_column.name)
+        else {
+            // Timestamp not found in row, simply fallback
+            filtered_requests.push(request);
+            continue;
+        };
+        let (filtered_rows, filtered_count) = filter_expired_rows(
+            std::mem::take(&mut rows_data.rows),
+            timestamp_index_in_rows,
+            ttl,
+            &now,
+        );
+        rows_data.rows = filtered_rows;
+        if filtered_count > 0 {
+            crate::metrics::DIST_INGEST_ROWS_FILTERED_TTL_COUNTER.inc_by(filtered_count as u64);
         }
         filtered_requests.push(request);
     }
