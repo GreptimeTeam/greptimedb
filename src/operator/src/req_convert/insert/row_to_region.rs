@@ -19,10 +19,10 @@ use api::v1::RowInsertRequests;
 use api::v1::region::InsertRequests as RegionInsertRequests;
 use common_time::{TimeToLive, Timestamp};
 use partition::manager::PartitionRuleManager;
-use snafu::{OptionExt, ResultExt};
+use snafu::OptionExt;
 use table::metadata::{TableId, TableInfo, TableInfoRef};
 
-use crate::error::{Result, TableNotFoundSnafu, TtlFilterSnafu};
+use crate::error::{Result, TableNotFoundSnafu};
 use crate::insert::InstantAndNormalInsertRequests;
 use crate::req_convert::common::partitioner::Partitioner;
 use crate::req_convert::common::ttl_filter::filter_expired_rows;
@@ -99,29 +99,24 @@ pub fn filter_normal_requests_by_ttl(
     for mut request in requests.requests {
         let region_id = RegionId::from_u64(request.region_id);
         let table_id = region_id.table_id();
-
         let table_info = table_infos
             .get(&table_id)
-            .context(TableNotFoundSnafu {
-                table_name: format!("table_id_{}", table_id),
+            .with_context(|| TableNotFoundSnafu {
+                table_name: format!("table_id: {}", table_id),
             })?;
 
-        // Get TTL from table options
         let ttl = &table_info.meta.options.ttl;
+        let Some(ttl) = ttl else {
+            filtered_requests.push(request);
+            continue;
+        };
 
-        // Skip filtering if no TTL
-        if ttl.is_none() {
+        // Skip filtering for instant TTL.
+        if matches!(ttl, TimeToLive::Instant) {
             filtered_requests.push(request);
             continue;
         }
 
-        // Skip filtering for instant TTL (designed for flow tasks, not expiration-based)
-        if matches!(ttl, Some(TimeToLive::Instant)) {
-            filtered_requests.push(request);
-            continue;
-        }
-
-        // Get timestamp column index
         let Some(timestamp_index) = table_info.meta.schema.timestamp_index() else {
             // No timestamp column, skip filtering (safe default)
             filtered_requests.push(request);
@@ -143,21 +138,13 @@ pub fn filter_normal_requests_by_ttl(
                 timestamp_index,
                 ttl,
                 &now,
-            )
-            .context(TtlFilterSnafu {
-                table_name: table_info.name.clone(),
-            })?;
-
+            );
             rows_data.rows = filtered_rows;
-
             // Track metrics
             if filtered_count > 0 {
-                crate::metrics::DIST_INGEST_ROWS_FILTERED_TTL_COUNTER
-                    .with_label_values(&[&table_info.name])
-                    .inc_by(filtered_count as u64);
+                crate::metrics::DIST_INGEST_ROWS_FILTERED_TTL_COUNTER.inc_by(filtered_count as u64);
             }
         }
-
         filtered_requests.push(request);
     }
 

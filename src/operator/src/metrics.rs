@@ -37,10 +37,9 @@ lazy_static! {
         &["db"]
     )
     .unwrap();
-    pub static ref DIST_INGEST_ROWS_FILTERED_TTL_COUNTER: IntCounterVec = register_int_counter_vec!(
+    pub static ref DIST_INGEST_ROWS_FILTERED_TTL_COUNTER: IntCounter = register_int_counter!(
         "greptime_frontend_ingest_rows_filtered_ttl",
         "frontend ingest rows filtered by TTL",
-        &["table"]
     )
     .unwrap();
     pub static ref DIST_MIRROR_ROW_COUNT: IntCounter = register_int_counter!(

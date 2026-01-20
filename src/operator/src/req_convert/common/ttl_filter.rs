@@ -13,10 +13,13 @@
 // limitations under the License.
 
 use api::v1::Row;
-use common_macro::stack_trace_debug;
-use common_time::ttl::TimeToLive;
+use api::v1::value::ValueData;
 use common_time::Timestamp;
-use snafu::{Location, ResultExt, Snafu};
+use common_time::ttl::TimeToLive;
+use snafu::ResultExt;
+
+use crate::error;
+use crate::error::CheckTtlSnafu;
 
 /// Extracts the timestamp value from a row at the given column index.
 /// Returns None if the index is invalid or the value is not a timestamp type.
@@ -28,48 +31,39 @@ pub fn extract_timestamp_from_row(row: &Row, timestamp_index: usize) -> Option<T
     let value = &row.values[timestamp_index];
     let value_data = value.value_data.as_ref()?;
 
-    use api::v1::value::ValueData;
     match value_data {
         ValueData::TimestampSecondValue(v) => {
             Some(Timestamp::new(*v, common_time::timestamp::TimeUnit::Second))
         }
-        ValueData::TimestampMillisecondValue(v) => {
-            Some(Timestamp::new(*v, common_time::timestamp::TimeUnit::Millisecond))
-        }
-        ValueData::TimestampMicrosecondValue(v) => {
-            Some(Timestamp::new(*v, common_time::timestamp::TimeUnit::Microsecond))
-        }
-        ValueData::TimestampNanosecondValue(v) => {
-            Some(Timestamp::new(*v, common_time::timestamp::TimeUnit::Nanosecond))
-        }
+        ValueData::TimestampMillisecondValue(v) => Some(Timestamp::new(
+            *v,
+            common_time::timestamp::TimeUnit::Millisecond,
+        )),
+        ValueData::TimestampMicrosecondValue(v) => Some(Timestamp::new(
+            *v,
+            common_time::timestamp::TimeUnit::Microsecond,
+        )),
+        ValueData::TimestampNanosecondValue(v) => Some(Timestamp::new(
+            *v,
+            common_time::timestamp::TimeUnit::Nanosecond,
+        )),
         _ => None,
     }
 }
 
-/// Checks if a row is expired based on TTL settings.
-/// Returns true if the row should be filtered out (expired), false otherwise.
+/// Returns true if the row is expired.
 pub fn is_row_expired(
     row: &Row,
     timestamp_index: usize,
-    ttl: &Option<TimeToLive>,
+    ttl: &TimeToLive,
     now: &Timestamp,
-) -> Result<bool, Error> {
-    // No TTL means data never expires
-    let Some(ttl_value) = ttl else {
-        return Ok(false);
-    };
-
-    // Extract timestamp from row
+) -> error::Result<bool> {
     let Some(row_timestamp) = extract_timestamp_from_row(row, timestamp_index) else {
         // If we can't extract timestamp, don't filter it out
         // This maintains backwards compatibility and safety
         return Ok(false);
     };
-
-    // Check if expired using TTL's is_expired method
-    ttl_value
-        .is_expired(&row_timestamp, now)
-        .context(CheckTtlSnafu)
+    ttl.is_expired(&row_timestamp, now).context(CheckTtlSnafu)
 }
 
 /// Filters expired rows from a vec of rows based on TTL.
@@ -80,70 +74,38 @@ pub fn is_row_expired(
 pub fn filter_expired_rows(
     rows: Vec<Row>,
     timestamp_index: usize,
-    ttl: &Option<TimeToLive>,
+    ttl: &TimeToLive,
     now: &Timestamp,
-) -> Result<(Vec<Row>, usize), Error> {
-    // If no TTL, return all rows unchanged
-    if ttl.is_none() {
-        return Ok((rows, 0));
-    }
-
+) -> (Vec<Row>, usize) {
     // Instant TTL should be handled separately (not by expiration logic)
-    if matches!(ttl, Some(TimeToLive::Instant)) {
-        return Ok((rows, 0));
-    }
+    assert_ne!(ttl, &TimeToLive::Instant);
 
     let original_count = rows.len();
-
-    // Filter rows based on TTL
     let filtered_rows: Vec<Row> = rows
         .into_iter()
         .filter(|row| {
             match is_row_expired(row, timestamp_index, ttl, now) {
-                Ok(expired) => !expired, // Keep non-expired rows
-                Err(_) => true,          // Keep rows we can't validate (safe default)
+                Ok(expired) => !expired,
+                Err(_) => true, // Keep rows we can't validate
             }
         })
         .collect();
 
     let filtered_count = original_count - filtered_rows.len();
-
-    Ok((filtered_rows, filtered_count))
-}
-
-#[derive(Snafu)]
-#[snafu(visibility(pub))]
-#[stack_trace_debug]
-pub enum Error {
-    #[snafu(display("Failed to check TTL expiration"))]
-    CheckTtl {
-        source: common_time::error::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-}
-
-impl common_error::ext::ErrorExt for Error {
-    fn status_code(&self) -> common_error::status_code::StatusCode {
-        match self {
-            Error::CheckTtl { source, .. } => source.status_code(),
-        }
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
+    (filtered_rows, filtered_count)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use api::v1::value::ValueData;
+    use std::sync::Arc;
+
     use api::v1::Value;
+    use api::v1::value::ValueData;
     use common_time::timestamp::TimeUnit;
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
-    use std::sync::Arc;
+
+    use super::*;
 
     #[test]
     fn test_extract_timestamp_from_row() {
@@ -173,11 +135,9 @@ mod tests {
     fn test_extract_timestamp_invalid_index() {
         let _schema = build_test_schema();
         let row = Row {
-            values: vec![
-                Value {
-                    value_data: Some(ValueData::I64Value(1)),
-                },
-            ],
+            values: vec![Value {
+                value_data: Some(ValueData::I64Value(1)),
+            }],
         };
 
         // Index out of bounds
@@ -205,18 +165,23 @@ mod tests {
     fn build_test_schema() -> Arc<Schema> {
         let columns = vec![
             ColumnSchema::new("id", ConcreteDataType::int64_datatype(), false),
-            ColumnSchema::new("ts", ConcreteDataType::timestamp_millisecond_datatype(), false),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
         ];
         Arc::new(Schema::new(columns))
     }
 
     #[test]
     fn test_is_row_expired_with_duration_ttl() {
-        use common_time::ttl::TimeToLive;
         use std::time::Duration as StdDuration;
 
+        use common_time::ttl::TimeToLive;
+
         // TTL of 1 hour (3600 seconds)
-        let ttl = Some(TimeToLive::Duration(StdDuration::from_secs(3600)));
+        let ttl = TimeToLive::Duration(StdDuration::from_secs(3600));
 
         // Current time: 2 hours (7200 seconds)
         let now = Timestamp::new(7200, TimeUnit::Second);
@@ -252,30 +217,10 @@ mod tests {
     }
 
     #[test]
-    fn test_is_row_expired_no_ttl() {
-        let ttl = None;
-        let now = Timestamp::new(7200, TimeUnit::Second);
-
-        let row = Row {
-            values: vec![
-                Value {
-                    value_data: Some(ValueData::I64Value(1)),
-                },
-                Value {
-                    value_data: Some(ValueData::TimestampSecondValue(100)),
-                },
-            ],
-        };
-
-        // No TTL means data never expires
-        assert!(!is_row_expired(&row, 1, &ttl, &now).unwrap());
-    }
-
-    #[test]
     fn test_is_row_expired_instant_ttl() {
         use common_time::ttl::TimeToLive;
 
-        let ttl = Some(TimeToLive::Instant);
+        let ttl = TimeToLive::Instant;
         let now = Timestamp::new(7200, TimeUnit::Second);
 
         let row = Row {
@@ -297,7 +242,7 @@ mod tests {
     fn test_is_row_expired_forever_ttl() {
         use common_time::ttl::TimeToLive;
 
-        let ttl = Some(TimeToLive::Forever);
+        let ttl = TimeToLive::Forever;
         let now = Timestamp::new(7200, TimeUnit::Second);
 
         let row = Row {
@@ -317,11 +262,12 @@ mod tests {
 
     #[test]
     fn test_filter_expired_rows_from_insert_request() {
-        use common_time::ttl::TimeToLive;
         use std::time::Duration as StdDuration;
 
+        use common_time::ttl::TimeToLive;
+
         // TTL of 1 hour
-        let ttl = Some(TimeToLive::Duration(StdDuration::from_secs(3600)));
+        let ttl = TimeToLive::Duration(StdDuration::from_secs(3600));
 
         // Current time: 2 hours (7200s)
         let now = Timestamp::new(7200, TimeUnit::Second);
@@ -373,7 +319,7 @@ mod tests {
         let timestamp_index = 1;
 
         let (filtered_rows, filtered_count) =
-            filter_expired_rows(rows, timestamp_index, &ttl, &now).unwrap();
+            filter_expired_rows(rows, timestamp_index, &ttl, &now);
 
         assert_eq!(filtered_count, 2); // 2 rows filtered
         assert_eq!(filtered_rows.len(), 2); // 2 rows remaining
@@ -387,39 +333,5 @@ mod tests {
             filtered_rows[1].values[0].value_data,
             Some(ValueData::I64Value(4))
         );
-    }
-
-    #[test]
-    fn test_filter_expired_rows_no_ttl() {
-        let ttl = None;
-        let now = Timestamp::new(7200, TimeUnit::Second);
-
-        let rows = vec![
-            Row {
-                values: vec![
-                    Value {
-                        value_data: Some(ValueData::I64Value(1)),
-                    },
-                    Value {
-                        value_data: Some(ValueData::TimestampSecondValue(100)),
-                    },
-                ],
-            },
-            Row {
-                values: vec![
-                    Value {
-                        value_data: Some(ValueData::I64Value(2)),
-                    },
-                    Value {
-                        value_data: Some(ValueData::TimestampSecondValue(200)),
-                    },
-                ],
-            },
-        ];
-
-        let (filtered_rows, filtered_count) = filter_expired_rows(rows.clone(), 1, &ttl, &now).unwrap();
-
-        assert_eq!(filtered_count, 0); // No rows filtered
-        assert_eq!(filtered_rows.len(), 2); // All rows remain
     }
 }
