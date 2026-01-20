@@ -122,8 +122,8 @@ impl<'a> DroppedRegionCollector<'a> {
         self.assign_to_peers(dropped_regions).await
     }
 
-    /// Identify dropped regions: regions in `table_repart` but not in heartbeats.
-    /// The `assign_to_peers` step later verifies they're also absent from `table_route`.
+    /// Identify dropped regions: regions in `table_repart` but not in table routes.
+    /// The `assign_to_peers` step later double check they're also absent from `table_route`.
     fn identify_dropped_regions(
         &self,
         table_reparts: &[(TableId, TableRepartValue)],
