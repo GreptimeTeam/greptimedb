@@ -20,6 +20,7 @@ use api::v1::region::InsertRequests as RegionInsertRequests;
 use common_time::{TimeToLive, Timestamp};
 use partition::manager::PartitionRuleManager;
 use snafu::OptionExt;
+use store_api::storage::RegionId;
 use table::metadata::{TableId, TableInfo, TableInfoRef};
 
 use crate::error::{Result, TableNotFoundSnafu};
@@ -92,9 +93,8 @@ pub fn filter_normal_requests_by_ttl(
     requests: RegionInsertRequests,
     table_infos: &HashMap<TableId, Arc<TableInfo>>,
 ) -> Result<RegionInsertRequests> {
-    use store_api::storage::RegionId;
-
     let mut filtered_requests = Vec::with_capacity(requests.requests.len());
+    let now = Timestamp::current_millis();
 
     for mut request in requests.requests {
         let region_id = RegionId::from_u64(request.region_id);
@@ -117,19 +117,11 @@ pub fn filter_normal_requests_by_ttl(
             continue;
         }
 
-        let Some(timestamp_index) = table_info.meta.schema.timestamp_index() else {
+        let Some(timestamp_col) = table_info.meta.schema.timestamp_column() else {
             // No timestamp column, skip filtering (safe default)
             filtered_requests.push(request);
             continue;
         };
-
-        // Get current time with matching time unit
-        let timestamp_column = &table_info.meta.schema.column_schemas()[timestamp_index];
-        let time_unit = match &timestamp_column.data_type {
-            datatypes::data_type::ConcreteDataType::Timestamp(ts_type) => ts_type.unit(),
-            _ => common_time::timestamp::TimeUnit::Millisecond, // Default fallback
-        };
-        let now = Timestamp::current_time(time_unit);
 
         let Some(rows_data) = &mut request.rows else {
             continue;
@@ -140,7 +132,7 @@ pub fn filter_normal_requests_by_ttl(
             .schema
             .iter()
             .enumerate()
-            .find(|(_, c)| c.column_name == timestamp_column.name)
+            .find(|(_, c)| c.column_name == timestamp_col.name)
         else {
             // Timestamp not found in row, simply fallback
             filtered_requests.push(request);
