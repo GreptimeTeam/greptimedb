@@ -25,6 +25,7 @@ use table::metadata::{TableId, TableInfo, TableInfoRef};
 
 use crate::error::{Result, TableNotFoundSnafu};
 use crate::insert::InstantAndNormalInsertRequests;
+use crate::metrics::DIST_INGEST_ROWS_FILTERED_TTL_COUNTER;
 use crate::req_convert::common::partitioner::Partitioner;
 use crate::req_convert::common::ttl_filter::filter_expired_rows;
 
@@ -146,9 +147,11 @@ pub fn filter_normal_requests_by_ttl(
         );
         rows_data.rows = filtered_rows;
         if filtered_count > 0 {
-            crate::metrics::DIST_INGEST_ROWS_FILTERED_TTL_COUNTER.inc_by(filtered_count as u64);
+            DIST_INGEST_ROWS_FILTERED_TTL_COUNTER.inc_by(filtered_count as u64);
         }
-        filtered_requests.push(request);
+        if !rows_data.rows.is_empty() {
+            filtered_requests.push(request);
+        }
     }
 
     Ok(RegionInsertRequests {
