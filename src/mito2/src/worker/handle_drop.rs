@@ -23,6 +23,7 @@ use object_store::util::join_path;
 use object_store::{EntryMode, ObjectStore};
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
+use store_api::metric_engine_consts::METADATA_REGION_SUBDIR;
 use store_api::region_request::AffectedRows;
 use store_api::storage::RegionId;
 use tokio::time::sleep;
@@ -207,7 +208,7 @@ async fn later_drop_task_with_global_gc(
     dropping_regions: RegionMapRef,
     _gc_duration: Duration,
 ) -> bool {
-    let metadata_dir = join_path(&region_path, "metadata");
+    let metadata_dir = join_path(&region_path, METADATA_REGION_SUBDIR);
 
     for _ in 0..MAX_RETRY_TIMES {
         let result = remove_subdirectory_once(&metadata_dir, &object_store, true).await;
