@@ -523,11 +523,9 @@ impl RangeBase {
 
         // Apply partition filter
         if let Some(partition_filter) = &self.partition_filter {
-            let partition_mask = self
-                .build_record_batch_for_pruning(&mut input, &partition_filter.partition_schema)
-                .and_then(|record_batch| {
-                    self.evaluate_partition_filter(&record_batch, partition_filter)
-                })?;
+            let record_batch = self
+                .build_record_batch_for_pruning(&mut input, &partition_filter.partition_schema)?;
+            let partition_mask = self.evaluate_partition_filter(&record_batch, partition_filter)?;
             mask = mask.bitand(&partition_mask);
         }
 
@@ -561,15 +559,12 @@ impl RangeBase {
 
         // Apply partition filter
         if let Some(partition_filter) = &self.partition_filter {
-            let partition_mask = self
-                .project_record_batch_for_pruning_flat(
-                    &input,
-                    &partition_filter.partition_schema,
-                    &mut tag_decode_state,
-                )
-                .and_then(|record_batch| {
-                    self.evaluate_partition_filter(&record_batch, partition_filter)
-                })?;
+            let record_batch = self.project_record_batch_for_pruning_flat(
+                &input,
+                &partition_filter.partition_schema,
+                &mut tag_decode_state,
+            )?;
+            let partition_mask = self.evaluate_partition_filter(&record_batch, partition_filter)?;
             mask = mask.bitand(&partition_mask);
         }
 
