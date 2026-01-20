@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use common_error::ext::BoxedError;
 use common_meta::ddl::DdlContext;
@@ -67,6 +68,7 @@ impl RepartitionProcedureFactory for StandaloneRepartitionProcedureFactory {
         _table_id: TableId,
         _from_exprs: Vec<String>,
         _to_exprs: Vec<String>,
+        _timeout: Option<Duration>,
     ) -> std::result::Result<BoxedProcedure, BoxedError> {
         Err(BoxedError::new(NoSupportRepartitionProcedureSnafu.build()))
     }

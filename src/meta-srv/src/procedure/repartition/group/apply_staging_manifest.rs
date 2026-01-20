@@ -31,7 +31,7 @@ use store_api::storage::RegionId;
 
 use crate::error::{self, Error, Result};
 use crate::handler::HeartbeatMailbox;
-use crate::procedure::repartition::group::repartition_end::RepartitionEnd;
+use crate::procedure::repartition::group::update_metadata::UpdateMetadata;
 use crate::procedure::repartition::group::utils::{
     HandleMultipleResult, group_region_routes_by_peer, handle_multiple_results,
 };
@@ -50,9 +50,14 @@ impl State for ApplyStagingManifest {
         ctx: &mut Context,
         _procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
+        let timer = Instant::now();
         self.apply_staging_manifests(ctx).await?;
+        ctx.update_apply_staging_manifest_elapsed(timer.elapsed());
 
-        Ok((Box::new(RepartitionEnd), Status::executing(true)))
+        Ok((
+            Box::new(UpdateMetadata::ExitStaging),
+            Status::executing(true),
+        ))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -125,7 +130,6 @@ impl ApplyStagingManifest {
         })
     }
 
-    #[allow(dead_code)]
     async fn apply_staging_manifests(&self, ctx: &mut Context) -> Result<()> {
         let table_id = ctx.persistent_ctx.table_id;
         let group_id = ctx.persistent_ctx.group_id;
@@ -150,6 +154,7 @@ impl ApplyStagingManifest {
                     operation: "Apply staging manifests",
                 })?;
 
+        let instruction_region_count: usize = instructions.values().map(|v| v.len()).sum();
         let (peers, tasks): (Vec<_>, Vec<_>) = instructions
             .iter()
             .map(|(peer, apply_staging_manifests)| {
@@ -166,8 +171,11 @@ impl ApplyStagingManifest {
             })
             .unzip();
         info!(
-            "Sent apply staging manifests instructions to peers: {:?} for repartition table {}, group id {}",
-            peers, table_id, group_id
+            "Sent apply staging manifests instructions, table_id: {}, group_id: {}, peers: {}, regions: {}",
+            table_id,
+            group_id,
+            peers.len(),
+            instruction_region_count
         );
 
         let format_err_msg = |idx: usize, error: &Error| {
@@ -292,11 +300,7 @@ impl ApplyStagingManifest {
         match receiver.await {
             Ok(msg) => {
                 let reply = HeartbeatMailbox::json_reply(&msg)?;
-                info!(
-                    "Received apply staging manifests reply: {:?}, elapsed: {:?}",
-                    reply,
-                    now.elapsed()
-                );
+                let elapsed = now.elapsed();
                 let InstructionReply::ApplyStagingManifests(ApplyStagingManifestsReply { replies }) =
                     reply
                 else {
@@ -306,9 +310,23 @@ impl ApplyStagingManifest {
                     }
                     .fail();
                 };
+                let total = replies.len();
+                let (mut ready, mut not_ready, mut with_error) = (0, 0, 0);
+                let region_ids = replies.iter().map(|r| r.region_id).collect::<Vec<_>>();
                 for reply in replies {
+                    if reply.error.is_some() {
+                        with_error += 1;
+                    } else if reply.ready {
+                        ready += 1;
+                    } else {
+                        not_ready += 1;
+                    }
                     Self::handle_apply_staging_manifest_reply(&reply, &now, peer)?;
                 }
+                info!(
+                    "Received apply staging manifests reply, peer: {:?}, total_regions: {}, regions:{:?}, ready: {}, not_ready: {}, with_error: {}, elapsed: {:?}",
+                    peer, total, region_ids, ready, not_ready, with_error, elapsed
+                );
 
                 Ok(())
             }

@@ -119,7 +119,7 @@ impl PruneReader {
     /// Prunes batches by the pushed down predicate.
     fn prune(&mut self, batch: Batch) -> Result<Option<Batch>> {
         // fast path
-        if self.context.filters().is_empty() {
+        if self.context.filters().is_empty() && !self.context.has_partition_filter() {
             return Ok(Some(batch));
         }
 
@@ -315,7 +315,7 @@ impl FlatPruneReader {
     /// Prunes batches by the pushed down predicate and returns RecordBatch.
     fn prune_flat(&mut self, record_batch: RecordBatch) -> Result<Option<RecordBatch>> {
         // fast path
-        if self.context.filters().is_empty() {
+        if self.context.filters().is_empty() && !self.context.has_partition_filter() {
             return Ok(Some(record_batch));
         }
 

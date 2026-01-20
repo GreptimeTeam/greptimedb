@@ -48,19 +48,32 @@ impl ApplyStagingManifestsHandler {
         ctx: &HandlerContext,
         request: ApplyStagingManifest,
     ) -> ApplyStagingManifestReply {
-        let Some(leader) = ctx.region_server.is_region_leader(request.region_id) else {
-            warn!("Region: {} is not found", request.region_id);
+        let ApplyStagingManifest {
+            region_id,
+            ref partition_expr,
+            central_region_id,
+            ref manifest_path,
+        } = request;
+        common_telemetry::info!(
+            "Datanode received apply staging manifest request, region_id: {}, central_region_id: {}, partition_expr: {}, manifest_path: {}",
+            region_id,
+            central_region_id,
+            partition_expr,
+            manifest_path
+        );
+        let Some(leader) = ctx.region_server.is_region_leader(region_id) else {
+            warn!("Region: {} is not found", region_id);
             return ApplyStagingManifestReply {
-                region_id: request.region_id,
+                region_id,
                 exists: false,
                 ready: false,
                 error: None,
             };
         };
         if !leader {
-            warn!("Region: {} is not leader", request.region_id);
+            warn!("Region: {} is not leader", region_id);
             return ApplyStagingManifestReply {
-                region_id: request.region_id,
+                region_id,
                 exists: true,
                 ready: false,
                 error: Some("Region is not leader".into()),
@@ -70,25 +83,25 @@ impl ApplyStagingManifestsHandler {
         match ctx
             .region_server
             .handle_request(
-                request.region_id,
+                region_id,
                 RegionRequest::ApplyStagingManifest(ApplyStagingManifestRequest {
-                    partition_expr: request.partition_expr,
-                    central_region_id: request.central_region_id,
-                    manifest_path: request.manifest_path,
+                    partition_expr: partition_expr.clone(),
+                    central_region_id,
+                    manifest_path: manifest_path.clone(),
                 }),
             )
             .await
         {
             Ok(_) => ApplyStagingManifestReply {
-                region_id: request.region_id,
+                region_id,
                 exists: true,
                 ready: true,
                 error: None,
             },
             Err(err) => {
-                error!(err; "Failed to apply staging manifest");
+                error!(err; "Failed to apply staging manifest, region_id: {}", region_id);
                 ApplyStagingManifestReply {
-                    region_id: request.region_id,
+                    region_id,
                     exists: true,
                     ready: false,
                     error: Some(format!("{err:?}")),

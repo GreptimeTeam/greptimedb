@@ -16,7 +16,7 @@
 
 #[cfg(feature = "vector_index")]
 use std::collections::BTreeSet;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -26,15 +26,16 @@ use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_telemetry::{debug, tracing, warn};
 use datafusion_expr::Expr;
 use datatypes::arrow::array::ArrayRef;
+use datatypes::arrow::datatypes::Field;
 use datatypes::arrow::error::ArrowError;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
+use datatypes::prelude::DataType;
 use mito_codec::row_converter::build_primary_key_codec;
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, RowSelection};
 use parquet::arrow::{FieldLevels, ProjectionMask, parquet_to_arrow_field_levels};
-use parquet::file::metadata::ParquetMetaData;
-use parquet::format::KeyValue;
+use parquet::file::metadata::{KeyValue, PageIndexPolicy, ParquetMetaData};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::region_request::PathType;
@@ -47,7 +48,7 @@ use crate::cache::index::result_cache::PredicateKey;
 use crate::error::ApplyVectorIndexSnafu;
 use crate::error::{
     ArrowReaderSnafu, InvalidMetadataSnafu, InvalidParquetSnafu, ReadDataPartSnafu,
-    ReadParquetSnafu, Result,
+    ReadParquetSnafu, Result, SerializePartitionExprSnafu,
 };
 use crate::metrics::{
     PRECISE_FILTER_ROWS_TOTAL, READ_ROW_GROUPS_TOTAL, READ_ROWS_IN_ROW_GROUP_TOTAL,
@@ -68,7 +69,8 @@ use crate::sst::index::inverted_index::applier::{
 #[cfg(feature = "vector_index")]
 use crate::sst::index::vector_index::applier::VectorIndexApplierRef;
 use crate::sst::parquet::file_range::{
-    FileRangeContext, FileRangeContextRef, PreFilterMode, RangeBase, row_group_contains_delete,
+    FileRangeContext, FileRangeContextRef, PartitionFilterContext, PreFilterMode, RangeBase,
+    row_group_contains_delete,
 };
 use crate::sst::parquet::format::{ReadFormat, need_override_sequence};
 use crate::sst::parquet::metadata::MetadataLoader;
@@ -76,6 +78,7 @@ use crate::sst::parquet::row_group::{InMemoryRowGroup, ParquetFetchMetrics};
 use crate::sst::parquet::row_selection::RowGroupSelection;
 use crate::sst::parquet::stats::RowGroupPruningStats;
 use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, PARQUET_METADATA_KEY};
+use crate::sst::tag_maybe_to_dictionary_field;
 
 const INDEX_TYPE_FULLTEXT: &str = "fulltext";
 const INDEX_TYPE_INVERTED: &str = "inverted";
@@ -142,6 +145,7 @@ pub struct ParquetReaderBuilder {
     pre_filter_mode: PreFilterMode,
     /// Whether to decode primary key values eagerly when reading primary key format SSTs.
     decode_primary_key_values: bool,
+    page_index_policy: PageIndexPolicy,
 }
 
 impl ParquetReaderBuilder {
@@ -172,6 +176,7 @@ impl ParquetReaderBuilder {
             compaction: false,
             pre_filter_mode: PreFilterMode::All,
             decode_primary_key_values: false,
+            page_index_policy: Default::default(),
         }
     }
 
@@ -276,6 +281,12 @@ impl ParquetReaderBuilder {
         self
     }
 
+    #[must_use]
+    pub fn page_index_policy(mut self, page_index_policy: PageIndexPolicy) -> Self {
+        self.page_index_policy = page_index_policy;
+        self
+    }
+
     /// Builds a [ParquetReader].
     ///
     /// This needs to perform IO operation.
@@ -314,7 +325,12 @@ impl ParquetReaderBuilder {
 
         // Loads parquet metadata of the file.
         let (parquet_meta, cache_miss) = self
-            .read_parquet_metadata(&file_path, file_size, &mut metrics.metadata_cache_metrics)
+            .read_parquet_metadata(
+                &file_path,
+                file_size,
+                &mut metrics.metadata_cache_metrics,
+                self.page_index_policy,
+            )
             .await?;
         // Decodes region metadata.
         let key_value_meta = parquet_meta.file_metadata().key_value_metadata();
@@ -426,6 +442,8 @@ impl ParquetReaderBuilder {
 
         let codec = build_primary_key_codec(read_format.metadata());
 
+        let partition_filter = self.build_partition_filter(&read_format, &prune_schema)?;
+
         let context = FileRangeContext::new(
             reader_builder,
             RangeBase {
@@ -437,12 +455,83 @@ impl ParquetReaderBuilder {
                 codec,
                 compat_batch: None,
                 pre_filter_mode: self.pre_filter_mode,
+                partition_filter,
             },
         );
 
         metrics.build_cost += start.elapsed();
 
         Ok((context, selection))
+    }
+
+    /// Compare partition expressions from expected metadata and file metadata,
+    /// and build a partition filter if they differ.
+    fn build_partition_filter(
+        &self,
+        read_format: &ReadFormat,
+        prune_schema: &Arc<datatypes::schema::Schema>,
+    ) -> Result<Option<PartitionFilterContext>> {
+        let region_partition_expr_str = self
+            .expected_metadata
+            .as_ref()
+            .and_then(|meta| meta.partition_expr.as_ref());
+        let file_partition_expr_ref = self.file_handle.meta_ref().partition_expr.as_ref();
+
+        let Some(region_str) = region_partition_expr_str else {
+            return Ok(None);
+        };
+
+        let Some(region_partition_expr) = crate::region::parse_partition_expr(Some(region_str))?
+        else {
+            return Ok(None);
+        };
+
+        if Some(&region_partition_expr) == file_partition_expr_ref {
+            return Ok(None);
+        }
+
+        // Collect columns referenced by the partition expression.
+        let mut referenced_columns = HashSet::new();
+        region_partition_expr.collect_column_names(&mut referenced_columns);
+
+        // Build a partition_schema containing only referenced columns.
+        let is_flat = read_format.as_flat().is_some();
+        let partition_schema = Arc::new(datatypes::schema::Schema::new(
+            prune_schema
+                .column_schemas()
+                .iter()
+                .filter(|col| referenced_columns.contains(&col.name))
+                .map(|col| {
+                    if is_flat
+                        && let Some(column_meta) = read_format.metadata().column_by_name(&col.name)
+                        && column_meta.semantic_type == SemanticType::Tag
+                        && col.data_type.is_string()
+                    {
+                        let field = Arc::new(Field::new(
+                            &col.name,
+                            col.data_type.as_arrow_type(),
+                            col.is_nullable(),
+                        ));
+                        let dict_field = tag_maybe_to_dictionary_field(&col.data_type, &field);
+                        let mut column = col.clone();
+                        column.data_type =
+                            ConcreteDataType::from_arrow_type(dict_field.data_type());
+                        return column;
+                    }
+
+                    col.clone()
+                })
+                .collect::<Vec<_>>(),
+        ));
+
+        let region_partition_physical_expr = region_partition_expr
+            .try_as_physical_expr(partition_schema.arrow_schema())
+            .context(SerializePartitionExprSnafu)?;
+
+        Ok(Some(PartitionFilterContext {
+            region_partition_physical_expr,
+            partition_schema,
+        }))
     }
 
     /// Decodes region metadata from key value.
@@ -479,6 +568,7 @@ impl ParquetReaderBuilder {
         file_path: &str,
         file_size: u64,
         cache_metrics: &mut MetadataCacheMetrics,
+        page_index_policy: PageIndexPolicy,
     ) -> Result<(Arc<ParquetMetaData>, bool)> {
         let start = Instant::now();
         let _t = READ_STAGE_ELAPSED
@@ -489,7 +579,7 @@ impl ParquetReaderBuilder {
         // Tries to get from cache with metrics tracking.
         if let Some(metadata) = self
             .cache_strategy
-            .get_parquet_meta_data(file_id, cache_metrics)
+            .get_parquet_meta_data(file_id, cache_metrics, page_index_policy)
             .await
         {
             cache_metrics.metadata_load_cost += start.elapsed();
@@ -497,8 +587,10 @@ impl ParquetReaderBuilder {
         }
 
         // Cache miss, load metadata directly.
-        let metadata_loader = MetadataLoader::new(self.object_store.clone(), file_path, file_size);
-        let metadata = metadata_loader.load().await?;
+        let mut metadata_loader =
+            MetadataLoader::new(self.object_store.clone(), file_path, file_size);
+        metadata_loader.with_page_index_policy(page_index_policy);
+        let metadata = metadata_loader.load(cache_metrics).await?;
 
         let metadata = Arc::new(metadata);
         // Cache the metadata.
@@ -649,11 +741,13 @@ impl ParquetReaderBuilder {
                 && all_required_row_groups_searched(output, result)
             {
                 apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_FULLTEXT);
+                metrics.fulltext_index_cache_hit += 1;
                 pruned = true;
                 continue;
             }
 
             // Slow path: apply the index from the file.
+            metrics.fulltext_index_cache_miss += 1;
             let file_size_hint = self.file_handle.meta_ref().index_file_size();
             let apply_res = index_applier
                 .apply_fine(
@@ -721,11 +815,13 @@ impl ParquetReaderBuilder {
                 && all_required_row_groups_searched(output, result)
             {
                 apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_INVERTED);
+                metrics.inverted_index_cache_hit += 1;
                 pruned = true;
                 continue;
             }
 
             // Slow path: apply the index from the file.
+            metrics.inverted_index_cache_miss += 1;
             let file_size_hint = self.file_handle.meta_ref().index_file_size();
             let apply_res = index_applier
                 .apply(
@@ -789,11 +885,13 @@ impl ParquetReaderBuilder {
                 && all_required_row_groups_searched(output, result)
             {
                 apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_BLOOM);
+                metrics.bloom_filter_cache_hit += 1;
                 pruned = true;
                 continue;
             }
 
             // Slow path: apply the index from the file.
+            metrics.bloom_filter_cache_miss += 1;
             let file_size_hint = self.file_handle.meta_ref().index_file_size();
             let rgs = parquet_meta.row_groups().iter().enumerate().map(|(i, rg)| {
                 (
@@ -914,11 +1012,13 @@ impl ParquetReaderBuilder {
                 && all_required_row_groups_searched(output, result)
             {
                 apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_FULLTEXT);
+                metrics.fulltext_index_cache_hit += 1;
                 pruned = true;
                 continue;
             }
 
             // Slow path: apply the index from the file.
+            metrics.fulltext_index_cache_miss += 1;
             let file_size_hint = self.file_handle.meta_ref().index_file_size();
             let rgs = parquet_meta.row_groups().iter().enumerate().map(|(i, rg)| {
                 (
@@ -1132,6 +1232,19 @@ pub(crate) struct ReaderFilterMetrics {
     /// Number of rows filtered by precise filter.
     pub(crate) rows_precise_filtered: usize,
 
+    /// Number of index result cache hits for fulltext index.
+    pub(crate) fulltext_index_cache_hit: usize,
+    /// Number of index result cache misses for fulltext index.
+    pub(crate) fulltext_index_cache_miss: usize,
+    /// Number of index result cache hits for inverted index.
+    pub(crate) inverted_index_cache_hit: usize,
+    /// Number of index result cache misses for inverted index.
+    pub(crate) inverted_index_cache_miss: usize,
+    /// Number of index result cache hits for bloom filter index.
+    pub(crate) bloom_filter_cache_hit: usize,
+    /// Number of index result cache misses for bloom filter index.
+    pub(crate) bloom_filter_cache_miss: usize,
+
     /// Optional metrics for inverted index applier.
     pub(crate) inverted_index_apply_metrics: Option<InvertedIndexApplyMetrics>,
     /// Optional metrics for bloom filter index applier.
@@ -1156,6 +1269,13 @@ impl ReaderFilterMetrics {
         self.rows_bloom_filtered += other.rows_bloom_filtered;
         self.rows_vector_filtered += other.rows_vector_filtered;
         self.rows_precise_filtered += other.rows_precise_filtered;
+
+        self.fulltext_index_cache_hit += other.fulltext_index_cache_hit;
+        self.fulltext_index_cache_miss += other.fulltext_index_cache_miss;
+        self.inverted_index_cache_hit += other.inverted_index_cache_hit;
+        self.inverted_index_cache_miss += other.inverted_index_cache_miss;
+        self.bloom_filter_cache_hit += other.bloom_filter_cache_hit;
+        self.bloom_filter_cache_miss += other.bloom_filter_cache_miss;
 
         // Merge optional applier metrics
         if let Some(other_metrics) = &other.inverted_index_apply_metrics {
@@ -1302,6 +1422,10 @@ pub(crate) struct MetadataCacheMetrics {
     pub(crate) cache_miss: usize,
     /// Duration to load parquet metadata.
     pub(crate) metadata_load_cost: Duration,
+    /// Number of read operations performed.
+    pub(crate) num_reads: usize,
+    /// Total bytes read from storage.
+    pub(crate) bytes_read: u64,
 }
 
 impl std::fmt::Debug for MetadataCacheMetrics {
@@ -1311,6 +1435,8 @@ impl std::fmt::Debug for MetadataCacheMetrics {
             file_cache_hit,
             cache_miss,
             metadata_load_cost,
+            num_reads,
+            bytes_read,
         } = self;
 
         if self.is_empty() {
@@ -1329,6 +1455,12 @@ impl std::fmt::Debug for MetadataCacheMetrics {
         if *cache_miss > 0 {
             write!(f, ", \"cache_miss\":{}", cache_miss)?;
         }
+        if *num_reads > 0 {
+            write!(f, ", \"num_reads\":{}", num_reads)?;
+        }
+        if *bytes_read > 0 {
+            write!(f, ", \"bytes_read\":{}", bytes_read)?;
+        }
 
         write!(f, "}}")
     }
@@ -1346,6 +1478,8 @@ impl MetadataCacheMetrics {
         self.file_cache_hit += other.file_cache_hit;
         self.cache_miss += other.cache_miss;
         self.metadata_load_cost += other.metadata_load_cost;
+        self.num_reads += other.num_reads;
+        self.bytes_read += other.bytes_read;
     }
 }
 

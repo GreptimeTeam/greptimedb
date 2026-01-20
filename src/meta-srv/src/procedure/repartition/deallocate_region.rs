@@ -27,6 +27,7 @@ use snafu::ResultExt;
 use store_api::storage::{RegionId, TableId};
 use table::table_name::TableName;
 use table::table_reference::TableReference;
+use tokio::time::Instant;
 
 use crate::error::{self, Result};
 use crate::procedure::repartition::group::region_routes;
@@ -44,6 +45,7 @@ impl State for DeallocateRegion {
         ctx: &mut Context,
         procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
+        let timer = Instant::now();
         let region_to_deallocate = ctx
             .persistent_ctx
             .plans
@@ -51,7 +53,8 @@ impl State for DeallocateRegion {
             .map(|p| p.pending_deallocate_region_ids.len())
             .sum::<usize>();
         if region_to_deallocate == 0 {
-            return Ok((Box::new(RepartitionEnd), Status::done()));
+            ctx.update_deallocate_region_elapsed(timer.elapsed());
+            return Ok((Box::new(RepartitionEnd), Status::executing(false)));
         }
 
         let table_id = ctx.persistent_ctx.table_id;
@@ -62,9 +65,10 @@ impl State for DeallocateRegion {
             .flat_map(|p| p.pending_deallocate_region_ids.iter())
             .cloned()
             .collect::<HashSet<_>>();
+        let dealloc_count = pending_deallocate_region_ids.len();
         info!(
-            "Deallocating regions: {:?} for table: {} during repartition procedure",
-            pending_deallocate_region_ids, table_id
+            "Deallocating regions for repartition, table_id: {}, count: {}, regions: {:?}",
+            table_id, dealloc_count, pending_deallocate_region_ids
         );
 
         let table_lock = TableLock::Write(table_id).into();
@@ -98,11 +102,12 @@ impl State for DeallocateRegion {
         let region_routes = table_route_value.region_routes().unwrap();
         let new_region_routes =
             Self::generate_region_routes(region_routes, &pending_deallocate_region_ids);
-        ctx.update_table_route(&table_route_value, new_region_routes)
+        ctx.update_table_route(&table_route_value, new_region_routes, HashMap::new())
             .await?;
         ctx.invalidate_table_cache().await?;
 
-        Ok((Box::new(RepartitionEnd), Status::executing(false)))
+        ctx.update_deallocate_region_elapsed(timer.elapsed());
+        Ok((Box::new(RepartitionEnd), Status::executing(true)))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -111,7 +116,6 @@ impl State for DeallocateRegion {
 }
 
 impl DeallocateRegion {
-    #[allow(dead_code)]
     async fn deallocate_regions(
         node_manager: &NodeManagerRef,
         leader_region_registry: &LeaderRegionRegistryRef,
@@ -136,7 +140,6 @@ impl DeallocateRegion {
         Ok(())
     }
 
-    #[allow(dead_code)]
     fn filter_deallocatable_region_routes(
         table_id: TableId,
         region_routes: &[RegionRoute],
@@ -161,7 +164,6 @@ impl DeallocateRegion {
             .collect::<Vec<_>>()
     }
 
-    #[allow(dead_code)]
     fn generate_region_routes(
         region_routes: &[RegionRoute],
         pending_deallocate_region_ids: &HashSet<RegionId>,

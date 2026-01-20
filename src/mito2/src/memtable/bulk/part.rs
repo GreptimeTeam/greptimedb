@@ -71,7 +71,6 @@ use crate::sst::index::IndexOutput;
 use crate::sst::parquet::file_range::{PreFilterMode, row_group_contains_delete};
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::{PrimaryKeyArray, PrimaryKeyArrayBuilder, ReadFormat};
-use crate::sst::parquet::helper::parse_parquet_metadata;
 use crate::sst::parquet::{PARQUET_METADATA_KEY, SstInfo};
 use crate::sst::{SeriesEstimator, to_sst_arrow_schema};
 
@@ -1197,7 +1196,7 @@ impl BulkPartEncoder {
         metrics.num_rows += total_rows;
 
         let buf = Bytes::from(buf);
-        let parquet_metadata = Arc::new(parse_parquet_metadata(file_metadata)?);
+        let parquet_metadata = Arc::new(file_metadata);
         let num_series = series_estimator.finish();
 
         Ok(Some(EncodedBulkPart {
@@ -1232,7 +1231,7 @@ impl BulkPartEncoder {
         };
 
         let buf = Bytes::from(buf);
-        let parquet_metadata = Arc::new(parse_parquet_metadata(file_metadata)?);
+        let parquet_metadata = Arc::new(file_metadata);
 
         Ok(Some(EncodedBulkPart {
             data: buf,

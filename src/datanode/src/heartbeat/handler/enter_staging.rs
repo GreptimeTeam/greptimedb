@@ -51,6 +51,11 @@ impl EnterStagingRegionsHandler {
             partition_expr,
         }: EnterStagingRegion,
     ) -> EnterStagingRegionReply {
+        common_telemetry::info!(
+            "Datanode received enter staging region: {}, partition_expr: {}",
+            region_id,
+            partition_expr
+        );
         let Some(writable) = ctx.region_server.is_region_leader(region_id) else {
             warn!("Region: {} is not found", region_id);
             return EnterStagingRegionReply {
@@ -85,7 +90,7 @@ impl EnterStagingRegionsHandler {
                 error: None,
             },
             Err(err) => {
-                error!(err; "Failed to enter staging region");
+                error!(err; "Failed to enter staging region, region_id: {}", region_id);
                 EnterStagingRegionReply {
                     region_id,
                     ready: false,

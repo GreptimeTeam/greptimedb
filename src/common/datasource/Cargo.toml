@@ -27,13 +27,14 @@ common-recordbatch.workspace = true
 common-runtime.workspace = true
 common-telemetry.workspace = true
 datafusion.workspace = true
+datafusion-datasource.workspace = true
 datafusion-orc.workspace = true
 datatypes.workspace = true
 futures.workspace = true
 lazy_static.workspace = true
 object-store.workspace = true
 object_store_opendal.workspace = true
-orc-rust = { version = "0.6.3", default-features = false, features = ["async"] }
+orc-rust = { version = "0.7", default-features = false, features = ["async"] }
 parquet.workspace = true
 paste.workspace = true
 regex.workspace = true
@@ -42,7 +43,7 @@ snafu.workspace = true
 strum.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
-url = "2.3"
+url.workspace = true
 
 [dev-dependencies]
 common-test-util.workspace = true

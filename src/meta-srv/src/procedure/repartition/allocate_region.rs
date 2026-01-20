@@ -30,6 +30,7 @@ use snafu::{OptionExt, ResultExt};
 use store_api::storage::{RegionNumber, TableId};
 use table::metadata::RawTableInfo;
 use table::table_reference::TableReference;
+use tokio::time::Instant;
 
 use crate::error::{self, Result};
 use crate::procedure::repartition::dispatch::Dispatch;
@@ -52,6 +53,7 @@ impl State for AllocateRegion {
         ctx: &mut Context,
         procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
+        let timer = Instant::now();
         let table_id = ctx.persistent_ctx.table_id;
         let table_route_value = ctx.get_table_route_value().await?;
         // Safety: it is physical table route value.
@@ -65,10 +67,17 @@ impl State for AllocateRegion {
             &mut next_region_number,
             &self.plan_entries,
         );
+        let plan_count = repartition_plan_entries.len();
+        let to_allocate = Self::count_regions_to_allocate(&repartition_plan_entries);
+        info!(
+            "Repartition allocate regions start, table_id: {}, groups: {}, regions_to_allocate: {}",
+            table_id, plan_count, to_allocate
+        );
 
         // If no region to allocate, directly dispatch the plan.
         if Self::count_regions_to_allocate(&repartition_plan_entries) == 0 {
             ctx.persistent_ctx.plans = repartition_plan_entries;
+            ctx.update_allocate_region_elapsed(timer.elapsed());
             return Ok((Box::new(Dispatch), Status::executing(true)));
         }
 
@@ -99,6 +108,20 @@ impl State for AllocateRegion {
             .await
             .context(error::AllocateWalOptionsSnafu { table_id })?;
 
+        let new_region_count = new_allocated_region_routes.len();
+        let new_regions_brief: Vec<_> = new_allocated_region_routes
+            .iter()
+            .map(|route| {
+                let region_id = route.region.id;
+                let peer = route.leader_peer.as_ref().map(|p| p.id).unwrap_or_default();
+                format!("region_id: {}, peer: {}", region_id, peer)
+            })
+            .collect();
+        info!(
+            "Allocated regions for repartition, table_id: {}, new_region_count: {}, new_regions: {:?}",
+            table_id, new_region_count, new_regions_brief
+        );
+
         let _operating_guards = Self::register_operating_regions(
             &ctx.memory_region_keeper,
             &new_allocated_region_routes,
@@ -119,11 +142,12 @@ impl State for AllocateRegion {
         let _guard = procedure_ctx.provider.acquire_lock(&table_lock).await;
         let new_region_routes =
             Self::generate_region_routes(region_routes, &new_allocated_region_routes);
-        ctx.update_table_route(&table_route_value, new_region_routes)
+        ctx.update_table_route(&table_route_value, new_region_routes, wal_options)
             .await?;
         ctx.invalidate_table_cache().await?;
 
         ctx.persistent_ctx.plans = repartition_plan_entries;
+        ctx.update_allocate_region_elapsed(timer.elapsed());
         Ok((Box::new(Dispatch), Status::executing(true)))
     }
 
@@ -137,7 +161,6 @@ impl AllocateRegion {
         Self { plan_entries }
     }
 
-    #[allow(dead_code)]
     fn register_operating_regions(
         memory_region_keeper: &MemoryRegionKeeperRef,
         region_routes: &[RegionRoute],
@@ -155,7 +178,6 @@ impl AllocateRegion {
         Ok(operating_guards)
     }
 
-    #[allow(dead_code)]
     fn generate_region_routes(
         region_routes: &[RegionRoute],
         new_allocated_region_ids: &[RegionRoute],
@@ -177,7 +199,6 @@ impl AllocateRegion {
     ///
     /// This method takes the allocation plan entries and converts them to repartition plan entries,
     /// updating `next_region_number` for each newly allocated region.
-    #[allow(dead_code)]
     fn convert_to_repartition_plans(
         table_id: TableId,
         next_region_number: &mut RegionNumber,
@@ -196,7 +217,6 @@ impl AllocateRegion {
     }
 
     /// Collects all regions that need to be allocated from the repartition plan entries.
-    #[allow(dead_code)]
     fn collect_allocate_regions(
         repartition_plan_entries: &[RepartitionPlanEntry],
     ) -> Vec<&RegionDescriptor> {
@@ -207,7 +227,6 @@ impl AllocateRegion {
     }
 
     /// Prepares region allocation data: region numbers and their partition expressions.
-    #[allow(dead_code)]
     fn prepare_region_allocation_data(
         allocate_regions: &[&RegionDescriptor],
     ) -> Result<Vec<(RegionNumber, String)>> {
@@ -225,7 +244,6 @@ impl AllocateRegion {
     }
 
     /// Calculates the total number of regions that need to be allocated.
-    #[allow(dead_code)]
     fn count_regions_to_allocate(repartition_plan_entries: &[RepartitionPlanEntry]) -> usize {
         repartition_plan_entries
             .iter()
@@ -234,12 +252,10 @@ impl AllocateRegion {
     }
 
     /// Gets the next region number from the physical table route.
-    #[allow(dead_code)]
     fn get_next_region_number(max_region_number: RegionNumber) -> RegionNumber {
         max_region_number + 1
     }
 
-    #[allow(dead_code)]
     async fn allocate_regions(
         node_manager: &NodeManagerRef,
         raw_table_info: &RawTableInfo,
@@ -252,12 +268,14 @@ impl AllocateRegion {
             &raw_table_info.name,
         );
         let table_id = raw_table_info.ident.table_id;
-        let request = build_template_from_raw_table_info(raw_table_info)
+        let request = build_template_from_raw_table_info(raw_table_info, true)
             .context(error::BuildCreateRequestSnafu { table_id })?;
         let builder = CreateRequestBuilder::new(request, None);
+        let region_count = region_routes.len();
+        let wal_region_count = wal_options.len();
         info!(
-            "Allocating regions for table: {}, region_routes: {:?}, wal_options: {:?}",
-            table_id, region_routes, wal_options
+            "Allocating regions on datanodes, table_id: {}, region_count: {}, wal_regions: {}",
+            table_id, region_count, wal_region_count
         );
         let executor = CreateTableExecutor::new(table_ref.into(), false, builder);
         executor

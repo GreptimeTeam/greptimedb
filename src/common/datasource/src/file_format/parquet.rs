@@ -18,15 +18,15 @@ use std::sync::Arc;
 use arrow::record_batch::RecordBatch;
 use arrow_schema::Schema;
 use async_trait::async_trait;
-use datafusion::datasource::physical_plan::{FileMeta, ParquetFileReaderFactory};
+use datafusion::datasource::physical_plan::ParquetFileReaderFactory;
 use datafusion::error::Result as DatafusionResult;
 use datafusion::parquet::arrow::async_reader::AsyncFileReader;
 use datafusion::parquet::arrow::{ArrowWriter, parquet_to_arrow_schema};
 use datafusion::parquet::errors::{ParquetError, Result as ParquetResult};
 use datafusion::parquet::file::metadata::ParquetMetaData;
-use datafusion::parquet::format::FileMetaData;
 use datafusion::physical_plan::SendableRecordBatchStream;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+use datafusion_datasource::PartitionedFile;
 use datatypes::schema::SchemaRef;
 use futures::StreamExt;
 use futures::future::BoxFuture;
@@ -100,11 +100,11 @@ impl ParquetFileReaderFactory for DefaultParquetFileReaderFactory {
     fn create_reader(
         &self,
         _partition_index: usize,
-        file_meta: FileMeta,
+        partitioned_file: PartitionedFile,
         _metadata_size_hint: Option<usize>,
         _metrics: &ExecutionPlanMetricsSet,
     ) -> DatafusionResult<Box<dyn AsyncFileReader + Send>> {
-        let path = file_meta.location().to_string();
+        let path = partitioned_file.path().to_string();
         let object_store = self.object_store.clone();
 
         Ok(Box::new(LazyParquetFileReader::new(object_store, path)))
@@ -180,7 +180,7 @@ impl DfRecordBatchEncoder for ArrowWriter<SharedBuffer> {
 
 #[async_trait]
 impl ArrowWriterCloser for ArrowWriter<SharedBuffer> {
-    async fn close(self) -> Result<FileMetaData> {
+    async fn close(self) -> Result<ParquetMetaData> {
         self.close().context(error::EncodeRecordBatchSnafu)
     }
 }

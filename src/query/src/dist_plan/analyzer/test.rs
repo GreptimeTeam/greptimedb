@@ -1170,7 +1170,7 @@ fn test_simplify_select_now_expression() {
     let expected = [
         "Projection: now()",
         "  MergeScan [is_placeholder=false, remote_input=[",
-        r#"Projection: TimestampNanosecond(<TIME>, Some("+00:00")) AS now()"#,
+        r#"Projection: TimestampNanosecond(<TIME>, None) AS now()"#,
         "  TableScan: t",
         "]]",
     ]

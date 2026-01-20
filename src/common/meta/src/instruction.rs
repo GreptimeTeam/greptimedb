@@ -17,6 +17,7 @@ use std::fmt::{Display, Formatter};
 use std::time::Duration;
 
 use serde::{Deserialize, Deserializer, Serialize};
+use store_api::region_engine::SyncRegionFromRequest;
 use store_api::storage::{FileRefsManifest, GcReport, RegionId, RegionNumber};
 use strum::Display;
 use table::metadata::TableId;
@@ -530,6 +531,25 @@ impl Display for EnterStagingRegion {
     }
 }
 
+/// Instruction payload for syncing a region from a manifest or another region.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SyncRegion {
+    /// Region id to sync.
+    pub region_id: RegionId,
+    /// Request to sync the region.
+    pub request: SyncRegionFromRequest,
+}
+
+impl Display for SyncRegion {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "SyncRegion(region_id={}, request={:?})",
+            self.region_id, self.request
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RemapManifest {
     pub region_id: RegionId,
@@ -602,8 +622,11 @@ pub enum Instruction {
     Suspend,
     /// Makes regions enter staging state.
     EnterStagingRegions(Vec<EnterStagingRegion>),
+    /// Syncs regions.
+    SyncRegions(Vec<SyncRegion>),
     /// Remaps manifests for a region.
     RemapManifest(RemapManifest),
+
     /// Applies staging manifests for a region.
     ApplyStagingManifests(Vec<ApplyStagingManifest>),
 }
@@ -666,6 +689,13 @@ impl Instruction {
     pub fn into_enter_staging_regions(self) -> Option<Vec<EnterStagingRegion>> {
         match self {
             Self::EnterStagingRegions(enter_staging) => Some(enter_staging),
+            _ => None,
+        }
+    }
+
+    pub fn into_sync_regions(self) -> Option<Vec<SyncRegion>> {
+        match self {
+            Self::SyncRegions(sync_regions) => Some(sync_regions),
             _ => None,
         }
     }
@@ -784,6 +814,31 @@ impl EnterStagingRegionsReply {
     }
 }
 
+/// Reply for a single region sync request.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
+pub struct SyncRegionReply {
+    /// Region id of the synced region.
+    pub region_id: RegionId,
+    /// Returns true if the region is successfully synced and ready.
+    pub ready: bool,
+    /// Indicates whether the region exists.
+    pub exists: bool,
+    /// Return error message if any during the operation.
+    pub error: Option<String>,
+}
+
+/// Reply for a batch of region sync requests.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
+pub struct SyncRegionsReply {
+    pub replies: Vec<SyncRegionReply>,
+}
+
+impl SyncRegionsReply {
+    pub fn new(replies: Vec<SyncRegionReply>) -> Self {
+        Self { replies }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct RemapManifestReply {
     /// Returns false if the region does not exist.
@@ -847,6 +902,7 @@ pub enum InstructionReply {
     GetFileRefs(GetFileRefsReply),
     GcRegions(GcRegionsReply),
     EnterStagingRegions(EnterStagingRegionsReply),
+    SyncRegions(SyncRegionsReply),
     RemapManifest(RemapManifestReply),
     ApplyStagingManifests(ApplyStagingManifestsReply),
 }
@@ -871,6 +927,9 @@ impl Display for InstructionReply {
                     "InstructionReply::EnterStagingRegions({:?})",
                     reply.replies
                 )
+            }
+            Self::SyncRegions(reply) => {
+                write!(f, "InstructionReply::SyncRegions({:?})", reply.replies)
             }
             Self::RemapManifest(reply) => write!(f, "InstructionReply::RemapManifest({})", reply),
             Self::ApplyStagingManifests(reply) => write!(
@@ -923,6 +982,13 @@ impl InstructionReply {
         match self {
             Self::EnterStagingRegions(reply) => reply.replies,
             _ => panic!("Expected EnterStagingRegion reply"),
+        }
+    }
+
+    pub fn expect_sync_regions_reply(self) -> Vec<SyncRegionReply> {
+        match self {
+            Self::SyncRegions(reply) => reply.replies,
+            _ => panic!("Expected SyncRegion reply"),
         }
     }
 

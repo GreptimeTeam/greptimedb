@@ -165,6 +165,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         &mut self,
         region_id: RegionId,
         request: RegionFlushRequest,
+        reason: Option<FlushReason>,
         mut sender: OptionOutputTx,
     ) {
         let Some(region) = self.regions.flushable_region_or(region_id, &mut sender) else {
@@ -175,11 +176,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // when handling flush request instead of in `schedule_flush` or `flush_finished`.
         self.update_topic_latest_entry_id(&region);
 
-        let reason = if region.is_downgrading() {
-            FlushReason::Downgrading
-        } else {
-            FlushReason::Manual
-        };
+        let reason = reason.unwrap_or_else(|| {
+            if region.is_downgrading() {
+                FlushReason::Downgrading
+            } else {
+                FlushReason::Manual
+            }
+        });
         let mut task =
             self.new_flush_task(&region, reason, request.row_group_size, self.config.clone());
         task.push_sender(sender);
@@ -277,6 +280,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         }
 
+        let flush_on_close = request.flush_reason == FlushReason::Closing;
         let index_build_file_metas = std::mem::take(&mut request.edit.files_to_add);
 
         // Notifies waiters and observes the flush timer.
@@ -295,25 +299,29 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             .await;
         }
 
-        // Handle pending requests for the region.
-        if let Some((mut ddl_requests, mut write_requests, mut bulk_writes)) =
-            self.flush_scheduler.on_flush_success(region_id)
-        {
-            // Perform DDLs first because they require empty memtables.
-            self.handle_ddl_requests(&mut ddl_requests).await;
-            // Handle pending write requests, we don't stall these requests.
-            self.handle_write_requests(&mut write_requests, &mut bulk_writes, false)
-                .await;
+        if flush_on_close {
+            // Remove region from server for flush on closing,
+            // no need to handle requests and schedule compactions.
+            self.remove_region(region_id).await;
+            info!("Region {} closed after flush", region_id);
+        } else {
+            // Handle pending requests for the region.
+            if let Some((mut ddl_requests, mut write_requests, mut bulk_writes)) =
+                self.flush_scheduler.on_flush_success(region_id)
+            {
+                // Perform DDLs first because they require empty memtables.
+                self.handle_ddl_requests(&mut ddl_requests).await;
+                // Handle pending write requests, we don't stall these requests.
+                self.handle_write_requests(&mut write_requests, &mut bulk_writes, false)
+                    .await;
+            }
+            // Maybe flush worker again.
+            self.maybe_flush_worker();
+            // Handle stalled requests.
+            self.handle_stalled_requests().await;
+            // Schedules compaction.
+            self.schedule_compaction(&region).await;
         }
-
-        // Maybe flush worker again.
-        self.maybe_flush_worker();
-
-        // Handle stalled requests.
-        self.handle_stalled_requests().await;
-
-        // Schedules compaction.
-        self.schedule_compaction(&region).await;
 
         self.listener.on_flush_success(region_id);
     }

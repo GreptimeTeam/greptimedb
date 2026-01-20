@@ -388,7 +388,7 @@ async fn test_staging_exit_success_with_manifests() {
 
 async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
-    let partition_expr = default_partition_expr();
+    let partition_expr = range_expr("field_0", 0, 100).as_json_str().unwrap();
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {

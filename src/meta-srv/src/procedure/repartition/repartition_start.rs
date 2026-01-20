@@ -16,10 +16,12 @@ use std::any::Any;
 
 use common_meta::key::table_route::PhysicalTableRouteValue;
 use common_procedure::{Context as ProcedureContext, Status};
+use common_telemetry::debug;
 use partition::expr::PartitionExpr;
 use partition::subtask::{self, RepartitionSubtask};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
+use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::error::{self, Result};
@@ -51,6 +53,7 @@ impl State for RepartitionStart {
         ctx: &mut Context,
         _: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
+        let timer = Instant::now();
         let (physical_table_id, table_route) = ctx
             .table_metadata_manager
             .table_route_manager()
@@ -69,6 +72,19 @@ impl State for RepartitionStart {
         );
 
         let plans = Self::build_plan(&table_route, &self.from_exprs, &self.to_exprs)?;
+        let plan_count = plans.len();
+        let total_source_regions: usize = plans.iter().map(|p| p.source_regions.len()).sum();
+        let total_target_regions: usize =
+            plans.iter().map(|p| p.target_partition_exprs.len()).sum();
+        common_telemetry::info!(
+            "Repartition start, table_id: {}, plans: {}, total_source_regions: {}, total_target_regions: {}",
+            table_id,
+            plan_count,
+            total_source_regions,
+            total_target_regions
+        );
+
+        ctx.update_build_plan_elapsed(timer.elapsed());
 
         if plans.is_empty() {
             return Ok((Box::new(RepartitionEnd), Status::done()));
@@ -86,7 +102,6 @@ impl State for RepartitionStart {
 }
 
 impl RepartitionStart {
-    #[allow(dead_code)]
     fn build_plan(
         physical_route: &PhysicalTableRouteValue,
         from_exprs: &[PartitionExpr],
@@ -106,7 +121,6 @@ impl RepartitionStart {
         ))
     }
 
-    #[allow(dead_code)]
     fn build_plan_entries(
         subtasks: Vec<RepartitionSubtask>,
         source_index: &[RegionDescriptor],
@@ -159,8 +173,9 @@ impl RepartitionStart {
                     .find_map(|(region_id, existing_expr)| {
                         (existing_expr == &expr_json).then_some(*region_id)
                     })
-                    .with_context(|| error::RepartitionSourceExprMismatchSnafu {
-                        expr: expr_json,
+                    .with_context(|| error::RepartitionSourceExprMismatchSnafu { expr: &expr_json })
+                    .inspect_err(|_| {
+                        debug!("Failed to find matching region for partition expression: {}, existing regions: {:?}", expr_json, existing_regions);
                     })?;
 
                 Ok(RegionDescriptor {

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use common_meta::instruction::{InstructionReply, RemapManifest, RemapManifestReply};
-use common_telemetry::warn;
+use common_telemetry::{error, info, warn};
 use store_api::region_engine::RemapManifestsRequest;
 
 use crate::heartbeat::handler::{HandlerContext, InstructionHandler};
@@ -34,6 +34,12 @@ impl InstructionHandler for RemapManifestHandler {
             region_mapping,
             new_partition_exprs,
         } = request;
+        info!(
+            "Datanode received remap manifest request, region_id: {}, input_regions: {}, target_regions: {}",
+            region_id,
+            input_regions.len(),
+            new_partition_exprs.len()
+        );
         let Some(leader) = ctx.region_server.is_region_leader(region_id) else {
             warn!("Region: {} is not found", region_id);
             return Some(InstructionReply::RemapManifest(RemapManifestReply {
@@ -67,11 +73,18 @@ impl InstructionHandler for RemapManifestHandler {
                 manifest_paths: result.manifest_paths,
                 error: None,
             }),
-            Err(e) => InstructionReply::RemapManifest(RemapManifestReply {
-                exists: true,
-                manifest_paths: Default::default(),
-                error: Some(format!("{e:?}")),
-            }),
+            Err(e) => {
+                error!(
+                    e;
+                    "Remap manifests failed on datanode, region_id: {}",
+                    region_id
+                );
+                InstructionReply::RemapManifest(RemapManifestReply {
+                    exists: true,
+                    manifest_paths: Default::default(),
+                    error: Some(format!("{e:?}")),
+                })
+            }
         };
 
         Some(reply)

@@ -17,13 +17,14 @@ pub(crate) mod enter_staging_region;
 pub(crate) mod remap_manifest;
 pub(crate) mod repartition_end;
 pub(crate) mod repartition_start;
+pub(crate) mod sync_region;
 pub(crate) mod update_metadata;
 pub(crate) mod utils;
 
 use std::any::Any;
 use std::collections::HashMap;
-use std::fmt::Debug;
-use std::time::Duration;
+use std::fmt::{Debug, Display};
+use std::time::{Duration, Instant};
 
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
@@ -40,7 +41,7 @@ use common_procedure::{
     Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
     Result as ProcedureResult, Status, StringKey, UserMetadata,
 };
-use common_telemetry::error;
+use common_telemetry::{error, info};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{RegionId, TableId};
@@ -53,9 +54,95 @@ use crate::procedure::repartition::utils::get_datanode_table_value;
 use crate::procedure::repartition::{self};
 use crate::service::mailbox::MailboxRef;
 
+#[derive(Debug, Clone, Default)]
+pub struct Metrics {
+    /// Elapsed time of flushing pending deallocate regions.
+    flush_pending_deallocate_regions_elapsed: Duration,
+    /// Elapsed time of entering staging region.
+    enter_staging_region_elapsed: Duration,
+    /// Elapsed time of applying staging manifest.
+    apply_staging_manifest_elapsed: Duration,
+    /// Elapsed time of remapping manifest.
+    remap_manifest_elapsed: Duration,
+    /// Elapsed time of updating metadata.
+    update_metadata_elapsed: Duration,
+}
+
+impl Display for Metrics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let total = self.flush_pending_deallocate_regions_elapsed
+            + self.enter_staging_region_elapsed
+            + self.apply_staging_manifest_elapsed
+            + self.remap_manifest_elapsed
+            + self.update_metadata_elapsed;
+        write!(f, "total: {:?}", total)?;
+        let mut parts = Vec::with_capacity(5);
+        if self.flush_pending_deallocate_regions_elapsed > Duration::ZERO {
+            parts.push(format!(
+                "flush_pending_deallocate_regions_elapsed: {:?}",
+                self.flush_pending_deallocate_regions_elapsed
+            ));
+        }
+        if self.enter_staging_region_elapsed > Duration::ZERO {
+            parts.push(format!(
+                "enter_staging_region_elapsed: {:?}",
+                self.enter_staging_region_elapsed
+            ));
+        }
+        if self.apply_staging_manifest_elapsed > Duration::ZERO {
+            parts.push(format!(
+                "apply_staging_manifest_elapsed: {:?}",
+                self.apply_staging_manifest_elapsed
+            ));
+        }
+        if self.remap_manifest_elapsed > Duration::ZERO {
+            parts.push(format!(
+                "remap_manifest_elapsed: {:?}",
+                self.remap_manifest_elapsed
+            ));
+        }
+        if self.update_metadata_elapsed > Duration::ZERO {
+            parts.push(format!(
+                "update_metadata_elapsed: {:?}",
+                self.update_metadata_elapsed
+            ));
+        }
+
+        if !parts.is_empty() {
+            write!(f, ", {}", parts.join(", "))?;
+        }
+        Ok(())
+    }
+}
+
+impl Metrics {
+    /// Updates the elapsed time of entering staging region.
+    pub fn update_enter_staging_region_elapsed(&mut self, elapsed: Duration) {
+        self.enter_staging_region_elapsed += elapsed;
+    }
+
+    pub fn update_flush_pending_deallocate_regions_elapsed(&mut self, elapsed: Duration) {
+        self.flush_pending_deallocate_regions_elapsed += elapsed;
+    }
+
+    /// Updates the elapsed time of applying staging manifest.
+    pub fn update_apply_staging_manifest_elapsed(&mut self, elapsed: Duration) {
+        self.apply_staging_manifest_elapsed += elapsed;
+    }
+
+    /// Updates the elapsed time of remapping manifest.
+    pub fn update_remap_manifest_elapsed(&mut self, elapsed: Duration) {
+        self.remap_manifest_elapsed += elapsed;
+    }
+
+    /// Updates the elapsed time of updating metadata.
+    pub fn update_update_metadata_elapsed(&mut self, elapsed: Duration) {
+        self.update_metadata_elapsed += elapsed;
+    }
+}
+
 pub type GroupId = Uuid;
 
-#[allow(dead_code)]
 pub struct RepartitionGroupProcedure {
     state: Box<dyn State>,
     context: Context,
@@ -87,6 +174,8 @@ impl RepartitionGroupProcedure {
                 table_metadata_manager: context.table_metadata_manager.clone(),
                 mailbox: context.mailbox.clone(),
                 server_addr: context.server_addr.clone(),
+                start_time: Instant::now(),
+                volatile_ctx: VolatileContext::default(),
             },
         }
     }
@@ -113,6 +202,14 @@ impl Procedure for RepartitionGroupProcedure {
 
     async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
         let state = &mut self.state;
+        let state_name = state.name();
+        // Log state transition
+        common_telemetry::info!(
+            "Repartition group procedure executing state: {}, group id: {}, table id: {}",
+            state_name,
+            self.context.persistent_ctx.group_id,
+            self.context.persistent_ctx.table_id
+        );
 
         match state.next(&mut self.context, _ctx).await {
             Ok((next, status)) => {
@@ -167,6 +264,15 @@ pub struct Context {
     pub mailbox: MailboxRef,
 
     pub server_addr: String,
+
+    pub start_time: Instant,
+
+    pub volatile_ctx: VolatileContext,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct VolatileContext {
+    pub metrics: Metrics,
 }
 
 impl Context {
@@ -182,6 +288,8 @@ impl Context {
             table_metadata_manager: ddl_ctx.table_metadata_manager.clone(),
             mailbox,
             server_addr,
+            start_time: Instant::now(),
+            volatile_ctx: VolatileContext::default(),
         }
     }
 }
@@ -221,9 +329,19 @@ pub struct PersistentContext {
     /// The staging manifest paths of the repartition group.
     /// The value will be set in [RemapManifest](crate::procedure::repartition::group::remap_manifest::RemapManifest) state.
     pub staging_manifest_paths: HashMap<RegionId, String>,
+    /// Whether sync region is needed for this group.
+    pub sync_region: bool,
+    /// The region ids of the newly allocated regions.
+    pub allocated_region_ids: Vec<RegionId>,
+    /// The region ids of the regions that are pending deallocation.
+    pub pending_deallocate_region_ids: Vec<RegionId>,
+    /// The timeout for repartition operations.
+    #[serde(with = "humantime_serde")]
+    pub timeout: Duration,
 }
 
 impl PersistentContext {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         group_id: GroupId,
         table_id: TableId,
@@ -232,6 +350,10 @@ impl PersistentContext {
         sources: Vec<RegionDescriptor>,
         targets: Vec<RegionDescriptor>,
         region_mapping: HashMap<RegionId, Vec<RegionId>>,
+        sync_region: bool,
+        allocated_region_ids: Vec<RegionId>,
+        pending_deallocate_region_ids: Vec<RegionId>,
+        timeout: Duration,
     ) -> Self {
         Self {
             group_id,
@@ -243,6 +365,10 @@ impl PersistentContext {
             region_mapping,
             group_prepare_result: None,
             staging_manifest_paths: HashMap::new(),
+            sync_region,
+            allocated_region_ids,
+            pending_deallocate_region_ids,
+            timeout,
         }
     }
 
@@ -334,6 +460,7 @@ impl Context {
         new_region_routes: Vec<RegionRoute>,
     ) -> Result<()> {
         let table_id = self.persistent_ctx.table_id;
+        let group_id = self.persistent_ctx.group_id;
         // Safety: prepare result is set in [RepartitionStart] state.
         let prepare_result = self.persistent_ctx.group_prepare_result.as_ref().unwrap();
         let central_region_datanode_table_value = self
@@ -345,6 +472,10 @@ impl Context {
             ..
         } = &central_region_datanode_table_value.region_info;
 
+        info!(
+            "Updating table route for table: {}, group_id: {}, new region routes: {:?}",
+            table_id, group_id, new_region_routes
+        );
         self.table_metadata_manager
             .update_table_route(
                 table_id,
@@ -362,7 +493,44 @@ impl Context {
     ///
     /// If the next operation timeout is not set, it will return `None`.
     pub fn next_operation_timeout(&self) -> Option<Duration> {
-        Some(Duration::from_secs(10))
+        self.persistent_ctx
+            .timeout
+            .checked_sub(self.start_time.elapsed())
+    }
+
+    /// Updates the elapsed time of entering staging region.
+    pub fn update_enter_staging_region_elapsed(&mut self, elapsed: Duration) {
+        self.volatile_ctx
+            .metrics
+            .update_enter_staging_region_elapsed(elapsed);
+    }
+
+    /// Updates the elapsed time of flushing pending deallocate regions.
+    pub fn update_flush_pending_deallocate_regions_elapsed(&mut self, elapsed: Duration) {
+        self.volatile_ctx
+            .metrics
+            .update_flush_pending_deallocate_regions_elapsed(elapsed);
+    }
+
+    /// Updates the elapsed time of applying staging manifest.
+    pub fn update_apply_staging_manifest_elapsed(&mut self, elapsed: Duration) {
+        self.volatile_ctx
+            .metrics
+            .update_apply_staging_manifest_elapsed(elapsed);
+    }
+
+    /// Updates the elapsed time of remapping manifest.
+    pub fn update_remap_manifest_elapsed(&mut self, elapsed: Duration) {
+        self.volatile_ctx
+            .metrics
+            .update_remap_manifest_elapsed(elapsed);
+    }
+
+    /// Updates the elapsed time of updating metadata.
+    pub fn update_update_metadata_elapsed(&mut self, elapsed: Duration) {
+        self.volatile_ctx
+            .metrics
+            .update_update_metadata_elapsed(elapsed);
     }
 }
 

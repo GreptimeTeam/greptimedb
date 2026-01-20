@@ -271,7 +271,7 @@ pub fn sql_data_type_to_concrete_data_type(
             })?
             .map(|t| ConcreteDataType::timestamp_datatype(t.unit()))
             .unwrap_or(ConcreteDataType::timestamp_millisecond_datatype())),
-        SqlDataType::Interval => Ok(ConcreteDataType::interval_month_day_nano_datatype()),
+        SqlDataType::Interval { .. } => Ok(ConcreteDataType::interval_month_day_nano_datatype()),
         SqlDataType::Decimal(exact_info) => match exact_info {
             ExactNumberInfo::None => Ok(ConcreteDataType::decimal128_default_datatype()),
             // refer to https://dev.mysql.com/doc/refman/8.0/en/fixed-point-types.html
@@ -333,7 +333,7 @@ pub fn concrete_data_type_to_sql_data_type(data_type: &ConcreteDataType) -> Resu
         ConcreteDataType::Int8(_) => Ok(SqlDataType::TinyInt(None)),
         ConcreteDataType::UInt8(_) => Ok(SqlDataType::TinyIntUnsigned(None)),
         ConcreteDataType::String(_) => Ok(SqlDataType::String(None)),
-        ConcreteDataType::Float32(_) => Ok(SqlDataType::Float(None)),
+        ConcreteDataType::Float32(_) => Ok(SqlDataType::Float(ExactNumberInfo::None)),
         ConcreteDataType::Float64(_) => Ok(SqlDataType::Double(ExactNumberInfo::None)),
         ConcreteDataType::Boolean(_) => Ok(SqlDataType::Boolean),
         ConcreteDataType::Date(_) => Ok(SqlDataType::Date),
@@ -345,10 +345,13 @@ pub fn concrete_data_type_to_sql_data_type(data_type: &ConcreteDataType) -> Resu
             Some(time_type.precision()),
             TimezoneInfo::None,
         )),
-        ConcreteDataType::Interval(_) => Ok(SqlDataType::Interval),
+        ConcreteDataType::Interval(_) => Ok(SqlDataType::Interval {
+            fields: None,
+            precision: None,
+        }),
         ConcreteDataType::Binary(_) => Ok(SqlDataType::Varbinary(None)),
         ConcreteDataType::Decimal128(d) => Ok(SqlDataType::Decimal(
-            ExactNumberInfo::PrecisionAndScale(d.precision() as u64, d.scale() as u64),
+            ExactNumberInfo::PrecisionAndScale(d.precision() as u64, d.scale() as i64),
         )),
         ConcreteDataType::Json(_) => Ok(SqlDataType::JSON),
         ConcreteDataType::Vector(v) => Ok(SqlDataType::Custom(
@@ -412,7 +415,7 @@ mod tests {
             ConcreteDataType::string_datatype(),
         );
         check_type(
-            SqlDataType::Float(None),
+            SqlDataType::Float(ExactNumberInfo::None),
             ConcreteDataType::float32_datatype(),
         );
         check_type(
@@ -450,7 +453,10 @@ mod tests {
             ConcreteDataType::timestamp_microsecond_datatype(),
         );
         check_type(
-            SqlDataType::Interval,
+            SqlDataType::Interval {
+                fields: None,
+                precision: None,
+            },
             ConcreteDataType::interval_month_day_nano_datatype(),
         );
         check_type(SqlDataType::JSON, ConcreteDataType::json_datatype());

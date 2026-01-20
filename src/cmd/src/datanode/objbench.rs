@@ -35,6 +35,7 @@ use mito2::sst::parquet::reader::ParquetReaderBuilder;
 use mito2::sst::parquet::{PARQUET_METADATA_KEY, WriteOptions};
 use mito2::worker::write_cache_from_config;
 use object_store::ObjectStore;
+use parquet::file::metadata::{FooterTail, KeyValue};
 use regex::Regex;
 use snafu::OptionExt;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
@@ -463,7 +464,6 @@ fn extract_region_metadata(
     file_path: &str,
     meta: &parquet::file::metadata::ParquetMetaData,
 ) -> error::Result<RegionMetadataRef> {
-    use parquet::format::KeyValue;
     let kvs: Option<&Vec<KeyValue>> = meta.file_metadata().key_value_metadata();
     let Some(kvs) = kvs else {
         return Err(error::IllegalConfigSnafu {
@@ -608,7 +608,7 @@ async fn load_parquet_metadata(
     let buffer_len = buffer.len();
     let mut footer = [0; 8];
     footer.copy_from_slice(&buffer[buffer_len - FOOTER_SIZE..]);
-    let footer = ParquetMetaDataReader::decode_footer_tail(&footer)?;
+    let footer = FooterTail::try_new(&footer)?;
     let metadata_len = footer.metadata_length() as u64;
     if actual_size - (FOOTER_SIZE as u64) < metadata_len {
         return Err("invalid footer/metadata length".into());

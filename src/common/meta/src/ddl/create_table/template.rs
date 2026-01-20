@@ -20,7 +20,9 @@ use api::v1::region::{CreateRequest, RegionColumnDef};
 use api::v1::{ColumnDef, CreateTableExpr, SemanticType};
 use common_telemetry::warn;
 use snafu::{OptionExt, ResultExt};
-use store_api::metric_engine_consts::LOGICAL_TABLE_METADATA_KEY;
+use store_api::metric_engine_consts::{
+    LOGICAL_TABLE_METADATA_KEY, is_metric_engine_internal_column,
+};
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::{RawTableInfo, TableId};
 
@@ -30,34 +32,45 @@ use crate::wal_provider::prepare_wal_options;
 /// Constructs a [CreateRequest] based on the provided [RawTableInfo].
 ///
 /// Note: This function is primarily intended for creating logical tables or allocating placeholder regions.
-pub fn build_template_from_raw_table_info(raw_table_info: &RawTableInfo) -> Result<CreateRequest> {
+pub fn build_template_from_raw_table_info(
+    raw_table_info: &RawTableInfo,
+    skip_internal_columns: bool,
+) -> Result<CreateRequest> {
     let primary_key_indices = &raw_table_info.meta.primary_key_indices;
-    let column_defs = raw_table_info
+    let filtered = raw_table_info
         .meta
         .schema
         .column_schemas
         .iter()
         .enumerate()
+        .filter(|(_, c)| !skip_internal_columns || !is_metric_engine_internal_column(&c.name))
         .map(|(i, c)| {
             let is_primary_key = primary_key_indices.contains(&i);
             let column_def = try_as_column_def(c, is_primary_key)
                 .context(error::ConvertColumnDefSnafu { column: &c.name })?;
-
-            Ok(RegionColumnDef {
-                column_def: Some(column_def),
-                // The column id will be overridden by the metric engine.
-                // So we just use the index as the column id.
-                column_id: i as u32,
-            })
+            Ok((
+                is_primary_key.then_some(i),
+                RegionColumnDef {
+                    column_def: Some(column_def),
+                    // The column id will be overridden by the metric engine.
+                    // So we just use the index as the column id.
+                    column_id: i as u32,
+                },
+            ))
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<Result<Vec<(Option<usize>, RegionColumnDef)>>>()?;
 
+    let (new_primary_key_indices, column_defs): (Vec<_>, Vec<_>) = filtered.into_iter().unzip();
     let options = HashMap::from(&raw_table_info.meta.options);
     let template = CreateRequest {
         region_id: 0,
         engine: raw_table_info.meta.engine.clone(),
         column_defs,
-        primary_key: primary_key_indices.iter().map(|i| *i as u32).collect(),
+        primary_key: new_primary_key_indices
+            .iter()
+            .flatten()
+            .map(|i| *i as u32)
+            .collect(),
         path: String::new(),
         options,
         partition: None,

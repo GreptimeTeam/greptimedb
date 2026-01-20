@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use common_error::ext::BoxedError;
 use common_meta::rpc::router::RegionRoute;
-use common_telemetry::error;
+use common_telemetry::{error, info};
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{self, Result};
@@ -77,7 +77,6 @@ impl UpdateMetadata {
     /// - Source region not found.
     /// - Failed to update the table route.
     /// - Central region datanode table value not found.
-    #[allow(dead_code)]
     pub(crate) async fn apply_staging_regions(&self, ctx: &mut Context) -> Result<()> {
         let table_id = ctx.persistent_ctx.table_id;
         let group_id = ctx.persistent_ctx.group_id;
@@ -89,6 +88,13 @@ impl UpdateMetadata {
             &ctx.persistent_ctx.targets,
             region_routes,
         )?;
+
+        let source_count = ctx.persistent_ctx.sources.len();
+        let target_count = ctx.persistent_ctx.targets.len();
+        info!(
+            "Apply staging regions for repartition, table_id: {}, group_id: {}, sources: {}, targets: {}",
+            table_id, group_id, source_count, target_count
+        );
 
         if let Err(err) = ctx
             .update_table_route(&current_table_route_value, new_region_routes)

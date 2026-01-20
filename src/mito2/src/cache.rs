@@ -35,7 +35,7 @@ use index::result_cache::IndexResultCache;
 use moka::notification::RemovalCause;
 use moka::sync::Cache;
 use object_store::ObjectStore;
-use parquet::file::metadata::ParquetMetaData;
+use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData};
 use puffin::puffin_manager::cache::{PuffinMetadataCache, PuffinMetadataCacheRef};
 use store_api::storage::{ConcreteDataType, FileId, RegionId, TimeSeriesRowSelector};
 
@@ -85,13 +85,13 @@ impl CacheStrategy {
         &self,
         file_id: RegionFileId,
         metrics: &mut MetadataCacheMetrics,
+        page_index_policy: PageIndexPolicy,
     ) -> Option<Arc<ParquetMetaData>> {
         match self {
-            CacheStrategy::EnableAll(cache_manager) => {
-                cache_manager.get_parquet_meta_data(file_id, metrics).await
-            }
-            CacheStrategy::Compaction(cache_manager) => {
-                cache_manager.get_parquet_meta_data(file_id, metrics).await
+            CacheStrategy::EnableAll(cache_manager) | CacheStrategy::Compaction(cache_manager) => {
+                cache_manager
+                    .get_parquet_meta_data(file_id, metrics, page_index_policy)
+                    .await
             }
             CacheStrategy::Disabled => {
                 metrics.cache_miss += 1;
@@ -340,6 +340,7 @@ impl CacheManager {
         &self,
         file_id: RegionFileId,
         metrics: &mut MetadataCacheMetrics,
+        page_index_policy: PageIndexPolicy,
     ) -> Option<Arc<ParquetMetaData>> {
         // Try to get metadata from sst meta cache
         if let Some(metadata) = self.get_parquet_meta_data_from_mem_cache(file_id) {
@@ -350,7 +351,10 @@ impl CacheManager {
         // Try to get metadata from write cache
         let key = IndexKey::new(file_id.region_id(), file_id.file_id(), FileType::Parquet);
         if let Some(write_cache) = &self.write_cache
-            && let Some(metadata) = write_cache.file_cache().get_parquet_meta_data(key).await
+            && let Some(metadata) = write_cache
+                .file_cache()
+                .get_parquet_meta_data(key, metrics, page_index_policy)
+                .await
         {
             metrics.file_cache_hit += 1;
             let metadata = Arc::new(metadata);
@@ -890,7 +894,7 @@ mod tests {
         cache.put_parquet_meta_data(file_id, metadata);
         assert!(
             cache
-                .get_parquet_meta_data(file_id, &mut metrics)
+                .get_parquet_meta_data(file_id, &mut metrics, Default::default())
                 .await
                 .is_none()
         );
@@ -920,7 +924,7 @@ mod tests {
         let file_id = RegionFileId::new(region_id, FileId::random());
         assert!(
             cache
-                .get_parquet_meta_data(file_id, &mut metrics)
+                .get_parquet_meta_data(file_id, &mut metrics, Default::default())
                 .await
                 .is_none()
         );
@@ -928,14 +932,14 @@ mod tests {
         cache.put_parquet_meta_data(file_id, metadata);
         assert!(
             cache
-                .get_parquet_meta_data(file_id, &mut metrics)
+                .get_parquet_meta_data(file_id, &mut metrics, Default::default())
                 .await
                 .is_some()
         );
         cache.remove_parquet_meta_data(file_id);
         assert!(
             cache
-                .get_parquet_meta_data(file_id, &mut metrics)
+                .get_parquet_meta_data(file_id, &mut metrics, Default::default())
                 .await
                 .is_none()
         );

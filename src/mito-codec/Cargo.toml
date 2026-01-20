@@ -35,3 +35,8 @@ datafusion-expr.workspace = true
 name = "bench_sparse_encoding"
 harness = false
 required-features = ["testing"]
+
+[[bench]]
+name = "bench_primary_key_filter"
+harness = false
+required-features = ["testing"]

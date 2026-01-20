@@ -99,7 +99,8 @@ mod tests {
         assert!(matches!(rate.signature(),
                          Signature {
                              type_signature: TypeSignature::Uniform(2, valid_types),
-                             volatility: Volatility::Immutable
+                             volatility: Volatility::Immutable,
+                             ..
                          } if  valid_types == NUMERICS
         ));
         let values = vec![1.0, 3.0, 6.0];

@@ -413,6 +413,14 @@ pub enum Error {
         error: datatypes::arrow::error::ArrowError,
     },
 
+    #[snafu(display("Failed to evaluate partition filter"))]
+    EvalPartitionFilter {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: datafusion::error::DataFusionError,
+    },
+
     #[snafu(display("Failed to compute vector"))]
     ComputeVector {
         #[snafu(implicit)]
@@ -553,18 +561,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(
-        "Region {} is in {:?} state, expect: Leader or Leader(Downgrading)",
-        region_id,
-        state
-    ))]
-    FlushableRegionState {
-        region_id: RegionId,
-        state: RegionRoleState,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Invalid options"))]
     JsonOptions {
         #[snafu(source)]
@@ -599,14 +595,6 @@ pub enum Error {
         error: ArrowError,
         #[snafu(implicit)]
         location: Location,
-    },
-
-    #[snafu(display("Invalid file metadata"))]
-    ConvertMetaData {
-        #[snafu(implicit)]
-        location: Location,
-        #[snafu(source)]
-        error: parquet::errors::ParquetError,
     },
 
     #[snafu(display("Column not found, column: {column}"))]
@@ -1284,9 +1272,9 @@ impl ErrorExt for Error {
             | Join { .. }
             | WorkerStopped { .. }
             | Recv { .. }
-            | ConvertMetaData { .. }
             | DecodeWal { .. }
             | ComputeArrow { .. }
+            | EvalPartitionFilter { .. }
             | BiErrors { .. }
             | StopScheduler { .. }
             | ComputeVector { .. }
@@ -1321,7 +1309,6 @@ impl ErrorExt for Error {
             CompatReader { .. } => StatusCode::Unexpected,
             InvalidRegionRequest { source, .. } => source.status_code(),
             RegionState { .. } | UpdateManifest { .. } => StatusCode::RegionNotReady,
-            FlushableRegionState { .. } => StatusCode::RegionNotReady,
             JsonOptions { .. } => StatusCode::InvalidArguments,
             EmptyRegionDir { .. } | EmptyManifestDir { .. } => StatusCode::RegionNotFound,
             ArrowReader { .. } => StatusCode::StorageUnavailable,

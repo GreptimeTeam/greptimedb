@@ -31,6 +31,7 @@ mod flush_region;
 mod gc_worker;
 mod open_region;
 mod remap_manifest;
+mod sync_region;
 mod upgrade_region;
 
 use crate::heartbeat::handler::apply_staging_manifest::ApplyStagingManifestsHandler;
@@ -42,6 +43,7 @@ use crate::heartbeat::handler::flush_region::FlushRegionsHandler;
 use crate::heartbeat::handler::gc_worker::GcRegionsHandler;
 use crate::heartbeat::handler::open_region::OpenRegionsHandler;
 use crate::heartbeat::handler::remap_manifest::RemapManifestHandler;
+use crate::heartbeat::handler::sync_region::SyncRegionHandler;
 use crate::heartbeat::handler::upgrade_region::UpgradeRegionsHandler;
 use crate::heartbeat::task_tracker::TaskTracker;
 use crate::region_server::RegionServer;
@@ -132,6 +134,7 @@ impl RegionHeartbeatResponseHandler {
             Instruction::EnterStagingRegions(_) => {
                 Ok(Some(Box::new(EnterStagingRegionsHandler.into())))
             }
+            Instruction::SyncRegions(_) => Ok(Some(Box::new(SyncRegionHandler.into()))),
             Instruction::RemapManifest(_) => Ok(Some(Box::new(RemapManifestHandler.into()))),
             Instruction::ApplyStagingManifests(_) => {
                 Ok(Some(Box::new(ApplyStagingManifestsHandler.into())))
@@ -150,6 +153,7 @@ pub enum InstructionHandlers {
     GetFileRefs(GetFileRefsHandler),
     GcRegions(GcRegionsHandler),
     EnterStagingRegions(EnterStagingRegionsHandler),
+    SyncRegions(SyncRegionHandler),
     RemapManifest(RemapManifestHandler),
     ApplyStagingManifests(ApplyStagingManifestsHandler),
 }
@@ -175,6 +179,7 @@ impl_from_handler!(
     GetFileRefsHandler => GetFileRefs,
     GcRegionsHandler => GcRegions,
     EnterStagingRegionsHandler => EnterStagingRegions,
+    SyncRegionHandler => SyncRegions,
     RemapManifestHandler => RemapManifest,
     ApplyStagingManifestsHandler => ApplyStagingManifests
 );
@@ -222,6 +227,7 @@ dispatch_instr!(
     GetFileRefs => GetFileRefs,
     GcRegions => GcRegions,
     EnterStagingRegions => EnterStagingRegions,
+    SyncRegions => SyncRegions,
     RemapManifest => RemapManifest,
     ApplyStagingManifests => ApplyStagingManifests,
 );

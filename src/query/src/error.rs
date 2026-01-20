@@ -331,6 +331,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to get VECTOR index options"))]
+    GetVectorIndexOptions {
+        source: datatypes::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display(
         "Column schema mismatch in CTE {}, original: {:?}, expected: {:?}",
         cte_name,
@@ -424,6 +431,7 @@ impl ErrorExt for Error {
 
             GetFulltextOptions { source, .. }
             | GetSkippingIndexOptions { source, .. }
+            | GetVectorIndexOptions { source, .. }
             | Datatypes { source, .. } => source.status_code(),
         }
     }

@@ -39,3 +39,4 @@ snafu.workspace = true
 store-api.workspace = true
 table.workspace = true
 tokio.workspace = true
+url.workspace = true

@@ -42,12 +42,18 @@ where
         &mut self,
         region_id: RegionId,
     ) -> Result<AffectedRows> {
-        let region = self.regions.writable_non_staging_region(region_id)?;
+        let region = self.regions.writable_region(region_id)?;
 
         info!("Try to drop region: {}, worker: {}", region_id, self.id);
 
+        let is_staging = region.is_staging();
+        let expect_state = if is_staging {
+            RegionLeaderState::Staging
+        } else {
+            RegionLeaderState::Writable
+        };
         // Marks the region as dropping.
-        region.set_dropping()?;
+        region.set_dropping(expect_state)?;
         // Writes dropping marker
         // We rarely drop a region so we still operate in the worker loop.
         let region_dir = region.access_layer.build_region_dir(region_id);

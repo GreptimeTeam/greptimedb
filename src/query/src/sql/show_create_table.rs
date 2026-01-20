@@ -23,8 +23,11 @@ use datatypes::schema::{
     COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_BACKEND,
     COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE, COLUMN_FULLTEXT_OPT_KEY_FALSE_POSITIVE_RATE,
     COLUMN_FULLTEXT_OPT_KEY_GRANULARITY, COLUMN_SKIPPING_INDEX_OPT_KEY_FALSE_POSITIVE_RATE,
-    COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY, COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE, COMMENT_KEY,
-    ColumnDefaultConstraint, ColumnSchema, FulltextBackend, SchemaRef,
+    COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY, COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE,
+    COLUMN_VECTOR_INDEX_OPT_KEY_CONNECTIVITY, COLUMN_VECTOR_INDEX_OPT_KEY_ENGINE,
+    COLUMN_VECTOR_INDEX_OPT_KEY_EXPANSION_ADD, COLUMN_VECTOR_INDEX_OPT_KEY_EXPANSION_SEARCH,
+    COLUMN_VECTOR_INDEX_OPT_KEY_METRIC, COMMENT_KEY, ColumnDefaultConstraint, ColumnSchema,
+    FulltextBackend, SchemaRef,
 };
 use snafu::ResultExt;
 use sql::ast::{ColumnDef, ColumnOption, ColumnOptionDef, Expr, Ident, ObjectName};
@@ -41,7 +44,7 @@ use table::requests::{
 
 use crate::error::{
     ConvertSqlTypeSnafu, ConvertSqlValueSnafu, GetFulltextOptionsSnafu,
-    GetSkippingIndexOptionsSnafu, Result, SqlSnafu,
+    GetSkippingIndexOptionsSnafu, GetVectorIndexOptionsSnafu, Result, SqlSnafu,
 };
 
 /// Generates CREATE TABLE options from given table metadata and schema-level options.
@@ -166,6 +169,35 @@ fn create_column(column_schema: &ColumnSchema, quote_style: char) -> Result<Colu
         extensions.skipping_index_options = Some(map.into());
     }
 
+    if let Some(opt) = column_schema
+        .vector_index_options()
+        .context(GetVectorIndexOptionsSnafu)?
+    {
+        let map = HashMap::from([
+            (
+                COLUMN_VECTOR_INDEX_OPT_KEY_ENGINE.to_string(),
+                opt.engine.to_string(),
+            ),
+            (
+                COLUMN_VECTOR_INDEX_OPT_KEY_METRIC.to_string(),
+                opt.metric.to_string(),
+            ),
+            (
+                COLUMN_VECTOR_INDEX_OPT_KEY_CONNECTIVITY.to_string(),
+                opt.connectivity.to_string(),
+            ),
+            (
+                COLUMN_VECTOR_INDEX_OPT_KEY_EXPANSION_ADD.to_string(),
+                opt.expansion_add.to_string(),
+            ),
+            (
+                COLUMN_VECTOR_INDEX_OPT_KEY_EXPANSION_SEARCH.to_string(),
+                opt.expansion_search.to_string(),
+            ),
+        ]);
+        extensions.vector_index_options = Some(map.into());
+    }
+
     if column_schema.is_inverted_indexed() {
         extensions.inverted_index_options = Some(HashMap::new().into());
     }
@@ -284,7 +316,9 @@ mod tests {
 
     use common_time::timestamp::TimeUnit;
     use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::{FulltextOptions, Schema, SchemaRef, SkippingIndexOptions};
+    use datatypes::schema::{
+        FulltextOptions, Schema, SchemaRef, SkippingIndexOptions, VectorIndexOptions,
+    };
     use table::metadata::*;
     use table::requests::{
         FILE_TABLE_FORMAT_KEY, FILE_TABLE_LOCATION_KEY, FILE_TABLE_META_KEY, TableOptions,
@@ -310,6 +344,9 @@ mod tests {
                     enable: true,
                     ..Default::default()
                 })
+                .unwrap(),
+            ColumnSchema::new("embedding", ConcreteDataType::vector_datatype(4), true)
+                .with_vector_index_options(&VectorIndexOptions::default())
                 .unwrap(),
             ColumnSchema::new(
                 "ts",
@@ -373,6 +410,7 @@ CREATE TABLE IF NOT EXISTS "system_metrics" (
   "cpu" DOUBLE NULL,
   "disk" FLOAT NULL,
   "msg" STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', backend = 'bloom', case_sensitive = 'false', false_positive_rate = '0.01', granularity = '10240'),
+  "embedding" VECTOR(4) NULL VECTOR INDEX WITH(connectivity = '16', engine = 'usearch', expansion_add = '128', expansion_search = '64', metric = 'l2sq'),
   "ts" TIMESTAMP(3) NOT NULL DEFAULT current_timestamp(),
   TIME INDEX ("ts"),
   PRIMARY KEY ("id", "host")

@@ -170,10 +170,11 @@ impl Helper {
             ScalarValue::List(array) => {
                 let item_type = Arc::new(ConcreteDataType::try_from(&array.value_type())?);
                 let mut builder = ListVectorBuilder::with_type_capacity(item_type.clone(), 1);
-                let values = ScalarValue::convert_array_to_scalar_vec(array.as_ref())
-                    .context(ConvertArrowArrayToScalarsSnafu)?
+                let scalar_values = ScalarValue::convert_array_to_scalar_vec(array.as_ref())
+                    .context(ConvertArrowArrayToScalarsSnafu)?;
+                let values = scalar_values
                     .into_iter()
-                    .flatten()
+                    .flat_map(|v| v.unwrap_or_else(|| vec![ScalarValue::Null]))
                     .map(ScalarValue::try_into)
                     .collect::<Result<Vec<Value>>>()?;
                 builder.push(Some(ListValueRef::Ref {

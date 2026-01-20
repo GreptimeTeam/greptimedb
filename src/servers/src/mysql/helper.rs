@@ -13,8 +13,10 @@
 // limitations under the License.
 
 use std::ops::ControlFlow;
+use std::sync::Arc;
 use std::time::Duration;
 
+use arrow_schema::Field;
 use chrono::NaiveDate;
 use common_query::prelude::ScalarValue;
 use common_sql::convert::sql_value_to_value;
@@ -87,8 +89,8 @@ pub fn fix_placeholder_types(plan: &mut LogicalPlan) -> Result<()> {
     let give_placeholder_types = |mut e: datafusion_expr::Expr| {
         if let datafusion_expr::Expr::Cast(cast) = &mut e {
             if let datafusion_expr::Expr::Placeholder(ph) = &mut *cast.expr {
-                if ph.data_type.is_none() {
-                    ph.data_type = Some(cast.data_type.clone());
+                if ph.field.is_none() {
+                    ph.field = Some(Arc::new(Field::new("", cast.data_type.clone(), true)));
                     common_telemetry::debug!(
                         "give placeholder type {:?} to {:?}",
                         cast.data_type,

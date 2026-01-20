@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use common_error::ext::BoxedError;
 use common_meta::rpc::router::RegionRoute;
-use common_telemetry::error;
+use common_telemetry::{error, info};
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{self, Result};
@@ -29,7 +29,6 @@ impl UpdateMetadata {
     /// Abort:
     /// - Source region not found.
     /// - Target region not found.
-    #[allow(dead_code)]
     fn rollback_staging_region_routes(
         group_id: GroupId,
         source_routes: &[RegionRoute],
@@ -74,7 +73,6 @@ impl UpdateMetadata {
     /// - Target region not found.
     /// - Failed to update the table route.
     /// - Central region datanode table value not found.
-    #[allow(dead_code)]
     pub(crate) async fn rollback_staging_regions(&self, ctx: &mut Context) -> Result<()> {
         let table_id = ctx.persistent_ctx.table_id;
         let group_id = ctx.persistent_ctx.group_id;
@@ -88,6 +86,13 @@ impl UpdateMetadata {
             &prepare_result.target_routes,
             region_routes,
         )?;
+
+        let source_count = prepare_result.source_routes.len();
+        let target_count = prepare_result.target_routes.len();
+        info!(
+            "Rollback staging regions for repartition, table_id: {}, group_id: {}, sources: {}, targets: {}",
+            table_id, group_id, source_count, target_count
+        );
 
         if let Err(err) = ctx
             .update_table_route(&current_table_route_value, new_region_routes)

@@ -65,6 +65,8 @@ mod scan_test;
 #[cfg(test)]
 mod set_role_state_test;
 #[cfg(test)]
+mod skip_wal_test;
+#[cfg(test)]
 mod staging_test;
 #[cfg(test)]
 mod sync_test;
@@ -78,6 +80,8 @@ mod remap_manifests_test;
 
 #[cfg(test)]
 mod apply_staging_manifest_test;
+#[cfg(test)]
+mod partition_filter_test;
 mod puffin_index;
 
 use std::any::Any;
