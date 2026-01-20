@@ -78,7 +78,7 @@ pub fn filter_expired_rows(
     now: &Timestamp,
 ) -> (Vec<Row>, usize) {
     // Instant TTL should be handled separately (not by expiration logic)
-    assert_ne!(ttl, &TimeToLive::Instant);
+    debug_assert_ne!(ttl, &TimeToLive::Instant);
 
     let original_count = rows.len();
     let filtered_rows: Vec<Row> = rows
