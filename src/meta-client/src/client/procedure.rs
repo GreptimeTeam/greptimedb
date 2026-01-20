@@ -328,7 +328,7 @@ impl Inner {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use api::v1::meta::heartbeat_server::{Heartbeat, HeartbeatServer};
     use api::v1::meta::procedure_service_server::{ProcedureService, ProcedureServiceServer};
@@ -448,7 +448,7 @@ mod tests {
             leader_addr: addr_str.clone(),
         };
         let procedure = MockProcedure {
-            delay: Duration::from_secs(2),
+            delay: Duration::from_secs(4),
         };
 
         let server = tonic::transport::Server::builder()
@@ -481,7 +481,11 @@ mod tests {
         );
         request.timeout = Duration::from_secs(1);
 
+        let now = Instant::now();
         let err = client.submit_ddl_task(request).await.unwrap_err();
+        let elapsed = now.elapsed();
+        // The request should be cancelled within 1 second.
+        assert!(elapsed < Duration::from_secs(2));
         info!("err: {err:?}, code: {}", err.status_code());
         assert_eq!(err.status_code(), StatusCode::Cancelled);
         let err_msg = err.to_string();
