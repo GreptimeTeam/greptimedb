@@ -193,8 +193,10 @@ mod tests {
             .build()
             .unwrap();
 
-        let mut options = TableOptions::default();
-        options.ttl = ttl;
+        let options = TableOptions {
+            ttl,
+            ..Default::default()
+        };
 
         let meta = TableMetaBuilder::empty()
             .schema(Arc::new(schema))
