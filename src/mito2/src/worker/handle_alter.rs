@@ -230,22 +230,52 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         );
                     }
                 }
-                SetRegionOption::SkipWal(skip_wal) => {
+                SetRegionOption::SkipWal {
+                    skip_wal,
+                    wal_options,
+                } => {
                     info!(
-                        "Update region skip_wal: {}, previous: {:?} new: {}",
-                        region.region_id, current_options.wal_options, skip_wal
+                        "Update region skip_wal: {}, previous: {:?}, new: {}, original: {:?}",
+                        region.region_id,
+                        current_options.wal_options,
+                        skip_wal,
+                        current_options.original_wal_options
                     );
                     if skip_wal {
-                        // Disable WAL by setting to Noop
+                        // Save original wal_options before disabling WAL
+                        if !matches!(current_options.wal_options, WalOptions::Noop) {
+                            current_options.original_wal_options =
+                                Some(current_options.wal_options.clone());
+                        }
                         current_options.wal_options = WalOptions::Noop;
                     } else {
-                        // Enable WAL: restore to default (RaftEngine)
-                        // TODO: In distributed mode, this should be allocated by metasrv,
-                        // but for simplicity, we use RaftEngine as default here.
-                        // The actual WAL options will be persisted in metasrv.
-                        // We should read the correct WAL options from DatanodeTableValue
-                        // or pass them through the AlterRegionRequest.
-                        current_options.wal_options = WalOptions::RaftEngine;
+                        // Restore WAL options: priority order:
+                        // 1. Provided wal_options from request
+                        // 2. Saved original_wal_options
+                        // 3. Fallback to RaftEngine
+                        if let Some(opts) = wal_options {
+                            match serde_json::from_str(&opts) {
+                                Ok(restored) => current_options.wal_options = restored,
+                                Err(e) => {
+                                    warn!(
+                                        "Failed to parse wal_options '{}': {}, trying original",
+                                        opts, e
+                                    );
+                                    current_options.wal_options = current_options
+                                        .original_wal_options
+                                        .take()
+                                        .unwrap_or(WalOptions::RaftEngine);
+                                }
+                            }
+                        } else if let Some(original) = current_options.original_wal_options.take() {
+                            current_options.wal_options = original;
+                        } else {
+                            warn!(
+                                "No wal_options to restore for region {}, using RaftEngine",
+                                region.region_id
+                            );
+                            current_options.wal_options = WalOptions::RaftEngine;
+                        }
                     }
                 }
             }
@@ -283,11 +313,22 @@ fn new_region_options_on_empty_memtable(
 
                 current_options.sst_format = Some(new_format);
             }
-            SetRegionOption::SkipWal(skip_wal) => {
+            SetRegionOption::SkipWal {
+                skip_wal,
+                wal_options,
+            } => {
                 if *skip_wal {
+                    if !matches!(current_options.wal_options, WalOptions::Noop) {
+                        current_options.original_wal_options =
+                            Some(current_options.wal_options.clone());
+                    }
                     current_options.wal_options = WalOptions::Noop;
-                } else {
-                    current_options.wal_options = WalOptions::RaftEngine;
+                } else if let Some(opts) = wal_options {
+                    if let Ok(restored) = serde_json::from_str(opts) {
+                        current_options.wal_options = restored;
+                    }
+                } else if let Some(original) = current_options.original_wal_options.take() {
+                    current_options.wal_options = original;
                 }
             }
         }

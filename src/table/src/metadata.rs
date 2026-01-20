@@ -299,7 +299,7 @@ impl TableMeta {
                         .extra_options
                         .insert(SST_FORMAT_KEY.to_string(), value.clone());
                 }
-                SetRegionOption::SkipWal(skip_wal) => {
+                SetRegionOption::SkipWal { skip_wal, .. } => {
                     new_options.skip_wal = *skip_wal;
                 }
             }

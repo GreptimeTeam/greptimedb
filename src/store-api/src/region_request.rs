@@ -1298,8 +1298,14 @@ pub enum SetRegionOption {
     Twsc(String, String),
     // Modifying the SST format.
     Format(String),
-    // Modifying skip_wal option.
-    SkipWal(bool),
+    /// Modifying skip_wal option.
+    /// - `skip_wal`: whether to skip WAL writes.
+    /// - `wal_options`: the WAL options to restore when enabling WAL (skip_wal=false).
+    ///   This should be the serialized WalOptions from DatanodeTableValue.
+    SkipWal {
+        skip_wal: bool,
+        wal_options: Option<String>,
+    },
 }
 
 impl TryFrom<&PbOption> for SetRegionOption {
@@ -1322,7 +1328,11 @@ impl TryFrom<&PbOption> for SetRegionOption {
                 let skip_wal = value
                     .parse::<bool>()
                     .map_err(|_| InvalidSetRegionOptionRequestSnafu { key, value }.build())?;
-                Ok(Self::SkipWal(skip_wal))
+                // wal_options will be filled by the caller (metasrv) when needed
+                Ok(Self::SkipWal {
+                    skip_wal,
+                    wal_options: None,
+                })
             }
             _ => InvalidSetRegionOptionRequestSnafu { key, value }.fail(),
         }
@@ -1342,7 +1352,10 @@ impl From<&UnsetRegionOption> for SetRegionOption {
                 SetRegionOption::Twsc(unset_option.to_string(), String::new())
             }
             UnsetRegionOption::Ttl => SetRegionOption::Ttl(Default::default()),
-            UnsetRegionOption::SkipWal => SetRegionOption::SkipWal(false),
+            UnsetRegionOption::SkipWal => SetRegionOption::SkipWal {
+                skip_wal: false,
+                wal_options: None,
+            },
         }
     }
 }
