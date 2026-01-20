@@ -803,7 +803,9 @@ fn memtable_flat_sources(
             .sum();
         debug!(
             "Flushing multiple flat ranges, total_rows: {}, min_flush_rows: {}, num_ranges: {}",
-            total_rows, min_flush_rows, ranges.len()
+            total_rows,
+            min_flush_rows,
+            ranges.len()
         );
         let mut rows_remaining = total_rows;
         let mut last_iter_rows = 0;
@@ -831,7 +833,10 @@ fn memtable_flat_sources(
             {
                 debug!(
                     "Flush batch ready, rows: {}, min_rows: {}, num_iters: {}, remaining: {}",
-                    last_iter_rows, min_flush_rows, input_iters.len(), rows_remaining
+                    last_iter_rows,
+                    min_flush_rows,
+                    input_iters.len(),
+                    rows_remaining
                 );
 
                 // Calculate max_sequence from all merged ranges
@@ -861,7 +866,10 @@ fn memtable_flat_sources(
         if !input_iters.is_empty() {
             debug!(
                 "Flush remaining batch, rows: {}, min_rows: {}, num_iters: {}, remaining: {}",
-                last_iter_rows, min_flush_rows, input_iters.len(), rows_remaining
+                last_iter_rows,
+                min_flush_rows,
+                input_iters.len(),
+                rows_remaining
             );
             let max_sequence = current_ranges
                 .iter()

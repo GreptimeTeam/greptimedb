@@ -62,25 +62,29 @@ use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, DEFAULT_ROW_GROUP_SIZE};
 use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
 
 /// Default merge threshold for triggering compaction.
-const DEFAULT_MERGE_THRESHOLD: usize = 8;
+const DEFAULT_MERGE_THRESHOLD: usize = 16;
 
 /// Threshold for triggering merge of parts. Configurable via `GREPTIME_BULK_MERGE_THRESHOLD`.
 static MERGE_THRESHOLD: LazyLock<usize> =
     LazyLock::new(|| env_usize("GREPTIME_BULK_MERGE_THRESHOLD", DEFAULT_MERGE_THRESHOLD));
 
-/// Default row threshold multiplier for encoding (4 * DEFAULT_ROW_GROUP_SIZE).
-const DEFAULT_ENCODE_ROW_THRESHOLD_FACTOR: usize = 4;
+/// Default maximum number of groups for parallel merging.
+const DEFAULT_MAX_MERGE_GROUPS: usize = 16;
+
+/// Maximum merge groups. Configurable via `GREPTIME_BULK_MAX_MERGE_GROUPS`.
+static MAX_MERGE_GROUPS: LazyLock<usize> =
+    LazyLock::new(|| env_usize("GREPTIME_BULK_MAX_MERGE_GROUPS", DEFAULT_MAX_MERGE_GROUPS));
 
 /// Row threshold for encoding parts. Configurable via `GREPTIME_BULK_ENCODE_ROW_THRESHOLD`.
 /// When estimated rows exceed this threshold, parts are encoded as EncodedBulkPart.
 pub(crate) static ENCODE_ROW_THRESHOLD: LazyLock<usize> = LazyLock::new(|| {
     env_usize(
         "GREPTIME_BULK_ENCODE_ROW_THRESHOLD",
-        DEFAULT_ENCODE_ROW_THRESHOLD_FACTOR * DEFAULT_ROW_GROUP_SIZE,
+        8 * DEFAULT_ROW_GROUP_SIZE,
     )
 });
 
-/// Default bytes threshold for encoding (64MB).
+/// Default bytes threshold for encoding.
 const DEFAULT_ENCODE_BYTES_THRESHOLD: usize = 64 * 1024 * 1024;
 
 /// Bytes threshold for encoding parts. Configurable via `GREPTIME_BULK_ENCODE_BYTES_THRESHOLD`.
@@ -101,6 +105,8 @@ pub struct BulkMemtableConfig {
     pub encode_row_threshold: usize,
     /// Bytes threshold for encoding parts.
     pub encode_bytes_threshold: usize,
+    /// Maximum number of groups for parallel merging.
+    pub max_merge_groups: usize,
 }
 
 impl Default for BulkMemtableConfig {
@@ -109,6 +115,7 @@ impl Default for BulkMemtableConfig {
             merge_threshold: *MERGE_THRESHOLD,
             encode_row_threshold: *ENCODE_ROW_THRESHOLD,
             encode_bytes_threshold: *ENCODE_BYTES_THRESHOLD,
+            max_merge_groups: *MAX_MERGE_GROUPS,
         }
     }
 }
@@ -182,7 +189,11 @@ impl BulkParts {
     /// Collects unmerged parts and marks them as being merged.
     /// Only collects parts of types that meet the threshold.
     /// Parts are pre-grouped into chunks for parallel processing.
-    fn collect_parts_to_merge(&mut self, merge_threshold: usize) -> CollectedParts {
+    fn collect_parts_to_merge(
+        &mut self,
+        merge_threshold: usize,
+        max_merge_groups: usize,
+    ) -> CollectedParts {
         // First pass: collect indices and row counts for each type
         let mut bulk_indices: Vec<(usize, usize)> = Vec::new();
         let mut encoded_indices: Vec<(usize, usize)> = Vec::new();
@@ -203,12 +214,20 @@ impl BulkParts {
 
         // Process bulk parts if threshold met
         if bulk_indices.len() >= merge_threshold {
-            groups.extend(self.collect_and_group_parts(bulk_indices, merge_threshold));
+            groups.extend(self.collect_and_group_parts(
+                bulk_indices,
+                merge_threshold,
+                max_merge_groups,
+            ));
         }
 
         // Process encoded parts if threshold met
         if encoded_indices.len() >= merge_threshold {
-            groups.extend(self.collect_and_group_parts(encoded_indices, merge_threshold));
+            groups.extend(self.collect_and_group_parts(
+                encoded_indices,
+                merge_threshold,
+                max_merge_groups,
+            ));
         }
 
         CollectedParts { groups }
@@ -219,16 +238,19 @@ impl BulkParts {
         &mut self,
         mut indices: Vec<(usize, usize)>,
         merge_threshold: usize,
+        max_merge_groups: usize,
     ) -> Vec<Vec<PartToMerge>> {
+        if indices.is_empty() {
+            return Vec::new();
+        }
+
         // Sort by row count for better grouping
         indices.sort_unstable_by_key(|(_, num_rows)| *num_rows);
 
-        // Compute group size: total_parts / merge_threshold, clamped to [16, 64]
-        let group_size = (indices.len() / merge_threshold).clamp(16, 64);
-
-        // Group into chunks and collect parts
+        // Group into chunks of merge_threshold size, limit to max_merge_groups
         indices
-            .chunks(group_size)
+            .chunks(merge_threshold)
+            .take(max_merge_groups)
             .map(|chunk| {
                 chunk
                     .iter()
@@ -1037,7 +1059,7 @@ impl MemtableCompactor {
         let collected = bulk_parts
             .write()
             .unwrap()
-            .collect_parts_to_merge(self.config.merge_threshold);
+            .collect_parts_to_merge(self.config.merge_threshold, self.config.max_merge_groups);
 
         if collected.groups.is_empty() {
             return Ok(());
@@ -2111,7 +2133,8 @@ mod tests {
         assert!(bulk_parts.should_merge_parts(DEFAULT_MERGE_THRESHOLD));
 
         // Collect parts to merge
-        let collected = bulk_parts.collect_parts_to_merge(DEFAULT_MERGE_THRESHOLD);
+        let collected =
+            bulk_parts.collect_parts_to_merge(DEFAULT_MERGE_THRESHOLD, DEFAULT_MAX_MERGE_GROUPS);
 
         // Should have groups
         assert!(!collected.groups.is_empty());
