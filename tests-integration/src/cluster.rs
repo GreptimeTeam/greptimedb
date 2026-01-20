@@ -200,7 +200,7 @@ impl GreptimeDbClusterBuilder {
         guards: Vec<TestGuard>,
     ) -> GreptimeDbCluster {
         let datanodes = datanode_options.len();
-        let channel_config = ChannelConfig::new().timeout(Duration::from_secs(20));
+        let channel_config = ChannelConfig::new().timeout(Some(Duration::from_secs(20)));
         let datanode_clients = Arc::new(NodeClients::new(channel_config));
 
         let opt = MetasrvOptions {

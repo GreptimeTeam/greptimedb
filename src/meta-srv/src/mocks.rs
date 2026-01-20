@@ -131,7 +131,7 @@ pub async fn mock(
     });
 
     let config = ChannelConfig::new()
-        .timeout(Duration::from_secs(10))
+        .timeout(Some(Duration::from_secs(10)))
         .connect_timeout(Duration::from_secs(10))
         .tcp_nodelay(true);
     let channel_manager = ChannelManager::with_config(config, None);

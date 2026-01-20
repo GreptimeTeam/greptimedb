@@ -96,7 +96,7 @@ impl RepairLogicalTablesCommand {
         self.validate().map_err(BoxedError::new)?;
         let kv_backend = self.store.build().await?;
         let node_client_channel_config = ChannelConfig::new()
-            .timeout(Duration::from_secs(self.client_timeout_secs))
+            .timeout(Some(Duration::from_secs(self.client_timeout_secs)))
             .connect_timeout(Duration::from_secs(self.client_connect_timeout_secs));
         let node_manager = Arc::new(NodeClients::new(node_client_channel_config));
 

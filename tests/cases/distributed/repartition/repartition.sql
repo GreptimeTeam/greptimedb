@@ -47,6 +47,31 @@ ALTER TABLE alter_repartition_table REPARTITION (
 
 DROP TABLE alter_repartition_table;
 
+CREATE TABLE alter_repartition_table_with_options(
+  device_id INT,
+  area STRING,
+  ty STRING,
+  ts TIMESTAMP TIME INDEX,
+  PRIMARY KEY(device_id)
+) PARTITION ON COLUMNS (device_id, area) (
+  device_id < 100,
+  device_id >= 100 AND device_id < 200,
+  device_id >= 200
+);
+
+-- SQLNESS REPLACE ([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}) PROC_ID
+ALTER TABLE alter_repartition_table_with_options REPARTITION (
+  device_id < 100
+) INTO (
+  device_id < 100 AND area < 'South',
+  device_id < 100 AND area >= 'South'
+) WITH (
+  TIMEOUT = '5m',
+  WAIT = false
+);
+
+DROP TABLE alter_repartition_table_with_options;
+
 -- Metric engine repartition test
 CREATE TABLE metric_physical_table (
     ts TIMESTAMP TIME INDEX,

@@ -87,6 +87,7 @@ impl OptionValue {
                 | Value::HexStringLiteral(s) => Some(s),
                 Value::DollarQuotedString(s) => Some(&s.value),
                 Value::Number(s, _) => Some(s),
+                Value::Boolean(b) => Some(if *b { "true" } else { "false" }),
                 _ => None,
             },
             Expr::Identifier(ident) => Some(&ident.value),
@@ -94,6 +95,9 @@ impl OptionValue {
         }
     }
 
+    /// Convert the option value to a string.
+    ///
+    /// Notes: Not all values can be converted to a string, refer to [Self::expr_as_string] for more details.
     pub fn as_string(&self) -> Option<&str> {
         Self::expr_as_string(&self.0)
     }

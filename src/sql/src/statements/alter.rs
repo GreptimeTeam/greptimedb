@@ -25,17 +25,26 @@ use serde::Serialize;
 use sqlparser::ast::{ColumnDef, DataType, Expr, Ident, ObjectName, TableConstraint};
 use sqlparser_derive::{Visit, VisitMut};
 
+use crate::statements::OptionMap;
+
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct AlterTable {
     pub table_name: ObjectName,
     pub alter_operation: AlterTableOperation,
+    /// Table options in `WITH`. All keys are lowercase.
+    pub options: OptionMap,
 }
 
 impl AlterTable {
-    pub(crate) fn new(table_name: ObjectName, alter_operation: AlterTableOperation) -> Self {
+    pub(crate) fn new(
+        table_name: ObjectName,
+        alter_operation: AlterTableOperation,
+        options: OptionMap,
+    ) -> Self {
         Self {
             table_name,
             alter_operation,
+            options,
         }
     }
 
@@ -45,6 +54,10 @@ impl AlterTable {
 
     pub fn alter_operation(&self) -> &AlterTableOperation {
         &self.alter_operation
+    }
+
+    pub fn options(&self) -> &OptionMap {
+        &self.options
     }
 
     pub fn alter_operation_mut(&mut self) -> &mut AlterTableOperation {

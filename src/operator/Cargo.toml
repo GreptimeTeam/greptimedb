@@ -76,6 +76,7 @@ tonic.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+catalog = { workspace = true, features = ["testing"] }
 common-meta = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
 path-slash = "0.2"

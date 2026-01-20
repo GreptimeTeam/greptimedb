@@ -30,6 +30,7 @@ tonic.workspace = true
 datatypes.workspace = true
 futures.workspace = true
 meta-srv = { workspace = true, features = ["mock"] }
+session.workspace = true
 tower.workspace = true
 tracing = "0.1"
 tracing-subscriber.workspace = true
