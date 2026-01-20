@@ -38,9 +38,6 @@ impl<'a> Partitioner<'a> {
     ) -> Result<Vec<InsertRequest>> {
         let table_id = table_info.table_id();
 
-        // TTL filtering now happens after flownode mirroring in insert.rs
-        // This preserves instant TTL data for flownodes while filtering before datanode writes
-
         let requests = self
             .partition_manager
             .split_rows(table_info, rows)
@@ -58,7 +55,6 @@ impl<'a> Partitioner<'a> {
             .collect();
         Ok(requests)
     }
-
 
     pub async fn partition_delete_requests(
         &self,
@@ -85,7 +81,3 @@ impl<'a> Partitioner<'a> {
         Ok(requests)
     }
 }
-
-// TTL filtering tests have been moved to:
-// - src/operator/src/req_convert/common/ttl_filter.rs for core filtering logic
-// - Integration tests will verify TTL filtering happens after flownode mirroring

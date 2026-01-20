@@ -299,10 +299,9 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to filter TTL expired rows for table {}", table_name))]
-    TtlFilter {
-        table_name: String,
-        source: crate::req_convert::common::ttl_filter::Error,
+    #[snafu(display("Failed to check TTL expiration"))]
+    CheckTtl {
+        source: common_time::error::Error,
         #[snafu(implicit)]
         location: Location,
     },
@@ -1026,7 +1025,7 @@ impl ErrorExt for Error {
             | Error::SplitInsert { source, .. }
             | Error::SplitDelete { source, .. }
             | Error::FindRegionLeader { source, .. } => source.status_code(),
-            Error::TtlFilter { source, .. } => source.status_code(),
+            Error::CheckTtl { source, .. } => source.status_code(),
             Error::UnrecognizedTableOption { .. } => StatusCode::InvalidArguments,
             Error::ReadObject { .. }
             | Error::ReadParquetMetadata { .. }

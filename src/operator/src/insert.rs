@@ -75,6 +75,7 @@ use crate::region_req_factory::RegionRequestFactory;
 use crate::req_convert::common::preprocess_row_insert_requests;
 use crate::req_convert::insert::{
     ColumnToRow, RowToRegion, StatementToRegion, TableToRegion, fill_reqs_with_impure_default,
+    filter_normal_requests_by_ttl,
 };
 use crate::statement::StatementExecutor;
 
@@ -394,8 +395,7 @@ impl Inserter {
             instant_requests,
         } = requests;
 
-        // Mirror requests for source table to flownode asynchronously.
-        // This includes both normal AND instant TTL data for continuous queries.
+        // Mirror requests for source table to flownode asynchronously
         let flow_mirror_task = FlowMirrorTask::new(
             &self.table_flownode_set_cache,
             normal_requests
@@ -408,14 +408,11 @@ impl Inserter {
 
         // Filter expired rows from normal_requests AFTER flownode mirroring
         // but BEFORE datanode writes. Instant requests are already excluded from datanodes.
-        let normal_requests = crate::req_convert::insert::filter_normal_requests_by_ttl(
-            normal_requests,
-            table_infos,
-        )?;
+        let filtered_requests = filter_normal_requests_by_ttl(normal_requests, table_infos)?;
 
         // Write requests to datanode and wait for response
         let write_tasks = self
-            .group_requests_by_peer(normal_requests)
+            .group_requests_by_peer(filtered_requests)
             .await?
             .into_iter()
             .map(|(peer, inserts)| {
