@@ -142,11 +142,6 @@ struct PromPlannerContext {
     time_index_column: Option<String>,
     field_columns: Vec<String>,
     tag_columns: Vec<String>,
-    /// Tag columns required by parent operators.
-    ///
-    /// When set and `use_tsid` is enabled, the planner may prune tag columns early and only
-    /// materialize those in this set (plus columns required by selector filters).
-    required_tag_columns: Option<BTreeSet<String>>,
     /// Use metric engine internal series identifier column (`__tsid`) as series key.
     ///
     /// This is enabled only when the underlying scan can provide `__tsid` (`UInt64`). The planner
@@ -1658,22 +1653,7 @@ impl PromPlanner {
                 .is_some_and(|col| matches!(col.data_type, ConcreteDataType::UInt64(_)));
         self.ctx.use_tsid = use_tsid;
 
-        // `SeriesDivide`/`SeriesNormalize` can use `__tsid` as the series key, so we can prune tag
-        // columns early when the parent operators don't require them.
-        //
-        // We still need tag columns referenced by selector matchers to evaluate filters.
         let all_table_tags = self.ctx.tag_columns.clone();
-        if use_tsid && let Some(required_tag_columns) = &self.ctx.required_tag_columns {
-            let mut projected_tags = required_tag_columns
-                .iter()
-                .filter(|tag| !is_metric_engine_internal_column(tag.as_str()))
-                .filter(|tag| all_table_tags.iter().any(|col| col == *tag))
-                .cloned()
-                .collect::<Vec<_>>();
-            projected_tags.sort_unstable();
-            projected_tags.dedup();
-            self.ctx.tag_columns = projected_tags;
-        }
 
         let scan_tag_columns = if use_tsid {
             let mut scan_tags = self.ctx.tag_columns.clone();
