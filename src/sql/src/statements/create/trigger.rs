@@ -124,7 +124,7 @@ pub struct TriggerOn {
 
 impl Display for TriggerOn {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ON {} EVERY {}", self.query, self.query_interval)
+        write!(f, "ON ({}) EVERY {}", self.query, self.query_interval)
     }
 }
 
@@ -146,6 +146,7 @@ mod tests {
 
     use crate::dialect::GreptimeDbDialect;
     use crate::parser::{ParseOptions, ParserContext};
+    use crate::statements::create::SqlOrTql;
     use crate::statements::statement::Statement;
 
     #[test]
@@ -197,5 +198,34 @@ WEBHOOK alert_manager2 URL 'http://127.0.0.1:9093' WITH (timeout='1m')
             raw_expr: "".to_string(),
         };
         assert_eq!(duration_expr_no_raw.to_string(), "600 seconds");
+    }
+
+    #[test]
+    fn test_parse_trigger_with_tql_query() {
+        let sql = r#"CREATE TRIGGER cpu_monitor
+ON (TQL EVAL (now() - now(), now() - (now() - '10 seconds'::interval), '1s') cpu_usage_total)
+EVERY '5 minute'::INTERVAL
+NOTIFY(
+    WEBHOOK alert_manager URL 'http://127.0.0.1:9093' WITH (timeout='1m')
+)
+"#;
+
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, result.len());
+
+        let Statement::CreateTrigger(trigger) = &result[0] else {
+            panic!("Expected CreateTrigger statement");
+        };
+
+        match &trigger.trigger_on.query {
+            SqlOrTql::Tql(_, raw) => {
+                assert!(raw.contains("TQL EVAL"));
+                assert!(raw.ends_with("cpu_usage_total"));
+                assert!(!raw.trim_end().ends_with(')'));
+            }
+            _ => panic!("Expected TQL query in trigger"),
+        }
     }
 }

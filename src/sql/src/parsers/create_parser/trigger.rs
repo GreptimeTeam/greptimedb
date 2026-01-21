@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use snafu::{OptionExt, ResultExt, ensure};
+use sqlparser::ast::Query;
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::Parser;
 use sqlparser::tokenizer::Token;
@@ -8,13 +9,15 @@ use sqlparser::tokenizer::Token;
 use crate::error;
 use crate::error::Result;
 use crate::parser::ParserContext;
+use crate::parsers::tql_parser;
 use crate::parsers::utils::convert_month_day_nano_to_duration;
 use crate::statements::OptionMap;
+use crate::statements::create::SqlOrTql;
 use crate::statements::create::trigger::{
     AlertManagerWebhook, ChannelType, CreateTrigger, DurationExpr, NotifyChannel, TriggerOn,
 };
 use crate::statements::statement::Statement;
-use crate::util::parse_option_string;
+use crate::util::{location_to_index, parse_option_string};
 
 /// Some keywords about trigger.
 pub const ON: &str = "ON";
@@ -161,7 +164,7 @@ impl<'a> ParserContext<'a> {
             return self.expected("`(` after `ON`", self.parser.peek_token());
         }
 
-        let query = self.parse_sql_or_tql(true)?;
+        let query = self.parse_parenthesized_sql_or_tql(true)?;
 
         self.parser
             .expect_token(&Token::RParen)
@@ -204,6 +207,51 @@ impl<'a> ParserContext<'a> {
             query,
             query_interval,
         })
+    }
+
+    fn parse_parenthesized_sql_or_tql(&mut self, is_lparen_consumed: bool) -> Result<SqlOrTql> {
+        if !is_lparen_consumed {
+            self.parser
+                .expect_token(&Token::LParen)
+                .context(error::SyntaxSnafu)?;
+        }
+
+        if let Token::Word(w) = self.parser.peek_token().token
+            && w.keyword == Keyword::NoKeyword
+            && w.quote_style.is_none()
+            && w.value.to_uppercase() == tql_parser::TQL
+        {
+            let (tql, raw_query) = self.parse_parenthesized_tql(true, true, true)?;
+            Ok(SqlOrTql::Tql(tql, raw_query))
+        } else {
+            let (query, raw_query) = self.parse_parenthesized_sql(true)?;
+            Ok(SqlOrTql::Sql(query, raw_query))
+        }
+    }
+
+    fn parse_parenthesized_sql(&mut self, is_lparen_consumed: bool) -> Result<(Query, String)> {
+        if !is_lparen_consumed {
+            self.parser
+                .expect_token(&Token::LParen)
+                .context(error::SyntaxSnafu)?;
+        }
+
+        let start_loc = self.parser.peek_token().span.start;
+        let start_index = location_to_index(self.sql, &start_loc);
+
+        let sql_query = self.parser.parse_query().context(error::SyntaxSnafu)?;
+        let end_token = self.parser.peek_token();
+
+        let raw_sql = if end_token == Token::EOF {
+            &self.sql[start_index..]
+        } else if end_token == Token::RParen {
+            let end_index = location_to_index(self.sql, &end_token.span.start);
+            &self.sql[start_index..end_index.min(self.sql.len())]
+        } else {
+            let end_index = location_to_index(self.sql, &end_token.span.end);
+            &self.sql[start_index..end_index.min(self.sql.len())]
+        };
+        Ok((*sql_query, raw_sql.trim().to_string()))
     }
 
     pub(crate) fn parse_trigger_for(
@@ -521,6 +569,8 @@ impl<'a> ParserContext<'a> {
 mod tests {
     use std::time::Duration;
 
+    use sqlparser::tokenizer::Token;
+
     use super::*;
     use crate::dialect::GreptimeDbDialect;
     use crate::statements::create::trigger::ChannelType;
@@ -701,6 +751,32 @@ IF NOT EXISTS cpu_monitor
         let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
         let trigger_on = ctx.parse_trigger_on(false).unwrap();
         assert_eq!(trigger_on.query_interval.duration, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn test_parse_parenthesized_sql_or_tql_sql_branch() {
+        let sql = "(SELECT 1)";
+        let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
+        let parsed = ctx.parse_parenthesized_sql_or_tql(false).unwrap();
+        let expected = "SELECT 1";
+        match parsed {
+            SqlOrTql::Sql(_, raw) => assert_eq!(raw, expected),
+            _ => panic!("Expected SQL branch"),
+        }
+        assert_eq!(ctx.parser.peek_token().token, Token::RParen);
+    }
+
+    #[test]
+    fn test_parse_parenthesized_sql_or_tql_tql_branch() {
+        let sql = "(TQL EVAL (now() - now(), now(), '1s') cpu_usage)";
+        let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
+        let parsed = ctx.parse_parenthesized_sql_or_tql(false).unwrap();
+        let expected = "TQL EVAL (now() - now(), now(), '1s') cpu_usage";
+        match parsed {
+            SqlOrTql::Tql(_, raw) => assert_eq!(raw, expected),
+            _ => panic!("Expected TQL branch"),
+        }
+        assert_eq!(ctx.parser.peek_token().token, Token::RParen);
     }
 
     #[test]
