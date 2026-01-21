@@ -438,23 +438,27 @@ impl BatchingEngine {
             self.check_is_tql_table(&plan, &query_ctx).await?;
         }
 
-        let (column_name, time_window_expr, _, df_schema) = find_time_window_expr(
-            &plan,
-            self.query_engine.engine_state().catalog_manager().clone(),
-            query_ctx.clone(),
-        )
-        .await?;
-
-        let phy_expr = time_window_expr
-            .map(|expr| {
-                TimeWindowExpr::from_expr(
-                    &expr,
-                    &column_name,
-                    &df_schema,
-                    &self.query_engine.engine_state().session_state(),
-                )
-            })
-            .transpose()?;
+        let phy_expr = if !is_tql {
+            let (column_name, time_window_expr, _, df_schema) = find_time_window_expr(
+                &plan,
+                self.query_engine.engine_state().catalog_manager().clone(),
+                query_ctx.clone(),
+            )
+            .await?;
+            time_window_expr
+                .map(|expr| {
+                    TimeWindowExpr::from_expr(
+                        &expr,
+                        &column_name,
+                        &df_schema,
+                        &self.query_engine.engine_state().session_state(),
+                    )
+                })
+                .transpose()?
+        } else {
+            // tql control by `EVAL INTERVAL`, no need to find time window expr
+            None
+        };
 
         debug!(
             "Flow id={}, found time window expr={}",
