@@ -60,6 +60,7 @@ fn should_delete_file(
     is_in_tmp_ref: bool,
     is_linger: bool,
     is_eligible_for_delete: bool,
+    is_region_dropped: bool,
     _entry: &Entry,
     _unknown_file_may_linger_until: chrono::DateTime<chrono::Utc>,
 ) -> bool {
@@ -70,8 +71,7 @@ fn should_delete_file(
         && if is_known {
             is_eligible_for_delete
         } else {
-            // FIXME(discord9)
-            !is_in_tmp_ref
+            !is_in_tmp_ref && is_region_dropped
         }
 }
 
@@ -423,6 +423,8 @@ impl LocalGcWorker {
             Default::default()
         };
 
+        let is_region_dropped = region.is_none();
+
         let in_tmp_ref = tmp_ref_files
             .iter()
             .map(|file_ref| (file_ref.file_id, file_ref.index_version))
@@ -431,6 +433,7 @@ impl LocalGcWorker {
         let deletable_files = self
             .list_to_be_deleted_files(
                 region_id,
+                is_region_dropped,
                 &in_manifest,
                 &in_tmp_ref,
                 recently_removed_files,
@@ -669,8 +672,10 @@ impl LocalGcWorker {
         Ok(all_entries)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn filter_deletable_files(
         &self,
+        is_region_dropped: bool,
         entries: Vec<Entry>,
         in_manifest: &HashMap<FileId, Option<IndexVersion>>,
         in_tmp_ref: &HashSet<(FileId, Option<IndexVersion>)>,
@@ -731,6 +736,7 @@ impl LocalGcWorker {
                         is_in_tmp_ref,
                         is_linger,
                         is_eligible_for_delete,
+                        is_region_dropped,
                         &entry,
                         unknown_file_may_linger_until,
                     )
@@ -759,6 +765,7 @@ impl LocalGcWorker {
                         is_in_tmp_ref,
                         is_linger,
                         is_eligible_for_delete,
+                        is_region_dropped,
                         &entry,
                         unknown_file_may_linger_until,
                     )
@@ -794,6 +801,7 @@ impl LocalGcWorker {
     pub async fn list_to_be_deleted_files(
         &self,
         region_id: RegionId,
+        is_region_dropped: bool,
         in_manifest: &HashMap<FileId, Option<IndexVersion>>,
         in_tmp_ref: &HashSet<(FileId, Option<IndexVersion>)>,
         recently_removed_files: BTreeMap<Timestamp, HashSet<RemovedFile>>,
@@ -878,6 +886,7 @@ impl LocalGcWorker {
 
         // Step 3: Filter files to determine which ones can be deleted
         let all_unused_files_ready_for_delete = self.filter_deletable_files(
+            is_region_dropped,
             all_entries,
             in_manifest,
             in_tmp_ref,
