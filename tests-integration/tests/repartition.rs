@@ -60,12 +60,15 @@ pub async fn test_repartition_mito(store_type: StorageType) {
     let cluster_name = "test_repartition_mito";
     let (store_config, _guard) = get_test_store_config(&store_type);
     let datanodes = 3u64;
-    let home_dir = create_temp_dir("test_repartition_mito_data_home");
-    let builder = GreptimeDbClusterBuilder::new(cluster_name).await;
+    let mut builder = GreptimeDbClusterBuilder::new(cluster_name).await;
+    if matches!(store_type, StorageType::File) {
+        let home_dir = create_temp_dir("test_repartition_mito_data_home");
+        builder = builder.with_shared_home_dir(Arc::new(home_dir));
+    }
+
     let cluster = builder
         .with_datanodes(datanodes as u32)
         .with_store_config(store_config)
-        .with_shared_home_dir(Arc::new(home_dir))
         .with_datanode_wal_config(DatanodeWalConfig::Noop)
         .with_datanode_gc_config(GcConfig {
             enable: true,
@@ -304,12 +307,14 @@ pub async fn test_repartition_metric(store_type: StorageType) {
     let cluster_name = "test_repartition_metric";
     let (store_config, _guard) = get_test_store_config(&store_type);
     let datanodes = 3u64;
-    let home_dir = create_temp_dir("test_repartition_metric_data_home");
-    let builder = GreptimeDbClusterBuilder::new(cluster_name).await;
+    let mut builder = GreptimeDbClusterBuilder::new(cluster_name).await;
+    if matches!(store_type, StorageType::File) {
+        let home_dir = create_temp_dir("test_repartition_metric_data_home");
+        builder = builder.with_shared_home_dir(Arc::new(home_dir));
+    }
     let cluster = builder
         .with_datanodes(datanodes as u32)
         .with_store_config(store_config)
-        .with_shared_home_dir(Arc::new(home_dir))
         .with_datanode_wal_config(DatanodeWalConfig::Noop)
         .with_datanode_gc_config(GcConfig {
             enable: true,
