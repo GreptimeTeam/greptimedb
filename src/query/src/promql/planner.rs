@@ -182,6 +182,7 @@ impl PromPlannerContext {
     fn reset_table_name_and_schema(&mut self) {
         self.table_name = Some(String::new());
         self.schema_name = None;
+        self.use_tsid = false;
     }
 
     /// Check if `le` is present in tag columns
@@ -1673,10 +1674,8 @@ impl PromPlanner {
         if !is_time_index_ms {
             // cast to ms if time_index not in Millisecond precision
             let expr: Vec<_> = self
-                .ctx
-                .field_columns
-                .iter()
-                .map(|col| DfExpr::Column(Column::new(Some(scan_table_ref.clone()), col.clone())))
+                .create_field_column_exprs()?
+                .into_iter()
                 .chain(self.create_tag_column_exprs()?)
                 .chain(
                     self.ctx
