@@ -60,28 +60,18 @@ fn should_delete_file(
     is_in_tmp_ref: bool,
     is_linger: bool,
     is_eligible_for_delete: bool,
-    entry: &Entry,
-    unknown_file_may_linger_until: chrono::DateTime<chrono::Utc>,
+    _entry: &Entry,
+    _unknown_file_may_linger_until: chrono::DateTime<chrono::Utc>,
 ) -> bool {
     let is_known = is_linger || is_eligible_for_delete;
-
-    let is_unknown_linger_time_exceeded = || {
-        // if the file's expel time is unknown(because not appear in delta manifest), we keep it for a while
-        // using it's last modified time
-        // notice unknown files use a different lingering time
-        entry
-            .metadata()
-            .last_modified()
-            .map(|t| t < unknown_file_may_linger_until)
-            .unwrap_or(false)
-    };
 
     !is_in_manifest
         && !is_in_tmp_ref
         && if is_known {
             is_eligible_for_delete
         } else {
-            is_unknown_linger_time_exceeded()
+            // FIXME(discord9)
+            !is_in_tmp_ref
         }
 }
 

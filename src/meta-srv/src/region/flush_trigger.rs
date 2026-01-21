@@ -47,7 +47,7 @@ const RECENT_DURATION: Duration = Duration::from_secs(300);
 ///
 /// Variants:
 /// - `Tick`: This event is used to trigger region flush trigger periodically.
-pub(crate) enum Event {
+pub enum Event {
     Tick,
 }
 

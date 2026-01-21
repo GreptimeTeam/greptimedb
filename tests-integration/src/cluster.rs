@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::env;
 use std::net::TcpListener;
 use std::ops::RangeInclusive;
@@ -51,6 +51,7 @@ use frontend::frontend::{Frontend, FrontendOptions};
 use frontend::instance::Instance as FeInstance;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
+use futures::TryStreamExt;
 use hyper_util::rt::TokioIo;
 use meta_client::client::MetaClientBuilder;
 use meta_srv::cluster::MetaPeerClientRef;
@@ -89,6 +90,53 @@ pub struct GreptimeDbCluster {
 impl GreptimeDbCluster {
     pub fn fe_instance(&self) -> &Arc<FeInstance> {
         &self.frontend.instance
+    }
+
+    /// List all SST files from all datanodes.
+    pub async fn list_sst_files_from_all_datanodes(&self) -> BTreeSet<String> {
+        let mut sst_files = BTreeSet::new();
+
+        for datanode in self.datanode_instances.values() {
+            let region_server = datanode.region_server();
+            let mito = region_server.mito_engine().unwrap();
+            let all_files = mito
+                .all_ssts_from_storage()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|e| e.file_path)
+                .collect::<Vec<_>>();
+            sst_files.extend(all_files);
+        }
+
+        sst_files
+    }
+
+    /// List all SST files from the manifests of all datanodes.
+    pub async fn list_sst_files_from_manifests(&self) -> BTreeSet<String> {
+        let mut sst_files = BTreeSet::new();
+
+        for datanode in self.datanode_instances.values() {
+            let region_server = datanode.region_server();
+            let mito = region_server.mito_engine().unwrap();
+            let all_files = mito
+                .all_ssts_from_manifest()
+                .await
+                .into_iter()
+                .flat_map(|e| {
+                    if e.index_file_path.is_some() {
+                        vec![e.file_path, e.index_file_path.unwrap()]
+                    } else {
+                        vec![e.file_path]
+                    }
+                })
+                .collect::<BTreeSet<_>>();
+
+            sst_files.extend(all_files);
+        }
+
+        sst_files
     }
 }
 

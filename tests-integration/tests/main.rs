@@ -32,5 +32,7 @@ sql_tests!(File);
 
 region_migration_tests!(File);
 
-repartition_tests!(File, S3, S3WithCache, Oss, Azblob, Gcs);
+repartition_tests!(File);
+
+repartition_tests!(S3, S3WithCache, Oss, Azblob, Gcs);
 // TODO(niebayes): add integration tests for remote wal.

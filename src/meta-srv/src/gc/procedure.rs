@@ -274,14 +274,31 @@ impl BatchGcProcedure {
     /// Clean up region repartition info in kvbackend after GC
     /// according to cross reference in `FileRefsManifest`.
     async fn cleanup_region_repartition(&self) -> Result<()> {
-        for (src_region, dst_regions) in self.data.file_refs.cross_region_refs.iter() {
-            // TODO(discord9): batch update
+        let mut table_grouped: HashMap<TableId, HashMap<RegionId, HashSet<RegionId>>> =
+            HashMap::new();
+        for (src_region, dst_regions) in &self.data.file_refs.cross_region_refs {
+            table_grouped
+                .entry(src_region.table_id())
+                .or_default()
+                .entry(*src_region)
+                .or_default()
+                .extend(dst_regions.iter().copied());
+        }
+        for (table_id, region_mappings) in table_grouped {
+            let region_mapping = region_mappings
+                .iter()
+                .map(|(src_region, dst_regions)| {
+                    (*src_region, dst_regions.iter().cloned().collect_vec())
+                })
+                .collect::<HashMap<RegionId, Vec<RegionId>>>();
+
             self.table_metadata_manager
                 .table_repart_manager()
-                .update_mappings(*src_region, &dst_regions.iter().cloned().collect_vec())
+                .update_mappings(table_id, &region_mapping)
                 .await
                 .context(KvBackendSnafu)?;
         }
+
         Ok(())
     }
 

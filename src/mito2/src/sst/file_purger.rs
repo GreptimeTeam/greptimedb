@@ -16,6 +16,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use common_telemetry::error;
+use store_api::region_request::PathType;
 
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
@@ -97,12 +98,18 @@ pub fn should_enable_gc(
 ///
 pub fn create_file_purger(
     gc_enabled: bool,
+    path_type: PathType,
     scheduler: SchedulerRef,
     sst_layer: AccessLayerRef,
     cache_manager: Option<CacheManagerRef>,
     file_ref_manager: FileReferenceManagerRef,
 ) -> FilePurgerRef {
-    if should_enable_gc(gc_enabled, sst_layer.object_store().info().scheme()) {
+    // Only enable GC for:
+    // - object store based storage
+    // - data or bare path type (metadata region doesn't need to be GCed)
+    if should_enable_gc(gc_enabled, sst_layer.object_store().info().scheme())
+        && matches!(path_type, PathType::Data | PathType::Bare)
+    {
         Arc::new(ObjectStoreFilePurger { file_ref_manager })
     } else {
         Arc::new(LocalFilePurger::new(scheduler, sst_layer, cache_manager))

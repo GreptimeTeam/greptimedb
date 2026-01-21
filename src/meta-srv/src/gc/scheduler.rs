@@ -21,8 +21,8 @@ use common_meta::key::TableMetadataManagerRef;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::{error, info};
 use store_api::storage::GcReport;
-use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::{Mutex, oneshot};
 
 use crate::cluster::MetaPeerClientRef;
 use crate::define_ticker;
@@ -43,12 +43,13 @@ pub struct GcJobReport {
 ///
 /// Variants:
 /// - `Tick`: This event is used to trigger gc periodically.
-pub(crate) enum Event {
+pub enum Event {
     Tick,
+    Manually(oneshot::Sender<GcJobReport>),
 }
 
 #[allow(unused)]
-pub(crate) type GcTickerRef = Arc<GcTicker>;
+pub type GcTickerRef = Arc<GcTicker>;
 
 define_ticker!(
     /// [GcTicker] is used to trigger gc periodically.
@@ -118,8 +119,20 @@ impl GcScheduler {
                 Event::Tick => {
                     info!("Received gc tick");
                     if let Err(e) = self.handle_tick().await {
-                        error!("Failed to handle gc tick: {}", e);
+                        error!(e; "Failed to handle gc tick");
                     }
+                }
+                Event::Manually(sender) => {
+                    info!("Received manually gc request");
+                    match self.handle_tick().await {
+                        Ok(report) => {
+                            // ignore error
+                            let _ = sender.send(report);
+                        }
+                        Err(e) => {
+                            error!(e; "Failed to handle gc tick");
+                        }
+                    };
                 }
             }
         }

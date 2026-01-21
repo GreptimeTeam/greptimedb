@@ -13,7 +13,11 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::time::Duration;
 
+use client::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_meta::key::table_name::TableNameKey;
+use common_procedure::{ProcedureWithId, watcher};
 use common_query::Output;
 use common_telemetry::info;
 use common_test_util::recordbatch::check_output_stream;
@@ -21,11 +25,14 @@ use common_test_util::temp_dir::create_temp_dir;
 use common_wal::config::DatanodeWalConfig;
 use frontend::error::Result as FrontendResult;
 use frontend::instance::Instance;
+use meta_srv::gc::{self, BatchGcProcedure, GcSchedulerOptions};
+use meta_srv::metasrv::Metasrv;
 use mito2::gc::GcConfig;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{QueryContext, QueryContextRef};
 use tests_integration::cluster::GreptimeDbClusterBuilder;
 use tests_integration::test_util::{StorageType, get_test_store_config};
+use tokio::sync::oneshot;
 
 #[macro_export]
 macro_rules! repartition_tests {
@@ -56,6 +63,49 @@ macro_rules! repartition_tests {
     };
 }
 
+async fn trigger_table_gc(metasrv: &Arc<Metasrv>, table_name: &str) {
+    let table_metadata_manager = metasrv.table_metadata_manager();
+    let table_id = table_metadata_manager
+        .table_name_manager()
+        .get(TableNameKey::new(
+            DEFAULT_CATALOG_NAME,
+            DEFAULT_SCHEMA_NAME,
+            table_name,
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .table_id();
+    let (_, table_route_value) = table_metadata_manager
+        .table_route_manager()
+        .get_physical_table_route(table_id)
+        .await
+        .unwrap();
+    let region_ids = table_route_value
+        .region_routes
+        .iter()
+        .map(|r| r.region.id)
+        .collect::<Vec<_>>();
+    let procedure = BatchGcProcedure::new(
+        metasrv.mailbox().clone(),
+        metasrv.table_metadata_manager().clone(),
+        metasrv.options().grpc.server_addr.clone(),
+        region_ids.clone(),
+        false,                   // full_file_listing
+        Duration::from_secs(10), // timeout
+        Default::default(),
+    );
+
+    // Submit the procedure to the procedure manager
+    let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+    let mut watcher = metasrv
+        .procedure_manager()
+        .submit(procedure_with_id)
+        .await
+        .unwrap();
+    watcher::wait(&mut watcher).await.unwrap();
+}
+
 pub async fn test_repartition_mito(store_type: StorageType) {
     let cluster_name = "test_repartition_mito";
     let (store_config, _guard) = get_test_store_config(&store_type);
@@ -70,12 +120,19 @@ pub async fn test_repartition_mito(store_type: StorageType) {
         .with_datanodes(datanodes as u32)
         .with_store_config(store_config)
         .with_datanode_wal_config(DatanodeWalConfig::Noop)
+        .with_metasrv_gc_config(GcSchedulerOptions {
+            enable: true,
+            ..Default::default()
+        })
         .with_datanode_gc_config(GcConfig {
             enable: true,
+            lingering_time: Some(Duration::from_secs(0)),
+            unknown_file_lingering_time: Duration::from_secs(0),
             ..Default::default()
         })
         .build(true)
         .await;
+    let metasrv = &cluster.metasrv;
 
     let query_ctx = QueryContext::arc();
     let instance = cluster.fe_instance();
@@ -158,6 +215,37 @@ pub async fn test_repartition_mito(store_type: StorageType) {
 | 25 | Shanghai | 2022-01-01T00:00:00 |
 +----+----------+---------------------+";
     check_output_stream(result.data, expected).await;
+
+    // It should be ok, if we try to compact the table after split partition.
+    let compact_sql = "ADMIN COMPACT_TABLE('repartition_mito_table', 'swcs', '3600')";
+    let _result = run_sql(instance, compact_sql, query_ctx.clone())
+        .await
+        .unwrap();
+
+    // Should be no change after compact.
+    let result = run_sql(
+        instance,
+        "SELECT * FROM `repartition_mito_table` ORDER BY `id`",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    check_output_stream(result.data, expected).await;
+
+    // Trigger GC to clean up the compacted files.
+    trigger_table_gc(metasrv, "repartition_mito_table").await;
+    // Should be no change after GC.
+    let result = run_sql(
+        instance,
+        "SELECT * FROM `repartition_mito_table` ORDER BY `id`",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    check_output_stream(result.data, expected).await;
+    let sst_files_after_gc = cluster.list_sst_files_from_all_datanodes().await;
+    let sst_files_after_gc_manifests = cluster.list_sst_files_from_manifests().await;
+    assert_eq!(sst_files_after_gc, sst_files_after_gc_manifests);
 
     let result = run_sql(
         instance,
@@ -243,6 +331,42 @@ pub async fn test_repartition_mito(store_type: StorageType) {
 +----+----------+---------------------+";
     check_output_stream(result.data, expected_all).await;
 
+    // It should be ok, if we try to compact the table after merge partition.
+    let compact_sql = "ADMIN COMPACT_TABLE('repartition_mito_table', 'swcs', '3600')";
+    let _result = run_sql(instance, compact_sql, query_ctx.clone())
+        .await
+        .unwrap();
+
+    // Should be no change after compact.
+    let result = run_sql(
+        instance,
+        "SELECT * FROM `repartition_mito_table` ORDER BY `id`",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    check_output_stream(result.data, expected_all).await;
+
+    trigger_table_gc(metasrv, "repartition_mito_table").await;
+    // Trigger GC to clean up the compacted files.
+    let ticker = metasrv.gc_ticker().unwrap();
+    let (tx, rx) = oneshot::channel();
+    ticker.sender.send(gc::Event::Manually(tx)).await.unwrap();
+    let _ = rx.await.unwrap();
+
+    // // Should be no change after GC.
+    let result = run_sql(
+        instance,
+        "SELECT * FROM `repartition_mito_table` ORDER BY `id`",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    check_output_stream(result.data, expected_all).await;
+    let sst_files_after_gc = cluster.list_sst_files_from_all_datanodes().await;
+    let sst_files_after_gc_manifests = cluster.list_sst_files_from_manifests().await;
+    assert_eq!(sst_files_after_gc, sst_files_after_gc_manifests);
+
     let result = run_sql(
         instance,
         "SHOW CREATE TABLE `repartition_mito_table`",
@@ -316,12 +440,19 @@ pub async fn test_repartition_metric(store_type: StorageType) {
         .with_datanodes(datanodes as u32)
         .with_store_config(store_config)
         .with_datanode_wal_config(DatanodeWalConfig::Noop)
+        .with_metasrv_gc_config(GcSchedulerOptions {
+            enable: true,
+            ..Default::default()
+        })
         .with_datanode_gc_config(GcConfig {
             enable: true,
+            lingering_time: Some(Duration::from_secs(0)),
+            unknown_file_lingering_time: Duration::from_secs(0),
             ..Default::default()
         })
         .build(true)
         .await;
+    let metasrv = &cluster.metasrv;
 
     let query_ctx = QueryContext::arc();
     let instance = cluster.fe_instance();
@@ -370,6 +501,7 @@ pub async fn test_repartition_metric(store_type: StorageType) {
 +--------+---------------------+-----+";
     check_output_stream(result.data, expected).await;
 
+    // Split physical table partition
     let sql = r#"
         ALTER TABLE `repart_phy_metric` SPLIT PARTITION (
           `host` < 'm'
@@ -424,6 +556,37 @@ pub async fn test_repartition_metric(store_type: StorageType) {
 | z_host | 2022-01-01T00:00:00 | 2.0 |
 +--------+---------------------+-----+";
     check_output_stream(result.data, expected).await;
+
+    // It should be ok, if we try to compact the table after split partition.
+    let compact_sql = "ADMIN COMPACT_TABLE('repart_phy_metric', 'swcs', '3600')";
+    let _result = run_sql(instance, compact_sql, query_ctx.clone())
+        .await
+        .unwrap();
+
+    // Should be no change after compact.
+    let result = run_sql(
+        instance,
+        "SELECT * FROM `repart_log_metric` ORDER BY `host`",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    check_output_stream(result.data, expected).await;
+
+    // Trigger GC to clean up the compacted files.
+    trigger_table_gc(metasrv, "repart_phy_metric").await;
+    // Should be no change after GC.
+    let result = run_sql(
+        instance,
+        "SELECT * FROM `repart_log_metric` ORDER BY `host`",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    check_output_stream(result.data, expected).await;
+    let sst_files_after_gc = cluster.list_sst_files_from_all_datanodes().await;
+    let sst_files_after_gc_manifests = cluster.list_sst_files_from_manifests().await;
+    assert_eq!(sst_files_after_gc, sst_files_after_gc_manifests);
 
     let sql = r#"INSERT INTO `repart_log_metric` (`host`, `ts`, `val`) VALUES ('b_host', '2022-01-02 00:00:00', 3.0);"#;
     run_sql(instance, sql, query_ctx.clone()).await.unwrap();
@@ -499,6 +662,42 @@ pub async fn test_repartition_metric(store_type: StorageType) {
 | z_host | 2022-01-01T00:00:00 | 2.0 |
 +--------+---------------------+-----+";
     check_output_stream(result.data, expected).await;
+
+    // It should be ok, if we try to compact the table after split partition.
+    let compact_sql = "ADMIN COMPACT_TABLE('repart_phy_metric', 'swcs', '3600')";
+    let _result = run_sql(instance, compact_sql, query_ctx.clone())
+        .await
+        .unwrap();
+
+    // Should be no change after compact.
+    let result = run_sql(
+        instance,
+        "SELECT * FROM `repart_log_metric` ORDER BY `host`",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    check_output_stream(result.data, expected).await;
+
+    // Trigger GC to clean up the compacted files.
+    trigger_table_gc(metasrv, "repart_phy_metric").await;
+    // Trigger GC to clean up the compacted files.
+    let ticker = metasrv.gc_ticker().unwrap();
+    let (tx, rx) = oneshot::channel();
+    ticker.sender.send(gc::Event::Manually(tx)).await.unwrap();
+    let _ = rx.await.unwrap();
+    // Should be no change after GC.
+    let result = run_sql(
+        instance,
+        "SELECT * FROM `repart_log_metric` ORDER BY `host`",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    check_output_stream(result.data, expected).await;
+    let sst_files_after_gc = cluster.list_sst_files_from_all_datanodes().await;
+    let sst_files_after_gc_manifests = cluster.list_sst_files_from_manifests().await;
+    assert_eq!(sst_files_after_gc, sst_files_after_gc_manifests);
 
     let sql = r#"INSERT INTO `repart_log_metric` (`host`, `ts`, `val`) VALUES ('c_host', '2022-01-03 00:00:00', 5.0);"#;
     run_sql(instance, sql, query_ctx.clone()).await.unwrap();
