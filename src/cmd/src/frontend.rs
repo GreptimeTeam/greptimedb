@@ -414,6 +414,7 @@ impl StartCommand {
             client.clone(),
         ));
         plugins.insert::<InformationExtensionRef>(information_extension.clone());
+        plugins.insert::<MetaClientRef>(meta_client.clone());
 
         let process_manager = Arc::new(ProcessManager::new(
             addrs::resolve_addr(&opts.grpc.bind_addr, Some(&opts.grpc.server_addr)),
