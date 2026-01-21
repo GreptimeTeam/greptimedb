@@ -225,7 +225,6 @@ pub async fn test_repartition_mito(store_type: StorageType) {
     .await
     .unwrap();
 
-    // FIXME(weny): There are some data missing in the result.
     let expected_all = "\
 +----+----------+---------------------+
 | id | city     | ts                  |
@@ -236,6 +235,8 @@ pub async fn test_repartition_mito(store_type: StorageType) {
 | 7  | Split2   | 2022-01-02T00:00:00 |
 | 10 | Paris    | 2022-01-01T00:00:00 |
 | 15 | Tokyo    | 2022-01-01T00:00:00 |
+| 20 | Beijing  | 2022-01-01T00:00:00 |
+| 25 | Shanghai | 2022-01-01T00:00:00 |
 +----+----------+---------------------+";
     check_output_stream(result.data, expected_all).await;
 
@@ -410,7 +411,6 @@ pub async fn test_repartition_metric(store_type: StorageType) {
     )
     .await
     .unwrap();
-    // FIXME(weny): fix the result.
     let expected = "\
 +--------+---------------------+-----+
 | host   | ts                  | val |
