@@ -863,15 +863,8 @@ mod tests {
         let src = RegionId::new(1024, 1);
         let dst = vec![RegionId::new(1024, 2)];
 
-        // Try to update mappings on non-existent table
-        let region_mapping = HashMap::from([(src, dst.clone())]);
-        manager
-            .update_mappings(1024, &region_mapping)
-            .await
-            .unwrap();
-
         // Try to remove mappings on non-existent table
-        let region_mapping = HashMap::from([(src, dst)]);
+        let region_mapping = HashMap::from([(src, dst.clone())]);
         let result = manager.remove_mappings(1024, &region_mapping).await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
@@ -879,6 +872,13 @@ mod tests {
             err_msg.contains("Failed to find table repartition metadata for table id 1024"),
             "{err_msg}"
         );
+
+        // Try to update mappings on non-existent table
+        let region_mapping = HashMap::from([(src, dst)]);
+        manager
+            .update_mappings(1024, &region_mapping)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
