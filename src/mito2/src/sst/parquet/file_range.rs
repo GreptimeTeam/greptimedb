@@ -529,22 +529,10 @@ impl RangeBase {
 
         // Apply partition filter
         if let Some(partition_filter) = &self.partition_filter {
-            let partition_result = self
-                .build_record_batch_for_pruning(&mut input, &partition_filter.partition_schema)
-                .and_then(|record_batch| {
-                    self.evaluate_partition_filter(&record_batch, partition_filter)
-                });
-            match partition_result {
-                Ok(partition_mask) => {
-                    mask = mask.bitand(&partition_mask);
-                }
-                Err(err) => {
-                    // FIXME(yingwen): due to a known bug, if partition expr include field column, and this field column is not in projection
-                    // we will fail to evaluate partition filter since column is missing.
-                    // we had to overlook the error for now.
-                    error!(err; "Failed to evaluate partition filter, skip partition filtering");
-                }
-            }
+            let record_batch = self
+                .build_record_batch_for_pruning(&mut input, &partition_filter.partition_schema)?;
+            let partition_mask = self.evaluate_partition_filter(&record_batch, partition_filter)?;
+            mask = mask.bitand(&partition_mask);
         }
 
         if mask.count_set_bits() == 0 {
@@ -577,26 +565,13 @@ impl RangeBase {
 
         // Apply partition filter
         if let Some(partition_filter) = &self.partition_filter {
-            let partition_result = self
-                .project_record_batch_for_pruning_flat(
-                    &input,
-                    &partition_filter.partition_schema,
-                    &mut tag_decode_state,
-                )
-                .and_then(|record_batch| {
-                    self.evaluate_partition_filter(&record_batch, partition_filter)
-                });
-            match partition_result {
-                Ok(partition_mask) => {
-                    mask = mask.bitand(&partition_mask);
-                }
-                Err(err) => {
-                    // FIXME(yingwen): due to a known bug, if partition expr include field column, and this field column is not in projection
-                    // we will fail to evaluate partition filter since column is missing.
-                    // we had to overlook the error for now.
-                    error!(err; "Failed to evaluate partition filter, skip partition filtering");
-                }
-            }
+            let record_batch = self.project_record_batch_for_pruning_flat(
+                &input,
+                &partition_filter.partition_schema,
+                &mut tag_decode_state,
+            )?;
+            let partition_mask = self.evaluate_partition_filter(&record_batch, partition_filter)?;
+            mask = mask.bitand(&partition_mask);
         }
 
         if mask.count_set_bits() == 0 {

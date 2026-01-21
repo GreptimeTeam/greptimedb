@@ -50,6 +50,12 @@ fn range_expr(col_name: &str, start: i64, end: i64) -> PartitionExpr {
         .and(col(col_name).lt(Value::Int64(end)))
 }
 
+fn float_range_expr(col_name: &str, start: f64, end: f64) -> PartitionExpr {
+    col(col_name)
+        .gt_eq(Value::Float64(start.into()))
+        .and(col(col_name).lt(Value::Float64(end.into())))
+}
+
 #[tokio::test]
 async fn test_staging_state_integration() {
     test_staging_state_integration_with_format(false).await;
@@ -388,7 +394,7 @@ async fn test_staging_exit_success_with_manifests() {
 
 async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
-    let partition_expr = range_expr("field_0", 0, 100).as_json_str().unwrap();
+    let partition_expr = float_range_expr("field_0", 0., 100.).as_json_str().unwrap();
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
