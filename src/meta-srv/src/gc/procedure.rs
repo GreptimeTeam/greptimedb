@@ -284,6 +284,15 @@ impl BatchGcProcedure {
                 .or_default()
                 .extend(dst_regions.iter().copied());
         }
+        // make sure for files without cross-region refs but with tmp refs, we DO NOT clean up repartition key entry
+        // so that dropped regions can still keep their region ids here
+        for src_region in self.data.file_refs.file_refs.keys() {
+            table_grouped
+                .entry(src_region.table_id())
+                .or_default()
+                .entry(*src_region)
+                .or_default();
+        }
         for (table_id, region_mappings) in table_grouped {
             let region_mapping = region_mappings
                 .iter()
