@@ -152,7 +152,7 @@ etcd-client = { version = "0.17", features = [
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "7755821c27295f4ea34a52fab6f993a55d8f9377" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "c43ef59ffea3842877708c45ed48c3fa8b365fb5" }
 hex = "0.4"
 http = "1"
 humantime = "2.1"
