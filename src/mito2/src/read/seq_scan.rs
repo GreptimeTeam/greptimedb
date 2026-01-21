@@ -41,7 +41,7 @@ use crate::read::flat_dedup::{FlatDedupReader, FlatLastNonNull, FlatLastRow};
 use crate::read::flat_merge::FlatMergeReader;
 use crate::read::last_row::LastRowReader;
 use crate::read::merge::MergeReaderBuilder;
-use crate::read::range::{RangeBuilderList, RangeMeta};
+use crate::read::range::{RangeBuilderList, RangeMeta, file_range_counts};
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{
     PartitionMetrics, PartitionMetricsList, SplitRecordBatchStream, scan_file_ranges,
@@ -170,9 +170,15 @@ impl SeqScan {
         part_metrics: &PartitionMetrics,
     ) -> Result<BoxedBatchReader> {
         let mut sources = Vec::new();
-        let range_builder_list = Arc::new(RangeBuilderList::new(
+        let counts = file_range_counts(
             stream_ctx.input.num_memtables(),
             stream_ctx.input.num_files(),
+            &stream_ctx.ranges,
+            partition_ranges.iter(),
+        );
+        let range_builder_list = Arc::new(RangeBuilderList::new(
+            stream_ctx.input.num_memtables(),
+            counts,
         ));
         for part_range in partition_ranges {
             build_sources(
@@ -204,9 +210,15 @@ impl SeqScan {
         part_metrics: &PartitionMetrics,
     ) -> Result<BoxedRecordBatchStream> {
         let mut sources = Vec::new();
-        let range_builder_list = Arc::new(RangeBuilderList::new(
+        let counts = file_range_counts(
             stream_ctx.input.num_memtables(),
             stream_ctx.input.num_files(),
+            &stream_ctx.ranges,
+            partition_ranges.iter(),
+        );
+        let range_builder_list = Arc::new(RangeBuilderList::new(
+            stream_ctx.input.num_memtables(),
+            counts,
         ));
         for part_range in partition_ranges {
             build_flat_sources(
@@ -414,9 +426,15 @@ impl SeqScan {
             // build part cost.
             let mut fetch_start = Instant::now();
 
-            let range_builder_list = Arc::new(RangeBuilderList::new(
+            let counts = file_range_counts(
                 stream_ctx.input.num_memtables(),
                 stream_ctx.input.num_files(),
+                &stream_ctx.ranges,
+                partition_ranges.iter(),
+            );
+            let range_builder_list = Arc::new(RangeBuilderList::new(
+                stream_ctx.input.num_memtables(),
+                counts,
             ));
             let _mapper = stream_ctx.input.mapper.as_primary_key().context(UnexpectedSnafu {
                 reason: "Unexpected format",
@@ -529,9 +547,15 @@ impl SeqScan {
             // build part cost.
             let mut fetch_start = Instant::now();
 
-            let range_builder_list = Arc::new(RangeBuilderList::new(
+            let counts = file_range_counts(
                 stream_ctx.input.num_memtables(),
                 stream_ctx.input.num_files(),
+                &stream_ctx.ranges,
+                partition_ranges.iter(),
+            );
+            let range_builder_list = Arc::new(RangeBuilderList::new(
+                stream_ctx.input.num_memtables(),
+                counts,
             ));
             // Scans each part.
             for part_range in partition_ranges {

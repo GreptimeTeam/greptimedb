@@ -225,6 +225,15 @@ pub(crate) struct ScanMetricsSet {
     metadata_cache_metrics: Option<MetadataCacheMetrics>,
     /// Per-file scan metrics, only populated when explain_verbose is true.
     per_file_metrics: Option<HashMap<RegionFileId, FileScanMetrics>>,
+
+    /// Current memory usage for file range builders.
+    build_ranges_mem_size: isize,
+    /// Peak memory usage for file range builders.
+    build_ranges_peak_mem_size: isize,
+    /// Current number of file range builders.
+    num_range_builders: isize,
+    /// Peak number of file range builders.
+    num_peak_range_builders: isize,
 }
 
 /// Wrapper for file metrics that compares by total cost in reverse order.
@@ -313,6 +322,10 @@ impl fmt::Debug for ScanMetricsSet {
             fetch_metrics,
             metadata_cache_metrics,
             per_file_metrics,
+            build_ranges_mem_size: _,
+            build_ranges_peak_mem_size,
+            num_range_builders: _,
+            num_peak_range_builders,
         } = self;
 
         // Write core metrics
@@ -534,7 +547,12 @@ impl fmt::Debug for ScanMetricsSet {
             write!(f, "}}")?;
         }
 
-        write!(f, ", \"stream_eof\":{stream_eof}}}")
+        write!(
+            f,
+            ", \"build_ranges_peak_mem_size\":{build_ranges_peak_mem_size}, \
+             \"num_peak_range_builders\":{num_peak_range_builders}, \
+             \"stream_eof\":{stream_eof}}}"
+        )
     }
 }
 impl ScanMetricsSet {
@@ -599,6 +617,8 @@ impl ScanMetricsSet {
             scan_cost,
             metadata_cache_metrics,
             fetch_metrics,
+            metadata_mem_size,
+            num_range_builders,
         } = other;
 
         self.build_parts_cost += *build_cost;
@@ -653,6 +673,18 @@ impl ScanMetricsSet {
         self.metadata_cache_metrics
             .get_or_insert_with(MetadataCacheMetrics::default)
             .merge_from(metadata_cache_metrics);
+
+        // Track memory usage and update peak.
+        self.build_ranges_mem_size += *metadata_mem_size;
+        if self.build_ranges_mem_size > self.build_ranges_peak_mem_size {
+            self.build_ranges_peak_mem_size = self.build_ranges_mem_size;
+        }
+
+        // Track number of builders and update peak.
+        self.num_range_builders += *num_range_builders;
+        if self.num_range_builders > self.num_peak_range_builders {
+            self.num_peak_range_builders = self.num_range_builders;
+        }
     }
 
     /// Merges per-file metrics.

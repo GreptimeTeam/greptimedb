@@ -440,6 +440,17 @@ impl FileRangeBuilder {
             );
         }
     }
+
+    /// Returns the estimated memory size of this builder.
+    pub(crate) fn memory_size(&self) -> usize {
+        let context_size = self
+            .context
+            .as_ref()
+            .map(|ctx| ctx.memory_size())
+            .unwrap_or(0);
+        let selection_size = self.selection.mem_usage();
+        context_size + selection_size
+    }
 }
 
 /// Builder to create mem ranges.
@@ -472,21 +483,68 @@ impl MemRangeBuilder {
     }
 }
 
+/// Computes the number of ranges that reference each file.
+///
+/// # Arguments
+/// * `num_memtables` - Number of memtables
+/// * `num_files` - Number of files
+/// * `ranges` - All range metadata from StreamContext
+/// * `part_ranges` - Iterator of partition ranges to scan
+pub(crate) fn file_range_counts<'a>(
+    num_memtables: usize,
+    num_files: usize,
+    ranges: &[RangeMeta],
+    part_ranges: impl Iterator<Item = &'a PartitionRange>,
+) -> Vec<usize> {
+    let mut counts = vec![0usize; num_files];
+    for part_range in part_ranges {
+        let range_meta = &ranges[part_range.identifier];
+        for row_group_index in &range_meta.row_group_indices {
+            if row_group_index.index >= num_memtables {
+                let file_index = row_group_index.index - num_memtables;
+                if file_index < num_files {
+                    counts[file_index] += 1;
+                }
+            }
+        }
+    }
+    counts
+}
+
+/// Entry for a file builder with its remaining range count.
+struct FileBuilderEntry {
+    /// The builder for the file. None if not yet built or already cleared.
+    builder: Option<Arc<FileRangeBuilder>>,
+    /// Number of remaining ranges to scan for this file.
+    remaining_ranges: usize,
+}
+
 /// List to manages the builders to create file ranges.
 /// Each scan partition should have its own list. Mutex inside this list is used to allow moving
 /// the list to different streams in the same partition.
 pub(crate) struct RangeBuilderList {
     num_memtables: usize,
-    file_builders: Mutex<Vec<Option<Arc<FileRangeBuilder>>>>,
+    file_entries: Mutex<Vec<FileBuilderEntry>>,
 }
 
 impl RangeBuilderList {
-    /// Creates a new [ReaderBuilderList] with the given number of memtables and files.
-    pub(crate) fn new(num_memtables: usize, num_files: usize) -> Self {
-        let file_builders = (0..num_files).map(|_| None).collect();
+    /// Creates a new [RangeBuilderList] with pre-computed file range counts.
+    ///
+    /// # Arguments
+    /// * `num_memtables` - Number of memtables
+    /// * `file_range_counts` - Pre-computed counts of ranges per file
+    pub(crate) fn new(num_memtables: usize, file_range_counts: Vec<usize>) -> Self {
+        let file_entries = file_range_counts
+            .into_iter()
+            .map(|count| FileBuilderEntry {
+                builder: None,
+                remaining_ranges: count,
+            })
+            .collect();
+
         Self {
             num_memtables,
-            file_builders: Mutex::new(file_builders),
+            file_entries: Mutex::new(file_entries),
         }
     }
 
@@ -506,20 +564,49 @@ impl RangeBuilderList {
                 let file = &input.files[file_index];
                 let builder = input.prune_file(file, reader_metrics).await?;
                 builder.build_ranges(index.row_group_index, &mut ranges);
+
+                // Record memory size and count of newly built builder.
+                reader_metrics.metadata_mem_size += builder.memory_size() as isize;
+                reader_metrics.num_range_builders += 1;
+
                 self.set_file_builder(file_index, Arc::new(builder));
             }
         }
+
+        // Decrement remaining count and auto-clear if all ranges are scanned
+        self.decrement_and_maybe_clear(file_index, reader_metrics);
+
         Ok(ranges)
     }
 
-    fn get_file_builder(&self, index: usize) -> Option<Arc<FileRangeBuilder>> {
-        let file_builders = self.file_builders.lock().unwrap();
-        file_builders[index].clone()
+    fn get_file_builder(&self, file_index: usize) -> Option<Arc<FileRangeBuilder>> {
+        let entries = self.file_entries.lock().unwrap();
+        entries
+            .get(file_index)
+            .and_then(|entry| entry.builder.clone())
     }
 
-    fn set_file_builder(&self, index: usize, builder: Arc<FileRangeBuilder>) {
-        let mut file_builders = self.file_builders.lock().unwrap();
-        file_builders[index] = Some(builder);
+    fn set_file_builder(&self, file_index: usize, builder: Arc<FileRangeBuilder>) {
+        let mut entries = self.file_entries.lock().unwrap();
+        if let Some(entry) = entries.get_mut(file_index) {
+            entry.builder = Some(builder);
+        }
+    }
+
+    /// Decrements the remaining range count for a file and clears the builder if done.
+    fn decrement_and_maybe_clear(&self, file_index: usize, reader_metrics: &mut ReaderMetrics) {
+        let mut entries = self.file_entries.lock().unwrap();
+        if let Some(entry) = entries.get_mut(file_index)
+            && entry.remaining_ranges > 0
+        {
+            entry.remaining_ranges -= 1;
+            if entry.remaining_ranges == 0
+                && let Some(builder) = entry.builder.take()
+            {
+                reader_metrics.metadata_mem_size -= builder.memory_size() as isize;
+                reader_metrics.num_range_builders -= 1;
+            }
+        }
     }
 }
 

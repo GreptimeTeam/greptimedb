@@ -363,6 +363,12 @@ impl FileRangeContext {
         let metadata = self.reader_builder.parquet_metadata();
         row_group_contains_delete(metadata, row_group_index, self.reader_builder.file_path())
     }
+
+    /// Returns the estimated memory size of this context.
+    /// Mainly accounts for the parquet metadata size.
+    pub(crate) fn memory_size(&self) -> usize {
+        crate::cache::cache_size::parquet_meta_size(self.reader_builder.parquet_metadata())
+    }
 }
 
 /// Mode to pre-filter columns in a range.
