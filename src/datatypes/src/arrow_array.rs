@@ -158,6 +158,40 @@ pub fn string_array_value_at_index(array: &ArrayRef, i: usize) -> Option<&str> {
     }
 }
 
+/// Get the string value at index `i` for `Utf8`, `LargeUtf8`, or `Utf8View` arrays.
+///
+/// Note: This method does not check for nulls and the value is arbitrary
+/// if [`is_null`](arrow::array::Array::is_null) returns true for the index.
+///
+/// # Panics
+/// 1. if index `i` is out of bounds;
+/// 2. or the array is not a string type.
+pub fn string_array_value(array: &ArrayRef, i: usize) -> &str {
+    match array.data_type() {
+        DataType::Utf8 => array.as_string::<i32>().value(i),
+        DataType::LargeUtf8 => array.as_string::<i64>().value(i),
+        DataType::Utf8View => array.as_string_view().value(i),
+        _ => unreachable!(),
+    }
+}
+
+/// Get the binary value at index `i` for `Binary`, `LargeBinary`, or `BinaryView` arrays.
+///
+/// Note: This method does not check for nulls and the value is arbitrary
+/// if [`is_null`](arrow::array::Array::is_null) returns true for the index.
+///
+/// # Panics
+/// 1. if index `i` is out of bounds;
+/// 2. or the array is not a binary type.
+pub fn binary_array_value(array: &ArrayRef, i: usize) -> &[u8] {
+    match array.data_type() {
+        DataType::Binary => array.as_binary::<i32>().value(i),
+        DataType::LargeBinary => array.as_binary::<i64>().value(i),
+        DataType::BinaryView => array.as_binary_view().value(i),
+        _ => unreachable!(),
+    }
+}
+
 /// Get the integer value (`i64`) at index `i` for any integer array.
 ///
 /// Returns `None` when:

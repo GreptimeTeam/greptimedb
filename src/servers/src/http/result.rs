@@ -175,34 +175,12 @@ impl HttpOutputWriter {
                         let v = array.value(i);
                         self.write_value(v)?;
                     }
-                    DataType::Utf8 => {
-                        let array = array.as_string::<i32>();
-                        let v = array.value(i);
+                    DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => {
+                        let v = datatypes::arrow_array::string_array_value(array, i);
                         self.write_value(v)?;
                     }
-                    DataType::LargeUtf8 => {
-                        let array = array.as_string::<i64>();
-                        let v = array.value(i);
-                        self.write_value(v)?;
-                    }
-                    DataType::Utf8View => {
-                        let array = array.as_string_view();
-                        let v = array.value(i);
-                        self.write_value(v)?;
-                    }
-                    DataType::Binary => {
-                        let array = array.as_binary::<i32>();
-                        let v = array.value(i);
-                        self.write_bytes(v, &schema.data_type)?;
-                    }
-                    DataType::LargeBinary => {
-                        let array = array.as_binary::<i64>();
-                        let v = array.value(i);
-                        self.write_bytes(v, &schema.data_type)?;
-                    }
-                    DataType::BinaryView => {
-                        let array = array.as_binary_view();
-                        let v = array.value(i);
+                    DataType::Binary | DataType::LargeBinary | DataType::BinaryView => {
+                        let v = datatypes::arrow_array::binary_array_value(array, i);
                         self.write_bytes(v, &schema.data_type)?;
                     }
                     DataType::Date32 => {

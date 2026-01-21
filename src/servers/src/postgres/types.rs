@@ -500,44 +500,12 @@ impl RecordBatchRowIterator {
                     let array = column.as_primitive::<Float64Type>();
                     encoder.encode_field(&array.value(i))?;
                 }
-                DataType::Utf8 => {
-                    let array = column.as_string::<i32>();
-                    let value = array.value(i);
+                DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => {
+                    let value = datatypes::arrow_array::string_array_value(column, i);
                     encoder.encode_field(&value)?;
                 }
-                DataType::Utf8View => {
-                    let array = column.as_string_view();
-                    let value = array.value(i);
-                    encoder.encode_field(&value)?;
-                }
-                DataType::LargeUtf8 => {
-                    let array = column.as_string::<i64>();
-                    let value = array.value(i);
-                    encoder.encode_field(&value)?;
-                }
-                DataType::Binary => {
-                    let array = column.as_binary::<i32>();
-                    let v = array.value(i);
-                    encode_bytes(
-                        &self.schema.column_schemas()[j],
-                        v,
-                        encoder,
-                        &self.query_ctx,
-                    )?;
-                }
-                DataType::BinaryView => {
-                    let array = column.as_binary_view();
-                    let v = array.value(i);
-                    encode_bytes(
-                        &self.schema.column_schemas()[j],
-                        v,
-                        encoder,
-                        &self.query_ctx,
-                    )?;
-                }
-                DataType::LargeBinary => {
-                    let array = column.as_binary::<i64>();
-                    let v = array.value(i);
+                DataType::Binary | DataType::LargeBinary | DataType::BinaryView => {
+                    let v = datatypes::arrow_array::binary_array_value(column, i);
                     encode_bytes(
                         &self.schema.column_schemas()[j],
                         v,
