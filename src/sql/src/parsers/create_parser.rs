@@ -361,7 +361,7 @@ impl<'a> ParserContext<'a> {
         // only accept sql or tql
         let query = match self.parser.peek_token().token {
             Token::Word(w) => match w.keyword {
-                Keyword::SELECT => self.parse_query(),
+                Keyword::SELECT | Keyword::WITH => self.parse_query(),
                 Keyword::NoKeyword
                     if w.quote_style.is_none() && w.value.to_uppercase() == tql_parser::TQL =>
                 {
