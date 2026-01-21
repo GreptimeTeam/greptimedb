@@ -4,12 +4,12 @@ use std::time::Duration;
 
 use itertools::Itertools;
 use serde::Serialize;
-use sqlparser::ast::{Query, Visit, VisitMut, Visitor, VisitorMut};
+use sqlparser::ast::{Visit, VisitMut, Visitor, VisitorMut};
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::ast::{Ident, ObjectName};
 use crate::statements::OptionMap;
-use crate::statements::create::{COMMA_SEP, INDENT};
+use crate::statements::create::{COMMA_SEP, INDENT, SqlOrTql};
 
 #[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize)]
 pub struct CreateTrigger {
@@ -118,7 +118,7 @@ impl VisitMut for DurationExpr {
 
 #[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize)]
 pub struct TriggerOn {
-    pub query: Box<Query>,
+    pub query: SqlOrTql,
     pub query_interval: DurationExpr,
 }
 

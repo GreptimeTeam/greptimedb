@@ -377,6 +377,12 @@ impl<'a> ParserContext<'a> {
 
         let raw_query = if end_token == Token::EOF {
             &self.sql[start_index..]
+        } else if end_token == Token::RParen {
+            // When caller already consumed the leading `(`, stop before the
+            // matching `)` so raw_query doesn't include it (e.g. trigger ON clause).
+            let end_loc = end_token.span.start;
+            let end_index = location_to_index(self.sql, &end_loc);
+            &self.sql[start_index..end_index.min(self.sql.len())]
         } else {
             let end_loc = end_token.span.end;
             let end_index = location_to_index(self.sql, &end_loc);

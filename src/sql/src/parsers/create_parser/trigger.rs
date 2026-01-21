@@ -155,7 +155,17 @@ impl<'a> ParserContext<'a> {
             }
         }
 
-        let query = self.parser.parse_query().context(error::SyntaxSnafu)?;
+        if let Token::LParen = self.parser.peek_token().token {
+            self.parser.next_token();
+        } else {
+            return self.expected("`(` after `ON`", self.parser.peek_token());
+        }
+
+        let query = self.parse_sql_or_tql(true)?;
+
+        self.parser
+            .expect_token(&Token::RParen)
+            .context(error::SyntaxSnafu)?;
 
         if let Token::Word(w) = self.parser.peek_token().token
             && w.value.eq_ignore_ascii_case(EVERY)
@@ -588,7 +598,7 @@ IF NOT EXISTS cpu_monitor
         assert_eq!(create_trigger.trigger_name.to_string(), "cpu_monitor");
         assert_eq!(
             create_trigger.trigger_on.query.to_string(),
-            "(SELECT host AS host_label, cpu, memory FROM machine_monitor WHERE cpu > 1)"
+            "SELECT host AS host_label, cpu, memory FROM machine_monitor WHERE cpu > 1"
         );
         let TriggerOn {
             query,
@@ -596,7 +606,7 @@ IF NOT EXISTS cpu_monitor
         } = &create_trigger.trigger_on;
         assert_eq!(
             query.to_string(),
-            "(SELECT host AS host_label, cpu, memory FROM machine_monitor WHERE cpu > 1)"
+            "SELECT host AS host_label, cpu, memory FROM machine_monitor WHERE cpu > 1"
         );
         assert_eq!(query_interval.duration, Duration::from_secs(300));
         assert_eq!(query_interval.raw_expr.clone(), "'5 minute'::INTERVAL");
@@ -642,9 +652,19 @@ IF NOT EXISTS cpu_monitor
             query,
             query_interval: interval,
         } = ctx.parse_trigger_on(false).unwrap();
-        assert_eq!(query.to_string(), "(SELECT * FROM cpu_usage)");
+        assert_eq!(query.to_string(), "SELECT * FROM cpu_usage");
         assert_eq!(interval.duration, Duration::from_secs(300));
         assert_eq!(interval.raw_expr, "'5 minute'::INTERVAL");
+
+        // Invalid, since missing `(` after `ON`.
+        let sql = "ON SELECT * FROM cpu_usage EVERY '5 minute'::INTERVAL";
+        let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
+        assert!(ctx.parse_trigger_on(false).is_err());
+
+        // Invalid, since missing `)` after query expression.
+        let sql = "ON (SELECT * FROM cpu_usage EVERY '5 minute'::INTERVAL";
+        let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
+        assert!(ctx.parse_trigger_on(false).is_err());
 
         // Invalid, since missing `ON` keyword.
         let sql = "SELECT * FROM cpu_usage EVERY '5 minute'::INTERVAL";
