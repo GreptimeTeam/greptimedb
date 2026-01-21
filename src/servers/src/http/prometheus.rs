@@ -895,36 +895,12 @@ impl RowWriter {
                         let v = array.value(i);
                         self.insert(column, v);
                     }
-                    DataType::Utf8 => {
-                        let array = array.as_string::<i32>();
-                        let v = array.value(i);
+                    DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => {
+                        let v = datatypes::arrow_array::string_array_value(array, i);
                         self.insert(column, v);
                     }
-                    DataType::LargeUtf8 => {
-                        let array = array.as_string::<i64>();
-                        let v = array.value(i);
-                        self.insert(column, v);
-                    }
-                    DataType::Utf8View => {
-                        let array = array.as_string_view();
-                        let v = array.value(i);
-                        self.insert(column, v);
-                    }
-                    DataType::Binary => {
-                        let array = array.as_binary::<i32>();
-                        let v = array.value(i);
-                        let column_schema = &schema.column_schemas()[j];
-                        self.insert_bytes(column_schema, v)?;
-                    }
-                    DataType::LargeBinary => {
-                        let array = array.as_binary::<i64>();
-                        let v = array.value(i);
-                        let column_schema = &schema.column_schemas()[j];
-                        self.insert_bytes(column_schema, v)?;
-                    }
-                    DataType::BinaryView => {
-                        let array = array.as_binary_view();
-                        let v = array.value(i);
+                    DataType::Binary | DataType::LargeBinary | DataType::BinaryView => {
+                        let v = datatypes::arrow_array::binary_array_value(array, i);
                         let column_schema = &schema.column_schemas()[j];
                         self.insert_bytes(column_schema, v)?;
                     }
