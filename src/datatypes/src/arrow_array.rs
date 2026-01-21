@@ -25,6 +25,7 @@ use common_time::time::Time;
 use common_time::{Duration, Timestamp};
 
 pub type BinaryArray = arrow::array::BinaryArray;
+pub type LargeBinaryArray = arrow::array::LargeBinaryArray;
 pub type MutableBinaryArray = arrow::array::BinaryBuilder;
 pub type BinaryViewArray = arrow::array::BinaryViewArray;
 pub type MutableBinaryViewArray = arrow::array::BinaryViewBuilder;

@@ -19,7 +19,7 @@ use arrow::array::{Array, ArrayBuilder, ArrayIter, ArrayRef};
 use snafu::ResultExt;
 
 use crate::arrow_array::{
-    BinaryArray, BinaryViewArray, MutableBinaryArray, MutableBinaryViewArray,
+    BinaryArray, BinaryViewArray, LargeBinaryArray, MutableBinaryArray, MutableBinaryViewArray,
 };
 use crate::data_type::ConcreteDataType;
 use crate::error::{self, InvalidVectorSnafu, Result};
@@ -32,6 +32,7 @@ use crate::vectors::{self, MutableVector, Validity, Vector, VectorRef};
 #[derive(Debug, PartialEq)]
 enum BinaryArrayData {
     Binary(BinaryArray),
+    LargeBinary(LargeBinaryArray),
     BinaryView(BinaryViewArray),
 }
 
@@ -45,6 +46,7 @@ impl BinaryVector {
     pub(crate) fn as_arrow(&self) -> &dyn Array {
         match &self.array {
             BinaryArrayData::Binary(array) => array,
+            BinaryArrayData::LargeBinary(array) => array,
             BinaryArrayData::BinaryView(array) => array,
         }
     }
@@ -123,6 +125,14 @@ impl From<BinaryViewArray> for BinaryVector {
     }
 }
 
+impl From<LargeBinaryArray> for BinaryVector {
+    fn from(array: LargeBinaryArray) -> Self {
+        Self {
+            array: BinaryArrayData::LargeBinary(array),
+        }
+    }
+}
+
 impl From<Vec<Option<Vec<u8>>>> for BinaryVector {
     fn from(data: Vec<Option<Vec<u8>>>) -> Self {
         Self {
@@ -143,6 +153,7 @@ impl Vector for BinaryVector {
     fn data_type(&self) -> ConcreteDataType {
         match &self.array {
             BinaryArrayData::Binary(_) => ConcreteDataType::binary_datatype(),
+            BinaryArrayData::LargeBinary(_) => ConcreteDataType::binary_datatype(),
             BinaryArrayData::BinaryView(_) => ConcreteDataType::binary_view_datatype(),
         }
     }
@@ -158,6 +169,7 @@ impl Vector for BinaryVector {
     fn len(&self) -> usize {
         match &self.array {
             BinaryArrayData::Binary(array) => array.len(),
+            BinaryArrayData::LargeBinary(array) => array.len(),
             BinaryArrayData::BinaryView(array) => array.len(),
         }
     }
@@ -165,6 +177,7 @@ impl Vector for BinaryVector {
     fn to_arrow_array(&self) -> ArrayRef {
         match &self.array {
             BinaryArrayData::Binary(array) => Arc::new(array.clone()),
+            BinaryArrayData::LargeBinary(array) => Arc::new(array.clone()),
             BinaryArrayData::BinaryView(array) => Arc::new(array.clone()),
         }
     }
@@ -172,6 +185,7 @@ impl Vector for BinaryVector {
     fn to_boxed_arrow_array(&self) -> Box<dyn Array> {
         match &self.array {
             BinaryArrayData::Binary(array) => Box::new(array.clone()),
+            BinaryArrayData::LargeBinary(array) => Box::new(array.clone()),
             BinaryArrayData::BinaryView(array) => Box::new(array.clone()),
         }
     }
@@ -179,6 +193,7 @@ impl Vector for BinaryVector {
     fn validity(&self) -> Validity {
         match &self.array {
             BinaryArrayData::Binary(array) => vectors::impl_validity_for_vector!(array),
+            BinaryArrayData::LargeBinary(array) => vectors::impl_validity_for_vector!(array),
             BinaryArrayData::BinaryView(array) => vectors::impl_validity_for_vector!(array),
         }
     }
@@ -186,6 +201,7 @@ impl Vector for BinaryVector {
     fn memory_size(&self) -> usize {
         match &self.array {
             BinaryArrayData::Binary(array) => array.get_buffer_memory_size(),
+            BinaryArrayData::LargeBinary(array) => array.get_buffer_memory_size(),
             BinaryArrayData::BinaryView(array) => array.get_buffer_memory_size(),
         }
     }
@@ -193,6 +209,7 @@ impl Vector for BinaryVector {
     fn null_count(&self) -> usize {
         match &self.array {
             BinaryArrayData::Binary(array) => array.null_count(),
+            BinaryArrayData::LargeBinary(array) => array.null_count(),
             BinaryArrayData::BinaryView(array) => array.null_count(),
         }
     }
@@ -200,6 +217,7 @@ impl Vector for BinaryVector {
     fn is_null(&self, row: usize) -> bool {
         match &self.array {
             BinaryArrayData::Binary(array) => array.is_null(row),
+            BinaryArrayData::LargeBinary(array) => array.is_null(row),
             BinaryArrayData::BinaryView(array) => array.is_null(row),
         }
     }
@@ -210,6 +228,12 @@ impl Vector for BinaryVector {
                 let array = array.slice(offset, length);
                 Arc::new(Self {
                     array: BinaryArrayData::Binary(array),
+                })
+            }
+            BinaryArrayData::LargeBinary(array) => {
+                let array = array.slice(offset, length);
+                Arc::new(Self {
+                    array: BinaryArrayData::LargeBinary(array),
                 })
             }
             BinaryArrayData::BinaryView(array) => {
@@ -224,6 +248,7 @@ impl Vector for BinaryVector {
     fn get(&self, index: usize) -> Value {
         match &self.array {
             BinaryArrayData::Binary(array) => vectors::impl_get_for_vector!(array, index),
+            BinaryArrayData::LargeBinary(array) => vectors::impl_get_for_vector!(array, index),
             BinaryArrayData::BinaryView(array) => vectors::impl_get_for_vector!(array, index),
         }
     }
@@ -231,6 +256,7 @@ impl Vector for BinaryVector {
     fn get_ref(&self, index: usize) -> ValueRef<'_> {
         match &self.array {
             BinaryArrayData::Binary(array) => vectors::impl_get_ref_for_vector!(array, index),
+            BinaryArrayData::LargeBinary(array) => vectors::impl_get_ref_for_vector!(array, index),
             BinaryArrayData::BinaryView(array) => vectors::impl_get_ref_for_vector!(array, index),
         }
     }
@@ -253,6 +279,7 @@ impl ScalarVector for BinaryVector {
     fn get_data(&self, idx: usize) -> Option<Self::RefItem<'_>> {
         match &self.array {
             BinaryArrayData::Binary(array) => array.is_valid(idx).then(|| array.value(idx)),
+            BinaryArrayData::LargeBinary(array) => array.is_valid(idx).then(|| array.value(idx)),
             BinaryArrayData::BinaryView(array) => array.is_valid(idx).then(|| array.value(idx)),
         }
     }
@@ -260,6 +287,7 @@ impl ScalarVector for BinaryVector {
     fn iter_data(&self) -> Self::Iter<'_> {
         match &self.array {
             BinaryArrayData::Binary(array) => BinaryIter::Binary(array.iter()),
+            BinaryArrayData::LargeBinary(array) => BinaryIter::LargeBinary(array.iter()),
             BinaryArrayData::BinaryView(array) => BinaryIter::BinaryView(array.iter()),
         }
     }
@@ -267,6 +295,7 @@ impl ScalarVector for BinaryVector {
 
 pub enum BinaryIter<'a> {
     Binary(ArrayIter<&'a BinaryArray>),
+    LargeBinary(ArrayIter<&'a LargeBinaryArray>),
     BinaryView(ArrayIter<&'a BinaryViewArray>),
 }
 
@@ -276,6 +305,7 @@ impl<'a> Iterator for BinaryIter<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             BinaryIter::Binary(iter) => iter.next(),
+            BinaryIter::LargeBinary(iter) => iter.next(),
             BinaryIter::BinaryView(iter) => iter.next(),
         }
     }
@@ -332,16 +362,11 @@ impl MutableVector for BinaryVectorBuilder {
     }
 
     fn try_push_value_ref(&mut self, value: &ValueRef) -> Result<()> {
-        match value.try_into_binary()? {
-            Some(v) => match &mut self.mutable_array {
-                MutableBinaryArrayData::Binary(array) => array.append_value(v),
-                MutableBinaryArrayData::BinaryView(array) => array.append_value(v),
-            },
-            None => match &mut self.mutable_array {
-                MutableBinaryArrayData::Binary(array) => array.append_null(),
-                MutableBinaryArrayData::BinaryView(array) => array.append_null(),
-            },
-        }
+        let value = value.try_into_binary()?;
+        match &mut self.mutable_array {
+            MutableBinaryArrayData::Binary(array) => array.append_option(value),
+            MutableBinaryArrayData::BinaryView(array) => array.append_option(value),
+        };
         Ok(())
     }
 
@@ -369,12 +394,10 @@ impl ScalarVectorBuilder for BinaryVectorBuilder {
     }
 
     fn push(&mut self, value: Option<<Self::VectorType as ScalarVector>::RefItem<'_>>) {
-        match (&mut self.mutable_array, value) {
-            (MutableBinaryArrayData::Binary(array), Some(v)) => array.append_value(v),
-            (MutableBinaryArrayData::Binary(array), None) => array.append_null(),
-            (MutableBinaryArrayData::BinaryView(array), Some(v)) => array.append_value(v),
-            (MutableBinaryArrayData::BinaryView(array), None) => array.append_null(),
-        }
+        match &mut self.mutable_array {
+            MutableBinaryArrayData::Binary(array) => array.append_option(value),
+            MutableBinaryArrayData::BinaryView(array) => array.append_option(value),
+        };
     }
 
     fn finish(&mut self) -> Self::VectorType {
@@ -420,6 +443,8 @@ impl BinaryVector {
 
         if let Some(binary_array) = array.as_any().downcast_ref::<BinaryArray>() {
             Ok(BinaryVector::from(binary_array.clone()))
+        } else if let Some(large_binary_array) = array.as_any().downcast_ref::<LargeBinaryArray>() {
+            Ok(BinaryVector::from(large_binary_array.clone()))
         } else if let Some(binary_view_array) = array.as_any().downcast_ref::<BinaryViewArray>() {
             Ok(BinaryVector::from(binary_view_array.clone()))
         } else {
@@ -440,7 +465,7 @@ mod tests {
     use serde_json;
 
     use super::*;
-    use crate::arrow_array::BinaryArray;
+    use crate::arrow_array::{BinaryArray, LargeBinaryArray};
     use crate::data_type::DataType;
     use crate::serialize::Serializable;
     use crate::types::BinaryType;
@@ -479,6 +504,19 @@ mod tests {
         let vector = builder.finish();
 
         assert_eq!(ConcreteDataType::binary_view_datatype(), vector.data_type());
+        assert_eq!(b"hello", vector.get_data(0).unwrap());
+        assert_eq!(None, vector.get_data(1));
+        assert_eq!(b"world", vector.get_data(2).unwrap());
+
+        assert_eq!(Value::Binary(b"hello".as_slice().into()), vector.get(0));
+        assert_eq!(Value::Null, vector.get(1));
+        assert_eq!(Value::Binary(b"world".as_slice().into()), vector.get(2));
+
+        let mut iter = vector.iter_data();
+        assert_eq!(b"hello", iter.next().unwrap().unwrap());
+        assert_eq!(None, iter.next().unwrap());
+        assert_eq!(b"world", iter.next().unwrap().unwrap());
+        assert_eq!(None, iter.next());
 
         let arrow_arr = vector.to_arrow_array();
         assert_eq!(&ArrowDataType::BinaryView, arrow_arr.data_type());
@@ -520,6 +558,17 @@ mod tests {
         let vector = BinaryVector::from(arrow_array);
         let BinaryArrayData::Binary(array) = &vector.array else {
             panic!("Expected BinaryArray");
+        };
+        assert_eq!(&original, array);
+    }
+
+    #[test]
+    fn test_from_large_binary_arrow_array() {
+        let arrow_array = LargeBinaryArray::from_iter_values([vec![1, 2, 3], vec![1, 2, 3]]);
+        let original = LargeBinaryArray::from(arrow_array.to_data());
+        let vector = BinaryVector::from(arrow_array);
+        let BinaryArrayData::LargeBinary(array) = &vector.array else {
+            panic!("Expected LargeBinaryArray");
         };
         assert_eq!(&original, array);
     }

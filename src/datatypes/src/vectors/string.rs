@@ -558,6 +558,22 @@ mod tests {
         let vector = builder.finish();
 
         assert_eq!(ConcreteDataType::utf8_view_datatype(), vector.data_type());
+        assert_eq!(Some("hello"), vector.get_data(0));
+        assert_eq!(None, vector.get_data(1));
+        assert_eq!(Some("world"), vector.get_data(2));
+
+        // Get out of bound
+        assert!(vector.try_get(3).is_err());
+
+        assert_eq!(Value::String("hello".into()), vector.get(0));
+        assert_eq!(Value::Null, vector.get(1));
+        assert_eq!(Value::String("world".into()), vector.get(2));
+
+        let mut iter = vector.iter_data();
+        assert_eq!("hello", iter.next().unwrap().unwrap());
+        assert_eq!(None, iter.next().unwrap());
+        assert_eq!("world", iter.next().unwrap().unwrap());
+        assert_eq!(None, iter.next());
 
         let arrow_arr = vector.to_arrow_array();
         assert_eq!(&DataType::Utf8View, arrow_arr.data_type());
