@@ -41,7 +41,7 @@ where
     pub(crate) async fn handle_drop_request(
         &mut self,
         region_id: RegionId,
-        _partial_drop: bool,
+        partial_drop: bool,
     ) -> Result<AffectedRows> {
         let region = self.regions.writable_region(region_id)?;
 
@@ -126,6 +126,7 @@ where
                     object_store,
                     dropping_regions,
                     gc_duration,
+                    partial_drop,
                 )
                 .await
             } else {
@@ -228,8 +229,16 @@ async fn later_drop_task_with_global_gc(
     object_store: ObjectStore,
     dropping_regions: RegionMapRef,
     gc_duration: Duration,
+    partial_drop: bool,
 ) -> bool {
-    if path_type == PathType::Metadata {
+    // For metadata regions or regions marked for full deletion (such as when dropping a table)
+    // the region directory is forcefully removed after the configured GC delay.
+    //
+    // Note: If the datanode restarts during the GC grace period, the region directory and files
+    // may persist unexpectedly and never be deleted.
+    //
+    // TODO(discord9): Evaluate removing files instantly rather than waiting for the GC period.
+    if path_type == PathType::Metadata || !partial_drop {
         remove_region_with_retry(
             region_id,
             region_path,
