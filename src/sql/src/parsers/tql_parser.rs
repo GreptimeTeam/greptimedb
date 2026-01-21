@@ -107,6 +107,7 @@ impl ParserContext<'_> {
     ///
     /// # Examples
     /// - (TQL EVAL (0, 10, '1s') cpu_usage)
+    #[allow(dead_code)]
     pub(crate) fn parse_parenthesized_tql(
         &mut self,
         is_lparen_consumed: bool,
