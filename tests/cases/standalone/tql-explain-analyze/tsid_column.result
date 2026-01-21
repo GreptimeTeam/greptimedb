@@ -97,6 +97,71 @@ TQL ANALYZE (0, 10, '5s') sum by (job, instance) (tsid_metric);
 |_|_| Total rows: 6_|
 +-+-+-+
 
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+TQL ANALYZE (0, 10, '5s')  sum(irate(tsid_metric[1h])) / scalar(count(count(tsid_metric) by (job)));
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_ProjectionExec: expr=[ts@1 as ts, sum(prom_irate(ts_range,val))@2 / scalar(count(count(tsid_metric.val)))@0 as lhs.sum(prom_irate(ts_range,val)) / rhs.scalar(count(count(tsid_metric.val)))] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_REDACTED
+|_|_|_ScalarCalculateExec: tags=[] REDACTED
+|_|_|_CoalescePartitionsExec REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_SortPreservingMergeExec: [ts@0 ASC NULLS LAST] REDACTED
+|_|_|_SortExec: expr=[ts@0 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
+|_|_|_AggregateExec: mode=FinalPartitioned, gby=[ts@0 as ts], aggr=[count(count(tsid_metric.val))] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[ts@0 as ts], aggr=[count(count(tsid_metric.val))] REDACTED
+|_|_|_ProjectionExec: expr=[ts@1 as ts, count(tsid_metric.val)@2 as count(tsid_metric.val)] REDACTED
+|_|_|_AggregateExec: mode=FinalPartitioned, gby=[job@0 as job, ts@1 as ts], aggr=[count(tsid_metric.val)] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[job@1 as job, ts@2 as ts], aggr=[count(tsid_metric.val)] REDACTED
+|_|_|_ProjectionExec: expr=[val@0 as val, job@1 as job, ts@3 as ts] REDACTED
+|_|_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
+|_|_|_SortExec: expr=[__tsid@2 ASC, ts@3 ASC], preserve_partitioning=[true] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_ProjectionExec: expr=[val@1 as val, job@3 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
+|_|_|_|
+| 1_| 0_|_SortPreservingMergeExec: [ts@0 ASC NULLS LAST] REDACTED
+|_|_|_SortExec: expr=[ts@0 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
+|_|_|_AggregateExec: mode=FinalPartitioned, gby=[ts@0 as ts], aggr=[sum(prom_irate(ts_range,val))] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[ts@0 as ts], aggr=[sum(prom_irate(ts_range,val))] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_FilterExec: prom_irate(ts_range,val)@1 IS NOT NULL REDACTED
+|_|_|_ProjectionExec: expr=[ts@2 as ts, prom_irate(ts_range@3, val@0) as prom_irate(ts_range,val)] REDACTED
+|_|_|_PromRangeManipulateExec: req range=[0..10000], interval=[5000], eval range=[3600000], time index=[ts] REDACTED
+|_|_|_PromSeriesNormalizeExec: offset=[0], time index=[ts], filter NaN: [true] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
+|_|_|_SortExec: expr=[__tsid@1 ASC, ts@2 ASC], preserve_partitioning=[true] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_ProjectionExec: expr=[val@1 as val, __tsid@2 as __tsid, ts@0 as ts] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
+|_|_|_|
+|_|_| Total rows: 2_|
++-+-+-+
+
 DROP TABLE tsid_metric;
 
 Affected Rows: 0

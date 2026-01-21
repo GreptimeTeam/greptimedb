@@ -42,6 +42,15 @@ TQL ANALYZE (0, 10, '5s') sum(tsid_metric);
 -- SQLNESS REPLACE (Hash.*) REDACTED
 TQL ANALYZE (0, 10, '5s') sum by (job, instance) (tsid_metric);
 
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+TQL ANALYZE (0, 10, '5s')  sum(irate(tsid_metric[1h])) / scalar(count(count(tsid_metric) by (job)));
+
 DROP TABLE tsid_metric;
 DROP TABLE tsid_physical;
 
