@@ -188,7 +188,7 @@ impl Categorizer {
                 // commutativity is needed under this situation.
                 Commutativity::ConditionalCommutative(None)
             }
-            LogicalPlan::Sort(sort) => {
+            LogicalPlan::Sort(_sort) => {
                 if partition_cols.is_empty() {
                     return Ok(Commutativity::Commutative);
                 }
@@ -196,7 +196,7 @@ impl Categorizer {
                 // sort plan needs to consider column priority
                 // Change Sort to MergeSort which assumes the input streams are already sorted hence can be more efficient.
                 #[cfg(feature = "vector_index")]
-                if is_vector_sort(sort) {
+                if is_vector_sort(_sort) {
                     return Ok(Commutativity::TransformedCommutative {
                         transformer: Some(Arc::new(vector_sort_transformer)),
                     });
