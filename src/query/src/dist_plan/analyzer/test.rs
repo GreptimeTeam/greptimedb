@@ -178,7 +178,6 @@ mod vector_search_tests {
 
     use super::*;
     use crate::dist_plan::MergeScanLogicalPlan;
-    use crate::optimizer::vector_search::VectorSearchRule;
 
     struct TestVectorFunction {
         name: &'static str,
@@ -307,7 +306,6 @@ mod vector_search_tests {
             .unwrap();
 
         let config = ConfigOptions::default();
-        let plan = VectorSearchRule.analyze(plan, &config).unwrap();
         let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
 
         let plan_str = result.to_string();
@@ -336,7 +334,6 @@ mod vector_search_tests {
             .unwrap();
 
         let config = ConfigOptions::default();
-        let plan = VectorSearchRule.analyze(plan, &config).unwrap();
         let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
 
         let plan_str = result.to_string();

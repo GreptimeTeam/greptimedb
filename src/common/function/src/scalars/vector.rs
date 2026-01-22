@@ -13,7 +13,7 @@
 // limitations under the License.
 
 mod convert;
-mod distance;
+pub mod distance;
 mod elem_avg;
 mod elem_product;
 mod elem_sum;

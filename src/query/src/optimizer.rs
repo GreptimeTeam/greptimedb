@@ -23,8 +23,6 @@ pub mod string_normalization;
 pub(crate) mod test_util;
 pub mod transcribe_atat;
 pub mod type_conversion;
-#[cfg(feature = "vector_index")]
-pub mod vector_search;
 pub mod windowed_sort;
 
 use datafusion_common::Result;

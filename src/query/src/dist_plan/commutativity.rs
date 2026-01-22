@@ -33,11 +33,9 @@ use crate::dist_plan::analyzer::AliasMapping;
 use crate::dist_plan::merge_sort::{MergeSortLogicalPlan, merge_sort_transformer};
 
 #[cfg(feature = "vector_index")]
-const VEC_L2SQ_DISTANCE: &str = "vec_l2sq_distance";
-#[cfg(feature = "vector_index")]
-const VEC_COS_DISTANCE: &str = "vec_cos_distance";
-#[cfg(feature = "vector_index")]
-const VEC_DOT_PRODUCT: &str = "vec_dot_product";
+use common_function::scalars::vector::distance::{
+    VEC_COS_DISTANCE, VEC_DOT_PRODUCT, VEC_L2SQ_DISTANCE,
+};
 
 #[cfg(feature = "vector_index")]
 fn is_vector_sort(sort: &Sort) -> bool {
