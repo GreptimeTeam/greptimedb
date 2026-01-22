@@ -22,7 +22,7 @@ use common_meta::instruction::{self, GcRegions, GetFileRefs, GetFileRefsReply, I
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::table_repart::TableRepartValue;
 use common_meta::key::table_route::PhysicalTableRouteValue;
-use common_meta::lock_key::RegionLock;
+use common_meta::lock_key::{RegionLock, TableLock};
 use common_meta::peer::Peer;
 use common_procedure::error::ToJsonSnafu;
 use common_procedure::{
@@ -32,7 +32,7 @@ use common_procedure::{
 use common_telemetry::{error, info, warn};
 use itertools::Itertools as _;
 use serde::{Deserialize, Serialize};
-use snafu::{ResultExt as _, ensure};
+use snafu::ResultExt as _;
 use store_api::storage::{FileRefsManifest, GcReport, RegionId};
 use table::metadata::TableId;
 
@@ -274,7 +274,7 @@ impl BatchGcProcedure {
 
     /// Clean up region repartition info in kvbackend after GC
     /// according to cross reference in `FileRefsManifest`.
-    async fn cleanup_region_repartition(&self) -> Result<()> {
+    async fn cleanup_region_repartition(&self, procedure_ctx: &ProcedureContext) -> Result<()> {
         let mut cross_refs_grouped: HashMap<TableId, HashMap<RegionId, HashSet<RegionId>>> =
             HashMap::new();
         for (src_region, dst_regions) in &self.data.file_refs.cross_region_refs {
@@ -302,6 +302,9 @@ impl BatchGcProcedure {
             .chain(tmp_refs_grouped.keys().copied())
             .collect::<HashSet<_>>()
         {
+            let table_lock = TableLock::Write(table_id).into();
+            let _guard = procedure_ctx.provider.acquire_lock(&table_lock).await;
+
             let cross_refs = cross_refs_grouped
                 .get(&table_id)
                 .cloned()
@@ -355,51 +358,10 @@ impl BatchGcProcedure {
                 continue;
             }
 
-            if let Some(current_value) = current {
-                let (txn, _) = repart_mgr
-                    .build_update_txn(table_id, &current_value, &new_value)
-                    .context(KvBackendSnafu)?;
-
-                let result = self
-                    .table_metadata_manager
-                    .kv_backend()
-                    .txn(txn)
-                    .await
-                    .context(KvBackendSnafu)?
-                    .succeeded;
-
-                ensure!(
-                    result,
-                    error::UnexpectedSnafu {
-                        violated: format!(
-                            "Failed to update repartition mappings for table {}: CAS operation failed",
-                            table_id
-                        ),
-                    }
-                );
-            } else {
-                let (txn, _) = repart_mgr
-                    .build_create_txn(table_id, &new_value)
-                    .context(KvBackendSnafu)?;
-
-                let result = self
-                    .table_metadata_manager
-                    .kv_backend()
-                    .txn(txn)
-                    .await
-                    .context(KvBackendSnafu)?
-                    .succeeded;
-
-                ensure!(
-                    result,
-                    error::UnexpectedSnafu {
-                        violated: format!(
-                            "Failed to create repartition mappings for table {}: CAS operation failed",
-                            table_id
-                        ),
-                    }
-                );
-            }
+            repart_mgr
+                .upsert_value(table_id, current, &new_value)
+                .await
+                .context(KvBackendSnafu)?;
         }
 
         Ok(())
@@ -688,7 +650,7 @@ impl Procedure for BatchGcProcedure {
         Self::TYPE_NAME
     }
 
-    async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
+    async fn execute(&mut self, ctx: &ProcedureContext) -> ProcedureResult<Status> {
         match self.data.state {
             State::Start => {
                 // Transition to Acquiring state
@@ -724,7 +686,7 @@ impl Procedure for BatchGcProcedure {
                     }
                 }
             }
-            State::UpdateRepartition => match self.cleanup_region_repartition().await {
+            State::UpdateRepartition => match self.cleanup_region_repartition(ctx).await {
                 Ok(()) => {
                     info!(
                         "Cleanup region repartition info completed successfully for regions {:?}",

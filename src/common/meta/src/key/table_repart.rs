@@ -395,6 +395,50 @@ impl TableRepartManager {
         Ok(())
     }
 
+    /// Upserts the full repartition value with CAS semantics using the caller-provided snapshot.
+    /// If the value is empty and no existing repartition entry is present, it no-ops.
+    pub async fn upsert_value(
+        &self,
+        table_id: TableId,
+        current: Option<DeserializedValueWithBytes<TableRepartValue>>,
+        new_value: &TableRepartValue,
+    ) -> Result<()> {
+        if new_value.src_to_dst.is_empty() && current.is_none() {
+            // Nothing to persist and caller confirmed no existing entry.
+            return Ok(());
+        }
+
+        if let Some(current) = current {
+            let (txn, _) = self.build_update_txn(table_id, &current, new_value)?;
+            let result = self.kv_backend.txn(txn).await?;
+
+            ensure!(
+                result.succeeded,
+                crate::error::MetadataCorruptionSnafu {
+                    err_msg: format!(
+                        "Failed to update repartition mappings for table {}: CAS operation failed",
+                        table_id
+                    ),
+                }
+            );
+        } else {
+            let (txn, _) = self.build_create_txn(table_id, new_value)?;
+            let result = self.kv_backend.txn(txn).await?;
+
+            ensure!(
+                result.succeeded,
+                crate::error::MetadataCorruptionSnafu {
+                    err_msg: format!(
+                        "Failed to create repartition mappings for table {}: CAS operation failed",
+                        table_id
+                    ),
+                }
+            );
+        }
+
+        Ok(())
+    }
+
     /// Returns the destination regions for a given source region.
     pub async fn get_dst_regions(
         &self,
