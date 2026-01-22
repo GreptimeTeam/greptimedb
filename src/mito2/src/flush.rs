@@ -45,7 +45,7 @@ use crate::memtable::{
     BoxedRecordBatchIterator, EncodedRange, IterBuilder, MemtableRanges, RangesOptions,
 };
 use crate::metrics::{
-    FLUSH_BYTES_TOTAL, FLUSH_ELAPSED, FLUSH_FAILURE_TOTAL, FLUSH_REQUESTS_TOTAL,
+    FLUSH_BYTES_TOTAL, FLUSH_ELAPSED, FLUSH_FAILURE_TOTAL, FLUSH_FILE_TOTAL, FLUSH_REQUESTS_TOTAL,
     INFLIGHT_FLUSH_COUNT,
 };
 use crate::read::dedup::{DedupReader, LastNonNull, LastRow};
@@ -543,6 +543,7 @@ impl RegionFlushTask {
                     .access_layer
                     .write_sst(write_request, &write_opts, &mut metrics)
                     .await?;
+                FLUSH_FILE_TOTAL.inc_by(ssts_written.len() as u64);
                 if ssts_written.is_empty() {
                     // No data written.
                     continue;
@@ -606,6 +607,7 @@ impl RegionFlushTask {
                 let ssts = access_layer
                     .write_sst(write_request, &write_opts, &mut metrics)
                     .await?;
+                FLUSH_FILE_TOTAL.inc_by(ssts.len() as u64);
                 Ok((max_sequence, ssts, metrics))
             });
             tasks.push(task);
@@ -620,6 +622,7 @@ impl RegionFlushTask {
                 let metrics = access_layer
                     .put_sst(&encoded.data, region_id, &encoded.sst_info, &cache_manager)
                     .await?;
+                FLUSH_FILE_TOTAL.inc();
                 Ok((max_sequence, smallvec![encoded.sst_info], metrics))
             });
             tasks.push(task);
