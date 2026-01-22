@@ -2016,6 +2016,7 @@ dependencies = [
  "nu-ansi-term",
  "object-store",
  "operator",
+ "partition",
  "paste",
  "query",
  "rand 0.9.1",

@@ -52,6 +52,7 @@ nu-ansi-term = "0.46"
 object-store.workspace = true
 operator.workspace = true
 paste.workspace = true
+partition.workspace = true
 query.workspace = true
 rand.workspace = true
 reqwest.workspace = true

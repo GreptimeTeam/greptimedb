@@ -21,6 +21,7 @@ pub mod store;
 use std::fmt::{Display, Formatter};
 
 use api::v1::meta::{KeyValue as PbKeyValue, ResponseHeader as PbResponseHeader};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone)]
 pub struct ResponseHeader(PbResponseHeader);
@@ -48,7 +49,7 @@ impl ResponseHeader {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KeyValue {
     pub key: Vec<u8>,
     pub value: Vec<u8>,
