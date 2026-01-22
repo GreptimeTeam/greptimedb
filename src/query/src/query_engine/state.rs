@@ -66,6 +66,8 @@ use crate::optimizer::scan_hint::ScanHintRule;
 use crate::optimizer::string_normalization::StringNormalizationRule;
 use crate::optimizer::transcribe_atat::TranscribeAtatRule;
 use crate::optimizer::type_conversion::TypeConversionRule;
+#[cfg(feature = "vector_index")]
+use crate::optimizer::vector_search::VectorSearchRule;
 use crate::optimizer::windowed_sort::WindowedSortPhysicalRule;
 use crate::options::QueryOptions as QueryOptionsNew;
 use crate::query_engine::DefaultSerializer;
@@ -152,6 +154,9 @@ impl QueryEngineState {
         analyzer
             .rules
             .insert(0, Arc::new(CountWildcardToTimeIndexRule));
+
+        #[cfg(feature = "vector_index")]
+        analyzer.rules.push(Arc::new(VectorSearchRule));
 
         if with_dist_planner {
             analyzer.rules.push(Arc::new(DistPlannerAnalyzer));

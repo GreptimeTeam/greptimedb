@@ -73,6 +73,8 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run cargo check
         run: cargo check --locked --workspace --all-targets
+      - name: Run cargo check (all features)
+        run: cargo check --locked --workspace --all-targets --all-features
 
   toml:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}

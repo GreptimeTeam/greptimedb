@@ -18,7 +18,11 @@ use std::sync::Arc;
 use common_function::aggrs::aggr_wrapper::{StateMergeHelper, is_all_aggr_exprs_steppable};
 use common_telemetry::debug;
 use datafusion::error::Result as DfResult;
+#[cfg(feature = "vector_index")]
+use datafusion_common::DataFusionError;
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
+#[cfg(feature = "vector_index")]
+use datafusion_expr::Sort;
 use datafusion_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
 use promql::extension_plan::{
     EmptyMetric, InstantManipulate, RangeManipulate, SeriesDivide, SeriesNormalize,
@@ -27,6 +31,44 @@ use promql::extension_plan::{
 use crate::dist_plan::MergeScanLogicalPlan;
 use crate::dist_plan::analyzer::AliasMapping;
 use crate::dist_plan::merge_sort::{MergeSortLogicalPlan, merge_sort_transformer};
+
+#[cfg(feature = "vector_index")]
+const VEC_L2SQ_DISTANCE: &str = "vec_l2sq_distance";
+#[cfg(feature = "vector_index")]
+const VEC_COS_DISTANCE: &str = "vec_cos_distance";
+#[cfg(feature = "vector_index")]
+const VEC_DOT_PRODUCT: &str = "vec_dot_product";
+
+#[cfg(feature = "vector_index")]
+fn is_vector_sort(sort: &Sort) -> bool {
+    if sort.expr.len() != 1 {
+        return false;
+    }
+    let sort_expr = &sort.expr[0].expr;
+    let Expr::ScalarFunction(func) = sort_expr else {
+        return false;
+    };
+    matches!(
+        func.name().to_lowercase().as_str(),
+        VEC_L2SQ_DISTANCE | VEC_COS_DISTANCE | VEC_DOT_PRODUCT
+    )
+}
+
+#[cfg(feature = "vector_index")]
+fn vector_sort_transformer(plan: &LogicalPlan) -> DfResult<TransformerAction> {
+    let LogicalPlan::Sort(sort) = plan else {
+        return Err(DataFusionError::Internal(format!(
+            "vector_sort_transformer expects Sort, got {plan}"
+        )));
+    };
+    Ok(TransformerAction {
+        extra_parent_plans: vec![
+            MergeSortLogicalPlan::new(sort.input.clone(), sort.expr.clone(), sort.fetch)
+                .into_logical_plan(),
+        ],
+        new_child_plan: Some(LogicalPlan::Sort(sort.clone())),
+    })
+}
 
 pub struct StepTransformAction {
     extra_parent_plans: Vec<LogicalPlan>,
@@ -149,11 +191,27 @@ impl Categorizer {
                 // commutativity is needed under this situation.
                 Commutativity::ConditionalCommutative(None)
             }
-            LogicalPlan::Sort(_) => {
+            #[cfg(feature = "vector_index")]
+            LogicalPlan::Sort(sort) => {
                 if partition_cols.is_empty() {
                     return Ok(Commutativity::Commutative);
                 }
 
+                // sort plan needs to consider column priority
+                // Change Sort to MergeSort which assumes the input streams are already sorted hence can be more efficient
+                // We should ensure the number of partition is not smaller than the number of region at present. Otherwise this would result in incorrect output.
+                if is_vector_sort(sort) {
+                    return Ok(Commutativity::TransformedCommutative {
+                        transformer: Some(Arc::new(vector_sort_transformer)),
+                    });
+                }
+                Commutativity::ConditionalCommutative(Some(Arc::new(merge_sort_transformer)))
+            }
+            #[cfg(not(feature = "vector_index"))]
+            LogicalPlan::Sort(_) => {
+                if partition_cols.is_empty() {
+                    return Ok(Commutativity::Commutative);
+                }
                 // sort plan needs to consider column priority
                 // Change Sort to MergeSort which assumes the input streams are already sorted hence can be more efficient
                 // We should ensure the number of partition is not smaller than the number of region at present. Otherwise this would result in incorrect output.
