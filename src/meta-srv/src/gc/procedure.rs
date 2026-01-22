@@ -13,13 +13,14 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
 use common_meta::instruction::{self, GcRegions, GetFileRefs, GetFileRefsReply, InstructionReply};
 use common_meta::key::TableMetadataManagerRef;
+use common_meta::key::table_repart::TableRepartValue;
 use common_meta::key::table_route::PhysicalTableRouteValue;
 use common_meta::lock_key::RegionLock;
 use common_meta::peer::Peer;
@@ -31,7 +32,7 @@ use common_procedure::{
 use common_telemetry::{error, info, warn};
 use itertools::Itertools as _;
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt as _;
+use snafu::{ResultExt as _, ensure};
 use store_api::storage::{FileRefsManifest, GcReport, RegionId};
 use table::metadata::TableId;
 
@@ -274,38 +275,131 @@ impl BatchGcProcedure {
     /// Clean up region repartition info in kvbackend after GC
     /// according to cross reference in `FileRefsManifest`.
     async fn cleanup_region_repartition(&self) -> Result<()> {
-        let mut table_grouped: HashMap<TableId, HashMap<RegionId, HashSet<RegionId>>> =
+        let mut cross_refs_grouped: HashMap<TableId, HashMap<RegionId, HashSet<RegionId>>> =
             HashMap::new();
         for (src_region, dst_regions) in &self.data.file_refs.cross_region_refs {
-            table_grouped
+            cross_refs_grouped
                 .entry(src_region.table_id())
                 .or_default()
                 .entry(*src_region)
                 .or_default()
                 .extend(dst_regions.iter().copied());
         }
-        // make sure for files without cross-region refs but with tmp refs, we DO NOT clean up repartition key entry
-        // so that dropped regions can still keep their region ids here
+
+        let mut tmp_refs_grouped: HashMap<TableId, HashSet<RegionId>> = HashMap::new();
         for src_region in self.data.file_refs.file_refs.keys() {
-            table_grouped
+            tmp_refs_grouped
                 .entry(src_region.table_id())
                 .or_default()
-                .entry(*src_region)
-                .or_default();
+                .insert(*src_region);
         }
-        for (table_id, region_mappings) in table_grouped {
-            let region_mapping = region_mappings
-                .iter()
-                .map(|(src_region, dst_regions)| {
-                    (*src_region, dst_regions.iter().cloned().collect_vec())
-                })
-                .collect::<HashMap<RegionId, Vec<RegionId>>>();
 
-            self.table_metadata_manager
-                .table_repart_manager()
-                .update_mappings(table_id, &region_mapping)
+        let repart_mgr = self.table_metadata_manager.table_repart_manager();
+
+        for table_id in cross_refs_grouped
+            .keys()
+            .copied()
+            .chain(tmp_refs_grouped.keys().copied())
+            .collect::<HashSet<_>>()
+        {
+            let cross_refs = cross_refs_grouped
+                .get(&table_id)
+                .cloned()
+                .unwrap_or_default();
+            let tmp_refs = tmp_refs_grouped.get(&table_id).cloned().unwrap_or_default();
+
+            let current = repart_mgr
+                .get_with_raw_bytes(table_id)
                 .await
                 .context(KvBackendSnafu)?;
+
+            let mut new_value = current
+                .as_ref()
+                .map(|v| (**v).clone())
+                .unwrap_or_else(TableRepartValue::new);
+
+            // We only touch regions involved in this GC batch for the current table to avoid
+            // clobbering unrelated repart entries. Start from the batch regions of this table.
+            let batch_src_regions: HashSet<RegionId> = self
+                .data
+                .regions
+                .iter()
+                .copied()
+                .filter(|r| r.table_id() == table_id)
+                .collect();
+
+            // Merge targets: only the batch regions of this table. This avoids touching unrelated
+            // repart entries; we just reconcile mappings for regions involved in the current GC
+            // cycle for this table.
+            let all_src_regions: HashSet<RegionId> = batch_src_regions;
+
+            for src_region in all_src_regions {
+                let cross_dst = cross_refs.get(&src_region);
+                let has_tmp_ref = tmp_refs.contains(&src_region);
+
+                if let Some(dst_regions) = cross_dst {
+                    let mut set = BTreeSet::new();
+                    set.extend(dst_regions.iter().copied());
+                    new_value.src_to_dst.insert(src_region, set);
+                } else if has_tmp_ref {
+                    // Keep a tombstone entry with an empty set so dropped regions that still
+                    // have tmp refs are preserved; removing it would lose the repartition trace.
+                    new_value.src_to_dst.insert(src_region, BTreeSet::new());
+                } else {
+                    new_value.src_to_dst.remove(&src_region);
+                }
+            }
+
+            // If there is no repartition info to persist, skip creating/updating the key
+            if new_value.src_to_dst.is_empty() && current.is_none() {
+                continue;
+            }
+
+            if let Some(current_value) = current {
+                let (txn, _) = repart_mgr
+                    .build_update_txn(table_id, &current_value, &new_value)
+                    .context(KvBackendSnafu)?;
+
+                let result = self
+                    .table_metadata_manager
+                    .kv_backend()
+                    .txn(txn)
+                    .await
+                    .context(KvBackendSnafu)?
+                    .succeeded;
+
+                ensure!(
+                    result,
+                    error::UnexpectedSnafu {
+                        violated: format!(
+                            "Failed to update repartition mappings for table {}: CAS operation failed",
+                            table_id
+                        ),
+                    }
+                );
+            } else {
+                let (txn, _) = repart_mgr
+                    .build_create_txn(table_id, &new_value)
+                    .context(KvBackendSnafu)?;
+
+                let result = self
+                    .table_metadata_manager
+                    .kv_backend()
+                    .txn(txn)
+                    .await
+                    .context(KvBackendSnafu)?
+                    .succeeded;
+
+                ensure!(
+                    result,
+                    error::UnexpectedSnafu {
+                        violated: format!(
+                            "Failed to create repartition mappings for table {}: CAS operation failed",
+                            table_id
+                        ),
+                    }
+                );
+            }
         }
 
         Ok(())
