@@ -178,7 +178,7 @@ impl ParserContext<'_> {
             Statement::Tql(tql) => match (only_eval, tql) {
                 (true, Tql::Eval(eval)) => Ok((Tql::Eval(eval), raw_query.to_string())),
                 (true, _) => Err(InvalidSqlSnafu {
-                    msg: "Only TQL EVAL is supported".to_string(),
+                    msg: "Only TQL EVAL is supported in this context".to_string(),
                 }
                 .build()),
                 (false, tql) => Ok((tql, raw_query.to_string())),
