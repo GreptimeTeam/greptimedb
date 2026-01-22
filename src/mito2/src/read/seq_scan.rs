@@ -41,7 +41,8 @@ use crate::read::flat_dedup::{FlatDedupReader, FlatLastNonNull, FlatLastRow};
 use crate::read::flat_merge::FlatMergeReader;
 use crate::read::last_row::LastRowReader;
 use crate::read::merge::MergeReaderBuilder;
-use crate::read::range::{RangeBuilderList, RangeMeta, file_range_counts};
+use crate::read::pruner::{PartitionPruner, Pruner};
+use crate::read::range::RangeMeta;
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{
     PartitionMetrics, PartitionMetricsList, SplitRecordBatchStream, scan_file_ranges,
@@ -64,6 +65,8 @@ pub struct SeqScan {
     properties: ScannerProperties,
     /// Context of streams.
     stream_ctx: Arc<StreamContext>,
+    /// Shared pruner for file range building.
+    pruner: Arc<Pruner>,
     /// Metrics for each partition.
     /// The scanner only sets in query and keeps it empty during compaction.
     metrics_list: PartitionMetricsList,
@@ -79,9 +82,14 @@ impl SeqScan {
         let stream_ctx = Arc::new(StreamContext::seq_scan_ctx(input));
         properties.partitions = vec![stream_ctx.partition_ranges()];
 
+        // Create the shared pruner with number of workers equal to CPU cores.
+        let num_workers = common_stat::get_total_cpu_cores().max(1);
+        let pruner = Arc::new(Pruner::new(stream_ctx.clone(), num_workers));
+
         Self {
             properties,
             stream_ctx,
+            pruner,
             metrics_list: PartitionMetricsList::default(),
         }
     }
@@ -136,6 +144,7 @@ impl SeqScan {
             &self.stream_ctx,
             partition_ranges,
             &part_metrics,
+            self.pruner.clone(),
         )
         .await?;
         Ok(Box::new(reader))
@@ -157,6 +166,7 @@ impl SeqScan {
             &self.stream_ctx,
             partition_ranges,
             &part_metrics,
+            self.pruner.clone(),
         )
         .await?;
         Ok(reader)
@@ -168,25 +178,22 @@ impl SeqScan {
         stream_ctx: &Arc<StreamContext>,
         partition_ranges: &[PartitionRange],
         part_metrics: &PartitionMetrics,
+        pruner: Arc<Pruner>,
     ) -> Result<BoxedBatchReader> {
+        // Initialize pruner reference counts for compaction.
+        pruner.add_partition_ranges(partition_ranges);
+
+        // Create PartitionPruner for compaction
+        let partition_pruner = Arc::new(PartitionPruner::new(pruner, partition_ranges));
+
         let mut sources = Vec::new();
-        let counts = file_range_counts(
-            stream_ctx.input.num_memtables(),
-            stream_ctx.input.num_files(),
-            &stream_ctx.ranges,
-            partition_ranges.iter(),
-        );
-        let range_builder_list = Arc::new(RangeBuilderList::new(
-            stream_ctx.input.num_memtables(),
-            counts,
-        ));
         for part_range in partition_ranges {
             build_sources(
                 stream_ctx,
                 part_range,
                 true,
                 part_metrics,
-                range_builder_list.clone(),
+                partition_pruner.clone(),
                 &mut sources,
                 None,
             )
@@ -208,25 +215,22 @@ impl SeqScan {
         stream_ctx: &Arc<StreamContext>,
         partition_ranges: &[PartitionRange],
         part_metrics: &PartitionMetrics,
+        pruner: Arc<Pruner>,
     ) -> Result<BoxedRecordBatchStream> {
+        // Initialize pruner reference counts for compaction.
+        pruner.add_partition_ranges(partition_ranges);
+
+        // Create PartitionPruner for compaction
+        let partition_pruner = Arc::new(PartitionPruner::new(pruner, partition_ranges));
+
         let mut sources = Vec::new();
-        let counts = file_range_counts(
-            stream_ctx.input.num_memtables(),
-            stream_ctx.input.num_files(),
-            &stream_ctx.ranges,
-            partition_ranges.iter(),
-        );
-        let range_builder_list = Arc::new(RangeBuilderList::new(
-            stream_ctx.input.num_memtables(),
-            counts,
-        ));
         for part_range in partition_ranges {
             build_flat_sources(
                 stream_ctx,
                 part_range,
                 true,
                 part_metrics,
-                range_builder_list.clone(),
+                partition_pruner.clone(),
                 &mut sources,
                 None,
             )
@@ -419,6 +423,12 @@ impl SeqScan {
         let compaction = self.stream_ctx.input.compaction;
         let distinguish_range = self.properties.distinguish_partition_range;
         let file_scan_semaphore = if compaction { None } else { semaphore.clone() };
+        let pruner = self.pruner.clone();
+        // Initialize pruner reference counts for partition.
+        pruner.add_partition_ranges(&partition_ranges);
+
+        // Create PartitionPruner for this partition
+        let partition_pruner = Arc::new(PartitionPruner::new(pruner, &partition_ranges));
 
         let stream = try_stream! {
             part_metrics.on_first_poll();
@@ -426,16 +436,6 @@ impl SeqScan {
             // build part cost.
             let mut fetch_start = Instant::now();
 
-            let counts = file_range_counts(
-                stream_ctx.input.num_memtables(),
-                stream_ctx.input.num_files(),
-                &stream_ctx.ranges,
-                partition_ranges.iter(),
-            );
-            let range_builder_list = Arc::new(RangeBuilderList::new(
-                stream_ctx.input.num_memtables(),
-                counts,
-            ));
             let _mapper = stream_ctx.input.mapper.as_primary_key().context(UnexpectedSnafu {
                 reason: "Unexpected format",
             })?;
@@ -447,7 +447,7 @@ impl SeqScan {
                     &part_range,
                     compaction,
                     &part_metrics,
-                    range_builder_list.clone(),
+                    partition_pruner.clone(),
                     &mut sources,
                     file_scan_semaphore.clone(),
                 ).await?;
@@ -540,6 +540,12 @@ impl SeqScan {
         let partition_ranges = self.properties.partitions[partition].clone();
         let compaction = self.stream_ctx.input.compaction;
         let file_scan_semaphore = if compaction { None } else { semaphore.clone() };
+        let pruner = self.pruner.clone();
+        // Initialize pruner reference counts for partition.
+        pruner.add_partition_ranges(&partition_ranges);
+
+        // Create PartitionPruner for this partition
+        let partition_pruner = Arc::new(PartitionPruner::new(pruner, &partition_ranges));
 
         let stream = try_stream! {
             part_metrics.on_first_poll();
@@ -547,16 +553,6 @@ impl SeqScan {
             // build part cost.
             let mut fetch_start = Instant::now();
 
-            let counts = file_range_counts(
-                stream_ctx.input.num_memtables(),
-                stream_ctx.input.num_files(),
-                &stream_ctx.ranges,
-                partition_ranges.iter(),
-            );
-            let range_builder_list = Arc::new(RangeBuilderList::new(
-                stream_ctx.input.num_memtables(),
-                counts,
-            ));
             // Scans each part.
             for part_range in partition_ranges {
                 let mut sources = Vec::new();
@@ -565,7 +561,7 @@ impl SeqScan {
                     &part_range,
                     compaction,
                     &part_metrics,
-                    range_builder_list.clone(),
+                    partition_pruner.clone(),
                     &mut sources,
                     file_scan_semaphore.clone(),
                 ).await?;
@@ -765,7 +761,7 @@ pub(crate) async fn build_sources(
     part_range: &PartitionRange,
     compaction: bool,
     part_metrics: &PartitionMetrics,
-    range_builder_list: Arc<RangeBuilderList>,
+    partition_pruner: Arc<PartitionPruner>,
     sources: &mut Vec<Source>,
     semaphore: Option<Arc<Semaphore>>,
 ) -> Result<()> {
@@ -814,7 +810,7 @@ pub(crate) async fn build_sources(
                 // run in parallel, controlled by semaphore
                 let stream_ctx = stream_ctx.clone();
                 let part_metrics = part_metrics.clone();
-                let range_builder_list = range_builder_list.clone();
+                let partition_pruner = partition_pruner.clone();
                 let semaphore = Arc::clone(semaphore_ref);
                 let row_group_index = *index;
                 file_scan_tasks.push(async move {
@@ -824,7 +820,7 @@ pub(crate) async fn build_sources(
                         part_metrics,
                         row_group_index,
                         read_type,
-                        range_builder_list,
+                        partition_pruner,
                     )
                     .await?;
                     Ok((position, Source::Stream(Box::pin(stream) as _)))
@@ -836,7 +832,7 @@ pub(crate) async fn build_sources(
                     part_metrics.clone(),
                     *index,
                     read_type,
-                    range_builder_list.clone(),
+                    partition_pruner.clone(),
                 )
                 .await?;
                 ordered_sources[position] = Some(Source::Stream(Box::pin(stream) as _));
@@ -867,7 +863,7 @@ pub(crate) async fn build_flat_sources(
     part_range: &PartitionRange,
     compaction: bool,
     part_metrics: &PartitionMetrics,
-    range_builder_list: Arc<RangeBuilderList>,
+    partition_pruner: Arc<PartitionPruner>,
     sources: &mut Vec<BoxedRecordBatchStream>,
     semaphore: Option<Arc<Semaphore>>,
 ) -> Result<()> {
@@ -912,7 +908,7 @@ pub(crate) async fn build_flat_sources(
                 // run in parallel, controlled by semaphore
                 let stream_ctx = stream_ctx.clone();
                 let part_metrics = part_metrics.clone();
-                let range_builder_list = range_builder_list.clone();
+                let partition_pruner = partition_pruner.clone();
                 let semaphore = Arc::clone(semaphore_ref);
                 let row_group_index = *index;
                 file_scan_tasks.push(async move {
@@ -922,7 +918,7 @@ pub(crate) async fn build_flat_sources(
                         part_metrics,
                         row_group_index,
                         read_type,
-                        range_builder_list,
+                        partition_pruner,
                     )
                     .await?;
                     Ok((position, Box::pin(stream) as _))
@@ -934,7 +930,7 @@ pub(crate) async fn build_flat_sources(
                     part_metrics.clone(),
                     *index,
                     read_type,
-                    range_builder_list.clone(),
+                    partition_pruner.clone(),
                 )
                 .await?;
                 ordered_sources[position] = Some(Box::pin(stream) as _);

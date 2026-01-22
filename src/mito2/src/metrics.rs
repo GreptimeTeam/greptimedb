@@ -249,6 +249,11 @@ lazy_static! {
         "greptime_mito_scan_requests_rejected_total",
         "total number of scan requests rejected due to memory limit"
     ).unwrap();
+    /// Gauge for active file range builders in the pruner.
+    pub static ref PRUNER_ACTIVE_BUILDERS: IntGauge = register_int_gauge!(
+        "greptime_mito_pruner_active_builders",
+        "number of active file range builders in the pruner"
+    ).unwrap();
 }
 
 // Cache metrics.

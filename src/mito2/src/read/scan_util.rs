@@ -40,7 +40,8 @@ use crate::metrics::{
 };
 use crate::read::dedup::{DedupMetrics, DedupMetricsReport};
 use crate::read::merge::{MergeMetrics, MergeMetricsReport};
-use crate::read::range::{RangeBuilderList, RangeMeta, RowGroupIndex};
+use crate::read::pruner::PartitionPruner;
+use crate::read::range::{RangeMeta, RowGroupIndex};
 use crate::read::scan_region::StreamContext;
 use crate::read::{Batch, BoxedBatchStream, BoxedRecordBatchStream, ScannerMetrics, Source};
 use crate::sst::file::{FileTimeRange, RegionFileId};
@@ -179,6 +180,12 @@ pub(crate) struct ScanMetricsSet {
     bloom_filter_cache_hit: usize,
     /// Number of index result cache misses for bloom filter index.
     bloom_filter_cache_miss: usize,
+    /// Number of pruner builder cache hits.
+    pruner_cache_hit: usize,
+    /// Number of pruner builder cache misses.
+    pruner_cache_miss: usize,
+    /// Duration spent waiting for pruner to build file ranges.
+    pruner_prune_cost: Duration,
     /// Number of record batches read from SST.
     num_sst_record_batches: usize,
     /// Number of batches decoded from SST.
@@ -298,6 +305,9 @@ impl fmt::Debug for ScanMetricsSet {
             inverted_index_cache_miss,
             bloom_filter_cache_hit,
             bloom_filter_cache_miss,
+            pruner_cache_hit,
+            pruner_cache_miss,
+            pruner_prune_cost,
             num_sst_record_batches,
             num_sst_batches,
             num_sst_rows,
@@ -416,6 +426,15 @@ impl fmt::Debug for ScanMetricsSet {
         }
         if *bloom_filter_cache_miss > 0 {
             write!(f, ", \"bloom_filter_cache_miss\":{bloom_filter_cache_miss}")?;
+        }
+        if *pruner_cache_hit > 0 {
+            write!(f, ", \"pruner_cache_hit\":{pruner_cache_hit}")?;
+        }
+        if *pruner_cache_miss > 0 {
+            write!(f, ", \"pruner_cache_miss\":{pruner_cache_miss}")?;
+        }
+        if !pruner_prune_cost.is_zero() {
+            write!(f, ", \"pruner_prune_cost\":\"{pruner_prune_cost:?}\"")?;
         }
 
         // Write non-zero distributor metrics
@@ -607,6 +626,9 @@ impl ScanMetricsSet {
                     inverted_index_cache_miss,
                     bloom_filter_cache_hit,
                     bloom_filter_cache_miss,
+                    pruner_cache_hit,
+                    pruner_cache_miss,
+                    pruner_prune_cost,
                     inverted_index_apply_metrics,
                     bloom_filter_apply_metrics,
                     fulltext_index_apply_metrics,
@@ -644,6 +666,9 @@ impl ScanMetricsSet {
         self.inverted_index_cache_miss += *inverted_index_cache_miss;
         self.bloom_filter_cache_hit += *bloom_filter_cache_hit;
         self.bloom_filter_cache_miss += *bloom_filter_cache_miss;
+        self.pruner_cache_hit += *pruner_cache_hit;
+        self.pruner_cache_miss += *pruner_cache_miss;
+        self.pruner_prune_cost += *pruner_prune_cost;
 
         self.num_sst_record_batches += *num_record_batches;
         self.num_sst_batches += *num_batches;
@@ -1243,14 +1268,14 @@ pub(crate) async fn scan_file_ranges(
     part_metrics: PartitionMetrics,
     index: RowGroupIndex,
     read_type: &'static str,
-    range_builder: Arc<RangeBuilderList>,
+    partition_pruner: Arc<PartitionPruner>,
 ) -> Result<impl Stream<Item = Result<Batch>>> {
     let mut reader_metrics = ReaderMetrics {
         filter_metrics: new_filter_metrics(part_metrics.explain_verbose()),
         ..Default::default()
     };
-    let ranges = range_builder
-        .build_file_ranges(&stream_ctx.input, index, &mut reader_metrics)
+    let ranges = partition_pruner
+        .build_file_ranges(index, &mut reader_metrics)
         .await?;
     part_metrics.inc_num_file_ranges(ranges.len());
     part_metrics.merge_reader_metrics(&reader_metrics, None);
@@ -1296,14 +1321,14 @@ pub(crate) async fn scan_flat_file_ranges(
     part_metrics: PartitionMetrics,
     index: RowGroupIndex,
     read_type: &'static str,
-    range_builder: Arc<RangeBuilderList>,
+    partition_pruner: Arc<PartitionPruner>,
 ) -> Result<impl Stream<Item = Result<RecordBatch>>> {
     let mut reader_metrics = ReaderMetrics {
         filter_metrics: new_filter_metrics(part_metrics.explain_verbose()),
         ..Default::default()
     };
-    let ranges = range_builder
-        .build_file_ranges(&stream_ctx.input, index, &mut reader_metrics)
+    let ranges = partition_pruner
+        .build_file_ranges(index, &mut reader_metrics)
         .await?;
     part_metrics.inc_num_file_ranges(ranges.len());
     part_metrics.merge_reader_metrics(&reader_metrics, None);
