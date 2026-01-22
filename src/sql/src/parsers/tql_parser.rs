@@ -1399,4 +1399,20 @@ mod tests {
         }
         assert!(raw.contains("TQL EXPLAIN"));
     }
+
+    #[test]
+    fn test_parse_parenthesized_tql_without_lparen() {
+        let sql = "TQL EVAL http_requests_total)";
+        let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
+        let result = ctx.parse_parenthesized_tql(false, false, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_parenthesized_tql_without_rparen() {
+        let sql = "(TQL EVAL http_requests_total";
+        let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
+        let result = ctx.parse_parenthesized_tql(false, false, true);
+        assert!(result.is_err());
+    }
 }
