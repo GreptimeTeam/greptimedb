@@ -18,11 +18,12 @@
 //! `expr1 OR expr2 OR ...`, where each expr is a conjunction of simple
 //! comparisons on partition columns.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
 
-use datatypes::value::Value;
+use datatypes::value::{OrderedF64, Value};
 
+use crate::collider::{AtomicExpr, Collider, GluonOp, NucleonExpr};
 use crate::expr::{Operand, PartitionExpr, RestrictedOp, col};
 
 /// Attempts to simplify a merged partition expression (typically an `OR` of multiple partitions)
@@ -33,30 +34,70 @@ pub fn simplify_merged_partition_expr(expr: PartitionExpr) -> PartitionExpr {
     try_simplify_merged_partition_expr(&expr).unwrap_or(expr)
 }
 
+type DenormValues = BTreeMap<String, BTreeMap<OrderedF64, Value>>;
+
 fn try_simplify_merged_partition_expr(expr: &PartitionExpr) -> Option<PartitionExpr> {
-    // Quick exit: not a disjunction.
-    if !contains_or(expr) {
+    let collider = Collider::new(std::slice::from_ref(expr)).ok()?;
+    if collider.atomic_exprs.len() <= 1 {
         return None;
     }
 
-    let terms = parse_terms(expr)?;
+    let denorm_values = build_denorm_values(&collider)?;
+
+    let mut terms = Vec::with_capacity(collider.atomic_exprs.len());
+    for atomic in &collider.atomic_exprs {
+        terms.push(term_from_atomic(atomic, &denorm_values)?);
+    }
+
     let terms = simplify_terms(terms)?;
-    build_expr_from_terms(&terms)
+    build_expr_from_terms(&terms, &denorm_values)
 }
 
-fn contains_or(expr: &PartitionExpr) -> bool {
-    if expr.op == RestrictedOp::Or {
-        return true;
+fn build_denorm_values(collider: &Collider<'_>) -> Option<DenormValues> {
+    let mut values = DenormValues::new();
+    for (column, pairs) in &collider.normalized_values {
+        let mut map = BTreeMap::new();
+        for (value, normalized) in pairs {
+            // Keep simplification conservative for NULL semantics.
+            if matches!(value, Value::Null) {
+                return None;
+            }
+            map.insert(*normalized, value.clone());
+        }
+        values.insert(column.clone(), map);
     }
-    let lhs = match expr.lhs.as_ref() {
-        Operand::Expr(e) => Some(e),
-        _ => None,
-    };
-    let rhs = match expr.rhs.as_ref() {
-        Operand::Expr(e) => Some(e),
-        _ => None,
-    };
-    lhs.is_some_and(contains_or) || rhs.is_some_and(contains_or)
+    Some(values)
+}
+
+fn term_from_atomic(atomic: &AtomicExpr, denorm_values: &DenormValues) -> Option<Term> {
+    let mut constraints = BTreeMap::new();
+
+    let mut i = 0;
+    while i < atomic.nucleons.len() {
+        let column = atomic.nucleons[i].column();
+        if !denorm_values.contains_key(column) {
+            return None;
+        }
+        let start = i;
+        while i < atomic.nucleons.len() && atomic.nucleons[i].column() == column {
+            i += 1;
+        }
+
+        let interval = interval_from_nucleons(&atomic.nucleons[start..i])?;
+        if !interval.is_unbounded() {
+            constraints.insert(column.to_string(), interval);
+        }
+    }
+
+    Some(Term { constraints })
+}
+
+fn interval_from_nucleons(nucleons: &[NucleonExpr]) -> Option<Interval> {
+    let mut interval = Interval::unbounded();
+    for nucleon in nucleons {
+        interval.apply_nucleon(nucleon.op(), nucleon.value())?;
+    }
+    Some(interval)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,8 +123,8 @@ impl Term {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Interval {
-    lower: Bound<Value>,
-    upper: Bound<Value>,
+    lower: Bound<OrderedF64>,
+    upper: Bound<OrderedF64>,
 }
 
 impl Interval {
@@ -98,27 +139,21 @@ impl Interval {
         matches!(self.lower, Bound::Unbounded) && matches!(self.upper, Bound::Unbounded)
     }
 
-    fn apply_predicate(&mut self, op: &RestrictedOp, value: &Value) -> Option<()> {
-        // Keep simplification conservative for NULL and `<>` constraints.
-        if matches!(value, Value::Null) {
-            return None;
-        }
-
+    fn apply_nucleon(&mut self, op: &GluonOp, value: OrderedF64) -> Option<()> {
         match op {
-            RestrictedOp::Eq => {
-                let v = value.clone();
-                // Ensure existing bounds contain `v`.
-                if !self.contains_value(&v) {
+            GluonOp::Eq => {
+                // Ensure existing bounds contain `value`.
+                if !self.contains_value(&value) {
                     return None;
                 }
-                self.lower = Bound::Included(v.clone());
-                self.upper = Bound::Included(v);
+                self.lower = Bound::Included(value);
+                self.upper = Bound::Included(value);
             }
-            RestrictedOp::Lt => self.update_upper(Bound::Excluded(value.clone())),
-            RestrictedOp::LtEq => self.update_upper(Bound::Included(value.clone())),
-            RestrictedOp::Gt => self.update_lower(Bound::Excluded(value.clone())),
-            RestrictedOp::GtEq => self.update_lower(Bound::Included(value.clone())),
-            RestrictedOp::NotEq | RestrictedOp::And | RestrictedOp::Or => return None,
+            GluonOp::Lt => self.update_upper(Bound::Excluded(value)),
+            GluonOp::LtEq => self.update_upper(Bound::Included(value)),
+            GluonOp::Gt => self.update_lower(Bound::Excluded(value)),
+            GluonOp::GtEq => self.update_lower(Bound::Included(value)),
+            GluonOp::NotEq => return None,
         }
 
         if self.is_empty() {
@@ -127,7 +162,7 @@ impl Interval {
         Some(())
     }
 
-    fn contains_value(&self, value: &Value) -> bool {
+    fn contains_value(&self, value: &OrderedF64) -> bool {
         // `value` is within [lower, upper] taking inclusiveness into account.
         match &self.lower {
             Bound::Unbounded => {}
@@ -144,13 +179,13 @@ impl Interval {
         true
     }
 
-    fn update_lower(&mut self, new_lower: Bound<Value>) {
+    fn update_lower(&mut self, new_lower: Bound<OrderedF64>) {
         if cmp_lower(&new_lower, &self.lower).is_gt() {
             self.lower = new_lower;
         }
     }
 
-    fn update_upper(&mut self, new_upper: Bound<Value>) {
+    fn update_upper(&mut self, new_upper: Bound<OrderedF64>) {
         if cmp_upper(&new_upper, &self.upper).is_lt() {
             self.upper = new_upper;
         }
@@ -204,7 +239,7 @@ enum UnionInterval {
     Interval(Interval),
 }
 
-fn cmp_lower(a: &Bound<Value>, b: &Bound<Value>) -> std::cmp::Ordering {
+fn cmp_lower(a: &Bound<OrderedF64>, b: &Bound<OrderedF64>) -> std::cmp::Ordering {
     use std::cmp::Ordering::*;
 
     use Bound::*;
@@ -225,7 +260,7 @@ fn cmp_lower(a: &Bound<Value>, b: &Bound<Value>) -> std::cmp::Ordering {
     }
 }
 
-fn cmp_upper(a: &Bound<Value>, b: &Bound<Value>) -> std::cmp::Ordering {
+fn cmp_upper(a: &Bound<OrderedF64>, b: &Bound<OrderedF64>) -> std::cmp::Ordering {
     use std::cmp::Ordering::*;
 
     use Bound::*;
@@ -246,7 +281,7 @@ fn cmp_upper(a: &Bound<Value>, b: &Bound<Value>) -> std::cmp::Ordering {
     }
 }
 
-fn has_gap(upper: &Bound<Value>, lower: &Bound<Value>) -> bool {
+fn has_gap(upper: &Bound<OrderedF64>, lower: &Bound<OrderedF64>) -> bool {
     use Bound::*;
 
     match (upper, lower) {
@@ -265,141 +300,65 @@ fn has_gap(upper: &Bound<Value>, lower: &Bound<Value>) -> bool {
     }
 }
 
-fn union_lower(a: &Bound<Value>, b: &Bound<Value>) -> Bound<Value> {
+fn union_lower(a: &Bound<OrderedF64>, b: &Bound<OrderedF64>) -> Bound<OrderedF64> {
     use Bound::*;
     match (a, b) {
         (Unbounded, _) | (_, Unbounded) => Unbounded,
         (Included(av), Included(bv)) => {
             if av <= bv {
-                Included(av.clone())
+                Included(*av)
             } else {
-                Included(bv.clone())
+                Included(*bv)
             }
         }
         (Excluded(av), Excluded(bv)) => {
             if av <= bv {
-                Excluded(av.clone())
+                Excluded(*av)
             } else {
-                Excluded(bv.clone())
+                Excluded(*bv)
             }
         }
         (Included(av), Excluded(bv)) => match av.cmp(bv) {
-            std::cmp::Ordering::Less => Included(av.clone()),
-            std::cmp::Ordering::Greater => Excluded(bv.clone()),
-            std::cmp::Ordering::Equal => Included(av.clone()),
+            std::cmp::Ordering::Less => Included(*av),
+            std::cmp::Ordering::Greater => Excluded(*bv),
+            std::cmp::Ordering::Equal => Included(*av),
         },
         (Excluded(av), Included(bv)) => match av.cmp(bv) {
-            std::cmp::Ordering::Less => Excluded(av.clone()),
-            std::cmp::Ordering::Greater => Included(bv.clone()),
-            std::cmp::Ordering::Equal => Included(bv.clone()),
+            std::cmp::Ordering::Less => Excluded(*av),
+            std::cmp::Ordering::Greater => Included(*bv),
+            std::cmp::Ordering::Equal => Included(*bv),
         },
     }
 }
 
-fn union_upper(a: &Bound<Value>, b: &Bound<Value>) -> Bound<Value> {
+fn union_upper(a: &Bound<OrderedF64>, b: &Bound<OrderedF64>) -> Bound<OrderedF64> {
     use Bound::*;
     match (a, b) {
         (Unbounded, _) | (_, Unbounded) => Unbounded,
         (Included(av), Included(bv)) => {
             if av >= bv {
-                Included(av.clone())
+                Included(*av)
             } else {
-                Included(bv.clone())
+                Included(*bv)
             }
         }
         (Excluded(av), Excluded(bv)) => {
             if av >= bv {
-                Excluded(av.clone())
+                Excluded(*av)
             } else {
-                Excluded(bv.clone())
+                Excluded(*bv)
             }
         }
         (Included(av), Excluded(bv)) => match av.cmp(bv) {
-            std::cmp::Ordering::Greater => Included(av.clone()),
-            std::cmp::Ordering::Less => Excluded(bv.clone()),
-            std::cmp::Ordering::Equal => Included(av.clone()),
+            std::cmp::Ordering::Greater => Included(*av),
+            std::cmp::Ordering::Less => Excluded(*bv),
+            std::cmp::Ordering::Equal => Included(*av),
         },
         (Excluded(av), Included(bv)) => match av.cmp(bv) {
-            std::cmp::Ordering::Greater => Excluded(av.clone()),
-            std::cmp::Ordering::Less => Included(bv.clone()),
-            std::cmp::Ordering::Equal => Included(bv.clone()),
+            std::cmp::Ordering::Greater => Excluded(*av),
+            std::cmp::Ordering::Less => Included(*bv),
+            std::cmp::Ordering::Equal => Included(*bv),
         },
-    }
-}
-
-fn parse_terms(expr: &PartitionExpr) -> Option<Vec<Term>> {
-    let mut or_terms = Vec::new();
-    collect_or_terms(expr, &mut or_terms)?;
-
-    let mut terms = Vec::with_capacity(or_terms.len());
-    for term_expr in or_terms {
-        terms.push(parse_one_term(term_expr)?);
-    }
-    Some(terms)
-}
-
-fn collect_or_terms<'a>(expr: &'a PartitionExpr, out: &mut Vec<&'a PartitionExpr>) -> Option<()> {
-    if expr.op == RestrictedOp::Or {
-        let Operand::Expr(lhs) = expr.lhs.as_ref() else {
-            return None;
-        };
-        let Operand::Expr(rhs) = expr.rhs.as_ref() else {
-            return None;
-        };
-        collect_or_terms(lhs, out)?;
-        collect_or_terms(rhs, out)?;
-        return Some(());
-    }
-
-    out.push(expr);
-    Some(())
-}
-
-fn parse_one_term(expr: &PartitionExpr) -> Option<Term> {
-    let mut preds = Vec::new();
-    collect_and_preds(expr, &mut preds)?;
-
-    let mut constraints: BTreeMap<String, Interval> = BTreeMap::new();
-    for pred in preds {
-        let (col, op, value) = parse_predicate(pred)?;
-        let entry = constraints
-            .entry(col.to_string())
-            .or_insert_with(Interval::unbounded);
-        entry.apply_predicate(op, value)?;
-    }
-
-    // Keep only effective constraints.
-    constraints.retain(|_, interval| !interval.is_unbounded());
-    Some(Term { constraints })
-}
-
-fn collect_and_preds<'a>(expr: &'a PartitionExpr, out: &mut Vec<&'a PartitionExpr>) -> Option<()> {
-    if expr.op == RestrictedOp::And {
-        let Operand::Expr(lhs) = expr.lhs.as_ref() else {
-            return None;
-        };
-        let Operand::Expr(rhs) = expr.rhs.as_ref() else {
-            return None;
-        };
-        collect_and_preds(lhs, out)?;
-        collect_and_preds(rhs, out)?;
-        return Some(());
-    }
-
-    if expr.op == RestrictedOp::Or {
-        // Avoid `(a OR b) AND c`-style constructs (not representable without parentheses).
-        return None;
-    }
-
-    out.push(expr);
-    Some(())
-}
-
-fn parse_predicate(expr: &PartitionExpr) -> Option<(&str, &RestrictedOp, &Value)> {
-    match (expr.lhs.as_ref(), expr.rhs.as_ref()) {
-        (Operand::Column(col), Operand::Value(v)) => Some((col.as_str(), &expr.op, v)),
-        (Operand::Value(v), Operand::Column(col)) => Some((col.as_str(), &expr.op, v)),
-        _ => None,
     }
 }
 
@@ -469,7 +428,7 @@ fn try_merge_terms(a: &Term, b: &Term) -> Option<Term> {
     // Find the only differing column (treat missing as unbounded).
     let mut diff_col: Option<&str> = None;
 
-    let mut cols = std::collections::BTreeSet::new();
+    let mut cols = BTreeSet::new();
     cols.extend(a.constraints.keys().map(|s| s.as_str()));
     cols.extend(b.constraints.keys().map(|s| s.as_str()));
 
@@ -503,10 +462,10 @@ fn try_merge_terms(a: &Term, b: &Term) -> Option<Term> {
     Some(Term { constraints })
 }
 
-fn build_expr_from_terms(terms: &[Term]) -> Option<PartitionExpr> {
+fn build_expr_from_terms(terms: &[Term], denorm_values: &DenormValues) -> Option<PartitionExpr> {
     let mut term_exprs = Vec::with_capacity(terms.len());
     for term in terms {
-        let expr = term_to_expr(term)?;
+        let expr = term_to_expr(term, denorm_values)?;
         term_exprs.push(expr);
     }
 
@@ -529,7 +488,7 @@ fn build_expr_from_terms(terms: &[Term]) -> Option<PartitionExpr> {
     Some(acc)
 }
 
-fn term_to_expr(term: &Term) -> Option<PartitionExpr> {
+fn term_to_expr(term: &Term, denorm_values: &DenormValues) -> Option<PartitionExpr> {
     // Empty term would represent a tautology which can't be expressed here.
     if term.constraints.is_empty() {
         return None;
@@ -537,7 +496,7 @@ fn term_to_expr(term: &Term) -> Option<PartitionExpr> {
 
     let mut exprs = Vec::new();
     for (column, interval) in &term.constraints {
-        exprs.extend(interval_to_exprs(column, interval)?);
+        exprs.extend(interval_to_exprs(column, interval, denorm_values)?);
     }
 
     let mut iter = exprs.into_iter();
@@ -548,19 +507,25 @@ fn term_to_expr(term: &Term) -> Option<PartitionExpr> {
     Some(acc)
 }
 
-fn interval_to_exprs(column: &str, interval: &Interval) -> Option<Vec<PartitionExpr>> {
+fn interval_to_exprs(
+    column: &str,
+    interval: &Interval,
+    denorm_values: &DenormValues,
+) -> Option<Vec<PartitionExpr>> {
     use Bound::*;
 
     if interval.is_unbounded() {
         return Some(vec![]);
     }
 
+    let col_values = denorm_values.get(column)?;
+
     let lower = &interval.lower;
     let upper = &interval.upper;
 
     match (lower, upper) {
         (Included(lv), Included(uv)) if lv == uv => {
-            return Some(vec![col(column).eq(lv.clone())]);
+            return Some(vec![col(column).eq(col_values.get(lv)?.clone())]);
         }
         (Excluded(lv), Excluded(uv)) if lv == uv => return None,
         (Included(lv), Excluded(uv)) if lv == uv => return None,
@@ -571,13 +536,13 @@ fn interval_to_exprs(column: &str, interval: &Interval) -> Option<Vec<PartitionE
     let mut exprs = Vec::new();
     match lower {
         Unbounded => {}
-        Included(v) => exprs.push(col(column).gt_eq(v.clone())),
-        Excluded(v) => exprs.push(col(column).gt(v.clone())),
+        Included(v) => exprs.push(col(column).gt_eq(col_values.get(v)?.clone())),
+        Excluded(v) => exprs.push(col(column).gt(col_values.get(v)?.clone())),
     }
     match upper {
         Unbounded => {}
-        Included(v) => exprs.push(col(column).lt_eq(v.clone())),
-        Excluded(v) => exprs.push(col(column).lt(v.clone())),
+        Included(v) => exprs.push(col(column).lt_eq(col_values.get(v)?.clone())),
+        Excluded(v) => exprs.push(col(column).lt(col_values.get(v)?.clone())),
     }
 
     Some(exprs)
