@@ -16,6 +16,10 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use common_function::aggrs::aggr_wrapper::{StateMergeHelper, is_all_aggr_exprs_steppable};
+#[cfg(feature = "vector_index")]
+use common_function::scalars::vector::distance::{
+    VEC_COS_DISTANCE, VEC_DOT_PRODUCT, VEC_L2SQ_DISTANCE,
+};
 use common_telemetry::debug;
 use datafusion::error::Result as DfResult;
 #[cfg(feature = "vector_index")]
@@ -31,11 +35,6 @@ use promql::extension_plan::{
 use crate::dist_plan::MergeScanLogicalPlan;
 use crate::dist_plan::analyzer::AliasMapping;
 use crate::dist_plan::merge_sort::{MergeSortLogicalPlan, merge_sort_transformer};
-
-#[cfg(feature = "vector_index")]
-use common_function::scalars::vector::distance::{
-    VEC_COS_DISTANCE, VEC_DOT_PRODUCT, VEC_L2SQ_DISTANCE,
-};
 
 #[cfg(feature = "vector_index")]
 fn is_vector_sort(sort: &Sort) -> bool {
