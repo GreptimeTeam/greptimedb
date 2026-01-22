@@ -21,6 +21,8 @@ mod jsonbench;
 mod sql;
 #[macro_use]
 mod region_migration;
+#[macro_use]
+mod repartition;
 
 grpc_tests!(File, S3, S3WithCache, Oss, Azblob, Gcs);
 
@@ -30,4 +32,7 @@ sql_tests!(File);
 
 region_migration_tests!(File);
 
+repartition_tests!(File);
+
+repartition_tests!(S3, S3WithCache, Oss, Azblob, Gcs);
 // TODO(niebayes): add integration tests for remote wal.

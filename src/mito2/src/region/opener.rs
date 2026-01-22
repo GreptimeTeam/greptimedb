@@ -328,6 +328,7 @@ impl RegionOpener {
             )),
             file_purger: create_file_purger(
                 config.gc.enable,
+                self.path_type,
                 self.purge_scheduler,
                 access_layer,
                 self.cache_manager,
@@ -465,6 +466,7 @@ impl RegionOpener {
         ));
         let file_purger = create_file_purger(
             config.gc.enable,
+            self.path_type,
             self.purge_scheduler.clone(),
             access_layer.clone(),
             self.cache_manager.clone(),

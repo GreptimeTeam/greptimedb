@@ -1432,6 +1432,7 @@ impl StatementExecutor {
             .chain(into_partition_exprs.clone().into_iter())
             .collect();
         let new_partition_exprs_len = new_partition_exprs.len();
+        let from_partition_exprs_len = from_partition_exprs.len();
 
         // Validate the new partition expressions using MultiDimPartitionRule and PartitionChecker.
         let _ = MultiDimPartitionRule::try_new(
@@ -1444,14 +1445,6 @@ impl StatementExecutor {
             true,
         )
         .context(InvalidPartitionSnafu)?;
-
-        info!(
-            "Submitting repartition task for table {} (table_id={}), from {} to {} partitions",
-            table_ref,
-            table_id,
-            from_partition_exprs.len(),
-            new_partition_exprs_len
-        );
 
         let ddl_options = parse_ddl_options(&request.options)?;
         let serialize_exprs = |exprs: Vec<PartitionExpr>| -> Result<Vec<String>> {
@@ -1477,6 +1470,16 @@ impl StatementExecutor {
         );
         req.wait = ddl_options.wait;
         req.timeout = ddl_options.timeout;
+
+        info!(
+            "Submitting repartition task for table {} (table_id={}), from {} to {} partitions, timeout: {:?}, wait: {}",
+            table_ref,
+            table_id,
+            from_partition_exprs_len,
+            new_partition_exprs_len,
+            ddl_options.timeout,
+            ddl_options.wait
+        );
 
         let response = self
             .procedure_executor

@@ -31,7 +31,7 @@ mod util;
 
 pub use options::GcSchedulerOptions;
 pub use procedure::BatchGcProcedure;
-pub(crate) use scheduler::{GcScheduler, GcTickerRef};
+pub use scheduler::{Event, GcScheduler, GcTickerRef};
 
 /// Mapping from region ID to its associated peers (leader and followers).
 pub type Region2Peers = HashMap<RegionId, (Peer, Vec<Peer>)>;
