@@ -13,14 +13,13 @@
 // limitations under the License.
 
 use datafusion_common::ScalarValue;
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{OptionExt, ResultExt};
 use sqlparser::ast::AnalyzeFormat;
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::ParserError;
 use sqlparser::tokenizer::Token;
 
-use crate::dialect::GreptimeDbDialect;
-use crate::error::{self, InvalidSqlSnafu, Result};
+use crate::error::{self, Result};
 use crate::parser::ParserContext;
 use crate::parsers::utils;
 use crate::statements::statement::Statement;
@@ -107,14 +106,15 @@ impl ParserContext<'_> {
     ///
     /// # Examples
     /// - (TQL EVAL (0, 10, '1s') cpu_usage)
-    // Only use in trigger create parse with enterprise feature now. Remove `#[allow(dead_code)]` later.
-    #[allow(dead_code)]
+    #[cfg(feature = "enterprise")]
     pub(crate) fn parse_parenthesized_tql(
         &mut self,
         is_lparen_consumed: bool,
         require_now_expr: bool,
         only_eval: bool,
     ) -> Result<(Tql, String)> {
+        use crate::error::InvalidSqlSnafu;
+
         if !is_lparen_consumed {
             self.parser
                 .expect_token(&Token::LParen)
@@ -152,7 +152,7 @@ impl ParserContext<'_> {
 
         let sql_len = self.sql.len();
         let start_index = location_to_index(self.sql, &start_location);
-        ensure!(
+        snafu::ensure!(
             start_index <= sql_len,
             error::InvalidSqlSnafu {
                 msg: format!("Invalid location (index {} > len {})", start_index, sql_len),
@@ -160,7 +160,7 @@ impl ParserContext<'_> {
         );
 
         let end_index = location_to_index(self.sql, &end_location);
-        ensure!(
+        snafu::ensure!(
             end_index <= sql_len,
             error::InvalidSqlSnafu {
                 msg: format!("Invalid location (index {} > len {})", end_index, sql_len),
@@ -171,7 +171,7 @@ impl ParserContext<'_> {
         let tql_sql = tql_sql.trim();
         let raw_query = tql_sql.trim_end_matches(';');
 
-        let mut parser_ctx = ParserContext::new(&GreptimeDbDialect {}, tql_sql)?;
+        let mut parser_ctx = ParserContext::new(&crate::dialect::GreptimeDbDialect {}, tql_sql)?;
         let statement = parser_ctx.parse_tql(require_now_expr)?;
 
         match statement {
@@ -1376,6 +1376,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "enterprise")]
     #[test]
     fn test_parse_parenthesized_tql_only_eval_allowed() {
         let sql = "(TQL EXPLAIN http_requests_total)";
@@ -1384,6 +1385,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[cfg(feature = "enterprise")]
     #[test]
     fn test_parse_parenthesized_tql_allow_non_eval_when_flag_false() {
         let sql = "(TQL EXPLAIN http_requests_total)";
@@ -1400,6 +1402,7 @@ mod tests {
         assert!(raw.contains("TQL EXPLAIN"));
     }
 
+    #[cfg(feature = "enterprise")]
     #[test]
     fn test_parse_parenthesized_tql_without_lparen() {
         let sql = "TQL EVAL http_requests_total)";
@@ -1408,6 +1411,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[cfg(feature = "enterprise")]
     #[test]
     fn test_parse_parenthesized_tql_without_rparen() {
         let sql = "(TQL EVAL http_requests_total";
