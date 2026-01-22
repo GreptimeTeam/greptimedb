@@ -13,14 +13,14 @@
 // limitations under the License.
 
 use datafusion_common::ScalarValue;
-use snafu::{OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use sqlparser::ast::AnalyzeFormat;
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::ParserError;
 use sqlparser::tokenizer::Token;
 
 use crate::dialect::GreptimeDbDialect;
-use crate::error::{self, Result};
+use crate::error::{self, InvalidSqlSnafu, Result};
 use crate::parser::ParserContext;
 use crate::parsers::utils;
 use crate::statements::statement::Statement;
@@ -107,6 +107,7 @@ impl ParserContext<'_> {
     ///
     /// # Examples
     /// - (TQL EVAL (0, 10, '1s') cpu_usage)
+    // Only use in trigger create parse with enterprise feature now. Remove `#[allow(dead_code)]` later.
     #[allow(dead_code)]
     pub(crate) fn parse_parenthesized_tql(
         &mut self,
@@ -120,14 +121,7 @@ impl ParserContext<'_> {
                 .context(error::SyntaxSnafu)?;
         }
 
-        let tql_token = self.parser.next_token();
-        if tql_token.token == Token::EOF {
-            return Err(error::InvalidSqlSnafu {
-                msg: "Unexpected end of input while parsing TQL".to_string(),
-            }
-            .build());
-        }
-
+        let tql_token = self.parser.peek_token();
         let start_location = tql_token.span.start;
         let mut paren_depth = 0usize;
         let end_location;
@@ -136,7 +130,7 @@ impl ParserContext<'_> {
             let token_with_span = self.parser.peek_token();
 
             if token_with_span.token == Token::EOF {
-                return Err(error::InvalidSqlSnafu {
+                return Err(InvalidSqlSnafu {
                     msg: "Unexpected end of input while parsing TQL".to_string(),
                 }
                 .build());
@@ -144,6 +138,7 @@ impl ParserContext<'_> {
 
             if token_with_span.token == Token::RParen && paren_depth == 0 {
                 end_location = token_with_span.span.start;
+                self.parser.next_token();
                 break;
             }
 
@@ -155,8 +150,23 @@ impl ParserContext<'_> {
             }
         }
 
+        let sql_len = self.sql.len();
         let start_index = location_to_index(self.sql, &start_location);
+        ensure!(
+            start_index <= sql_len,
+            error::InvalidSqlSnafu {
+                msg: format!("Invalid location (index {} > len {})", start_index, sql_len),
+            }
+        );
+
         let end_index = location_to_index(self.sql, &end_location);
+        ensure!(
+            end_index <= sql_len,
+            error::InvalidSqlSnafu {
+                msg: format!("Invalid location (index {} > len {})", end_index, sql_len),
+            }
+        );
+
         let tql_sql = &self.sql[start_index..end_index];
         let tql_sql = tql_sql.trim();
         let raw_query = tql_sql.trim_end_matches(';');
@@ -167,14 +177,14 @@ impl ParserContext<'_> {
         match statement {
             Statement::Tql(tql) => match (only_eval, tql) {
                 (true, Tql::Eval(eval)) => Ok((Tql::Eval(eval), raw_query.to_string())),
-                (true, _) => Err(error::InvalidSqlSnafu {
+                (true, _) => Err(InvalidSqlSnafu {
                     msg: "Only TQL EVAL is supported".to_string(),
                 }
                 .build()),
                 (false, tql) => Ok((tql, raw_query.to_string())),
             },
-            _ => Err(error::InvalidSqlSnafu {
-                msg: "Expected TQL statement".to_string(),
+            _ => Err(InvalidSqlSnafu {
+                msg: "Expected TQL statement",
             }
             .build()),
         }
@@ -393,7 +403,6 @@ impl ParserContext<'_> {
 #[cfg(test)]
 mod tests {
     use common_error::ext::ErrorExt;
-    use sqlparser::tokenizer::Token;
 
     use super::*;
     use crate::dialect::GreptimeDbDialect;
@@ -1389,6 +1398,5 @@ mod tests {
             _ => panic!("Expected TQL Explain variant"),
         }
         assert!(raw.contains("TQL EXPLAIN"));
-        assert_eq!(ctx.parser.peek_token().token, Token::RParen);
     }
 }

@@ -166,10 +166,6 @@ impl<'a> ParserContext<'a> {
 
         let query = self.parse_parenthesized_sql_or_tql(true)?;
 
-        self.parser
-            .expect_token(&Token::RParen)
-            .context(error::SyntaxSnafu)?;
-
         if let Token::Word(w) = self.parser.peek_token().token
             && w.value.eq_ignore_ascii_case(EVERY)
         {
@@ -236,21 +232,33 @@ impl<'a> ParserContext<'a> {
                 .context(error::SyntaxSnafu)?;
         }
 
+        let sql_len = self.sql.len();
         let start_loc = self.parser.peek_token().span.start;
         let start_index = location_to_index(self.sql, &start_loc);
 
-        let sql_query = self.parser.parse_query().context(error::SyntaxSnafu)?;
-        let end_token = self.parser.peek_token();
+        ensure!(
+            start_index <= sql_len,
+            error::InvalidSqlSnafu {
+                msg: format!("Invalid location (index {} > len {})", start_index, sql_len),
+            }
+        );
 
-        let raw_sql = if end_token == Token::EOF {
-            &self.sql[start_index..]
-        } else if end_token == Token::RParen {
-            let end_index = location_to_index(self.sql, &end_token.span.start);
-            &self.sql[start_index..end_index.min(self.sql.len())]
-        } else {
-            let end_index = location_to_index(self.sql, &end_token.span.end);
-            &self.sql[start_index..end_index.min(self.sql.len())]
-        };
+        let sql_query = self.parser.parse_query().context(error::SyntaxSnafu)?;
+
+        let end_token = self.parser.peek_token();
+        self.parser
+            .expect_token(&Token::RParen)
+            .context(error::SyntaxSnafu)?;
+
+        let end_index = location_to_index(self.sql, &end_token.span.start);
+        ensure!(
+            end_index <= sql_len,
+            error::InvalidSqlSnafu {
+                msg: format!("Invalid location (index {} > len {})", end_index, sql_len),
+            }
+        );
+        let raw_sql = &self.sql[start_index..end_index];
+
         Ok((*sql_query, raw_sql.trim().to_string()))
     }
 
@@ -569,8 +577,6 @@ impl<'a> ParserContext<'a> {
 mod tests {
     use std::time::Duration;
 
-    use sqlparser::tokenizer::Token;
-
     use super::*;
     use crate::dialect::GreptimeDbDialect;
     use crate::statements::create::trigger::ChannelType;
@@ -763,7 +769,6 @@ IF NOT EXISTS cpu_monitor
             SqlOrTql::Sql(_, raw) => assert_eq!(raw, expected),
             _ => panic!("Expected SQL branch"),
         }
-        assert_eq!(ctx.parser.peek_token().token, Token::RParen);
     }
 
     #[test]
@@ -776,7 +781,6 @@ IF NOT EXISTS cpu_monitor
             SqlOrTql::Tql(_, raw) => assert_eq!(raw, expected),
             _ => panic!("Expected TQL branch"),
         }
-        assert_eq!(ctx.parser.peek_token().token, Token::RParen);
     }
 
     #[test]
