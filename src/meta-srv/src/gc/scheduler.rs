@@ -43,6 +43,8 @@ pub struct GcJobReport {
 ///
 /// Variants:
 /// - `Tick`: This event is used to trigger gc periodically.
+/// - `Manually`: This event is used to trigger a manual gc run and provides a channel
+///   to send back the [`GcJobReport`] for that run.
 pub enum Event {
     Tick,
     Manually(oneshot::Sender<GcJobReport>),

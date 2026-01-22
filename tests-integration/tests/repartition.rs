@@ -25,7 +25,7 @@ use common_test_util::temp_dir::create_temp_dir;
 use common_wal::config::DatanodeWalConfig;
 use frontend::error::Result as FrontendResult;
 use frontend::instance::Instance;
-use meta_srv::gc::{self, BatchGcProcedure, GcSchedulerOptions};
+use meta_srv::gc::{self, BatchGcProcedure, GcSchedulerOptions, GcTickerRef};
 use meta_srv::metasrv::Metasrv;
 use mito2::gc::GcConfig;
 use servers::query_handler::sql::SqlQueryHandler;
@@ -107,6 +107,13 @@ async fn trigger_table_gc(metasrv: &Arc<Metasrv>, table_name: &str) {
     watcher::wait(&mut watcher).await.unwrap();
 }
 
+async fn trigger_full_gc(ticker: &GcTickerRef) {
+    info!("triggering full gc");
+    let (tx, rx) = oneshot::channel();
+    ticker.sender.send(gc::Event::Manually(tx)).await.unwrap();
+    let _ = rx.await.unwrap();
+}
+
 pub async fn test_repartition_mito(store_type: StorageType) {
     let cluster_name = "test_repartition_mito";
     let (store_config, _guard) = get_test_store_config(&store_type);
@@ -135,6 +142,7 @@ pub async fn test_repartition_mito(store_type: StorageType) {
         .build(true)
         .await;
     let metasrv = &cluster.metasrv;
+    let ticker = metasrv.gc_ticker().unwrap();
 
     let query_ctx = QueryContext::arc();
     let instance = cluster.fe_instance();
@@ -349,11 +357,8 @@ pub async fn test_repartition_mito(store_type: StorageType) {
 
     trigger_table_gc(metasrv, "repartition_mito_table").await;
     // Trigger GC to clean up the compacted files.
-    let ticker = metasrv.gc_ticker().unwrap();
-    let (tx, rx) = oneshot::channel();
-    ticker.sender.send(gc::Event::Manually(tx)).await.unwrap();
-    let _ = rx.await.unwrap();
-    // Should be ok before compact.
+    trigger_full_gc(&ticker).await;
+
     let result = run_sql(
         instance,
         "SELECT * FROM `repartition_mito_table` ORDER BY `id`",
@@ -364,14 +369,6 @@ pub async fn test_repartition_mito(store_type: StorageType) {
     check_output_stream(result.data, expected_all).await;
     let sst_files_after_gc = cluster.list_sst_files_from_all_datanodes().await;
     let sst_files_after_gc_manifests = cluster.list_sst_files_from_manifests().await;
-    let table_repart = metasrv
-        .table_metadata_manager()
-        .table_repart_manager()
-        .get(1024)
-        .await
-        .unwrap()
-        .unwrap();
-    info!("table_repart: {:?}", table_repart.src_to_dst);
     assert_eq!(sst_files_after_gc, sst_files_after_gc_manifests);
 
     // It should be ok, if we try to compact the table after merge partition.
@@ -391,14 +388,9 @@ pub async fn test_repartition_mito(store_type: StorageType) {
     check_output_stream(result.data, expected_all).await;
 
     trigger_table_gc(metasrv, "repartition_mito_table").await;
-    info!("triggering full gc manually");
-    // Trigger GC to clean up the compacted files.
-    let ticker = metasrv.gc_ticker().unwrap();
-    let (tx, rx) = oneshot::channel();
-    ticker.sender.send(gc::Event::Manually(tx)).await.unwrap();
-    let _ = rx.await.unwrap();
+    trigger_full_gc(&ticker).await;
 
-    // // Should be no change after GC.
+    // Should be no change after GC.
     let result = run_sql(
         instance,
         "SELECT * FROM `repartition_mito_table` ORDER BY `id`",
@@ -498,6 +490,7 @@ pub async fn test_repartition_metric(store_type: StorageType) {
         .build(true)
         .await;
     let metasrv = &cluster.metasrv;
+    let ticker = metasrv.gc_ticker().unwrap();
 
     let query_ctx = QueryContext::arc();
     let instance = cluster.fe_instance();
@@ -723,12 +716,8 @@ pub async fn test_repartition_metric(store_type: StorageType) {
     check_output_stream(result.data, expected).await;
 
     trigger_table_gc(metasrv, "repart_phy_metric").await;
-    info!("triggering full gc manually");
-    let ticker = metasrv.gc_ticker().unwrap();
-    let (tx, rx) = oneshot::channel();
-    ticker.sender.send(gc::Event::Manually(tx)).await.unwrap();
-    let _ = rx.await.unwrap();
-    // Should be no change before GC.
+    trigger_full_gc(&ticker).await;
+    // Should be no change after GC.
     let result = run_sql(
         instance,
         "SELECT * FROM `repart_log_metric` ORDER BY `host`",
@@ -741,7 +730,7 @@ pub async fn test_repartition_metric(store_type: StorageType) {
     let sst_files_after_gc_manifests = cluster.list_sst_files_from_manifests().await;
     assert_eq!(sst_files_after_gc, sst_files_after_gc_manifests);
 
-    // It should be ok, if we try to compact the table after split partition.
+    // It should be ok, if we try to compact the table after merge partition.
     let compact_sql = "ADMIN COMPACT_TABLE('repart_phy_metric', 'swcs', '3600')";
     let _result = run_sql(instance, compact_sql, query_ctx.clone())
         .await
@@ -759,11 +748,8 @@ pub async fn test_repartition_metric(store_type: StorageType) {
 
     // Trigger GC to clean up the compacted files.
     trigger_table_gc(metasrv, "repart_phy_metric").await;
-    // Trigger GC to clean up the compacted files.
-    let ticker = metasrv.gc_ticker().unwrap();
-    let (tx, rx) = oneshot::channel();
-    ticker.sender.send(gc::Event::Manually(tx)).await.unwrap();
-    let _ = rx.await.unwrap();
+    trigger_full_gc(&ticker).await;
+
     // Should be no change after GC.
     let result = run_sql(
         instance,
