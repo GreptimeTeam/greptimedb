@@ -31,6 +31,7 @@ use table::metadata::TableType;
 
 use crate::{StoreConfig, Tool};
 
+/// CLI command to repair partition column metadata mismatches.
 #[derive(Parser)]
 pub struct RepairPartitionColumnCommand {
     #[clap(flatten)]
@@ -56,6 +57,7 @@ impl RepairPartitionColumnCommand {
     }
 }
 
+/// Repair tool that reconciles partition columns between table info and routes.
 pub(crate) struct RepairPartitionColumnTool {
     kv_backend: KvBackendRef,
     dry_run: bool,
@@ -76,7 +78,11 @@ impl RepairPartitionColumnTool {
                 if let Some(x) = table_meta.schema.column_schemas.get(*i) {
                     partition_columns.push(&x.name);
                 } else {
-                    warn!("Partition column not found by index: {i}");
+                    warn!(
+                        "Partition column not found by index: {i}, table: {}, id: {}",
+                        table_info_value.table_name(),
+                        table_id
+                    );
                 }
             }
 
@@ -85,7 +91,8 @@ impl RepairPartitionColumnTool {
             };
             let mut partition_expr_columns = HashSet::new();
             for region_route in &table_route.region_routes {
-                let partition_expr_result = PartitionExpr::from_json_str(&region_route.region.partition_expr());
+                let partition_expr_result =
+                    PartitionExpr::from_json_str(&region_route.region.partition_expr());
                 let partition_expr = match partition_expr_result {
                     Ok(Some(expr)) => expr,
                     Ok(None) => {
@@ -93,10 +100,14 @@ impl RepairPartitionColumnTool {
                         continue;
                     }
                     Err(e) => {
-                        warn!(e; "Failed to deserialize partition expression for region: {:?}, table: {}", region_route.region.id, table_info_value.table_name());
+                        warn!(
+                            e;
+                            "Failed to deserialize partition expression for region: {:?}, table: {}",
+                            region_route.region.id,
+                            table_info_value.table_name()
+                        );
                         continue;
                     }
-                };
                 };
                 partition_expr.collect_column_names(&mut partition_expr_columns);
             }
@@ -115,9 +126,10 @@ impl RepairPartitionColumnTool {
                 if let Some(update_limit) = self.update_limit
                     && update_count >= update_limit
                 {
-                    warn!("Reached update limit: {update_limit}. Stopping further table metadata updates.");
+                    warn!(
+                        "Reached update limit: {update_limit}. Stopping further table metadata updates."
+                    );
                     return Ok(());
-                }
                 }
                 self.update_partition_columns(partition_expr_columns, table_info_value)
                     .await?;
@@ -134,11 +146,11 @@ impl RepairPartitionColumnTool {
     ) -> Result<(), BoxedError> {
         let column_schemas = &table_info_value.table_info.meta.schema.column_schemas;
         let mut partition_column_indices = Vec::with_capacity(partition_expr_columns.len());
-        for column_name in partition_expr_columns {
+        for column_name in &partition_expr_columns {
             if let Some((i, _)) = column_schemas
                 .iter()
                 .enumerate()
-                .find(|(_, x)| &x.name == column_name)
+                .find(|(_, x)| &x.name == *column_name)
             {
                 partition_column_indices.push(i);
             } else {
