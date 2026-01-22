@@ -85,10 +85,18 @@ impl RepairPartitionColumnTool {
             };
             let mut partition_expr_columns = HashSet::new();
             for region_route in &table_route.region_routes {
-                let Ok(Some(partition_expr)) =
-                    PartitionExpr::from_json_str(&region_route.region.partition_expr())
-                else {
-                    continue;
+                let partition_expr_result = PartitionExpr::from_json_str(&region_route.region.partition_expr());
+                let partition_expr = match partition_expr_result {
+                    Ok(Some(expr)) => expr,
+                    Ok(None) => {
+                        // No partition expression found, which might be valid.
+                        continue;
+                    }
+                    Err(e) => {
+                        warn!(e; "Failed to deserialize partition expression for region: {:?}, table: {}", region_route.region.id, table_info_value.table_name());
+                        continue;
+                    }
+                };
                 };
                 partition_expr.collect_column_names(&mut partition_expr_columns);
             }
@@ -107,8 +115,9 @@ impl RepairPartitionColumnTool {
                 if let Some(update_limit) = self.update_limit
                     && update_count >= update_limit
                 {
-                    warn!("Reached update limit: {update_limit}, return");
+                    warn!("Reached update limit: {update_limit}. Stopping further table metadata updates.");
                     return Ok(());
+                }
                 }
                 self.update_partition_columns(partition_expr_columns, table_info_value)
                     .await?;
@@ -124,15 +133,22 @@ impl RepairPartitionColumnTool {
         table_info_value: &TableInfoValue,
     ) -> Result<(), BoxedError> {
         let column_schemas = &table_info_value.table_info.meta.schema.column_schemas;
-        let partition_column_indices = partition_expr_columns
-            .iter()
-            .flat_map(|column| {
-                column_schemas
-                    .iter()
-                    .enumerate()
-                    .find_map(|(i, x)| (&x.name == *column).then_some(i))
-            })
-            .collect::<Vec<_>>();
+        let mut partition_column_indices = Vec::with_capacity(partition_expr_columns.len());
+        for column_name in partition_expr_columns {
+            if let Some((i, _)) = column_schemas
+                .iter()
+                .enumerate()
+                .find(|(_, x)| &x.name == column_name)
+            {
+                partition_column_indices.push(i);
+            } else {
+                warn!(
+                    "Partition column '{}' from partition expression not found in table schema '{}'. Skipping this column for update.",
+                    column_name,
+                    table_info_value.table_name()
+                );
+            }
+        }
 
         info!(
             "Updating partition columns to {:?} (by column indices: {:?}) in table '{}'",
