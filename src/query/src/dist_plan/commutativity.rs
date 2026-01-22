@@ -188,30 +188,19 @@ impl Categorizer {
                 // commutativity is needed under this situation.
                 Commutativity::ConditionalCommutative(None)
             }
-            #[cfg(feature = "vector_index")]
             LogicalPlan::Sort(sort) => {
                 if partition_cols.is_empty() {
                     return Ok(Commutativity::Commutative);
                 }
 
                 // sort plan needs to consider column priority
-                // Change Sort to MergeSort which assumes the input streams are already sorted hence can be more efficient
-                // We should ensure the number of partition is not smaller than the number of region at present. Otherwise this would result in incorrect output.
+                // Change Sort to MergeSort which assumes the input streams are already sorted hence can be more efficient.
+                #[cfg(feature = "vector_index")]
                 if is_vector_sort(sort) {
                     return Ok(Commutativity::TransformedCommutative {
                         transformer: Some(Arc::new(vector_sort_transformer)),
                     });
                 }
-                Commutativity::ConditionalCommutative(Some(Arc::new(merge_sort_transformer)))
-            }
-            #[cfg(not(feature = "vector_index"))]
-            LogicalPlan::Sort(_) => {
-                if partition_cols.is_empty() {
-                    return Ok(Commutativity::Commutative);
-                }
-                // sort plan needs to consider column priority
-                // Change Sort to MergeSort which assumes the input streams are already sorted hence can be more efficient
-                // We should ensure the number of partition is not smaller than the number of region at present. Otherwise this would result in incorrect output.
                 Commutativity::ConditionalCommutative(Some(Arc::new(merge_sort_transformer)))
             }
             LogicalPlan::Join(_) => Commutativity::NonCommutative,

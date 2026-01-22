@@ -17,6 +17,7 @@ use std::collections::{HashMap, VecDeque};
 use common_function::scalars::vector::distance::{
     VEC_COS_DISTANCE, VEC_DOT_PRODUCT, VEC_L2SQ_DISTANCE,
 };
+use common_telemetry::debug;
 use datafusion_common::ScalarValue;
 use datafusion_expr::logical_plan::FetchType;
 use datafusion_expr::{Expr, SortExpr};
@@ -68,6 +69,22 @@ impl VectorSearchState {
         !self.vector_hints.is_empty()
     }
 
+    pub(crate) fn on_branching_enter(&mut self) {
+        // Clear per-branch state so hints are only derived within a single input chain.
+        self.distance_stack.push(self.current_distance.take());
+        self.limit_stack.push(self.current_limit.take());
+    }
+
+    pub(crate) fn on_branching_exit(&mut self) {
+        // Restore the prior chain state after leaving the branch.
+        if let Some(previous) = self.limit_stack.pop() {
+            self.current_limit = previous;
+        }
+        if let Some(previous) = self.distance_stack.pop() {
+            self.current_distance = previous;
+        }
+    }
+
     pub(crate) fn on_limit_enter(&mut self, limit: &datafusion_expr::logical_plan::Limit) {
         self.limit_stack.push(self.current_limit.take());
         self.current_limit = Self::extract_limit_info(limit);
@@ -80,6 +97,7 @@ impl VectorSearchState {
     }
 
     pub(crate) fn on_sort_enter(&mut self, sort: &datafusion_expr::logical_plan::Sort) {
+        // Distance is scoped to the nearest sort, while limit may be inherited from parents.
         self.distance_stack.push(self.current_distance.take());
         self.limit_stack.push(self.current_limit.clone());
         let distance = Self::extract_distance_from_sort(sort);
@@ -215,6 +233,10 @@ impl VectorSearchState {
         sort: &datafusion_expr::logical_plan::Sort,
     ) -> Option<VectorDistanceInfo> {
         if sort.expr.len() != 1 {
+            debug!(
+                "Skip vector hint: Sort has {} expressions, expected 1",
+                sort.expr.len()
+            );
             return None;
         }
         let sort_expr: &SortExpr = &sort.expr[0];
@@ -253,6 +275,7 @@ impl VectorSearchState {
         let Some(distance) = self.current_distance.as_ref() else {
             return;
         };
+        // Only emit hints when distance+limit are present and the table matches the sort target.
         if let Some(ref hint_table) = distance.table_reference
             && hint_table != &table_scan.table_name
         {
@@ -304,7 +327,7 @@ impl VectorSearchState {
     }
 
     fn parse_binary_vector(bytes: &[u8]) -> Option<Vec<f32>> {
-        if !bytes.len().is_multiple_of(4) {
+        if bytes.is_empty() || !bytes.len().is_multiple_of(4) {
             return None;
         }
         Some(
@@ -330,7 +353,9 @@ mod tests {
     use datafusion_common::{Column, DataFusionError, Result, ScalarValue};
     use datafusion_expr::expr::ScalarFunction;
     use datafusion_expr::logical_plan::JoinType;
-    use datafusion_expr::{Expr, LogicalPlanBuilder, Signature, Volatility, col, lit};
+    use datafusion_expr::{
+        Expr, LogicalPlan, LogicalPlanBuilder, Signature, Subquery, Volatility, col, lit,
+    };
     use datafusion_optimizer::{OptimizerContext, OptimizerRule};
     use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
     use futures::Stream;
@@ -759,6 +784,76 @@ mod tests {
                 lit(ScalarValue::Utf8(Some("[1.0, 2.0]".to_string()))),
             ],
         ))
+    }
+
+    #[test]
+    fn test_no_vector_hint_above_join() {
+        let t1_provider = build_dummy_provider(10);
+        let t2_provider = build_dummy_provider(20);
+        let t1_source = Arc::new(DefaultTableSource::new(t1_provider.clone()));
+        let t2_source = Arc::new(DefaultTableSource::new(t2_provider.clone()));
+
+        let left = LogicalPlanBuilder::scan_with_filters("t1", t1_source, None, vec![])
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let right = LogicalPlanBuilder::scan_with_filters("t2", t2_source, None, vec![])
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let join_keys: (Vec<Column>, Vec<Column>) = (vec![], vec![]);
+        let join_plan = LogicalPlanBuilder::from(left)
+            .join(right, JoinType::Inner, join_keys, None)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let expr = vec_distance_expr_qualified(VEC_L2SQ_DISTANCE, "t1", "v");
+        let plan = LogicalPlanBuilder::from(join_plan)
+            .sort(vec![expr.sort(true, false)])
+            .unwrap()
+            .limit(0, Some(5))
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let context = OptimizerContext::default();
+        let _ = ScanHintRule.rewrite(plan, &context).unwrap();
+
+        assert!(t1_provider.get_vector_search_hint().is_none());
+        assert!(t2_provider.get_vector_search_hint().is_none());
+    }
+
+    #[test]
+    fn test_no_vector_hint_above_subquery() {
+        let provider = build_dummy_provider(10);
+        let table_source = Arc::new(DefaultTableSource::new(provider.clone()));
+        let scan_plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let subquery = LogicalPlan::Subquery(Subquery {
+            subquery: Arc::new(scan_plan),
+            outer_ref_columns: vec![],
+            spans: Default::default(),
+        });
+
+        let expr = vec_distance_expr(VEC_L2SQ_DISTANCE);
+        let plan = LogicalPlanBuilder::from(subquery)
+            .sort(vec![expr.sort(true, false)])
+            .unwrap()
+            .limit(0, Some(5))
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let context = OptimizerContext::default();
+        let _ = ScanHintRule.rewrite(plan, &context).unwrap();
+
+        assert!(provider.get_vector_search_hint().is_none());
     }
 
     #[test]

@@ -236,6 +236,7 @@ impl TreeNodeVisitor<'_> for ScanHintVisitor {
     fn f_down(&mut self, node: &Self::Node) -> Result<TreeNodeRecursion> {
         #[cfg(feature = "vector_index")]
         if let LogicalPlan::Limit(limit) = node {
+            // Track LIMIT so vector hint k can be derived within the same input chain.
             self.vector_search.on_limit_enter(limit);
         }
 
@@ -245,6 +246,7 @@ impl TreeNodeVisitor<'_> for ScanHintVisitor {
 
             #[cfg(feature = "vector_index")]
             {
+                // Capture vector ORDER BY and TopK hints from sort nodes.
                 self.vector_search.on_sort_enter(sort);
             }
         }
@@ -311,11 +313,16 @@ impl TreeNodeVisitor<'_> for ScanHintVisitor {
             }
         }
 
-        if self.ts_row_selector.is_some()
-            && (matches!(node, LogicalPlan::Subquery(_)) || node.inputs().len() > 1)
-        {
+        // Avoid carrying vector hints across branching inputs (join/subquery) to prevent
+        // pruning results before global ordering is applied.
+        let is_branching = matches!(node, LogicalPlan::Subquery(_)) || node.inputs().len() > 1;
+        if is_branching && self.ts_row_selector.is_some() {
             // clean previous time series selector hint when encounter subqueries or join
             self.ts_row_selector = None;
+        }
+        #[cfg(feature = "vector_index")]
+        if is_branching {
+            self.vector_search.on_branching_enter();
         }
 
         if let LogicalPlan::Filter(filter) = node
@@ -331,6 +338,7 @@ impl TreeNodeVisitor<'_> for ScanHintVisitor {
 
         #[cfg(feature = "vector_index")]
         if let LogicalPlan::TableScan(table_scan) = node {
+            // Record vector hints at leaf scans after scope checks.
             self.vector_search.on_table_scan(table_scan);
         }
 
@@ -345,6 +353,12 @@ impl TreeNodeVisitor<'_> for ScanHintVisitor {
             }
             LogicalPlan::Sort(_) => {
                 self.vector_search.on_sort_exit();
+            }
+            LogicalPlan::Subquery(_) => {
+                self.vector_search.on_branching_exit();
+            }
+            _ if _node.inputs().len() > 1 => {
+                self.vector_search.on_branching_exit();
             }
             _ => {}
         }
