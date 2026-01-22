@@ -311,9 +311,9 @@ mod tests {
         // Test that parentheses within the TQL query don't interfere with CTE parsing
         let sql = r#"
             WITH tql_cte AS (
-                TQL EVAL (0, 100, '5s') 
+                TQL EVAL (0, 100, '5s')
                 sum(rate(http_requests_total[1m])) + (max(cpu_usage) * (1 + 0.5))
-            ) 
+            )
             SELECT * FROM tql_cte
         "#;
 
@@ -348,10 +348,10 @@ mod tests {
     #[test]
     fn test_parse_hybrid_cte_sql_and_tql() {
         let sql = r#"
-            WITH 
+            WITH
                 sql_cte(ts, value, label) AS (SELECT timestamp, val, name FROM metrics),
                 tql_cte(time, metric_value) AS (TQL EVAL (0, 100, '5s') cpu_usage)
-            SELECT s.ts, s.value, t.metric_value 
+            SELECT s.ts, s.value, t.metric_value
             FROM sql_cte s JOIN tql_cte t ON s.ts = t.time
         "#;
 
