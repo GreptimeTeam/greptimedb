@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use common_function::scalars::vector::distance::{
     VEC_COS_DISTANCE, VEC_DOT_PRODUCT, VEC_L2SQ_DISTANCE,
@@ -20,6 +20,7 @@ use common_function::scalars::vector::distance::{
 use common_telemetry::debug;
 use datafusion_common::ScalarValue;
 use datafusion_expr::logical_plan::FetchType;
+use datafusion_expr::utils::split_conjunction;
 use datafusion_expr::{Expr, SortExpr};
 use datafusion_sql::TableReference;
 use datatypes::types::parse_string_to_vector_type_value;
@@ -29,12 +30,20 @@ use table::table::adapter::DfTableProviderAdapter;
 use crate::dummy_catalog::DummyTableProvider;
 
 /// Tracks vector search hints while traversing the logical plan.
+///
+/// Vector search requests are emitted only when:
+/// - ORDER BY uses a supported vector distance function and its direction matches the metric.
+/// - A LIMIT (or Sort.fetch) is present to derive k.
+/// - The hint stays within a single input chain (not across join/subquery branches).
+/// - The target column is non-nullable, or an explicit IS NOT NULL filter exists.
 #[derive(Default)]
 pub(crate) struct VectorSearchState {
     current_distance: Option<VectorDistanceInfo>,
     current_limit: Option<VectorLimitInfo>,
     distance_stack: Vec<Option<VectorDistanceInfo>>,
     limit_stack: Vec<Option<VectorLimitInfo>>,
+    non_null_columns: HashSet<ColumnKey>,
+    non_null_stack: Vec<HashSet<ColumnKey>>,
     vector_hints: HashMap<TableReference, VecDeque<VectorHintEntry>>,
 }
 
@@ -62,6 +71,13 @@ impl VectorLimitInfo {
 struct VectorHintEntry {
     distance: VectorDistanceInfo,
     limit: VectorLimitInfo,
+    non_null_constraint: bool,
+}
+
+#[derive(Clone, Hash, PartialEq, Eq)]
+struct ColumnKey {
+    table_reference: Option<TableReference>,
+    column_name: String,
 }
 
 impl VectorSearchState {
@@ -73,6 +89,8 @@ impl VectorSearchState {
         // Clear per-branch state so hints are only derived within a single input chain.
         self.distance_stack.push(self.current_distance.take());
         self.limit_stack.push(self.current_limit.take());
+        self.non_null_stack
+            .push(std::mem::take(&mut self.non_null_columns));
     }
 
     pub(crate) fn on_branching_exit(&mut self) {
@@ -82,6 +100,9 @@ impl VectorSearchState {
         }
         if let Some(previous) = self.distance_stack.pop() {
             self.current_distance = previous;
+        }
+        if let Some(previous) = self.non_null_stack.pop() {
+            self.non_null_columns = previous;
         }
     }
 
@@ -123,6 +144,27 @@ impl VectorSearchState {
         self.record_vector_hint(table_scan);
     }
 
+    pub(crate) fn on_filter_enter(&mut self, predicate: &Expr) {
+        self.non_null_stack.push(self.non_null_columns.clone());
+        for expr in split_conjunction(predicate) {
+            if let Expr::IsNotNull(inner) = expr
+                && let Expr::Column(col) = inner.as_ref()
+            {
+                self.non_null_columns.insert(ColumnKey {
+                    table_reference: col.relation.clone(),
+                    column_name: col.name.clone(),
+                });
+            }
+        }
+        // TODO: detect non-null constraints from more complex predicates (casts/functions).
+    }
+
+    pub(crate) fn on_filter_exit(&mut self) {
+        if let Some(previous) = self.non_null_stack.pop() {
+            self.non_null_columns = previous;
+        }
+    }
+
     pub(crate) fn take_vector_request_from_dummy(
         &mut self,
         provider: &DummyTableProvider,
@@ -158,6 +200,13 @@ impl VectorSearchState {
 
         let metadata = provider.region_metadata();
         let column = metadata.column_by_name(&info.column_name)?;
+        if column.column_schema.is_nullable() && !hint.non_null_constraint {
+            debug!(
+                "Skip vector hint: column '{}' is nullable without IS NOT NULL filter",
+                info.column_name
+            );
+            return None;
+        }
 
         Some(VectorSearchRequest {
             column_id: column.column_id,
@@ -186,6 +235,14 @@ impl VectorSearchState {
         let table_info = table.table_info();
         let schema = &table_info.meta.schema;
 
+        let column_schema = schema.column_schema_by_name(&info.column_name)?;
+        if column_schema.is_nullable() && !hint.non_null_constraint {
+            debug!(
+                "Skip vector hint: column '{}' is nullable without IS NOT NULL filter",
+                info.column_name
+            );
+            return None;
+        }
         let column_index = schema.column_index_by_name(&info.column_name)?;
         let column_id = *table_info.meta.column_ids.get(column_index)?;
 
@@ -282,12 +339,15 @@ impl VectorSearchState {
             return;
         }
 
+        let non_null_constraint =
+            self.is_column_non_null(&distance.table_reference, &distance.column_name);
         self.vector_hints
             .entry(table_scan.table_name.clone())
             .or_default()
             .push_back(VectorHintEntry {
                 distance: distance.clone(),
                 limit: limit.clone(),
+                non_null_constraint,
             });
     }
 
@@ -298,6 +358,17 @@ impl VectorSearchState {
             self.vector_hints.remove(table_name);
         }
         hint
+    }
+
+    fn is_column_non_null(
+        &self,
+        table_reference: &Option<TableReference>,
+        column_name: &str,
+    ) -> bool {
+        self.non_null_columns.contains(&ColumnKey {
+            table_reference: table_reference.clone(),
+            column_name: column_name.to_string(),
+        })
     }
 
     fn extract_query_vector(expr: &Expr) -> Option<Vec<f32>> {
@@ -428,6 +499,13 @@ mod tests {
     }
 
     fn build_dummy_provider(column_id: u32) -> Arc<DummyTableProvider> {
+        build_dummy_provider_with_nullable(column_id, false)
+    }
+
+    fn build_dummy_provider_with_nullable(
+        column_id: u32,
+        nullable_vector: bool,
+    ) -> Arc<DummyTableProvider> {
         let mut builder = RegionMetadataBuilder::new(0.into());
         builder
             .push_column_metadata(ColumnMetadata {
@@ -445,7 +523,11 @@ mod tests {
                 column_id: 2,
             })
             .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new("v", ConcreteDataType::vector_datatype(2), false),
+                column_schema: ColumnSchema::new(
+                    "v",
+                    ConcreteDataType::vector_datatype(2),
+                    nullable_vector,
+                ),
                 semantic_type: SemanticType::Field,
                 column_id,
             })
@@ -711,6 +793,50 @@ mod tests {
         let _ = ScanHintRule.rewrite(plan, &context).unwrap();
 
         assert!(dummy_provider.get_vector_search_hint().is_none());
+    }
+
+    #[test]
+    fn test_nullable_vector_requires_is_not_null_filter() {
+        let dummy_provider = build_dummy_provider_with_nullable(10, true);
+        let table_source = Arc::new(DefaultTableSource::new(dummy_provider.clone()));
+        let expr = vec_distance_expr(VEC_L2SQ_DISTANCE);
+        let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+            .unwrap()
+            .sort(vec![expr.sort(true, false)])
+            .unwrap()
+            .limit(0, Some(5))
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let context = OptimizerContext::default();
+        let _ = ScanHintRule.rewrite(plan, &context).unwrap();
+
+        assert!(dummy_provider.get_vector_search_hint().is_none());
+    }
+
+    #[test]
+    fn test_nullable_vector_with_is_not_null_filter() {
+        let dummy_provider = build_dummy_provider_with_nullable(10, true);
+        let table_source = Arc::new(DefaultTableSource::new(dummy_provider.clone()));
+        let expr = vec_distance_expr(VEC_L2SQ_DISTANCE);
+        let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+            .unwrap()
+            .filter(col("v").is_not_null())
+            .unwrap()
+            .sort(vec![expr.sort(true, false)])
+            .unwrap()
+            .limit(0, Some(5))
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let context = OptimizerContext::default();
+        let _ = ScanHintRule.rewrite(plan, &context).unwrap();
+
+        let hint = dummy_provider.get_vector_search_hint().unwrap();
+        assert_eq!(hint.column_id, 10);
+        assert_eq!(hint.k, 5);
     }
 
     #[test]

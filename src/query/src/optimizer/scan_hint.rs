@@ -337,6 +337,11 @@ impl TreeNodeVisitor<'_> for ScanHintVisitor {
         }
 
         #[cfg(feature = "vector_index")]
+        if let LogicalPlan::Filter(filter) = node {
+            self.vector_search.on_filter_enter(&filter.predicate);
+        }
+
+        #[cfg(feature = "vector_index")]
         if let LogicalPlan::TableScan(table_scan) = node {
             // Record vector hints at leaf scans after scope checks.
             self.vector_search.on_table_scan(table_scan);
@@ -353,6 +358,9 @@ impl TreeNodeVisitor<'_> for ScanHintVisitor {
             }
             LogicalPlan::Sort(_) => {
                 self.vector_search.on_sort_exit();
+            }
+            LogicalPlan::Filter(_) => {
+                self.vector_search.on_filter_exit();
             }
             LogicalPlan::Subquery(_) => {
                 self.vector_search.on_branching_exit();
