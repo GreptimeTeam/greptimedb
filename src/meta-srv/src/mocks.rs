@@ -131,7 +131,8 @@ pub async fn mock(
     });
 
     let config = ChannelConfig::new()
-        .timeout(Some(Duration::from_secs(10)))
+        // Use an long timeout to prevent test failures due to slow operations (e.g., when testing with S3).
+        .timeout(Some(Duration::from_secs(60)))
         .connect_timeout(Duration::from_secs(10))
         .tcp_nodelay(true);
     let channel_manager = ChannelManager::with_config(config, None);
