@@ -26,7 +26,6 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_telemetry::{error, warn};
-use common_time::Duration;
 use datafusion::error::DataFusionError;
 use datatypes::prelude::ConcreteDataType;
 use headers::ContentType;
@@ -640,9 +639,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Overflow while casting `{:?}` to Interval", val))]
-    DurationOverflow { val: Duration },
-
     #[snafu(display("Failed to handle otel-arrow request, error message: {}", err_msg))]
     HandleOtelArrowRequest {
         err_msg: String,
@@ -791,8 +787,6 @@ impl ErrorExt for Error {
             ToJson { .. } | DataFusion { .. } => StatusCode::Internal,
 
             ConvertSqlValue { source, .. } => source.status_code(),
-
-            DurationOverflow { .. } => StatusCode::InvalidArguments,
 
             HandleOtelArrowRequest { .. } => StatusCode::Internal,
 
