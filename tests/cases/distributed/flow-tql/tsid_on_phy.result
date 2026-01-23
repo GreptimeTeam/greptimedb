@@ -61,6 +61,7 @@ VALUES
 
 Affected Rows: 3
 
+-- SQLNESS SORT_RESULT 3 1
 TQL EVAL (
   timestamp '2026-01-23 03:30:00+00' + (now() - now()),
   timestamp '2026-01-23 03:45:00+00' + (now() - now()),
@@ -75,18 +76,19 @@ TQL EVAL (
 +-------+------+---------------------+-------------------------------------+
 | tag4  | tag5 | ts                  | sum(prom_avg_over_time(ts_range,v)) |
 +-------+------+---------------------+-------------------------------------+
-| svc-a | prod | 2026-01-23T03:42:00 | 0.25                                |
 | svc-a | prod | 2026-01-23T03:40:00 | NaN                                 |
-| svc-a | prod | 2026-01-23T03:45:00 | 0.25                                |
-| svc-a | prod | 2026-01-23T03:44:00 | 0.25                                |
-| svc-a | prod | 2026-01-23T03:43:00 | 0.25                                |
 | svc-a | prod | 2026-01-23T03:41:00 | NaN                                 |
+| svc-a | prod | 2026-01-23T03:42:00 | 0.25                                |
+| svc-a | prod | 2026-01-23T03:43:00 | 0.25                                |
+| svc-a | prod | 2026-01-23T03:44:00 | 0.25                                |
+| svc-a | prod | 2026-01-23T03:45:00 | 0.25                                |
 +-------+------+---------------------+-------------------------------------+
 
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
 -- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
+-- SQLNESS REPLACE phy.__table_id\s=\sUInt32\(\d+\) phy.__table_id=UInt32(REDACTED)
 TQL EXPLAIN (
   timestamp '2026-01-23 03:30:00+00' + (now() - now()),
   timestamp '2026-01-23 03:45:00+00' + (now() - now()),
@@ -114,7 +116,7 @@ TQL EXPLAIN (
 |               |                 Filter: test_tsid.ts >= TimestampMillisecond(-2100000, None) AND test_tsid.ts <= TimestampMillisecond(300000, None)                                                                                             |
 |               |                   Projection: test_tsid.v, test_tsid.le, test_tsid.tag1, test_tsid.tag2, test_tsid.tag4, test_tsid.tag5, test_tsid.tag6, test_tsid.tag7, test_tsid.tag8, test_tsid.__tsid, test_tsid.ts                         |
 |               |                     SubqueryAlias: test_tsid                                                                                                                                                                                    |
-|               |                       Filter: phy.__table_id = UInt32(1025)                                                                                                                                                                     |
+|               |                       Filter: phy.__table_id=UInt32(REDACTED)                                                                                                                                                                     |
 |               |                         TableScan: phy projection=[ts, v, tag1, tag2, le, tag4, tag5, tag6, tag7, tag8, __table_id, __tsid]                                                                                                     |
 |               | ]]                                                                                                                                                                                                                              |
 | physical_plan | HistogramFoldExec: le=@0, field=@4, quantile=0.5                                                                                                                                                                                |

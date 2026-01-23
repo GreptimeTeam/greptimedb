@@ -56,6 +56,7 @@ VALUES
   ('2026-01-23T03:41:00Z', 5.0,  'istio-ingressgateway', 'outbound', '0.9',  'svc-a', 'prod', 'peer.example', 'svc-b', 'prod'),
   ('2026-01-23T03:41:30Z', 2.0,  'istio-ingressgateway', 'outbound', '+Inf', 'svc-a', 'prod', 'peer.example', 'svc-b', 'prod');
 
+-- SQLNESS SORT_RESULT 3 1
 TQL EVAL (
   timestamp '2026-01-23 03:30:00+00' + (now() - now()),
   timestamp '2026-01-23 03:45:00+00' + (now() - now()),
@@ -71,6 +72,7 @@ TQL EVAL (
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
 -- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
+-- SQLNESS REPLACE phy.__table_id\s=\sUInt32\(\d+\) phy.__table_id=UInt32(REDACTED)
 TQL EXPLAIN (
   timestamp '2026-01-23 03:30:00+00' + (now() - now()),
   timestamp '2026-01-23 03:45:00+00' + (now() - now()),
