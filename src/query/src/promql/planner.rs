@@ -1590,7 +1590,7 @@ impl PromPlanner {
 
         let logical_table = self.table_from_source(&provider)?;
 
-        let scan_table_ref = table_ref.clone();
+        let mut scan_table_ref = table_ref.clone();
         let mut scan_provider = provider;
         let mut table_id_filter: Option<u32> = None;
 
@@ -1639,6 +1639,7 @@ impl PromPlanner {
 
                 if has_table_id && has_tsid {
                     scan_provider = physical_provider;
+                    scan_table_ref = physical_table_ref;
                     table_id_filter = Some(logical_table.table_info().ident.table_id);
                 }
             }
