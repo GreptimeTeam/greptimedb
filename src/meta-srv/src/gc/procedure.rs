@@ -167,6 +167,9 @@ pub struct BatchGcData {
     regions: Vec<RegionId>,
     full_file_listing: bool,
     region_routes: Region2Peers,
+    /// Routes assigned by the scheduler for regions missing from table routes.
+    #[serde(default)]
+    region_routes_override: Region2Peers,
     /// Related regions (e.g., for shared files after repartition).
     /// The source regions (where those files originally came from) are used as the key, and the destination regions (where files are currently stored) are used as the value.
     related_regions: HashMap<RegionId, HashSet<RegionId>>,
@@ -199,6 +202,7 @@ impl BatchGcProcedure {
         regions: Vec<RegionId>,
         full_file_listing: bool,
         timeout: Duration,
+        region_routes_override: Region2Peers,
     ) -> Self {
         Self {
             mailbox,
@@ -210,6 +214,7 @@ impl BatchGcProcedure {
                 full_file_listing,
                 timeout,
                 region_routes: HashMap::new(),
+                region_routes_override,
                 related_regions: HashMap::new(),
                 file_refs: FileRefsManifest::default(),
                 gc_report: None,
@@ -269,14 +274,40 @@ impl BatchGcProcedure {
     /// Clean up region repartition info in kvbackend after GC
     /// according to cross reference in `FileRefsManifest`.
     async fn cleanup_region_repartition(&self) -> Result<()> {
-        for (src_region, dst_regions) in self.data.file_refs.cross_region_refs.iter() {
-            // TODO(discord9): batch update
+        let mut table_grouped: HashMap<TableId, HashMap<RegionId, HashSet<RegionId>>> =
+            HashMap::new();
+        for (src_region, dst_regions) in &self.data.file_refs.cross_region_refs {
+            table_grouped
+                .entry(src_region.table_id())
+                .or_default()
+                .entry(*src_region)
+                .or_default()
+                .extend(dst_regions.iter().copied());
+        }
+        // make sure for files without cross-region refs but with tmp refs, we DO NOT clean up repartition key entry
+        // so that dropped regions can still keep their region ids here
+        for src_region in self.data.file_refs.file_refs.keys() {
+            table_grouped
+                .entry(src_region.table_id())
+                .or_default()
+                .entry(*src_region)
+                .or_default();
+        }
+        for (table_id, region_mappings) in table_grouped {
+            let region_mapping = region_mappings
+                .iter()
+                .map(|(src_region, dst_regions)| {
+                    (*src_region, dst_regions.iter().cloned().collect_vec())
+                })
+                .collect::<HashMap<RegionId, Vec<RegionId>>>();
+
             self.table_metadata_manager
                 .table_repart_manager()
-                .update_mappings(*src_region, &dst_regions.iter().cloned().collect_vec())
+                .update_mappings(table_id, &region_mapping)
                 .await
                 .context(KvBackendSnafu)?;
         }
+
         Ok(())
     }
 
@@ -339,9 +370,15 @@ impl BatchGcProcedure {
 
         let regions_to_discover = regions_set.into_iter().collect_vec();
 
-        let (region_to_peer, _) = self
+        let (mut region_to_peer, _) = self
             .discover_route_for_regions(&regions_to_discover)
             .await?;
+
+        for (region_id, route) in &self.data.region_routes_override {
+            region_to_peer
+                .entry(*region_id)
+                .or_insert_with(|| route.clone());
+        }
 
         self.data.region_routes = region_to_peer;
 
@@ -356,11 +393,19 @@ impl BatchGcProcedure {
         let related_regions = &self.data.related_regions;
         let region_routes = &self.data.region_routes;
         let timeout = self.data.timeout;
+        let dropped_regions = self
+            .data
+            .region_routes_override
+            .keys()
+            .collect::<HashSet<_>>();
 
         // Group regions by datanode to minimize RPC calls
         let mut datanode2query_regions: HashMap<Peer, Vec<RegionId>> = HashMap::new();
 
         for region_id in query_regions {
+            if dropped_regions.contains(region_id) {
+                continue;
+            }
             if let Some((leader, followers)) = region_routes.get(region_id) {
                 datanode2query_regions
                     .entry(leader.clone())
@@ -403,12 +448,21 @@ impl BatchGcProcedure {
         let mut all_manifest_versions = HashMap::new();
         let mut all_cross_region_refs = HashMap::new();
 
-        for (peer, regions) in datanode2query_regions {
+        let mut peers = HashSet::new();
+        peers.extend(datanode2query_regions.keys().cloned());
+        peers.extend(datanode2related_regions.keys().cloned());
+
+        for peer in peers {
+            let regions = datanode2query_regions.remove(&peer).unwrap_or_default();
             let related_regions_for_peer =
                 datanode2related_regions.remove(&peer).unwrap_or_default();
 
+            if regions.is_empty() && related_regions_for_peer.is_empty() {
+                continue;
+            }
+
             let instruction = GetFileRefs {
-                query_regions: regions.clone(),
+                query_regions: regions,
                 related_regions: related_regions_for_peer,
             };
 

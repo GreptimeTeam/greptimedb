@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use api::greptime_proto::v1;
 use api::v1::meta::cluster_client::ClusterClient;
-use api::v1::meta::{MetasrvNodeInfo, MetasrvPeersRequest, ResponseHeader, Role};
+use api::v1::meta::{MetasrvNodeInfo, MetasrvPeersRequest, ResponseHeader};
 use common_error::ext::BoxedError;
 use common_grpc::channel_manager::ChannelManager;
 use common_meta::error::{
@@ -37,8 +37,7 @@ use tonic::Status;
 use tonic::codec::CompressionEncoding;
 use tonic::transport::Channel;
 
-use crate::client::ask_leader::AskLeader;
-use crate::client::{Id, LeaderProviderRef, util};
+use crate::client::{LeaderProviderRef, util};
 use crate::error::{
     ConvertMetaResponseSnafu, CreateChannelSnafu, Error, IllegalGrpcClientStateSnafu,
     ReadOnlyKvBackendSnafu, Result, RetryTimesExceededSnafu,
@@ -50,25 +49,14 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(id: Id, role: Role, channel_manager: ChannelManager, max_retry: usize) -> Self {
+    pub fn new(channel_manager: ChannelManager, max_retry: usize) -> Self {
         let inner = Arc::new(RwLock::new(Inner {
-            id,
-            role,
             channel_manager,
             leader_provider: None,
             max_retry,
         }));
 
         Self { inner }
-    }
-
-    pub async fn start<U, A>(&mut self, urls: A) -> Result<()>
-    where
-        U: AsRef<str>,
-        A: AsRef<[U]>,
-    {
-        let mut inner = self.inner.write().await;
-        inner.start(urls)
     }
 
     /// Start the client with a [LeaderProvider].
@@ -147,8 +135,6 @@ impl KvBackend for Client {
 
 #[derive(Debug)]
 struct Inner {
-    id: Id,
-    role: Role,
     channel_manager: ChannelManager,
     leader_provider: Option<LeaderProviderRef>,
     max_retry: usize,
@@ -164,26 +150,6 @@ impl Inner {
         );
         self.leader_provider = Some(leader_provider);
         Ok(())
-    }
-
-    fn start<U, A>(&mut self, urls: A) -> Result<()>
-    where
-        U: AsRef<str>,
-        A: AsRef<[U]>,
-    {
-        let peers = urls
-            .as_ref()
-            .iter()
-            .map(|url| url.as_ref().to_string())
-            .collect::<Vec<_>>();
-        let ask_leader = AskLeader::new(
-            self.id,
-            self.role,
-            peers,
-            self.channel_manager.clone(),
-            self.max_retry,
-        );
-        self.start_with(Arc::new(ask_leader))
     }
 
     fn make_client(&self, addr: impl AsRef<str>) -> Result<ClusterClient<Channel>> {

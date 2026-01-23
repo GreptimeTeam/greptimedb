@@ -14,6 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::alter_table_expr::Kind;
@@ -46,6 +47,7 @@ use common_meta::rpc::ddl::{
     SubmitDdlTaskResponse,
 };
 use common_query::Output;
+use common_recordbatch::{RecordBatch, RecordBatches};
 use common_sql::convert::sql_value_to_value;
 use common_telemetry::{debug, info, tracing, warn};
 use common_time::{Timestamp, Timezone};
@@ -54,6 +56,8 @@ use datafusion_expr::LogicalPlan;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, RawSchema, Schema};
 use datatypes::value::Value;
+use datatypes::vectors::{StringVector, VectorRef};
+use humantime::parse_duration;
 use partition::expr::{Operand, PartitionExpr, RestrictedOp};
 use partition::multi_dim::MultiDimPartitionRule;
 use query::parser::QueryStatement;
@@ -64,6 +68,7 @@ use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
 use snafu::{OptionExt, ResultExt, ensure};
 use sql::parser::{ParseOptions, ParserContext};
+use sql::statements::OptionMap;
 #[cfg(feature = "enterprise")]
 use sql::statements::alter::trigger::AlterTrigger;
 use sql::statements::alter::{AlterDatabase, AlterTable, AlterTableOperation};
@@ -79,7 +84,9 @@ use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::TableRef;
 use table::dist_table::DistTable;
 use table::metadata::{self, RawTableInfo, RawTableMeta, TableId, TableInfo, TableType};
-use table::requests::{AlterKind, AlterTableRequest, COMMENT_KEY, TableOptions};
+use table::requests::{
+    AlterKind, AlterTableRequest, COMMENT_KEY, DDL_TIMEOUT, DDL_WAIT, TableOptions,
+};
 use table::table_name::TableName;
 use table::table_reference::TableReference;
 
@@ -97,6 +104,51 @@ use crate::error::{
 use crate::expr_helper::{self, RepartitionRequest};
 use crate::statement::StatementExecutor;
 use crate::statement::show::create_partitions_stmt;
+
+#[derive(Debug, Clone, Copy)]
+struct DdlSubmitOptions {
+    wait: bool,
+    timeout: Duration,
+}
+
+fn build_procedure_id_output(procedure_id: Vec<u8>) -> Result<Output> {
+    let procedure_id = String::from_utf8_lossy(&procedure_id).to_string();
+    let vector: VectorRef = Arc::new(StringVector::from(vec![procedure_id]));
+    let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+        "Procedure ID",
+        vector.data_type(),
+        false,
+    )]));
+    let batch =
+        RecordBatch::new(schema.clone(), vec![vector]).context(error::BuildRecordBatchSnafu)?;
+    let batches =
+        RecordBatches::try_new(schema, vec![batch]).context(error::BuildRecordBatchSnafu)?;
+    Ok(Output::new_with_record_batches(batches))
+}
+
+fn parse_ddl_options(options: &OptionMap) -> Result<DdlSubmitOptions> {
+    let wait = match options.get(DDL_WAIT) {
+        Some(value) => value.parse::<bool>().map_err(|_| {
+            InvalidSqlSnafu {
+                err_msg: format!("invalid DDL option '{DDL_WAIT}': '{value}'"),
+            }
+            .build()
+        })?,
+        None => SubmitDdlTaskRequest::default_wait(),
+    };
+
+    let timeout = match options.get(DDL_TIMEOUT) {
+        Some(value) => parse_duration(value).map_err(|err| {
+            InvalidSqlSnafu {
+                err_msg: format!("invalid DDL option '{DDL_TIMEOUT}': '{value}': {err}"),
+            }
+            .build()
+        })?,
+        None => SubmitDdlTaskRequest::default_timeout(),
+    };
+
+    Ok(DdlSubmitOptions { wait, timeout })
+}
 
 impl StatementExecutor {
     pub fn catalog_manager(&self) -> CatalogManagerRef {
@@ -505,10 +557,7 @@ impl StatementExecutor {
         })
         .context(error::InvalidExprSnafu)?;
 
-        let request = SubmitDdlTaskRequest {
-            query_context,
-            task: DdlTask::new_create_trigger(task),
-        };
+        let request = SubmitDdlTaskRequest::new(query_context, DdlTask::new_create_trigger(task));
 
         self.procedure_executor
             .submit_ddl_task(&ExecutorContext::default(), request)
@@ -558,10 +607,7 @@ impl StatementExecutor {
             create_flow: Some(expr),
         })
         .context(error::InvalidExprSnafu)?;
-        let request = SubmitDdlTaskRequest {
-            query_context,
-            task: DdlTask::new_create_flow(task),
-        };
+        let request = SubmitDdlTaskRequest::new(query_context, DdlTask::new_create_flow(task));
 
         self.procedure_executor
             .submit_ddl_task(&ExecutorContext::default(), request)
@@ -856,10 +902,8 @@ impl StatementExecutor {
             table_type: TableType::View,
         };
 
-        let request = SubmitDdlTaskRequest {
-            query_context: ctx,
-            task: DdlTask::new_create_view(expr, view_info.clone()),
-        };
+        let request =
+            SubmitDdlTaskRequest::new(ctx, DdlTask::new_create_view(expr, view_info.clone()));
 
         let resp = self
             .procedure_executor
@@ -942,10 +986,7 @@ impl StatementExecutor {
         expr: DropFlowTask,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
-        let request = SubmitDdlTaskRequest {
-            query_context,
-            task: DdlTask::new_drop_flow(expr),
-        };
+        let request = SubmitDdlTaskRequest::new(query_context, DdlTask::new_drop_flow(expr));
 
         self.procedure_executor
             .submit_ddl_task(&ExecutorContext::default(), request)
@@ -977,10 +1018,7 @@ impl StatementExecutor {
         expr: DropTriggerTask,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
-        let request = SubmitDdlTaskRequest {
-            query_context,
-            task: DdlTask::new_drop_trigger(expr),
-        };
+        let request = SubmitDdlTaskRequest::new(query_context, DdlTask::new_drop_trigger(expr));
 
         self.procedure_executor
             .submit_ddl_task(&ExecutorContext::default(), request)
@@ -1045,10 +1083,7 @@ impl StatementExecutor {
         expr: DropViewTask,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
-        let request = SubmitDdlTaskRequest {
-            query_context,
-            task: DdlTask::new_drop_view(expr),
-        };
+        let request = SubmitDdlTaskRequest::new(query_context, DdlTask::new_drop_view(expr));
 
         self.procedure_executor
             .submit_ddl_task(&ExecutorContext::default(), request)
@@ -1397,6 +1432,7 @@ impl StatementExecutor {
             .chain(into_partition_exprs.clone().into_iter())
             .collect();
         let new_partition_exprs_len = new_partition_exprs.len();
+        let from_partition_exprs_len = from_partition_exprs.len();
 
         // Validate the new partition expressions using MultiDimPartitionRule and PartitionChecker.
         let _ = MultiDimPartitionRule::try_new(
@@ -1410,14 +1446,7 @@ impl StatementExecutor {
         )
         .context(InvalidPartitionSnafu)?;
 
-        info!(
-            "Submitting repartition task for table {} (table_id={}), from {} to {} partitions",
-            table_ref,
-            table_id,
-            from_partition_exprs.len(),
-            new_partition_exprs_len
-        );
-
+        let ddl_options = parse_ddl_options(&request.options)?;
         let serialize_exprs = |exprs: Vec<PartitionExpr>| -> Result<Vec<String>> {
             let mut json_exprs = Vec::with_capacity(exprs.len());
             for expr in exprs {
@@ -1427,20 +1456,42 @@ impl StatementExecutor {
         };
         let from_partition_exprs_json = serialize_exprs(from_partition_exprs)?;
         let into_partition_exprs_json = serialize_exprs(into_partition_exprs)?;
-        let req = SubmitDdlTaskRequest {
-            query_context: query_context.clone(),
-            task: DdlTask::new_alter_table(AlterTableExpr {
+        let mut req = SubmitDdlTaskRequest::new(
+            query_context.clone(),
+            DdlTask::new_alter_table(AlterTableExpr {
                 catalog_name: request.catalog_name.clone(),
                 schema_name: request.schema_name.clone(),
                 table_name: request.table_name.clone(),
                 kind: Some(Kind::Repartition(Repartition {
                     from_partition_exprs: from_partition_exprs_json,
                     into_partition_exprs: into_partition_exprs_json,
-                    // TODO(weny): allow passing 'wait' from SQL options or QueryContext
-                    wait: true,
                 })),
             }),
-        };
+        );
+        req.wait = ddl_options.wait;
+        req.timeout = ddl_options.timeout;
+
+        info!(
+            "Submitting repartition task for table {} (table_id={}), from {} to {} partitions, timeout: {:?}, wait: {}",
+            table_ref,
+            table_id,
+            from_partition_exprs_len,
+            new_partition_exprs_len,
+            ddl_options.timeout,
+            ddl_options.wait
+        );
+
+        let response = self
+            .procedure_executor
+            .submit_ddl_task(&ExecutorContext::default(), req)
+            .await
+            .context(error::ExecuteDdlSnafu)?;
+
+        if !ddl_options.wait {
+            return build_procedure_id_output(response.key);
+        }
+
+        // Only invalidate cache if wait is true.
         let invalidate_keys = vec![
             CacheIdent::TableId(table_id),
             CacheIdent::TableName(TableName::new(
@@ -1449,10 +1500,6 @@ impl StatementExecutor {
                 request.table_name,
             )),
         ];
-        self.procedure_executor
-            .submit_ddl_task(&ExecutorContext::default(), req)
-            .await
-            .context(error::ExecuteDdlSnafu)?;
 
         // Invalidates local cache ASAP.
         self.cache_invalidator
@@ -1524,10 +1571,7 @@ impl StatementExecutor {
 
         let (req, invalidate_keys) = if physical_table_id == table_id {
             // This is physical table
-            let req = SubmitDdlTaskRequest {
-                query_context,
-                task: DdlTask::new_alter_table(expr),
-            };
+            let req = SubmitDdlTaskRequest::new(query_context, DdlTask::new_alter_table(expr));
 
             let invalidate_keys = vec![
                 CacheIdent::TableId(table_id),
@@ -1537,10 +1581,10 @@ impl StatementExecutor {
             (req, invalidate_keys)
         } else {
             // This is logical table
-            let req = SubmitDdlTaskRequest {
+            let req = SubmitDdlTaskRequest::new(
                 query_context,
-                task: DdlTask::new_alter_logical_tables(vec![expr]),
-            };
+                DdlTask::new_alter_logical_tables(vec![expr]),
+            );
 
             let mut invalidate_keys = vec![
                 CacheIdent::TableId(physical_table_id),
@@ -1658,10 +1702,10 @@ impl StatementExecutor {
             .map(|expr| expr.as_pb_partition().context(PartitionExprToPbSnafu))
             .collect::<Result<Vec<_>>>()?;
 
-        let request = SubmitDdlTaskRequest {
+        let request = SubmitDdlTaskRequest::new(
             query_context,
-            task: DdlTask::new_create_table(create_table, partitions, table_info),
-        };
+            DdlTask::new_create_table(create_table, partitions, table_info),
+        );
 
         self.procedure_executor
             .submit_ddl_task(&ExecutorContext::default(), request)
@@ -1674,10 +1718,10 @@ impl StatementExecutor {
         tables_data: Vec<(CreateTableExpr, RawTableInfo)>,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
-        let request = SubmitDdlTaskRequest {
+        let request = SubmitDdlTaskRequest::new(
             query_context,
-            task: DdlTask::new_create_logical_tables(tables_data),
-        };
+            DdlTask::new_create_logical_tables(tables_data),
+        );
 
         self.procedure_executor
             .submit_ddl_task(&ExecutorContext::default(), request)
@@ -1690,10 +1734,10 @@ impl StatementExecutor {
         tables_data: Vec<AlterTableExpr>,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
-        let request = SubmitDdlTaskRequest {
+        let request = SubmitDdlTaskRequest::new(
             query_context,
-            task: DdlTask::new_alter_logical_tables(tables_data),
-        };
+            DdlTask::new_alter_logical_tables(tables_data),
+        );
 
         self.procedure_executor
             .submit_ddl_task(&ExecutorContext::default(), request)
@@ -1708,16 +1752,16 @@ impl StatementExecutor {
         drop_if_exists: bool,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
-        let request = SubmitDdlTaskRequest {
+        let request = SubmitDdlTaskRequest::new(
             query_context,
-            task: DdlTask::new_drop_table(
+            DdlTask::new_drop_table(
                 table_name.catalog_name.clone(),
                 table_name.schema_name.clone(),
                 table_name.table_name.clone(),
                 table_id,
                 drop_if_exists,
             ),
-        };
+        );
 
         self.procedure_executor
             .submit_ddl_task(&ExecutorContext::default(), request)
@@ -1732,10 +1776,10 @@ impl StatementExecutor {
         drop_if_exists: bool,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
-        let request = SubmitDdlTaskRequest {
+        let request = SubmitDdlTaskRequest::new(
             query_context,
-            task: DdlTask::new_drop_database(catalog, schema, drop_if_exists),
-        };
+            DdlTask::new_drop_database(catalog, schema, drop_if_exists),
+        );
 
         self.procedure_executor
             .submit_ddl_task(&ExecutorContext::default(), request)
@@ -1748,10 +1792,8 @@ impl StatementExecutor {
         alter_expr: AlterDatabaseExpr,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
-        let request = SubmitDdlTaskRequest {
-            query_context,
-            task: DdlTask::new_alter_database(alter_expr),
-        };
+        let request =
+            SubmitDdlTaskRequest::new(query_context, DdlTask::new_alter_database(alter_expr));
 
         self.procedure_executor
             .submit_ddl_task(&ExecutorContext::default(), request)
@@ -1766,16 +1808,16 @@ impl StatementExecutor {
         time_ranges: Vec<(Timestamp, Timestamp)>,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
-        let request = SubmitDdlTaskRequest {
+        let request = SubmitDdlTaskRequest::new(
             query_context,
-            task: DdlTask::new_truncate_table(
+            DdlTask::new_truncate_table(
                 table_name.catalog_name.clone(),
                 table_name.schema_name.clone(),
                 table_name.table_name.clone(),
                 table_id,
                 time_ranges,
             ),
-        };
+        );
 
         self.procedure_executor
             .submit_ddl_task(&ExecutorContext::default(), request)
@@ -1838,10 +1880,10 @@ impl StatementExecutor {
         options: HashMap<String, String>,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
-        let request = SubmitDdlTaskRequest {
+        let request = SubmitDdlTaskRequest::new(
             query_context,
-            task: DdlTask::new_create_database(catalog, database, create_if_not_exists, options),
-        };
+            DdlTask::new_create_database(catalog, database, create_if_not_exists, options),
+        );
 
         self.procedure_executor
             .submit_ddl_task(&ExecutorContext::default(), request)
@@ -2204,6 +2246,8 @@ fn convert_value(
 
 #[cfg(test)]
 mod test {
+    use std::time::Duration;
+
     use session::context::{QueryContext, QueryContextBuilder};
     use sql::dialect::GreptimeDbDialect;
     use sql::parser::{ParseOptions, ParserContext};
@@ -2212,6 +2256,17 @@ mod test {
 
     use super::*;
     use crate::expr_helper;
+
+    #[test]
+    fn test_parse_ddl_options() {
+        let options = OptionMap::from([
+            ("timeout".to_string(), "5m".to_string()),
+            ("wait".to_string(), "false".to_string()),
+        ]);
+        let ddl_options = parse_ddl_options(&options).unwrap();
+        assert!(!ddl_options.wait);
+        assert_eq!(Duration::from_secs(300), ddl_options.timeout);
+    }
 
     #[test]
     fn test_name_is_match() {

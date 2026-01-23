@@ -28,10 +28,10 @@ macro_rules! define_ticker {
         event_value = $event_val:expr
     ) => {
         $(#[$meta])*
-        pub(crate) struct $name {
-            pub(crate) tick_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
-            pub(crate) tick_interval: std::time::Duration,
-            pub(crate) sender: tokio::sync::mpsc::Sender<$event_ty>,
+        pub struct $name {
+            pub tick_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+            pub tick_interval: std::time::Duration,
+            pub sender: tokio::sync::mpsc::Sender<$event_ty>,
         }
 
         #[async_trait::async_trait]

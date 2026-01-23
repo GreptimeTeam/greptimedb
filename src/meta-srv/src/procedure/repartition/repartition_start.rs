@@ -21,6 +21,7 @@ use partition::expr::PartitionExpr;
 use partition::subtask::{self, RepartitionSubtask};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
+use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::error::{self, Result};
@@ -52,6 +53,7 @@ impl State for RepartitionStart {
         ctx: &mut Context,
         _: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
+        let timer = Instant::now();
         let (physical_table_id, table_route) = ctx
             .table_metadata_manager
             .table_route_manager()
@@ -81,6 +83,8 @@ impl State for RepartitionStart {
             total_source_regions,
             total_target_regions
         );
+
+        ctx.update_build_plan_elapsed(timer.elapsed());
 
         if plans.is_empty() {
             return Ok((Box::new(RepartitionEnd), Status::done()));

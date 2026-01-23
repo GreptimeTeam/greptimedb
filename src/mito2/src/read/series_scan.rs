@@ -43,7 +43,7 @@ use crate::error::{
     Error, InvalidSenderSnafu, PartitionOutOfRangeSnafu, Result, ScanMultiTimesSnafu,
     ScanSeriesSnafu, TooManyFilesToReadSnafu,
 };
-use crate::read::range::RangeBuilderList;
+use crate::read::range::{RangeBuilderList, file_range_counts};
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{PartitionMetrics, PartitionMetricsList, SeriesDistributorMetrics};
 use crate::read::seq_scan::{SeqScan, build_flat_sources, build_sources};
@@ -450,9 +450,15 @@ impl SeriesDistributor {
         // build part cost.
         let mut fetch_start = Instant::now();
 
-        let range_builder_list = Arc::new(RangeBuilderList::new(
+        let counts = file_range_counts(
             self.stream_ctx.input.num_memtables(),
             self.stream_ctx.input.num_files(),
+            &self.stream_ctx.ranges,
+            self.partitions.iter().flatten(),
+        );
+        let range_builder_list = Arc::new(RangeBuilderList::new(
+            self.stream_ctx.input.num_memtables(),
+            counts,
         ));
         // Scans all parts.
         let mut sources = Vec::with_capacity(self.partitions.len());
@@ -548,9 +554,15 @@ impl SeriesDistributor {
         // build part cost.
         let mut fetch_start = Instant::now();
 
-        let range_builder_list = Arc::new(RangeBuilderList::new(
+        let counts = file_range_counts(
             self.stream_ctx.input.num_memtables(),
             self.stream_ctx.input.num_files(),
+            &self.stream_ctx.ranges,
+            self.partitions.iter().flatten(),
+        );
+        let range_builder_list = Arc::new(RangeBuilderList::new(
+            self.stream_ctx.input.num_memtables(),
+            counts,
         ));
         // Scans all parts.
         let mut sources = Vec::with_capacity(self.partitions.len());

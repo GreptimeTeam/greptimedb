@@ -19,8 +19,8 @@ use datafusion::execution::registry::SerializerRegistry;
 use datafusion_common::DataFusionError;
 use datafusion_expr::UserDefinedLogicalNode;
 use promql::extension_plan::{
-    Absent, EmptyMetric, InstantManipulate, RangeManipulate, ScalarCalculate, SeriesDivide,
-    SeriesNormalize,
+    Absent, EmptyMetric, HistogramFold, InstantManipulate, RangeManipulate, ScalarCalculate,
+    SeriesDivide, SeriesNormalize, UnionDistinctOn,
 };
 
 #[derive(Debug)]
@@ -73,6 +73,20 @@ impl SerializerRegistry for ExtensionSerializer {
                     .expect("Failed to downcast to Absent");
                 Ok(absent.serialize())
             }
+            name if name == HistogramFold::name() => {
+                let histogram_fold = node
+                    .as_any()
+                    .downcast_ref::<HistogramFold>()
+                    .expect("Failed to downcast to HistogramFold");
+                Ok(histogram_fold.serialize())
+            }
+            name if name == UnionDistinctOn::name() => {
+                let union_distinct_on = node
+                    .as_any()
+                    .downcast_ref::<UnionDistinctOn>()
+                    .expect("Failed to downcast to UnionDistinctOn");
+                Ok(union_distinct_on.serialize())
+            }
             name if name == EmptyMetric::name() => Err(DataFusionError::Substrait(
                 "EmptyMetric should not be serialized".to_string(),
             )),
@@ -114,6 +128,14 @@ impl SerializerRegistry for ExtensionSerializer {
             name if name == Absent::name() => {
                 let absent = Absent::deserialize(bytes)?;
                 Ok(Arc::new(absent))
+            }
+            name if name == HistogramFold::name() => {
+                let histogram_fold = HistogramFold::deserialize(bytes)?;
+                Ok(Arc::new(histogram_fold))
+            }
+            name if name == UnionDistinctOn::name() => {
+                let union_distinct_on = UnionDistinctOn::deserialize(bytes)?;
+                Ok(Arc::new(union_distinct_on))
             }
             name if name == EmptyMetric::name() => Err(DataFusionError::Substrait(
                 "EmptyMetric should not be deserialized".to_string(),

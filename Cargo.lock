@@ -4296,6 +4296,7 @@ dependencies = [
  "cache",
  "client",
  "common-base",
+ "common-catalog",
  "common-config",
  "common-error",
  "common-function",
@@ -4371,6 +4372,7 @@ dependencies = [
  "num-traits",
  "ordered-float 4.6.0",
  "paste",
+ "regex",
  "serde",
  "serde_json",
  "snafu 0.8.6",
@@ -5740,7 +5742,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=1353b0ada9e17890c7ba0e402ba29b2b57816ff1#1353b0ada9e17890c7ba0e402ba29b2b57816ff1"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=4a14b140f20d2a8fa2046fbbc5e0947203a3e34c#4a14b140f20d2a8fa2046fbbc5e0947203a3e34c"
 dependencies = [
  "prost 0.14.1",
  "prost-types 0.14.1",
@@ -7787,6 +7789,7 @@ dependencies = [
  "meta-srv",
  "rand 0.9.1",
  "serde",
+ "session",
  "snafu 0.8.6",
  "tokio",
  "tokio-stream",

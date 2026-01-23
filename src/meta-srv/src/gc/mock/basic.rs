@@ -31,7 +31,7 @@ async fn test_parallel_process_datanodes_empty() {
     let env = TestEnv::new();
     let report = env
         .scheduler
-        .parallel_process_datanodes(HashMap::new())
+        .parallel_process_datanodes(HashMap::new(), HashMap::new(), HashMap::new())
         .await;
 
     assert_eq!(report.per_datanode_reports.len(), 0);
@@ -85,7 +85,7 @@ async fn test_parallel_process_datanodes_with_candidates() {
     )]);
 
     let report = scheduler
-        .parallel_process_datanodes(datanode_to_candidates)
+        .parallel_process_datanodes(datanode_to_candidates, HashMap::new(), HashMap::new())
         .await;
 
     assert_eq!(report.per_datanode_reports.len(), 1);

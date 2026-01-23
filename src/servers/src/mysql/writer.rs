@@ -280,41 +280,12 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                         let array = column.as_primitive::<Float64Type>();
                         row_writer.write_col(array.value(i))?;
                     }
-                    DataType::Utf8 => {
-                        let array = column.as_string::<i32>();
-                        row_writer.write_col(array.value(i))?;
+                    DataType::Utf8 | DataType::Utf8View | DataType::LargeUtf8 => {
+                        let v = datatypes::arrow_array::string_array_value(column, i);
+                        row_writer.write_col(v)?;
                     }
-                    DataType::Utf8View => {
-                        let array = column.as_string_view();
-                        row_writer.write_col(array.value(i))?;
-                    }
-                    DataType::LargeUtf8 => {
-                        let array = column.as_string::<i64>();
-                        row_writer.write_col(array.value(i))?;
-                    }
-                    DataType::Binary => {
-                        let array = column.as_binary::<i32>();
-                        let v = array.value(i);
-                        if let ConcreteDataType::Json(_) = &schema.column_schemas()[j].data_type {
-                            let s = jsonb_to_string(v).context(ConvertSqlValueSnafu)?;
-                            row_writer.write_col(s)?;
-                        } else {
-                            row_writer.write_col(v)?;
-                        }
-                    }
-                    DataType::BinaryView => {
-                        let array = column.as_binary_view();
-                        let v = array.value(i);
-                        if let ConcreteDataType::Json(_) = &schema.column_schemas()[j].data_type {
-                            let s = jsonb_to_string(v).context(ConvertSqlValueSnafu)?;
-                            row_writer.write_col(s)?;
-                        } else {
-                            row_writer.write_col(v)?;
-                        }
-                    }
-                    DataType::LargeBinary => {
-                        let array = column.as_binary::<i64>();
-                        let v = array.value(i);
+                    DataType::Binary | DataType::BinaryView | DataType::LargeBinary => {
+                        let v = datatypes::arrow_array::binary_array_value(column, i);
                         if let ConcreteDataType::Json(_) = &schema.column_schemas()[j].data_type {
                             let s = jsonb_to_string(v).context(ConvertSqlValueSnafu)?;
                             row_writer.write_col(s)?;

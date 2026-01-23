@@ -13,12 +13,15 @@
 // limitations under the License.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::Duration;
 
 use common_meta::key::TableMetadataManagerRef;
 use common_procedure::ProcedureWithId;
 use common_telemetry::info;
 use common_test_util::recordbatch::check_output_stream;
+use common_test_util::temp_dir::create_temp_dir;
+use common_wal::config::DatanodeWalConfig;
 use futures::TryStreamExt as _;
 use itertools::Itertools;
 use meta_srv::gc::{BatchGcProcedure, GcSchedulerOptions, Region2Peers};
@@ -84,8 +87,13 @@ async fn distributed_with_gc(store_type: &StorageType) -> (TestContext, TempDirG
     let test_name = uuid::Uuid::new_v4().to_string();
     let (store_config, guard) = get_test_store_config(store_type);
 
-    let builder = GreptimeDbClusterBuilder::new(&test_name)
-        .await
+    let mut builder = GreptimeDbClusterBuilder::new(&test_name).await;
+    if matches!(store_type, StorageType::File) {
+        let home_dir = create_temp_dir("test_gc_data_home");
+        builder = builder.with_shared_home_dir(Arc::new(home_dir));
+    }
+
+    let builder = builder
         .with_metasrv_gc_config(GcSchedulerOptions {
             enable: true,
             ..Default::default()
@@ -96,6 +104,7 @@ async fn distributed_with_gc(store_type: &StorageType) -> (TestContext, TempDirG
             lingering_time: Some(Duration::ZERO),
             ..Default::default()
         })
+        .with_datanode_wal_config(DatanodeWalConfig::Noop)
         .with_store_config(store_config);
     (
         TestContext::new(MockInstanceBuilder::Distributed(builder)).await,
@@ -110,9 +119,6 @@ async fn test_gc_basic_different_store() {
     let store_type = StorageType::build_storage_types_based_on_env();
     info!("store type: {:?}", store_type);
     for store in store_type {
-        if store == StorageType::File {
-            continue; // no point in test gc in fs storage
-        }
         info!("Running GC test with storage type: {}", store);
         test_gc_basic(&store).await;
     }
@@ -203,6 +209,7 @@ async fn test_gc_basic(store_type: &StorageType) {
         regions.clone(),
         false,                   // full_file_listing
         Duration::from_secs(10), // timeout
+        Default::default(),
     );
 
     // Submit the procedure to the procedure manager

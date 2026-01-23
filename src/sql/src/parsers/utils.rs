@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -39,13 +40,18 @@ use datatypes::schema::{
 };
 use snafu::{ResultExt, ensure};
 use sqlparser::dialect::Dialect;
+use sqlparser::keywords::Keyword;
+use sqlparser::parser::Parser;
+use table::requests::validate_table_option;
 
 use crate::error::{
-    ConvertToLogicalExpressionSnafu, InvalidSqlSnafu, ParseSqlValueSnafu, Result,
-    SimplificationSnafu,
+    ConvertToLogicalExpressionSnafu, InvalidSqlSnafu, InvalidTableOptionSnafu, ParseSqlValueSnafu,
+    Result, SimplificationSnafu, SyntaxSnafu,
 };
 use crate::parser::{ParseOptions, ParserContext};
+use crate::statements::OptionMap;
 use crate::statements::statement::Statement;
+use crate::util::{OptionValue, parse_option_string};
 
 /// Check if the given SQL query is a TQL statement.
 pub fn is_tql(dialect: &dyn Dialect, sql: &str) -> Result<bool> {
@@ -270,6 +276,19 @@ pub fn convert_month_day_nano_to_duration(
     let nanos_remainder = nanos_remainder as u32;
 
     Ok(std::time::Duration::new(adjusted_seconds, nanos_remainder))
+}
+
+pub fn parse_with_options(parser: &mut Parser) -> Result<OptionMap> {
+    let options = parser
+        .parse_options(Keyword::WITH)
+        .context(SyntaxSnafu)?
+        .into_iter()
+        .map(parse_option_string)
+        .collect::<Result<HashMap<String, OptionValue>>>()?;
+    for key in options.keys() {
+        ensure!(validate_table_option(key), InvalidTableOptionSnafu { key });
+    }
+    Ok(OptionMap::new(options))
 }
 
 #[cfg(test)]

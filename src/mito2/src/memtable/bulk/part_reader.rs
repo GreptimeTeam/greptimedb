@@ -28,7 +28,7 @@ use crate::memtable::bulk::part::EncodedBulkPart;
 use crate::memtable::bulk::row_group_reader::MemtableRowGroupReaderBuilder;
 use crate::memtable::{MemScanMetrics, MemScanMetricsData};
 use crate::metrics::{READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
-use crate::sst::parquet::file_range::PreFilterMode;
+use crate::sst::parquet::file_range::{PreFilterMode, TagDecodeState};
 use crate::sst::parquet::flat_format::sequence_column_index;
 use crate::sst::parquet::reader::RowGroupReaderContext;
 
@@ -340,12 +340,15 @@ fn apply_combined_filters(
 
     let num_rows = record_batch.num_rows();
     let mut combined_filter = None;
+    let mut tag_decode_state = TagDecodeState::new();
 
     // First, apply predicate filters using the shared method.
     if !context.base.filters.is_empty() {
-        let predicate_mask = context
-            .base
-            .compute_filter_mask_flat(&record_batch, skip_fields)?;
+        let predicate_mask = context.base.compute_filter_mask_flat(
+            &record_batch,
+            skip_fields,
+            &mut tag_decode_state,
+        )?;
         // If predicate filters out the entire batch, return None early
         let Some(mask) = predicate_mask else {
             return Ok(None);

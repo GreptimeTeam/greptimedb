@@ -27,11 +27,10 @@ use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{error, info, warn};
 use snafu::{ResultExt, ensure};
 use tokio::sync::RwLock;
-use tonic::Status;
 use tonic::codec::CompressionEncoding;
 use tonic::transport::Channel;
+use tonic::{Request, Status};
 
-use crate::client::ask_leader::AskLeader;
 use crate::client::{Id, LeaderProviderRef, util};
 use crate::error;
 use crate::error::Result;
@@ -42,25 +41,23 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(id: Id, role: Role, channel_manager: ChannelManager, max_retry: usize) -> Self {
+    pub fn new(
+        id: Id,
+        role: Role,
+        channel_manager: ChannelManager,
+        max_retry: usize,
+        timeout: Duration,
+    ) -> Self {
         let inner = Arc::new(RwLock::new(Inner {
             id,
             role,
             channel_manager,
             leader_provider: None,
             max_retry,
+            timeout,
         }));
 
         Self { inner }
-    }
-
-    pub async fn start<U, A>(&mut self, urls: A) -> Result<()>
-    where
-        U: AsRef<str>,
-        A: AsRef<[U]>,
-    {
-        let mut inner = self.inner.write().await;
-        inner.start(urls)
     }
 
     /// Start the client with a [LeaderProvider].
@@ -117,6 +114,8 @@ struct Inner {
     channel_manager: ChannelManager,
     leader_provider: Option<LeaderProviderRef>,
     max_retry: usize,
+    /// Request timeout.
+    timeout: Duration,
 }
 
 impl Inner {
@@ -129,26 +128,6 @@ impl Inner {
         );
         self.leader_provider = Some(leader_provider);
         Ok(())
-    }
-
-    fn start<U, A>(&mut self, urls: A) -> Result<()>
-    where
-        U: AsRef<str>,
-        A: AsRef<[U]>,
-    {
-        let peers = urls
-            .as_ref()
-            .iter()
-            .map(|url| url.as_ref().to_string())
-            .collect::<Vec<_>>();
-        let ask_leader = AskLeader::new(
-            self.id,
-            self.role,
-            peers,
-            self.channel_manager.clone(),
-            self.max_retry,
-        );
-        self.start_with(Arc::new(ask_leader))
     }
 
     fn make_client(&self, addr: impl AsRef<str>) -> Result<ProcedureServiceClient<Channel>> {
@@ -209,7 +188,7 @@ impl Inner {
                             times += 1;
                             continue;
                         } else {
-                            error!("An error occurred in gRPC, status: {status}");
+                            error!("An error occurred in gRPC, status: {status:?}");
                             return Err(error::Error::from(status));
                         }
                     }
@@ -250,7 +229,8 @@ impl Inner {
         self.with_retry(
             "migrate region",
             move |mut client| {
-                let req = req.clone();
+                let mut req = Request::new(req.clone());
+                req.set_timeout(self.timeout);
 
                 async move { client.migrate(req).await.map(|res| res.into_inner()) }
             },
@@ -270,7 +250,8 @@ impl Inner {
         self.with_retry(
             "reconcile",
             move |mut client| {
-                let req = req.clone();
+                let mut req = Request::new(req.clone());
+                req.set_timeout(self.timeout);
 
                 async move { client.reconcile(req).await.map(|res| res.into_inner()) }
             },
@@ -294,7 +275,8 @@ impl Inner {
         self.with_retry(
             "query procedure state",
             move |mut client| {
-                let req = req.clone();
+                let mut req = Request::new(req.clone());
+                req.set_timeout(self.timeout);
 
                 async move { client.query(req).await.map(|res| res.into_inner()) }
             },
@@ -309,11 +291,13 @@ impl Inner {
             self.role,
             TracingContext::from_current_span().to_w3c(),
         );
+        let timeout = Duration::from_secs(req.timeout_secs.into());
 
         self.with_retry(
             "submit ddl task",
             move |mut client| {
-                let req = req.clone();
+                let mut req = Request::new(req.clone());
+                req.set_timeout(timeout);
                 async move { client.ddl(req).await.map(|res| res.into_inner()) }
             },
             |resp: &DdlTaskResponse| &resp.header,
@@ -332,11 +316,184 @@ impl Inner {
         self.with_retry(
             "list procedure",
             move |mut client| {
-                let req = req.clone();
+                let mut req = Request::new(req.clone());
+                req.set_timeout(self.timeout);
                 async move { client.details(req).await.map(|res| res.into_inner()) }
             },
             |resp: &ProcedureDetailResponse| &resp.header,
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use api::v1::meta::heartbeat_server::{Heartbeat, HeartbeatServer};
+    use api::v1::meta::procedure_service_server::{ProcedureService, ProcedureServiceServer};
+    use api::v1::meta::{
+        AskLeaderRequest, AskLeaderResponse, DdlTaskRequest, DdlTaskResponse, HeartbeatRequest,
+        HeartbeatResponse, MigrateRegionRequest, MigrateRegionResponse, Peer,
+        ProcedureDetailRequest, ProcedureDetailResponse, ProcedureStateResponse,
+        QueryProcedureRequest, ReconcileRequest, ReconcileResponse, ResponseHeader, Role,
+    };
+    use async_trait::async_trait;
+    use common_error::status_code::StatusCode;
+    use common_meta::rpc::ddl::{CommentObjectType, CommentOnTask, DdlTask, SubmitDdlTaskRequest};
+    use common_telemetry::common_error::ext::ErrorExt;
+    use common_telemetry::info;
+    use session::context::QueryContext;
+    use tokio::net::TcpListener;
+    use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
+    use tonic::codec::CompressionEncoding;
+    use tonic::{Request, Response, Status};
+
+    use crate::client::MetaClientBuilder;
+
+    #[derive(Clone)]
+    struct MockHeartbeat {
+        leader_addr: String,
+    }
+
+    #[async_trait]
+    impl Heartbeat for MockHeartbeat {
+        type HeartbeatStream = ReceiverStream<Result<HeartbeatResponse, Status>>;
+
+        async fn heartbeat(
+            &self,
+            _request: Request<tonic::Streaming<HeartbeatRequest>>,
+        ) -> Result<Response<Self::HeartbeatStream>, Status> {
+            Err(Status::unimplemented(
+                "heartbeat stream is not used in this test",
+            ))
+        }
+
+        async fn ask_leader(
+            &self,
+            _request: Request<AskLeaderRequest>,
+        ) -> Result<Response<AskLeaderResponse>, Status> {
+            Ok(Response::new(AskLeaderResponse {
+                header: Some(ResponseHeader {
+                    protocol_version: 0,
+                    error: None,
+                }),
+                leader: Some(Peer {
+                    id: 1,
+                    addr: self.leader_addr.clone(),
+                }),
+            }))
+        }
+    }
+
+    #[derive(Clone)]
+    struct MockProcedure {
+        delay: Duration,
+    }
+
+    #[async_trait]
+    impl ProcedureService for MockProcedure {
+        async fn query(
+            &self,
+            _request: Request<QueryProcedureRequest>,
+        ) -> Result<Response<ProcedureStateResponse>, Status> {
+            Err(Status::unimplemented("query is not used in this test"))
+        }
+
+        async fn ddl(
+            &self,
+            _request: Request<DdlTaskRequest>,
+        ) -> Result<Response<DdlTaskResponse>, Status> {
+            tokio::time::sleep(self.delay).await;
+            Ok(Response::new(DdlTaskResponse {
+                header: Some(ResponseHeader {
+                    protocol_version: 0,
+                    error: None,
+                }),
+                ..Default::default()
+            }))
+        }
+
+        async fn reconcile(
+            &self,
+            _request: Request<ReconcileRequest>,
+        ) -> Result<Response<ReconcileResponse>, Status> {
+            Err(Status::unimplemented("reconcile is not used in this test"))
+        }
+
+        async fn migrate(
+            &self,
+            _request: Request<MigrateRegionRequest>,
+        ) -> Result<Response<MigrateRegionResponse>, Status> {
+            Err(Status::unimplemented("migrate is not used in this test"))
+        }
+
+        async fn details(
+            &self,
+            _request: Request<ProcedureDetailRequest>,
+        ) -> Result<Response<ProcedureDetailResponse>, Status> {
+            Err(Status::unimplemented("details is not used in this test"))
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_meta_client_ddl_request_timeout() {
+        common_telemetry::init_default_ut_logging();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let addr_str = addr.to_string();
+
+        let heartbeat = MockHeartbeat {
+            leader_addr: addr_str.clone(),
+        };
+        let procedure = MockProcedure {
+            delay: Duration::from_secs(4),
+        };
+
+        let server = tonic::transport::Server::builder()
+            .add_service(
+                HeartbeatServer::new(heartbeat).accept_compressed(CompressionEncoding::Zstd),
+            )
+            .add_service(
+                ProcedureServiceServer::new(procedure).accept_compressed(CompressionEncoding::Zstd),
+            )
+            .serve_with_incoming(TcpListenerStream::new(listener));
+        let server_handle = tokio::spawn(server);
+
+        let mut client = MetaClientBuilder::new(0, Role::Frontend)
+            .enable_heartbeat()
+            .enable_procedure()
+            .build();
+        client.start(&[addr_str.as_str()]).await.unwrap();
+
+        let mut request = SubmitDdlTaskRequest::new(
+            QueryContext::arc(),
+            DdlTask::new_comment_on(CommentOnTask {
+                catalog_name: "greptime".to_string(),
+                schema_name: "public".to_string(),
+                object_type: CommentObjectType::Table,
+                object_name: "test_table".to_string(),
+                column_name: None,
+                object_id: None,
+                comment: Some("timeout".to_string()),
+            }),
+        );
+        request.timeout = Duration::from_secs(1);
+
+        let now = Instant::now();
+        let err = client.submit_ddl_task(request).await.unwrap_err();
+        let elapsed = now.elapsed();
+        // The request should be cancelled within 1 second.
+        assert!(elapsed < Duration::from_secs(2));
+        info!("err: {err:?}, code: {}", err.status_code());
+        assert_eq!(err.status_code(), StatusCode::Cancelled);
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("Timeout expired"),
+            "unexpected error: {err_msg}"
+        );
+
+        server_handle.abort();
     }
 }

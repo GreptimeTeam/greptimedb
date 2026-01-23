@@ -107,6 +107,10 @@ impl State for Collect {
             // TODO(weny): retry the failed or unknown procedures.
         }
 
+        if let Some(start_time) = ctx.volatile_ctx.dispatch_start_time.take() {
+            ctx.update_finish_groups_elapsed(start_time.elapsed());
+        }
+
         Ok((Box::new(DeallocateRegion), Status::executing(true)))
     }
 

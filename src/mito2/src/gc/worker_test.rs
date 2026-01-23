@@ -33,11 +33,19 @@ use crate::test_util::{
 
 async fn create_gc_worker(
     mito_engine: &MitoEngine,
-    regions: BTreeMap<RegionId, MitoRegionRef>,
+    regions: BTreeMap<RegionId, Option<MitoRegionRef>>,
     file_ref_manifest: &FileRefsManifest,
     full_file_listing: bool,
 ) -> LocalGcWorker {
-    let access_layer = regions.first_key_value().unwrap().1.access_layer.clone();
+    let access_layer = regions
+        .first_key_value()
+        .as_ref()
+        .unwrap()
+        .1
+        .as_ref()
+        .unwrap()
+        .access_layer
+        .clone();
     let cache_manager = mito_engine.cache_manager();
 
     LocalGcWorker::try_new(
@@ -130,7 +138,7 @@ async fn test_gc_worker_basic_truncate() {
     );
     let version = manifest.manifest_version;
 
-    let regions = BTreeMap::from([(region_id, region.clone())]);
+    let regions = BTreeMap::from([(region_id, Some(region.clone()))]);
     let file_ref_manifest = FileRefsManifest {
         file_refs: Default::default(),
         manifest_version: [(region_id, version)].into(),
@@ -225,7 +233,7 @@ async fn test_gc_worker_truncate_with_ref() {
     );
     let version = manifest.manifest_version;
 
-    let regions = BTreeMap::from([(region_id, region.clone())]);
+    let regions = BTreeMap::from([(region_id, Some(region.clone()))]);
     let file_ref_manifest = FileRefsManifest {
         file_refs: [(
             region_id,
@@ -311,7 +319,7 @@ async fn test_gc_worker_basic_compact() {
 
     let version = manifest.manifest_version;
 
-    let regions = BTreeMap::from([(region_id, region.clone())]);
+    let regions = BTreeMap::from([(region_id, Some(region.clone()))]);
     let file_ref_manifest = FileRefsManifest {
         file_refs: Default::default(),
         manifest_version: [(region_id, version)].into(),
@@ -388,7 +396,7 @@ async fn test_gc_worker_compact_with_ref() {
 
     let version = manifest.manifest_version;
 
-    let regions = BTreeMap::from([(region_id, region.clone())]);
+    let regions = BTreeMap::from([(region_id, Some(region.clone()))]);
     let file_ref_manifest = FileRefsManifest {
         file_refs: HashMap::from([(
             region_id,

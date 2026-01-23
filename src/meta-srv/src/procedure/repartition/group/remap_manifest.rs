@@ -43,6 +43,7 @@ impl State for RemapManifest {
         ctx: &mut Context,
         _procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
+        let timer = Instant::now();
         let prepare_result = ctx.persistent_ctx.group_prepare_result.as_ref().unwrap();
         let remap = Self::build_remap_manifest_instructions(
             &ctx.persistent_ctx.sources,
@@ -84,6 +85,7 @@ impl State for RemapManifest {
         }
 
         ctx.persistent_ctx.staging_manifest_paths = manifest_paths;
+        ctx.update_remap_manifest_elapsed(timer.elapsed());
 
         Ok((Box::new(ApplyStagingManifest), Status::executing(true)))
     }

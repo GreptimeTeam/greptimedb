@@ -294,7 +294,7 @@ impl MetasrvBuilder {
         let memory_region_keeper = Arc::new(MemoryRegionKeeper::default());
         let node_manager = node_manager.unwrap_or_else(|| {
             let datanode_client_channel_config = ChannelConfig::new()
-                .timeout(options.datanode.client.timeout)
+                .timeout(Some(options.datanode.client.timeout))
                 .connect_timeout(options.datanode.client.connect_timeout)
                 .tcp_nodelay(options.datanode.client.tcp_nodelay);
             Arc::new(NodeClients::new(datanode_client_channel_config))

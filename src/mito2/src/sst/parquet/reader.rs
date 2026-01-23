@@ -16,7 +16,7 @@
 
 #[cfg(feature = "vector_index")]
 use std::collections::BTreeSet;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -26,9 +26,11 @@ use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_telemetry::{debug, tracing, warn};
 use datafusion_expr::Expr;
 use datatypes::arrow::array::ArrayRef;
+use datatypes::arrow::datatypes::Field;
 use datatypes::arrow::error::ArrowError;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
+use datatypes::prelude::DataType;
 use mito_codec::row_converter::build_primary_key_codec;
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, RowSelection};
@@ -46,7 +48,7 @@ use crate::cache::index::result_cache::PredicateKey;
 use crate::error::ApplyVectorIndexSnafu;
 use crate::error::{
     ArrowReaderSnafu, InvalidMetadataSnafu, InvalidParquetSnafu, ReadDataPartSnafu,
-    ReadParquetSnafu, Result,
+    ReadParquetSnafu, Result, SerializePartitionExprSnafu,
 };
 use crate::metrics::{
     PRECISE_FILTER_ROWS_TOTAL, READ_ROW_GROUPS_TOTAL, READ_ROWS_IN_ROW_GROUP_TOTAL,
@@ -67,7 +69,8 @@ use crate::sst::index::inverted_index::applier::{
 #[cfg(feature = "vector_index")]
 use crate::sst::index::vector_index::applier::VectorIndexApplierRef;
 use crate::sst::parquet::file_range::{
-    FileRangeContext, FileRangeContextRef, PreFilterMode, RangeBase, row_group_contains_delete,
+    FileRangeContext, FileRangeContextRef, PartitionFilterContext, PreFilterMode, RangeBase,
+    row_group_contains_delete,
 };
 use crate::sst::parquet::format::{ReadFormat, need_override_sequence};
 use crate::sst::parquet::metadata::MetadataLoader;
@@ -75,6 +78,7 @@ use crate::sst::parquet::row_group::{InMemoryRowGroup, ParquetFetchMetrics};
 use crate::sst::parquet::row_selection::RowGroupSelection;
 use crate::sst::parquet::stats::RowGroupPruningStats;
 use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, PARQUET_METADATA_KEY};
+use crate::sst::tag_maybe_to_dictionary_field;
 
 const INDEX_TYPE_FULLTEXT: &str = "fulltext";
 const INDEX_TYPE_INVERTED: &str = "inverted";
@@ -438,6 +442,8 @@ impl ParquetReaderBuilder {
 
         let codec = build_primary_key_codec(read_format.metadata());
 
+        let partition_filter = self.build_partition_filter(&read_format, &prune_schema)?;
+
         let context = FileRangeContext::new(
             reader_builder,
             RangeBase {
@@ -449,12 +455,83 @@ impl ParquetReaderBuilder {
                 codec,
                 compat_batch: None,
                 pre_filter_mode: self.pre_filter_mode,
+                partition_filter,
             },
         );
 
         metrics.build_cost += start.elapsed();
 
         Ok((context, selection))
+    }
+
+    /// Compare partition expressions from expected metadata and file metadata,
+    /// and build a partition filter if they differ.
+    fn build_partition_filter(
+        &self,
+        read_format: &ReadFormat,
+        prune_schema: &Arc<datatypes::schema::Schema>,
+    ) -> Result<Option<PartitionFilterContext>> {
+        let region_partition_expr_str = self
+            .expected_metadata
+            .as_ref()
+            .and_then(|meta| meta.partition_expr.as_ref());
+        let file_partition_expr_ref = self.file_handle.meta_ref().partition_expr.as_ref();
+
+        let Some(region_str) = region_partition_expr_str else {
+            return Ok(None);
+        };
+
+        let Some(region_partition_expr) = crate::region::parse_partition_expr(Some(region_str))?
+        else {
+            return Ok(None);
+        };
+
+        if Some(&region_partition_expr) == file_partition_expr_ref {
+            return Ok(None);
+        }
+
+        // Collect columns referenced by the partition expression.
+        let mut referenced_columns = HashSet::new();
+        region_partition_expr.collect_column_names(&mut referenced_columns);
+
+        // Build a partition_schema containing only referenced columns.
+        let is_flat = read_format.as_flat().is_some();
+        let partition_schema = Arc::new(datatypes::schema::Schema::new(
+            prune_schema
+                .column_schemas()
+                .iter()
+                .filter(|col| referenced_columns.contains(&col.name))
+                .map(|col| {
+                    if is_flat
+                        && let Some(column_meta) = read_format.metadata().column_by_name(&col.name)
+                        && column_meta.semantic_type == SemanticType::Tag
+                        && col.data_type.is_string()
+                    {
+                        let field = Arc::new(Field::new(
+                            &col.name,
+                            col.data_type.as_arrow_type(),
+                            col.is_nullable(),
+                        ));
+                        let dict_field = tag_maybe_to_dictionary_field(&col.data_type, &field);
+                        let mut column = col.clone();
+                        column.data_type =
+                            ConcreteDataType::from_arrow_type(dict_field.data_type());
+                        return column;
+                    }
+
+                    col.clone()
+                })
+                .collect::<Vec<_>>(),
+        ));
+
+        let region_partition_physical_expr = region_partition_expr
+            .try_as_physical_expr(partition_schema.arrow_schema())
+            .context(SerializePartitionExprSnafu)?;
+
+        Ok(Some(PartitionFilterContext {
+            region_partition_physical_expr,
+            partition_schema,
+        }))
     }
 
     /// Decodes region metadata from key value.
@@ -1425,6 +1502,10 @@ pub struct ReaderMetrics {
     pub(crate) metadata_cache_metrics: MetadataCacheMetrics,
     /// Optional metrics for page/row group fetch operations.
     pub(crate) fetch_metrics: Option<Arc<ParquetFetchMetrics>>,
+    /// Memory size of metadata loaded for building file ranges.
+    pub(crate) metadata_mem_size: isize,
+    /// Number of file range builders created.
+    pub(crate) num_range_builders: isize,
 }
 
 impl ReaderMetrics {
@@ -1445,6 +1526,8 @@ impl ReaderMetrics {
                 self.fetch_metrics = Some(other_fetch.clone());
             }
         }
+        self.metadata_mem_size += other.metadata_mem_size;
+        self.num_range_builders += other.num_range_builders;
     }
 
     /// Reports total rows.

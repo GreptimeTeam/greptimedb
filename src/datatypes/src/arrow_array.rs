@@ -25,11 +25,16 @@ use common_time::time::Time;
 use common_time::{Duration, Timestamp};
 
 pub type BinaryArray = arrow::array::BinaryArray;
+pub type LargeBinaryArray = arrow::array::LargeBinaryArray;
 pub type MutableBinaryArray = arrow::array::BinaryBuilder;
+pub type BinaryViewArray = arrow::array::BinaryViewArray;
+pub type MutableBinaryViewArray = arrow::array::BinaryViewBuilder;
 pub type StringArray = arrow::array::StringArray;
 pub type MutableStringArray = arrow::array::StringBuilder;
 pub type LargeStringArray = arrow::array::LargeStringArray;
 pub type MutableLargeStringArray = arrow::array::LargeStringBuilder;
+pub type StringViewArray = arrow::array::StringViewArray;
+pub type MutableStringViewArray = arrow::array::StringViewBuilder;
 
 /// Get the [Timestamp] value at index `i` of the timestamp array.
 ///
@@ -151,6 +156,40 @@ pub fn string_array_value_at_index(array: &ArrayRef, i: usize) -> Option<&str> {
             array.is_valid(i).then(|| array.value(i))
         }
         _ => None,
+    }
+}
+
+/// Get the string value at index `i` for `Utf8`, `LargeUtf8`, or `Utf8View` arrays.
+///
+/// Note: This method does not check for nulls and the value is arbitrary
+/// if [`is_null`](arrow::array::Array::is_null) returns true for the index.
+///
+/// # Panics
+/// 1. if index `i` is out of bounds;
+/// 2. or the array is not a string type.
+pub fn string_array_value(array: &ArrayRef, i: usize) -> &str {
+    match array.data_type() {
+        DataType::Utf8 => array.as_string::<i32>().value(i),
+        DataType::LargeUtf8 => array.as_string::<i64>().value(i),
+        DataType::Utf8View => array.as_string_view().value(i),
+        _ => unreachable!(),
+    }
+}
+
+/// Get the binary value at index `i` for `Binary`, `LargeBinary`, or `BinaryView` arrays.
+///
+/// Note: This method does not check for nulls and the value is arbitrary
+/// if [`is_null`](arrow::array::Array::is_null) returns true for the index.
+///
+/// # Panics
+/// 1. if index `i` is out of bounds;
+/// 2. or the array is not a binary type.
+pub fn binary_array_value(array: &ArrayRef, i: usize) -> &[u8] {
+    match array.data_type() {
+        DataType::Binary => array.as_binary::<i32>().value(i),
+        DataType::LargeBinary => array.as_binary::<i64>().value(i),
+        DataType::BinaryView => array.as_binary_view().value(i),
+        _ => unreachable!(),
     }
 }
 

@@ -23,7 +23,7 @@ use object_store::util::join_path;
 use object_store::{EntryMode, ObjectStore};
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
-use store_api::region_request::AffectedRows;
+use store_api::region_request::{AffectedRows, PathType};
 use store_api::storage::RegionId;
 use tokio::time::sleep;
 
@@ -57,6 +57,7 @@ where
         // Writes dropping marker
         // We rarely drop a region so we still operate in the worker loop.
         let region_dir = region.access_layer.build_region_dir(region_id);
+        let path_type = region.access_layer.path_type();
         let table_dir = region.access_layer.table_dir().to_string();
         let marker_path = join_path(&region_dir, DROPPING_MARKER_FILE);
         region
@@ -104,34 +105,46 @@ where
 
         self.region_count.dec();
 
-        // Detaches a background task to delete the region dir
         let object_store = region.access_layer.object_store().clone();
         let dropping_regions = self.dropping_regions.clone();
         let listener = self.listener.clone();
         let intm_manager = self.intermediate_manager.clone();
         let cache_manager = self.cache_manager.clone();
+        let gc_enabled = self.file_ref_manager.is_gc_enabled();
+
         common_runtime::spawn_global(async move {
             let gc_duration = listener
                 .on_later_drop_begin(region_id)
                 .unwrap_or(Duration::from_secs(GC_TASK_INTERVAL_SEC));
-            let removed = later_drop_task(
-                region_id,
-                region_dir.clone(),
-                object_store,
-                dropping_regions,
-                gc_duration,
-            )
-            .await;
+
+            let removed = if gc_enabled {
+                later_drop_task_with_global_gc(
+                    region_id,
+                    region_dir.clone(),
+                    path_type,
+                    object_store,
+                    dropping_regions,
+                    gc_duration,
+                )
+                .await
+            } else {
+                later_drop_task_without_global_gc(
+                    region_id,
+                    region_dir.clone(),
+                    object_store,
+                    dropping_regions,
+                    gc_duration,
+                )
+                .await
+            };
+
             if let Err(err) = intm_manager.prune_region_dir(&region_id).await {
                 warn!(err; "Failed to prune intermediate region directory, region_id: {}", region_id);
             }
 
-            // Clean manifest cache for the region
             if let Some(write_cache) = cache_manager.write_cache()
                 && let Some(manifest_cache) = write_cache.manifest_cache()
             {
-                // We pass the table dir so we can remove the table dir in manifest cache
-                // when the last region in the same host is dropped.
                 manifest_cache.clean_manifests(&table_dir).await;
             }
 
@@ -152,14 +165,32 @@ where
 /// This task will retry on failure and keep running until finished. Any resource
 /// captured by it will not be released before then. Be sure to only pass weak reference
 /// if something is depended on ref-count mechanism.
-async fn later_drop_task(
+async fn later_drop_task_without_global_gc(
     region_id: RegionId,
     region_path: String,
     object_store: ObjectStore,
     dropping_regions: RegionMapRef,
     gc_duration: Duration,
 ) -> bool {
-    let mut force = false;
+    remove_region_with_retry(
+        region_id,
+        region_path,
+        object_store,
+        dropping_regions,
+        gc_duration,
+        false,
+    )
+    .await
+}
+
+async fn remove_region_with_retry(
+    region_id: RegionId,
+    region_path: String,
+    object_store: ObjectStore,
+    dropping_regions: std::sync::Arc<crate::region::RegionMap>,
+    gc_duration: Duration,
+    mut force: bool,
+) -> bool {
     for _ in 0..MAX_RETRY_TIMES {
         let result = remove_region_dir_once(&region_path, &object_store, force).await;
         match result {
@@ -187,6 +218,31 @@ async fn later_drop_task(
     );
 
     false
+}
+
+async fn later_drop_task_with_global_gc(
+    region_id: RegionId,
+    region_path: String,
+    path_type: PathType,
+    object_store: ObjectStore,
+    dropping_regions: RegionMapRef,
+    gc_duration: Duration,
+) -> bool {
+    if path_type == PathType::Metadata {
+        remove_region_with_retry(
+            region_id,
+            region_path,
+            object_store,
+            dropping_regions,
+            gc_duration,
+            true,
+        )
+        .await
+    } else {
+        // left for global gc
+        dropping_regions.remove_region(region_id);
+        true
+    }
 }
 
 // TODO(ruihang): place the marker in a separate dir

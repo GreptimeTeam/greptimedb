@@ -99,6 +99,8 @@ impl UpdateMetadata {
             });
         };
 
+        ctx.update_table_repart_mapping().await?;
+
         Ok(())
     }
 }
