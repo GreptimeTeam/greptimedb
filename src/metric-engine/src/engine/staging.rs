@@ -15,12 +15,11 @@
 use common_base::AffectedRows;
 use snafu::ResultExt;
 use store_api::region_engine::RegionEngine;
-use store_api::region_request::{EnterStagingRequest, RegionRequest};
+use store_api::region_request::RegionRequest;
 use store_api::storage::RegionId;
 
 use crate::engine::MetricEngine;
 use crate::error::{MitoEnterStagingOperationSnafu, Result};
-use crate::utils;
 
 impl MetricEngine {
     /// Handles the enter staging request for the given region.
@@ -29,24 +28,10 @@ impl MetricEngine {
         region_id: RegionId,
         request: RegionRequest,
     ) -> Result<AffectedRows> {
-        let metadata_region_id = utils::to_metadata_region_id(region_id);
-        let data_region_id = utils::to_data_region_id(region_id);
-
-        // For metadata region, it doesn't care about the partition expr, so we can just pass an empty string.
+        // We don't need to enter staging for metadata region.
         self.inner
             .mito
-            .handle_request(
-                metadata_region_id,
-                RegionRequest::EnterStaging(EnterStagingRequest {
-                    partition_expr: String::new(),
-                }),
-            )
-            .await
-            .context(MitoEnterStagingOperationSnafu)?;
-
-        self.inner
-            .mito
-            .handle_request(data_region_id, request)
+            .handle_request(region_id, request)
             .await
             .context(MitoEnterStagingOperationSnafu)
             .map(|response| response.affected_rows)
