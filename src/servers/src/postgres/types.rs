@@ -13,26 +13,18 @@
 // limitations under the License.
 
 mod error;
-mod interval;
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, AsArray};
-use arrow::datatypes::{
-    Date32Type, Date64Type, Decimal128Type, Float32Type, Float64Type, Int8Type, Int16Type,
-    Int32Type, Int64Type, IntervalDayTimeType, IntervalMonthDayNanoType, IntervalYearMonthType,
-    Time32MillisecondType, Time32SecondType, Time64MicrosecondType, Time64NanosecondType,
-    TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
-    TimestampSecondType, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
-};
+use arrow::datatypes::{UInt8Type, UInt16Type, UInt32Type, UInt64Type};
 use arrow_pg::encoder::encode_value;
-use arrow_schema::{DataType, IntervalUnit, TimeUnit};
-use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime};
-use common_decimal::Decimal128;
+use arrow_pg::list_encoder::encode_list;
+use arrow_schema::{DataType, TimeUnit};
+use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime};
 use common_recordbatch::RecordBatch;
-use common_time::time::Time;
-use common_time::{Date, IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth, Timestamp};
+use common_time::{IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth};
 use datafusion_common::ScalarValue;
 use datafusion_expr::LogicalPlan;
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
@@ -41,17 +33,16 @@ use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::types::{IntervalType, TimestampType, jsonb_to_string};
 use datatypes::value::StructValue;
+use pg_interval::Interval as PgInterval;
 use pgwire::api::Type;
 use pgwire::api::portal::{Format, Portal};
 use pgwire::api::results::{DataRowEncoder, FieldInfo};
 use pgwire::error::{PgWireError, PgWireResult};
 use pgwire::messages::data::DataRow;
 use session::context::QueryContextRef;
-use session::session_config::PGByteaOutputValue;
 use snafu::ResultExt;
 
 pub use self::error::{PgErrorCode, PgErrorSeverity};
-use self::interval::PgInterval;
 use crate::SqlPlan;
 use crate::error::{self as server_error, DataFusionSnafu, Error, Result};
 use crate::postgres::utils::convert_err;
@@ -99,6 +90,7 @@ fn encode_array(
     query_ctx: &QueryContextRef,
     array: ArrayRef,
     builder: &mut DataRowEncoder,
+    pg_field: &FieldInfo,
 ) -> PgWireResult<()> {
     macro_rules! encode_primitive_array {
         ($array: ident, $data_type: ty, $lower_type: ty, $upper_type: ty) => {{
@@ -125,31 +117,6 @@ fn encode_array(
     }
 
     match array.data_type() {
-        DataType::Boolean => {
-            let array = array.as_boolean();
-            let array = array.iter().collect::<Vec<_>>();
-            builder.encode_field(&array)
-        }
-        DataType::Int8 => {
-            let array = array.as_primitive::<Int8Type>();
-            let array = array.iter().collect::<Vec<_>>();
-            builder.encode_field(&array)
-        }
-        DataType::Int16 => {
-            let array = array.as_primitive::<Int16Type>();
-            let array = array.iter().collect::<Vec<_>>();
-            builder.encode_field(&array)
-        }
-        DataType::Int32 => {
-            let array = array.as_primitive::<Int32Type>();
-            let array = array.iter().collect::<Vec<_>>();
-            builder.encode_field(&array)
-        }
-        DataType::Int64 => {
-            let array = array.as_primitive::<Int64Type>();
-            let array = array.iter().collect::<Vec<_>>();
-            builder.encode_field(&array)
-        }
         DataType::UInt8 => {
             let array = array.as_primitive::<UInt8Type>();
             encode_primitive_array!(array, u8, i8, i16)
@@ -181,202 +148,8 @@ fn encode_array(
                 )
             }
         }
-        DataType::Float32 => {
-            let array = array.as_primitive::<Float32Type>();
-            let array = array.iter().collect::<Vec<_>>();
-            builder.encode_field(&array)
-        }
-        DataType::Float64 => {
-            let array = array.as_primitive::<Float64Type>();
-            let array = array.iter().collect::<Vec<_>>();
-            builder.encode_field(&array)
-        }
-        DataType::Binary => {
-            let bytea_output = query_ctx.configuration_parameter().postgres_bytea_output();
 
-            let array = array.as_binary::<i32>();
-            match *bytea_output {
-                PGByteaOutputValue::ESCAPE => {
-                    let array = array
-                        .iter()
-                        .map(|v| v.map(EscapeOutputBytea))
-                        .collect::<Vec<_>>();
-                    builder.encode_field(&array)
-                }
-                PGByteaOutputValue::HEX => {
-                    let array = array
-                        .iter()
-                        .map(|v| v.map(HexOutputBytea))
-                        .collect::<Vec<_>>();
-                    builder.encode_field(&array)
-                }
-            }
-        }
-        DataType::Utf8 => {
-            let array = array.as_string::<i32>();
-            let array = array.into_iter().collect::<Vec<_>>();
-            builder.encode_field(&array)
-        }
-        DataType::LargeUtf8 => {
-            let array = array.as_string::<i64>();
-            let array = array.into_iter().collect::<Vec<_>>();
-            builder.encode_field(&array)
-        }
-        DataType::Utf8View => {
-            let array = array.as_string_view();
-            let array = array.into_iter().collect::<Vec<_>>();
-            builder.encode_field(&array)
-        }
-        DataType::Date32 | DataType::Date64 => {
-            let iter: Box<dyn Iterator<Item = Option<i32>>> =
-                if matches!(array.data_type(), DataType::Date32) {
-                    let array = array.as_primitive::<Date32Type>();
-                    Box::new(array.into_iter())
-                } else {
-                    let array = array.as_primitive::<Date64Type>();
-                    // `Date64` values are milliseconds representation of `Date32` values, according
-                    // to its specification. So we convert them to `Date32` values to process the
-                    // `Date64` array unified with `Date32` array.
-                    Box::new(
-                        array
-                            .into_iter()
-                            .map(|x| x.map(|i| (i / 86_400_000) as i32)),
-                    )
-                };
-            let array = iter
-                .into_iter()
-                .map(|v| match v {
-                    None => Ok(None),
-                    Some(v) => {
-                        if let Some(date) = Date::new(v).to_chrono_date() {
-                            let (style, order) =
-                                *query_ctx.configuration_parameter().pg_datetime_style();
-                            Ok(Some(StylingDate(date, style, order)))
-                        } else {
-                            Err(convert_err(Error::Internal {
-                                err_msg: format!("Failed to convert date to postgres type {v:?}",),
-                            }))
-                        }
-                    }
-                })
-                .collect::<PgWireResult<Vec<Option<StylingDate>>>>()?;
-            builder.encode_field(&array)
-        }
-        DataType::Timestamp(time_unit, _) => {
-            let array = match time_unit {
-                TimeUnit::Second => {
-                    let array = array.as_primitive::<TimestampSecondType>();
-                    array.into_iter().collect::<Vec<_>>()
-                }
-                TimeUnit::Millisecond => {
-                    let array = array.as_primitive::<TimestampMillisecondType>();
-                    array.into_iter().collect::<Vec<_>>()
-                }
-                TimeUnit::Microsecond => {
-                    let array = array.as_primitive::<TimestampMicrosecondType>();
-                    array.into_iter().collect::<Vec<_>>()
-                }
-                TimeUnit::Nanosecond => {
-                    let array = array.as_primitive::<TimestampNanosecondType>();
-                    array.into_iter().collect::<Vec<_>>()
-                }
-            };
-            let time_unit = time_unit.into();
-            let array = array
-                .into_iter()
-                .map(|v| match v {
-                    None => Ok(None),
-                    Some(v) => {
-                        let v = Timestamp::new(v, time_unit);
-                        if let Some(datetime) =
-                            v.to_chrono_datetime_with_timezone(Some(&query_ctx.timezone()))
-                        {
-                            let (style, order) =
-                                *query_ctx.configuration_parameter().pg_datetime_style();
-                            Ok(Some(StylingDateTime(datetime, style, order)))
-                        } else {
-                            Err(convert_err(Error::Internal {
-                                err_msg: format!("Failed to convert date to postgres type {v:?}",),
-                            }))
-                        }
-                    }
-                })
-                .collect::<PgWireResult<Vec<Option<StylingDateTime>>>>()?;
-            builder.encode_field(&array)
-        }
-        DataType::Time32(time_unit) | DataType::Time64(time_unit) => {
-            let iter: Box<dyn Iterator<Item = Option<Time>>> = match time_unit {
-                TimeUnit::Second => {
-                    let array = array.as_primitive::<Time32SecondType>();
-                    Box::new(
-                        array
-                            .into_iter()
-                            .map(|v| v.map(|i| Time::new_second(i as i64))),
-                    )
-                }
-                TimeUnit::Millisecond => {
-                    let array = array.as_primitive::<Time32MillisecondType>();
-                    Box::new(
-                        array
-                            .into_iter()
-                            .map(|v| v.map(|i| Time::new_millisecond(i as i64))),
-                    )
-                }
-                TimeUnit::Microsecond => {
-                    let array = array.as_primitive::<Time64MicrosecondType>();
-                    Box::new(array.into_iter().map(|v| v.map(Time::new_microsecond)))
-                }
-                TimeUnit::Nanosecond => {
-                    let array = array.as_primitive::<Time64NanosecondType>();
-                    Box::new(array.into_iter().map(|v| v.map(Time::new_nanosecond)))
-                }
-            };
-            let array = iter
-                .into_iter()
-                .map(|v| v.and_then(|v| v.to_chrono_time()))
-                .collect::<Vec<Option<NaiveTime>>>();
-            builder.encode_field(&array)
-        }
-        DataType::Interval(interval_unit) => {
-            let array = match interval_unit {
-                IntervalUnit::YearMonth => {
-                    let array = array.as_primitive::<IntervalYearMonthType>();
-                    array
-                        .into_iter()
-                        .map(|v| v.map(|i| PgInterval::from(IntervalYearMonth::from(i))))
-                        .collect::<Vec<_>>()
-                }
-                IntervalUnit::DayTime => {
-                    let array = array.as_primitive::<IntervalDayTimeType>();
-                    array
-                        .into_iter()
-                        .map(|v| v.map(|i| PgInterval::from(IntervalDayTime::from(i))))
-                        .collect::<Vec<_>>()
-                }
-                IntervalUnit::MonthDayNano => {
-                    let array = array.as_primitive::<IntervalMonthDayNanoType>();
-                    array
-                        .into_iter()
-                        .map(|v| v.map(|i| PgInterval::from(IntervalMonthDayNano::from(i))))
-                        .collect::<Vec<_>>()
-                }
-            };
-            builder.encode_field(&array)
-        }
-        DataType::Decimal128(precision, scale) => {
-            let array = array.as_primitive::<Decimal128Type>();
-            let array = array
-                .into_iter()
-                .map(|v| v.map(|i| Decimal128::new(i, *precision, *scale).to_string()))
-                .collect::<Vec<_>>();
-            builder.encode_field(&array)
-        }
-        _ => Err(convert_err(Error::Internal {
-            err_msg: format!(
-                "cannot write array type {:?} in postgres protocol: unimplemented",
-                array.data_type()
-            ),
-        })),
+        _ => encode_list(builder, array, pg_field),
     }
 }
 
@@ -423,12 +196,14 @@ impl RecordBatchRowIterator {
     }
 
     fn encode_row(&mut self, i: usize, encoder: &mut DataRowEncoder) -> PgWireResult<()> {
+        let arrow_schema = self.record_batch.schema();
         for (j, column) in self.record_batch.columns().iter().enumerate() {
             if column.is_null(i) {
                 encoder.encode_field(&None::<&i8>)?;
                 continue;
             }
 
+            let pg_field = &self.pg_schema[j];
             match column.data_type() {
                 // these types are greptimedb specific or custom
                 DataType::UInt8 => {
@@ -467,69 +242,35 @@ impl RecordBatchRowIterator {
                         encoder.encode_field(&value.to_string())?;
                     }
                 }
-                DataType::Interval(interval_unit) => match interval_unit {
-                    IntervalUnit::YearMonth => {
-                        let array = column.as_primitive::<IntervalYearMonthType>();
-                        let v: IntervalYearMonth = array.value(i).into();
-                        encoder.encode_field(&PgInterval::from(v))?;
-                    }
-                    IntervalUnit::DayTime => {
-                        let array = column.as_primitive::<IntervalDayTimeType>();
-                        let v: IntervalDayTime = array.value(i).into();
-                        encoder.encode_field(&PgInterval::from(v))?;
-                    }
-                    IntervalUnit::MonthDayNano => {
-                        let array = column.as_primitive::<IntervalMonthDayNanoType>();
-                        let v: IntervalMonthDayNano = array.value(i).into();
-                        encoder.encode_field(&PgInterval::from(v))?;
-                    }
-                },
-                DataType::Duration(_) => {
-                    let d = datatypes::arrow_array::duration_array_value(column, i);
-                    match PgInterval::try_from(d) {
-                        Ok(i) => encoder.encode_field(&i)?,
-                        Err(e) => {
-                            return Err(convert_err(Error::Internal {
-                                err_msg: e.to_string(),
-                            }));
-                        }
+                DataType::Binary | DataType::LargeBinary | DataType::BinaryView => {
+                    // jsonb
+                    if let ConcreteDataType::Json(_) = &self.schema.column_schemas()[j].data_type {
+                        let v = datatypes::arrow_array::binary_array_value(column, i);
+                        let s = jsonb_to_string(v).map_err(convert_err)?;
+                        encoder.encode_field(&s)?;
+                    } else {
+                        // bytea
+                        let arrow_field = arrow_schema.field(j);
+                        encode_value(encoder, column, i, arrow_field, pg_field)?;
                     }
                 }
+
                 DataType::List(_) => {
                     let array = column.as_list::<i32>();
                     let items = array.value(i);
-                    encode_array(&self.query_ctx, items, encoder)?;
+                    encode_array(&self.query_ctx, items, encoder, pg_field)?;
                 }
                 DataType::Struct(_) => {
                     encode_struct(&self.query_ctx, Default::default(), encoder)?;
                 }
-
                 _ => {
                     // Encode value using arrow-pg
-                    let pg_field = &self.pg_schema[j];
-                    encode_value(encoder, column, i, pg_field)?;
+                    let arrow_field = arrow_schema.field(j);
+                    encode_value(encoder, column, i, arrow_field, pg_field)?;
                 }
             }
         }
         Ok(())
-    }
-}
-
-fn encode_bytes(
-    schema: &ColumnSchema,
-    v: &[u8],
-    encoder: &mut DataRowEncoder,
-    query_ctx: &QueryContextRef,
-) -> PgWireResult<()> {
-    if let ConcreteDataType::Json(_) = &schema.data_type {
-        let s = jsonb_to_string(v).map_err(convert_err)?;
-        encoder.encode_field(&s)
-    } else {
-        let bytea_output = query_ctx.configuration_parameter().postgres_bytea_output();
-        match *bytea_output {
-            PGByteaOutputValue::ESCAPE => encoder.encode_field(&EscapeOutputBytea(v)),
-            PGByteaOutputValue::HEX => encoder.encode_field(&HexOutputBytea(v)),
-        }
     }
 }
 
@@ -675,7 +416,7 @@ pub(super) fn parameter_to_string(portal: &Portal<SqlPlan>, idx: usize) -> PgWir
             .unwrap_or_else(|| "".to_owned())),
         &Type::INTERVAL => Ok(portal
             .parameter::<PgInterval>(idx, param_type)?
-            .map(|v| v.to_string())
+            .map(|v| v.to_sql())
             .unwrap_or_else(|| "".to_owned())),
         _ => Err(invalid_parameter_error(
             "unsupported_parameter_type",
@@ -1046,9 +787,14 @@ pub(super) fn parameters_to_scalar_values(
                             )
                         }
                         ConcreteDataType::Interval(IntervalType::MonthDayNano(_)) => {
-                            ScalarValue::IntervalMonthDayNano(
-                                data.map(|i| IntervalMonthDayNano::from(i).into()),
-                            )
+                            ScalarValue::IntervalMonthDayNano(data.map(|i| {
+                                IntervalMonthDayNano::new(
+                                    i.months,
+                                    i.days,
+                                    i.microseconds * 1_000i64,
+                                )
+                                .into()
+                            }))
                         }
                         _ => {
                             return Err(invalid_parameter_error(
@@ -1058,9 +804,10 @@ pub(super) fn parameters_to_scalar_values(
                         }
                     }
                 } else {
-                    ScalarValue::IntervalMonthDayNano(
-                        data.map(|i| IntervalMonthDayNano::from(i).into()),
-                    )
+                    ScalarValue::IntervalMonthDayNano(data.map(|i| {
+                        IntervalMonthDayNano::new(i.months, i.days, i.microseconds * 1_000i64)
+                            .into()
+                    }))
                 }
             }
             &Type::BYTEA => {
@@ -1374,7 +1121,7 @@ mod test {
     use arrow::array::{
         Float64Builder, Int64Builder, ListBuilder, StringBuilder, TimestampSecondBuilder,
     };
-    use arrow_schema::Field;
+    use arrow_schema::{Field, IntervalUnit};
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{
         BinaryVector, BooleanVector, DateVector, Float32Vector, Float64Vector, Int8Vector,

@@ -643,13 +643,14 @@ dependencies = [
 [[package]]
 name = "arrow-pg"
 version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "88ce1ffbf30cd0198a53f1f838226337aa136c2eb58530253ed8796b97c05e2e"
+source = "git+https://github.com/datafusion-contrib/datafusion-postgres?rev=6ce5621097d5f2da39edd75fcc454da41bbf049f#6ce5621097d5f2da39edd75fcc454da41bbf049f"
 dependencies = [
  "arrow 57.0.0",
+ "arrow-schema 57.0.0",
  "bytes",
  "chrono",
  "futures",
+ "pg_interval_2",
  "pgwire",
  "postgres-types",
  "rust_decimal",
@@ -2236,7 +2237,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "117725a109d387c937a1533ce01b450cbde6b88abceea8473c4d7a85853cda3c"
 dependencies = [
  "lazy_static",
- "windows-sys 0.59.0",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -6268,7 +6269,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.0",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -6339,7 +6340,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.61.2",
+ "windows-core 0.57.0",
 ]
 
 [[package]]
@@ -7336,7 +7337,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07033963ba89ebaf1584d767badaa2e8fcec21aedea6b8c0346d487d49c28667"
 dependencies = [
  "cfg-if",
- "windows-targets 0.52.6",
+ "windows-targets 0.48.5",
 ]
 
 [[package]]
@@ -8726,7 +8727,7 @@ version = "0.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77e878c846a8abae00dd069496dbe8751b16ac1c3d6bd2a7283a938e8228f90d"
 dependencies = [
- "proc-macro-crate 3.3.0",
+ "proc-macro-crate 1.3.1",
  "proc-macro2",
  "quote",
  "syn 2.0.114",
@@ -9641,10 +9642,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "pg_interval"
-version = "0.4.2"
+name = "pg_interval_2"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe46640b465e284b048ef065cbed8ef17a622878d310c724578396b4cfd00df2"
+checksum = "469827e70c8c74562f88b9434cf8a8fe35665281d2442304e99efcadf8f76a8f"
 dependencies = [
  "bytes",
  "chrono",
@@ -9653,9 +9654,9 @@ dependencies = [
 
 [[package]]
 name = "pgwire"
-version = "0.37.0"
+version = "0.37.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02d86d57e732d40382ceb9bfea80901d839bae8571aa11c06af9177aed9dfb6c"
+checksum = "48d0c1dd6eeb1a1528104880a526a177ce2d3294e6a8363014148be2980a14ac"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -9666,6 +9667,7 @@ dependencies = [
  "hex",
  "lazy-regex",
  "md5",
+ "pg_interval_2",
  "postgres-types",
  "rand 0.9.1",
  "ring",
@@ -12197,7 +12199,7 @@ dependencies = [
  "otel-arrow-rust",
  "parking_lot 0.12.4",
  "permutation",
- "pg_interval",
+ "pg_interval_2",
  "pgwire",
  "pin-project",
  "pipeline",
@@ -15223,7 +15225,7 @@ version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf221c93e13a30d793f7645a0e7762c55d169dbb0a49671918a2319d289b10bb"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
