@@ -4572,8 +4572,10 @@ mod test {
                 .unwrap();
 
         let plan_str = plan.display_indent_schema().to_string();
-        assert!(plan_str.contains("TableScan: some_metric"));
-        assert!(!plan_str.contains("TableScan: phy"));
+        assert!(plan_str.contains("TableScan: phy"), "{plan}");
+        assert!(plan_str.contains("SubqueryAlias: some_metric"));
+        assert!(plan_str.contains("Filter: phy.__table_id = UInt32(1024)"));
+        assert!(!plan_str.contains("TableScan: some_metric"));
     }
 
     #[tokio::test]
