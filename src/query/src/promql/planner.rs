@@ -1727,6 +1727,8 @@ impl PromPlanner {
                         .eq(lit(table_id)),
                 )
                 .context(DataFusionPlanningSnafu)?
+                .alias(table_ref) // rename the relation back to logical table's name after filtering
+                .context(DataFusionPlanningSnafu)?
                 .build()
                 .context(DataFusionPlanningSnafu)?;
         }
