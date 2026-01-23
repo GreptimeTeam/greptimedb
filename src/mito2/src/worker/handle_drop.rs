@@ -114,10 +114,6 @@ where
         let gc_enabled = self.file_ref_manager.is_gc_enabled();
 
         common_runtime::spawn_global(async move {
-            let gc_duration = listener
-                .on_later_drop_begin(region_id)
-                .unwrap_or(Duration::from_secs(GC_TASK_INTERVAL_SEC));
-
             let removed = if gc_enabled {
                 later_drop_task_with_global_gc(
                     region_id,
@@ -125,11 +121,14 @@ where
                     path_type,
                     object_store,
                     dropping_regions,
-                    gc_duration,
                     partial_drop,
                 )
                 .await
             } else {
+                let gc_duration = listener
+                    .on_later_drop_begin(region_id)
+                    .unwrap_or(Duration::from_secs(GC_TASK_INTERVAL_SEC));
+
                 later_drop_task_without_global_gc(
                     region_id,
                     region_dir.clone(),
@@ -179,7 +178,7 @@ async fn later_drop_task_without_global_gc(
         region_path,
         object_store,
         dropping_regions,
-        gc_duration,
+        Some(gc_duration),
         false,
     )
     .await
@@ -190,7 +189,7 @@ async fn remove_region_with_retry(
     region_path: String,
     object_store: ObjectStore,
     dropping_regions: std::sync::Arc<crate::region::RegionMap>,
-    gc_duration: Duration,
+    gc_duration: Option<Duration>,
     mut force: bool,
 ) -> bool {
     for _ in 0..MAX_RETRY_TIMES {
@@ -209,7 +208,9 @@ async fn remove_region_with_retry(
             }
             Ok(false) => (),
         }
-        sleep(gc_duration).await;
+        if let Some(duration) = gc_duration {
+            sleep(duration).await;
+        }
         // Force recycle after gc duration.
         force = true;
     }
@@ -228,14 +229,10 @@ async fn later_drop_task_with_global_gc(
     path_type: PathType,
     object_store: ObjectStore,
     dropping_regions: RegionMapRef,
-    gc_duration: Duration,
     partial_drop: bool,
 ) -> bool {
     // For metadata regions or regions marked for full deletion (such as when dropping a table)
-    // the region directory is forcefully removed after the configured GC delay.
-    //
-    // Note: If the datanode restarts during the GC grace period, the region directory and files
-    // may persist unexpectedly and never be deleted.
+    // the region directory is forcefully removed immediately.
     //
     // TODO(discord9): Evaluate removing files instantly rather than waiting for the GC period.
     if path_type == PathType::Metadata || !partial_drop {
@@ -244,7 +241,7 @@ async fn later_drop_task_with_global_gc(
             region_path,
             object_store,
             dropping_regions,
-            gc_duration,
+            None,
             true,
         )
         .await
