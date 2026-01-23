@@ -17,8 +17,7 @@ mod error;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, AsArray};
-use arrow::datatypes::{UInt8Type, UInt16Type, UInt32Type, UInt64Type};
+use arrow::array::{Array, AsArray};
 use arrow_pg::encoder::encode_value;
 use arrow_pg::list_encoder::encode_list;
 use arrow_schema::{DataType, TimeUnit};
@@ -30,7 +29,7 @@ use datafusion_expr::LogicalPlan;
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::json::JsonStructureSettings;
 use datatypes::prelude::{ConcreteDataType, Value};
-use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
+use datatypes::schema::{Schema, SchemaRef};
 use datatypes::types::{IntervalType, TimestampType, jsonb_to_string};
 use datatypes::value::StructValue;
 use pg_interval::Interval as PgInterval;
@@ -39,27 +38,36 @@ use pgwire::api::portal::{Format, Portal};
 use pgwire::api::results::{DataRowEncoder, FieldInfo};
 use pgwire::error::{PgWireError, PgWireResult};
 use pgwire::messages::data::DataRow;
+use pgwire::types::format::FormatOptions as PgFormatOptions;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 
 pub use self::error::{PgErrorCode, PgErrorSeverity};
 use crate::SqlPlan;
-use crate::error::{self as server_error, DataFusionSnafu, Error, Result};
+use crate::error::{self as server_error, DataFusionSnafu, Result};
 use crate::postgres::utils::convert_err;
 
-pub(super) fn schema_to_pg(origin: &Schema, field_formats: &Format) -> Result<Vec<FieldInfo>> {
+pub(super) fn schema_to_pg(
+    origin: &Schema,
+    field_formats: &Format,
+    format_options: Option<Arc<PgFormatOptions>>,
+) -> Result<Vec<FieldInfo>> {
     origin
         .column_schemas()
         .iter()
         .enumerate()
         .map(|(idx, col)| {
-            Ok(FieldInfo::new(
+            let mut field_info = FieldInfo::new(
                 col.name.clone(),
                 None,
                 None,
                 type_gt_to_pg(&col.data_type)?,
                 field_formats.format_for(idx),
-            ))
+            );
+            if let Some(format_options) = &format_options {
+                field_info = field_info.with_format_options(format_options.clone());
+            }
+            Ok(field_info)
         })
         .collect::<Result<Vec<FieldInfo>>>()
 }
@@ -84,73 +92,6 @@ fn encode_struct(
         .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
 
     builder.encode_field(&json_value)
-}
-
-fn encode_array(
-    query_ctx: &QueryContextRef,
-    array: ArrayRef,
-    builder: &mut DataRowEncoder,
-    pg_field: &FieldInfo,
-) -> PgWireResult<()> {
-    macro_rules! encode_primitive_array {
-        ($array: ident, $data_type: ty, $lower_type: ty, $upper_type: ty) => {{
-            let array = $array.iter().collect::<Vec<Option<$data_type>>>();
-            if array
-                .iter()
-                .all(|x| x.is_none_or(|i| i <= <$lower_type>::MAX as $data_type))
-            {
-                builder.encode_field(
-                    &array
-                        .into_iter()
-                        .map(|x| x.map(|i| i as $lower_type))
-                        .collect::<Vec<Option<$lower_type>>>(),
-                )
-            } else {
-                builder.encode_field(
-                    &array
-                        .into_iter()
-                        .map(|x| x.map(|i| i as $upper_type))
-                        .collect::<Vec<Option<$upper_type>>>(),
-                )
-            }
-        }};
-    }
-
-    match array.data_type() {
-        DataType::UInt8 => {
-            let array = array.as_primitive::<UInt8Type>();
-            encode_primitive_array!(array, u8, i8, i16)
-        }
-        DataType::UInt16 => {
-            let array = array.as_primitive::<UInt16Type>();
-            encode_primitive_array!(array, u16, i16, i32)
-        }
-        DataType::UInt32 => {
-            let array = array.as_primitive::<UInt32Type>();
-            encode_primitive_array!(array, u32, i32, i64)
-        }
-        DataType::UInt64 => {
-            let array = array.as_primitive::<UInt64Type>();
-            let array = array.iter().collect::<Vec<_>>();
-            if array.iter().all(|x| x.is_none_or(|i| i <= i64::MAX as u64)) {
-                builder.encode_field(
-                    &array
-                        .into_iter()
-                        .map(|x| x.map(|i| i as i64))
-                        .collect::<Vec<Option<i64>>>(),
-                )
-            } else {
-                builder.encode_field(
-                    &array
-                        .into_iter()
-                        .map(|x| x.map(|i| i.to_string()))
-                        .collect::<Vec<_>>(),
-                )
-            }
-        }
-
-        _ => encode_list(builder, array, pg_field),
-    }
 }
 
 pub(crate) struct RecordBatchRowIterator {
@@ -206,42 +147,6 @@ impl RecordBatchRowIterator {
             let pg_field = &self.pg_schema[j];
             match column.data_type() {
                 // these types are greptimedb specific or custom
-                DataType::UInt8 => {
-                    let array = column.as_primitive::<UInt8Type>();
-                    let value = array.value(i);
-                    if value <= i8::MAX as u8 {
-                        encoder.encode_field(&(value as i8))?;
-                    } else {
-                        encoder.encode_field(&(value as i16))?;
-                    }
-                }
-                DataType::UInt16 => {
-                    let array = column.as_primitive::<UInt16Type>();
-                    let value = array.value(i);
-                    if value <= i16::MAX as u16 {
-                        encoder.encode_field(&(value as i16))?;
-                    } else {
-                        encoder.encode_field(&(value as i32))?;
-                    }
-                }
-                DataType::UInt32 => {
-                    let array = column.as_primitive::<UInt32Type>();
-                    let value = array.value(i);
-                    if value <= i32::MAX as u32 {
-                        encoder.encode_field(&(value as i32))?;
-                    } else {
-                        encoder.encode_field(&(value as i64))?;
-                    }
-                }
-                DataType::UInt64 => {
-                    let array = column.as_primitive::<UInt64Type>();
-                    let value = array.value(i);
-                    if value <= i64::MAX as u64 {
-                        encoder.encode_field(&(value as i64))?;
-                    } else {
-                        encoder.encode_field(&value.to_string())?;
-                    }
-                }
                 DataType::Binary | DataType::LargeBinary | DataType::BinaryView => {
                     // jsonb
                     if let ConcreteDataType::Json(_) = &self.schema.column_schemas()[j].data_type {
@@ -258,7 +163,8 @@ impl RecordBatchRowIterator {
                 DataType::List(_) => {
                     let array = column.as_list::<i32>();
                     let items = array.value(i);
-                    encode_array(&self.query_ctx, items, encoder, pg_field)?;
+
+                    encode_list(encoder, items, pg_field)?;
                 }
                 DataType::Struct(_) => {
                     encode_struct(&self.query_ctx, Default::default(), encoder)?;
@@ -278,10 +184,11 @@ pub(super) fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
     match origin {
         &ConcreteDataType::Null(_) => Ok(Type::UNKNOWN),
         &ConcreteDataType::Boolean(_) => Ok(Type::BOOL),
-        &ConcreteDataType::Int8(_) | &ConcreteDataType::UInt8(_) => Ok(Type::CHAR),
-        &ConcreteDataType::Int16(_) | &ConcreteDataType::UInt16(_) => Ok(Type::INT2),
-        &ConcreteDataType::Int32(_) | &ConcreteDataType::UInt32(_) => Ok(Type::INT4),
-        &ConcreteDataType::Int64(_) | &ConcreteDataType::UInt64(_) => Ok(Type::INT8),
+        &ConcreteDataType::Int8(_) => Ok(Type::CHAR),
+        &ConcreteDataType::Int16(_) | &ConcreteDataType::UInt8(_) => Ok(Type::INT2),
+        &ConcreteDataType::Int32(_) | &ConcreteDataType::UInt16(_) => Ok(Type::INT4),
+        &ConcreteDataType::Int64(_) | &ConcreteDataType::UInt32(_) => Ok(Type::INT8),
+        &ConcreteDataType::UInt64(_) => Ok(Type::NUMERIC),
         &ConcreteDataType::Float32(_) => Ok(Type::FLOAT4),
         &ConcreteDataType::Float64(_) => Ok(Type::FLOAT8),
         &ConcreteDataType::Binary(_) | &ConcreteDataType::Vector(_) => Ok(Type::BYTEA),
@@ -295,10 +202,11 @@ pub(super) fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
         ConcreteDataType::List(list) => match list.item_type() {
             &ConcreteDataType::Null(_) => Ok(Type::UNKNOWN),
             &ConcreteDataType::Boolean(_) => Ok(Type::BOOL_ARRAY),
-            &ConcreteDataType::Int8(_) | &ConcreteDataType::UInt8(_) => Ok(Type::CHAR_ARRAY),
-            &ConcreteDataType::Int16(_) | &ConcreteDataType::UInt16(_) => Ok(Type::INT2_ARRAY),
-            &ConcreteDataType::Int32(_) | &ConcreteDataType::UInt32(_) => Ok(Type::INT4_ARRAY),
-            &ConcreteDataType::Int64(_) | &ConcreteDataType::UInt64(_) => Ok(Type::INT8_ARRAY),
+            &ConcreteDataType::Int8(_) => Ok(Type::CHAR_ARRAY),
+            &ConcreteDataType::Int16(_) | &ConcreteDataType::UInt8(_) => Ok(Type::INT2_ARRAY),
+            &ConcreteDataType::Int32(_) | &ConcreteDataType::UInt16(_) => Ok(Type::INT4_ARRAY),
+            &ConcreteDataType::Int64(_) | &ConcreteDataType::UInt32(_) => Ok(Type::INT8_ARRAY),
+            &ConcreteDataType::UInt64(_) => Ok(Type::NUMERIC_ARRAY),
             &ConcreteDataType::Float32(_) => Ok(Type::FLOAT4_ARRAY),
             &ConcreteDataType::Float64(_) => Ok(Type::FLOAT8_ARRAY),
             &ConcreteDataType::Binary(_) => Ok(Type::BYTEA_ARRAY),
@@ -1114,6 +1022,19 @@ pub(super) fn param_types_to_pg_types(
     Ok(types)
 }
 
+pub fn format_options_from_query_ctx(query_ctx: &QueryContextRef) -> Arc<PgFormatOptions> {
+    let config = query_ctx.configuration_parameter();
+    let (date_style, date_order) = *config.pg_datetime_style();
+
+    let mut format_options = PgFormatOptions::default();
+    format_options.date_style = format!("{}, {}", date_style, date_order);
+    format_options.interval_style = config.pg_intervalstyle_format().to_string();
+    format_options.bytea_output = config.postgres_bytea_output().to_string();
+    format_options.time_zone = query_ctx.timezone().to_string();
+
+    Arc::new(format_options)
+}
+
 #[cfg(test)]
 mod test {
     use std::sync::Arc;
@@ -1172,10 +1093,10 @@ mod test {
             FieldInfo::new("int16s".into(), None, None, Type::INT2, FieldFormat::Text),
             FieldInfo::new("int32s".into(), None, None, Type::INT4, FieldFormat::Text),
             FieldInfo::new("int64s".into(), None, None, Type::INT8, FieldFormat::Text),
-            FieldInfo::new("uint8s".into(), None, None, Type::CHAR, FieldFormat::Text),
-            FieldInfo::new("uint16s".into(), None, None, Type::INT2, FieldFormat::Text),
-            FieldInfo::new("uint32s".into(), None, None, Type::INT4, FieldFormat::Text),
-            FieldInfo::new("uint64s".into(), None, None, Type::INT8, FieldFormat::Text),
+            FieldInfo::new("uint8s".into(), None, None, Type::INT2, FieldFormat::Text),
+            FieldInfo::new("uint16s".into(), None, None, Type::INT4, FieldFormat::Text),
+            FieldInfo::new("uint32s".into(), None, None, Type::INT8, FieldFormat::Text),
+            FieldInfo::new("uint64s".into(), None, None, Type::NUMERIC, FieldFormat::Text),
             FieldInfo::new(
                 "float32s".into(),
                 None,
@@ -1222,7 +1143,7 @@ mod test {
             ),
         ];
         let schema = Schema::new(column_schemas);
-        let fs = schema_to_pg(&schema, &Format::UnifiedText).unwrap();
+        let fs = schema_to_pg(&schema, &Format::UnifiedText, None).unwrap();
         assert_eq!(fs, pg_field_info);
     }
 
@@ -1231,10 +1152,10 @@ mod test {
         let schema = vec![
             FieldInfo::new("nulls".into(), None, None, Type::UNKNOWN, FieldFormat::Text),
             FieldInfo::new("bools".into(), None, None, Type::BOOL, FieldFormat::Text),
-            FieldInfo::new("uint8s".into(), None, None, Type::CHAR, FieldFormat::Text),
-            FieldInfo::new("uint16s".into(), None, None, Type::INT2, FieldFormat::Text),
-            FieldInfo::new("uint32s".into(), None, None, Type::INT4, FieldFormat::Text),
-            FieldInfo::new("uint64s".into(), None, None, Type::INT8, FieldFormat::Text),
+            FieldInfo::new("uint8s".into(), None, None, Type::INT2, FieldFormat::Text),
+            FieldInfo::new("uint16s".into(), None, None, Type::INT4, FieldFormat::Text),
+            FieldInfo::new("uint32s".into(), None, None, Type::INT8, FieldFormat::Text),
+            FieldInfo::new("uint64s".into(), None, None, Type::NUMERIC, FieldFormat::Text),
             FieldInfo::new("int8s".into(), None, None, Type::CHAR, FieldFormat::Text),
             FieldInfo::new("int16s".into(), None, None, Type::INT2, FieldFormat::Text),
             FieldInfo::new("int32s".into(), None, None, Type::INT4, FieldFormat::Text),

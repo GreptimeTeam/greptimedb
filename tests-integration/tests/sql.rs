@@ -24,6 +24,7 @@ use common_frontend::slow_query_event::{
 };
 use sqlx::mysql::{MySqlConnection, MySqlDatabaseError, MySqlPoolOptions};
 use sqlx::postgres::{PgDatabaseError, PgPoolOptions};
+use sqlx::types::Decimal;
 use sqlx::{Connection, Executor, Row};
 use tests_integration::test_util::{
     StorageType, setup_mysql_server, setup_mysql_server_with_user_provider, setup_pg_server,
@@ -77,6 +78,7 @@ macro_rules! sql_tests {
                 test_postgres_bytea,
                 test_postgres_slow_query,
                 test_postgres_datestyle,
+                test_postgres_intervalstyle,
                 test_postgres_parameter_inference,
                 test_postgres_array_types,
                 test_mysql_prepare_stmt_insert_timestamp,
@@ -834,12 +836,12 @@ pub async fn test_postgres_slow_query(store_type: StorageType) {
     let rows = sqlx::query(&query).fetch_all(&pool).await.unwrap();
     assert_eq!(rows.len(), 1);
     let row = &rows[0];
-    let cost: i64 = row.get(0);
-    let threshold: i64 = row.get(1);
+    let cost: Decimal = row.get(0);
+    let threshold: Decimal = row.get(1);
     let query: String = row.get(2);
     let is_promql: bool = row.get(3);
 
-    assert!(cost > 0 && threshold > 0 && cost > threshold);
+    assert!(cost > 0.into() && threshold > 0.into() && cost > threshold);
     assert_eq!(query, slow_query);
     assert!(!is_promql);
 
@@ -1066,6 +1068,90 @@ pub async fn test_postgres_datestyle(store_type: StorageType) {
                 order
             );
         }
+    }
+
+    drop(client);
+    rx.await.unwrap();
+
+    let _ = fe_pg_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+pub async fn test_postgres_intervalstyle(store_type: StorageType) {
+    let (mut guard, fe_pg_server) =
+        setup_pg_server(store_type, "test_postgres_intervalstyle").await;
+    let addr = fe_pg_server.bind_addr().unwrap().to_string();
+
+    let (client, connection) = tokio_postgres::connect(&format!("postgres://{addr}/public"), NoTls)
+        .await
+        .unwrap();
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        connection.await.unwrap();
+        tx.send(()).unwrap();
+    });
+
+    let validate_intervalstyle = |client: Client, intervalstyle: &str, is_valid: bool| {
+        let intervalstyle = intervalstyle.to_string();
+        async move {
+            assert_eq!(
+                client
+                    .simple_query(format!("SET INTERVALSTYLE='{}'", intervalstyle).as_str())
+                    .await
+                    .is_ok(),
+                is_valid,
+                "testing intervalstyle {intervalstyle}"
+            );
+            client
+        }
+    };
+
+    let get_row = |mess: Vec<SimpleQueryMessage>| -> String {
+        match &mess[1] {
+            SimpleQueryMessage::Row(row) => row.get(0).unwrap().to_string(),
+            _ => unreachable!(),
+        }
+    };
+
+    let client = validate_intervalstyle(client, "iso_8601", true).await;
+    let client = validate_intervalstyle(client, "sql_standard", true).await;
+    let client = validate_intervalstyle(client, "postgres", true).await;
+    let client = validate_intervalstyle(client, "postgres_verbose", true).await;
+    let client = validate_intervalstyle(client, "invalid_style", false).await;
+
+    let expected_formats: HashMap<&str, &str> = HashMap::from([
+        ("iso_8601", "P1DT2H3M"),
+        ("sql_standard", "1 2:03:00"),
+        ("postgres", "1 day 02:03:00"),
+        ("postgres_verbose", "@ 1 day 2 hours 3 mins"),
+    ]);
+
+    for (style, expected_format) in expected_formats {
+        let _ = client
+            .simple_query(&format!("SET INTERVALSTYLE='{}'", style))
+            .await
+            .expect("SET INTERVALSTYLE ERROR");
+
+        let interval = get_row(
+            client
+                .simple_query("SHOW VARIABLES intervalstyle")
+                .await
+                .unwrap(),
+        );
+        assert_eq!(interval, style);
+
+        let result = get_row(
+            client
+                .simple_query("SELECT INTERVAL '1 day 2 hours 3 minutes'")
+                .await
+                .unwrap(),
+        );
+        assert_eq!(
+            result, expected_format,
+            "intervalstyle {}: expected '{}', got '{}'",
+            style, expected_format, result
+        );
     }
 
     drop(client);

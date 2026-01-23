@@ -79,7 +79,8 @@ use table::table_name::TableName;
 use table::table_reference::TableReference;
 
 use self::set::{
-    set_bytea_output, set_datestyle, set_search_path, set_timezone, validate_client_encoding,
+    set_bytea_output, set_datestyle, set_intervalstyle, set_search_path, set_timezone,
+    validate_client_encoding,
 };
 use crate::error::{
     self, CatalogSnafu, ExecLogicalPlanSnafu, ExternalSnafu, InvalidSqlSnafu, NotSupportedSnafu,
@@ -483,6 +484,7 @@ impl StatementExecutor {
             // Not harmful since it only relates to how date is viewed in client app's output.
             // The tracked issue is https://github.com/GreptimeTeam/greptimedb/issues/3442.
             "DATESTYLE" => set_datestyle(set_var.value, query_ctx)?,
+            "INTERVALSTYLE" => set_intervalstyle(set_var.value, query_ctx)?,
 
             // Allow query to fallback when failed to push down.
             "ALLOW_QUERY_FALLBACK" => set_allow_query_fallback(set_var.value, query_ctx)?,

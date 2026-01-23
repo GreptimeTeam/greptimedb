@@ -33,7 +33,7 @@ use derive_builder::Builder;
 use sql::dialect::{Dialect, GenericDialect, GreptimeDbDialect, MySqlDialect, PostgreSqlDialect};
 
 use crate::protocol_ctx::ProtocolCtx;
-use crate::session_config::{PGByteaOutputValue, PGDateOrder, PGDateTimeStyle};
+use crate::session_config::{PGByteaOutputValue, PGDateOrder, PGDateTimeStyle, PGIntervalStyle};
 use crate::{MutableInner, ReadPreference};
 
 pub type QueryContextRef = Arc<QueryContext>;
@@ -614,6 +614,7 @@ impl AsRef<str> for Channel {
 pub struct ConfigurationVariables {
     postgres_bytea_output: ArcSwap<PGByteaOutputValue>,
     pg_datestyle_format: ArcSwap<(PGDateTimeStyle, PGDateOrder)>,
+    pg_intervalstyle_format: ArcSwap<PGIntervalStyle>,
     allow_query_fallback: ArcSwap<bool>,
 }
 
@@ -622,6 +623,7 @@ impl Clone for ConfigurationVariables {
         Self {
             postgres_bytea_output: ArcSwap::new(self.postgres_bytea_output.load().clone()),
             pg_datestyle_format: ArcSwap::new(self.pg_datestyle_format.load().clone()),
+            pg_intervalstyle_format: ArcSwap::new(self.pg_intervalstyle_format.load().clone()),
             allow_query_fallback: ArcSwap::new(self.allow_query_fallback.load().clone()),
         }
     }
@@ -646,6 +648,14 @@ impl ConfigurationVariables {
 
     pub fn set_pg_datetime_style(&self, style: PGDateTimeStyle, order: PGDateOrder) {
         self.pg_datestyle_format.swap(Arc::new((style, order)));
+    }
+
+    pub fn pg_intervalstyle_format(&self) -> Arc<PGIntervalStyle> {
+        self.pg_intervalstyle_format.load().clone()
+    }
+
+    pub fn set_pg_intervalstyle_format(&self, value: PGIntervalStyle) {
+        self.pg_intervalstyle_format.swap(Arc::new(value));
     }
 
     pub fn allow_query_fallback(&self) -> bool {

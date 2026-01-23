@@ -23,7 +23,7 @@ api.workspace = true
 arrow.workspace = true
 arrow-flight.workspace = true
 arrow-ipc.workspace = true
-arrow-pg = { version = "0.10", git = "https://github.com/datafusion-contrib/datafusion-postgres", rev = "6ce5621097d5f2da39edd75fcc454da41bbf049f" }
+arrow-pg = { version = "0.10", git = "https://github.com/datafusion-contrib/datafusion-postgres", rev = "8dc3dd9405b4a0bff67de435d600a9bfb78c1e9f" }
 arrow-schema.workspace = true
 async-trait.workspace = true
 auth.workspace = true
@@ -88,8 +88,8 @@ opentelemetry-proto.workspace = true
 operator.workspace = true
 otel-arrow-rust.workspace = true
 parking_lot.workspace = true
-pg_interval = { version = "0.5.1", package = "pg_interval_2" }
-pgwire = { version = "0.37.2", default-features = false, features = [
+pg_interval = { version = "0.5.2", package = "pg_interval_2" }
+pgwire = { version = "0.37.3", default-features = false, features = [
     "server-api-ring",
     "pg-ext-types",
 ] }

@@ -225,7 +225,7 @@ similar-asserts = "1.6.0"
 smallvec = { version = "1", features = ["serde"] }
 snafu = "0.8"
 sqlparser = { version = "0.59.0", default-features = false, features = ["std", "visitor", "serde"] }
-sqlx = { version = "0.8", default-features = false, features = ["any", "macros", "json", "runtime-tokio-rustls"] }
+sqlx = { version = "0.8", default-features = false, features = ["any", "macros", "json", "runtime-tokio-rustls", "rust_decimal"] }
 strum = { version = "0.27", features = ["derive"] }
 sysinfo = "0.33"
 tempfile = "3"
