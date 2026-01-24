@@ -27,6 +27,7 @@ use datatypes::schema::ColumnSchema;
 use store_api::metadata::{
     ColumnMetadata, RegionMetadata, RegionMetadataBuilder, RegionMetadataRef,
 };
+use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 use store_api::region_engine::{
     RegionEngine, RegionRole, RegionScannerRef, RegionStatistic, RemapManifestsRequest,
     RemapManifestsResponse, SetRegionRoleStateResponse, SettableRegionRoleState,
@@ -142,6 +143,15 @@ pub(crate) fn mock_table_provider(region_id: RegionId) -> DummyTableProvider {
     DummyTableProvider::new(region_id, engine, metadata)
 }
 
+/// Mock a [DummyTableProvider] with a single region and internal `__tsid` column.
+///
+/// The schema is: `__tsid: uint64 tag, k0: string tag, ts: timestamp, v0: float64 field`
+pub(crate) fn mock_table_provider_with_tsid(region_id: RegionId) -> DummyTableProvider {
+    let metadata = Arc::new(mock_region_metadata_with_tsid(region_id));
+    let engine = Arc::new(MetaRegionEngine::with_metadata(metadata.clone()));
+    DummyTableProvider::new(region_id, engine, metadata)
+}
+
 /// Returns a mock region metadata.
 /// The schema is: `k0: string tag, ts: timestamp, v0: float64 field`
 fn mock_region_metadata(region_id: RegionId) -> RegionMetadata {
@@ -167,5 +177,41 @@ fn mock_region_metadata(region_id: RegionId) -> RegionMetadata {
             column_id: 3,
         })
         .primary_key(vec![1]);
+    builder.build().unwrap()
+}
+
+/// Returns a mock region metadata with internal `__tsid` column.
+fn mock_region_metadata_with_tsid(region_id: RegionId) -> RegionMetadata {
+    let mut builder = RegionMetadataBuilder::new(region_id);
+    builder
+        .push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                DATA_SCHEMA_TSID_COLUMN_NAME,
+                ConcreteDataType::uint64_datatype(),
+                false,
+            ),
+            semantic_type: SemanticType::Tag,
+            column_id: 1,
+        })
+        .push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new("k0", ConcreteDataType::string_datatype(), true),
+            semantic_type: SemanticType::Tag,
+            column_id: 2,
+        })
+        .push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            semantic_type: SemanticType::Timestamp,
+            column_id: 3,
+        })
+        .push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new("v0", ConcreteDataType::float64_datatype(), false),
+            semantic_type: SemanticType::Field,
+            column_id: 4,
+        })
+        .primary_key(vec![1, 2]);
     builder.build().unwrap()
 }
