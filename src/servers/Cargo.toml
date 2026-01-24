@@ -23,7 +23,7 @@ api.workspace = true
 arrow.workspace = true
 arrow-flight.workspace = true
 arrow-ipc.workspace = true
-arrow-pg = { version = "0.10", git = "https://github.com/datafusion-contrib/datafusion-postgres", rev = "8dc3dd9405b4a0bff67de435d600a9bfb78c1e9f" }
+arrow-pg = "0.11"
 arrow-schema.workspace = true
 async-trait.workspace = true
 auth.workspace = true

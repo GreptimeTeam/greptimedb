@@ -642,8 +642,9 @@ dependencies = [
 
 [[package]]
 name = "arrow-pg"
-version = "0.10.0"
-source = "git+https://github.com/datafusion-contrib/datafusion-postgres?rev=8dc3dd9405b4a0bff67de435d600a9bfb78c1e9f#8dc3dd9405b4a0bff67de435d600a9bfb78c1e9f"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "87bc2eb53228ffb0cffff4a8a99d5311641b6d8ce63ec48b860dab70ec01ae1f"
 dependencies = [
  "arrow 57.0.0",
  "arrow-schema 57.0.0",
