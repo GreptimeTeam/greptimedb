@@ -850,9 +850,10 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    uses: ./.github/workflows/run-multi-lang-tests.yml
-    with:
-      artifact-name: bins
+    steps:
+    - uses: ./.github/workflows/run-multi-lang-tests.yml
+      with:
+        artifact-name: bins
 
 
   # compat:
