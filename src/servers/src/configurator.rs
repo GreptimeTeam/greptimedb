@@ -46,6 +46,57 @@ pub trait GrpcRouterConfigurator<C>: Send + Sync {
 
 pub type GrpcRouterConfiguratorRef<C> = Arc<dyn GrpcRouterConfigurator<C>>;
 
+/// A list of gRPC router configurators that can be applied sequentially.
+///
+/// This allows multiple configurators to be registered and applied to a router
+/// in order. Each configurator receives the router from the previous one.
+#[derive(Default)]
+pub struct GrpcRouterConfiguratorList<C> {
+    configurators: Vec<GrpcRouterConfiguratorRef<C>>,
+}
+
+impl<C> GrpcRouterConfiguratorList<C> {
+    /// Creates a new empty configurator list.
+    pub fn new() -> Self {
+        Self {
+            configurators: Vec::new(),
+        }
+    }
+
+    /// Adds a configurator to the list.
+    pub fn push(&mut self, configurator: GrpcRouterConfiguratorRef<C>) {
+        self.configurators.push(configurator);
+    }
+
+    /// Returns true if the list is empty.
+    pub fn is_empty(&self) -> bool {
+        self.configurators.is_empty()
+    }
+
+    /// Returns the number of configurators in the list.
+    pub fn len(&self) -> usize {
+        self.configurators.len()
+    }
+}
+
+#[async_trait::async_trait]
+impl<C: Clone + Send + Sync + 'static> GrpcRouterConfigurator<C> for GrpcRouterConfiguratorList<C> {
+    async fn configure_grpc_router(
+        &self,
+        mut route: GrpcRouter,
+        ctx: C,
+    ) -> std::result::Result<GrpcRouter, BoxedError> {
+        for configurator in &self.configurators {
+            route = configurator
+                .configure_grpc_router(route, ctx.clone())
+                .await?;
+        }
+        Ok(route)
+    }
+}
+
+pub type GrpcRouterConfiguratorListRef<C> = Arc<GrpcRouterConfiguratorList<C>>;
+
 /// A configurator that customizes or enhances a [`GrpcServerBuilder`].
 #[async_trait::async_trait]
 pub trait GrpcBuilderConfigurator<C>: Send + Sync {
