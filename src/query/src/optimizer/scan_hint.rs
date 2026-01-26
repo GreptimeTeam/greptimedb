@@ -25,8 +25,6 @@ use datafusion_expr::expr::Sort;
 use datafusion_expr::{Expr, LogicalPlan, utils};
 use datafusion_optimizer::{OptimizerConfig, OptimizerRule};
 use store_api::storage::{TimeSeriesDistribution, TimeSeriesRowSelector};
-#[cfg(feature = "vector_index")]
-use table::table::adapter::DfTableProviderAdapter;
 
 use crate::dummy_catalog::DummyTableProvider;
 #[cfg(feature = "vector_index")]
@@ -110,19 +108,6 @@ impl ScanHintRule {
                             adapter.with_vector_search_hint(vector_request);
                             transformed = true;
                         }
-                    }
-
-                    #[cfg(feature = "vector_index")]
-                    if let Some(adapter) = source
-                        .table_provider
-                        .as_any()
-                        .downcast_ref::<DfTableProviderAdapter>()
-                        && let Some(vector_request) = visitor
-                            .vector_search
-                            .take_vector_request_from_adapter(adapter, &table_scan.table_name)
-                    {
-                        adapter.with_vector_search_hint(vector_request);
-                        transformed = true;
                     }
                 }
                 if transformed {

@@ -25,7 +25,6 @@ use datafusion_expr::{Expr, SortExpr};
 use datafusion_sql::TableReference;
 use datatypes::types::parse_string_to_vector_type_value;
 use store_api::storage::{VectorDistanceMetric, VectorSearchRequest};
-use table::table::adapter::DfTableProviderAdapter;
 
 use crate::dummy_catalog::DummyTableProvider;
 
@@ -174,15 +173,6 @@ impl VectorSearchState {
         self.build_vector_request_from_dummy(provider, table_name, &hint)
     }
 
-    pub(crate) fn take_vector_request_from_adapter(
-        &mut self,
-        adapter: &DfTableProviderAdapter,
-        table_name: &TableReference,
-    ) -> Option<VectorSearchRequest> {
-        let hint = self.take_vector_hint(table_name)?;
-        self.build_vector_request_from_adapter(adapter, table_name, &hint)
-    }
-
     fn build_vector_request_from_dummy(
         &self,
         provider: &DummyTableProvider,
@@ -210,44 +200,6 @@ impl VectorSearchState {
 
         Some(VectorSearchRequest {
             column_id: column.column_id,
-            query_vector: info.query_vector.clone(),
-            k,
-            metric: info.metric,
-        })
-    }
-
-    fn build_vector_request_from_adapter(
-        &self,
-        adapter: &DfTableProviderAdapter,
-        table_name: &TableReference,
-        hint: &VectorHintEntry,
-    ) -> Option<VectorSearchRequest> {
-        let info = &hint.distance;
-        let k = hint.limit.k()?;
-
-        if let Some(ref hint_table) = info.table_reference
-            && table_name != hint_table
-        {
-            return None;
-        }
-
-        let table = adapter.table();
-        let table_info = table.table_info();
-        let schema = &table_info.meta.schema;
-
-        let column_schema = schema.column_schema_by_name(&info.column_name)?;
-        if column_schema.is_nullable() && !hint.non_null_constraint {
-            debug!(
-                "Skip vector hint: column '{}' is nullable without IS NOT NULL filter",
-                info.column_name
-            );
-            return None;
-        }
-        let column_index = schema.column_index_by_name(&info.column_name)?;
-        let column_id = *table_info.meta.column_ids.get(column_index)?;
-
-        Some(VectorSearchRequest {
-            column_id,
             query_vector: info.query_vector.clone(),
             k,
             metric: info.metric,
@@ -418,7 +370,6 @@ mod tests {
     use common_function::function::Function;
     use common_function::scalars::udf::create_udf;
     use common_function::scalars::vector::distance::{VEC_DOT_PRODUCT, VEC_L2SQ_DISTANCE};
-    use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
     use datafusion::datasource::DefaultTableSource;
     use datafusion::logical_expr::ColumnarValue;
     use datafusion_common::{Column, DataFusionError, Result, ScalarValue};
@@ -428,13 +379,9 @@ mod tests {
         Expr, LogicalPlan, LogicalPlanBuilder, Signature, Subquery, Volatility, col, lit,
     };
     use datafusion_optimizer::{OptimizerContext, OptimizerRule};
-    use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
-    use futures::Stream;
+    use datatypes::schema::ColumnSchema;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::{ConcreteDataType, VectorDistanceMetric};
-    use table::metadata::{FilterPushDownType, TableInfoBuilder, TableMeta, TableType};
-    use table::table::adapter::DfTableProviderAdapter;
-    use table::{Table, TableRef};
 
     use super::VectorSearchState;
     use crate::dummy_catalog::DummyTableProvider;
@@ -535,112 +482,6 @@ mod tests {
         let metadata = Arc::new(builder.build().unwrap());
         let engine = Arc::new(MetaRegionEngine::with_metadata(metadata.clone()));
         Arc::new(DummyTableProvider::new(0.into(), engine, metadata))
-    }
-
-    fn build_vector_table() -> TableRef {
-        let schema = {
-            let columns = vec![
-                ColumnSchema::new("k0", ConcreteDataType::string_datatype(), true),
-                ColumnSchema::new(
-                    "ts",
-                    ConcreteDataType::timestamp_millisecond_datatype(),
-                    false,
-                )
-                .with_time_index(true),
-                ColumnSchema::new("v", ConcreteDataType::vector_datatype(2), false),
-            ];
-            Arc::new(
-                SchemaBuilder::try_from_columns(columns)
-                    .unwrap()
-                    .build()
-                    .unwrap(),
-            )
-        };
-
-        struct TestDataSource {
-            schema: SchemaRef,
-        }
-
-        impl TestDataSource {
-            fn new(schema: SchemaRef) -> Self {
-                Self { schema }
-            }
-        }
-
-        struct EmptyStream {
-            schema: SchemaRef,
-        }
-
-        impl RecordBatchStream for EmptyStream {
-            fn schema(&self) -> SchemaRef {
-                self.schema.clone()
-            }
-
-            fn output_ordering(&self) -> Option<&[common_recordbatch::OrderOption]> {
-                None
-            }
-
-            fn metrics(&self) -> Option<common_recordbatch::adapter::RecordBatchMetrics> {
-                None
-            }
-        }
-
-        impl Stream for EmptyStream {
-            type Item = common_recordbatch::error::Result<RecordBatch>;
-
-            fn poll_next(
-                self: std::pin::Pin<&mut Self>,
-                _cx: &mut std::task::Context<'_>,
-            ) -> std::task::Poll<Option<Self::Item>> {
-                std::task::Poll::Ready(None)
-            }
-        }
-
-        impl store_api::data_source::DataSource for TestDataSource {
-            fn get_stream(
-                &self,
-                request: store_api::storage::ScanRequest,
-            ) -> Result<SendableRecordBatchStream, common_error::ext::BoxedError> {
-                let projected_schema = match &request.projection {
-                    Some(projection) => Arc::new(self.schema.try_project(projection).unwrap()),
-                    None => self.schema.clone(),
-                };
-                Ok(Box::pin(EmptyStream {
-                    schema: projected_schema,
-                }))
-            }
-        }
-
-        let table_meta = TableMeta {
-            schema: schema.clone(),
-            primary_key_indices: vec![0],
-            value_indices: vec![2],
-            engine: "test_engine".to_string(),
-            next_column_id: 4,
-            options: Default::default(),
-            created_on: Default::default(),
-            updated_on: Default::default(),
-            partition_key_indices: vec![0],
-            column_ids: vec![1, 2, 3],
-        };
-
-        let table_info = TableInfoBuilder::default()
-            .table_id(1)
-            .name("t".to_string())
-            .catalog_name(common_catalog::consts::DEFAULT_CATALOG_NAME)
-            .schema_name(common_catalog::consts::DEFAULT_SCHEMA_NAME)
-            .table_version(0)
-            .table_type(TableType::Base)
-            .meta(table_meta)
-            .build()
-            .unwrap();
-
-        let data_source = Arc::new(TestDataSource::new(schema));
-        Arc::new(Table::new(
-            Arc::new(table_info),
-            FilterPushDownType::Unsupported,
-            data_source,
-        ))
     }
 
     #[test]
@@ -749,32 +590,6 @@ mod tests {
         let _ = ScanHintRule.rewrite(plan, &context).unwrap();
         let hint = dummy_provider.get_vector_search_hint().unwrap();
         assert_eq!(hint.metric, VectorDistanceMetric::InnerProduct);
-    }
-
-    #[test]
-    fn test_adapter_overfetch_with_filter() {
-        let table = build_vector_table();
-        let adapter = Arc::new(DfTableProviderAdapter::new(table));
-        let table_source = Arc::new(DefaultTableSource::new(adapter.clone()));
-        let expr = vec_distance_expr(VEC_L2SQ_DISTANCE);
-        let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
-            .unwrap()
-            .filter(col("k0").eq(lit("hello")))
-            .unwrap()
-            .sort(vec![expr.sort(true, false)])
-            .unwrap()
-            .limit(0, Some(7))
-            .unwrap()
-            .build()
-            .unwrap();
-
-        let context = OptimizerContext::default();
-        let _ = ScanHintRule.rewrite(plan, &context).unwrap();
-
-        let hint = adapter.get_vector_search_hint().unwrap();
-        assert_eq!(hint.column_id, 3);
-        assert_eq!(hint.k, 7);
-        assert_eq!(hint.metric, VectorDistanceMetric::L2sq);
     }
 
     #[test]
