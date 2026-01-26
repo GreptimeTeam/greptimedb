@@ -26,61 +26,32 @@ pub trait HttpConfigurator<C>: Send + Sync {
     /// Configures the given HTTP router using the provided context.
     async fn configure_http(
         &self,
-        route: HttpRouter,
+        router: HttpRouter,
         ctx: C,
     ) -> std::result::Result<HttpRouter, BoxedError>;
 }
 
 pub type HttpConfiguratorRef<C> = Arc<dyn HttpConfigurator<C>>;
 
-/// A list of HTTP configurators that can be applied sequentially.
-///
-/// This allows multiple configurators to be registered and applied to a router
-/// in order. Each configurator receives the router from the previous one.
-#[derive(Default)]
-pub struct HttpConfiguratorList<C> {
-    configurators: Vec<HttpConfiguratorRef<C>>,
-}
+/// A list of HTTP configurators. Implement the trait to apply all configurators sequentially.
+pub type HttpConfiguratorList<C> = Vec<HttpConfiguratorRef<C>>;
 
-impl<C> HttpConfiguratorList<C> {
-    /// Creates a new empty configurator list.
-    pub fn new() -> Self {
-        Self {
-            configurators: Vec::new(),
-        }
-    }
-
-    /// Adds a configurator to the list.
-    pub fn push(&mut self, configurator: HttpConfiguratorRef<C>) {
-        self.configurators.push(configurator);
-    }
-
-    /// Returns true if the list is empty.
-    pub fn is_empty(&self) -> bool {
-        self.configurators.is_empty()
-    }
-
-    /// Returns the number of configurators in the list.
-    pub fn len(&self) -> usize {
-        self.configurators.len()
-    }
-}
+/// A reference to a list of HTTP configurators that can be stored in plugins.
+pub type HttpConfiguratorListRef<C> = Arc<HttpConfiguratorList<C>>;
 
 #[async_trait::async_trait]
 impl<C: Clone + Send + Sync + 'static> HttpConfigurator<C> for HttpConfiguratorList<C> {
     async fn configure_http(
         &self,
-        mut route: HttpRouter,
+        mut router: HttpRouter,
         ctx: C,
     ) -> std::result::Result<HttpRouter, BoxedError> {
-        for configurator in &self.configurators {
-            route = configurator.configure_http(route, ctx.clone()).await?;
+        for configurator in self {
+            router = configurator.configure_http(router, ctx.clone()).await?;
         }
-        Ok(route)
+        Ok(router)
     }
 }
-
-pub type HttpConfiguratorListRef<C> = Arc<HttpConfiguratorList<C>>;
 
 /// A configurator that customizes or enhances a gRPC router.
 #[async_trait::async_trait]
@@ -88,67 +59,39 @@ pub trait GrpcRouterConfigurator<C>: Send + Sync {
     /// Configures the given gRPC router using the provided context.
     async fn configure_grpc_router(
         &self,
-        route: GrpcRouter,
+        router: GrpcRouter,
         ctx: C,
     ) -> std::result::Result<GrpcRouter, BoxedError>;
 }
 
 pub type GrpcRouterConfiguratorRef<C> = Arc<dyn GrpcRouterConfigurator<C>>;
 
-/// A list of gRPC router configurators that can be applied sequentially.
-///
-/// This allows multiple configurators to be registered and applied to a router
-/// in order. Each configurator receives the router from the previous one.
-#[derive(Default)]
-pub struct GrpcRouterConfiguratorList<C> {
-    configurators: Vec<GrpcRouterConfiguratorRef<C>>,
-}
+/// A list of gRPC router configurators. Implement the trait to apply all configurators sequentially.
+pub type GrpcRouterConfiguratorList<C> = Vec<GrpcRouterConfiguratorRef<C>>;
 
-impl<C> GrpcRouterConfiguratorList<C> {
-    /// Creates a new empty configurator list.
-    pub fn new() -> Self {
-        Self {
-            configurators: Vec::new(),
-        }
-    }
-
-    /// Adds a configurator to the list.
-    pub fn push(&mut self, configurator: GrpcRouterConfiguratorRef<C>) {
-        self.configurators.push(configurator);
-    }
-
-    /// Returns true if the list is empty.
-    pub fn is_empty(&self) -> bool {
-        self.configurators.is_empty()
-    }
-
-    /// Returns the number of configurators in the list.
-    pub fn len(&self) -> usize {
-        self.configurators.len()
-    }
-}
+/// A reference to a list of gRPC router configurators that can be stored in plugins.
+pub type GrpcRouterConfiguratorListRef<C> = Arc<GrpcRouterConfiguratorList<C>>;
 
 #[async_trait::async_trait]
 impl<C: Clone + Send + Sync + 'static> GrpcRouterConfigurator<C> for GrpcRouterConfiguratorList<C> {
     async fn configure_grpc_router(
         &self,
-        mut route: GrpcRouter,
+        mut router: GrpcRouter,
         ctx: C,
     ) -> std::result::Result<GrpcRouter, BoxedError> {
-        for configurator in &self.configurators {
-            route = configurator
-                .configure_grpc_router(route, ctx.clone())
+        for configurator in self {
+            router = configurator
+                .configure_grpc_router(router, ctx.clone())
                 .await?;
         }
-        Ok(route)
+        Ok(router)
     }
 }
-
-pub type GrpcRouterConfiguratorListRef<C> = Arc<GrpcRouterConfiguratorList<C>>;
 
 /// A configurator that customizes or enhances a [`GrpcServerBuilder`].
 #[async_trait::async_trait]
 pub trait GrpcBuilderConfigurator<C>: Send + Sync {
+    /// Configures the given gRPC server builder using the provided context.
     async fn configure(
         &self,
         builder: GrpcServerBuilder,
@@ -157,3 +100,23 @@ pub trait GrpcBuilderConfigurator<C>: Send + Sync {
 }
 
 pub type GrpcBuilderConfiguratorRef<C> = Arc<dyn GrpcBuilderConfigurator<C>>;
+
+/// A list of gRPC builder configurators. Implement the trait to apply all configurators sequentially.
+pub type GrpcBuilderConfiguratorList<C> = Vec<GrpcBuilderConfiguratorRef<C>>;
+
+/// A reference to a list of gRPC builder configurators that can be stored in plugins.
+pub type GrpcBuilderConfiguratorListRef<C> = Arc<GrpcBuilderConfiguratorList<C>>;
+
+#[async_trait::async_trait]
+impl<C: Clone + Send + Sync + 'static> GrpcBuilderConfigurator<C> for GrpcBuilderConfiguratorList<C> {
+    async fn configure(
+        &self,
+        mut builder: GrpcServerBuilder,
+        ctx: C,
+    ) -> std::result::Result<GrpcServerBuilder, BoxedError> {
+        for configurator in self {
+            builder = configurator.configure(builder, ctx.clone()).await?;
+        }
+        Ok(builder)
+    }
+}
