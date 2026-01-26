@@ -831,7 +831,7 @@ fn memtable_flat_sources(
 
             // Flush if we have enough rows, but don't flush if the remaining rows
             // would be less than DEFAULT_ROW_GROUP_SIZE (to avoid small last files).
-            if last_iter_rows > min_flush_rows
+            if last_iter_rows >= min_flush_rows
                 && (rows_remaining == 0 || rows_remaining >= DEFAULT_ROW_GROUP_SIZE)
             {
                 debug!(
