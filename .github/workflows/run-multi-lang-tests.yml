@@ -81,6 +81,8 @@ jobs:
             # Direct binary format
             if [ -f artifact/greptime ]; then
               cp artifact/greptime bin/greptime
+            elif [ -f artifact/bins/greptime ]; then
+              cp artifact/bins/greptime bin/greptime
             else
               cp artifact/* bin/greptime
             fi
