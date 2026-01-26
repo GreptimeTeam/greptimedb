@@ -1,0 +1,187 @@
+-- Simplified schema and queries for TSID on physical table
+CREATE TABLE phy (
+  ts TIMESTAMP(3) TIME INDEX,
+  v DOUBLE NULL,
+  tag1 STRING,
+  tag2 STRING,
+  le STRING,
+  tag4 STRING,
+  tag5 STRING,
+  tag6 STRING NULL,
+  tag7 STRING NULL,
+  tag8 STRING NULL,
+  PRIMARY KEY (
+    tag1,
+    tag2,
+    le,
+    tag4,
+    tag5,
+    tag6,
+    tag7,
+    tag8
+  )
+) ENGINE = metric WITH ("physical_metric_table" = "");
+
+Affected Rows: 0
+
+CREATE TABLE IF NOT EXISTS test_tsid (
+  tag1 STRING,
+  tag2 STRING,
+  ts TIMESTAMP(3) NOT NULL,
+  v DOUBLE NULL,
+  le STRING,
+  tag4 STRING,
+  tag5 STRING,
+  tag6 STRING NULL,
+  tag7 STRING NULL,
+  tag8 STRING NULL,
+  TIME INDEX (ts),
+  PRIMARY KEY (
+    tag1,
+    tag2,
+    le,
+    tag4,
+    tag5,
+    tag6,
+    tag7,
+    tag8
+  )
+) ENGINE=metric WITH(
+  on_physical_table = 'phy'
+);
+
+Affected Rows: 0
+
+INSERT INTO test_tsid
+  (ts, v, tag1, tag2, le, tag4, tag5, tag8, tag6, tag7)
+VALUES
+  ('2026-01-23T03:40:00Z', 2.0, 'istio-ingressgateway', 'outbound', '0.5',  'svc-a', 'prod', 'peer.example', 'svc-b', 'prod'),
+  ('2026-01-23T03:41:00Z', 5.0,  'istio-ingressgateway', 'outbound', '0.9',  'svc-a', 'prod', 'peer.example', 'svc-b', 'prod'),
+  ('2026-01-23T03:41:30Z', 10.0,  'istio-ingressgateway', 'outbound', '+Inf', 'svc-a', 'prod', 'peer.example', 'svc-b', 'prod');
+
+Affected Rows: 3
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (
+  timestamp '2026-01-23 03:30:00+00' + (now() - now()),
+  timestamp '2026-01-23 03:45:00+00' + (now() - now()),
+  '1m'
+) histogram_quantile(
+  0.50,
+  sum by (le, tag4, tag5) (
+    avg_over_time(test_tsid[30m])
+  )
+);
+
++-------+------+---------------------+-------------------------------------+
+| tag4  | tag5 | ts                  | sum(prom_avg_over_time(ts_range,v)) |
++-------+------+---------------------+-------------------------------------+
+| svc-a | prod | 2026-01-23T03:40:00 | NaN                                 |
+| svc-a | prod | 2026-01-23T03:41:00 | NaN                                 |
+| svc-a | prod | 2026-01-23T03:42:00 | 0.9                                 |
+| svc-a | prod | 2026-01-23T03:43:00 | 0.9                                 |
+| svc-a | prod | 2026-01-23T03:44:00 | 0.9                                 |
+| svc-a | prod | 2026-01-23T03:45:00 | 0.9                                 |
++-------+------+---------------------+-------------------------------------+
+
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
+-- SQLNESS REPLACE phy.__table_id\s=\sUInt32\(\d+\) phy.__table_id=UInt32(REDACTED)
+TQL EXPLAIN (
+  timestamp '2026-01-23 03:30:00+00' + (now() - now()),
+  timestamp '2026-01-23 03:45:00+00' + (now() - now()),
+  '1m'
+) histogram_quantile(
+  0.50,
+  sum by (le, tag4, tag5) (
+    avg_over_time(test_tsid[30m])
+  )
+);
+
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                                                                            |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | HistogramFold: le=le, field=sum(prom_avg_over_time(ts_range,v)), quantile=0.5                                                                                                                                                   |
+|               |   MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                                               |
+|               | Sort: test_tsid.le ASC NULLS LAST, test_tsid.tag4 ASC NULLS LAST, test_tsid.tag5 ASC NULLS LAST, test_tsid.ts ASC NULLS LAST                                                                                                    |
+|               |   Aggregate: groupBy=[[test_tsid.le, test_tsid.tag4, test_tsid.tag5, test_tsid.ts]], aggr=[[sum(prom_avg_over_time(ts_range,v))]]                                                                                               |
+|               |     Filter: prom_avg_over_time(ts_range,v) IS NOT NULL                                                                                                                                                                          |
+|               |       Projection: test_tsid.ts, prom_avg_over_time(ts_range, v) AS prom_avg_over_time(ts_range,v), test_tsid.le, test_tsid.tag1, test_tsid.tag2, test_tsid.tag4, test_tsid.tag5, test_tsid.tag6, test_tsid.tag7, test_tsid.tag8 |
+|               |         PromRangeManipulate: req range=[0..0], interval=[300000], eval range=[1800000], time index=[ts], values=["v"]                                                                                                           |
+|               |           PromSeriesNormalize: offset=[0], time index=[ts], filter NaN: [true]                                                                                                                                                  |
+|               |             PromSeriesDivide: tags=["__tsid"]                                                                                                                                                                                   |
+|               |               Sort: test_tsid.__tsid ASC NULLS FIRST, test_tsid.ts ASC NULLS FIRST                                                                                                                                              |
+|               |                 Filter: test_tsid.ts >= TimestampMillisecond(-2100000, None) AND test_tsid.ts <= TimestampMillisecond(300000, None)                                                                                             |
+|               |                   Projection: test_tsid.v, test_tsid.le, test_tsid.tag1, test_tsid.tag2, test_tsid.tag4, test_tsid.tag5, test_tsid.tag6, test_tsid.tag7, test_tsid.tag8, test_tsid.__tsid, test_tsid.ts                         |
+|               |                     SubqueryAlias: test_tsid                                                                                                                                                                                    |
+|               |                       Filter: phy.__table_id=UInt32(REDACTED)                                                                                                                                                                     |
+|               |                         TableScan: phy projection=[ts, v, tag1, tag2, le, tag4, tag5, tag6, tag7, tag8, __table_id, __tsid]                                                                                                     |
+|               | ]]                                                                                                                                                                                                                              |
+| physical_plan | HistogramFoldExec: le=@0, field=@4, quantile=0.5                                                                                                                                                                                |
+|               |   SortExec: expr=[tag4@1 ASC NULLS LAST, tag5@2 ASC NULLS LAST, ts@3 ASC NULLS LAST, CAST(le@0 AS Float64) ASC NULLS LAST], preserve_partitioning=[true]                                                                        |
+|               |     CoalesceBatchesExec: target_batch_size=8192                                                                                                                                                                                 |
+|               |       RepartitionExec: REDACTED
+|               |         CooperativeExec                                                                                                                                                                                                         |
+|               |           MergeScanExec: REDACTED
+|               |                                                                                                                                                                                                                                 |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+CREATE FLOW IF NOT EXISTS test_tsid
+SINK TO 'test_tsid_output'
+EVAL INTERVAL '3600 s'
+AS
+TQL EVAL (
+  timestamp '2026-01-23 03:10:00+00' + (now() - now()),
+  timestamp '2026-01-23 03:50:00+00' + (now() - now()),
+  '1m'
+)
+histogram_quantile(
+  0.50,
+  sum by (le, tag4, tag5) (
+    avg_over_time(test_tsid[30m])
+  )
+);
+
+Affected Rows: 0
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('test_tsid');
+
++-------------------------------+
+| ADMIN FLUSH_FLOW('test_tsid') |
++-------------------------------+
+|  FLOW_FLUSHED  |
++-------------------------------+
+
+SELECT * FROM "test_tsid_output"
+ORDER BY ts
+LIMIT 5;
+
++-------+------+---------------------+-------------------------------------+
+| tag4  | tag5 | ts                  | sum(prom_avg_over_time(ts_range,v)) |
++-------+------+---------------------+-------------------------------------+
+| svc-a | prod | 2026-01-23T03:40:00 | NaN                                 |
+| svc-a | prod | 2026-01-23T03:41:00 | NaN                                 |
+| svc-a | prod | 2026-01-23T03:42:00 | 0.9                                 |
+| svc-a | prod | 2026-01-23T03:43:00 | 0.9                                 |
+| svc-a | prod | 2026-01-23T03:44:00 | 0.9                                 |
++-------+------+---------------------+-------------------------------------+
+
+DROP FLOW test_tsid;
+
+Affected Rows: 0
+
+DROP TABLE IF EXISTS "test_tsid_output";
+
+Affected Rows: 0
+
+DROP TABLE test_tsid;
+
+Affected Rows: 0
+
+DROP TABLE phy;
+
+Affected Rows: 0
+

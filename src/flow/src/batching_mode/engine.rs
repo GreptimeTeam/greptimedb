@@ -36,6 +36,7 @@ use query::QueryEngineRef;
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt, ensure};
 use sql::parsers::utils::is_tql;
+use store_api::metric_engine_consts::is_metric_engine_internal_column;
 use store_api::storage::{RegionId, TableId};
 use table::table_reference::TableReference;
 use tokio::sync::{RwLock, oneshot};
@@ -607,6 +608,9 @@ impl BatchingEngine {
                 .iter()
                 .enumerate()
             {
+                if is_metric_engine_internal_column(&col.name) {
+                    continue;
+                }
                 // three cases:
                 // 1. val column
                 // 2. timestamp column
