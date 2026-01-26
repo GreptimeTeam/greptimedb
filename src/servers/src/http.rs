@@ -53,7 +53,7 @@ use tower_http::trace::TraceLayer;
 
 use self::authorize::AuthState;
 use self::result::table_result::TableResponse;
-use crate::configurator::{HttpConfigurator, HttpConfiguratorListRef};
+use crate::configurator::ConfiguratorRegistryRef;
 use crate::elasticsearch;
 use crate::error::{
     AddressBindSnafu, AlreadyStartedSnafu, Error, InternalIoSnafu, InvalidHeaderValueSnafu,
@@ -1225,11 +1225,8 @@ impl Server for HttpServer {
             );
 
             let mut app = self.make_app();
-            if let Some(configurators) = self.plugins.get::<HttpConfiguratorListRef<()>>() {
-                app = configurators
-                    .configure_http(app, ())
-                    .await
-                    .context(OtherSnafu)?;
+            if let Some(registry) = self.plugins.get::<ConfiguratorRegistryRef>() {
+                app = registry.configure_http(app).await.context(OtherSnafu)?;
             }
             let app = self.build(app)?;
             let listener = tokio::net::TcpListener::bind(listening)

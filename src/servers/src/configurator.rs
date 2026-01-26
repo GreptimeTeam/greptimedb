@@ -22,73 +22,83 @@ use crate::grpc::builder::GrpcServerBuilder;
 
 /// A configurator that customizes or enhances an HTTP router.
 #[async_trait::async_trait]
-pub trait HttpConfigurator<C>: Send + Sync {
-    /// Configures the given HTTP router using the provided context.
+pub trait HttpConfigurator: Send + Sync {
+    /// Configures the given HTTP router.
     async fn configure_http(
         &self,
         router: HttpRouter,
-        ctx: C,
     ) -> std::result::Result<HttpRouter, BoxedError>;
 }
 
-pub type HttpConfiguratorRef<C> = Arc<dyn HttpConfigurator<C>>;
-
-/// A list of HTTP configurators. Implement the trait to apply all configurators sequentially.
-pub type HttpConfiguratorList<C> = Vec<HttpConfiguratorRef<C>>;
-
-/// A reference to a list of HTTP configurators that can be stored in plugins.
-pub type HttpConfiguratorListRef<C> = Arc<HttpConfiguratorList<C>>;
-
-#[async_trait::async_trait]
-impl<C: Clone + Send + Sync + 'static> HttpConfigurator<C> for HttpConfiguratorList<C> {
-    async fn configure_http(
-        &self,
-        mut router: HttpRouter,
-        ctx: C,
-    ) -> std::result::Result<HttpRouter, BoxedError> {
-        for configurator in self {
-            router = configurator.configure_http(router, ctx.clone()).await?;
-        }
-        Ok(router)
-    }
-}
+pub type HttpConfiguratorRef = Arc<dyn HttpConfigurator>;
 
 /// A configurator that customizes or enhances a gRPC router.
 #[async_trait::async_trait]
-pub trait GrpcRouterConfigurator<C>: Send + Sync {
-    /// Configures the given gRPC router using the provided context.
+pub trait GrpcRouterConfigurator: Send + Sync {
+    /// Configures the given gRPC router.
     async fn configure_grpc_router(
         &self,
         router: GrpcRouter,
-        ctx: C,
     ) -> std::result::Result<GrpcRouter, BoxedError>;
 }
 
-pub type GrpcRouterConfiguratorRef<C> = Arc<dyn GrpcRouterConfigurator<C>>;
+pub type GrpcRouterConfiguratorRef = Arc<dyn GrpcRouterConfigurator>;
 
-/// A list of gRPC router configurators. Implement the trait to apply all configurators sequentially.
-pub type GrpcRouterConfiguratorList<C> = Vec<GrpcRouterConfiguratorRef<C>>;
+/// A registry that holds both HTTP and gRPC router configurators.
+///
+/// This provides a single place to register all configurators that can be
+/// stored in plugins and applied to routers during server startup.
+#[derive(Default)]
+pub struct ConfiguratorRegistry {
+    http_configurators: Vec<HttpConfiguratorRef>,
+    grpc_router_configurators: Vec<GrpcRouterConfiguratorRef>,
+}
 
-/// A reference to a list of gRPC router configurators that can be stored in plugins.
-pub type GrpcRouterConfiguratorListRef<C> = Arc<GrpcRouterConfiguratorList<C>>;
+impl ConfiguratorRegistry {
+    /// Creates a new empty registry.
+    pub fn new() -> Self {
+        Self::default()
+    }
 
-#[async_trait::async_trait]
-impl<C: Clone + Send + Sync + 'static> GrpcRouterConfigurator<C> for GrpcRouterConfiguratorList<C> {
-    async fn configure_grpc_router(
+    /// Registers an HTTP configurator.
+    pub fn register_http(&mut self, configurator: HttpConfiguratorRef) {
+        self.http_configurators.push(configurator);
+    }
+
+    /// Registers a gRPC router configurator.
+    pub fn register_grpc_router(&mut self, configurator: GrpcRouterConfiguratorRef) {
+        self.grpc_router_configurators.push(configurator);
+    }
+
+    /// Applies all registered HTTP configurators to the given router sequentially.
+    pub async fn configure_http(
+        &self,
+        mut router: HttpRouter,
+    ) -> std::result::Result<HttpRouter, BoxedError> {
+        for configurator in &self.http_configurators {
+            router = configurator.configure_http(router).await?;
+        }
+        Ok(router)
+    }
+
+    /// Applies all registered gRPC router configurators to the given router sequentially.
+    pub async fn configure_grpc_router(
         &self,
         mut router: GrpcRouter,
-        ctx: C,
     ) -> std::result::Result<GrpcRouter, BoxedError> {
-        for configurator in self {
-            router = configurator
-                .configure_grpc_router(router, ctx.clone())
-                .await?;
+        for configurator in &self.grpc_router_configurators {
+            router = configurator.configure_grpc_router(router).await?;
         }
         Ok(router)
     }
 }
 
+pub type ConfiguratorRegistryRef = Arc<ConfiguratorRegistry>;
+
 /// A configurator that customizes or enhances a [`GrpcServerBuilder`].
+///
+/// This is kept separate from the registry because it uses a different context type
+/// (e.g., `GrpcConfigureContext` in flownode).
 #[async_trait::async_trait]
 pub trait GrpcBuilderConfigurator<C>: Send + Sync {
     /// Configures the given gRPC server builder using the provided context.
@@ -100,25 +110,3 @@ pub trait GrpcBuilderConfigurator<C>: Send + Sync {
 }
 
 pub type GrpcBuilderConfiguratorRef<C> = Arc<dyn GrpcBuilderConfigurator<C>>;
-
-/// A list of gRPC builder configurators. Implement the trait to apply all configurators sequentially.
-pub type GrpcBuilderConfiguratorList<C> = Vec<GrpcBuilderConfiguratorRef<C>>;
-
-/// A reference to a list of gRPC builder configurators that can be stored in plugins.
-pub type GrpcBuilderConfiguratorListRef<C> = Arc<GrpcBuilderConfiguratorList<C>>;
-
-#[async_trait::async_trait]
-impl<C: Clone + Send + Sync + 'static> GrpcBuilderConfigurator<C>
-    for GrpcBuilderConfiguratorList<C>
-{
-    async fn configure(
-        &self,
-        mut builder: GrpcServerBuilder,
-        ctx: C,
-    ) -> std::result::Result<GrpcServerBuilder, BoxedError> {
-        for configurator in self {
-            builder = configurator.configure(builder, ctx.clone()).await?;
-        }
-        Ok(builder)
-    }
-}
