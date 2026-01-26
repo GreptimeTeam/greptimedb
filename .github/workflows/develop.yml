@@ -848,12 +848,9 @@ jobs:
   run-multi-lang-tests:
     name: Run Multi-language SDK Tests
     needs: build
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-    - uses: ./.github/workflows/run-multi-lang-tests.yml
-      with:
-        artifact-name: bins
+    uses: ./.github/workflows/run-multi-lang-tests.yml
+    with:
+      artifact-name: bins
 
 
   # compat:
