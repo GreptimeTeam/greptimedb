@@ -24,11 +24,13 @@ use datatypes::schema::ColumnSchema;
 use mito_codec::row_converter::DensePrimaryKeyCodec;
 use mito2::memtable::bulk::context::BulkIterContext;
 use mito2::memtable::bulk::part::BulkPartConverter;
+use mito2::memtable::bulk::{BulkMemtable, BulkMemtableConfig};
 use mito2::memtable::bulk::part_reader::BulkPartBatchIter;
 use mito2::memtable::partition_tree::{PartitionTreeConfig, PartitionTreeMemtable};
 use mito2::memtable::time_series::TimeSeriesMemtable;
-use mito2::memtable::{KeyValues, Memtable};
+use mito2::memtable::{KeyValues, Memtable, RangesOptions};
 use mito2::read::flat_merge::FlatMergeIterator;
+use mito2::read::scan_region::PredicateGroup;
 use mito2::region::options::MergeMode;
 use mito2::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
 use mito2::test_util::memtable_util::{self, region_metadata_to_row_schema};
@@ -146,6 +148,55 @@ fn filter_1_host(c: &mut Criterion) {
             let iter = memtable.iter(None, Some(predicate.clone()), None).unwrap();
             for batch in iter {
                 let _batch = batch.unwrap();
+            }
+        });
+    });
+    group.bench_function("bulk", |b| {
+        // Create BulkMemtable
+        let memtable = BulkMemtable::new(
+            1,
+            BulkMemtableConfig::default(),
+            metadata.clone(),
+            None,  // write_buffer_manager
+            None,  // compact_dispatcher
+            false, // append_mode
+            MergeMode::LastRow,
+        );
+
+        // Write data using BulkPartConverter
+        let schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
+        let codec = Arc::new(DensePrimaryKeyCodec::new(&metadata));
+
+        for kvs in generator.iter() {
+            let mut converter = BulkPartConverter::new(
+                &metadata,
+                schema.clone(),
+                kvs.num_rows(),
+                codec.clone(),
+                true, // store_pk_columns
+            );
+            converter.append_key_values(&kvs).unwrap();
+            let bulk_part = converter.convert().unwrap();
+            memtable.write_bulk(bulk_part).unwrap();
+        }
+
+        // Create predicate for filtering
+        let filter_exprs = generator.random_host_filter_exprs();
+        let predicate = PredicateGroup::new(&metadata, &filter_exprs).unwrap();
+
+        b.iter(|| {
+            let ranges = memtable
+                .ranges(
+                    None, // No projection
+                    RangesOptions::default().with_predicate(predicate.clone()),
+                )
+                .unwrap();
+
+            for (_range_id, range) in ranges.ranges.iter() {
+                let iter = range.build_record_batch_iter(None).unwrap();
+                for batch in iter {
+                    let _batch = batch.unwrap();
+                }
             }
         });
     });
@@ -290,6 +341,11 @@ impl CpuDataGenerator {
         let host = self.random_hostname();
         let expr = Expr::Column(Column::from_name("hostname")).eq(lit(host));
         Predicate::new(vec![expr])
+    }
+
+    fn random_host_filter_exprs(&self) -> Vec<Expr> {
+        let host = self.random_hostname();
+        vec![Expr::Column(Column::from_name("hostname")).eq(lit(host))]
     }
 
     fn random_hostname(&self) -> String {
