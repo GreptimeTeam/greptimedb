@@ -679,7 +679,7 @@ enable = false
 ## Lingering time before deleting files.
 ## Should be long enough to allow long running queries to finish.
 ## If set to None, then unused files will be deleted immediately.
-lingering_time = "5m"
+lingering_time = "1m"
 
 ## Lingering time before deleting unknown files(files with undetermine expel time).
 ## expel time is the time when the file is considered as removed, as in removed from the manifest.
