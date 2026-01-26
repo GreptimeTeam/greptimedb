@@ -37,6 +37,7 @@ use servers::interceptor::LogIngestInterceptorRef;
 use servers::metrics_handler::MetricsHandler;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
 use servers::otel_arrow::OtelArrowServiceHandler;
+use servers::pending_rows_batcher::PendingRowsBatcher;
 use servers::postgres::PostgresServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdapter;
 use servers::query_handler::sql::ServerSqlQueryHandlerAdapter;
@@ -126,12 +127,19 @@ where
         }
 
         if opts.prom_store.enable {
+            let pending_rows_batcher = PendingRowsBatcher::try_new(
+                self.instance.clone(),
+                opts.prom_store.with_metric_engine,
+                opts.prom_store.pending_rows_flush_interval,
+                opts.prom_store.max_batch_rows,
+            );
             builder = builder
                 .with_prom_handler(
                     self.instance.clone(),
                     Some(self.instance.clone()),
                     opts.prom_store.with_metric_engine,
                     opts.http.prom_validation_mode,
+                    pending_rows_batcher,
                 )
                 .with_prometheus_handler(self.instance.clone());
         }

@@ -57,6 +57,12 @@ pub enum Error {
     #[snafu(display("Internal error: {}", err_msg))]
     Internal { err_msg: String },
 
+    #[snafu(display("Pending rows batcher channel closed"))]
+    BatcherChannelClosed,
+
+    #[snafu(display("Pending rows batcher queue is full, capacity: {}", capacity))]
+    BatcherQueueFull { capacity: usize },
+
     #[snafu(display("Unsupported data type: {}, reason: {}", data_type, reason))]
     UnsupportedDataType {
         data_type: ConcreteDataType,
@@ -680,6 +686,7 @@ impl ErrorExt for Error {
         use Error::*;
         match self {
             Internal { .. }
+            | BatcherChannelClosed
             | InternalIo { .. }
             | TokioIo { .. }
             | StartHttp { .. }
@@ -800,7 +807,7 @@ impl ErrorExt for Error {
 
             Suspended { .. } => StatusCode::Suspended,
 
-            MemoryLimitExceeded { .. } => StatusCode::RateLimited,
+            MemoryLimitExceeded { .. } | BatcherQueueFull { .. } => StatusCode::RateLimited,
 
             GreptimeProto { source, .. } => source.status_code(),
         }

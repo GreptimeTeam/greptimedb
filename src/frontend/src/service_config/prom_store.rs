@@ -12,12 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PromStoreOptions {
     pub enable: bool,
     pub with_metric_engine: bool,
+    #[serde(default, with = "humantime_serde")]
+    pub pending_rows_flush_interval: Duration,
+    #[serde(default = "default_max_batch_rows")]
+    pub max_batch_rows: usize,
+}
+
+fn default_max_batch_rows() -> usize {
+    100_000
 }
 
 impl Default for PromStoreOptions {
@@ -25,18 +35,25 @@ impl Default for PromStoreOptions {
         Self {
             enable: true,
             with_metric_engine: true,
+            pending_rows_flush_interval: Duration::from_secs(2),
+            max_batch_rows: default_max_batch_rows(),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::PromStoreOptions;
+    use crate::service_config::prom_store::default_max_batch_rows;
 
     #[test]
     fn test_prom_store_options() {
         let default = PromStoreOptions::default();
         assert!(default.enable);
-        assert!(default.with_metric_engine)
+        assert!(default.with_metric_engine);
+        assert_eq!(default.pending_rows_flush_interval, Duration::from_secs(2));
+        assert_eq!(default.max_batch_rows, default_max_batch_rows());
     }
 }
