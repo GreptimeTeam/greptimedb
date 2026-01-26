@@ -158,6 +158,9 @@ impl RegionScanExec {
                 // Metric engine physical tables keep tag columns alongside `__tsid`. When `__tsid`
                 // is present, the scan output is also ordered by `(__tsid, time index)` which can
                 // help eliminate redundant sorts for promql plans (e.g. SeriesDivide).
+                //
+                // `pk_time_ordering` and the potential `(__tsid, time index)` ordering are actually
+                // the same thing, thus present in one `OrderingEquivalenceClass`.
                 if let (Ok(tsid_col), Some(ts)) = (
                     Column::new_with_schema(DATA_SCHEMA_TSID_COLUMN_NAME, &arrow_schema),
                     ts_col.clone(),
