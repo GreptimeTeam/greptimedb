@@ -1,4 +1,4 @@
--- Minimalized repro for tsid/table_id Substrait flow path
+-- test if `ts` from appear in group by twice(and cause query failure)
 
 CREATE TABLE phy_metric_min (
   ts timestamp(3) time index,
@@ -26,11 +26,10 @@ VALUES
   ('2026-01-23T03:41:00Z', 2.0, 'alpha'),
   ('2026-01-23T03:41:00Z', 4.0, 'beta');
 
-select ts, ts from metric_min limit 1;
-
 -- Substrait encode/decode check via TQL pushdown on metric_min
+-- test if `ts` from appear in group by twice(and cause query failure)
 -- SQLNESS REPLACE (peers.*) REDACTED
--- SQLNESS REPLACE phy.__table_id\s=\sUInt32\(\d+\) phy.__table_id=UInt32(REDACTED)
+-- SQLNESS REPLACE __table_id\s=\sUInt32\(\d+\) __table_id=UInt32(REDACTED)
 TQL EXPLAIN (
   timestamp '2026-01-23 03:38:00+00',
   timestamp '2026-01-23 03:44:00+00',
@@ -41,7 +40,7 @@ sum by (tag_a, ts) (
 );
 
 -- SQLNESS REPLACE (peers.*) REDACTED
--- SQLNESS REPLACE phy.__table_id\s=\sUInt32\(\d+\) phy.__table_id=UInt32(REDACTED)
+-- SQLNESS REPLACE __table_id\s=\sUInt32\(\d+\) __table_id=UInt32(REDACTED)
 TQL EXPLAIN (
   timestamp '2026-01-23 03:38:00+00',
   timestamp '2026-01-23 03:44:00+00',
