@@ -54,12 +54,9 @@ TQL ANALYZE (0, 10, '5s') sum(tsid_metric);
 |_|_|_ProjectionExec: expr=[val@0 as val, ts@2 as ts] REDACTED
 |_|_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
-|_|_|_SortExec: expr=[__tsid@1 ASC, ts@2 ASC], preserve_partitioning=[true] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_ProjectionExec: expr=[val@1 as val, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
 |_|_| Total rows: 3_|
 +-+-+-+
@@ -87,12 +84,9 @@ TQL ANALYZE (0, 10, '5s') sum by (job, instance) (tsid_metric);
 |_|_|_AggregateExec: mode=Partial, gby=[job@2 as job, instance@1 as instance, ts@4 as ts], aggr=[sum(tsid_metric.val), __tsid] REDACTED
 |_|_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
-|_|_|_SortExec: expr=[__tsid@3 ASC, ts@4 ASC], preserve_partitioning=[true] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_ProjectionExec: expr=[val@1 as val, instance@3 as instance, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
 |_|_| Total rows: 6_|
 +-+-+-+
@@ -133,12 +127,9 @@ TQL ANALYZE (0, 10, '5s')  sum(irate(tsid_metric[1h])) / scalar(count(count(tsid
 |_|_|_ProjectionExec: expr=[val@0 as val, job@1 as job, ts@3 as ts] REDACTED
 |_|_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
-|_|_|_SortExec: expr=[__tsid@2 ASC, ts@3 ASC], preserve_partitioning=[true] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_ProjectionExec: expr=[val@1 as val, job@3 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
 | 1_| 0_|_SortPreservingMergeExec: [ts@0 ASC NULLS LAST] REDACTED
 |_|_|_SortExec: expr=[ts@0 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
@@ -152,12 +143,9 @@ TQL ANALYZE (0, 10, '5s')  sum(irate(tsid_metric[1h])) / scalar(count(count(tsid
 |_|_|_PromRangeManipulateExec: req range=[0..10000], interval=[5000], eval range=[3600000], time index=[ts] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[ts], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
-|_|_|_SortExec: expr=[__tsid@1 ASC, ts@2 ASC], preserve_partitioning=[true] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_ProjectionExec: expr=[val@1 as val, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
 |_|_| Total rows: 2_|
 +-+-+-+
