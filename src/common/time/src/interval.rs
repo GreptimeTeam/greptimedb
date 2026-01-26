@@ -631,7 +631,7 @@ mod tests {
         let interval = IntervalMonthDayNano::new(1, 1, 1);
         assert_eq!(interval.to_iso8601_string(), "P0Y1M1DT0H0M0S");
 
-        let interval = IntervalMonthDayNano::new(14, 31, 10_000_000_000);
+        let interval = IntervalMonthDayNano::new(14, 31, 10000000000);
         assert_eq!(interval.to_iso8601_string(), "P1Y2M31DT0H0M10S");
 
         let interval = IntervalMonthDayNano::new(14, 31, 23210200000000);
