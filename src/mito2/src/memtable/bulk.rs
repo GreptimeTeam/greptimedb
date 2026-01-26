@@ -69,7 +69,7 @@ static MERGE_THRESHOLD: LazyLock<usize> =
     LazyLock::new(|| env_usize("GREPTIME_BULK_MERGE_THRESHOLD", DEFAULT_MERGE_THRESHOLD));
 
 /// Default maximum number of groups for parallel merging.
-const DEFAULT_MAX_MERGE_GROUPS: usize = 16;
+const DEFAULT_MAX_MERGE_GROUPS: usize = 32;
 
 /// Maximum merge groups. Configurable via `GREPTIME_BULK_MAX_MERGE_GROUPS`.
 static MAX_MERGE_GROUPS: LazyLock<usize> =
@@ -80,7 +80,7 @@ static MAX_MERGE_GROUPS: LazyLock<usize> =
 pub(crate) static ENCODE_ROW_THRESHOLD: LazyLock<usize> = LazyLock::new(|| {
     env_usize(
         "GREPTIME_BULK_ENCODE_ROW_THRESHOLD",
-        8 * DEFAULT_ROW_GROUP_SIZE,
+        10 * DEFAULT_ROW_GROUP_SIZE,
     )
 });
 
