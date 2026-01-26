@@ -1,896 +1,875 @@
 on:
-    schedule:
-        - cron: "0 15 * * 1-5"
-    merge_group:
-    pull_request:
-        types: [opened, synchronize, reopened, ready_for_review]
-        paths-ignore:
-            - "docs/**"
-            - "config/**"
-            - "**.md"
-            - ".dockerignore"
-            - "docker/**"
-            - ".gitignore"
-            - "grafana/**"
-            - "Makefile"
-    workflow_dispatch:
+  schedule:
+    - cron: "0 15 * * 1-5"
+  merge_group:
+  pull_request:
+    types: [ opened, synchronize, reopened, ready_for_review ]
+    paths-ignore:
+      - 'docs/**'
+      - 'config/**'
+      - '**.md'
+      - '.dockerignore'
+      - 'docker/**'
+      - '.gitignore'
+      - 'grafana/**'
+      - 'Makefile'
+  workflow_dispatch:
 
 name: CI
 
 concurrency:
-    group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
-    cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
 
 jobs:
-    check-typos-and-docs:
-        if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
-        name: Check typos and docs
-        runs-on: ubuntu-latest
-        steps:
-            - uses: actions/checkout@v4
-              with:
-                  persist-credentials: false
-            - uses: crate-ci/typos@master
-            - name: Check the config docs
-              run: |
-                  make config-docs && \
-                  git diff --name-only --exit-code ./config/config.md  \
-                  || (echo "'config/config.md' is not up-to-date, please run 'make config-docs'." && exit 1)
-
-    license-header-check:
-        if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
-        runs-on: ubuntu-latest
-        name: Check License Header
-        steps:
-            - uses: actions/checkout@v4
-              with:
-                  persist-credentials: false
-            - uses: korandoru/hawkeye@v5
-
-    check:
-        if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
-        name: Check
-        runs-on: ${{ matrix.os }}
-        strategy:
-            matrix:
-                os: [ubuntu-latest]
-        timeout-minutes: 60
-        steps:
-            - uses: actions/checkout@v4
-              with:
-                  persist-credentials: false
-            - uses: arduino/setup-protoc@v3
-              with:
-                  repo-token: ${{ secrets.GITHUB_TOKEN }}
-            - uses: actions-rust-lang/setup-rust-toolchain@v1
-            - name: Rust Cache
-              uses: Swatinem/rust-cache@v2
-              with:
-                  # Shares across multiple jobs
-                  # Shares with `Clippy` job
-                  shared-key: "check-lint"
-                  cache-all-crates: "true"
-                  save-if: ${{ github.ref == 'refs/heads/main' }}
-            - name: Run cargo check
-              run: cargo check --locked --workspace --all-targets
-
-    toml:
-        if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
-        name: Toml Check
-        runs-on: ubuntu-latest
-        timeout-minutes: 60
-        steps:
-            - uses: actions/checkout@v4
-              with:
-                  persist-credentials: false
-            - uses: actions-rust-lang/setup-rust-toolchain@v1
-            - name: Install taplo
-              run: cargo +stable install taplo-cli --version ^0.9 --locked --force
-            - name: Run taplo
-              run: taplo format --check
-
-    build:
-        if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
-        name: Build GreptimeDB binaries
-        runs-on: ${{ matrix.os }}
-        strategy:
-            matrix:
-                os: [ubuntu-latest]
-        timeout-minutes: 60
-        steps:
-            - uses: actions/checkout@v4
-              with:
-                  persist-credentials: false
-            - uses: arduino/setup-protoc@v3
-              with:
-                  repo-token: ${{ secrets.GITHUB_TOKEN }}
-            - uses: actions-rust-lang/setup-rust-toolchain@v1
-            - uses: Swatinem/rust-cache@v2
-              with:
-                  # Shares across multiple jobs
-                  shared-key: "build-binaries"
-                  cache-all-crates: "true"
-                  save-if: ${{ github.ref == 'refs/heads/main' }}
-            - name: Install cargo-gc-bin
-              shell: bash
-              run: cargo install cargo-gc-bin --force
-            - name: Build greptime binaries
-              shell: bash
-              # `cargo gc` will invoke `cargo build` with specified args
-              run: cargo gc -- --bin greptime --bin sqlness-runner --features "pg_kvbackend,mysql_kvbackend"
-            - name: Pack greptime binaries
-              shell: bash
-              run: |
-                  mkdir bins && \
-                  mv ./target/debug/greptime bins && \
-                  mv ./target/debug/sqlness-runner bins
-            - name: Print greptime binaries info
-              run: ls -lh bins
-            - name: Upload artifacts
-              uses: ./.github/actions/upload-artifacts
-              with:
-                  artifacts-dir: bins
-                  version: current
-
-    fuzztest:
-        if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
-        name: Fuzz Test
-        needs: build
-        runs-on: ubuntu-latest
-        timeout-minutes: 60
-        strategy:
-            fail-fast: false
-            matrix:
-                target:
-                    [
-                        "fuzz_create_table",
-                        "fuzz_alter_table",
-                        "fuzz_create_database",
-                        "fuzz_create_logical_table",
-                        "fuzz_alter_logical_table",
-                        "fuzz_insert",
-                        "fuzz_insert_logical_table",
-                    ]
-        steps:
-            - name: Remove unused software
-              run: |
-                  echo "Disk space before:"
-                  df -h
-                  [[ -d /usr/share/dotnet ]] && sudo rm -rf /usr/share/dotnet
-                  [[ -d /usr/local/lib/android ]] && sudo rm -rf /usr/local/lib/android
-                  [[ -d /opt/ghc ]] && sudo rm -rf /opt/ghc
-                  [[ -d /opt/hostedtoolcache/CodeQL ]] && sudo rm -rf /opt/hostedtoolcache/CodeQL
-                  sudo docker image prune --all --force
-                  sudo docker builder prune -a
-                  echo "Disk space after:"
-                  df -h
-            - uses: actions/checkout@v4
-              with:
-                  persist-credentials: false
-            - uses: arduino/setup-protoc@v3
-              with:
-                  repo-token: ${{ secrets.GITHUB_TOKEN }}
-            - uses: actions-rust-lang/setup-rust-toolchain@v1
-            - name: Set Rust Fuzz
-              shell: bash
-              run: |
-                  sudo apt-get install -y libfuzzer-14-dev
-                  rustup install nightly
-                  cargo +nightly install cargo-fuzz cargo-gc-bin --force
-            - name: Download pre-built binaries
-              uses: actions/download-artifact@v4
-              with:
-                  name: bins
-                  path: .
-            - name: Unzip binaries
-              run: |
-                  tar -xvf ./bins.tar.gz
-                  rm ./bins.tar.gz
-            - name: Run GreptimeDB
-              run: |
-                  ./bins/greptime standalone start&
-            - name: Fuzz Test
-              uses: ./.github/actions/fuzz-test
-              env:
-                  CUSTOM_LIBFUZZER_PATH: /usr/lib/llvm-14/lib/libFuzzer.a
-                  GT_MYSQL_ADDR: 127.0.0.1:4002
-              with:
-                  target: ${{ matrix.target }}
-                  max-total-time: 120
-
-    unstable-fuzztest:
-        if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
-        name: Unstable Fuzz Test
-        needs: build-greptime-ci
-        runs-on: ubuntu-latest
-        timeout-minutes: 60
-        strategy:
-            fail-fast: false
-            matrix:
-                target: ["unstable_fuzz_create_table_standalone"]
-        steps:
-            - name: Remove unused software
-              run: |
-                  echo "Disk space before:"
-                  df -h
-                  [[ -d /usr/share/dotnet ]] && sudo rm -rf /usr/share/dotnet
-                  [[ -d /usr/local/lib/android ]] && sudo rm -rf /usr/local/lib/android
-                  [[ -d /opt/ghc ]] && sudo rm -rf /opt/ghc
-                  [[ -d /opt/hostedtoolcache/CodeQL ]] && sudo rm -rf /opt/hostedtoolcache/CodeQL
-                  sudo docker image prune --all --force
-                  sudo docker builder prune -a
-                  echo "Disk space after:"
-                  df -h
-            - uses: actions/checkout@v4
-              with:
-                  persist-credentials: false
-            - uses: arduino/setup-protoc@v3
-              with:
-                  repo-token: ${{ secrets.GITHUB_TOKEN }}
-            - uses: actions-rust-lang/setup-rust-toolchain@v1
-            - name: Set Rust Fuzz
-              shell: bash
-              run: |
-                  sudo apt update && sudo apt install -y libfuzzer-14-dev
-                  cargo install cargo-fuzz cargo-gc-bin --force
-            - name: Download pre-built binary
-              uses: actions/download-artifact@v4
-              with:
-                  name: bin
-                  path: .
-            - name: Unzip binary
-              run: |
-                  tar -xvf ./bin.tar.gz
-                  rm ./bin.tar.gz
-            - name: Run Fuzz Test
-              uses: ./.github/actions/fuzz-test
-              env:
-                  CUSTOM_LIBFUZZER_PATH: /usr/lib/llvm-14/lib/libFuzzer.a
-                  GT_MYSQL_ADDR: 127.0.0.1:4002
-                  GT_FUZZ_BINARY_PATH: ./bin/greptime
-                  GT_FUZZ_INSTANCE_ROOT_DIR: /tmp/unstable-greptime/
-              with:
-                  target: ${{ matrix.target }}
-                  max-total-time: 120
-                  unstable: "true"
-            - name: Upload unstable fuzz test logs
-              if: failure()
-              uses: actions/upload-artifact@v4
-              with:
-                  name: unstable-fuzz-logs
-                  path: /tmp/unstable-greptime/
-                  retention-days: 3
-            - name: Describe pods
-              if: failure()
-              shell: bash
-              run: |
-                  kubectl describe pod -n my-greptimedb
-
-    build-greptime-ci:
-        if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
-        name: Build GreptimeDB binary (profile-CI)
-        runs-on: ${{ matrix.os }}
-        strategy:
-            matrix:
-                os: [ubuntu-latest]
-        timeout-minutes: 60
-        steps:
-            - uses: actions/checkout@v4
-              with:
-                  persist-credentials: false
-            - uses: arduino/setup-protoc@v3
-              with:
-                  repo-token: ${{ secrets.GITHUB_TOKEN }}
-            - uses: actions-rust-lang/setup-rust-toolchain@v1
-            - uses: Swatinem/rust-cache@v2
-              with:
-                  # Shares across multiple jobs
-                  shared-key: "build-greptime-ci"
-                  cache-all-crates: "true"
-                  save-if: ${{ github.ref == 'refs/heads/main' }}
-            - name: Install cargo-gc-bin
-              shell: bash
-              run: cargo install cargo-gc-bin --force
-            - name: Build greptime binary
-              shell: bash
-              # `cargo gc` will invoke `cargo build` with specified args
-              run: cargo gc --profile ci -- --bin greptime --features "pg_kvbackend,mysql_kvbackend"
-            - name: Pack greptime binary
-              shell: bash
-              run: |
-                  mkdir bin && \
-                  mv ./target/ci/greptime bin
-            - name: Print greptime binaries info
-              run: ls -lh bin
-            - name: Upload artifacts
-              uses: ./.github/actions/upload-artifacts
-              with:
-                  artifacts-dir: bin
-                  version: current
-
-    distributed-fuzztest:
-        if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
-        name: Fuzz Test (Distributed, ${{ matrix.mode.name }}, ${{ matrix.target }})
-        runs-on: ubuntu-latest
-        needs: build-greptime-ci
-        timeout-minutes: 60
-        strategy:
-            fail-fast: false
-            matrix:
-                target:
-                    [
-                        "fuzz_create_table",
-                        "fuzz_alter_table",
-                        "fuzz_create_database",
-                        "fuzz_create_logical_table",
-                        "fuzz_alter_logical_table",
-                        "fuzz_insert",
-                        "fuzz_insert_logical_table",
-                    ]
-                mode:
-                    - name: "Remote WAL"
-                      minio: true
-                      kafka: true
-                      values: "with-remote-wal.yaml"
-        steps:
-            - name: Remove unused software
-              run: |
-                  echo "Disk space before:"
-                  df -h
-                  [[ -d /usr/share/dotnet ]] && sudo rm -rf /usr/share/dotnet
-                  [[ -d /usr/local/lib/android ]] && sudo rm -rf /usr/local/lib/android
-                  [[ -d /opt/ghc ]] && sudo rm -rf /opt/ghc
-                  [[ -d /opt/hostedtoolcache/CodeQL ]] && sudo rm -rf /opt/hostedtoolcache/CodeQL
-                  sudo docker image prune --all --force
-                  sudo docker builder prune -a
-                  echo "Disk space after:"
-                  df -h
-            - uses: actions/checkout@v4
-              with:
-                  persist-credentials: false
-            - name: Setup Kind
-              uses: ./.github/actions/setup-kind
-            - if: matrix.mode.minio
-              name: Setup Minio
-              uses: ./.github/actions/setup-minio
-            - if: matrix.mode.kafka
-              name: Setup Kafka cluster
-              uses: ./.github/actions/setup-kafka-cluster
-            - name: Setup Etcd cluster
-              uses: ./.github/actions/setup-etcd-cluster
-            # Prepares for fuzz tests
-            - uses: arduino/setup-protoc@v3
-              with:
-                  repo-token: ${{ secrets.GITHUB_TOKEN }}
-            - uses: actions-rust-lang/setup-rust-toolchain@v1
-            - name: Set Rust Fuzz
-              shell: bash
-              run: |
-                  sudo apt-get install -y libfuzzer-14-dev
-                  rustup install nightly
-                  cargo +nightly install cargo-fuzz cargo-gc-bin --force
-            # Downloads ci image
-            - name: Download pre-built binariy
-              uses: actions/download-artifact@v4
-              with:
-                  name: bin
-                  path: .
-            - name: Unzip binary
-              run: |
-                  tar -xvf ./bin.tar.gz
-                  rm ./bin.tar.gz
-            - name: Build and push GreptimeDB image
-              uses: ./.github/actions/build-and-push-ci-image
-            - name: Wait for etcd
-              run: |
-                  kubectl wait \
-                    --for=condition=Ready \
-                    pod -l app.kubernetes.io/instance=etcd \
-                    --timeout=120s \
-                    -n etcd-cluster
-            - if: matrix.mode.minio
-              name: Wait for minio
-              run: |
-                  kubectl wait \
-                    --for=condition=Ready \
-                    pod -l app=minio \
-                    --timeout=120s \
-                    -n minio
-            - if: matrix.mode.kafka
-              name: Wait for kafka
-              run: |
-                  kubectl wait \
-                    --for=condition=Ready \
-                    pod -l app.kubernetes.io/instance=kafka \
-                    --timeout=120s \
-                    -n kafka-cluster
-            - name: Print etcd info
-              shell: bash
-              run: kubectl get all --show-labels -n etcd-cluster
-            # Setup cluster for test
-            - name: Setup GreptimeDB cluster
-              uses: ./.github/actions/setup-greptimedb-cluster
-              with:
-                  image-registry: localhost:5001
-                  values-filename: ${{ matrix.mode.values }}
-            - name: Port forward (mysql)
-              run: |
-                  kubectl port-forward service/my-greptimedb-frontend 4002:4002 -n my-greptimedb&
-            - name: Fuzz Test
-              uses: ./.github/actions/fuzz-test
-              env:
-                  CUSTOM_LIBFUZZER_PATH: /usr/lib/llvm-14/lib/libFuzzer.a
-                  GT_MYSQL_ADDR: 127.0.0.1:4002
-              with:
-                  target: ${{ matrix.target }}
-                  max-total-time: 120
-            - name: Describe Nodes
-              if: failure()
-              shell: bash
-              run: |
-                  kubectl describe nodes
-            - name: Describe pod
-              if: failure()
-              shell: bash
-              run: |
-                  kubectl describe pod -n my-greptimedb
-            - name: Export kind logs
-              if: failure()
-              shell: bash
-              run: |
-                  kind export logs /tmp/kind
-            - name: Upload logs
-              if: failure()
-              uses: actions/upload-artifact@v4
-              with:
-                  name: fuzz-tests-kind-logs-${{ matrix.mode.name }}-${{ matrix.target }}
-                  path: /tmp/kind
-                  retention-days: 3
-            - name: Delete cluster
-              if: success()
-              shell: bash
-              run: |
-                  kind delete cluster
-                  docker stop $(docker ps -a -q)
-                  docker rm $(docker ps -a -q)
-                  docker system prune -f
-
-    distributed-fuzztest-with-chaos:
-        if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
-        name: Fuzz Test with Chaos (Distributed, ${{ matrix.mode.name }}, ${{ matrix.target }})
-        runs-on: ubuntu-latest
-        needs: build-greptime-ci
-        timeout-minutes: 60
-        strategy:
-            fail-fast: false
-            matrix:
-                target:
-                    [
-                        "fuzz_migrate_mito_regions",
-                        "fuzz_migrate_metric_regions",
-                        "fuzz_failover_mito_regions",
-                        "fuzz_failover_metric_regions",
-                    ]
-                mode:
-                    - name: "Remote WAL"
-                      minio: true
-                      kafka: true
-                      values: "with-remote-wal.yaml"
-                include:
-                    - target: "fuzz_migrate_mito_regions"
-                      mode:
-                          name: "Local WAL"
-                          minio: true
-                          kafka: false
-                          values: "with-minio.yaml"
-                    - target: "fuzz_migrate_metric_regions"
-                      mode:
-                          name: "Local WAL"
-                          minio: true
-                          kafka: false
-                          values: "with-minio.yaml"
-        steps:
-            - name: Remove unused software
-              run: |
-                  echo "Disk space before:"
-                  df -h
-                  [[ -d /usr/share/dotnet ]] && sudo rm -rf /usr/share/dotnet
-                  [[ -d /usr/local/lib/android ]] && sudo rm -rf /usr/local/lib/android
-                  [[ -d /opt/ghc ]] && sudo rm -rf /opt/ghc
-                  [[ -d /opt/hostedtoolcache/CodeQL ]] && sudo rm -rf /opt/hostedtoolcache/CodeQL
-                  sudo docker image prune --all --force
-                  sudo docker builder prune -a
-                  echo "Disk space after:"
-                  df -h
-            - uses: actions/checkout@v4
-              with:
-                  persist-credentials: false
-            - name: Setup Kind
-              uses: ./.github/actions/setup-kind
-            - name: Setup Chaos Mesh
-              uses: ./.github/actions/setup-chaos
-            - if: matrix.mode.minio
-              name: Setup Minio
-              uses: ./.github/actions/setup-minio
-            - if: matrix.mode.kafka
-              name: Setup Kafka cluster
-              uses: ./.github/actions/setup-kafka-cluster
-            - name: Setup Etcd cluster
-              uses: ./.github/actions/setup-etcd-cluster
-            # Prepares for fuzz tests
-            - uses: arduino/setup-protoc@v3
-              with:
-                  repo-token: ${{ secrets.GITHUB_TOKEN }}
-            - uses: actions-rust-lang/setup-rust-toolchain@v1
-            - name: Set Rust Fuzz
-              shell: bash
-              run: |
-                  sudo apt-get install -y libfuzzer-14-dev
-                  rustup install nightly
-                  cargo +nightly install cargo-fuzz cargo-gc-bin --force
-            # Downloads ci image
-            - name: Download pre-built binariy
-              uses: actions/download-artifact@v4
-              with:
-                  name: bin
-                  path: .
-            - name: Unzip binary
-              run: |
-                  tar -xvf ./bin.tar.gz
-                  rm ./bin.tar.gz
-            - name: Build and push GreptimeDB image
-              uses: ./.github/actions/build-and-push-ci-image
-            - name: Wait for etcd
-              run: |
-                  kubectl wait \
-                    --for=condition=Ready \
-                    pod -l app.kubernetes.io/instance=etcd \
-                    --timeout=120s \
-                    -n etcd-cluster
-            - if: matrix.mode.minio
-              name: Wait for minio
-              run: |
-                  kubectl wait \
-                    --for=condition=Ready \
-                    pod -l app=minio \
-                    --timeout=120s \
-                    -n minio
-            - if: matrix.mode.kafka
-              name: Wait for kafka
-              run: |
-                  kubectl wait \
-                    --for=condition=Ready \
-                    pod -l app.kubernetes.io/instance=kafka \
-                    --timeout=120s \
-                    -n kafka-cluster
-            - name: Print etcd info
-              shell: bash
-              run: kubectl get all --show-labels -n etcd-cluster
-            # Setup cluster for test
-            - name: Setup GreptimeDB cluster
-              uses: ./.github/actions/setup-greptimedb-cluster
-              with:
-                  image-registry: localhost:5001
-                  values-filename: ${{ matrix.mode.values }}
-                  enable-region-failover: ${{ matrix.mode.kafka }}
-            - name: Port forward (mysql)
-              run: |
-                  kubectl port-forward service/my-greptimedb-frontend 4002:4002 -n my-greptimedb&
-            - name: Fuzz Test
-              uses: ./.github/actions/fuzz-test
-              env:
-                  CUSTOM_LIBFUZZER_PATH: /usr/lib/llvm-14/lib/libFuzzer.a
-                  GT_MYSQL_ADDR: 127.0.0.1:4002
-              with:
-                  target: ${{ matrix.target }}
-                  max-total-time: 120
-            - name: Describe Nodes
-              if: failure()
-              shell: bash
-              run: |
-                  kubectl describe nodes
-            - name: Describe pods
-              if: failure()
-              shell: bash
-              run: |
-                  kubectl describe pod -n my-greptimedb
-            - name: Export kind logs
-              if: failure()
-              shell: bash
-              run: |
-                  kind export logs /tmp/kind
-            - name: Upload logs
-              if: failure()
-              uses: actions/upload-artifact@v4
-              with:
-                  name: fuzz-tests-kind-logs-${{ matrix.mode.name }}-${{ matrix.target }}
-                  path: /tmp/kind
-                  retention-days: 3
-            - name: Delete cluster
-              if: success()
-              shell: bash
-              run: |
-                  kind delete cluster
-                  docker stop $(docker ps -a -q)
-                  docker rm $(docker ps -a -q)
-                  docker system prune -f
-
-    sqlness:
-        if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
-        name: Sqlness Test (${{ matrix.mode.name }})
-        needs: build
-        runs-on: ${{ matrix.os }}
-        strategy:
-            fail-fast: false
-            matrix:
-                os: [ubuntu-latest]
-                mode:
-                    - name: "Basic"
-                      opts: ""
-                      kafka: false
-                    - name: "Remote WAL"
-                      opts: "-w kafka -k 127.0.0.1:9092"
-                      kafka: true
-                    - name: "PostgreSQL KvBackend"
-                      opts: "--setup-pg"
-                      kafka: false
-                    - name: "MySQL Kvbackend"
-                      opts: "--setup-mysql"
-                      kafka: false
-                    - name: "Flat format"
-                      opts: "--enable-flat-format"
-                      kafka: false
-        timeout-minutes: 60
-        steps:
-            - uses: actions/checkout@v4
-              with:
-                  persist-credentials: false
-
-            - if: matrix.mode.kafka
-              name: Setup kafka server
-              working-directory: tests-integration/fixtures
-              run: ../../.github/scripts/pull-test-deps-images.sh && docker compose up -d --wait kafka
-
-            - name: Download pre-built binaries
-              uses: actions/download-artifact@v4
-              with:
-                  name: bins
-                  path: .
-            - name: Unzip binaries
-              run: tar -xvf ./bins.tar.gz
-            - name: Run sqlness
-              run: RUST_BACKTRACE=1 ./bins/sqlness-runner bare ${{ matrix.mode.opts }} -c ./tests/cases --bins-dir ./bins --preserve-state
-            - name: Upload sqlness logs
-              if: failure()
-              uses: actions/upload-artifact@v4
-              with:
-                  name: sqlness-logs-${{ matrix.mode.name }}
-                  path: /tmp/sqlness*
-                  retention-days: 3
-
-    fmt:
-        if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
-        name: Rustfmt
-        runs-on: ubuntu-latest
-        timeout-minutes: 60
-        steps:
-            - uses: actions/checkout@v4
-              with:
-                  persist-credentials: false
-            - uses: arduino/setup-protoc@v3
-              with:
-                  repo-token: ${{ secrets.GITHUB_TOKEN }}
-            - uses: actions-rust-lang/setup-rust-toolchain@v1
-              with:
-                  components: rustfmt
-            - name: Check format
-              run: make fmt-check
-
-    clippy:
-        if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
-        name: Clippy
-        runs-on: ubuntu-latest
-        timeout-minutes: 60
-        steps:
-            - uses: actions/checkout@v4
-              with:
-                  persist-credentials: false
-            - uses: arduino/setup-protoc@v3
-              with:
-                  repo-token: ${{ secrets.GITHUB_TOKEN }}
-            - uses: actions-rust-lang/setup-rust-toolchain@v1
-              with:
-                  components: clippy
-            - name: Rust Cache
-              uses: Swatinem/rust-cache@v2
-              with:
-                  # Shares across multiple jobs
-                  # Shares with `Check` job
-                  shared-key: "check-lint"
-                  cache-all-crates: "true"
-                  save-if: ${{ github.ref == 'refs/heads/main' }}
-            - name: Run cargo clippy
-              run: make clippy
-
-    check-udeps:
-        if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
-        name: Check Unused Dependencies
-        runs-on: ubuntu-latest
-        timeout-minutes: 60
-        steps:
-            - uses: actions/checkout@v4
-              with:
-                  persist-credentials: false
-            - uses: arduino/setup-protoc@v3
-              with:
-                  repo-token: ${{ secrets.GITHUB_TOKEN }}
-            - uses: actions-rust-lang/setup-rust-toolchain@v1
-            - name: Rust Cache
-              uses: Swatinem/rust-cache@v2
-              with:
-                  shared-key: "check-udeps"
-                  cache-all-crates: "true"
-                  save-if: ${{ github.ref == 'refs/heads/main' }}
-            - name: Install cargo-udeps
-              run: cargo install cargo-udeps --locked
-            - name: Check unused dependencies
-              run: make check-udeps
-
-    conflict-check:
-        if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
-        name: Check for conflict
-        runs-on: ubuntu-latest
-        steps:
-            - uses: actions/checkout@v4
-              with:
-                  persist-credentials: false
-            - name: Merge Conflict Finder
-              uses: olivernybroe/action-conflict-finder@v4.0
-
-    test:
-        if: ${{ github.repository == 'GreptimeTeam/greptimedb' && github.event_name != 'merge_group' }}
-        runs-on: ubuntu-22.04-arm
-        timeout-minutes: 60
-        needs: [conflict-check, clippy, fmt, check-udeps]
-        steps:
-            - uses: actions/checkout@v4
-              with:
-                  persist-credentials: false
-            - uses: arduino/setup-protoc@v3
-              with:
-                  repo-token: ${{ secrets.GITHUB_TOKEN }}
-            - uses: rui314/setup-mold@v1
-            - name: Install toolchain
-              uses: actions-rust-lang/setup-rust-toolchain@v1
-              with:
-                  cache: false
-            - name: Rust Cache
-              uses: Swatinem/rust-cache@v2
-              with:
-                  # Shares cross multiple jobs
-                  shared-key: "coverage-test"
-                  cache-all-crates: "true"
-                  save-if: ${{ github.ref == 'refs/heads/main' }}
-            - name: Install latest nextest release
-              uses: taiki-e/install-action@nextest
-
-            - name: Setup external services
-              working-directory: tests-integration/fixtures
-              run: ../../.github/scripts/pull-test-deps-images.sh && docker compose up -d --wait
-
-            - name: Run nextest cases
-              run: cargo nextest run --workspace -F dashboard -F pg_kvbackend -F mysql_kvbackend -F vector_index
-              env:
-                  CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
-                  RUST_BACKTRACE: 1
-                  RUST_MIN_STACK: 8388608 # 8MB
-                  CARGO_INCREMENTAL: 0
-                  GT_S3_BUCKET: ${{ vars.AWS_CI_TEST_BUCKET }}
-                  GT_S3_ACCESS_KEY_ID: ${{ secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
-                  GT_S3_ACCESS_KEY: ${{ secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
-                  GT_S3_REGION: ${{ vars.AWS_CI_TEST_BUCKET_REGION }}
-                  GT_MINIO_BUCKET: greptime
-                  GT_MINIO_ACCESS_KEY_ID: superpower_ci_user
-                  GT_MINIO_ACCESS_KEY: superpower_password
-                  GT_MINIO_REGION: us-west-2
-                  GT_MINIO_ENDPOINT_URL: http://127.0.0.1:9000
-                  GT_ETCD_TLS_ENDPOINTS: https://127.0.0.1:2378
-                  GT_ETCD_ENDPOINTS: http://127.0.0.1:2379
-                  GT_POSTGRES_ENDPOINTS: postgres://greptimedb:admin@127.0.0.1:5432/postgres
-                  GT_POSTGRES15_ENDPOINTS: postgres://test_user:test_password@127.0.0.1:5433/postgres
-                  GT_POSTGRES15_SCHEMA: test_schema
-                  GT_MYSQL_ENDPOINTS: mysql://greptimedb:admin@127.0.0.1:3306/mysql
-                  GT_KAFKA_ENDPOINTS: 127.0.0.1:9092
-                  GT_KAFKA_SASL_ENDPOINTS: 127.0.0.1:9093
-                  UNITTEST_LOG_DIR: "__unittest_logs"
-
-    coverage:
-        if: ${{ github.repository == 'GreptimeTeam/greptimedb' && github.event_name == 'merge_group' }}
-        runs-on: ubuntu-22.04-8-cores
-        timeout-minutes: 60
-        steps:
-            - uses: actions/checkout@v4
-              with:
-                  persist-credentials: false
-            - uses: arduino/setup-protoc@v3
-              with:
-                  repo-token: ${{ secrets.GITHUB_TOKEN }}
-            - uses: rui314/setup-mold@v1
-            - name: Install toolchain
-              uses: actions-rust-lang/setup-rust-toolchain@v1
-              with:
-                  components: llvm-tools
-                  cache: false
-            - name: Rust Cache
-              uses: Swatinem/rust-cache@v2
-              with:
-                  # Shares cross multiple jobs
-                  shared-key: "coverage-test"
-                  save-if: ${{ github.ref == 'refs/heads/main' }}
-            - name: Install latest nextest release
-              uses: taiki-e/install-action@nextest
-            - name: Install cargo-llvm-cov
-              uses: taiki-e/install-action@cargo-llvm-cov
-
-            - name: Setup external services
-              working-directory: tests-integration/fixtures
-              run: ../../.github/scripts/pull-test-deps-images.sh && docker compose up -d --wait
-
-            - name: Run nextest cases
-              run: cargo llvm-cov nextest --workspace --lcov --output-path lcov.info -F dashboard -F pg_kvbackend -F mysql_kvbackend -F vector_index
-              env:
-                  CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
-                  RUST_BACKTRACE: 1
-                  CARGO_INCREMENTAL: 0
-                  GT_S3_BUCKET: ${{ vars.AWS_CI_TEST_BUCKET }}
-                  GT_S3_ACCESS_KEY_ID: ${{ secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
-                  GT_S3_ACCESS_KEY: ${{ secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
-                  GT_S3_REGION: ${{ vars.AWS_CI_TEST_BUCKET_REGION }}
-                  GT_MINIO_BUCKET: greptime
-                  GT_MINIO_ACCESS_KEY_ID: superpower_ci_user
-                  GT_MINIO_ACCESS_KEY: superpower_password
-                  GT_MINIO_REGION: us-west-2
-                  GT_MINIO_ENDPOINT_URL: http://127.0.0.1:9000
-                  GT_ETCD_TLS_ENDPOINTS: https://127.0.0.1:2378
-                  GT_ETCD_ENDPOINTS: http://127.0.0.1:2379
-                  GT_POSTGRES_ENDPOINTS: postgres://greptimedb:admin@127.0.0.1:5432/postgres
-                  GT_POSTGRES15_ENDPOINTS: postgres://test_user:test_password@127.0.0.1:5433/postgres
-                  GT_POSTGRES15_SCHEMA: test_schema
-                  GT_MYSQL_ENDPOINTS: mysql://greptimedb:admin@127.0.0.1:3306/mysql
-                  GT_KAFKA_ENDPOINTS: 127.0.0.1:9092
-                  GT_KAFKA_SASL_ENDPOINTS: 127.0.0.1:9093
-                  UNITTEST_LOG_DIR: "__unittest_logs"
-            - name: Codecov upload
-              uses: codecov/codecov-action@v4
-              with:
-                  token: ${{ secrets.CODECOV_TOKEN }}
-                  files: ./lcov.info
-                  flags: rust
-                  fail_ci_if_error: false
-                  verbose: true
-
-    run-multi-lang-tests:
-        name: Run Multi-language SDK Tests
-        needs: build
-        uses: ./.github/workflows/run-multi-lang-tests.yml
+  check-typos-and-docs:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    name: Check typos and docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
         with:
-            artifact-name: bins
+          persist-credentials: false
+      - uses: crate-ci/typos@master
+      - name: Check the config docs
+        run: |
+          make config-docs && \
+          git diff --name-only --exit-code ./config/config.md  \
+          || (echo "'config/config.md' is not up-to-date, please run 'make config-docs'." && exit 1)
 
-    # compat:
-    #   if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
-    #   name: Compatibility Test
-    #   needs: build
-    #   runs-on: ubuntu-22.04
-    #   timeout-minutes: 60
-    #   steps:
-    #     - uses: actions/checkout@v4
-    #     - name: Download pre-built binaries
-    #       uses: actions/download-artifact@v4
-    #       with:
-    #         name: bins
-    #         path: .
-    #     - name: Unzip binaries
-    #       run: |
-    #         mkdir -p ./bins/current
-    #         tar -xvf ./bins.tar.gz --strip-components=1 -C ./bins/current
-    #     - run: ./tests/compat/test-compat.sh 0.6.0
+  license-header-check:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    runs-on: ubuntu-latest
+    name: Check License Header
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: korandoru/hawkeye@v5
+
+  check:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    name: Check
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ ubuntu-latest ]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Shares across multiple jobs
+          # Shares with `Clippy` job
+          shared-key: "check-lint"
+          cache-all-crates: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Run cargo check
+        run: cargo check --locked --workspace --all-targets
+
+  toml:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    name: Toml Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Install taplo
+        run: cargo +stable install taplo-cli --version ^0.9 --locked --force
+      - name: Run taplo
+        run: taplo format --check
+
+  build:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    name: Build GreptimeDB binaries
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ ubuntu-latest ]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Shares across multiple jobs
+          shared-key: "build-binaries"
+          cache-all-crates: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install cargo-gc-bin
+        shell: bash
+        run: cargo install cargo-gc-bin --force
+      - name: Build greptime binaries
+        shell: bash
+        # `cargo gc` will invoke `cargo build` with specified args
+        run: cargo gc -- --bin greptime --bin sqlness-runner --features "pg_kvbackend,mysql_kvbackend"
+      - name: Pack greptime binaries
+        shell: bash
+        run: |
+          mkdir bins && \
+          mv ./target/debug/greptime bins && \
+          mv ./target/debug/sqlness-runner bins
+      - name: Print greptime binaries info
+        run: ls -lh bins
+      - name: Upload artifacts
+        uses: ./.github/actions/upload-artifacts
+        with:
+          artifacts-dir: bins
+          version: current
+
+  fuzztest:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    name: Fuzz Test
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [ "fuzz_create_table", "fuzz_alter_table", "fuzz_create_database", "fuzz_create_logical_table", "fuzz_alter_logical_table", "fuzz_insert", "fuzz_insert_logical_table" ]
+    steps:
+      - name: Remove unused software
+        run: |
+          echo "Disk space before:"
+          df -h
+          [[ -d /usr/share/dotnet ]] && sudo rm -rf /usr/share/dotnet
+          [[ -d /usr/local/lib/android ]] && sudo rm -rf /usr/local/lib/android
+          [[ -d /opt/ghc ]] && sudo rm -rf /opt/ghc
+          [[ -d /opt/hostedtoolcache/CodeQL ]] && sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          sudo docker builder prune -a
+          echo "Disk space after:"
+          df -h
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Set Rust Fuzz
+        shell: bash
+        run: |
+          sudo apt-get install -y libfuzzer-14-dev
+          rustup install nightly
+          cargo +nightly install cargo-fuzz cargo-gc-bin --force
+      - name: Download pre-built binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: bins
+          path: .
+      - name: Unzip binaries
+        run: |
+          tar -xvf ./bins.tar.gz
+          rm ./bins.tar.gz
+      - name: Run GreptimeDB
+        run: |
+          ./bins/greptime standalone start&
+      - name: Fuzz Test
+        uses: ./.github/actions/fuzz-test
+        env:
+          CUSTOM_LIBFUZZER_PATH: /usr/lib/llvm-14/lib/libFuzzer.a
+          GT_MYSQL_ADDR: 127.0.0.1:4002
+        with:
+          target: ${{ matrix.target }}
+          max-total-time: 120
+
+  unstable-fuzztest:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    name: Unstable Fuzz Test
+    needs: build-greptime-ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [ "unstable_fuzz_create_table_standalone" ]
+    steps:
+      - name: Remove unused software
+        run: |
+          echo "Disk space before:"
+          df -h
+          [[ -d /usr/share/dotnet ]] && sudo rm -rf /usr/share/dotnet
+          [[ -d /usr/local/lib/android ]] && sudo rm -rf /usr/local/lib/android
+          [[ -d /opt/ghc ]] && sudo rm -rf /opt/ghc
+          [[ -d /opt/hostedtoolcache/CodeQL ]] && sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          sudo docker builder prune -a
+          echo "Disk space after:"
+          df -h
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Set Rust Fuzz
+        shell: bash
+        run: |
+          sudo apt update && sudo apt install -y libfuzzer-14-dev
+          cargo install cargo-fuzz cargo-gc-bin --force
+      - name: Download pre-built binary
+        uses: actions/download-artifact@v4
+        with:
+          name: bin
+          path: .
+      - name: Unzip binary
+        run: |
+          tar -xvf ./bin.tar.gz
+          rm ./bin.tar.gz
+      - name: Run Fuzz Test
+        uses: ./.github/actions/fuzz-test
+        env:
+          CUSTOM_LIBFUZZER_PATH: /usr/lib/llvm-14/lib/libFuzzer.a
+          GT_MYSQL_ADDR: 127.0.0.1:4002
+          GT_FUZZ_BINARY_PATH: ./bin/greptime
+          GT_FUZZ_INSTANCE_ROOT_DIR: /tmp/unstable-greptime/
+        with:
+          target: ${{ matrix.target }}
+          max-total-time: 120
+          unstable: 'true'
+      - name: Upload unstable fuzz test logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unstable-fuzz-logs
+          path: /tmp/unstable-greptime/
+          retention-days: 3
+      - name: Describe pods
+        if: failure()
+        shell: bash
+        run: |
+          kubectl describe pod -n my-greptimedb
+
+  build-greptime-ci:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    name: Build GreptimeDB binary (profile-CI)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ ubuntu-latest ]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Shares across multiple jobs
+          shared-key: "build-greptime-ci"
+          cache-all-crates: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install cargo-gc-bin
+        shell: bash
+        run: cargo install cargo-gc-bin --force
+      - name: Build greptime binary
+        shell: bash
+        # `cargo gc` will invoke `cargo build` with specified args
+        run: cargo gc --profile ci -- --bin greptime --features "pg_kvbackend,mysql_kvbackend"
+      - name: Pack greptime binary
+        shell: bash
+        run: |
+          mkdir bin && \
+          mv ./target/ci/greptime bin
+      - name: Print greptime binaries info
+        run: ls -lh bin
+      - name: Upload artifacts
+        uses: ./.github/actions/upload-artifacts
+        with:
+          artifacts-dir: bin
+          version: current
+
+  distributed-fuzztest:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    name: Fuzz Test (Distributed, ${{ matrix.mode.name }}, ${{ matrix.target }})
+    runs-on: ubuntu-latest
+    needs:  build-greptime-ci
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [ "fuzz_create_table", "fuzz_alter_table", "fuzz_create_database", "fuzz_create_logical_table", "fuzz_alter_logical_table", "fuzz_insert", "fuzz_insert_logical_table" ]
+        mode:
+          - name: "Remote WAL"
+            minio: true
+            kafka: true
+            values: "with-remote-wal.yaml"
+    steps:
+      - name: Remove unused software
+        run: |
+          echo "Disk space before:"
+          df -h
+          [[ -d /usr/share/dotnet ]] && sudo rm -rf /usr/share/dotnet
+          [[ -d /usr/local/lib/android ]] && sudo rm -rf /usr/local/lib/android
+          [[ -d /opt/ghc ]] && sudo rm -rf /opt/ghc
+          [[ -d /opt/hostedtoolcache/CodeQL ]] && sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          sudo docker builder prune -a
+          echo "Disk space after:"
+          df -h
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Setup Kind
+        uses: ./.github/actions/setup-kind
+      - if: matrix.mode.minio
+        name: Setup Minio
+        uses: ./.github/actions/setup-minio
+      - if: matrix.mode.kafka
+        name: Setup Kafka cluster
+        uses: ./.github/actions/setup-kafka-cluster
+      - name: Setup Etcd cluster
+        uses: ./.github/actions/setup-etcd-cluster
+      # Prepares for fuzz tests
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Set Rust Fuzz
+        shell: bash
+        run: |
+          sudo apt-get install -y libfuzzer-14-dev
+          rustup install nightly
+          cargo +nightly install cargo-fuzz cargo-gc-bin --force
+      # Downloads ci image
+      - name: Download pre-built binariy
+        uses: actions/download-artifact@v4
+        with:
+          name: bin
+          path: .
+      - name: Unzip binary
+        run: |
+          tar -xvf ./bin.tar.gz
+          rm ./bin.tar.gz
+      - name: Build and push GreptimeDB image
+        uses: ./.github/actions/build-and-push-ci-image
+      - name: Wait for etcd
+        run: |
+          kubectl wait \
+            --for=condition=Ready \
+            pod -l app.kubernetes.io/instance=etcd \
+            --timeout=120s \
+            -n etcd-cluster
+      - if: matrix.mode.minio
+        name: Wait for minio
+        run: |
+          kubectl wait \
+            --for=condition=Ready \
+            pod -l app=minio \
+            --timeout=120s \
+            -n minio
+      - if: matrix.mode.kafka
+        name: Wait for kafka
+        run: |
+          kubectl wait \
+            --for=condition=Ready \
+            pod -l app.kubernetes.io/instance=kafka \
+            --timeout=120s \
+            -n kafka-cluster
+      - name: Print etcd info
+        shell: bash
+        run: kubectl get all --show-labels -n etcd-cluster
+      # Setup cluster for test
+      - name: Setup GreptimeDB cluster
+        uses: ./.github/actions/setup-greptimedb-cluster
+        with:
+          image-registry: localhost:5001
+          values-filename: ${{ matrix.mode.values }}
+      - name: Port forward (mysql)
+        run: |
+          kubectl port-forward service/my-greptimedb-frontend 4002:4002 -n my-greptimedb&
+      - name: Fuzz Test
+        uses: ./.github/actions/fuzz-test
+        env:
+          CUSTOM_LIBFUZZER_PATH: /usr/lib/llvm-14/lib/libFuzzer.a
+          GT_MYSQL_ADDR: 127.0.0.1:4002
+        with:
+          target: ${{ matrix.target }}
+          max-total-time: 120
+      - name: Describe Nodes
+        if: failure()
+        shell: bash
+        run: |
+          kubectl describe nodes
+      - name: Describe pod
+        if: failure()
+        shell: bash
+        run: |
+          kubectl describe pod -n my-greptimedb
+      - name: Export kind logs
+        if: failure()
+        shell: bash
+        run: |
+          kind export logs /tmp/kind
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-tests-kind-logs-${{ matrix.mode.name }}-${{ matrix.target }}
+          path: /tmp/kind
+          retention-days: 3
+      - name: Delete cluster
+        if: success()
+        shell: bash
+        run: |
+          kind delete cluster
+          docker stop $(docker ps -a -q)
+          docker rm $(docker ps -a -q)
+          docker system prune -f
+
+  distributed-fuzztest-with-chaos:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    name: Fuzz Test with Chaos (Distributed, ${{ matrix.mode.name }}, ${{ matrix.target }})
+    runs-on: ubuntu-latest
+    needs:  build-greptime-ci
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ["fuzz_migrate_mito_regions", "fuzz_migrate_metric_regions", "fuzz_failover_mito_regions", "fuzz_failover_metric_regions"]
+        mode:
+          - name: "Remote WAL"
+            minio: true
+            kafka: true
+            values: "with-remote-wal.yaml"
+        include:
+          - target: "fuzz_migrate_mito_regions"
+            mode:
+              name: "Local WAL"
+              minio: true
+              kafka: false
+              values: "with-minio.yaml"
+          - target: "fuzz_migrate_metric_regions"
+            mode:
+              name: "Local WAL"
+              minio: true
+              kafka: false
+              values: "with-minio.yaml"
+    steps:
+      - name: Remove unused software
+        run: |
+          echo "Disk space before:"
+          df -h
+          [[ -d /usr/share/dotnet ]] && sudo rm -rf /usr/share/dotnet
+          [[ -d /usr/local/lib/android ]] && sudo rm -rf /usr/local/lib/android
+          [[ -d /opt/ghc ]] && sudo rm -rf /opt/ghc
+          [[ -d /opt/hostedtoolcache/CodeQL ]] && sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          sudo docker builder prune -a
+          echo "Disk space after:"
+          df -h
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Setup Kind
+        uses: ./.github/actions/setup-kind
+      - name: Setup Chaos Mesh
+        uses: ./.github/actions/setup-chaos
+      - if: matrix.mode.minio
+        name: Setup Minio
+        uses: ./.github/actions/setup-minio
+      - if: matrix.mode.kafka
+        name: Setup Kafka cluster
+        uses: ./.github/actions/setup-kafka-cluster
+      - name: Setup Etcd cluster
+        uses: ./.github/actions/setup-etcd-cluster
+      # Prepares for fuzz tests
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Set Rust Fuzz
+        shell: bash
+        run: |
+          sudo apt-get install -y libfuzzer-14-dev
+          rustup install nightly
+          cargo +nightly install cargo-fuzz cargo-gc-bin --force
+      # Downloads ci image
+      - name: Download pre-built binariy
+        uses: actions/download-artifact@v4
+        with:
+          name: bin
+          path: .
+      - name: Unzip binary
+        run: |
+          tar -xvf ./bin.tar.gz
+          rm ./bin.tar.gz
+      - name: Build and push GreptimeDB image
+        uses: ./.github/actions/build-and-push-ci-image
+      - name: Wait for etcd
+        run: |
+          kubectl wait \
+            --for=condition=Ready \
+            pod -l app.kubernetes.io/instance=etcd \
+            --timeout=120s \
+            -n etcd-cluster
+      - if: matrix.mode.minio
+        name: Wait for minio
+        run: |
+          kubectl wait \
+            --for=condition=Ready \
+            pod -l app=minio \
+            --timeout=120s \
+            -n minio
+      - if: matrix.mode.kafka
+        name: Wait for kafka
+        run: |
+          kubectl wait \
+            --for=condition=Ready \
+            pod -l app.kubernetes.io/instance=kafka \
+            --timeout=120s \
+            -n kafka-cluster
+      - name: Print etcd info
+        shell: bash
+        run: kubectl get all --show-labels -n etcd-cluster
+      # Setup cluster for test
+      - name: Setup GreptimeDB cluster
+        uses: ./.github/actions/setup-greptimedb-cluster
+        with:
+          image-registry: localhost:5001
+          values-filename: ${{ matrix.mode.values }}
+          enable-region-failover: ${{ matrix.mode.kafka }}
+      - name: Port forward (mysql)
+        run: |
+          kubectl port-forward service/my-greptimedb-frontend 4002:4002 -n my-greptimedb&
+      - name: Fuzz Test
+        uses: ./.github/actions/fuzz-test
+        env:
+          CUSTOM_LIBFUZZER_PATH: /usr/lib/llvm-14/lib/libFuzzer.a
+          GT_MYSQL_ADDR: 127.0.0.1:4002
+        with:
+          target: ${{ matrix.target }}
+          max-total-time: 120
+      - name: Describe Nodes
+        if: failure()
+        shell: bash
+        run: |
+          kubectl describe nodes
+      - name: Describe pods
+        if: failure()
+        shell: bash
+        run: |
+          kubectl describe pod -n my-greptimedb
+      - name: Export kind logs
+        if: failure()
+        shell: bash
+        run: |
+          kind export logs /tmp/kind
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-tests-kind-logs-${{ matrix.mode.name }}-${{ matrix.target }}
+          path: /tmp/kind
+          retention-days: 3
+      - name: Delete cluster
+        if: success()
+        shell: bash
+        run: |
+          kind delete cluster
+          docker stop $(docker ps -a -q)
+          docker rm $(docker ps -a -q)
+          docker system prune -f
+
+  sqlness:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    name: Sqlness Test (${{ matrix.mode.name }})
+    needs: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest ]
+        mode:
+          - name: "Basic"
+            opts: ""
+            kafka: false
+          - name: "Remote WAL"
+            opts: "-w kafka -k 127.0.0.1:9092"
+            kafka: true
+          - name: "PostgreSQL KvBackend"
+            opts: "--setup-pg"
+            kafka: false
+          - name: "MySQL Kvbackend"
+            opts: "--setup-mysql"
+            kafka: false
+          - name: "Flat format"
+            opts: "--enable-flat-format"
+            kafka: false
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - if: matrix.mode.kafka
+        name: Setup kafka server
+        working-directory: tests-integration/fixtures
+        run:  ../../.github/scripts/pull-test-deps-images.sh && docker compose up -d --wait kafka
+
+      - name: Download pre-built binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: bins
+          path: .
+      - name: Unzip binaries
+        run: tar -xvf ./bins.tar.gz
+      - name: Run sqlness
+        run: RUST_BACKTRACE=1 ./bins/sqlness-runner bare ${{ matrix.mode.opts }} -c ./tests/cases --bins-dir ./bins --preserve-state
+      - name: Upload sqlness logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sqlness-logs-${{ matrix.mode.name }}
+          path: /tmp/sqlness*
+          retention-days: 3
+
+  fmt:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: rustfmt
+      - name: Check format
+        run: make fmt-check
+
+  clippy:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    name: Clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: clippy
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Shares across multiple jobs
+          # Shares with `Check` job
+          shared-key: "check-lint"
+          cache-all-crates: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Run cargo clippy
+        run: make clippy
+
+  check-udeps:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    name: Check Unused Dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "check-udeps"
+          cache-all-crates: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install cargo-udeps
+        run: cargo install cargo-udeps --locked
+      - name: Check unused dependencies
+        run: make check-udeps
+
+  conflict-check:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    name: Check for conflict
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Merge Conflict Finder
+        uses: olivernybroe/action-conflict-finder@v4.0
+
+  test:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && github.event_name != 'merge_group' }}
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 60
+    needs: [conflict-check, clippy, fmt, check-udeps]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: rui314/setup-mold@v1
+      - name: Install toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Shares cross multiple jobs
+          shared-key: "coverage-test"
+          cache-all-crates: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install latest nextest release
+        uses: taiki-e/install-action@nextest
+
+      - name: Setup external services
+        working-directory: tests-integration/fixtures
+        run: ../../.github/scripts/pull-test-deps-images.sh && docker compose up -d --wait
+
+      - name: Run nextest cases
+        run: cargo nextest run --workspace -F dashboard -F pg_kvbackend -F mysql_kvbackend -F vector_index
+        env:
+          CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+          RUST_BACKTRACE: 1
+          RUST_MIN_STACK: 8388608 # 8MB
+          CARGO_INCREMENTAL: 0
+          GT_S3_BUCKET: ${{ vars.AWS_CI_TEST_BUCKET }}
+          GT_S3_ACCESS_KEY_ID: ${{ secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
+          GT_S3_ACCESS_KEY: ${{ secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
+          GT_S3_REGION: ${{ vars.AWS_CI_TEST_BUCKET_REGION }}
+          GT_MINIO_BUCKET: greptime
+          GT_MINIO_ACCESS_KEY_ID: superpower_ci_user
+          GT_MINIO_ACCESS_KEY: superpower_password
+          GT_MINIO_REGION: us-west-2
+          GT_MINIO_ENDPOINT_URL: http://127.0.0.1:9000
+          GT_ETCD_TLS_ENDPOINTS: https://127.0.0.1:2378
+          GT_ETCD_ENDPOINTS: http://127.0.0.1:2379
+          GT_POSTGRES_ENDPOINTS: postgres://greptimedb:admin@127.0.0.1:5432/postgres
+          GT_POSTGRES15_ENDPOINTS: postgres://test_user:test_password@127.0.0.1:5433/postgres
+          GT_POSTGRES15_SCHEMA: test_schema
+          GT_MYSQL_ENDPOINTS: mysql://greptimedb:admin@127.0.0.1:3306/mysql
+          GT_KAFKA_ENDPOINTS: 127.0.0.1:9092
+          GT_KAFKA_SASL_ENDPOINTS: 127.0.0.1:9093
+          UNITTEST_LOG_DIR: "__unittest_logs"
+
+  coverage:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && github.event_name == 'merge_group' }}
+    runs-on: ubuntu-22.04-8-cores
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: rui314/setup-mold@v1
+      - name: Install toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: llvm-tools
+          cache: false
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Shares cross multiple jobs
+          shared-key: "coverage-test"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install latest nextest release
+        uses: taiki-e/install-action@nextest
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Setup external services
+        working-directory: tests-integration/fixtures
+        run: ../../.github/scripts/pull-test-deps-images.sh && docker compose up -d --wait
+
+      - name: Run nextest cases
+        run: cargo llvm-cov nextest --workspace --lcov --output-path lcov.info -F dashboard -F pg_kvbackend -F mysql_kvbackend -F vector_index
+        env:
+          CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+          RUST_BACKTRACE: 1
+          CARGO_INCREMENTAL: 0
+          GT_S3_BUCKET: ${{ vars.AWS_CI_TEST_BUCKET }}
+          GT_S3_ACCESS_KEY_ID: ${{ secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
+          GT_S3_ACCESS_KEY: ${{ secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
+          GT_S3_REGION: ${{ vars.AWS_CI_TEST_BUCKET_REGION }}
+          GT_MINIO_BUCKET: greptime
+          GT_MINIO_ACCESS_KEY_ID: superpower_ci_user
+          GT_MINIO_ACCESS_KEY: superpower_password
+          GT_MINIO_REGION: us-west-2
+          GT_MINIO_ENDPOINT_URL: http://127.0.0.1:9000
+          GT_ETCD_TLS_ENDPOINTS: https://127.0.0.1:2378
+          GT_ETCD_ENDPOINTS: http://127.0.0.1:2379
+          GT_POSTGRES_ENDPOINTS: postgres://greptimedb:admin@127.0.0.1:5432/postgres
+          GT_POSTGRES15_ENDPOINTS: postgres://test_user:test_password@127.0.0.1:5433/postgres
+          GT_POSTGRES15_SCHEMA: test_schema
+          GT_MYSQL_ENDPOINTS: mysql://greptimedb:admin@127.0.0.1:3306/mysql
+          GT_KAFKA_ENDPOINTS: 127.0.0.1:9092
+          GT_KAFKA_SASL_ENDPOINTS: 127.0.0.1:9093
+          UNITTEST_LOG_DIR: "__unittest_logs"
+      - name: Codecov upload
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./lcov.info
+          flags: rust
+          fail_ci_if_error: false
+          verbose: true
+
+  run-multi-lang-tests:
+    name: Run Multi-language SDK Tests
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    uses: ./.github/workflows/run-multi-lang-tests.yml
+    with:
+      artifact-name: bins
+
+
+  # compat:
+  #   if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+  #   name: Compatibility Test
+  #   needs: build
+  #   runs-on: ubuntu-22.04
+  #   timeout-minutes: 60
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - name: Download pre-built binaries
+  #       uses: actions/download-artifact@v4
+  #       with:
+  #         name: bins
+  #         path: .
+  #     - name: Unzip binaries
+  #       run: |
+  #         mkdir -p ./bins/current
+  #         tar -xvf ./bins.tar.gz --strip-components=1 -C ./bins/current
+  #     - run: ./tests/compat/test-compat.sh 0.6.0
