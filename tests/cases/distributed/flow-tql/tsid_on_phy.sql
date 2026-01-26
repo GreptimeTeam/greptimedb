@@ -52,9 +52,9 @@ CREATE TABLE IF NOT EXISTS test_tsid (
 INSERT INTO test_tsid
   (ts, v, tag1, tag2, le, tag4, tag5, tag8, tag6, tag7)
 VALUES
-  ('2026-01-23T03:40:00Z', 10.0, 'istio-ingressgateway', 'outbound', '0.5',  'svc-a', 'prod', 'peer.example', 'svc-b', 'prod'),
+  ('2026-01-23T03:40:00Z', 2.0, 'istio-ingressgateway', 'outbound', '0.5',  'svc-a', 'prod', 'peer.example', 'svc-b', 'prod'),
   ('2026-01-23T03:41:00Z', 5.0,  'istio-ingressgateway', 'outbound', '0.9',  'svc-a', 'prod', 'peer.example', 'svc-b', 'prod'),
-  ('2026-01-23T03:41:30Z', 2.0,  'istio-ingressgateway', 'outbound', '+Inf', 'svc-a', 'prod', 'peer.example', 'svc-b', 'prod');
+  ('2026-01-23T03:41:30Z', 10.0,  'istio-ingressgateway', 'outbound', '+Inf', 'svc-a', 'prod', 'peer.example', 'svc-b', 'prod');
 
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (
