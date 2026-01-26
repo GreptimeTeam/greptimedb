@@ -30,6 +30,7 @@ use crate::error::{PruneFileSnafu, Result};
 use crate::metrics::PRUNER_ACTIVE_BUILDERS;
 use crate::read::range::{FileRangeBuilder, RowGroupIndex};
 use crate::read::scan_region::StreamContext;
+use crate::read::scan_util::PartitionMetrics;
 use crate::sst::parquet::file_range::FileRange;
 use crate::sst::parquet::reader::ReaderMetrics;
 
@@ -80,18 +81,22 @@ impl PartitionPruner {
     pub async fn build_file_ranges(
         &self,
         index: RowGroupIndex,
+        partition_metrics: &PartitionMetrics,
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<SmallVec<[FileRange; 2]>> {
         let file_index = index.index - self.pruner.inner.stream_ctx.input.num_memtables();
 
         // Delegate to underlying Pruner
-        let ranges = self.pruner.build_file_ranges(index, reader_metrics).await?;
+        let ranges = self
+            .pruner
+            .build_file_ranges(index, partition_metrics, reader_metrics)
+            .await?;
 
         // Find position and trigger pre-fetch for upcoming files
         if let Some(pos) = self.file_indices.iter().position(|&idx| idx == file_index) {
             let prev_pos = self.current_position.fetch_max(pos, Ordering::Relaxed);
             if pos > prev_pos || prev_pos == 0 {
-                self.prefetch_upcoming_files(pos);
+                self.prefetch_upcoming_files(pos, partition_metrics);
             }
         }
 
@@ -99,13 +104,13 @@ impl PartitionPruner {
     }
 
     /// Pre-fetches upcoming files starting from the given position.
-    fn prefetch_upcoming_files(&self, current_pos: usize) {
+    fn prefetch_upcoming_files(&self, current_pos: usize, partition_metrics: &PartitionMetrics) {
         let start = current_pos + 1;
         let end = (start + PREFETCH_COUNT).min(self.file_indices.len());
 
         for i in start..end {
             self.pruner
-                .get_file_builder_background(self.file_indices[i]);
+                .get_file_builder_background(self.file_indices[i], Some(partition_metrics.clone()));
         }
     }
 }
@@ -163,6 +168,8 @@ struct PruneRequest {
     file_index: usize,
     /// Oneshot channel to send back the result.
     response_tx: Option<oneshot::Sender<Result<Arc<FileRangeBuilder>>>>,
+    /// Partition metrics for merging reader metrics.
+    partition_metrics: Option<PartitionMetrics>,
 }
 
 impl Pruner {
@@ -239,12 +246,15 @@ impl Pruner {
     pub async fn build_file_ranges(
         &self,
         index: RowGroupIndex,
+        partition_metrics: &PartitionMetrics,
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<SmallVec<[FileRange; 2]>> {
         let file_index = index.index - self.inner.stream_ctx.input.num_memtables();
 
         // Get builder (from cache or by pruning)
-        let builder = self.get_file_builder(file_index, reader_metrics).await?;
+        let builder = self
+            .get_file_builder(file_index, partition_metrics, reader_metrics)
+            .await?;
 
         // Build ranges
         let mut ranges = SmallVec::new();
@@ -260,6 +270,7 @@ impl Pruner {
     async fn get_file_builder(
         &self,
         file_index: usize,
+        partition_metrics: &PartitionMetrics,
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<Arc<FileRangeBuilder>> {
         // Fast path: check cache
@@ -283,6 +294,7 @@ impl Pruner {
         let request = PruneRequest {
             file_index,
             response_tx: Some(response_tx),
+            partition_metrics: Some(partition_metrics.clone()),
         };
 
         // Send request to worker
@@ -308,7 +320,11 @@ impl Pruner {
     }
 
     /// Gets or creates the FileRangeBuilder for a file.
-    pub fn get_file_builder_background(&self, file_index: usize) {
+    pub fn get_file_builder_background(
+        &self,
+        file_index: usize,
+        partition_metrics: Option<PartitionMetrics>,
+    ) {
         // Fast path: check cache
         {
             let entry = self.inner.file_entries[file_index].lock().unwrap();
@@ -326,6 +342,7 @@ impl Pruner {
         let request = PruneRequest {
             file_index,
             response_tx: None,
+            partition_metrics,
         };
 
         // Send request to worker
@@ -384,7 +401,6 @@ impl Pruner {
         mut rx: mpsc::Receiver<PruneRequest>,
         inner: Arc<PrunerInner>,
     ) {
-        let mut cumulative_metrics = ReaderMetrics::default();
         let mut worker_cache_hit = 0;
         let mut worker_cache_miss = 0;
         let mut pruned_files = Vec::new();
@@ -393,6 +409,7 @@ impl Pruner {
             let PruneRequest {
                 file_index,
                 response_tx,
+                partition_metrics,
             } = request;
 
             // Check if already cached or in-progress
@@ -437,10 +454,17 @@ impl Pruner {
                     }
 
                     debug!(
-                        "Pruner worker {} pruned file_index: {}, metrics: {:?}",
-                        worker_id, file_index, metrics
+                        "Pruner worker {} pruned file_index: {}, file: {:?}, metrics: {:?}",
+                        worker_id,
+                        file_index,
+                        file.file_id(),
+                        metrics
                     );
-                    cumulative_metrics.merge_from(&metrics);
+
+                    // Merge metrics to partition if provided
+                    if let Some(part_metrics) = &partition_metrics {
+                        part_metrics.merge_reader_metrics(&metrics, None);
+                    }
                 }
                 Err(e) => {
                     entry.status = PruneStatus::Pending; // Reset status on error
@@ -455,13 +479,12 @@ impl Pruner {
             }
         }
 
-        common_telemetry::info!(
-            "Pruner worker {} finished, cache_hit: {}, cache_miss: {}, files: {:?}, total_metrics: {:?}",
+        common_telemetry::debug!(
+            "Pruner worker {} finished, cache_hit: {}, cache_miss: {}, files: {:?}",
             worker_id,
             worker_cache_hit,
             worker_cache_miss,
             pruned_files,
-            cumulative_metrics
         );
     }
 }

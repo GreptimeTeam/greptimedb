@@ -1275,7 +1275,7 @@ pub(crate) async fn scan_file_ranges(
         ..Default::default()
     };
     let ranges = partition_pruner
-        .build_file_ranges(index, &mut reader_metrics)
+        .build_file_ranges(index, &part_metrics, &mut reader_metrics)
         .await?;
     part_metrics.inc_num_file_ranges(ranges.len());
     part_metrics.merge_reader_metrics(&reader_metrics, None);
@@ -1328,7 +1328,7 @@ pub(crate) async fn scan_flat_file_ranges(
         ..Default::default()
     };
     let ranges = partition_pruner
-        .build_file_ranges(index, &mut reader_metrics)
+        .build_file_ranges(index, &part_metrics, &mut reader_metrics)
         .await?;
     part_metrics.inc_num_file_ranges(ranges.len());
     part_metrics.merge_reader_metrics(&reader_metrics, None);
