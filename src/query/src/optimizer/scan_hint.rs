@@ -106,8 +106,8 @@ impl ScanHintRule {
                             .take_vector_request_from_dummy(adapter, &table_scan.table_name)
                         {
                             adapter.with_vector_search_hint(vector_request);
-                            transformed = true;
                         }
+                        transformed = true;
                     }
                 }
                 if transformed {
