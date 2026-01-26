@@ -16,6 +16,7 @@ pub mod json_get;
 mod json_is;
 mod json_path_exists;
 mod json_path_match;
+mod json_path_query;
 mod json_to_string;
 mod parse_json;
 
@@ -51,5 +52,6 @@ impl JsonFunction {
 
         registry.register_scalar(json_path_exists::JsonPathExistsFunction::default());
         registry.register_scalar(json_path_match::JsonPathMatchFunction::default());
+        registry.register_scalar(json_path_query::JsonPathQueryFunction::default());
     }
 }
