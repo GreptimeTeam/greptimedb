@@ -53,7 +53,7 @@ use tower_http::trace::TraceLayer;
 
 use self::authorize::AuthState;
 use self::result::table_result::TableResponse;
-use crate::configurator::HttpConfiguratorRef;
+use crate::configurator::{HttpConfigurator, HttpConfiguratorListRef};
 use crate::elasticsearch;
 use crate::error::{
     AddressBindSnafu, AlreadyStartedSnafu, Error, InternalIoSnafu, InvalidHeaderValueSnafu,
@@ -1225,8 +1225,8 @@ impl Server for HttpServer {
             );
 
             let mut app = self.make_app();
-            if let Some(configurator) = self.plugins.get::<HttpConfiguratorRef<()>>() {
-                app = configurator
+            if let Some(configurators) = self.plugins.get::<HttpConfiguratorListRef<()>>() {
+                app = configurators
                     .configure_http(app, ())
                     .await
                     .context(OtherSnafu)?;

@@ -33,6 +33,55 @@ pub trait HttpConfigurator<C>: Send + Sync {
 
 pub type HttpConfiguratorRef<C> = Arc<dyn HttpConfigurator<C>>;
 
+/// A list of HTTP configurators that can be applied sequentially.
+///
+/// This allows multiple configurators to be registered and applied to a router
+/// in order. Each configurator receives the router from the previous one.
+#[derive(Default)]
+pub struct HttpConfiguratorList<C> {
+    configurators: Vec<HttpConfiguratorRef<C>>,
+}
+
+impl<C> HttpConfiguratorList<C> {
+    /// Creates a new empty configurator list.
+    pub fn new() -> Self {
+        Self {
+            configurators: Vec::new(),
+        }
+    }
+
+    /// Adds a configurator to the list.
+    pub fn push(&mut self, configurator: HttpConfiguratorRef<C>) {
+        self.configurators.push(configurator);
+    }
+
+    /// Returns true if the list is empty.
+    pub fn is_empty(&self) -> bool {
+        self.configurators.is_empty()
+    }
+
+    /// Returns the number of configurators in the list.
+    pub fn len(&self) -> usize {
+        self.configurators.len()
+    }
+}
+
+#[async_trait::async_trait]
+impl<C: Clone + Send + Sync + 'static> HttpConfigurator<C> for HttpConfiguratorList<C> {
+    async fn configure_http(
+        &self,
+        mut route: HttpRouter,
+        ctx: C,
+    ) -> std::result::Result<HttpRouter, BoxedError> {
+        for configurator in &self.configurators {
+            route = configurator.configure_http(route, ctx.clone()).await?;
+        }
+        Ok(route)
+    }
+}
+
+pub type HttpConfiguratorListRef<C> = Arc<HttpConfiguratorList<C>>;
+
 /// A configurator that customizes or enhances a gRPC router.
 #[async_trait::async_trait]
 pub trait GrpcRouterConfigurator<C>: Send + Sync {
