@@ -68,28 +68,13 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: ${{ inputs.artifact-name }}
-          path: artifact
+          path: .
 
-      - name: Setup greptime binary
-        run: |
-          mkdir -p bin
-          if [ "${{ inputs.artifact-is-tarball }}" = "true" ]; then
-            # Extract tarball and find greptime binary
-            tar -xzf artifact/*.tar.gz -C artifact
-            find artifact -name "greptime" -type f -exec cp {} bin/greptime \;
-          else
-            # Direct binary format
-            if [ -f artifact/greptime ]; then
-              cp artifact/greptime bin/greptime
-            elif [ -f artifact/bins/greptime ]; then
-              cp artifact/bins/greptime bin/greptime
-            else
-              cp artifact/* bin/greptime
-            fi
-          fi
-          chmod +x ./bin/greptime
-          ls -lh ./bin/greptime
-          ./bin/greptime --version
+      - name: Unzip binaries
+        run: tar -xvf ./${{ inputs.artifact-name }}.tar.gz
+
+      - name: Print greptime binary info
+        run: ls -lh ${{ inputs.artifact-name }} && file ${{ inputs.artifact-name }}/greptime
 
       - name: Setup Java 17
         uses: actions/setup-java@v4
@@ -135,7 +120,7 @@ jobs:
 
       - name: Start GreptimeDB standalone
         run: |
-          ./bin/greptime standalone start \
+          ./bins/greptime standalone start \
             --http-addr 0.0.0.0:${{ inputs.http-port }} \
             --rpc-addr 0.0.0.0:4001 \
             --mysql-addr 0.0.0.0:${{ inputs.mysql-port }} \
