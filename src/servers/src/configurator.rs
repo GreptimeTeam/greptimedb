@@ -108,7 +108,9 @@ pub type GrpcBuilderConfiguratorList<C> = Vec<GrpcBuilderConfiguratorRef<C>>;
 pub type GrpcBuilderConfiguratorListRef<C> = Arc<GrpcBuilderConfiguratorList<C>>;
 
 #[async_trait::async_trait]
-impl<C: Clone + Send + Sync + 'static> GrpcBuilderConfigurator<C> for GrpcBuilderConfiguratorList<C> {
+impl<C: Clone + Send + Sync + 'static> GrpcBuilderConfigurator<C>
+    for GrpcBuilderConfiguratorList<C>
+{
     async fn configure(
         &self,
         mut builder: GrpcServerBuilder,
