@@ -749,6 +749,58 @@ fn expand_part_col_aggr_part_col_aggr() {
 }
 
 #[test]
+fn expand_sort_part_col_aggr_part_col_aggr() {
+    // use logging for better debugging
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "t".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .sort(vec![
+            col("pk1").sort(true, false),
+            col("pk2").sort(true, false),
+        ])
+        .unwrap()
+        .aggregate(vec![col("pk1"), col("pk2")], vec![max(col("number"))])
+        .unwrap()
+        .aggregate(
+            vec![col("pk1"), col("pk2")],
+            vec![min(col("max(t.number)"))],
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let expected_original = [
+        // See DataFusion #14860 for change details.
+        "Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[min(max(t.number))]]",
+        "  Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[max(t.number)]]",
+        "    Sort: t.pk1 ASC NULLS LAST, t.pk2 ASC NULLS LAST",
+        "      TableScan: t",
+    ]
+    .join("\n");
+    assert_eq!(expected_original, plan.to_string());
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+
+    let expected = [
+        "Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[min(max(t.number))]]",
+        "  Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[max(t.number)]]",
+        "    Projection: t.pk1, t.pk2, t.pk3, t.ts, t.number",
+        "      MergeSort: t.pk1 ASC NULLS LAST, t.pk2 ASC NULLS LAST",
+        "        MergeScan [is_placeholder=false, remote_input=[",
+        "Sort: t.pk1 ASC NULLS LAST, t.pk2 ASC NULLS LAST",
+        "  TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
+#[test]
 fn expand_step_aggr_proj() {
     // use logging for better debugging
     init_default_ut_logging();
