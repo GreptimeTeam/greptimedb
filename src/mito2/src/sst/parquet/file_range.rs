@@ -271,8 +271,8 @@ impl FileRange {
     }
 
     /// Returns the helper to project batches.
-    pub(crate) fn reader_mapper(&self) -> Option<&FlatSparseMapper> {
-        self.context.reader_mapper()
+    pub(crate) fn compaction_projection_mapper(&self) -> Option<&FlatSparseMapper> {
+        self.context.compaction_projection_mapper()
     }
 
     /// Returns the file handle of the file range.
@@ -331,8 +331,8 @@ impl FileRangeContext {
     }
 
     /// Returns the helper to project batches.
-    pub(crate) fn reader_mapper(&self) -> Option<&FlatSparseMapper> {
-        self.base.reader_mapper.as_ref()
+    pub(crate) fn compaction_projection_mapper(&self) -> Option<&FlatSparseMapper> {
+        self.base.compaction_projection_mapper.as_ref()
     }
 
     /// Sets the `CompatBatch` to the context.
@@ -418,7 +418,7 @@ pub(crate) struct RangeBase {
     /// Optional helper to compat batches.
     pub(crate) compat_batch: Option<CompatBatch>,
     /// Optional helper to project batches.
-    pub(crate) reader_mapper: Option<FlatSparseMapper>,
+    pub(crate) compaction_projection_mapper: Option<FlatSparseMapper>,
     /// Mode to pre-filter columns.
     pub(crate) pre_filter_mode: PreFilterMode,
     /// Partition filter.

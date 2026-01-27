@@ -261,7 +261,7 @@ impl FlatReadFormat {
         match &self.parquet_adapter {
             ParquetAdapter::Flat(p) => &p.format_projection,
             ParquetAdapter::PrimaryKeyToFlat(p) => p
-                .old_format_projection
+                .primary_key_format_projection
                 .as_ref()
                 .unwrap_or(&p.format_projection),
         }
@@ -375,8 +375,8 @@ struct ParquetPrimaryKeyToFlat {
     convert_format: Option<FlatConvertFormat>,
     /// Projection computed for the flat format.
     format_projection: FormatProjection,
-    /// Whether to skip auto convert.
-    old_format_projection: Option<FormatProjection>,
+    /// Projection used when reading primary key format without auto convert.
+    primary_key_format_projection: Option<FormatProjection>,
 }
 
 impl ParquetPrimaryKeyToFlat {
@@ -413,7 +413,7 @@ impl ParquetPrimaryKeyToFlat {
         };
 
         let format = PrimaryKeyReadFormat::new(metadata.clone(), column_ids.iter().copied());
-        let old_format_projection = if skip_auto_convert {
+        let primary_key_format_projection = if skip_auto_convert {
             Some(FormatProjection {
                 projection_indices: format.projection_indices().to_vec(),
                 column_id_to_projected_index: format.field_id_to_projected_index().clone(),
@@ -426,7 +426,7 @@ impl ParquetPrimaryKeyToFlat {
             format,
             convert_format,
             format_projection,
-            old_format_projection,
+            primary_key_format_projection,
         }
     }
 

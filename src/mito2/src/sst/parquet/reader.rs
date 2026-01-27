@@ -357,7 +357,7 @@ impl ParquetReaderBuilder {
         // - region partition expr is not same with file partition expr
         // - flat format is enabled
         // - primary key encoding is sparse
-        let reader_mapper = if self.compaction
+        let compaction_projection_mapper = if self.compaction
             && !is_same_region_partition
             && self.flat_format
             && region_meta.primary_key_encoding == PrimaryKeyEncoding::Sparse
@@ -485,7 +485,7 @@ impl ParquetReaderBuilder {
                 prune_schema,
                 codec,
                 compat_batch: None,
-                reader_mapper,
+                compaction_projection_mapper,
                 pre_filter_mode: self.pre_filter_mode,
                 partition_filter,
             },

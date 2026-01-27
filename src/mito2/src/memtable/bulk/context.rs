@@ -17,7 +17,7 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use mito_codec::row_converter::{DensePrimaryKeyCodec, build_primary_key_codec};
+use mito_codec::row_converter::{build_primary_key_codec, DensePrimaryKeyCodec};
 use parquet::file::metadata::ParquetMetaData;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
@@ -97,7 +97,7 @@ impl BulkIterContext {
                 codec,
                 // we don't need to compat batch since all batch in memtable have the same schema.
                 compat_batch: None,
-                reader_mapper: None,
+                compaction_projection_mapper: None,
                 pre_filter_mode,
                 partition_filter: None,
             },

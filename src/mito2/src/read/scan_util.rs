@@ -1436,7 +1436,7 @@ pub fn build_flat_file_range_scan_stream(
                 })
                 .transpose()?;
 
-            let mapper = range.reader_mapper();
+            let mapper = range.compaction_projection_mapper();
             while let Some(record_batch) = reader.next_batch()? {
                 let record_batch = if let Some(mapper) = mapper {
                     let batch = mapper.project(record_batch)?;
