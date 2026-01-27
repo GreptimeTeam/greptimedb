@@ -143,6 +143,7 @@ mod tests {
                     })
                     .collect(),
             }),
+            partition_rule_version: 0,
         }
     }
 }

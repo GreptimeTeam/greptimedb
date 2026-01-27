@@ -24,6 +24,7 @@ use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
 use bytes::Bytes;
 use common_base::AffectedRows;
+use common_function::utils::partition_rule_version;
 use common_grpc::FlightData;
 use common_grpc::flight::{FlightEncoder, FlightMessage};
 use common_telemetry::error;
@@ -66,6 +67,25 @@ impl Inserter {
         let partition_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
             .with_label_values(&["partition"])
             .start_timer();
+        let partitions = self
+            .partition_manager
+            .find_table_partitions(table_id)
+            .await
+            .context(error::FindTablePartitionRuleSnafu {
+                table_name: table_info.name.clone(),
+            })?;
+        let mut partition_rule_versions = HashMap::with_capacity(partitions.len());
+        for partition in partitions {
+            let expr_json = match &partition.partition_expr {
+                Some(expr) => Some(
+                    expr.as_json_str()
+                        .context(error::SerializePartitionExprSnafu)?,
+                ),
+                None => None,
+            };
+            let version = partition_rule_version(expr_json.as_deref());
+            partition_rule_versions.insert(partition.id.region_number(), version);
+        }
         let partition_rule = self
             .partition_manager
             .find_table_partition_rule(&table_info)
@@ -87,6 +107,10 @@ impl Inserter {
             // SAFETY: region masks length checked
             let (region_number, _) = region_masks.into_iter().next().unwrap();
             let region_id = RegionId::new(table_id, region_number);
+            let partition_rule_version = partition_rule_versions
+                .get(&region_number)
+                .copied()
+                .unwrap_or_default();
             let datanode = self
                 .partition_manager
                 .find_region_leader(region_id)
@@ -100,6 +124,7 @@ impl Inserter {
                 }),
                 body: Some(region_request::Body::BulkInsert(BulkInsertRequest {
                     region_id: region_id.as_u64(),
+                    partition_rule_version,
                     body: Some(bulk_insert_request::Body::ArrowIpc(ArrowIpc {
                         schema: schema_bytes.clone(),
                         data_header: raw_flight_data.data_header,
@@ -150,6 +175,10 @@ impl Inserter {
                 if mask.select_none() {
                     continue;
                 }
+                let partition_rule_version = partition_rule_versions
+                    .get(&region_id.region_number())
+                    .copied()
+                    .unwrap_or_default();
                 let rb = record_batch.clone();
                 let schema_bytes = schema_bytes.clone();
                 let node_manager = self.node_manager.clone();
@@ -208,6 +237,7 @@ impl Inserter {
                             }),
                             body: Some(region_request::Body::BulkInsert(BulkInsertRequest {
                                 region_id: region_id.as_u64(),
+                                partition_rule_version,
                                 body: Some(bulk_insert_request::Body::ArrowIpc(ArrowIpc {
                                     schema: schema_bytes,
                                     data_header: header,
