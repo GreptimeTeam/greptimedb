@@ -20,9 +20,7 @@ use api::v1::region::{CreateRequest, RegionColumnDef};
 use api::v1::{ColumnDef, CreateTableExpr, SemanticType};
 use common_telemetry::warn;
 use snafu::{OptionExt, ResultExt};
-use store_api::metric_engine_consts::{
-    LOGICAL_TABLE_METADATA_KEY, is_metric_engine_internal_column,
-};
+use store_api::metric_engine_consts::LOGICAL_TABLE_METADATA_KEY;
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::{RawTableInfo, TableId};
 
@@ -81,7 +79,7 @@ pub fn build_template_from_raw_table_info(raw_table_info: &RawTableInfo) -> Resu
 ///
 /// Note: This function is primarily intended for creating physical table.
 ///
-/// Physical table templates filter out metric-engine internal columns and mark primary
+/// Physical table templates mark primary
 /// keys by tag semantic type to match the physical storage layout.
 pub fn build_template_from_raw_table_info_for_physical_table(
     raw_table_info: &RawTableInfo,
@@ -101,7 +99,6 @@ pub fn build_template_from_raw_table_info_for_physical_table(
         .collect::<HashSet<_>>();
     let (primary_key, column_defs): (Vec<_>, Vec<_>) = column_metadatas
         .iter()
-        .filter(|c| !is_metric_engine_internal_column(&c.column_schema.name))
         .map(|c| {
             let column_def = try_as_column_def(
                 &c.column_schema,
