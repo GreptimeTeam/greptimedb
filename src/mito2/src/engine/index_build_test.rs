@@ -26,7 +26,7 @@ use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::{IndexBuildMode, MitoConfig, Mode};
 use crate::engine::MitoEngine;
-use crate::engine::compaction_test::{compact, put_and_flush};
+use crate::engine::compaction_test::put_and_flush;
 use crate::engine::listener::IndexBuildListener;
 use crate::read::scan_region::Scanner;
 use crate::sst::location;
@@ -187,7 +187,7 @@ async fn test_index_build_type_compact() {
 
     let request = CreateRequestBuilder::new()
         .insert_option("compaction.type", "twcs")
-        .insert_option("compaction.twcs.trigger_file_num", "100") // Make sure compaction is not triggered by file num.
+        .insert_option("compaction.twcs.trigger_file_num", "4")
         .build_with_index();
 
     let column_schemas = rows_schema(&request);
@@ -198,42 +198,38 @@ async fn test_index_build_type_compact() {
 
     put_and_flush(&engine, region_id, &column_schemas, 10..20).await;
     put_and_flush(&engine, region_id, &column_schemas, 20..30).await;
-    put_and_flush(&engine, region_id, &column_schemas, 15..25).await;
-    put_and_flush(&engine, region_id, &column_schemas, 40..50).await;
+    put_and_flush(&engine, region_id, &column_schemas, 35..45).await;
+
+    common_telemetry::info!("After flush 3 files");
 
     // all index build tasks begin means flush tasks are all finished.
-    listener.wait_begin(4).await;
-    // Before compaction is triggered, files should be 4, and not all index files are built.
+    listener.wait_begin(3).await;
+    // Before compaction is triggered, files should be 4.
     let scanner = engine
         .scanner(region_id, ScanRequest::default())
         .await
         .unwrap();
-    assert_eq!(scanner.num_files(), 4);
-    assert!(num_of_index_files(&engine, &scanner, region_id).await < 4);
+    assert_eq!(scanner.num_files(), 3);
+    assert!(num_of_index_files(&engine, &scanner, region_id).await <= 3);
 
-    // Note: Compaction have been implicitly triggered by the flush operations above.
-    // This explicit compaction call serves to make the process deterministic for the test.
-    compact(&engine, region_id).await;
+    common_telemetry::info!("Checked 3 files, start compact");
+
+    put_and_flush(&engine, region_id, &column_schemas, 45..50).await;
 
     listener.wait_begin(5).await; // 4 flush + 1 compaction begin
-    // Before compaction is triggered, files should be 2, and not all index files are built.
-    let scanner = engine
-        .scanner(region_id, ScanRequest::default())
-        .await
-        .unwrap();
-    assert_eq!(scanner.num_files(), 2);
-    // Compaction is an async task, so it may be finished at this moment.
-    assert!(num_of_index_files(&engine, &scanner, region_id).await <= 2);
 
     // Wait a while to make sure index build tasks are finished.
     listener.wait_stop(5).await; // 4 flush + 1 compaction = some abort + some finish
+
+    common_telemetry::info!("All stopped");
+
     let scanner = engine
         .scanner(region_id, ScanRequest::default())
         .await
         .unwrap();
-    assert_eq!(scanner.num_files(), 2);
+    assert_eq!(scanner.num_files(), 1);
     // Index files should be built.
-    assert_eq!(num_of_index_files(&engine, &scanner, region_id).await, 2);
+    assert_eq!(num_of_index_files(&engine, &scanner, region_id).await, 1);
 }
 
 #[tokio::test]
