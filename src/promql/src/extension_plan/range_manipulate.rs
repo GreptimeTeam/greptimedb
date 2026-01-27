@@ -129,7 +129,7 @@ impl RangeManipulate {
         let mut new_columns = Vec::with_capacity(columns.len() + 1);
         for i in 0..columns.len() {
             let x = input_schema.qualified_field(i);
-            new_columns.push((x.0.cloned(), Arc::new(x.1.clone())));
+            new_columns.push((x.0.cloned(), x.1.clone()));
         }
 
         // process time index column

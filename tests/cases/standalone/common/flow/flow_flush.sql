@@ -1,6 +1,6 @@
 -- test if flush_flow works and flush old data to flow for compute
 CREATE TABLE numbers_input_basic (
-    number INT,
+    "number" INT,
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(number),
     TIME INDEX(ts)

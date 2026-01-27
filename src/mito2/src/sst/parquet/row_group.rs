@@ -205,7 +205,8 @@ impl ParquetFetchMetrics {
 }
 
 pub(crate) struct RowGroupBase<'a> {
-    metadata: &'a RowGroupMetaData,
+    parquet_metadata: &'a ParquetMetaData,
+    row_group_idx: usize,
     pub(crate) offset_index: Option<&'a [OffsetIndexMetaData]>,
     /// Compressed page of each column.
     column_chunks: Vec<Option<Arc<ColumnChunkData>>>,
@@ -225,7 +226,8 @@ impl<'a> RowGroupBase<'a> {
             .map(|x| x[row_group_idx].as_slice());
 
         Self {
-            metadata,
+            parquet_metadata: parquet_meta,
+            row_group_idx,
             offset_index,
             column_chunks: vec![None; metadata.columns().len()],
             row_count: metadata.num_rows() as usize,
@@ -244,7 +246,7 @@ impl<'a> RowGroupBase<'a> {
         let ranges = self
             .column_chunks
             .iter()
-            .zip(self.metadata.columns())
+            .zip(self.row_group_metadata().columns())
             .enumerate()
             .filter(|&(idx, (chunk, _chunk_meta))| chunk.is_none() && projection.leaf_included(idx))
             .flat_map(|(idx, (_chunk, chunk_meta))| {
@@ -293,8 +295,12 @@ impl<'a> RowGroupBase<'a> {
                     chunks.push(chunk_data.next().unwrap());
                 }
 
+                let column = self
+                    .parquet_metadata
+                    .row_group(self.row_group_idx)
+                    .column(idx);
                 *chunk = Some(Arc::new(ColumnChunkData::Sparse {
-                    length: self.metadata.column(idx).byte_range().1 as usize,
+                    length: column.byte_range().1 as usize,
                     data: offsets.into_iter().zip(chunks).collect(),
                 }))
             }
@@ -307,7 +313,7 @@ impl<'a> RowGroupBase<'a> {
             .enumerate()
             .filter(|&(idx, chunk)| chunk.is_none() && projection.leaf_included(idx))
             .map(|(idx, _chunk)| {
-                let column = self.metadata.column(idx);
+                let column = self.row_group_metadata().column(idx);
                 let (start, length) = column.byte_range();
                 start..(start + length)
             })
@@ -333,7 +339,10 @@ impl<'a> RowGroupBase<'a> {
                 continue;
             };
 
-            let column = self.metadata.column(idx);
+            let column = self
+                .parquet_metadata
+                .row_group(self.row_group_idx)
+                .column(idx);
             *chunk = Some(Arc::new(ColumnChunkData::Dense {
                 offset: column.byte_range().0 as usize,
                 data,
@@ -360,7 +369,7 @@ impl<'a> RowGroupBase<'a> {
                     .map(|index| index[col_idx].page_locations.clone());
                 SerializedPageReader::new(
                     data.clone(),
-                    self.metadata.column(col_idx),
+                    self.row_group_metadata().column(col_idx),
                     self.row_count,
                     page_locations,
                 )?
@@ -368,6 +377,14 @@ impl<'a> RowGroupBase<'a> {
         };
 
         Ok(page_reader)
+    }
+
+    pub(crate) fn parquet_metadata(&self) -> &ParquetMetaData {
+        self.parquet_metadata
+    }
+
+    pub(crate) fn row_group_metadata(&self) -> &RowGroupMetaData {
+        self.parquet_metadata().row_group(self.row_group_idx)
     }
 }
 
@@ -598,6 +615,14 @@ impl RowGroups for InMemoryRowGroup<'_> {
         Ok(Box::new(ColumnChunkIterator {
             reader: Some(Ok(Box::new(page_reader))),
         }))
+    }
+
+    fn row_groups(&self) -> Box<dyn Iterator<Item = &RowGroupMetaData> + '_> {
+        Box::new(std::iter::once(self.base.row_group_metadata()))
+    }
+
+    fn metadata(&self) -> &ParquetMetaData {
+        self.base.parquet_metadata()
     }
 }
 

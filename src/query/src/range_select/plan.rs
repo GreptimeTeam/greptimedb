@@ -414,7 +414,7 @@ impl RangeSelect {
                 .iter()
                 .map(|i| {
                     let f = schema_before_project.qualified_field(*i);
-                    (f.0.cloned(), Arc::new(f.1.clone()))
+                    (f.0.cloned(), f.1.clone())
                 })
                 .collect();
             Arc::new(DFSchema::new_with_metadata(

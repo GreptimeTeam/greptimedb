@@ -21,7 +21,7 @@ use datatypes::arrow::error::ArrowError;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, RowGroups, RowSelection};
 use parquet::arrow::{FieldLevels, ProjectionMask, parquet_to_arrow_field_levels};
 use parquet::column::page::{PageIterator, PageReader};
-use parquet::file::metadata::ParquetMetaData;
+use parquet::file::metadata::{ParquetMetaData, RowGroupMetaData};
 use snafu::ResultExt;
 
 use crate::error;
@@ -102,6 +102,14 @@ impl RowGroups for MemtableRowGroupPageFetcher<'_> {
         Ok(Box::new(ColumnChunkIterator {
             reader: Some(self.column_page_reader(i)),
         }))
+    }
+
+    fn row_groups(&self) -> Box<dyn Iterator<Item = &RowGroupMetaData> + '_> {
+        Box::new(std::iter::once(self.base.row_group_metadata()))
+    }
+
+    fn metadata(&self) -> &ParquetMetaData {
+        self.base.parquet_metadata()
     }
 }
 

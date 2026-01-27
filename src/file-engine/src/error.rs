@@ -178,8 +178,8 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to extract column from filter"))]
-    ExtractColumnFromFilter {
+    #[snafu(transparent)]
+    DataFusion {
         #[snafu(source)]
         error: DataFusionError,
         #[snafu(implicit)]
@@ -225,8 +225,9 @@ impl ErrorExt for Error {
             | ManifestExists { .. }
             | BuildStream { .. }
             | ParquetScanPlan { .. }
-            | UnexpectedEngine { .. }
-            | ExtractColumnFromFilter { .. } => StatusCode::Unexpected,
+            | UnexpectedEngine { .. } => StatusCode::Unexpected,
+
+            DataFusion { .. } => StatusCode::Internal,
         }
     }
 

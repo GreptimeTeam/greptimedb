@@ -94,7 +94,7 @@ impl ScalarCalculate {
         let qualifier = table_name.map(TableReference::bare);
         let schema = DFSchema::new_with_metadata(
             vec![
-                (qualifier.clone(), Arc::new(ts_field)),
+                (qualifier.clone(), ts_field),
                 (qualifier, Arc::new(val_field)),
             ],
             input_schema.metadata().clone(),

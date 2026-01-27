@@ -81,7 +81,7 @@ impl EmptyMetric {
     ) -> DataFusionResult<Self> {
         let qualifier = Some(TableReference::bare(""));
         let ts_only_schema = build_ts_only_schema(&time_index_column_name);
-        let mut fields = vec![(qualifier.clone(), Arc::new(ts_only_schema.field(0).clone()))];
+        let mut fields = vec![(qualifier.clone(), ts_only_schema.field(0).clone())];
         if let Some(field_expr) = &field_expr {
             let field_data_type = field_expr.get_type(&ts_only_schema)?;
             fields.push((

@@ -121,7 +121,6 @@ TQL ANALYZE VERBOSE (0, 0, '1s') test{host!~".*"};
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[1000], time index=[ts] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_PromSeriesDivideExec: tags=["host"] REDACTED
 |_|_|_SortExec: expr=[host@1 ASC, ts@0 ASC], preserve_partitioning=[false] REDACTED
