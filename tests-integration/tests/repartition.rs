@@ -422,7 +422,7 @@ pub async fn test_repartition_mito(store_type: StorageType) {
 |                        | )                                                     |
 |                        | PARTITION ON COLUMNS ("id") (                         |
 |                        |   id < 5,                                             |
-|                        |   id >= 10 AND id < 20 OR id >= 20,                   |
+|                        |   id >= 10,                                           |
 |                        |   id >= 5 AND id < 10                                 |
 |                        | )                                                     |
 |                        | ENGINE=mito                                           |
@@ -687,7 +687,7 @@ pub async fn test_repartition_metric(store_type: StorageType) {
 |                   |   PRIMARY KEY ("host")                           |
 |                   | )                                                |
 |                   | PARTITION ON COLUMNS ("host") (                  |
-|                   |   host < 'g' OR host >= 'g' AND host < 'm',      |
+|                   |   host < 'm',                                    |
 |                   |   host >= 'm'                                    |
 |                   | )                                                |
 |                   | ENGINE=metric                                    |
