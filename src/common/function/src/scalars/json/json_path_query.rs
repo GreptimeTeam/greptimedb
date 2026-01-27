@@ -20,7 +20,6 @@ use arrow::compute;
 use datafusion_common::arrow::datatypes::DataType;
 use datafusion_common::DataFusionError;
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature};
-use serde_json::Value as JsonValue;
 use sql_json_path::JsonPath;
 
 use crate::function::{extract_args, Function};
@@ -81,7 +80,7 @@ impl Function for JsonPathQueryFunction {
                         let jsonb_value = jsonb::from_slice(json).map_err(|e| {
                             DataFusionError::Execution(format!("invalid jsonb binary: {e}"))
                         })?;
-                        let json_value: JsonValue = jsonb_value.into();
+                        let json_value: serde_json::Value = jsonb_value.into();
                         let json_path = JsonPath::new(path).map_err(|e| {
                             DataFusionError::Execution(format!("invalid json path '{path}': {e}"))
                         })?;
@@ -90,15 +89,16 @@ impl Function for JsonPathQueryFunction {
                                 "failed to evaluate json path '{path}': {e}"
                             ))
                         })?;
-                        let node_values: Vec<JsonValue> = nodes
+                        let node_values: Vec<serde_json::Value> = nodes
                             .iter()
                             .map(|n| {
-                                serde_json::from_str::<JsonValue>(&n.to_string())
-                                    .unwrap_or(JsonValue::Null)
+                                let mut s = n.to_string();
+                                unsafe { simd_json::from_str::<serde_json::Value>(&mut s) }
+                                    .unwrap_or(serde_json::Value::Null)
                             })
                             .collect();
                         if !node_values.is_empty() {
-                            let result_json = JsonValue::Array(node_values);
+                            let result_json = serde_json::Value::Array(node_values);
                             let result_jsonb: jsonb::Value = result_json.into();
                             Some(result_jsonb.to_vec())
                         } else {

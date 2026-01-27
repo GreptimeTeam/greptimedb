@@ -2454,6 +2454,7 @@ dependencies = [
  "serde",
  "serde_json",
  "session",
+ "simd-json",
  "snafu 0.8.6",
  "sql",
  "sql-json-path",
@@ -12435,11 +12436,10 @@ checksum = "d66dc143e6b11c1eddc06d5c423cfc97062865baf299914ab64caa38182078fe"
 
 [[package]]
 name = "simd-json"
-version = "0.15.1"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c962f626b54771990066e5435ec8331d1462576cd2d1e62f24076ae014f92112"
+checksum = "90daf33666402178ddbb5d595e6d5e6d7d372da948e23ea26762f5a23e02a04e"
 dependencies = [
- "getrandom 0.3.3",
  "halfbrown",
  "ref-cast",
  "serde",

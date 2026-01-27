@@ -59,6 +59,7 @@ s2 = { version = "0.0.12", optional = true }
 serde.workspace = true
 serde_json.workspace = true
 session.workspace = true
+simd-json.workspace = true
 snafu.workspace = true
 sql.workspace = true
 sql-json-path = { version = "0.1", default-features = false }
