@@ -94,6 +94,7 @@ uuid.workspace = true
 zstd.workspace = true
 
 [dev-dependencies]
+common-procedure-test.workspace = true
 common-wal = { workspace = true, features = ["testing"] }
 datafusion.workspace = true
 datafusion-expr.workspace = true

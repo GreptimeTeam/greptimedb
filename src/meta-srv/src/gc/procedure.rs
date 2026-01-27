@@ -223,6 +223,36 @@ impl BatchGcProcedure {
         }
     }
 
+    /// Test-only constructor to jump directly into the repartition update state.
+    /// Intended for integration tests that validate `cleanup_region_repartition` without
+    /// running the full batch GC state machine.
+    #[cfg(feature = "mock")]
+    pub fn new_update_repartition_for_test(
+        mailbox: MailboxRef,
+        table_metadata_manager: TableMetadataManagerRef,
+        server_addr: String,
+        regions: Vec<RegionId>,
+        file_refs: FileRefsManifest,
+        timeout: Duration,
+    ) -> Self {
+        Self {
+            mailbox,
+            table_metadata_manager,
+            data: BatchGcData {
+                state: State::UpdateRepartition,
+                server_addr,
+                regions,
+                full_file_listing: false,
+                timeout,
+                region_routes: HashMap::new(),
+                region_routes_override: HashMap::new(),
+                related_regions: HashMap::new(),
+                file_refs,
+                gc_report: Some(GcReport::default()),
+            },
+        }
+    }
+
     pub fn cast_result(res: Arc<dyn Any>) -> Result<GcReport> {
         res.downcast_ref::<GcReport>().cloned().ok_or_else(|| {
             error::UnexpectedSnafu {
