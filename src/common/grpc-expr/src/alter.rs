@@ -24,7 +24,7 @@ use api::v1::{
     SkippingIndexType as PbSkippingIndexType, column_def,
 };
 use common_query::AddColumnLocation;
-use datatypes::schema::{ColumnSchema, FulltextOptions, RawSchema, SkippingIndexOptions};
+use datatypes::schema::{ColumnSchema, FulltextOptions, Schema, SkippingIndexOptions};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 use table::metadata::{TableId, TableMeta};
@@ -268,7 +268,7 @@ pub fn alter_expr_to_request(
     Ok(request)
 }
 
-pub fn create_table_schema(expr: &CreateTableExpr, require_time_index: bool) -> Result<RawSchema> {
+pub fn create_table_schema(expr: &CreateTableExpr, require_time_index: bool) -> Result<Schema> {
     let column_schemas = expr
         .column_defs
         .iter()
@@ -300,7 +300,7 @@ pub fn create_table_schema(expr: &CreateTableExpr, require_time_index: bool) -> 
         })
         .collect::<Vec<_>>();
 
-    Ok(RawSchema::new(column_schemas))
+    Ok(Schema::new(column_schemas))
 }
 
 fn parse_location(location: Option<Location>) -> Result<Option<AddColumnLocation>> {

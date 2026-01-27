@@ -15,7 +15,7 @@
 use itertools::Itertools;
 use snafu::OptionExt;
 use store_api::storage::TableId;
-use table::metadata::RawTableInfo;
+use table::metadata::TableInfo;
 use table::table_reference::TableReference;
 
 use crate::error::{Result, TableInfoNotFoundSnafu};
@@ -75,7 +75,7 @@ pub(crate) async fn all_logical_table_routes_have_same_physical_id(
 /// Returns an error if any table info value fails to update.
 pub(crate) async fn batch_update_table_info_values(
     table_metadata_manager: &TableMetadataManager,
-    table_info_values: Vec<(DeserializedValueWithBytes<TableInfoValue>, RawTableInfo)>,
+    table_info_values: Vec<(DeserializedValueWithBytes<TableInfoValue>, TableInfo)>,
 ) -> Result<()> {
     let chunk_size = table_metadata_manager.batch_update_table_info_value_chunk_size();
     if table_info_values.len() > chunk_size {

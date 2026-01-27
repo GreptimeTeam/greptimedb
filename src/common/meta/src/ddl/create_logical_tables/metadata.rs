@@ -13,9 +13,10 @@
 // limitations under the License.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{ColumnSchema, RawSchema};
+use datatypes::schema::{ColumnSchema, Schema};
 use snafu::OptionExt;
 
 use crate::ddl::create_logical_tables::CreateLogicalTablesProcedure;
@@ -51,7 +52,7 @@ impl CreateLogicalTablesProcedure {
             .partition_key_indices
             .iter()
             .map(|&idx| {
-                physical_table_info.table_info.meta.schema.column_schemas[idx]
+                physical_table_info.table_info.meta.schema.column_schemas()[idx]
                     .name
                     .clone()
             })
@@ -72,14 +73,9 @@ impl CreateLogicalTablesProcedure {
 
         for task in &mut self.data.tasks {
             // Get existing column names in the logical table
-            let existing_column_names: HashSet<_> = task
-                .table_info
-                .meta
-                .schema
-                .column_schemas
-                .iter()
-                .map(|c| &c.name)
-                .collect();
+            let column_schemas = task.table_info.meta.schema.column_schemas();
+            let existing_column_names: HashSet<_> =
+                column_schemas.iter().map(|c| &c.name).collect();
 
             let mut new_columns = Vec::new();
             let mut new_primary_key_indices = task.table_info.meta.primary_key_indices.clone();
@@ -87,8 +83,7 @@ impl CreateLogicalTablesProcedure {
             // Add missing partition columns
             for partition_column in partition_columns {
                 if !existing_column_names.contains(partition_column) {
-                    let new_column_index =
-                        task.table_info.meta.schema.column_schemas.len() + new_columns.len();
+                    let new_column_index = column_schemas.len() + new_columns.len();
 
                     // Create new column schema for the partition column
                     let column_schema = ColumnSchema::new(
@@ -105,11 +100,11 @@ impl CreateLogicalTablesProcedure {
 
             // If we added new columns, update the table info
             if !new_columns.is_empty() {
-                let mut updated_columns = task.table_info.meta.schema.column_schemas.clone();
+                let mut updated_columns = column_schemas.to_vec();
                 updated_columns.extend(new_columns);
 
                 // Create new schema with updated columns
-                let new_schema = RawSchema::new(updated_columns);
+                let new_schema = Arc::new(Schema::new(updated_columns));
 
                 // Update the table info
                 task.table_info.meta.schema = new_schema;

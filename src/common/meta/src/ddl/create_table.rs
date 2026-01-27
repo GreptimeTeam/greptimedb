@@ -30,7 +30,7 @@ use snafu::{OptionExt, ResultExt};
 use store_api::metadata::ColumnMetadata;
 use store_api::storage::RegionNumber;
 use strum::AsRefStr;
-use table::metadata::{RawTableInfo, TableId};
+use table::metadata::{TableId, TableInfo};
 use table::table_name::TableName;
 use table::table_reference::TableReference;
 pub(crate) use template::{CreateRequestBuilder, build_template_from_raw_table_info};
@@ -103,7 +103,7 @@ impl CreateTableProcedure {
         })
     }
 
-    fn table_info(&self) -> &RawTableInfo {
+    fn table_info(&self) -> &TableInfo {
         &self.data.task.table_info
     }
 

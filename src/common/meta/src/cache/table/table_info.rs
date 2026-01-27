@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use futures::future::BoxFuture;
 use moka::future::Cache;
-use snafu::{OptionExt, ResultExt};
+use snafu::OptionExt;
 use store_api::storage::TableId;
 use table::metadata::TableInfo;
 
@@ -48,15 +48,13 @@ fn init_factory(table_info_manager: TableInfoManagerRef) -> Initializer<TableId,
     Arc::new(move |table_id| {
         let table_info_manager = table_info_manager.clone();
         Box::pin(async move {
-            let raw_table_info = table_info_manager
+            let table_info = table_info_manager
                 .get(*table_id)
                 .await?
                 .context(error::ValueNotExistSnafu {})?
                 .into_inner()
                 .table_info;
-            Ok(Some(Arc::new(
-                TableInfo::try_from(raw_table_info).context(error::ConvertRawTableInfoSnafu)?,
-            )))
+            Ok(Some(Arc::new(table_info)))
         })
     })
 }
@@ -109,7 +107,7 @@ mod tests {
             .await
             .unwrap();
         let table_info = cache.get(1024).await.unwrap().unwrap();
-        assert_eq!(*table_info, TableInfo::try_from(task.table_info).unwrap());
+        assert_eq!(*table_info, task.table_info);
 
         assert!(cache.contains_key(&1024));
         cache

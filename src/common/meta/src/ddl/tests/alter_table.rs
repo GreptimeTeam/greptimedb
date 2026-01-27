@@ -506,7 +506,7 @@ async fn test_on_update_metadata_add_columns() {
         .table_info;
 
     assert_eq!(
-        table_info.meta.schema.column_schemas.len() as u32,
+        table_info.meta.schema.column_schemas().len() as u32,
         table_info.meta.next_column_id
     );
     assert_column_name(&table_info, &["ts", "host", "cpu", "my_tag3"]);

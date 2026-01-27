@@ -201,13 +201,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to convert RawTableInfo into TableInfo"))]
-    ConvertRawTableInfo {
-        #[snafu(implicit)]
-        location: Location,
-        source: datatypes::Error,
-    },
-
     #[snafu(display("Primary key '{key}' not found when creating region request"))]
     PrimaryKeyNotFound {
         key: String,
@@ -1113,7 +1106,6 @@ impl ErrorExt for Error {
             | BuildTableMeta { .. }
             | TableRouteNotFound { .. }
             | TableRepartNotFound { .. }
-            | ConvertRawTableInfo { .. }
             | RegionOperatingRace { .. }
             | EncodeWalOptions { .. }
             | BuildKafkaClient { .. }

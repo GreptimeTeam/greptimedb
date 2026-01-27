@@ -118,7 +118,7 @@ impl State for ResolveColumnMetadata {
                     .name_to_ids()
                     .context(MissingColumnIdsSnafu)?;
                 let column_metadata = build_column_metadata_from_table_info(
-                    &table_info_value.table_info.meta.schema.column_schemas,
+                    table_info_value.table_info.meta.schema.column_schemas(),
                     &table_info_value.table_info.meta.primary_key_indices,
                     &name_to_ids,
                 )?;

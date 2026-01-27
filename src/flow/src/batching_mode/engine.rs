@@ -127,7 +127,7 @@ impl BatchingEngine {
                     table_name.table_name,
                 ];
                 let schema = &table_infos.get(&id).unwrap().table_info.meta.schema;
-                let time_index_unit = schema.column_schemas[schema.timestamp_index.unwrap()]
+                let time_index_unit = schema.column_schemas()[schema.timestamp_index().unwrap()]
                     .data_type
                     .as_timestamp()
                     .unwrap()
@@ -576,7 +576,7 @@ impl BatchingEngine {
                 .table_info
                 .meta
                 .schema
-                .column_schemas
+                .column_schemas()
                 .iter()
                 .filter(|col| col.data_type == ConcreteDataType::float64_datatype())
                 .collect::<Vec<_>>();
@@ -604,7 +604,7 @@ impl BatchingEngine {
                 .table_info
                 .meta
                 .schema
-                .column_schemas
+                .column_schemas()
                 .iter()
                 .enumerate()
             {

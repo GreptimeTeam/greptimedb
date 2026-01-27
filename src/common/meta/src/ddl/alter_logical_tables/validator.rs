@@ -239,7 +239,7 @@ fn skip_alter_logical_region(alter: &AlterTableExpr, table: &TableInfoValue) -> 
         .table_info
         .meta
         .schema
-        .column_schemas
+        .column_schemas()
         .iter()
         .map(|c| &c.name)
         .collect::<HashSet<_>>();

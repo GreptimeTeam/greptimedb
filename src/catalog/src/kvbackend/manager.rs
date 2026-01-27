@@ -50,8 +50,8 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::CatalogManager;
 use crate::error::{
-    CacheNotFoundSnafu, GetTableCacheSnafu, InvalidTableInfoInCatalogSnafu, ListCatalogsSnafu,
-    ListSchemasSnafu, ListTablesSnafu, Result, TableMetadataManagerSnafu,
+    CacheNotFoundSnafu, GetTableCacheSnafu, ListCatalogsSnafu, ListSchemasSnafu, ListTablesSnafu,
+    Result, TableMetadataManagerSnafu,
 };
 use crate::information_schema::{
     InformationExtensionRef, InformationSchemaProvider, InformationSchemaTableFactoryRef,
@@ -146,7 +146,7 @@ impl KvBackendCatalogManager {
                         .table_info
                         .meta
                         .schema
-                        .column_schemas
+                        .column_schemas()
                         .get(physical_index)
                         .and_then(|physical_column| {
                             // Find the corresponding index in the logical table schema
@@ -417,7 +417,7 @@ impl CatalogManager for KvBackendCatalogManager {
             .into_values()
             .filter(|t| t.table_info.catalog_name == catalog && t.table_info.schema_name == schema)
             .map(build_table)
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<Vec<_>>();
 
         Ok(tables)
     }
@@ -507,16 +507,12 @@ impl CatalogManager for KvBackendCatalogManager {
                     };
 
                     for table in table_info_values.into_values().map(build_table) {
-                        let table = if let Ok(table) = table {
-                            Self::override_logical_table_partition_key_indices(
-                                &table_route_cache,
-                                metadata_manager.table_info_manager(),
-                                table,
-                            )
-                            .await
-                        } else {
-                            table
-                        };
+                        let table = Self::override_logical_table_partition_key_indices(
+                            &table_route_cache,
+                            metadata_manager.table_info_manager(),
+                            table,
+                        )
+                        .await;
                         if tx.send(table).await.is_err() {
                             return;
                         }
@@ -530,12 +526,9 @@ impl CatalogManager for KvBackendCatalogManager {
     }
 }
 
-fn build_table(table_info_value: TableInfoValue) -> Result<TableRef> {
-    let table_info = table_info_value
-        .table_info
-        .try_into()
-        .context(InvalidTableInfoInCatalogSnafu)?;
-    Ok(DistTable::table(Arc::new(table_info)))
+fn build_table(table_info_value: TableInfoValue) -> TableRef {
+    let table_info = table_info_value.table_info;
+    DistTable::table(Arc::new(table_info))
 }
 
 // TODO: This struct can hold a static map of all system tables when

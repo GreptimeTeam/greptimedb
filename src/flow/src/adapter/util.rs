@@ -145,8 +145,8 @@ pub fn table_info_value_to_relation_desc(
 ) -> Result<TableDesc, Error> {
     let raw_schema = table_info_value.table_info.meta.schema;
     let (column_types, col_names): (Vec<_>, Vec<_>) = raw_schema
-        .column_schemas
-        .clone()
+        .column_schemas()
+        .to_vec()
         .into_iter()
         .map(|col| {
             (
@@ -162,7 +162,7 @@ pub fn table_info_value_to_relation_desc(
     let key = table_info_value.table_info.meta.primary_key_indices;
     let keys = vec![crate::repr::Key::from(key)];
 
-    let time_index = raw_schema.timestamp_index;
+    let time_index = raw_schema.timestamp_index();
     let relation_desc = RelationDesc {
         typ: RelationType {
             column_types,
@@ -174,7 +174,7 @@ pub fn table_info_value_to_relation_desc(
         names: col_names,
     };
     let default_values = raw_schema
-        .column_schemas
+        .column_schemas()
         .iter()
         .map(|c| {
             c.default_constraint().cloned().or_else(|| {

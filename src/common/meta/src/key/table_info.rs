@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
-use table::metadata::{RawTableInfo, TableId};
+use table::metadata::{TableId, TableInfo};
 use table::table_name::TableName;
 use table::table_reference::TableReference;
 
@@ -82,19 +82,19 @@ impl MetadataKey<'_, TableInfoKey> for TableInfoKey {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TableInfoValue {
-    pub table_info: RawTableInfo,
+    pub table_info: TableInfo,
     version: u64,
 }
 
 impl TableInfoValue {
-    pub fn new(table_info: RawTableInfo) -> Self {
+    pub fn new(table_info: TableInfo) -> Self {
         Self {
             table_info,
             version: 0,
         }
     }
 
-    pub fn update(&self, new_table_info: RawTableInfo) -> Self {
+    pub fn update(&self, new_table_info: TableInfo) -> Self {
         Self {
             table_info: new_table_info,
             version: self.version + 1,
@@ -103,7 +103,7 @@ impl TableInfoValue {
 
     pub(crate) fn with_update<F>(&self, update: F) -> Self
     where
-        F: FnOnce(&mut RawTableInfo),
+        F: FnOnce(&mut TableInfo),
     {
         let mut new_table_info = self.table_info.clone();
         update(&mut new_table_info);
@@ -280,8 +280,8 @@ impl TableInfoManager {
 mod tests {
 
     use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::{ColumnSchema, RawSchema, Schema};
-    use table::metadata::{RawTableMeta, TableIdent, TableType};
+    use datatypes::schema::{ColumnSchema, Schema};
+    use table::metadata::{TableIdent, TableMeta, TableType};
 
     use super::*;
 
@@ -322,15 +322,15 @@ mod tests {
         assert_eq!(value, deserialized);
     }
 
-    fn new_table_info(table_id: TableId) -> RawTableInfo {
+    fn new_table_info(table_id: TableId) -> TableInfo {
         let schema = Schema::new(vec![ColumnSchema::new(
             "name",
             ConcreteDataType::string_datatype(),
             true,
         )]);
 
-        let meta = RawTableMeta {
-            schema: RawSchema::from(&schema),
+        let meta = TableMeta {
+            schema: Arc::new(schema),
             engine: "mito".to_string(),
             created_on: chrono::DateTime::default(),
             updated_on: chrono::DateTime::default(),
@@ -342,7 +342,7 @@ mod tests {
             column_ids: vec![],
         };
 
-        RawTableInfo {
+        TableInfo {
             ident: TableIdent {
                 table_id,
                 version: 1,

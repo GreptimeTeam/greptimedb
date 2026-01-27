@@ -223,7 +223,7 @@ mod tests {
         let env = TestingEnv::new();
         let mut ctx = env.context_factory().new_context(persistent_context);
 
-        let table_info = new_test_table_info(1024).into();
+        let table_info = new_test_table_info(1024);
         let region_route = RegionRoute {
             region: Region::new_test(RegionId::new(1024, 3)),
             leader_peer: Some(from_peer.clone()),
@@ -250,7 +250,7 @@ mod tests {
         let env = TestingEnv::new();
         let mut ctx = env.context_factory().new_context(persistent_context);
 
-        let table_info = new_test_table_info(1024).into();
+        let table_info = new_test_table_info(1024);
         let region_routes = vec![RegionRoute {
             region: Region::new_test(region_id),
             leader_peer: Some(to_peer),
@@ -277,7 +277,7 @@ mod tests {
         let env = TestingEnv::new();
         let mut ctx = env.context_factory().new_context(persistent_context);
 
-        let table_info = new_test_table_info(1024).into();
+        let table_info = new_test_table_info(1024);
         let region_routes = vec![RegionRoute {
             region: Region::new_test(region_id),
             leader_peer: Some(Peer::empty(from_peer_id)),
@@ -302,7 +302,7 @@ mod tests {
         let env = TestingEnv::new();
         let mut ctx = env.context_factory().new_context(persistent_context);
 
-        let table_info = new_test_table_info(1024).into();
+        let table_info = new_test_table_info(1024);
         let region_routes: Vec<RegionRoute> = vec![RegionRoute {
             region: Region::new_test(region_id),
             leader_peer: Some(Peer::empty(1024)),

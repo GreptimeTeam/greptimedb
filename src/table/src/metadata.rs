@@ -22,8 +22,7 @@ use common_query::AddColumnLocation;
 use datafusion_expr::TableProviderFilterPushDown;
 pub use datatypes::error::{Error as ConvertError, Result as ConvertResult};
 use datatypes::schema::{
-    ColumnSchema, FulltextOptions, RawSchema, Schema, SchemaBuilder, SchemaRef,
-    SkippingIndexOptions,
+    ColumnSchema, FulltextOptions, Schema, SchemaBuilder, SchemaRef, SkippingIndexOptions,
 };
 use derive_builder::Builder;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -124,7 +123,7 @@ pub struct TableIdent {
 /// The table metadata.
 ///
 /// Note: if you add new fields to this struct, please ensure 'new_meta_builder' function works.
-#[derive(Clone, Debug, Builder, PartialEq, Eq, ToMetaBuilder)]
+#[derive(Clone, Debug, Builder, PartialEq, Eq, ToMetaBuilder, Serialize)]
 #[builder(pattern = "mutable", custom_constructor)]
 pub struct TableMeta {
     pub schema: SchemaRef,
@@ -147,6 +146,72 @@ pub struct TableMeta {
     pub partition_key_indices: Vec<usize>,
     #[builder(default = "Vec::new()")]
     pub column_ids: Vec<ColumnId>,
+}
+
+impl TableMeta {
+    pub fn empty() -> Self {
+        Self {
+            schema: Arc::new(Schema::new(vec![])),
+            primary_key_indices: vec![],
+            value_indices: vec![],
+            engine: "".to_string(),
+            next_column_id: 0,
+            options: TableOptions::default(),
+            created_on: Utc::now(),
+            updated_on: Utc::now(),
+            partition_key_indices: vec![],
+            column_ids: vec![],
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for TableMeta {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawTableMeta {
+            schema: SchemaRef,
+            primary_key_indices: Vec<usize>,
+            value_indices: Vec<usize>,
+            engine: String,
+            next_column_id: ColumnId,
+            options: TableOptions,
+            created_on: DateTime<Utc>,
+            updated_on: Option<DateTime<Utc>>,
+            #[serde(default)]
+            partition_key_indices: Vec<usize>,
+            #[serde(default)]
+            column_ids: Vec<ColumnId>,
+        }
+
+        let RawTableMeta {
+            schema,
+            primary_key_indices,
+            value_indices,
+            engine,
+            next_column_id,
+            options,
+            created_on,
+            updated_on,
+            partition_key_indices,
+            column_ids,
+        } = RawTableMeta::deserialize(deserializer)?;
+
+        Ok(Self {
+            schema,
+            primary_key_indices,
+            value_indices,
+            engine,
+            next_column_id,
+            options,
+            created_on,
+            updated_on: updated_on.unwrap_or(created_on),
+            partition_key_indices,
+            column_ids,
+        })
+    }
 }
 
 impl TableMetaBuilder {
@@ -1062,7 +1127,7 @@ impl TableMeta {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Builder)]
+#[derive(Clone, Debug, PartialEq, Eq, Builder, Serialize, Deserialize)]
 #[builder(pattern = "owned")]
 pub struct TableInfo {
     /// Id and version of the table.
@@ -1154,126 +1219,13 @@ impl From<TableId> for TableIdent {
     }
 }
 
-/// Struct used to serialize and deserialize [`TableMeta`].
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Default)]
-pub struct RawTableMeta {
-    pub schema: RawSchema,
-    /// The indices of columns in primary key. Note that the index of timestamp column
-    /// is not included. Order matters to this array.
-    pub primary_key_indices: Vec<usize>,
-    ///  The indices of columns in value. The index of timestamp column is included.
-    /// Order doesn't matter to this array.
-    pub value_indices: Vec<usize>,
-    /// Engine type of this table. Usually in small case.
-    pub engine: String,
-    /// Next column id of a new column.
-    /// It's used to ensure all columns with the same name across all regions have the same column id.
-    pub next_column_id: ColumnId,
-    pub options: TableOptions,
-    pub created_on: DateTime<Utc>,
-    pub updated_on: DateTime<Utc>,
-    /// Order doesn't matter to this array.
-    #[serde(default)]
-    pub partition_key_indices: Vec<usize>,
-    /// Map of column name to column id.
-    /// Note: This field may be empty for older versions that did not include this field.
-    #[serde(default)]
-    pub column_ids: Vec<ColumnId>,
-}
-
-impl<'de> Deserialize<'de> for RawTableMeta {
-    fn deserialize<D>(
-        deserializer: D,
-    ) -> std::result::Result<RawTableMeta, <D as Deserializer<'de>>::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct Helper {
-            schema: RawSchema,
-            primary_key_indices: Vec<usize>,
-            value_indices: Vec<usize>,
-            engine: String,
-            next_column_id: u32,
-            options: TableOptions,
-            created_on: DateTime<Utc>,
-            updated_on: Option<DateTime<Utc>>,
-            #[serde(default)]
-            partition_key_indices: Vec<usize>,
-            #[serde(default)]
-            column_ids: Vec<ColumnId>,
-        }
-
-        let h = Helper::deserialize(deserializer)?;
-        Ok(RawTableMeta {
-            schema: h.schema,
-            primary_key_indices: h.primary_key_indices,
-            value_indices: h.value_indices,
-            engine: h.engine,
-            next_column_id: h.next_column_id,
-            options: h.options,
-            created_on: h.created_on,
-            updated_on: h.updated_on.unwrap_or(h.created_on),
-            partition_key_indices: h.partition_key_indices,
-            column_ids: h.column_ids,
-        })
-    }
-}
-
-impl From<TableMeta> for RawTableMeta {
-    fn from(meta: TableMeta) -> RawTableMeta {
-        RawTableMeta {
-            schema: RawSchema::from(&*meta.schema),
-            primary_key_indices: meta.primary_key_indices,
-            value_indices: meta.value_indices,
-            engine: meta.engine,
-            next_column_id: meta.next_column_id,
-            options: meta.options,
-            created_on: meta.created_on,
-            updated_on: meta.updated_on,
-            partition_key_indices: meta.partition_key_indices,
-            column_ids: meta.column_ids,
-        }
-    }
-}
-
-impl TryFrom<RawTableMeta> for TableMeta {
-    type Error = ConvertError;
-
-    fn try_from(raw: RawTableMeta) -> ConvertResult<TableMeta> {
-        Ok(TableMeta {
-            schema: Arc::new(Schema::try_from(raw.schema)?),
-            primary_key_indices: raw.primary_key_indices,
-            value_indices: raw.value_indices,
-            engine: raw.engine,
-            next_column_id: raw.next_column_id,
-            options: raw.options,
-            created_on: raw.created_on,
-            updated_on: raw.updated_on,
-            partition_key_indices: raw.partition_key_indices,
-            column_ids: raw.column_ids,
-        })
-    }
-}
-
-/// Struct used to serialize and deserialize [`TableInfo`].
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
-pub struct RawTableInfo {
-    pub ident: TableIdent,
-    pub name: String,
-    pub desc: Option<String>,
-    pub catalog_name: String,
-    pub schema_name: String,
-    pub meta: RawTableMeta,
-    pub table_type: TableType,
-}
-
-impl RawTableInfo {
+impl TableInfo {
     /// Returns the map of column name to column id.
     ///
     /// Note: This method may return an empty map for older versions that did not include this field.
     pub fn name_to_ids(&self) -> Option<HashMap<String, ColumnId>> {
-        if self.meta.column_ids.len() != self.meta.schema.column_schemas.len() {
+        let column_schemas = self.meta.schema.column_schemas();
+        if self.meta.column_ids.len() != column_schemas.len() {
             None
         } else {
             Some(
@@ -1281,15 +1233,15 @@ impl RawTableInfo {
                     .column_ids
                     .iter()
                     .enumerate()
-                    .map(|(index, id)| (self.meta.schema.column_schemas[index].name.clone(), *id))
+                    .map(|(index, id)| (column_schemas[index].name.clone(), *id))
                     .collect(),
             )
         }
     }
 
-    /// Sort the columns in [RawTableInfo], logical tables require it.
+    /// Sort the columns in [TableInfo], logical tables require it.
     pub fn sort_columns(&mut self) {
-        let column_schemas = &self.meta.schema.column_schemas;
+        let column_schemas = self.meta.schema.column_schemas();
         let primary_keys = self
             .meta
             .primary_key_indices
@@ -1298,23 +1250,16 @@ impl RawTableInfo {
             .collect::<HashSet<_>>();
 
         let name_to_ids = self.name_to_ids().unwrap_or_default();
-        self.meta
-            .schema
-            .column_schemas
-            .sort_unstable_by(|a, b| a.name.cmp(&b.name));
+        let mut column_schemas = column_schemas.to_vec();
+        column_schemas.sort_unstable_by(|a, b| a.name.cmp(&b.name));
 
         // Compute new indices of sorted columns
         let mut primary_key_indices = Vec::with_capacity(primary_keys.len());
-        let mut timestamp_index = None;
-        let mut value_indices =
-            Vec::with_capacity(self.meta.schema.column_schemas.len() - primary_keys.len());
-        let mut column_ids = Vec::with_capacity(self.meta.schema.column_schemas.len());
-        for (index, column_schema) in self.meta.schema.column_schemas.iter().enumerate() {
+        let mut value_indices = Vec::with_capacity(column_schemas.len() - primary_keys.len());
+        let mut column_ids = Vec::with_capacity(column_schemas.len());
+        for (index, column_schema) in column_schemas.iter().enumerate() {
             if primary_keys.contains(&column_schema.name) {
                 primary_key_indices.push(index);
-            } else if column_schema.is_time_index() {
-                value_indices.push(index);
-                timestamp_index = Some(index);
             } else {
                 value_indices.push(index);
             }
@@ -1324,7 +1269,10 @@ impl RawTableInfo {
         }
 
         // Overwrite table meta
-        self.meta.schema.timestamp_index = timestamp_index;
+        self.meta.schema = Arc::new(Schema::new_with_version(
+            column_schemas,
+            self.meta.schema.version(),
+        ));
         self.meta.primary_key_indices = primary_key_indices;
         self.meta.value_indices = value_indices;
         self.meta.column_ids = column_ids;
@@ -1344,36 +1292,6 @@ impl RawTableInfo {
             self.schema_name.as_str(),
             self.name.as_str(),
         )
-    }
-}
-
-impl From<TableInfo> for RawTableInfo {
-    fn from(info: TableInfo) -> RawTableInfo {
-        RawTableInfo {
-            ident: info.ident,
-            name: info.name,
-            desc: info.desc,
-            catalog_name: info.catalog_name,
-            schema_name: info.schema_name,
-            meta: RawTableMeta::from(info.meta),
-            table_type: info.table_type,
-        }
-    }
-}
-
-impl TryFrom<RawTableInfo> for TableInfo {
-    type Error = ConvertError;
-
-    fn try_from(raw: RawTableInfo) -> ConvertResult<TableInfo> {
-        Ok(TableInfo {
-            ident: raw.ident,
-            name: raw.name,
-            desc: raw.desc,
-            catalog_name: raw.catalog_name,
-            schema_name: raw.schema_name,
-            meta: TableMeta::try_from(raw.meta)?,
-            table_type: raw.table_type,
-        })
     }
 }
 
@@ -1489,30 +1407,6 @@ mod tests {
             .version(123)
             .build()
             .unwrap()
-    }
-
-    #[test]
-    fn test_raw_convert() {
-        let schema = Arc::new(new_test_schema());
-        let meta = TableMetaBuilder::empty()
-            .schema(schema)
-            .primary_key_indices(vec![0])
-            .engine("engine")
-            .next_column_id(3)
-            .build()
-            .unwrap();
-        let info = TableInfoBuilder::default()
-            .table_id(10)
-            .table_version(5)
-            .name("mytable")
-            .meta(meta)
-            .build()
-            .unwrap();
-
-        let raw = RawTableInfo::from(info.clone());
-        let info_new = TableInfo::try_from(raw).unwrap();
-
-        assert_eq!(info, info_new);
     }
 
     fn add_columns_to_meta(meta: &TableMeta) -> TableMeta {
@@ -2120,5 +2014,73 @@ mod tests {
             .unwrap();
         let fulltext_options = column_schema.fulltext_options().unwrap().unwrap();
         assert!(!fulltext_options.enable);
+    }
+
+    #[test]
+    fn test_table_info_serde_compatibility() {
+        // "serialized" is generated by the following codes before this refactor (PR 7626):
+        //
+        // ```Rust
+        // serde_json::to_string(&RawTableInfo::from(TableInfo {
+        //     ident: TableIdent {
+        //         table_id: 1024,
+        //         version: 1,
+        //     },
+        //     name: "foo".to_string(),
+        //     desc: Some("my table".to_string()),
+        //     catalog_name: "greptime".to_string(),
+        //     schema_name: "public".to_string(),
+        //     meta: TableMeta {
+        //         schema: Arc::new(new_test_schema()),
+        //         primary_key_indices: vec![0],
+        //         value_indices: vec![1, 2],
+        //         engine: "mito".to_string(),
+        //         next_column_id: 3,
+        //         options: TableOptions {
+        //             ttl: Some(common_time::TimeToLive::Duration(
+        //                 std::time::Duration::from_secs(3600),
+        //             )),
+        //             ..Default::default()
+        //         },
+        //         created_on: DateTime::<Utc>::MIN_UTC,
+        //         updated_on: DateTime::<Utc>::MAX_UTC,
+        //         partition_key_indices: vec![2],
+        //         column_ids: vec![0, 1, 2],
+        //     },
+        //     table_type: TableType::Base,
+        // }))
+        // ```
+        let serialized = r#"{"ident":{"table_id":1024,"version":1},"name":"foo","desc":"my table","catalog_name":"greptime","schema_name":"public","meta":{"schema":{"column_schemas":[{"name":"col1","data_type":{"Int32":{}},"is_nullable":true,"is_time_index":false,"default_constraint":null,"metadata":{}},{"name":"ts","data_type":{"Timestamp":{"Millisecond":null}},"is_nullable":false,"is_time_index":true,"default_constraint":null,"metadata":{"greptime:time_index":"true"}},{"name":"col2","data_type":{"Int32":{}},"is_nullable":true,"is_time_index":false,"default_constraint":null,"metadata":{}}],"timestamp_index":1,"version":123},"primary_key_indices":[0],"value_indices":[1,2],"engine":"mito","next_column_id":3,"options":{"write_buffer_size":null,"ttl":"1h","skip_wal":false,"extra_options":{}},"created_on":"-262143-01-01T00:00:00Z","updated_on":"+262142-12-31T23:59:59.999999999Z","partition_key_indices":[2],"column_ids":[0,1,2]},"table_type":"Base"}"#;
+
+        let actual: TableInfo = serde_json::from_str(serialized).unwrap();
+        let expected = TableInfo {
+            ident: TableIdent {
+                table_id: 1024,
+                version: 1,
+            },
+            name: "foo".to_string(),
+            desc: Some("my table".to_string()),
+            catalog_name: "greptime".to_string(),
+            schema_name: "public".to_string(),
+            meta: TableMeta {
+                schema: Arc::new(new_test_schema()),
+                primary_key_indices: vec![0],
+                value_indices: vec![1, 2],
+                engine: "mito".to_string(),
+                next_column_id: 3,
+                options: TableOptions {
+                    ttl: Some(common_time::TimeToLive::Duration(
+                        std::time::Duration::from_secs(3600),
+                    )),
+                    ..Default::default()
+                },
+                created_on: DateTime::<Utc>::MIN_UTC,
+                updated_on: DateTime::<Utc>::MAX_UTC,
+                partition_key_indices: vec![2],
+                column_ids: vec![0, 1, 2],
+            },
+            table_type: TableType::Base,
+        };
+        assert_eq!(actual, expected);
     }
 }

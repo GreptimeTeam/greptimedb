@@ -54,7 +54,7 @@ use common_time::{Timestamp, Timezone};
 use datafusion_common::tree_node::TreeNodeVisitor;
 use datafusion_expr::LogicalPlan;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{ColumnSchema, RawSchema, Schema};
+use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::value::Value;
 use datatypes::vectors::{StringVector, VectorRef};
 use humantime::parse_duration;
@@ -83,7 +83,7 @@ use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::TableRef;
 use table::dist_table::DistTable;
-use table::metadata::{self, RawTableInfo, RawTableMeta, TableId, TableInfo, TableType};
+use table::metadata::{self, TableId, TableInfo, TableMeta, TableType};
 use table::requests::{
     AlterKind, AlterTableRequest, COMMENT_KEY, DDL_TIMEOUT, DDL_WAIT, TableOptions,
 };
@@ -92,7 +92,7 @@ use table::table_reference::TableReference;
 
 use crate::error::{
     self, AlterExprToRequestSnafu, BuildDfLogicalPlanSnafu, CatalogSnafu, ColumnDataTypeSnafu,
-    ColumnNotFoundSnafu, ConvertSchemaSnafu, CreateLogicalTablesSnafu, CreateTableInfoSnafu,
+    ColumnNotFoundSnafu, ConvertSchemaSnafu, CreateLogicalTablesSnafu,
     DeserializePartitionExprSnafu, EmptyDdlExprSnafu, ExternalSnafu, ExtractTableNamesSnafu,
     FlowNotFoundSnafu, InvalidPartitionRuleSnafu, InvalidPartitionSnafu, InvalidSqlSnafu,
     InvalidTableNameSnafu, InvalidViewNameSnafu, InvalidViewStmtSnafu, NotSupportedSnafu,
@@ -385,8 +385,7 @@ impl StatementExecutor {
 
         table_info.ident.table_id = table_id;
 
-        let table_info: Arc<TableInfo> =
-            Arc::new(table_info.try_into().context(CreateTableInfoSnafu)?);
+        let table_info = Arc::new(table_info);
         create_table.table_id = Some(api::v1::TableId { id: table_id });
 
         let table = DistTable::table(table_info);
@@ -921,7 +920,7 @@ impl StatementExecutor {
 
         let view_name = TableName::new(&expr.catalog_name, &expr.schema_name, &expr.view_name);
 
-        let mut view_info = RawTableInfo {
+        let mut view_info = TableInfo {
             ident: metadata::TableIdent {
                 // The view id of distributed table is assigned by Meta, set "0" here as a placeholder.
                 table_id: 0,
@@ -932,7 +931,7 @@ impl StatementExecutor {
             catalog_name: expr.catalog_name.clone(),
             schema_name: expr.schema_name.clone(),
             // The meta doesn't make sense for views, so using a default one.
-            meta: RawTableMeta::default(),
+            meta: TableMeta::empty(),
             table_type: TableType::View,
         };
 
@@ -961,7 +960,7 @@ impl StatementExecutor {
 
         view_info.ident.table_id = view_id;
 
-        let view_info = Arc::new(view_info.try_into().context(CreateTableInfoSnafu)?);
+        let view_info = Arc::new(view_info);
 
         let table = DistTable::table(view_info);
 
@@ -1737,7 +1736,7 @@ impl StatementExecutor {
         &self,
         create_table: CreateTableExpr,
         partitions: Vec<PartitionExpr>,
-        table_info: RawTableInfo,
+        table_info: TableInfo,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let partitions = partitions
@@ -1758,7 +1757,7 @@ impl StatementExecutor {
 
     async fn create_logical_tables_procedure(
         &self,
-        tables_data: Vec<(CreateTableExpr, RawTableInfo)>,
+        tables_data: Vec<(CreateTableExpr, TableInfo)>,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
@@ -2057,7 +2056,7 @@ pub fn verify_alter(
 pub fn create_table_info(
     create_table: &CreateTableExpr,
     partition_columns: Vec<String>,
-) -> Result<RawTableInfo> {
+) -> Result<TableInfo> {
     let mut column_schemas = Vec::with_capacity(create_table.column_defs.len());
     let mut column_name_to_index_map = HashMap::new();
 
@@ -2072,15 +2071,8 @@ pub fn create_table_info(
         let _ = column_name_to_index_map.insert(column.name.clone(), idx);
     }
 
-    let timestamp_index = column_name_to_index_map
-        .get(&create_table.time_index)
-        .cloned();
-
-    let raw_schema = RawSchema {
-        column_schemas: column_schemas.clone(),
-        timestamp_index,
-        version: 0,
-    };
+    let next_column_id = column_schemas.len() as u32;
+    let schema = Arc::new(Schema::new(column_schemas));
 
     let primary_key_indices = create_table
         .primary_keys
@@ -2106,12 +2098,12 @@ pub fn create_table_info(
     let table_options = TableOptions::try_from_iter(&create_table.table_options)
         .context(UnrecognizedTableOptionSnafu)?;
 
-    let meta = RawTableMeta {
-        schema: raw_schema,
+    let meta = TableMeta {
+        schema,
         primary_key_indices,
         value_indices: vec![],
         engine: create_table.engine.clone(),
-        next_column_id: column_schemas.len() as u32,
+        next_column_id,
         options: table_options,
         created_on: Utc::now(),
         updated_on: Utc::now(),
@@ -2125,7 +2117,7 @@ pub fn create_table_info(
         Some(create_table.desc.clone())
     };
 
-    let table_info = RawTableInfo {
+    let table_info = TableInfo {
         ident: metadata::TableIdent {
             // The table id of distributed table is assigned by Meta, set "0" here as a placeholder.
             table_id: 0,

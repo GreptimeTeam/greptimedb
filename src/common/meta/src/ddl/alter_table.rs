@@ -34,7 +34,7 @@ use snafu::{ResultExt, ensure};
 use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::TABLE_COLUMN_METADATA_EXTENSION_KEY;
 use strum::AsRefStr;
-use table::metadata::{RawTableInfo, TableId, TableInfo};
+use table::metadata::{TableId, TableInfo};
 use table::table_reference::TableReference;
 
 use crate::ddl::DdlContext;
@@ -288,7 +288,7 @@ impl AlterTableProcedure {
                 &self.context.table_metadata_manager,
                 table_info_value,
                 self.data.region_distribution.as_ref(),
-                new_info.into(),
+                new_info,
                 &self.data.column_metadatas,
             )
             .await?;
@@ -426,7 +426,7 @@ impl AlterTableData {
         self.table_id
     }
 
-    fn table_info(&self) -> Option<&RawTableInfo> {
+    fn table_info(&self) -> Option<&TableInfo> {
         self.table_info_value
             .as_ref()
             .map(|value| &value.table_info)

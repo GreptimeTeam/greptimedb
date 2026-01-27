@@ -24,7 +24,7 @@ use common_meta::kv_backend::KvBackendRef;
 use futures::Stream;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::TableId;
-use table::metadata::RawTableInfo;
+use table::metadata::TableInfo;
 
 use crate::error::{Result, TableMetadataSnafu, UnexpectedSnafu};
 
@@ -58,7 +58,7 @@ pub struct TableMetadataIterator {
 /// The full table metadata.
 pub struct FullTableMetadata {
     pub table_id: TableId,
-    pub table_info: RawTableInfo,
+    pub table_info: TableInfo,
     pub table_route: TableRouteValue,
 }
 
