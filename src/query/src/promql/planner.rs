@@ -1590,7 +1590,7 @@ impl PromPlanner {
 
         let logical_table = self.table_from_source(&provider)?;
 
-        let scan_table_ref = table_ref.clone();
+        let mut scan_table_ref = table_ref.clone();
         let mut scan_provider = provider;
         let mut table_id_filter: Option<u32> = None;
 
@@ -1639,6 +1639,7 @@ impl PromPlanner {
 
                 if has_table_id && has_tsid {
                     scan_provider = physical_provider;
+                    scan_table_ref = physical_table_ref;
                     table_id_filter = Some(logical_table.table_info().ident.table_id);
                 }
             }
@@ -1725,6 +1726,8 @@ impl PromPlanner {
                     DfExpr::Column(Column::from_name(DATA_SCHEMA_TABLE_ID_COLUMN_NAME))
                         .eq(lit(table_id)),
                 )
+                .context(DataFusionPlanningSnafu)?
+                .alias(table_ref) // rename the relation back to logical table's name after filtering
                 .context(DataFusionPlanningSnafu)?
                 .build()
                 .context(DataFusionPlanningSnafu)?;
@@ -2949,6 +2952,11 @@ impl PromPlanner {
 
         let input = args.args[1].as_ref().clone();
         let input_plan = self.prom_expr_to_plan(&input, query_engine_state).await?;
+        // `histogram_quantile` folds buckets across `le`, so `__tsid` (which includes `le`) is not
+        // a stable series identifier anymore. Also, HistogramFold infers label columns from the
+        // input schema and must not treat `__tsid` as a label column.
+        let input_plan = self.strip_tsid_column(input_plan)?;
+        self.ctx.use_tsid = false;
 
         if !self.ctx.has_le_tag() {
             // Return empty result instead of error when 'le' column is not found
@@ -4569,8 +4577,10 @@ mod test {
                 .unwrap();
 
         let plan_str = plan.display_indent_schema().to_string();
-        assert!(plan_str.contains("TableScan: some_metric"));
-        assert!(!plan_str.contains("TableScan: phy"));
+        assert!(plan_str.contains("TableScan: phy"), "{plan}");
+        assert!(plan_str.contains("SubqueryAlias: some_metric"));
+        assert!(plan_str.contains("Filter: phy.__table_id = UInt32(1024)"));
+        assert!(!plan_str.contains("TableScan: some_metric"));
     }
 
     #[tokio::test]

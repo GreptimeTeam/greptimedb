@@ -209,6 +209,7 @@ jobs:
           disable-run-tests: ${{ env.DISABLE_RUN_TESTS }}
           image-registry: ${{ vars.ECR_IMAGE_REGISTRY }}
           image-namespace: ${{ vars.ECR_IMAGE_NAMESPACE }}
+          large-page-size: true
 
   run-multi-lang-tests:
     name: Run Multi-language SDK Tests

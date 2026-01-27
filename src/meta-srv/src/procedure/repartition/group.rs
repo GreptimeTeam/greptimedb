@@ -489,6 +489,25 @@ impl Context {
             .context(error::TableMetadataManagerSnafu)
     }
 
+    /// Updates the table repart mapping.
+    pub async fn update_table_repart_mapping(&self) -> Result<()> {
+        info!(
+            "Updating table repart mapping for table: {}, group_id: {}, region mapping: {:?}",
+            self.persistent_ctx.table_id,
+            self.persistent_ctx.group_id,
+            self.persistent_ctx.region_mapping
+        );
+
+        self.table_metadata_manager
+            .table_repart_manager()
+            .update_mappings(
+                self.persistent_ctx.table_id,
+                &self.persistent_ctx.region_mapping,
+            )
+            .await
+            .context(error::TableMetadataManagerSnafu)
+    }
+
     /// Returns the next operation timeout.
     ///
     /// If the next operation timeout is not set, it will return `None`.

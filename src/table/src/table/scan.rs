@@ -44,6 +44,7 @@ use datafusion_physical_expr::{EquivalenceProperties, Partitioning, PhysicalSort
 use datatypes::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use datatypes::compute::SortOptions;
 use futures::{Stream, StreamExt};
+use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 use store_api::region_engine::{
     PartitionRange, PrepareRequest, QueryScanContext, RegionScannerRef,
 };
@@ -116,7 +117,7 @@ impl RegionScanExec {
                 |col| Some(Arc::new(Column::new_with_schema(col, &arrow_schema).ok()?) as _),
             )
             .collect::<Vec<_>>();
-        let mut pk_sort_columns: Vec<PhysicalSortExpr> = pk_names
+        let pk_sort_columns: Vec<PhysicalSortExpr> = pk_names
             .iter()
             .filter_map(|col| {
                 Some(PhysicalSortExpr::new(
@@ -146,21 +147,46 @@ impl RegionScanExec {
 
         let eq_props = match request.distribution {
             Some(TimeSeriesDistribution::PerSeries) => {
-                if let Some(ts) = ts_col {
-                    pk_sort_columns.push(ts);
+                let mut orderings = Vec::with_capacity(2);
+
+                let mut pk_time_ordering = pk_sort_columns.clone();
+                if let Some(ts) = ts_col.clone() {
+                    pk_time_ordering.push(ts);
                 }
-                EquivalenceProperties::new_with_orderings(
-                    arrow_schema.clone(),
-                    vec![pk_sort_columns],
-                )
+                orderings.push(pk_time_ordering);
+
+                // Metric engine physical tables keep tag columns alongside `__tsid`. When `__tsid`
+                // is present, the scan output is also ordered by `(__tsid, time index)` which can
+                // help eliminate redundant sorts for promql plans (e.g. SeriesDivide).
+                //
+                // `pk_time_ordering` and the potential `(__tsid, time index)` ordering are actually
+                // the same thing, thus present in one `OrderingEquivalenceClass`.
+                if let (Ok(tsid_col), Some(ts)) = (
+                    Column::new_with_schema(DATA_SCHEMA_TSID_COLUMN_NAME, &arrow_schema),
+                    ts_col.clone(),
+                ) {
+                    orderings.push(vec![
+                        PhysicalSortExpr::new(
+                            Arc::new(tsid_col) as _,
+                            SortOptions {
+                                descending: false,
+                                nulls_first: true,
+                            },
+                        ),
+                        ts,
+                    ]);
+                }
+
+                EquivalenceProperties::new_with_orderings(arrow_schema.clone(), orderings)
             }
             Some(TimeSeriesDistribution::TimeWindowed) => {
-                if let Some(ts_col) = ts_col {
-                    pk_sort_columns.insert(0, ts_col);
+                let mut pk_time_ordering = pk_sort_columns.clone();
+                if let Some(ts) = ts_col.clone() {
+                    pk_time_ordering.insert(0, ts);
                 }
                 EquivalenceProperties::new_with_orderings(
                     arrow_schema.clone(),
-                    vec![pk_sort_columns],
+                    vec![pk_time_ordering],
                 )
             }
             None => EquivalenceProperties::new(arrow_schema.clone()),
@@ -168,7 +194,12 @@ impl RegionScanExec {
 
         let partitioning = match request.distribution {
             Some(TimeSeriesDistribution::PerSeries) => {
-                Partitioning::Hash(pk_columns.clone(), num_output_partition)
+                match Column::new_with_schema(DATA_SCHEMA_TSID_COLUMN_NAME, &arrow_schema) {
+                    Ok(tsid_col) => {
+                        Partitioning::Hash(vec![Arc::new(tsid_col) as _], num_output_partition)
+                    }
+                    Err(_) => Partitioning::Hash(pk_columns.clone(), num_output_partition),
+                }
             }
             Some(TimeSeriesDistribution::TimeWindowed) | None => {
                 Partitioning::UnknownPartitioning(num_output_partition)

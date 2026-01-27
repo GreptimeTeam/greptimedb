@@ -947,6 +947,10 @@ impl Metasrv {
         self.started.clone()
     }
 
+    pub fn gc_ticker(&self) -> Option<GcTickerRef> {
+        self.gc_ticker.as_ref().cloned()
+    }
+
     #[inline]
     pub fn new_ctx(&self) -> Context {
         let server_addr = self.options().grpc.server_addr.clone();

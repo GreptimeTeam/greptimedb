@@ -641,6 +641,8 @@ mod tests {
 
     use super::*;
 
+    const MOCK_AZBLOB_ACCOUNT_KEY_B64: &str = "dGVzdC1rZXk=";
+
     // ==================== Basic Success Cases ====================
 
     #[tokio::test]
@@ -770,7 +772,7 @@ mod tests {
             "--azblob-account-name",
             "test-account",
             "--azblob-account-key",
-            "test-key",
+            MOCK_AZBLOB_ACCOUNT_KEY_B64,
             "--azblob-endpoint",
             "https://account.blob.core.windows.net",
         ]);
@@ -794,7 +796,7 @@ mod tests {
             "--azblob-account-name",
             "test-account",
             "--azblob-account-key",
-            "test-key",
+            MOCK_AZBLOB_ACCOUNT_KEY_B64,
             "--azblob-endpoint",
             "https://account.blob.core.windows.net",
             "--azblob-sas-token",
@@ -1093,7 +1095,7 @@ mod tests {
             "--azblob-account-name",
             "", // Empty account name
             "--azblob-account-key",
-            "test-key",
+            MOCK_AZBLOB_ACCOUNT_KEY_B64,
             "--azblob-endpoint",
             "https://account.blob.core.windows.net",
         ]);
@@ -1239,7 +1241,7 @@ mod tests {
             "--azblob-account-name",
             "test-account",
             "--azblob-account-key",
-            "test-key",
+            MOCK_AZBLOB_ACCOUNT_KEY_B64,
             "--azblob-endpoint",
             "https://account.blob.core.windows.net",
             // No sas_token

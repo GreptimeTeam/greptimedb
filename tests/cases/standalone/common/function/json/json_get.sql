@@ -73,6 +73,18 @@ SELECT json_get_int(json_get_object(j, '[0]'), 'a.i') FROM jsons;
 
 SELECT json_get_int(json_get_object(j, '[9]'), 'a.i') FROM jsons;
 
+SELECT json_get(j, '[0]', 'int') FROM jsons;
+
+SELECT json_get(j, '[0]', 'float') FROM jsons;
+
+SELECT json_get(j, '[1]', 'int') FROM jsons;
+
+SELECT json_get(j, '[1]', 'float') FROM jsons;
+
+SELECT json_get(j, '[2]', 'bool') FROM jsons;
+
+SELECT json_get(j, '[3]', 'string') FROM jsons;
+
 DROP TABLE jsons;
 
 -- test functions in WHERE clause --

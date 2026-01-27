@@ -24,6 +24,7 @@ use datafusion_common::{Column, Result};
 use datafusion_expr::expr::Sort;
 use datafusion_expr::{Expr, LogicalPlan, utils};
 use datafusion_optimizer::{OptimizerConfig, OptimizerRule};
+use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 use store_api::storage::{TimeSeriesDistribution, TimeSeriesRowSelector};
 
 use crate::dummy_catalog::DummyTableProvider;
@@ -123,8 +124,31 @@ impl ScanHintRule {
         }
         adapter.with_ordering_hint(&opts);
 
-        let mut sort_expr_cursor = order_expr.iter().filter_map(|s| s.expr.try_as_col());
         let region_metadata = adapter.region_metadata();
+        let time_index_name = region_metadata
+            .time_index_column()
+            .column_schema
+            .name
+            .as_str();
+        let sort_cols = order_expr
+            .iter()
+            .filter_map(|s| s.expr.try_as_col())
+            .collect::<Vec<_>>();
+
+        // Special-case metric engine: when the nearest sort requirement is `__tsid, <time index>`,
+        // we can safely enable per-series distribution hint so the region can use `SeriesScan`.
+        //
+        // This pattern is produced by promql planning when `__tsid` is available and is used as the
+        // series identifier (instead of expanding to all tag columns).
+        if sort_cols.len() == 2
+            && sort_cols[0].name == DATA_SCHEMA_TSID_COLUMN_NAME
+            && sort_cols[1].name == time_index_name
+        {
+            adapter.with_distribution(TimeSeriesDistribution::PerSeries);
+            return;
+        }
+
+        let mut sort_expr_cursor = sort_cols.into_iter();
         // ignore table without pk
         if region_metadata.primary_key.is_empty() {
             return;
@@ -306,10 +330,11 @@ mod test {
     use datafusion_expr::expr::{AggregateFunction, AggregateFunctionParams};
     use datafusion_expr::{LogicalPlanBuilder, col};
     use datafusion_optimizer::OptimizerContext;
+    use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
     use store_api::storage::RegionId;
 
     use super::*;
-    use crate::optimizer::test_util::mock_table_provider;
+    use crate::optimizer::test_util::{mock_table_provider, mock_table_provider_with_tsid};
 
     #[test]
     fn set_order_hint() {
@@ -373,5 +398,29 @@ mod test {
 
         let scan_req = provider.scan_request();
         let _ = scan_req.series_row_selector.unwrap();
+    }
+
+    #[test]
+    fn set_order_hint_sets_per_series_distribution_for_tsid_sort() {
+        let provider = Arc::new(mock_table_provider_with_tsid(RegionId::new(1, 1)));
+        let table_source = Arc::new(DefaultTableSource::new(provider.clone()));
+        let plan = LogicalPlanBuilder::scan("t", table_source, None)
+            .unwrap()
+            .sort(vec![
+                col(DATA_SCHEMA_TSID_COLUMN_NAME).sort(true, true),
+                col("ts").sort(true, true),
+            ])
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let context = OptimizerContext::default();
+        ScanHintRule.rewrite(plan, &context).unwrap();
+
+        let scan_req = provider.scan_request();
+        assert_eq!(
+            scan_req.distribution,
+            Some(TimeSeriesDistribution::PerSeries)
+        );
     }
 }
