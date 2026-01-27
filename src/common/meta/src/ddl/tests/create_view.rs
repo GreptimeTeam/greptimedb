@@ -22,7 +22,7 @@ use common_error::status_code::StatusCode;
 use common_procedure::{Context as ProcedureContext, Procedure, ProcedureId, Status};
 use common_procedure_test::MockContextProvider;
 use table::metadata;
-use table::metadata::{RawTableInfo, RawTableMeta, TableType};
+use table::metadata::{RawTableInfo, TableMeta, TableType};
 
 use crate::ddl::create_table::CreateTableProcedure;
 use crate::ddl::create_view::CreateViewProcedure;
@@ -83,7 +83,7 @@ pub(crate) fn test_create_view_task(name: &str) -> CreateViewTask {
         desc: None,
         catalog_name: expr.catalog_name.clone(),
         schema_name: expr.schema_name.clone(),
-        meta: RawTableMeta::default(),
+        meta: TableMeta::empty(),
         table_type: TableType::View,
     };
 

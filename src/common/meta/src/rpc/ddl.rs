@@ -1597,10 +1597,10 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::{AlterTableExpr, ColumnDef, CreateTableExpr, SemanticType};
-    use datatypes::schema::{ColumnSchema, RawSchema, SchemaBuilder};
+    use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder};
     use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
     use store_api::storage::ConcreteDataType;
-    use table::metadata::{RawTableInfo, RawTableMeta, TableType};
+    use table::metadata::{RawTableInfo, TableMeta, TableType};
     use table::test_util::table_info::test_table_info;
 
     use super::{AlterTableTask, CreateTableTask, *};
@@ -1636,32 +1636,28 @@ mod tests {
     #[test]
     fn test_sort_columns() {
         // construct RawSchema
-        let raw_schema = RawSchema {
-            column_schemas: vec![
-                ColumnSchema::new(
-                    "column3".to_string(),
-                    ConcreteDataType::string_datatype(),
-                    true,
-                ),
-                ColumnSchema::new(
-                    "column1".to_string(),
-                    ConcreteDataType::timestamp_millisecond_datatype(),
-                    false,
-                )
-                .with_time_index(true),
-                ColumnSchema::new(
-                    "column2".to_string(),
-                    ConcreteDataType::float64_datatype(),
-                    true,
-                ),
-            ],
-            timestamp_index: Some(1),
-            version: 0,
-        };
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "column3".to_string(),
+                ConcreteDataType::string_datatype(),
+                true,
+            ),
+            ColumnSchema::new(
+                "column1".to_string(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new(
+                "column2".to_string(),
+                ConcreteDataType::float64_datatype(),
+                true,
+            ),
+        ]));
 
         // construct RawTableMeta
-        let raw_table_meta = RawTableMeta {
-            schema: raw_schema,
+        let meta = TableMeta {
+            schema,
             primary_key_indices: vec![0],
             value_indices: vec![2],
             engine: METRIC_ENGINE_NAME.to_string(),
@@ -1676,7 +1672,7 @@ mod tests {
         // construct RawTableInfo
         let raw_table_info = RawTableInfo {
             ident: Default::default(),
-            meta: raw_table_meta,
+            meta,
             name: Default::default(),
             desc: Default::default(),
             catalog_name: Default::default(),
@@ -1729,7 +1725,7 @@ mod tests {
 
         // Assert that the table_info is updated correctly
         assert_eq!(
-            create_table_task.table_info.meta.schema.timestamp_index,
+            create_table_task.table_info.meta.schema.timestamp_index(),
             Some(0)
         );
         assert_eq!(

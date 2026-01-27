@@ -42,10 +42,10 @@ pub fn generate_alter_table_expr_for_all_columns(
         .meta
         .primary_key_indices
         .iter()
-        .map(|i| schema.column_schemas[*i].name.clone())
+        .map(|i| schema.column_schemas()[*i].name.clone())
         .collect::<Vec<_>>();
 
-    let add_columns = column_schemas_to_defs(schema.column_schemas.clone(), &primary_keys)
+    let add_columns = column_schemas_to_defs(schema.column_schemas().to_vec(), &primary_keys)
         .context(CovertColumnSchemasToDefsSnafu)?;
 
     alter_table_expr.kind = Some(Kind::AddColumns(AddColumns {

@@ -280,8 +280,8 @@ impl TableInfoManager {
 mod tests {
 
     use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::{ColumnSchema, RawSchema, Schema};
-    use table::metadata::{RawTableMeta, TableIdent, TableType};
+    use datatypes::schema::{ColumnSchema, Schema};
+    use table::metadata::{TableIdent, TableMeta, TableType};
 
     use super::*;
 
@@ -329,8 +329,8 @@ mod tests {
             true,
         )]);
 
-        let meta = RawTableMeta {
-            schema: RawSchema::from(&schema),
+        let meta = TableMeta {
+            schema: Arc::new(schema),
             engine: "mito".to_string(),
             created_on: chrono::DateTime::default(),
             updated_on: chrono::DateTime::default(),

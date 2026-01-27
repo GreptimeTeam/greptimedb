@@ -546,7 +546,7 @@ async fn test_on_part_duplicate_alter_request() {
         .table_info
         .meta
         .schema
-        .column_schemas
+        .column_schemas()
         .iter()
         .map(|x| x.name.clone())
         .collect::<Vec<_>>();
@@ -565,7 +565,7 @@ async fn test_on_part_duplicate_alter_request() {
         .table_info
         .meta
         .schema
-        .column_schemas
+        .column_schemas()
         .iter()
         .map(|x| x.name.clone())
         .collect::<Vec<_>>();

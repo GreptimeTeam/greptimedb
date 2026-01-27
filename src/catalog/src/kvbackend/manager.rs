@@ -146,7 +146,7 @@ impl KvBackendCatalogManager {
                         .table_info
                         .meta
                         .schema
-                        .column_schemas
+                        .column_schemas()
                         .get(physical_index)
                         .and_then(|physical_column| {
                             // Find the corresponding index in the logical table schema
