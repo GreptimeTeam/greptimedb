@@ -17,6 +17,7 @@
 pub mod adapter;
 pub mod cursor;
 pub mod error;
+pub mod ext;
 pub mod filter;
 pub mod recordbatch;
 pub mod util;

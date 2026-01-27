@@ -17,15 +17,15 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use bytes::{Buf, Bytes};
+use bytes::Bytes;
 use object_store::ObjectStore;
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::{RowGroups, RowSelection};
-use parquet::column::page::{PageIterator, PageReader};
+use parquet::arrow::async_reader::{ColumnChunkData, ColumnChunkIterator};
+use parquet::column::page::PageIterator;
 use parquet::errors::{ParquetError, Result};
 use parquet::file::metadata::{ParquetMetaData, RowGroupMetaData};
 use parquet::file::page_index::offset_index::OffsetIndexMetaData;
-use parquet::file::reader::{ChunkReader, Length};
 use parquet::file::serialized_reader::SerializedPageReader;
 use store_api::storage::{FileId, RegionId};
 use tokio::task::yield_now;
@@ -595,78 +595,8 @@ impl RowGroups for InMemoryRowGroup<'_> {
         // Creates a page reader to read column at `i`.
         let page_reader = self.base.column_reader(i)?;
 
-        Ok(Box::new(ColumnChunkIterator {
-            reader: Some(Ok(Box::new(page_reader))),
-        }))
+        Ok(Box::new(ColumnChunkIterator::new(Some(Ok(Box::new(
+            page_reader,
+        ))))))
     }
 }
-
-/// An in-memory column chunk
-#[derive(Clone)]
-pub(crate) enum ColumnChunkData {
-    /// Column chunk data representing only a subset of data pages
-    Sparse {
-        /// Length of the full column chunk
-        length: usize,
-        /// Set of data pages included in this sparse chunk. Each element is a tuple
-        /// of (page offset, page data)
-        data: Vec<(usize, Bytes)>,
-    },
-    /// Full column chunk and its offset
-    Dense { offset: usize, data: Bytes },
-}
-
-impl ColumnChunkData {
-    fn get(&self, start: u64) -> Result<Bytes> {
-        match &self {
-            ColumnChunkData::Sparse { data, .. } => data
-                .binary_search_by_key(&start, |(offset, _)| *offset as u64)
-                .map(|idx| data[idx].1.clone())
-                .map_err(|_| {
-                    ParquetError::General(format!(
-                        "Invalid offset in sparse column chunk data: {start}"
-                    ))
-                }),
-            ColumnChunkData::Dense { offset, data } => {
-                let start = start as usize - *offset;
-                Ok(data.slice(start..))
-            }
-        }
-    }
-}
-
-impl Length for ColumnChunkData {
-    fn len(&self) -> u64 {
-        match &self {
-            ColumnChunkData::Sparse { length, .. } => *length as u64,
-            ColumnChunkData::Dense { data, .. } => data.len() as u64,
-        }
-    }
-}
-
-impl ChunkReader for ColumnChunkData {
-    type T = bytes::buf::Reader<Bytes>;
-
-    fn get_read(&self, start: u64) -> Result<Self::T> {
-        Ok(self.get(start)?.reader())
-    }
-
-    fn get_bytes(&self, start: u64, length: usize) -> Result<Bytes> {
-        Ok(self.get(start)?.slice(..length))
-    }
-}
-
-/// Implements [`PageIterator`] for a single column chunk, yielding a single [`PageReader`]
-pub(crate) struct ColumnChunkIterator {
-    pub(crate) reader: Option<Result<Box<dyn PageReader>>>,
-}
-
-impl Iterator for ColumnChunkIterator {
-    type Item = Result<Box<dyn PageReader>>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.reader.take()
-    }
-}
-
-impl PageIterator for ColumnChunkIterator {}

@@ -73,6 +73,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 cache.workspace = true
+catalog = { workspace = true, features = ["testing"] }
 client.workspace = true
 common-meta = { workspace = true, features = ["testing"] }
 common-query.workspace = true
@@ -81,3 +82,4 @@ datafusion-common.workspace = true
 mito2 = { workspace = true, features = ["test"] }
 partition.workspace = true
 session.workspace = true
+sql.workspace = true

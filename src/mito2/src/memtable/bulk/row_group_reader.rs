@@ -19,6 +19,7 @@ use bytes::Bytes;
 use datatypes::arrow::array::RecordBatch;
 use datatypes::arrow::error::ArrowError;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, RowGroups, RowSelection};
+use parquet::arrow::async_reader::ColumnChunkIterator;
 use parquet::arrow::{FieldLevels, ProjectionMask, parquet_to_arrow_field_levels};
 use parquet::column::page::{PageIterator, PageReader};
 use parquet::file::metadata::ParquetMetaData;
@@ -30,7 +31,7 @@ use crate::memtable::bulk::context::BulkIterContextRef;
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::reader::RowGroupReaderContext;
-use crate::sst::parquet::row_group::{ColumnChunkIterator, RowGroupBase};
+use crate::sst::parquet::row_group::RowGroupBase;
 
 /// Helper for reading specific row group inside Memtable Parquet parts.
 // This is similar to [mito2::sst::parquet::row_group::InMemoryRowGroup] since
@@ -99,9 +100,9 @@ impl RowGroups for MemtableRowGroupPageFetcher<'_> {
     }
 
     fn column_chunks(&self, i: usize) -> parquet::errors::Result<Box<dyn PageIterator>> {
-        Ok(Box::new(ColumnChunkIterator {
-            reader: Some(self.column_page_reader(i)),
-        }))
+        Ok(Box::new(ColumnChunkIterator::new(Some(
+            self.column_page_reader(i),
+        ))))
     }
 }
 

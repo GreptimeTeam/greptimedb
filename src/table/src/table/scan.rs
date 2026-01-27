@@ -33,6 +33,7 @@ use datafusion::physical_plan::filter_pushdown::{
     ChildPushdownResult, FilterPushdownPhase, FilterPushdownPropagation,
 };
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
+use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties,
     RecordBatchStream as DfRecordBatchStream,
@@ -436,6 +437,13 @@ impl ExecutionPlan for RegionScanExec {
 
     fn name(&self) -> &str {
         "RegionScanExec"
+    }
+
+    fn try_swapping_with_projection(
+        &self,
+        _projection: &ProjectionExec,
+    ) -> DfResult<Option<Arc<dyn ExecutionPlan>>> {
+        todo!()
     }
 
     fn handle_child_pushdown_result(

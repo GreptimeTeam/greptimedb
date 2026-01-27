@@ -322,6 +322,18 @@ impl FlatReadFormat {
             return Ok(false);
         }
 
+        if metadata
+            .schema
+            .arrow_schema()
+            .fields()
+            .iter()
+            .any(|x| x.data_type().is_nested())
+        {
+            // Definitely not legacy if any data type is nested. Because the nested data types,
+            // like "struct", are only introduced in the new version of GreptimeDB.
+            return Ok(false);
+        }
+
         // For flat format, compute expected column number:
         // all columns + internal columns (pk, sequence, op_type)
         let expected_columns = metadata.column_metadatas.len() + INTERNAL_COLUMN_NUM;

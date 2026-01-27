@@ -329,6 +329,16 @@ git = "https://github.com/GreptimeTeam/greptime-meter.git"
 rev = "5618e779cf2bb4755b499c630fba4c35e91898cb"
 
 [patch.crates-io]
+# on branch "greptime-57"
+arrow = { git = "https://github.com/GreptimeTeam/arrow-rs.git", rev = "ea8d41eaa336cd85b1116a32918eec652017f8af" }
+arrow-array = { git = "https://github.com/GreptimeTeam/arrow-rs.git", rev = "ea8d41eaa336cd85b1116a32918eec652017f8af" }
+arrow-buffer = { git = "https://github.com/GreptimeTeam/arrow-rs.git", rev = "ea8d41eaa336cd85b1116a32918eec652017f8af" }
+arrow-cast = { git = "https://github.com/GreptimeTeam/arrow-rs.git", rev = "ea8d41eaa336cd85b1116a32918eec652017f8af" }
+arrow-flight = { git = "https://github.com/GreptimeTeam/arrow-rs.git", rev = "ea8d41eaa336cd85b1116a32918eec652017f8af" }
+arrow-ipc = { git = "https://github.com/GreptimeTeam/arrow-rs.git", rev = "ea8d41eaa336cd85b1116a32918eec652017f8af" }
+arrow-ord = { git = "https://github.com/GreptimeTeam/arrow-rs.git", rev = "ea8d41eaa336cd85b1116a32918eec652017f8af" }
+arrow-schema = { git = "https://github.com/GreptimeTeam/arrow-rs.git", rev = "ea8d41eaa336cd85b1116a32918eec652017f8af" }
+parquet = { git = "https://github.com/GreptimeTeam/arrow-rs.git", rev = "ea8d41eaa336cd85b1116a32918eec652017f8af" }
 datafusion = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7143b2fc4492a7970774583ed0997a459f3e5c05" }
 datafusion-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7143b2fc4492a7970774583ed0997a459f3e5c05" }
 datafusion-expr = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7143b2fc4492a7970774583ed0997a459f3e5c05" }

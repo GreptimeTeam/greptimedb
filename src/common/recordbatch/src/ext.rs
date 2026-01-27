@@ -12,20 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(assert_matches)]
+use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::arrow::util::pretty;
 
-pub mod alive_keeper;
-pub mod config;
-pub mod datanode;
-pub mod error;
-pub mod event_listener;
-mod greptimedb_telemetry;
-pub mod heartbeat;
-pub mod metrics;
-pub mod partition_expr_fetcher;
-pub mod region_server;
-pub mod service;
-pub mod store;
-#[cfg(any(test, feature = "testing"))]
-pub mod tests;
-pub mod utils;
+pub trait RecordBatchExt {
+    fn pretty_print(&self) -> String;
+}
+
+impl RecordBatchExt for RecordBatch {
+    fn pretty_print(&self) -> String {
+        match pretty::pretty_format_batches(std::slice::from_ref(self)) {
+            Ok(s) => s.to_string(),
+            Err(e) => format!("unable to pretty print {self:?}: {e}"),
+        }
+    }
+}

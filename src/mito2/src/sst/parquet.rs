@@ -93,30 +93,35 @@ pub struct SstInfo {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    use std::ops::Range;
     use std::sync::Arc;
 
     use api::v1::{OpType, SemanticType};
+    use common_error::ext::WhateverResult;
     use common_function::function::FunctionRef;
     use common_function::function_factory::ScalarFunctionFactory;
     use common_function::scalars::matches::MatchesFunction;
     use common_function::scalars::matches_term::MatchesTermFunction;
+    use common_recordbatch::ext::RecordBatchExt;
     use common_time::Timestamp;
     use datafusion_common::{Column, ScalarValue};
     use datafusion_expr::expr::ScalarFunction;
     use datafusion_expr::{BinaryExpr, Expr, Literal, Operator, col, lit};
     use datatypes::arrow;
     use datatypes::arrow::array::{
-        ArrayRef, BinaryDictionaryBuilder, RecordBatch, StringArray, StringDictionaryBuilder,
-        TimestampMillisecondArray, UInt8Array, UInt64Array,
+        ArrayRef, BinaryDictionaryBuilder, Int32Array, RecordBatch, StringArray,
+        StringDictionaryBuilder, StructArray, TimestampMillisecondArray, UInt8Array, UInt64Array,
     };
-    use datatypes::arrow::datatypes::{DataType, Field, Schema, UInt32Type};
+    use datatypes::arrow::datatypes::{DataType, Field, Fields, Schema, UInt32Type};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{FulltextAnalyzer, FulltextBackend, FulltextOptions};
+    use datatypes::types::{StructField, StructType};
     use object_store::ObjectStore;
     use parquet::arrow::AsyncArrowWriter;
     use parquet::basic::{Compression, Encoding, ZstdLevel};
     use parquet::file::metadata::{KeyValue, PageIndexPolicy};
     use parquet::file::properties::WriterProperties;
+    use smallvec::SmallVec;
     use store_api::codec::PrimaryKeyEncoding;
     use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
     use store_api::region_request::PathType;
@@ -129,6 +134,7 @@ mod tests {
     use crate::cache::test_util::assert_parquet_metadata_equal;
     use crate::cache::{CacheManager, CacheStrategy, PageKey};
     use crate::config::IndexConfig;
+    use crate::read::range::FileRangeBuilder;
     use crate::read::{BatchBuilder, BatchReader, FlatSource};
     use crate::region::options::{IndexOptions, InvertedIndexOptions};
     use crate::sst::file::{FileHandle, FileMeta, RegionFileId, RegionIndexId};
@@ -2112,5 +2118,229 @@ mod tests {
         assert_eq!(metrics.filter_metrics.rg_minmax_filtered, 0);
         assert_eq!(metrics.filter_metrics.rg_fulltext_filtered, 2);
         assert_eq!(metrics.filter_metrics.rows_fulltext_filtered, 100);
+    }
+
+    #[tokio::test]
+    async fn test_parquet_write_and_read_with_nested_data_type() -> WhateverResult<()> {
+        common_telemetry::init_default_ut_logging();
+
+        let mut env = TestEnv::new().await;
+        let object_store = env.init_object_store_manager();
+
+        let mut builder = RegionMetadataBuilder::new(REGION_ID);
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "tag_0".to_string(),
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 0,
+            })
+            // Create a column "a" with nested (struct) data type:
+            //
+            // struct<
+            //   "a_a": string,
+            //   "a_": struct<
+            //     "a_b": int32,
+            //   >
+            // >
+            //
+            // There are two leaf columns in the parquet: "a_a" and "a_b", which will be written and read in this test.
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "a",
+                    ConcreteDataType::struct_datatype(StructType::new(Arc::new(vec![
+                        StructField::new("a_a", ConcreteDataType::string_datatype(), true),
+                        StructField::new(
+                            "a_",
+                            ConcreteDataType::struct_datatype(StructType::new(Arc::new(vec![
+                                StructField::new("a_b", ConcreteDataType::int32_datatype(), true),
+                            ]))),
+                            true,
+                        ),
+                    ]))),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts".to_string(),
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 2,
+            })
+            .primary_key(vec![0]);
+        let metadata = Arc::new(builder.build()?);
+        let flat_schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
+
+        let create_record_batch = |tag: &str, range: Range<i32>| -> WhateverResult<RecordBatch> {
+            let num_rows = range.len();
+            let mut columns = Vec::new();
+
+            // Add primary key column (tag_0) as dictionary array
+            let mut tag_builder = StringDictionaryBuilder::<UInt32Type>::new();
+            for _ in 0..num_rows {
+                tag_builder.append_value(tag);
+            }
+            columns.push(Arc::new(tag_builder.finish()) as ArrayRef);
+
+            columns.push(Arc::new(StructArray::new(
+                Fields::from(vec![
+                    Field::new("a_a", DataType::Utf8, true),
+                    Field::new_struct(
+                        "a_",
+                        Fields::from(vec![Field::new("a_b", DataType::Int32, true)]),
+                        true,
+                    ),
+                ]),
+                vec![
+                    Arc::new(StringArray::from_iter_values(
+                        range.clone().map(|i| format!("s_{i}")),
+                    )) as ArrayRef,
+                    Arc::new(StructArray::new(
+                        Fields::from(vec![Field::new("a_b", DataType::Int32, true)]),
+                        vec![Arc::new(Int32Array::from_iter_values(range.clone())) as ArrayRef],
+                        None,
+                    )),
+                ],
+                None,
+            )));
+
+            // Add time index column (ts)
+            let timestamps: Vec<i64> = range.map(|v| v as i64).collect();
+            columns.push(Arc::new(TimestampMillisecondArray::from(timestamps)));
+
+            // Add encoded primary key column
+            let pk = new_primary_key(&[tag]);
+            let mut pk_builder = BinaryDictionaryBuilder::<UInt32Type>::new();
+            for _ in 0..num_rows {
+                pk_builder.append(&pk).unwrap();
+            }
+            columns.push(Arc::new(pk_builder.finish()));
+
+            // Add sequence column
+            columns.push(Arc::new(UInt64Array::from_value(1000, num_rows)));
+
+            // Add op_type column
+            columns.push(Arc::new(UInt8Array::from_value(
+                OpType::Put as u8,
+                num_rows,
+            )));
+
+            Ok(RecordBatch::try_new(flat_schema.clone(), columns).map_err(|e| e.to_string())?)
+        };
+        let flat_source = new_flat_source_from_record_batches(vec![
+            create_record_batch("x", 0..10)?,
+            create_record_batch("y", 10..20)?,
+            create_record_batch("z", 20..30)?,
+        ]);
+
+        let info = ParquetWriter::new_with_object_store(
+            object_store.clone(),
+            metadata.clone(),
+            IndexConfig::default(),
+            NoopIndexBuilder,
+            RegionFilePathFactory::new(FILE_DIR.to_string(), PathType::Bare),
+            &mut Metrics::new(WriteType::Flush),
+        )
+        .await
+        .write_all_flat(
+            flat_source,
+            &WriteOptions {
+                row_group_size: 16,
+                ..Default::default()
+            },
+        )
+        .await?
+        .remove(0);
+
+        assert_eq!(30, info.num_rows);
+        assert!(info.file_size > 0);
+        assert_eq!(
+            (
+                Timestamp::new_millisecond(0),
+                Timestamp::new_millisecond(29)
+            ),
+            info.time_range
+        );
+
+        let (context, selection) = ParquetReaderBuilder::new(
+            FILE_DIR.to_string(),
+            PathType::Bare,
+            create_file_handle_from_sst_info(&info, &metadata),
+            object_store,
+        )
+        .flat_format(true)
+        .build_reader_input(&mut ReaderMetrics::default())
+        .await?;
+
+        assert_eq!(selection.row_group_count(), 2);
+        assert_eq!(selection.row_count(), 30);
+
+        let mut record_batches = vec![];
+        let mut ranges = SmallVec::<[_; 2]>::new();
+        FileRangeBuilder::new(Arc::new(context), selection).build_ranges(-1, &mut ranges);
+        for range in ranges {
+            let Some(mut reader) = range.flat_reader(None).await? else {
+                continue;
+            };
+            while let Some(record_batch) = reader.next_batch()? {
+                record_batches.push(record_batch);
+            }
+        }
+
+        let expects = vec![
+            r#"
++-------+----------------------------+-------------------------+------------------------+------------+-----------+
+| tag_0 | a                          | ts                      | __primary_key          | __sequence | __op_type |
++-------+----------------------------+-------------------------+------------------------+------------+-----------+
+| x     | {a_a: s_0, a_: {a_b: 0}}   | 1970-01-01T00:00:00     | 0101780000000000000001 | 1000       | 1         |
+| x     | {a_a: s_1, a_: {a_b: 1}}   | 1970-01-01T00:00:00.001 | 0101780000000000000001 | 1000       | 1         |
+| x     | {a_a: s_2, a_: {a_b: 2}}   | 1970-01-01T00:00:00.002 | 0101780000000000000001 | 1000       | 1         |
+| x     | {a_a: s_3, a_: {a_b: 3}}   | 1970-01-01T00:00:00.003 | 0101780000000000000001 | 1000       | 1         |
+| x     | {a_a: s_4, a_: {a_b: 4}}   | 1970-01-01T00:00:00.004 | 0101780000000000000001 | 1000       | 1         |
+| x     | {a_a: s_5, a_: {a_b: 5}}   | 1970-01-01T00:00:00.005 | 0101780000000000000001 | 1000       | 1         |
+| x     | {a_a: s_6, a_: {a_b: 6}}   | 1970-01-01T00:00:00.006 | 0101780000000000000001 | 1000       | 1         |
+| x     | {a_a: s_7, a_: {a_b: 7}}   | 1970-01-01T00:00:00.007 | 0101780000000000000001 | 1000       | 1         |
+| x     | {a_a: s_8, a_: {a_b: 8}}   | 1970-01-01T00:00:00.008 | 0101780000000000000001 | 1000       | 1         |
+| x     | {a_a: s_9, a_: {a_b: 9}}   | 1970-01-01T00:00:00.009 | 0101780000000000000001 | 1000       | 1         |
+| y     | {a_a: s_10, a_: {a_b: 10}} | 1970-01-01T00:00:00.010 | 0101790000000000000001 | 1000       | 1         |
+| y     | {a_a: s_11, a_: {a_b: 11}} | 1970-01-01T00:00:00.011 | 0101790000000000000001 | 1000       | 1         |
+| y     | {a_a: s_12, a_: {a_b: 12}} | 1970-01-01T00:00:00.012 | 0101790000000000000001 | 1000       | 1         |
+| y     | {a_a: s_13, a_: {a_b: 13}} | 1970-01-01T00:00:00.013 | 0101790000000000000001 | 1000       | 1         |
+| y     | {a_a: s_14, a_: {a_b: 14}} | 1970-01-01T00:00:00.014 | 0101790000000000000001 | 1000       | 1         |
+| y     | {a_a: s_15, a_: {a_b: 15}} | 1970-01-01T00:00:00.015 | 0101790000000000000001 | 1000       | 1         |
++-------+----------------------------+-------------------------+------------------------+------------+-----------+"#,
+            r#"
++-------+----------------------------+-------------------------+------------------------+------------+-----------+
+| tag_0 | a                          | ts                      | __primary_key          | __sequence | __op_type |
++-------+----------------------------+-------------------------+------------------------+------------+-----------+
+| y     | {a_a: s_16, a_: {a_b: 16}} | 1970-01-01T00:00:00.016 | 0101790000000000000001 | 1000       | 1         |
+| y     | {a_a: s_17, a_: {a_b: 17}} | 1970-01-01T00:00:00.017 | 0101790000000000000001 | 1000       | 1         |
+| y     | {a_a: s_18, a_: {a_b: 18}} | 1970-01-01T00:00:00.018 | 0101790000000000000001 | 1000       | 1         |
+| y     | {a_a: s_19, a_: {a_b: 19}} | 1970-01-01T00:00:00.019 | 0101790000000000000001 | 1000       | 1         |
+| z     | {a_a: s_20, a_: {a_b: 20}} | 1970-01-01T00:00:00.020 | 01017a0000000000000001 | 1000       | 1         |
+| z     | {a_a: s_21, a_: {a_b: 21}} | 1970-01-01T00:00:00.021 | 01017a0000000000000001 | 1000       | 1         |
+| z     | {a_a: s_22, a_: {a_b: 22}} | 1970-01-01T00:00:00.022 | 01017a0000000000000001 | 1000       | 1         |
+| z     | {a_a: s_23, a_: {a_b: 23}} | 1970-01-01T00:00:00.023 | 01017a0000000000000001 | 1000       | 1         |
+| z     | {a_a: s_24, a_: {a_b: 24}} | 1970-01-01T00:00:00.024 | 01017a0000000000000001 | 1000       | 1         |
+| z     | {a_a: s_25, a_: {a_b: 25}} | 1970-01-01T00:00:00.025 | 01017a0000000000000001 | 1000       | 1         |
+| z     | {a_a: s_26, a_: {a_b: 26}} | 1970-01-01T00:00:00.026 | 01017a0000000000000001 | 1000       | 1         |
+| z     | {a_a: s_27, a_: {a_b: 27}} | 1970-01-01T00:00:00.027 | 01017a0000000000000001 | 1000       | 1         |
+| z     | {a_a: s_28, a_: {a_b: 28}} | 1970-01-01T00:00:00.028 | 01017a0000000000000001 | 1000       | 1         |
+| z     | {a_a: s_29, a_: {a_b: 29}} | 1970-01-01T00:00:00.029 | 01017a0000000000000001 | 1000       | 1         |
++-------+----------------------------+-------------------------+------------------------+------------+-----------+"#,
+        ];
+        assert_eq!(record_batches.len(), expects.len());
+        for (record_batch, expect) in record_batches.iter().zip(expects) {
+            assert_eq!(record_batch.pretty_print(), expect.trim());
+        }
+        Ok(())
     }
 }
