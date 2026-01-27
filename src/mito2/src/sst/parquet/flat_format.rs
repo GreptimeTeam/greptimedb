@@ -257,6 +257,9 @@ impl FlatReadFormat {
     }
 
     /// Gets the projection in the flat format.
+    ///
+    /// When `skip_auto_convert` is enabled (primary-key format read), this returns the
+    /// primary-key format projection so filter/prune can resolve projected indices.
     pub(crate) fn format_projection(&self) -> &FormatProjection {
         match &self.parquet_adapter {
             ParquetAdapter::Flat(p) => &p.format_projection,
@@ -376,6 +379,8 @@ struct ParquetPrimaryKeyToFlat {
     /// Projection computed for the flat format.
     format_projection: FormatProjection,
     /// Projection used when reading primary key format without auto convert.
+    ///
+    /// Only used when `skip_auto_convert` is true.
     primary_key_format_projection: Option<FormatProjection>,
 }
 
@@ -665,7 +670,6 @@ impl DecodedPrimaryKeys {
 
 /// Converts a batch that doesn't have decoded primary key columns into a batch that has decoded
 /// primary key columns in flat format.
-#[derive(Debug)]
 pub(crate) struct FlatConvertFormat {
     /// Metadata of the region.
     metadata: RegionMetadataRef,

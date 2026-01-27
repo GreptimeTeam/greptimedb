@@ -29,6 +29,7 @@ impl MetricEngine {
         request: RegionRequest,
     ) -> Result<AffectedRows> {
         // We don't need to enter staging for metadata region.
+        // Callers should pass the data region id here; metadata regions stay unchanged.
         self.inner
             .mito
             .handle_request(region_id, request)

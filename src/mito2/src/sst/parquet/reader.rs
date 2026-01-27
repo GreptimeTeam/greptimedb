@@ -352,11 +352,14 @@ impl ParquetReaderBuilder {
         // - region partition expr is same with file partition expr (no need to auto convert)
         let skip_auto_convert = self.compaction && is_same_region_partition;
 
-        // Build compat format for compaction when:
+        // Build a compaction projection helper when:
         // - compaction is enabled
-        // - region partition expr is not same with file partition expr
+        // - region partition expr differs from file partition expr
         // - flat format is enabled
         // - primary key encoding is sparse
+        //
+        // This is applied after row-group filtering to align batches with flat output schema
+        // before compat handling.
         let compaction_projection_mapper = if self.compaction
             && !is_same_region_partition
             && self.flat_format

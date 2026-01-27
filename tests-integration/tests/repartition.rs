@@ -47,6 +47,7 @@ macro_rules! repartition_tests {
                         let store_type = tests_integration::test_util::StorageType::$service;
                         if store_type.test_on() {
                             common_telemetry::init_default_ut_logging();
+                            // Cover both storage formats for repartition behavior.
                             // for flat format
                             $crate::repartition::test_repartition_mito(store_type, true).await;
                             // for primary key format
@@ -60,6 +61,7 @@ macro_rules! repartition_tests {
                         if store_type.test_on() {
                             use store_api::codec::PrimaryKeyEncoding;
                             common_telemetry::init_default_ut_logging();
+                            // Exercise format + primary key encoding matrix for metric engine.
                             // for flat format with sparse primary key encoding
                             $crate::repartition::test_repartition_metric(store_type, true, PrimaryKeyEncoding::Sparse).await;
                             // for flat format with dense primary key encoding
@@ -128,6 +130,8 @@ async fn trigger_full_gc(ticker: &GcTickerRef) {
 }
 
 fn query_partitions_sql(table_name: &str) -> String {
+    // We query information_schema.partitions to assert repartition results across engines,
+    // rather than relying on SHOW CREATE TABLE formatting differences.
     format!(
         "\
 SELECT table_catalog, table_schema, table_name, partition_name, partition_expression, \
@@ -176,7 +180,7 @@ pub async fn test_repartition_mito(store_type: StorageType, flat_format: bool) {
     let query_ctx = QueryContext::arc();
     let instance = cluster.fe_instance();
 
-    // 1. Setup: Create a table with partitions
+    // 1. Setup: Create a table with partitions (format varies by test case)
     let sql = if flat_format {
         r#"
         CREATE TABLE `repartition_mito_table`(
@@ -528,6 +532,7 @@ pub async fn test_repartition_metric(
     let query_ctx = QueryContext::arc();
     let instance = cluster.fe_instance();
 
+    // Explicitly configure sst_format and primary key encoding to cover the matrix.
     let sst_format = if flat_format { "flat" } else { "primary_key" };
     let primary_key_encoding = match primary_key_encoding {
         PrimaryKeyEncoding::Dense => "dense",
@@ -555,6 +560,8 @@ pub async fn test_repartition_metric(
     );
     run_sql(instance, &sql, query_ctx.clone()).await.unwrap();
 
+    // A second logical table exercises repartition behavior across multiple logical tables
+    // sharing the same physical metric table.
     let sql = r#"
         CREATE TABLE `repart_log_metric`(
           `ts` TIMESTAMP TIME INDEX,
@@ -614,6 +621,7 @@ pub async fn test_repartition_metric(
     )
     .await
     .unwrap();
+    // Partition ids and order are expected to be stable within a single test run.
     let expected_create_table_after_split = r#"+---------------+--------------+-------------------+----------------+----------------------+------------------------+-----------------------+----------------------------+
 | table_catalog | table_schema | table_name        | partition_name | partition_expression | partition_description  | greptime_partition_id | partition_ordinal_position |
 +---------------+--------------+-------------------+----------------+----------------------+------------------------+-----------------------+----------------------------+

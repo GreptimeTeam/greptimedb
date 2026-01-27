@@ -268,6 +268,8 @@ impl AllocateRegion {
             &raw_table_info.name,
         );
         let table_id = raw_table_info.ident.table_id;
+        // Repartition allocation targets physical regions, so exclude metric internal columns
+        // and derive primary keys from tag semantics.
         let request = build_template_from_raw_table_info_for_physical_table(raw_table_info)
             .context(error::BuildCreateRequestSnafu { table_id })?;
         common_telemetry::debug!(

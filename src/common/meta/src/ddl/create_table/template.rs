@@ -21,7 +21,7 @@ use api::v1::{ColumnDef, CreateTableExpr, SemanticType};
 use common_telemetry::warn;
 use snafu::{OptionExt, ResultExt};
 use store_api::metric_engine_consts::{
-    LOGICAL_TABLE_METADATA_KEY, is_metric_engine_internal_column,
+    is_metric_engine_internal_column, LOGICAL_TABLE_METADATA_KEY,
 };
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::{RawTableInfo, TableId};
@@ -33,6 +33,10 @@ use crate::wal_provider::prepare_wal_options;
 /// Constructs a [CreateRequest] based on the provided [RawTableInfo].
 ///
 /// Note: This function is primarily intended for creating logical tables.
+///
+/// Logical table templates keep the original column order and primary key indices from
+/// `RawTableInfo` (including internal columns when present), because these are used to
+/// reconstruct the logical schema on the engine side.
 pub fn build_template_from_raw_table_info(raw_table_info: &RawTableInfo) -> Result<CreateRequest> {
     let primary_key_indices = &raw_table_info.meta.primary_key_indices;
     let column_defs = raw_table_info
@@ -76,6 +80,9 @@ pub fn build_template_from_raw_table_info(raw_table_info: &RawTableInfo) -> Resu
 /// Constructs a [CreateRequest] based on the provided [RawTableInfo] for physical table.
 ///
 /// Note: This function is primarily intended for creating physical table.
+///
+/// Physical table templates filter out metric-engine internal columns and mark primary
+/// keys by tag semantic type to match the physical storage layout.
 pub fn build_template_from_raw_table_info_for_physical_table(
     raw_table_info: &RawTableInfo,
 ) -> Result<CreateRequest> {

@@ -856,8 +856,8 @@ impl FormatProjection {
 
         // Creates a map from column id to the index of that column in the projected record batch.
         let column_id_to_projected_index = projected_schema
-            .iter()
-            .map(|(column_id, _)| *column_id)
+            .into_iter()
+            .map(|(column_id, _)| column_id)
             .enumerate()
             .map(|(index, column_id)| (column_id, index))
             .collect();

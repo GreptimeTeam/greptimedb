@@ -641,16 +641,13 @@ impl RangeBase {
                 continue;
             }
 
-            // Get the column directly by its projected index
+            // Get the column directly by its projected index.
+            // If the column is missing and it's not a tag/time column, this filter is skipped.
+            // Assumes the projection indices align with the input batch schema.
             let column_idx = flat_format.projected_index_by_id(filter_ctx.column_id());
             if let Some(idx) = column_idx {
                 let column = &input.columns().get(idx).unwrap();
-                let result = filter
-                    .evaluate_array(column)
-                    .inspect_err(
-                        |e| error!(e; "Failed to evaluate array for filter, column id: {}, idx: {}, column: {:?},filter: {:?}", filter_ctx.column_id(), idx, column.data_type(), filter),
-                    )
-                    .context(RecordBatchSnafu)?;
+                let result = filter.evaluate_array(column).context(RecordBatchSnafu)?;
                 mask = mask.bitand(&result);
             } else if filter_ctx.semantic_type() == SemanticType::Tag {
                 // Column not found in projection, it may be a tag column.
@@ -887,6 +884,6 @@ impl RangeBase {
             .fail();
         }
 
-        RecordBatch::try_new(arrow_schema.clone(), columns.clone()).context(NewRecordBatchSnafu)
+        RecordBatch::try_new(arrow_schema.clone(), columns).context(NewRecordBatchSnafu)
     }
 }

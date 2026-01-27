@@ -387,6 +387,8 @@ impl CompactionProjectionMapper {
     }
 
     /// Projects columns and appends internal columns for compaction output.
+    ///
+    /// The input batch is expected to be in flat format with internal columns appended.
     pub(crate) fn project(&self, batch: DfRecordBatch) -> Result<DfRecordBatch> {
         let columns = self
             .mapper
@@ -421,6 +423,9 @@ impl DfBatchAssembler {
     }
 
     /// Builds a [DfRecordBatch] from projected vectors plus internal columns.
+    ///
+    /// Assumes the input batch already contains internal columns as the last three fields
+    /// ("__primary_key", "__sequence", "__op_type").
     pub(crate) fn build_df_record_batch_with_internal(
         &self,
         batch: &datatypes::arrow::record_batch::RecordBatch,
@@ -436,6 +441,6 @@ impl DfBatchAssembler {
                 .context(ExternalSnafu)?;
             columns.push(vector);
         }
-git log         RecordBatch::to_df_record_batch(self.output_arrow_schema_with_internal.clone(), columns)
+        RecordBatch::to_df_record_batch(self.output_arrow_schema_with_internal.clone(), columns)
     }
 }
