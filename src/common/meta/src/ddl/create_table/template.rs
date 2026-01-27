@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use api::v1::column_def::try_as_column_def;
 use api::v1::meta::Partition;
@@ -92,38 +92,35 @@ pub fn build_template_from_raw_table_info_for_physical_table(
         &raw_table_info.meta.primary_key_indices,
         &name_to_ids,
     )?;
-    let primary_keys = column_metadatas
+    let primary_key_ids = column_metadatas
         .iter()
         .filter(|c| c.semantic_type == SemanticType::Tag)
-        .map(|c| c.column_schema.name.clone())
-        .collect::<HashSet<_>>();
-    let (primary_key, column_defs): (Vec<_>, Vec<_>) = column_metadatas
+        .map(|c| c.column_id)
+        .collect::<Vec<_>>();
+    let column_defs = column_metadatas
         .iter()
         .map(|c| {
-            let column_def = try_as_column_def(
-                &c.column_schema,
-                primary_keys.contains(&c.column_schema.name),
-            )
-            .context(error::ConvertColumnDefSnafu {
-                column: &c.column_schema.name,
-            })?;
+            let column_def =
+                try_as_column_def(&c.column_schema, c.semantic_type == SemanticType::Tag).context(
+                    error::ConvertColumnDefSnafu {
+                        column: &c.column_schema.name,
+                    },
+                )?;
             let region_column_def = RegionColumnDef {
                 column_def: Some(column_def),
                 column_id: c.column_id,
             };
 
-            Ok((c.column_id, region_column_def))
+            Ok(region_column_def)
         })
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .unzip();
+        .collect::<Result<Vec<_>>>()?;
 
     let options = HashMap::from(&raw_table_info.meta.options);
     let template = CreateRequest {
         region_id: 0,
         engine: raw_table_info.meta.engine.clone(),
         column_defs,
-        primary_key,
+        primary_key: primary_key_ids,
         path: String::new(),
         options,
         partition: None,
