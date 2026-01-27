@@ -23,6 +23,7 @@ pub mod manager;
 pub mod multi_dim;
 pub mod overlap;
 pub mod partition;
+pub mod simplify;
 pub mod splitter;
 pub mod subtask;
 
