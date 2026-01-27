@@ -457,17 +457,28 @@ pub fn extract_column_metadatas(
     let first_column_metadatas = schemas
         .swap_remove(0)
         .map(|first_bytes| ColumnMetadata::decode_list(&first_bytes).context(DecodeJsonSnafu))
-        .transpose()?;
+        .transpose()?
+        .map(|mut c| {
+            c.sort_unstable_by_key(|c| c.column_id);
+            c
+        });
 
     for s in schemas {
         // check decoded column metadata instead of bytes because it contains extension map.
         let column_metadata = s
             .map(|bytes| ColumnMetadata::decode_list(&bytes).context(DecodeJsonSnafu))
-            .transpose()?;
+            .transpose()?
+            .map(|mut c| {
+                c.sort_unstable_by_key(|c| c.column_id);
+                c
+            });
         ensure!(
             column_metadata == first_column_metadatas,
             MetadataCorruptionSnafu {
-                err_msg: "The table column metadata schemas from datanodes are not the same."
+                err_msg: format!(
+                    "The table column metadata schemas from datanodes are not the same. First: {:?}, Current: {:?}",
+                    first_column_metadatas, column_metadata,
+                ),
             }
         );
     }

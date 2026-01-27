@@ -282,6 +282,10 @@ pub(crate) async fn remove_region_dir_once(
     }
 
     if !has_parquet_file {
+        info!(
+            "Deleting region path: {} with files: {:?}",
+            region_path, files_to_remove_first
+        );
         // no parquet file found, delete the region path
         // first delete all files other than the marker
         object_store

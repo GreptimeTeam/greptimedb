@@ -44,6 +44,7 @@ use crate::error::{
 };
 use crate::read::Batch;
 use crate::read::compat::CompatBatch;
+use crate::read::flat_projection::FlatSparseMapper;
 use crate::read::last_row::RowGroupLastRowCachedReader;
 use crate::read::prune::{FlatPruneReader, PruneReader};
 use crate::sst::file::FileHandle;
@@ -269,6 +270,11 @@ impl FileRange {
         self.context.compat_batch()
     }
 
+    /// Returns the helper to project batches.
+    pub(crate) fn reader_mapper(&self) -> Option<&FlatSparseMapper> {
+        self.context.reader_mapper()
+    }
+
     /// Returns the file handle of the file range.
     pub(crate) fn file_handle(&self) -> &FileHandle {
         self.context.reader_builder.file_handle()
@@ -322,6 +328,11 @@ impl FileRangeContext {
     /// Returns the helper to compat batches.
     pub(crate) fn compat_batch(&self) -> Option<&CompatBatch> {
         self.base.compat_batch.as_ref()
+    }
+
+    /// Returns the helper to project batches.
+    pub(crate) fn reader_mapper(&self) -> Option<&FlatSparseMapper> {
+        self.base.reader_mapper.as_ref()
     }
 
     /// Sets the `CompatBatch` to the context.
@@ -384,6 +395,7 @@ pub enum PreFilterMode {
 }
 
 /// Context for partition expression filtering.
+#[derive(Debug)]
 pub(crate) struct PartitionFilterContext {
     pub(crate) region_partition_physical_expr: Arc<dyn PhysicalExpr>,
     /// Schema containing only columns referenced by the partition expression.
@@ -406,6 +418,8 @@ pub(crate) struct RangeBase {
     pub(crate) codec: Arc<dyn PrimaryKeyCodec>,
     /// Optional helper to compat batches.
     pub(crate) compat_batch: Option<CompatBatch>,
+    /// Optional helper to project batches.
+    pub(crate) reader_mapper: Option<FlatSparseMapper>,
     /// Mode to pre-filter columns.
     pub(crate) pre_filter_mode: PreFilterMode,
     /// Partition filter.
@@ -631,8 +645,22 @@ impl RangeBase {
             // Get the column directly by its projected index
             let column_idx = flat_format.projected_index_by_id(filter_ctx.column_id());
             if let Some(idx) = column_idx {
-                let column = &input.columns()[idx];
-                let result = filter.evaluate_array(column).context(RecordBatchSnafu)?;
+                let column = &input.columns().get(idx).expect(
+                    &format!(
+                        "column_idx: {:?}, column_id_to_projected_index: {:?}, input: {:?}, filter column name: {:?}, flat_format: {:?}, is_same_partition: {:?}",
+                        idx,
+                        flat_format.format_projection().column_id_to_projected_index,
+                        input,
+                        filter_ctx.filter(),
+                        flat_format,
+                        self.partition_filter,
+                    ));
+                let result = filter
+                    .evaluate_array(column)
+                    .inspect_err(
+                        |e| error!(e; "Failed to evaluate array for filter, column id: {}, idx: {}, column: {:?},filter: {:?}", filter_ctx.column_id(), idx, column.data_type(), filter),
+                    )
+                    .context(RecordBatchSnafu)?;
                 mask = mask.bitand(&result);
             } else if filter_ctx.semantic_type() == SemanticType::Tag {
                 // Column not found in projection, it may be a tag column.
@@ -869,6 +897,8 @@ impl RangeBase {
             .fail();
         }
 
-        RecordBatch::try_new(arrow_schema.clone(), columns).context(NewRecordBatchSnafu)
+        RecordBatch::try_new(arrow_schema.clone(), columns.clone()).inspect_err(|err|{
+            error!(err; "Failed to build record batch for pruning, arrow schema: {:?}, columns: {:?}", arrow_schema, columns.iter().map(|c| c.data_type()).collect::<Vec<_>>());
+        }).context(NewRecordBatchSnafu)
     }
 }

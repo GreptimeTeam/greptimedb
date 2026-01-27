@@ -407,6 +407,7 @@ impl ReadFormat {
 }
 
 /// Helper for reading the SST format.
+#[derive(Debug)]
 pub struct PrimaryKeyReadFormat {
     /// The metadata stored in the SST.
     metadata: RegionMetadataRef,
@@ -438,6 +439,18 @@ impl PrimaryKeyReadFormat {
             .map(|(index, column)| (column.column_id, index))
             .collect();
         let arrow_schema = to_sst_arrow_schema(&metadata);
+
+        let names = metadata
+            .column_metadatas
+            .iter()
+            .enumerate()
+            .map(|(index, column)| (column.column_id, &column.column_schema.name, index))
+            .collect::<Vec<_>>();
+        common_telemetry::debug!(
+            "names: {:?}, field_id_to_index: {:?}",
+            names,
+            field_id_to_index
+        );
 
         let format_projection = FormatProjection::compute_format_projection(
             &field_id_to_index,
@@ -486,6 +499,11 @@ impl PrimaryKeyReadFormat {
     /// Gets sorted projection indices to read.
     pub(crate) fn projection_indices(&self) -> &[usize] {
         &self.projection_indices
+    }
+
+    /// Gets the field id to projected index.
+    pub(crate) fn field_id_to_projected_index(&self) -> &HashMap<ColumnId, usize> {
+        &self.field_id_to_projected_index
     }
 
     /// Creates a sequence array to override.
@@ -801,6 +819,7 @@ impl PrimaryKeyReadFormat {
 }
 
 /// Helper to compute the projection for the SST.
+#[derive(Debug)]
 pub(crate) struct FormatProjection {
     /// Indices of columns to read from the SST. It contains all internal columns.
     pub(crate) projection_indices: Vec<usize>,
@@ -820,10 +839,12 @@ impl FormatProjection {
         sst_column_num: usize,
         column_ids: impl Iterator<Item = ColumnId>,
     ) -> Self {
+        let column_ids = column_ids.collect::<Vec<_>>();
         // Maps column id of a projected column to its index in SST.
         // It also ignores columns not in the SST.
         // [(column id, index in SST)]
         let mut projected_schema: Vec<_> = column_ids
+            .iter()
             .filter_map(|column_id| {
                 id_to_index
                     .get(&column_id)
@@ -851,11 +872,25 @@ impl FormatProjection {
 
         // Creates a map from column id to the index of that column in the projected record batch.
         let column_id_to_projected_index = projected_schema
-            .into_iter()
-            .map(|(column_id, _)| column_id)
+            .iter()
+            .map(|(column_id, _)| *column_id)
             .enumerate()
-            .map(|(index, column_id)| (column_id, index))
+            .map(|(index, column_id)| (*column_id, index))
             .collect();
+        common_telemetry::debug!(
+            "projected_schema: {:?},column_id_to_projected_index: {:?},id_to_index: {:?}",
+            projected_schema,
+            column_id_to_projected_index,
+            id_to_index
+        );
+
+        common_telemetry::debug!(
+            "compute_format_projection: id_to_index: {:?}, sst_column_num: {:?}, column_ids: {:?}, column_id_to_projected_index: {:?}",
+            id_to_index,
+            sst_column_num,
+            column_ids,
+            column_id_to_projected_index
+        );
 
         Self {
             projection_indices,

@@ -361,7 +361,7 @@ impl MetricEngineInner {
             .map(|(idx, metadata)| (metadata.column_schema.name.clone(), idx))
             .collect::<HashMap<String, usize>>();
 
-        // check if internal columns are not occupied
+        // // check if internal columns are not occupied
         ensure!(
             !name_to_index.contains_key(DATA_SCHEMA_TABLE_ID_COLUMN_NAME),
             InternalColumnOccupiedSnafu {

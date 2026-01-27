@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 
 use common_meta::ddl::create_table::executor::CreateTableExecutor;
 use common_meta::ddl::create_table::template::{
-    CreateRequestBuilder, build_template_from_raw_table_info,
+    CreateRequestBuilder, build_template_from_raw_table_info_for_physical_table,
 };
 use common_meta::lock_key::TableLock;
 use common_meta::node_manager::NodeManagerRef;
@@ -268,8 +268,13 @@ impl AllocateRegion {
             &raw_table_info.name,
         );
         let table_id = raw_table_info.ident.table_id;
-        let request = build_template_from_raw_table_info(raw_table_info, true)
+        let request = build_template_from_raw_table_info_for_physical_table(raw_table_info)
             .context(error::BuildCreateRequestSnafu { table_id })?;
+        common_telemetry::debug!(
+            "Allocating regions request, table_id: {}, request: {:?}",
+            table_id,
+            request
+        );
         let builder = CreateRequestBuilder::new(request, None);
         let region_count = region_routes.len();
         let wal_region_count = wal_options.len();

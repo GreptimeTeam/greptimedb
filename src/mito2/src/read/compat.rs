@@ -290,7 +290,14 @@ impl FlatCompatBatch {
                             "column {} does not have a default value to read",
                             expect_column.column_schema.name
                         ),
-                    })?;
+                    })
+                    .inspect_err(|e| common_telemetry::error!(
+                        "Failed to create default vector for column {}, expect_schema: {:?}, actual_schema: {:?}, error: {:?}", 
+                        expect_column.column_schema.name,
+                        expect_schema,
+                        actual_schema,
+                        e
+                    ))?;
                 index_or_defaults.push(IndexOrDefault::DefaultValue {
                     column_id: expect_column.column_id,
                     default_vector,
@@ -379,6 +386,11 @@ impl FlatCompatBatch {
             )
             .collect::<Result<Vec<_>>>()?;
 
+        common_telemetry::debug!(
+            "compat schema: {:?}, columns: {:?}",
+            self.arrow_schema,
+            columns
+        );
         let compat_batch = RecordBatch::try_new(self.arrow_schema.clone(), columns)
             .context(NewRecordBatchSnafu)?;
 
