@@ -919,6 +919,7 @@ mod test {
                 RegionRequest::Drop(RegionDropRequest {
                     fast_path: false,
                     force: false,
+                    partial_drop: false,
                 }),
             )
             .await
@@ -934,6 +935,7 @@ mod test {
                 RegionRequest::Drop(RegionDropRequest {
                     fast_path: false,
                     force: true,
+                    partial_drop: false,
                 }),
             )
             .await
