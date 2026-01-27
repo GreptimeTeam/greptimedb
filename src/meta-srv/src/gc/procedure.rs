@@ -317,7 +317,11 @@ impl BatchGcProcedure {
         }
 
         let mut tmp_refs_grouped: HashMap<TableId, HashSet<RegionId>> = HashMap::new();
-        for src_region in self.data.file_refs.file_refs.keys() {
+        for (src_region, refs) in &self.data.file_refs.file_refs {
+            if refs.is_empty() {
+                continue;
+            }
+
             tmp_refs_grouped
                 .entry(src_region.table_id())
                 .or_default()
@@ -326,12 +330,14 @@ impl BatchGcProcedure {
 
         let repart_mgr = self.table_metadata_manager.table_repart_manager();
 
-        for table_id in cross_refs_grouped
+        let mut table_ids: HashSet<TableId> = cross_refs_grouped
             .keys()
             .copied()
             .chain(tmp_refs_grouped.keys().copied())
-            .collect::<HashSet<_>>()
-        {
+            .collect();
+        table_ids.extend(self.data.regions.iter().map(|r| r.table_id()));
+
+        for table_id in table_ids {
             let table_lock = TableLock::Write(table_id).into();
             let _guard = procedure_ctx.provider.acquire_lock(&table_lock).await;
 

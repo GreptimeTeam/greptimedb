@@ -19,7 +19,7 @@ use common_meta::key::table_repart::TableRepartValue;
 use common_procedure::{Procedure, Status};
 use common_procedure_test::new_test_procedure_context;
 use meta_srv::gc::BatchGcProcedure;
-use store_api::storage::{FileRefsManifest, RegionId};
+use store_api::storage::{FileId, FileRef, FileRefsManifest, RegionId};
 
 use crate::test_util::{StorageType, execute_sql};
 use crate::tests::gc::{distributed_with_gc, get_table_route};
@@ -78,7 +78,12 @@ CREATE TABLE test_cleanup_repartition (
     manifest
         .cross_region_refs
         .insert(region_a, [dst_a_new].into());
-    manifest.file_refs.insert(region_b, Default::default());
+    manifest.file_refs.insert(
+        region_b,
+        [FileRef::new(region_b, FileId::random(), None)]
+            .into_iter()
+            .collect(),
+    );
 
     let regions = vec![region_a, region_b, region_c];
 
@@ -193,13 +198,89 @@ async fn test_cleanup_region_repartition_preserve_uninvolved_entries() {
         repart_after.src_to_dst.get(&region_a),
         Some(&BTreeSet::from([dst_a_new]))
     );
-    assert_eq!(
-        repart_after.src_to_dst.get(&region_b),
-        Some(&BTreeSet::new())
-    );
+    assert_eq!(repart_after.src_to_dst.get(&region_b), None);
     assert!(!repart_after.src_to_dst.contains_key(&region_c));
     assert_eq!(
         repart_after.src_to_dst.get(&region_d),
         Some(&BTreeSet::from([dst_d_initial]))
+    );
+}
+
+#[tokio::test]
+async fn test_cleanup_region_repartition_remove_when_tmp_refs_empty() {
+    let _ = dotenv::dotenv();
+    let (test_context, _guard) = distributed_with_gc(&StorageType::File).await;
+    let instance = test_context.frontend();
+    let metasrv = test_context.metasrv();
+
+    let create_table_sql = r#"
+        CREATE TABLE test_cleanup_repartition_empty_tmp_refs (
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE,
+            host STRING
+        )PARTITION ON COLUMNS (host) (
+   host < 'a',
+   host >= 'a' AND host < 'm',
+   host >= 'm'
+ ) WITH (append_mode = 'true')
+    "#;
+    execute_sql(&instance, create_table_sql).await;
+
+    let table = instance
+        .catalog_manager()
+        .table(
+            "greptime",
+            "public",
+            "test_cleanup_repartition_empty_tmp_refs",
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let table_id = table.table_info().table_id();
+
+    let (_routes, regions) = get_table_route(metasrv.table_metadata_manager(), table_id).await;
+    let base_region = *regions.first().expect("table has at least one region");
+
+    let region_a = base_region;
+    let region_b = RegionId::new(table_id, base_region.region_number() + 1);
+
+    let dst_a_initial = RegionId::new(table_id, base_region.region_number() + 10);
+    let dst_b_initial = RegionId::new(table_id, base_region.region_number() + 20);
+
+    let repart_mgr = metasrv.table_metadata_manager().table_repart_manager();
+    let current = repart_mgr.get_with_raw_bytes(table_id).await.unwrap();
+    let mut initial_value = TableRepartValue::new();
+    initial_value.update_mappings(region_a, &[dst_a_initial]);
+    initial_value.update_mappings(region_b, &[dst_b_initial]);
+    repart_mgr
+        .upsert_value(table_id, current, &initial_value)
+        .await
+        .unwrap();
+
+    let mut manifest = FileRefsManifest::default();
+    // Simulate empty tmp refs snapshot for region_a: entry exists but set is empty.
+    manifest.file_refs.insert(region_a, Default::default());
+
+    let regions = vec![region_a];
+
+    let mut procedure = BatchGcProcedure::new_update_repartition_for_test(
+        metasrv.mailbox().clone(),
+        metasrv.table_metadata_manager().clone(),
+        metasrv.options().grpc.server_addr.clone(),
+        regions,
+        manifest,
+        Duration::from_secs(5),
+    );
+
+    let procedure_ctx = new_test_procedure_context();
+    let status = procedure.execute(&procedure_ctx).await.unwrap();
+    assert!(matches!(status, Status::Done { .. }));
+
+    let repart_after = repart_mgr.get(table_id).await.unwrap().unwrap();
+    assert!(!repart_after.src_to_dst.contains_key(&region_a));
+    assert_eq!(
+        repart_after.src_to_dst.get(&region_b),
+        Some(&BTreeSet::from([dst_b_initial]))
     );
 }
