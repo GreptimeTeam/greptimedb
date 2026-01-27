@@ -365,7 +365,7 @@ impl MetricEngineInner {
         let table_id_col_def = request.column_metadatas.iter().any(is_metric_name_col);
         let tsid_col_def = request.column_metadatas.iter().any(is_tsid_col);
 
-        // // check if internal columns are not occupied or defined in the request
+        // check if internal columns are not occupied or defined in the request
         ensure!(
             !name_to_index.contains_key(DATA_SCHEMA_TABLE_ID_COLUMN_NAME) || table_id_col_def,
             InternalColumnOccupiedSnafu {

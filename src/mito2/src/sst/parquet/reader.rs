@@ -343,7 +343,7 @@ impl ParquetReaderBuilder {
             .expected_metadata
             .as_ref()
             .and_then(|meta| meta.partition_expr.as_ref());
-        let is_same_region_partition = Self::is_same_region_partition(
+        let (_, is_same_region_partition) = Self::is_same_region_partition(
             region_partition_expr.as_ref().map(|expr| expr.as_str()),
             self.file_handle.meta_ref().partition_expr.as_ref(),
         )?;
@@ -502,18 +502,14 @@ impl ParquetReaderBuilder {
     fn is_same_region_partition(
         region_partition_expr_str: Option<&str>,
         file_partition_expr: Option<&PartitionExpr>,
-    ) -> Result<bool> {
+    ) -> Result<(Option<PartitionExpr>, bool)> {
         let region_partition_expr = match region_partition_expr_str {
             Some(expr_str) => crate::region::parse_partition_expr(Some(expr_str))?,
             None => None,
         };
 
-        Ok(
-            match (region_partition_expr.as_ref(), file_partition_expr) {
-                (Some(expected), Some(file)) => expected == file,
-                _ => false,
-            },
-        )
+        let is_same = region_partition_expr.as_ref() == file_partition_expr;
+        Ok((region_partition_expr, is_same))
     }
 
     /// Compare partition expressions from expected metadata and file metadata,
@@ -529,18 +525,18 @@ impl ParquetReaderBuilder {
             .and_then(|meta| meta.partition_expr.as_ref());
         let file_partition_expr_ref = self.file_handle.meta_ref().partition_expr.as_ref();
 
-        let Some(region_str) = region_partition_expr_str else {
-            return Ok(None);
-        };
+        let (region_partition_expr, is_same_region_partition) = Self::is_same_region_partition(
+            region_partition_expr_str.map(|s| s.as_str()),
+            file_partition_expr_ref,
+        )?;
 
-        let Some(region_partition_expr) = crate::region::parse_partition_expr(Some(region_str))?
-        else {
-            return Ok(None);
-        };
-
-        if Some(&region_partition_expr) == file_partition_expr_ref {
+        if is_same_region_partition {
             return Ok(None);
         }
+
+        let Some(region_partition_expr) = region_partition_expr else {
+            return Ok(None);
+        };
 
         // Collect columns referenced by the partition expression.
         let mut referenced_columns = HashSet::new();
