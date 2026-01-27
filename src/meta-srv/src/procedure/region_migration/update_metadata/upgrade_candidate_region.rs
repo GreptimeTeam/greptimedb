@@ -262,7 +262,7 @@ mod tests {
         let persistent_context = new_persistent_context();
         let mut ctx = env.context_factory().new_context(persistent_context);
 
-        let table_info = new_test_table_info(1024).into();
+        let table_info = new_test_table_info(1024);
         let region_routes = vec![RegionRoute {
             region: Region::new_test(RegionId::new(1024, 2)),
             leader_peer: Some(Peer::empty(4)),
@@ -295,7 +295,7 @@ mod tests {
         let persistent_context = new_persistent_context();
         let mut ctx = env.context_factory().new_context(persistent_context);
 
-        let table_info = new_test_table_info(1024).into();
+        let table_info = new_test_table_info(1024);
         let region_routes = vec![RegionRoute {
             region: Region::new_test(RegionId::new(1024, 1)),
             leader_peer: Some(Peer::empty(3)),
@@ -330,7 +330,7 @@ mod tests {
         let persistent_context = new_persistent_context();
         let mut ctx = env.context_factory().new_context(persistent_context);
 
-        let table_info = new_test_table_info(1024).into();
+        let table_info = new_test_table_info(1024);
         let region_routes = vec![RegionRoute {
             region: Region::new_test(RegionId::new(1024, 1)),
             leader_peer: Some(Peer::empty(1)),
@@ -369,7 +369,7 @@ mod tests {
         let leader_peer = persistent_context.from_peer.clone();
 
         let mut ctx = env.context_factory().new_context(persistent_context);
-        let table_info = new_test_table_info(1024).into();
+        let table_info = new_test_table_info(1024);
         let region_routes = vec![RegionRoute {
             region: Region::new_test(RegionId::new(1024, 1)),
             leader_peer: Some(leader_peer),
@@ -396,7 +396,7 @@ mod tests {
         let candidate_peer = persistent_context.to_peer.clone();
 
         let mut ctx = env.context_factory().new_context(persistent_context);
-        let table_info = new_test_table_info(1024).into();
+        let table_info = new_test_table_info(1024);
         let region_routes = vec![RegionRoute {
             region: Region::new_test(RegionId::new(1024, 1)),
             leader_peer: Some(candidate_peer),
@@ -424,7 +424,7 @@ mod tests {
         let candidate_peer = persistent_context.to_peer.clone();
 
         let mut ctx = env.context_factory().new_context(persistent_context);
-        let table_info = new_test_table_info(1024).into();
+        let table_info = new_test_table_info(1024);
         let region_routes = vec![RegionRoute {
             region: Region::new_test(RegionId::new(1024, 1)),
             leader_peer: Some(candidate_peer),
@@ -454,7 +454,7 @@ mod tests {
         let opening_keeper = MemoryRegionKeeper::default();
 
         let table_id = 1024;
-        let table_info = new_test_table_info(table_id).into();
+        let table_info = new_test_table_info(table_id);
         let region_routes = vec![RegionRoute {
             region: Region::new_test(RegionId::new(table_id, 1)),
             leader_peer: Some(Peer::empty(1)),

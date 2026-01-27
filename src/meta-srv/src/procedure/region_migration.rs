@@ -1172,7 +1172,7 @@ mod tests {
         let from_peer = persistent_context.from_peer.clone();
         let to_peer = persistent_context.to_peer.clone();
         let region_id = persistent_context.region_ids[0];
-        let table_info = new_test_table_info(1024).into();
+        let table_info = new_test_table_info(1024);
         let region_routes = vec![RegionRoute {
             region: Region::new_test(region_id),
             leader_peer: Some(from_peer),
@@ -1211,7 +1211,7 @@ mod tests {
         let to_peer_id = persistent_context.to_peer.id;
         let from_peer = persistent_context.from_peer.clone();
         let region_id = persistent_context.region_ids[0];
-        let table_info = new_test_table_info(1024).into();
+        let table_info = new_test_table_info(1024);
         let region_routes = vec![RegionRoute {
             region: Region::new_test(region_id),
             leader_peer: Some(from_peer),
@@ -1299,7 +1299,7 @@ mod tests {
         let to_peer_id = persistent_context.to_peer.id;
         let from_peer = persistent_context.from_peer.clone();
         let region_id = persistent_context.region_ids[0];
-        let table_info = new_test_table_info(1024).into();
+        let table_info = new_test_table_info(1024);
         let region_routes = vec![RegionRoute {
             region: Region::new_test(region_id),
             leader_peer: Some(from_peer),
@@ -1419,7 +1419,7 @@ mod tests {
         let from_peer_id = persistent_context.from_peer.id;
         let from_peer = persistent_context.from_peer.clone();
         let region_id = persistent_context.region_ids[0];
-        let table_info = new_test_table_info(1024).into();
+        let table_info = new_test_table_info(1024);
         let region_routes = vec![RegionRoute {
             region: Region::new_test(region_id),
             leader_peer: Some(from_peer),

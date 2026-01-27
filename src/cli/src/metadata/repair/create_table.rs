@@ -23,23 +23,24 @@ use common_meta::rpc::router::{RegionRoute, find_leader_regions};
 use operator::expr_helper::column_schemas_to_defs;
 use snafu::ResultExt;
 use store_api::storage::{RegionId, TableId};
-use table::metadata::RawTableInfo;
+use table::metadata::TableInfo;
 
 use crate::error::{CovertColumnSchemasToDefsSnafu, Result};
 
-/// Generates a `CreateTableExpr` from a `RawTableInfo`.
-pub fn generate_create_table_expr(table_info: &RawTableInfo) -> Result<CreateTableExpr> {
+/// Generates a `CreateTableExpr` from a `TableInfo`.
+pub fn generate_create_table_expr(table_info: &TableInfo) -> Result<CreateTableExpr> {
     let schema = &table_info.meta.schema;
+    let column_schemas = schema.column_schemas();
     let primary_keys = table_info
         .meta
         .primary_key_indices
         .iter()
-        .map(|i| schema.column_schemas[*i].name.clone())
+        .map(|i| column_schemas[*i].name.clone())
         .collect::<Vec<_>>();
 
-    let timestamp_index = schema.timestamp_index.as_ref().unwrap();
-    let time_index = schema.column_schemas[*timestamp_index].name.clone();
-    let column_defs = column_schemas_to_defs(schema.column_schemas.clone(), &primary_keys)
+    let timestamp_index = schema.timestamp_index().unwrap();
+    let time_index = column_schemas[timestamp_index].name.clone();
+    let column_defs = column_schemas_to_defs(column_schemas.to_vec(), &primary_keys)
         .context(CovertColumnSchemasToDefsSnafu)?;
     let table_options = HashMap::from(&table_info.meta.options);
 

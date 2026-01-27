@@ -23,7 +23,7 @@ use snafu::ensure;
 use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::TABLE_COLUMN_METADATA_EXTENSION_KEY;
 use store_api::storage::{RegionId, RegionNumber};
-use table::metadata::{RawTableInfo, TableId};
+use table::metadata::{TableId, TableInfo};
 use table::table_name::TableName;
 
 use crate::ddl::utils::raw_table_info::update_table_info_column_ids;
@@ -175,7 +175,7 @@ impl CreateTableExecutor {
         &self,
         table_metadata_manager: &TableMetadataManagerRef,
         region_failure_detector_controller: &RegionFailureDetectorControllerRef,
-        mut raw_table_info: RawTableInfo,
+        mut raw_table_info: TableInfo,
         column_metadatas: &[ColumnMetadata],
         table_route: PhysicalTableRouteValue,
         region_wal_options: HashMap<RegionNumber, String>,

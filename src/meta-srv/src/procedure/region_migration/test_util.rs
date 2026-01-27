@@ -37,7 +37,7 @@ use common_procedure_test::MockContextProvider;
 use common_telemetry::debug;
 use futures::future::BoxFuture;
 use store_api::storage::RegionId;
-use table::metadata::RawTableInfo;
+use table::metadata::TableInfo;
 
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::error::{self, Error, Result};
@@ -169,7 +169,7 @@ impl TestingEnv {
     // Creates a table metadata with the physical table route.
     pub async fn create_physical_table_metadata(
         &self,
-        table_info: RawTableInfo,
+        table_info: TableInfo,
         region_routes: Vec<RegionRoute>,
     ) {
         self.table_metadata_manager
@@ -289,7 +289,7 @@ impl ProcedureMigrationTestSuite {
     /// Initializes table metadata.
     pub(crate) async fn init_table_metadata(
         &self,
-        table_info: RawTableInfo,
+        table_info: TableInfo,
         region_routes: Vec<RegionRoute>,
     ) {
         self.env

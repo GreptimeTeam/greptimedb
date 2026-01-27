@@ -15,18 +15,19 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Display};
 use std::ops::AddAssign;
+use std::sync::Arc;
 use std::time::Instant;
 
 use api::v1::SemanticType;
 use common_procedure::{Context as ProcedureContext, ProcedureId, watcher};
 use common_telemetry::{error, warn};
-use datatypes::schema::ColumnSchema;
+use datatypes::schema::{ColumnSchema, Schema};
 use futures::future::{join_all, try_join_all};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::{ColumnMetadata, RegionMetadata};
 use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::{RegionId, TableId};
-use table::metadata::{RawTableInfo, RawTableMeta};
+use table::metadata::{TableInfo, TableMeta};
 use table::table_name::TableName;
 use table::table_reference::TableReference;
 
@@ -272,7 +273,7 @@ pub(crate) fn check_column_metadata_invariants(
     Ok(())
 }
 
-/// Builds a [`RawTableMeta`] from the provided [`ColumnMetadata`]s.
+/// Builds a [`TableMeta`] from the provided [`ColumnMetadata`]s.
 ///
 /// Returns an error if:
 /// - Any column is missing in the `name_to_ids`(if `name_to_ids` is provided).
@@ -284,23 +285,24 @@ pub(crate) fn check_column_metadata_invariants(
 pub(crate) fn build_table_meta_from_column_metadatas(
     table_id: TableId,
     table_ref: TableReference,
-    table_meta: &RawTableMeta,
+    table_meta: &TableMeta,
     name_to_ids: Option<HashMap<String, u32>>,
     column_metadata: &[ColumnMetadata],
-) -> Result<RawTableMeta> {
+) -> Result<TableMeta> {
     let column_in_column_metadata = column_metadata
         .iter()
         .map(|c| (c.column_schema.name.as_str(), c))
         .collect::<HashMap<_, _>>();
+    let column_schemas = table_meta.schema.column_schemas();
     let primary_key_names = table_meta
         .primary_key_indices
         .iter()
-        .map(|i| table_meta.schema.column_schemas[*i].name.as_str())
+        .map(|i| column_schemas[*i].name.as_str())
         .collect::<HashSet<_>>();
     let partition_key_names = table_meta
         .partition_key_indices
         .iter()
-        .map(|i| table_meta.schema.column_schemas[*i].name.as_str())
+        .map(|i| column_schemas[*i].name.as_str())
         .collect::<HashSet<_>>();
     ensure!(
         column_metadata
@@ -351,14 +353,12 @@ pub(crate) fn build_table_meta_from_column_metadatas(
     let primary_key_indices = &mut new_raw_table_meta.primary_key_indices;
     let partition_key_indices = &mut new_raw_table_meta.partition_key_indices;
     let value_indices = &mut new_raw_table_meta.value_indices;
-    let time_index = &mut new_raw_table_meta.schema.timestamp_index;
-    let columns = &mut new_raw_table_meta.schema.column_schemas;
+    let mut columns = Vec::with_capacity(column_metadata.len());
     let column_ids = &mut new_raw_table_meta.column_ids;
     let next_column_id = &mut new_raw_table_meta.next_column_id;
 
     column_ids.clear();
     value_indices.clear();
-    columns.clear();
     primary_key_indices.clear();
     partition_key_indices.clear();
 
@@ -375,7 +375,6 @@ pub(crate) fn build_table_meta_from_column_metadatas(
             }
             SemanticType::Timestamp => {
                 value_indices.push(idx);
-                *time_index = Some(idx);
             }
         }
 
@@ -391,10 +390,10 @@ pub(crate) fn build_table_meta_from_column_metadatas(
         .unwrap_or(*next_column_id)
         .max(*next_column_id);
 
-    if let Some(time_index) = *time_index {
-        new_raw_table_meta.schema.column_schemas[time_index].set_time_index();
-    }
-
+    new_raw_table_meta.schema = Arc::new(Schema::new_with_version(
+        columns,
+        table_meta.schema.version(),
+    ));
     Ok(new_raw_table_meta)
 }
 
@@ -403,10 +402,10 @@ pub(crate) fn build_table_meta_from_column_metadatas(
 /// The logical table only support to add columns, so we can check the length of column metadatas
 /// to determine whether the logical table info needs to be updated.
 pub(crate) fn need_update_logical_table_info(
-    table_info: &RawTableInfo,
+    table_info: &TableInfo,
     column_metadatas: &[ColumnMetadata],
 ) -> bool {
-    table_info.meta.schema.column_schemas.len() != column_metadatas.len()
+    table_info.meta.schema.column_schemas().len() != column_metadatas.len()
 }
 
 /// The result of waiting for inflight subprocedures.
@@ -959,7 +958,7 @@ mod tests {
     use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder};
     use store_api::metadata::ColumnMetadata;
     use store_api::storage::RegionId;
-    use table::metadata::{RawTableMeta, TableMetaBuilder};
+    use table::metadata::TableMetaBuilder;
     use table::table_reference::TableReference;
 
     use super::*;
@@ -1010,17 +1009,15 @@ mod tests {
         ]
     }
 
-    fn new_test_raw_table_info() -> RawTableMeta {
+    fn new_test_raw_table_info() -> TableMeta {
         let mut table_meta_builder = TableMetaBuilder::empty();
-        let table_meta = table_meta_builder
+        table_meta_builder
             .schema(Arc::new(new_test_schema()))
             .primary_key_indices(vec![0])
             .partition_key_indices(vec![2])
             .next_column_id(4)
             .build()
-            .unwrap();
-
-        table_meta.into()
+            .unwrap()
     }
 
     #[test]
@@ -1081,7 +1078,7 @@ mod tests {
         assert_eq!(new_table_meta.primary_key_indices, vec![0, 3]);
         assert_eq!(new_table_meta.partition_key_indices, vec![2]);
         assert_eq!(new_table_meta.value_indices, vec![1, 2]);
-        assert_eq!(new_table_meta.schema.timestamp_index, Some(1));
+        assert_eq!(new_table_meta.schema.timestamp_index(), Some(1));
         assert_eq!(
             new_table_meta.column_ids,
             vec![0, 1, 2, ReservedColumnId::table_id()]

@@ -22,25 +22,25 @@ use common_telemetry::warn;
 use snafu::{OptionExt, ResultExt};
 use store_api::metric_engine_consts::LOGICAL_TABLE_METADATA_KEY;
 use store_api::storage::{RegionId, RegionNumber};
-use table::metadata::{RawTableInfo, TableId};
+use table::metadata::{TableId, TableInfo};
 
 use crate::error::{self, Result};
 use crate::reconciliation::utils::build_column_metadata_from_table_info;
 use crate::wal_provider::prepare_wal_options;
 
-/// Constructs a [CreateRequest] based on the provided [RawTableInfo].
+/// Constructs a [CreateRequest] based on the provided [TableInfo].
 ///
 /// Note: This function is primarily intended for creating logical tables.
 ///
 /// Logical table templates keep the original column order and primary key indices from
-/// `RawTableInfo` (including internal columns when present), because these are used to
+/// `TableInfo` (including internal columns when present), because these are used to
 /// reconstruct the logical schema on the engine side.
-pub fn build_template_from_raw_table_info(raw_table_info: &RawTableInfo) -> Result<CreateRequest> {
+pub fn build_template_from_raw_table_info(raw_table_info: &TableInfo) -> Result<CreateRequest> {
     let primary_key_indices = &raw_table_info.meta.primary_key_indices;
     let column_defs = raw_table_info
         .meta
         .schema
-        .column_schemas
+        .column_schemas()
         .iter()
         .enumerate()
         .map(|(i, c)| {
@@ -75,20 +75,20 @@ pub fn build_template_from_raw_table_info(raw_table_info: &RawTableInfo) -> Resu
     Ok(template)
 }
 
-/// Constructs a [CreateRequest] based on the provided [RawTableInfo] for physical table.
+/// Constructs a [CreateRequest] based on the provided [TableInfo] for physical table.
 ///
 /// Note: This function is primarily intended for creating physical table.
 ///
 /// Physical table templates mark primary
 /// keys by tag semantic type to match the physical storage layout.
 pub fn build_template_from_raw_table_info_for_physical_table(
-    raw_table_info: &RawTableInfo,
+    raw_table_info: &TableInfo,
 ) -> Result<CreateRequest> {
     let name_to_ids = raw_table_info
         .name_to_ids()
         .context(error::MissingColumnIdsSnafu)?;
     let column_metadatas = build_column_metadata_from_table_info(
-        &raw_table_info.meta.schema.column_schemas,
+        raw_table_info.meta.schema.column_schemas(),
         &raw_table_info.meta.primary_key_indices,
         &name_to_ids,
     )?;

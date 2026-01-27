@@ -65,14 +65,14 @@ impl SchemaMetadataManager {
         schema_value: Option<crate::key::schema_name::SchemaNameValue>,
         kv_backend: crate::kv_backend::KvBackendRef,
     ) {
-        use table::metadata::{RawTableInfo, TableType};
-        let value = crate::key::table_info::TableInfoValue::new(RawTableInfo {
+        use table::metadata::{TableInfo, TableType};
+        let value = crate::key::table_info::TableInfoValue::new(TableInfo {
             ident: Default::default(),
             name: table_name.to_string(),
             desc: None,
             catalog_name: catalog_name.to_string(),
             schema_name: schema_name.to_string(),
-            meta: Default::default(),
+            meta: table::metadata::TableMeta::empty(),
             table_type: TableType::Base,
         });
         let table_info_manager = crate::key::table_info::TableInfoManager::new(kv_backend.clone());

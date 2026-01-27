@@ -133,8 +133,7 @@ impl StatementExecutor {
             .await
             .context(TableMetadataManagerSnafu)?
         {
-            let mut latest_info = TableInfo::try_from(latest.into_inner().table_info)
-                .context(error::CreateTableInfoSnafu)?;
+            let mut latest_info = latest.into_inner().table_info;
 
             if !partition_column_names.is_empty() {
                 latest_info.meta.partition_key_indices = partition_column_names

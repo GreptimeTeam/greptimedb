@@ -19,7 +19,7 @@ use api::v1::region::{
     AddColumn, AddColumns, DropColumn, DropColumns, RegionColumnDef, alter_request,
 };
 use snafu::OptionExt;
-use table::metadata::RawTableInfo;
+use table::metadata::TableInfo;
 
 use crate::ddl::alter_table::AlterTableProcedure;
 use crate::error::{self, InvalidProtoMsgSnafu, Result};
@@ -43,7 +43,7 @@ impl AlterTableProcedure {
 /// It always adds column if not exists and drops column if exists.
 /// It skips the column if it already exists in the table.
 fn create_proto_alter_kind(
-    table_info: &RawTableInfo,
+    table_info: &TableInfo,
     alter_kind: &Kind,
 ) -> Result<Option<alter_request::Kind>> {
     match alter_kind {
@@ -52,7 +52,7 @@ fn create_proto_alter_kind(
             let existing_columns: HashSet<_> = table_info
                 .meta
                 .schema
-                .column_schemas
+                .column_schemas()
                 .iter()
                 .map(|col| &col.name)
                 .collect();

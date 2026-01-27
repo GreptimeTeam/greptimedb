@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use store_api::metadata::ColumnMetadata;
 use store_api::storage::TableId;
-use table::metadata::RawTableInfo;
+use table::metadata::TableInfo;
 use table::table_name::TableName;
 
 use crate::cache_invalidator::CacheInvalidatorRef;
@@ -107,7 +107,7 @@ pub(crate) struct PersistentContext {
     pub(crate) update_table_infos: Vec<(TableId, Vec<ColumnMetadata>)>,
     // The table infos to be created.
     // The value will be set in `ResolveTableMetadatas` state.
-    pub(crate) create_tables: Vec<(TableId, RawTableInfo)>,
+    pub(crate) create_tables: Vec<(TableId, TableInfo)>,
     // Whether the procedure is a subprocedure.
     pub(crate) is_subprocedure: bool,
 }
