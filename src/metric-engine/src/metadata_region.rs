@@ -480,7 +480,11 @@ impl MetadataRegion {
                 .collect(),
         };
 
-        RegionPutRequest { rows, hint: None }
+        RegionPutRequest {
+            rows,
+            hint: None,
+            partition_rule_version: 0,
+        }
     }
 
     fn build_delete_request(keys: &[String]) -> RegionDeleteRequest {
@@ -509,7 +513,11 @@ impl MetadataRegion {
             .collect();
         let rows = Rows { schema: cols, rows };
 
-        RegionDeleteRequest { rows, hint: None }
+        RegionDeleteRequest {
+            rows,
+            hint: None,
+            partition_rule_version: 0,
+        }
     }
 
     /// Add logical regions to the metadata region.

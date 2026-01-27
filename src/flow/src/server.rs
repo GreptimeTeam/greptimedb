@@ -122,6 +122,7 @@ impl flow_server::Flow for FlowService {
                     api::v1::region::InsertRequest {
                         region_id: insert.region_id,
                         rows: insert.rows,
+                        partition_rule_version: insert.partition_rule_version,
                     }
                 })
                 .collect_vec(),

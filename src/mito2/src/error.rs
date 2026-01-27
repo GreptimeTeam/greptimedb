@@ -561,6 +561,20 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Partition rule version mismatch for region {}: request {}, expected {}",
+        region_id,
+        request_version,
+        expected_version
+    ))]
+    PartitionRuleVersionMismatch {
+        region_id: RegionId,
+        request_version: u64,
+        expected_version: u64,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid options"))]
     JsonOptions {
         #[snafu(source)]
@@ -1251,6 +1265,7 @@ impl ErrorExt for Error {
             | InvalidScanIndex { .. }
             | InvalidMeta { .. }
             | InvalidRequest { .. }
+            | PartitionRuleVersionMismatch { .. }
             | FillDefault { .. }
             | ConvertColumnDataType { .. }
             | ColumnNotFound { .. }

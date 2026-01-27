@@ -23,6 +23,8 @@ mod sql;
 mod region_migration;
 #[macro_use]
 mod repartition;
+#[macro_use]
+mod repartition_rule_version;
 
 grpc_tests!(File, S3, S3WithCache, Oss, Azblob, Gcs);
 
@@ -35,4 +37,8 @@ region_migration_tests!(File);
 repartition_tests!(File);
 
 repartition_tests!(S3, S3WithCache, Oss, Azblob, Gcs);
+
+repartition_rule_version_tests!(File);
+
+repartition_rule_version_tests!(S3, S3WithCache, Oss, Azblob, Gcs);
 // TODO(niebayes): add integration tests for remote wal.

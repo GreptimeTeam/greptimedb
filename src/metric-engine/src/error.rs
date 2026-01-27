@@ -261,6 +261,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid request for region {}, reason: {}", region_id, reason))]
+    InvalidRequest {
+        reason: String,
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display(
         "Physical region {} is busy, there are still some logical regions using it",
         region_id
@@ -385,7 +393,8 @@ impl ErrorExt for Error {
             | UnexpectedRequest { .. }
             | UnsupportedAlterKind { .. }
             | UnsupportedRemapManifestsRequest { .. }
-            | UnsupportedSyncRegionFromRequest { .. } => StatusCode::InvalidArguments,
+            | UnsupportedSyncRegionFromRequest { .. }
+            | InvalidRequest { .. } => StatusCode::InvalidArguments,
 
             ForbiddenPhysicalAlter { .. }
             | UnsupportedRegionRequest { .. }
