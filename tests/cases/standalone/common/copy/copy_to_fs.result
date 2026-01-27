@@ -38,6 +38,10 @@ COPY (select host, cpu, jsons, ts, ts2 from demo where host = 'host2') TO '${SQL
 
 Affected Rows: 1
 
+COPY (select host, cpu, jsons, ts, ts2 from demo where host = 'host2') TO '${SQLNESS_HOME}/export/demo.json' WITH (format='json', timestamp_format='%m-%d-%Y', date_format='%Y/%m/%d');
+
+Affected Rows: 1
+
 drop table demo;
 
 Affected Rows: 0

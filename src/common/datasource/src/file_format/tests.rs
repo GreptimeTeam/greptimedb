@@ -34,7 +34,7 @@ use object_store::ObjectStore;
 use super::FORMAT_TYPE;
 use crate::file_format::parquet::DefaultParquetFileReaderFactory;
 use crate::file_format::{FileFormat, Format, OrcFormat};
-use crate::test_util::{csv_basic_schema, scan_config, test_basic_schema, test_store};
+use crate::test_util::{basic_schema_with_time_format, scan_config, test_basic_schema, test_store};
 use crate::{error, test_util};
 
 struct Test<'a> {
@@ -66,35 +66,36 @@ impl Test<'_> {
 #[tokio::test]
 async fn test_json_opener() {
     let store = test_store("/");
-    let schema = test_basic_schema();
+    let schema = basic_schema_with_time_format();
     let file_source = Arc::new(JsonSource::new(schema)).with_batch_size(test_util::TEST_BATCH_SIZE);
 
     let path = &find_workspace_path("/src/common/datasource/tests/json/basic.json")
         .display()
         .to_string();
+
     let tests = [
         Test {
             config: scan_config(None, path, file_source.clone()),
             file_source: file_source.clone(),
             expected: vec![
-                "+-----+-------+",
-                "| num | str   |",
-                "+-----+-------+",
-                "| 5   | test  |",
-                "| 2   | hello |",
-                "| 4   | foo   |",
-                "+-----+-------+",
+                "+-----+-------+---------------------+----------+------------+",
+                "| num | str   | ts                  | t        | date       |",
+                "+-----+-------+---------------------+----------+------------+",
+                "| 5   | test  | 2023-04-01T00:00:00 | 00:00:10 | 2023-04-01 |",
+                "| 2   | hello | 2023-04-01T00:00:00 | 00:00:20 | 2023-04-01 |",
+                "| 4   | foo   | 2023-04-01T00:00:00 | 00:00:30 | 2023-04-01 |",
+                "+-----+-------+---------------------+----------+------------+",
             ],
         },
         Test {
             config: scan_config(Some(1), path, file_source.clone()),
             file_source,
             expected: vec![
-                "+-----+------+",
-                "| num | str  |",
-                "+-----+------+",
-                "| 5   | test |",
-                "+-----+------+",
+                "+-----+------+---------------------+----------+------------+",
+                "| num | str  | ts                  | t        | date       |",
+                "+-----+------+---------------------+----------+------------+",
+                "| 5   | test | 2023-04-01T00:00:00 | 00:00:10 | 2023-04-01 |",
+                "+-----+------+---------------------+----------+------------+",
             ],
         },
     ];
@@ -107,7 +108,7 @@ async fn test_json_opener() {
 #[tokio::test]
 async fn test_csv_opener() {
     let store = test_store("/");
-    let schema = csv_basic_schema();
+    let schema = basic_schema_with_time_format();
     let path = &find_workspace_path("/src/common/datasource/tests/csv/basic.csv")
         .display()
         .to_string();
