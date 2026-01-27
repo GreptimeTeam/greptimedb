@@ -30,6 +30,8 @@ use crate::expr::{Operand, PartitionExpr, RestrictedOp, col};
 /// into an equivalent but shorter expression.
 ///
 /// Falls back to the original expression if the simplifier can't prove equivalence.
+///
+/// Note: NULL semantics is not part of this simplification logic.
 pub fn simplify_merged_partition_expr(expr: PartitionExpr) -> PartitionExpr {
     try_simplify_merged_partition_expr(&expr).unwrap_or(expr)
 }
