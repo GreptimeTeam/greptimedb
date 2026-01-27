@@ -777,6 +777,17 @@ pub async fn test_prom_http_api(store_type: StorageType) {
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
+    // query a metric table backed by a physical table with nanosecond precision to ensure
+    // time cast and __tsid path work with logical table aliasing.
+    let res = client
+        .get(
+            "/v1/prometheus/api/v1/query_range?query=demo_metrics_with_nanos&start=0&end=10&step=1",
+        )
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = serde_json::from_str::<PrometheusJsonResponse>(&res.text().await).unwrap();
+    assert_eq!(body.status, "success");
     let res = client
         .get("/v1/prometheus/api/v1/query_range?query=up&start=1&end=100&step=0.5")
         .send()
