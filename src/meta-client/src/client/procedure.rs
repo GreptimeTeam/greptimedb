@@ -18,11 +18,16 @@ use std::time::Duration;
 
 use api::v1::meta::procedure_service_client::ProcedureServiceClient;
 use api::v1::meta::{
-    DdlTaskRequest, DdlTaskResponse, MigrateRegionRequest, MigrateRegionResponse,
-    ProcedureDetailRequest, ProcedureDetailResponse, ProcedureId, ProcedureStateResponse,
-    QueryProcedureRequest, ReconcileRequest, ReconcileResponse, ResponseHeader, Role,
+    DdlTaskRequest, DdlTaskResponse, GcRegionsRequest, GcRegionsResponse, GcTableRequest,
+    GcTableResponse, MigrateRegionRequest, MigrateRegionResponse, ProcedureDetailRequest,
+    ProcedureDetailResponse, ProcedureId, ProcedureStateResponse, QueryProcedureRequest,
+    ReconcileRequest, ReconcileResponse, RequestHeader, ResponseHeader, Role,
 };
 use common_grpc::channel_manager::ChannelManager;
+use common_meta::rpc::procedure::{
+    GcRegionsRequest as MetaGcRegionsRequest, GcResponse as MetaGcResponse,
+    GcTableRequest as MetaGcTableRequest,
+};
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{error, info, warn};
 use snafu::{ResultExt, ensure};
@@ -104,6 +109,16 @@ impl Client {
     pub async fn list_procedures(&self) -> Result<ProcedureDetailResponse> {
         let inner = self.inner.read().await;
         inner.list_procedures().await
+    }
+
+    pub async fn gc_regions(&self, request: MetaGcRegionsRequest) -> Result<MetaGcResponse> {
+        let inner = self.inner.read().await;
+        inner.gc_regions(request).await
+    }
+
+    pub async fn gc_table(&self, request: MetaGcTableRequest) -> Result<MetaGcResponse> {
+        let inner = self.inner.read().await;
+        inner.gc_table(request).await
     }
 }
 
@@ -260,6 +275,74 @@ impl Inner {
         .await
     }
 
+    async fn gc_regions(&self, request: MetaGcRegionsRequest) -> Result<MetaGcResponse> {
+        let req = GcRegionsRequest {
+            header: Some(RequestHeader {
+                protocol_version: 0,
+                member_id: self.id,
+                role: self.role as i32,
+                tracing_context: TracingContext::from_current_span().to_w3c(),
+            }),
+            region_ids: request.region_ids,
+            full_file_listing: request.full_file_listing,
+            timeout_secs: request.timeout.as_secs() as u32,
+        };
+
+        let resp: GcRegionsResponse = self
+            .with_retry(
+                "gc_regions",
+                move |mut client| {
+                    let mut req = Request::new(req.clone());
+                    req.set_timeout(self.timeout);
+                    async move { client.gc_regions(req).await.map(|res| res.into_inner()) }
+                },
+                |resp: &GcRegionsResponse| &resp.header,
+            )
+            .await?;
+
+        Ok(MetaGcResponse {
+            processed_regions: resp.processed_regions,
+            need_retry_regions: resp.need_retry_regions,
+            deleted_files: resp.deleted_files,
+            deleted_indexes: resp.deleted_indexes,
+        })
+    }
+
+    async fn gc_table(&self, request: MetaGcTableRequest) -> Result<MetaGcResponse> {
+        let req = GcTableRequest {
+            header: Some(RequestHeader {
+                protocol_version: 0,
+                member_id: self.id,
+                role: self.role as i32,
+                tracing_context: TracingContext::from_current_span().to_w3c(),
+            }),
+            catalog_name: request.catalog_name,
+            schema_name: request.schema_name,
+            table_name: request.table_name,
+            full_file_listing: request.full_file_listing,
+            timeout_secs: request.timeout.as_secs() as u32,
+        };
+
+        let resp: GcTableResponse = self
+            .with_retry(
+                "gc_table",
+                move |mut client| {
+                    let mut req = Request::new(req.clone());
+                    req.set_timeout(self.timeout);
+                    async move { client.gc_table(req).await.map(|res| res.into_inner()) }
+                },
+                |resp: &GcTableResponse| &resp.header,
+            )
+            .await?;
+
+        Ok(MetaGcResponse {
+            processed_regions: resp.processed_regions,
+            need_retry_regions: resp.need_retry_regions,
+            deleted_files: resp.deleted_files,
+            deleted_indexes: resp.deleted_indexes,
+        })
+    }
+
     async fn query_procedure_state(&self, pid: &str) -> Result<ProcedureStateResponse> {
         let mut req = QueryProcedureRequest {
             pid: Some(ProcedureId { key: pid.into() }),
@@ -333,10 +416,11 @@ mod tests {
     use api::v1::meta::heartbeat_server::{Heartbeat, HeartbeatServer};
     use api::v1::meta::procedure_service_server::{ProcedureService, ProcedureServiceServer};
     use api::v1::meta::{
-        AskLeaderRequest, AskLeaderResponse, DdlTaskRequest, DdlTaskResponse, HeartbeatRequest,
-        HeartbeatResponse, MigrateRegionRequest, MigrateRegionResponse, Peer,
-        ProcedureDetailRequest, ProcedureDetailResponse, ProcedureStateResponse,
-        QueryProcedureRequest, ReconcileRequest, ReconcileResponse, ResponseHeader, Role,
+        AskLeaderRequest, AskLeaderResponse, DdlTaskRequest, DdlTaskResponse, GcRegionsRequest,
+        GcRegionsResponse, GcTableRequest, GcTableResponse, HeartbeatRequest, HeartbeatResponse,
+        MigrateRegionRequest, MigrateRegionResponse, Peer, ProcedureDetailRequest,
+        ProcedureDetailResponse, ProcedureStateResponse, QueryProcedureRequest, ReconcileRequest,
+        ReconcileResponse, ResponseHeader, Role,
     };
     use async_trait::async_trait;
     use common_error::status_code::StatusCode;
@@ -434,6 +518,20 @@ mod tests {
             _request: Request<ProcedureDetailRequest>,
         ) -> Result<Response<ProcedureDetailResponse>, Status> {
             Err(Status::unimplemented("details is not used in this test"))
+        }
+
+        async fn gc_regions(
+            &self,
+            _request: Request<GcRegionsRequest>,
+        ) -> Result<Response<GcRegionsResponse>, Status> {
+            Err(Status::unimplemented("gc_regions is not used in this test"))
+        }
+
+        async fn gc_table(
+            &self,
+            _request: Request<GcTableRequest>,
+        ) -> Result<Response<GcTableResponse>, Status> {
+            Err(Status::unimplemented("gc_table is not used in this test"))
         }
     }
 

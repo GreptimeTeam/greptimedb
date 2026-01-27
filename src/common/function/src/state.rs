@@ -37,7 +37,8 @@ impl FunctionState {
         use catalog::CatalogManagerRef;
         use common_base::AffectedRows;
         use common_meta::rpc::procedure::{
-            ManageRegionFollowerRequest, MigrateRegionRequest, ProcedureStateResponse,
+            GcRegionsRequest, GcResponse, GcTableRequest, ManageRegionFollowerRequest,
+            MigrateRegionRequest, ProcedureStateResponse,
         };
         use common_query::Output;
         use common_query::error::Result;
@@ -80,6 +81,24 @@ impl FunctionState {
                 _request: ManageRegionFollowerRequest,
             ) -> Result<()> {
                 Ok(())
+            }
+
+            async fn gc_regions(&self, _request: GcRegionsRequest) -> Result<GcResponse> {
+                Ok(GcResponse {
+                    processed_regions: 1,
+                    need_retry_regions: vec![],
+                    deleted_files: 0,
+                    deleted_indexes: 0,
+                })
+            }
+
+            async fn gc_table(&self, _request: GcTableRequest) -> Result<GcResponse> {
+                Ok(GcResponse {
+                    processed_regions: 1,
+                    need_retry_regions: vec![],
+                    deleted_files: 0,
+                    deleted_indexes: 0,
+                })
             }
 
             fn catalog_manager(&self) -> &CatalogManagerRef {
