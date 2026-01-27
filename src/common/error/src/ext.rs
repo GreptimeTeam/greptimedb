@@ -13,7 +13,10 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
+
+use snafu::{FromString, Snafu};
 
 use crate::status_code::StatusCode;
 
@@ -113,6 +116,39 @@ impl<T: StackError> StackError for Box<T> {
 
     fn next(&self) -> Option<&dyn StackError> {
         self.as_ref().next()
+    }
+}
+
+/// A simple [Result] of which the error is convertable from [ErrorExt] (which every GreptimeDB
+/// error implements). Use this if you are tired of writing `unwrap`s in test codes, that you can
+/// use the `?` on all GreptimeDB errors.
+pub type WhateverResult<T> = Result<T, Whatever>;
+
+#[derive(Snafu)]
+#[snafu(display("{inner}"))]
+pub struct Whatever {
+    inner: snafu::Whatever,
+}
+
+impl Debug for Whatever {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.inner)
+    }
+}
+
+impl<E: ErrorExt> From<E> for Whatever {
+    fn from(e: E) -> Self {
+        Self {
+            inner: FromString::without_source(format!("{e:?}")),
+        }
+    }
+}
+
+impl From<String> for Whatever {
+    fn from(s: String) -> Self {
+        Self {
+            inner: FromString::without_source(s),
+        }
     }
 }
 
