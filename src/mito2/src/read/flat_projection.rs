@@ -249,6 +249,9 @@ impl FlatProjectionMapper {
         &self,
         batch: &datatypes::arrow::record_batch::RecordBatch,
     ) -> common_recordbatch::error::Result<RecordBatch> {
+        if self.is_empty_projection {
+            return RecordBatch::new_with_count(self.output_schema.clone(), batch.num_rows());
+        }
         let columns = self.project_vectors(batch)?;
         RecordBatch::new(self.output_schema.clone(), columns)
     }
@@ -258,9 +261,6 @@ impl FlatProjectionMapper {
         &self,
         batch: &datatypes::arrow::record_batch::RecordBatch,
     ) -> common_recordbatch::error::Result<Vec<datatypes::vectors::VectorRef>> {
-        if self.is_empty_projection {
-            return Ok(vec![]);
-        }
         let mut columns = Vec::with_capacity(self.output_schema.num_columns());
         for index in &self.batch_indices {
             let mut array = batch.column(*index).clone();
