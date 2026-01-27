@@ -133,7 +133,6 @@ pub(crate) fn op_type_column_index(num_columns: usize) -> usize {
 /// Helper for reading the flat SST format with projection.
 ///
 /// It only supports flat format that stores primary keys additionally.
-#[derive(Debug)]
 pub struct FlatReadFormat {
     /// Sequence number to override the sequence read from the SST.
     override_sequence: Option<SequenceNumber>,
@@ -157,32 +156,22 @@ impl FlatReadFormat {
             None => metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse,
         };
 
-        let column_ids = column_ids.collect::<Vec<_>>();
-        common_telemetry::debug!(
-            "skip_auto_convert: {}, is_legacy: {}, encoding: {:?}, column_ids: {:?}",
-            skip_auto_convert,
-            is_legacy,
-            metadata.primary_key_encoding,
-            column_ids
-        );
         let parquet_adapter = if is_legacy {
             // Safety: is_legacy_format() ensures primary_key is not empty.
             if metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse {
                 // Only skip auto convert when the primary key encoding is sparse.
                 ParquetAdapter::PrimaryKeyToFlat(ParquetPrimaryKeyToFlat::new(
                     metadata,
-                    column_ids.iter().copied(),
+                    column_ids,
                     skip_auto_convert,
                 ))
             } else {
                 ParquetAdapter::PrimaryKeyToFlat(ParquetPrimaryKeyToFlat::new(
-                    metadata,
-                    column_ids.iter().copied(),
-                    false,
+                    metadata, column_ids, false,
                 ))
             }
         } else {
-            ParquetAdapter::Flat(ParquetFlat::new(metadata, column_ids.iter().copied()))
+            ParquetAdapter::Flat(ParquetFlat::new(metadata, column_ids))
         };
 
         Ok(FlatReadFormat {
@@ -271,16 +260,10 @@ impl FlatReadFormat {
     pub(crate) fn format_projection(&self) -> &FormatProjection {
         match &self.parquet_adapter {
             ParquetAdapter::Flat(p) => &p.format_projection,
-            ParquetAdapter::PrimaryKeyToFlat(p) => {
-                common_telemetry::debug!(
-                    "format_projection_for_skip_auto_convert: {:?}, format_projection: {:?}",
-                    p.old_format_projection,
-                    p.format_projection
-                );
-                p.old_format_projection
-                    .as_ref()
-                    .unwrap_or(&p.format_projection)
-            }
+            ParquetAdapter::PrimaryKeyToFlat(p) => p
+                .old_format_projection
+                .as_ref()
+                .unwrap_or(&p.format_projection),
         }
     }
 
@@ -379,14 +362,12 @@ impl FlatReadFormat {
 }
 
 /// Wraps the parquet helper for different formats.
-#[derive(Debug)]
 enum ParquetAdapter {
     Flat(ParquetFlat),
     PrimaryKeyToFlat(ParquetPrimaryKeyToFlat),
 }
 
 /// Helper to reads the parquet from primary key format into the flat format.
-#[derive(Debug)]
 struct ParquetPrimaryKeyToFlat {
     /// The primary key format to read the parquet.
     format: PrimaryKeyReadFormat,
@@ -441,14 +422,6 @@ impl ParquetPrimaryKeyToFlat {
             None
         };
 
-        common_telemetry::debug!(
-            "flat: id_to_index: {:?}, sst_column_num: {:?}, skip_auto_convert: {:?}, old_format_projection: {:?}",
-            id_to_index,
-            sst_column_num,
-            skip_auto_convert,
-            old_format_projection
-        );
-
         Self {
             format,
             convert_format,
@@ -467,7 +440,6 @@ impl ParquetPrimaryKeyToFlat {
 }
 
 /// Helper to reads the parquet in flat format directly.
-#[derive(Debug)]
 struct ParquetFlat {
     /// The metadata stored in the SST.
     metadata: RegionMetadataRef,

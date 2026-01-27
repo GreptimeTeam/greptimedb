@@ -351,14 +351,6 @@ impl ParquetReaderBuilder {
         // - compaction is enabled
         // - region partition expr is same with file partition expr (no need to auto convert)
         let skip_auto_convert = self.compaction && is_same_region_partition;
-        common_telemetry::debug!(
-            "skip_auto_convert: {}, is_same_region_partition: {:?}, compaction: {:?}, region_partition_expr: {:?}, file_partition_expr: {:?}",
-            skip_auto_convert,
-            is_same_region_partition,
-            self.compaction,
-            region_partition_expr,
-            self.file_handle.meta_ref().partition_expr
-        );
 
         // Build compat format for compaction when:
         // - compaction is enabled
@@ -1698,7 +1690,6 @@ impl ReaderState {
 }
 
 /// The filter to evaluate or the prune result of the default value.
-#[derive(Debug)]
 pub(crate) enum MaybeFilter {
     /// The filter to evaluate.
     Filter(SimpleFilterEvaluator),
@@ -1709,7 +1700,6 @@ pub(crate) enum MaybeFilter {
 }
 
 /// Context to evaluate the column filter for a parquet file.
-#[derive(Debug)]
 pub(crate) struct SimpleFilterContext {
     /// Filter to evaluate.
     filter: MaybeFilter,

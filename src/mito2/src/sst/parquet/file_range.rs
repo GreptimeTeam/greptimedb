@@ -395,7 +395,6 @@ pub enum PreFilterMode {
 }
 
 /// Context for partition expression filtering.
-#[derive(Debug)]
 pub(crate) struct PartitionFilterContext {
     pub(crate) region_partition_physical_expr: Arc<dyn PhysicalExpr>,
     /// Schema containing only columns referenced by the partition expression.
@@ -645,16 +644,7 @@ impl RangeBase {
             // Get the column directly by its projected index
             let column_idx = flat_format.projected_index_by_id(filter_ctx.column_id());
             if let Some(idx) = column_idx {
-                let column = &input.columns().get(idx).expect(
-                    &format!(
-                        "column_idx: {:?}, column_id_to_projected_index: {:?}, input: {:?}, filter column name: {:?}, flat_format: {:?}, is_same_partition: {:?}",
-                        idx,
-                        flat_format.format_projection().column_id_to_projected_index,
-                        input,
-                        filter_ctx.filter(),
-                        flat_format,
-                        self.partition_filter,
-                    ));
+                let column = &input.columns().get(idx).unwrap();
                 let result = filter
                     .evaluate_array(column)
                     .inspect_err(
@@ -897,8 +887,6 @@ impl RangeBase {
             .fail();
         }
 
-        RecordBatch::try_new(arrow_schema.clone(), columns.clone()).inspect_err(|err|{
-            error!(err; "Failed to build record batch for pruning, arrow schema: {:?}, columns: {:?}", arrow_schema, columns.iter().map(|c| c.data_type()).collect::<Vec<_>>());
-        }).context(NewRecordBatchSnafu)
+        RecordBatch::try_new(arrow_schema.clone(), columns.clone()).context(NewRecordBatchSnafu)
     }
 }

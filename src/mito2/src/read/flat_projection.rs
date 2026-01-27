@@ -433,21 +433,6 @@ impl FlatSparseMapper {
             .convert_with_internal_columns(&batch)
             .context(RecordBatchSnafu)?;
 
-        common_telemetry::debug!(
-            "before schema: {:?}, after schema: {:?}",
-            batch
-                .schema()
-                .fields()
-                .iter()
-                .map(|f| f.name())
-                .collect::<Vec<_>>(),
-            output
-                .schema()
-                .fields()
-                .iter()
-                .map(|f| f.name())
-                .collect::<Vec<_>>()
-        );
         Ok(output)
     }
 }

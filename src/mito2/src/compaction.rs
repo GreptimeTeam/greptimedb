@@ -740,11 +740,6 @@ impl CompactionSstReaderBuilder<'_> {
     }
 
     fn build_scan_input(self, flat_format: bool) -> Result<ScanInput> {
-        common_telemetry::debug!(
-            "encoding: {:?}, flat_format: {}",
-            self.metadata.primary_key_encoding,
-            flat_format
-        );
         let mapper = ProjectionMapper::all(&self.metadata, flat_format)?;
         let mut scan_input = ScanInput::new(self.sst_layer, mapper)
             .with_files(self.inputs.to_vec())

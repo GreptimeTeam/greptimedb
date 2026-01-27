@@ -313,7 +313,6 @@ impl SeqScan {
 
         let mapper = stream_ctx.input.mapper.as_flat().unwrap();
         let schema = mapper.input_arrow_schema(stream_ctx.input.compaction);
-        common_telemetry::debug!("mappeed schema: {:?}", schema);
 
         let metrics_reporter = part_metrics.map(|m| m.merge_metrics_reporter());
         let reader =
