@@ -846,6 +846,7 @@ jobs:
           verbose: true
 
   run-multi-lang-tests:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
     name: Run Multi-language SDK Tests
     needs: build
     uses: ./.github/workflows/run-multi-lang-tests.yml
