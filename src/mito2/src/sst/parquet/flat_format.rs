@@ -263,10 +263,7 @@ impl FlatReadFormat {
     pub(crate) fn format_projection(&self) -> &FormatProjection {
         match &self.parquet_adapter {
             ParquetAdapter::Flat(p) => &p.format_projection,
-            ParquetAdapter::PrimaryKeyToFlat(p) => p
-                .primary_key_format_projection
-                .as_ref()
-                .unwrap_or(&p.format_projection),
+            ParquetAdapter::PrimaryKeyToFlat(p) => &p.format_projection,
         }
     }
 
@@ -378,10 +375,6 @@ struct ParquetPrimaryKeyToFlat {
     convert_format: Option<FlatConvertFormat>,
     /// Projection computed for the flat format.
     format_projection: FormatProjection,
-    /// Projection used when reading primary key format without auto convert.
-    ///
-    /// Only used when `skip_auto_convert` is true.
-    primary_key_format_projection: Option<FormatProjection>,
 }
 
 impl ParquetPrimaryKeyToFlat {
@@ -404,34 +397,33 @@ impl ParquetPrimaryKeyToFlat {
         let sst_column_num =
             flat_sst_arrow_schema_column_num(&metadata, &FlatSchemaOptions::default());
 
-        // Computes the format projection for the new format.
-        let format_projection = FormatProjection::compute_format_projection(
-            &id_to_index,
-            sst_column_num,
-            column_ids.iter().copied(),
-        );
         let codec = build_primary_key_codec(&metadata);
-        let convert_format = if skip_auto_convert {
-            None
-        } else {
-            FlatConvertFormat::new(Arc::clone(&metadata), &format_projection, codec)
-        };
-
         let format = PrimaryKeyReadFormat::new(metadata.clone(), column_ids.iter().copied());
-        let primary_key_format_projection = if skip_auto_convert {
-            Some(FormatProjection {
-                projection_indices: format.projection_indices().to_vec(),
-                column_id_to_projected_index: format.field_id_to_projected_index().clone(),
-            })
+        let (convert_format, format_projection) = if skip_auto_convert {
+            (
+                None,
+                FormatProjection {
+                    projection_indices: format.projection_indices().to_vec(),
+                    column_id_to_projected_index: format.field_id_to_projected_index().clone(),
+                },
+            )
         } else {
-            None
+            // Computes the format projection for the new format.
+            let format_projection = FormatProjection::compute_format_projection(
+                &id_to_index,
+                sst_column_num,
+                column_ids.iter().copied(),
+            );
+            (
+                FlatConvertFormat::new(Arc::clone(&metadata), &format_projection, codec),
+                format_projection,
+            )
         };
 
         Self {
             format,
             convert_format,
             format_projection,
-            primary_key_format_projection,
         }
     }
 
