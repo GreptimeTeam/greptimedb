@@ -1738,9 +1738,13 @@ mod tests {
     #[test]
     fn test_bulk_memtable_ranges_with_encoded_parts() {
         let metadata = metadata_for_test();
+        let config = BulkMemtableConfig {
+            merge_threshold: 8,
+            ..Default::default()
+        };
         let memtable = BulkMemtable::new(
             999,
-            BulkMemtableConfig::default(),
+            config,
             metadata.clone(),
             None,
             None,
@@ -2059,12 +2063,13 @@ mod tests {
     #[test]
     fn test_should_merge_parts_at_threshold() {
         let mut bulk_parts = BulkParts::default();
+        let merge_threshold = 8;
 
-        // Add 8 bulk parts (at DEFAULT_MERGE_THRESHOLD)
-        for i in 0..8 {
+        // Add 8 bulk parts (at merge_threshold)
+        for i in 0..merge_threshold {
             let part = create_bulk_part_with_converter(
                 &format!("key_{}", i),
-                i,
+                i as u32,
                 vec![1000 + i as i64 * 100],
                 vec![Some(i as f64 * 10.0)],
                 100 + i as u64,
@@ -2074,18 +2079,19 @@ mod tests {
         }
 
         // Should trigger merge since we have 8 parts
-        assert!(bulk_parts.should_merge_parts(DEFAULT_MERGE_THRESHOLD));
+        assert!(bulk_parts.should_merge_parts(merge_threshold));
     }
 
     #[test]
     fn test_should_merge_parts_with_merging_flag() {
         let mut bulk_parts = BulkParts::default();
+        let merge_threshold = 8;
 
         // Add 10 bulk parts
         for i in 0..10 {
             let part = create_bulk_part_with_converter(
                 &format!("key_{}", i),
-                i,
+                i as u32,
                 vec![1000 + i as i64 * 100],
                 vec![Some(i as f64 * 10.0)],
                 100 + i as u64,
@@ -2095,7 +2101,7 @@ mod tests {
         }
 
         // Should trigger merge since we have 10 parts
-        assert!(bulk_parts.should_merge_parts(DEFAULT_MERGE_THRESHOLD));
+        assert!(bulk_parts.should_merge_parts(merge_threshold));
 
         // Mark first 3 parts as merging
         for wrapper in bulk_parts.parts.iter_mut().take(3) {
@@ -2103,7 +2109,7 @@ mod tests {
         }
 
         // Now only 7 parts are available for merging, should not trigger
-        assert!(!bulk_parts.should_merge_parts(DEFAULT_MERGE_THRESHOLD));
+        assert!(!bulk_parts.should_merge_parts(merge_threshold));
     }
 
     #[test]
@@ -2152,9 +2158,14 @@ mod tests {
     #[test]
     fn test_bulk_memtable_ranges_with_multi_bulk_part() {
         let metadata = metadata_for_test();
+        let merge_threshold = 8;
+        let config = BulkMemtableConfig {
+            merge_threshold,
+            ..Default::default()
+        };
         let memtable = BulkMemtable::new(
             2005,
-            BulkMemtableConfig::default(),
+            config,
             metadata.clone(),
             None,
             None,
@@ -2164,10 +2175,10 @@ mod tests {
         // Disable unordered_part for this test
         memtable.set_unordered_part_threshold(0);
 
-        // Write enough bulk parts to trigger merge (DEFAULT_MERGE_THRESHOLD = 8)
+        // Write enough bulk parts to trigger merge (merge_threshold = 8)
         // Each part has small number of rows so total < DEFAULT_ROW_GROUP_SIZE
         // This will result in MultiBulkPart after compaction
-        for i in 0..DEFAULT_MERGE_THRESHOLD {
+        for i in 0..merge_threshold {
             let part = create_bulk_part_with_converter(
                 &format!("key_{}", i),
                 i as u32,
@@ -2192,8 +2203,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(1, ranges.ranges.len());
+        let expected_rows = merge_threshold * 2; // Each part has 2 rows
         let total_rows: usize = ranges.ranges.values().map(|r| r.stats().num_rows()).sum();
-        assert_eq!(16, total_rows);
+        assert_eq!(expected_rows, total_rows);
 
         // Read all data
         let mut total_rows_read = 0;
@@ -2206,6 +2218,6 @@ mod tests {
                 total_rows_read += batch.num_rows();
             }
         }
-        assert_eq!(16, total_rows_read);
+        assert_eq!(expected_rows, total_rows_read);
     }
 }
