@@ -19,7 +19,9 @@ use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_base::AffectedRows;
 use common_meta::rpc::procedure::{
-    ManageRegionFollowerRequest, MigrateRegionRequest, ProcedureStateResponse,
+    GcRegionsRequest as MetaGcRegionsRequest, GcResponse as MetaGcResponse,
+    GcTableRequest as MetaGcTableRequest, ManageRegionFollowerRequest, MigrateRegionRequest,
+    ProcedureStateResponse,
 };
 use common_query::Output;
 use common_query::error::Result;
@@ -85,6 +87,12 @@ pub trait ProcedureServiceHandler: Send + Sync {
 
     /// Get the catalog manager
     fn catalog_manager(&self) -> &CatalogManagerRef;
+
+    /// Manually trigger GC for specific regions.
+    async fn gc_regions(&self, request: MetaGcRegionsRequest) -> Result<MetaGcResponse>;
+
+    /// Manually trigger GC for a table.
+    async fn gc_table(&self, request: MetaGcTableRequest) -> Result<MetaGcResponse>;
 }
 
 /// This flow service handler is only use for flush flow for now.
