@@ -361,15 +361,21 @@ impl MetricEngineInner {
             .map(|(idx, metadata)| (metadata.column_schema.name.clone(), idx))
             .collect::<HashMap<String, usize>>();
 
-        // // check if internal columns are not occupied
+        let table_id_col_def = request
+            .column_metadatas
+            .iter()
+            .any(|col| is_metric_name_col(col));
+        let tsid_col_def = request.column_metadatas.iter().any(|col| is_tsid_col(col));
+
+        // // check if internal columns are not occupied or defined in the request
         ensure!(
-            !name_to_index.contains_key(DATA_SCHEMA_TABLE_ID_COLUMN_NAME),
+            !name_to_index.contains_key(DATA_SCHEMA_TABLE_ID_COLUMN_NAME) || table_id_col_def,
             InternalColumnOccupiedSnafu {
                 column: DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
             }
         );
         ensure!(
-            !name_to_index.contains_key(DATA_SCHEMA_TSID_COLUMN_NAME),
+            !name_to_index.contains_key(DATA_SCHEMA_TSID_COLUMN_NAME) || tsid_col_def,
             InternalColumnOccupiedSnafu {
                 column: DATA_SCHEMA_TSID_COLUMN_NAME,
             }
@@ -508,21 +514,33 @@ impl MetricEngineInner {
         data_region_request.table_dir = request.table_dir.clone();
         data_region_request.path_type = PathType::Data;
 
+        let table_id_col_def = request
+            .column_metadatas
+            .iter()
+            .any(|col| is_metric_name_col(col));
+        let tsid_col_def = request.column_metadatas.iter().any(|col| is_tsid_col(col));
+
         // change nullability for tag columns
         data_region_request
             .column_metadatas
             .iter_mut()
             .for_each(|metadata| {
-                if metadata.semantic_type == SemanticType::Tag {
+                if metadata.semantic_type == SemanticType::Tag
+                    && !is_metric_name_col(metadata)
+                    && !is_tsid_col(metadata)
+                {
                     metadata.column_schema.set_nullable();
                     primary_key.push(metadata.column_id);
                 }
             });
 
-        // add internal columns
-        let [table_id_col, tsid_col] = Self::internal_column_metadata();
-        data_region_request.column_metadatas.push(table_id_col);
-        data_region_request.column_metadatas.push(tsid_col);
+        // add internal columns if not defined in the request
+        if !table_id_col_def {
+            data_region_request.column_metadatas.push(table_id_col());
+        }
+        if !tsid_col_def {
+            data_region_request.column_metadatas.push(tsid_col());
+        }
         data_region_request.primary_key = primary_key;
 
         // set data region options
@@ -533,39 +551,55 @@ impl MetricEngineInner {
 
         data_region_request
     }
+}
 
-    /// Generate internal column metadata.
-    ///
-    /// Return `[table_id_col, tsid_col]`
-    fn internal_column_metadata() -> [ColumnMetadata; 2] {
-        // Safety: BloomFilter is a valid skipping index type
-        let metric_name_col = ColumnMetadata {
-            column_id: ReservedColumnId::table_id(),
-            semantic_type: SemanticType::Tag,
-            column_schema: ColumnSchema::new(
-                DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
-                ConcreteDataType::uint32_datatype(),
-                false,
-            )
-            .with_skipping_options(SkippingIndexOptions::new_unchecked(
-                DEFAULT_TABLE_ID_SKIPPING_INDEX_GRANULARITY,
-                DEFAULT_TABLE_ID_SKIPPING_INDEX_FALSE_POSITIVE_RATE,
-                datatypes::schema::SkippingIndexType::BloomFilter,
-            ))
-            .unwrap(),
-        };
-        let tsid_col = ColumnMetadata {
-            column_id: ReservedColumnId::tsid(),
-            semantic_type: SemanticType::Tag,
-            column_schema: ColumnSchema::new(
-                DATA_SCHEMA_TSID_COLUMN_NAME,
-                ConcreteDataType::uint64_datatype(),
-                false,
-            )
-            .with_inverted_index(false),
-        };
-        [metric_name_col, tsid_col]
+fn table_id_col() -> ColumnMetadata {
+    ColumnMetadata {
+        column_id: ReservedColumnId::table_id(),
+        semantic_type: SemanticType::Tag,
+        column_schema: ColumnSchema::new(
+            DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+            ConcreteDataType::uint32_datatype(),
+            false,
+        )
+        .with_skipping_options(SkippingIndexOptions::new_unchecked(
+            DEFAULT_TABLE_ID_SKIPPING_INDEX_GRANULARITY,
+            DEFAULT_TABLE_ID_SKIPPING_INDEX_FALSE_POSITIVE_RATE,
+            datatypes::schema::SkippingIndexType::BloomFilter,
+        ))
+        .unwrap(),
     }
+}
+
+fn tsid_col() -> ColumnMetadata {
+    ColumnMetadata {
+        column_id: ReservedColumnId::tsid(),
+        semantic_type: SemanticType::Tag,
+        column_schema: ColumnSchema::new(
+            DATA_SCHEMA_TSID_COLUMN_NAME,
+            ConcreteDataType::uint64_datatype(),
+            false,
+        )
+        .with_inverted_index(false),
+    }
+}
+
+/// Returns true if the column is the metric name column.
+pub(crate) fn is_metric_name_col(column: &ColumnMetadata) -> bool {
+    column.column_id == ReservedColumnId::table_id()
+        && column.semantic_type == SemanticType::Tag
+        && column.column_schema.data_type == ConcreteDataType::uint32_datatype()
+        && column.column_schema.name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME
+        && column.column_schema.is_nullable() == false
+}
+
+/// Returns true if the column is the tsid column.
+pub(crate) fn is_tsid_col(column: &ColumnMetadata) -> bool {
+    column.column_id == ReservedColumnId::tsid()
+        && column.semantic_type == SemanticType::Tag
+        && column.column_schema.data_type == ConcreteDataType::uint64_datatype()
+        && column.column_schema.name == DATA_SCHEMA_TSID_COLUMN_NAME
+        && column.column_schema.is_nullable() == false
 }
 
 /// Groups the create logical region requests by physical region id.
@@ -627,6 +661,14 @@ mod test {
     use crate::config::EngineConfig;
     use crate::engine::MetricEngine;
     use crate::test_util::{TestEnv, create_logical_region_request};
+
+    #[test]
+    fn test_internal_column_metadata() {
+        let table_id_col = table_id_col();
+        let tsid_col = tsid_col();
+        assert!(is_metric_name_col(&table_id_col));
+        assert!(is_tsid_col(&tsid_col));
+    }
 
     #[test]
     fn test_verify_region_create_request() {

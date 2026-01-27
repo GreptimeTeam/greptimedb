@@ -457,21 +457,13 @@ pub fn extract_column_metadatas(
     let first_column_metadatas = schemas
         .swap_remove(0)
         .map(|first_bytes| ColumnMetadata::decode_list(&first_bytes).context(DecodeJsonSnafu))
-        .transpose()?
-        .map(|mut c| {
-            c.sort_unstable_by_key(|c| c.column_id);
-            c
-        });
+        .transpose()?;
 
     for s in schemas {
         // check decoded column metadata instead of bytes because it contains extension map.
         let column_metadata = s
             .map(|bytes| ColumnMetadata::decode_list(&bytes).context(DecodeJsonSnafu))
-            .transpose()?
-            .map(|mut c| {
-                c.sort_unstable_by_key(|c| c.column_id);
-                c
-            });
+            .transpose()?;
         ensure!(
             column_metadata == first_column_metadatas,
             MetadataCorruptionSnafu {
