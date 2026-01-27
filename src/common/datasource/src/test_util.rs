@@ -68,7 +68,7 @@ pub fn test_basic_schema() -> SchemaRef {
     Arc::new(schema)
 }
 
-pub fn csv_basic_schema() -> SchemaRef {
+pub fn basic_schema_with_time_format() -> SchemaRef {
     let schema = Schema::new(vec![
         Field::new("num", DataType::Int64, false),
         Field::new("str", DataType::Utf8, false),
@@ -148,7 +148,7 @@ pub async fn setup_stream_to_csv_test(
 ) {
     let store = test_store("/");
 
-    let schema = csv_basic_schema();
+    let schema = basic_schema_with_time_format();
 
     let csv_source = CsvSource::new(schema).with_batch_size(TEST_BATCH_SIZE);
     let config = scan_config(None, origin_path, csv_source.clone());
