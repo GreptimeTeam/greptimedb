@@ -12698,6 +12698,7 @@ dependencies = [
  "nom 7.1.3",
  "regex",
  "serde_json",
+ "simd-json",
  "thiserror 2.0.17",
 ]
 

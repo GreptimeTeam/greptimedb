@@ -17,12 +17,12 @@ use std::sync::Arc;
 
 use arrow::array::{Array, AsArray, BinaryBuilder};
 use arrow::compute;
-use datafusion_common::arrow::datatypes::DataType;
 use datafusion_common::DataFusionError;
+use datafusion_common::arrow::datatypes::DataType;
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature};
 use sql_json_path::JsonPath;
 
-use crate::function::{extract_args, Function};
+use crate::function::{Function, extract_args};
 use crate::helper;
 
 /// Query JSON data using the given JSON path.
@@ -80,7 +80,12 @@ impl Function for JsonPathQueryFunction {
                         let jsonb_value = jsonb::from_slice(json).map_err(|e| {
                             DataFusionError::Execution(format!("invalid jsonb binary: {e}"))
                         })?;
-                        let json_value: serde_json::Value = jsonb_value.into();
+                        let mut json_str = jsonb_value.to_string();
+                        let json_value: simd_json::OwnedValue = unsafe {
+                            simd_json::from_str(&mut json_str).map_err(|e| {
+                                DataFusionError::Execution(format!("failed to parse json: {e}"))
+                            })?
+                        };
                         let json_path = JsonPath::new(path).map_err(|e| {
                             DataFusionError::Execution(format!("invalid json path '{path}': {e}"))
                         })?;
@@ -89,21 +94,19 @@ impl Function for JsonPathQueryFunction {
                                 "failed to evaluate json path '{path}': {e}"
                             ))
                         })?;
-                        let node_values: Vec<serde_json::Value> = nodes
-                            .iter()
-                            .map(|n| {
-                                let mut s = n.to_string();
-                                unsafe { simd_json::from_str::<serde_json::Value>(&mut s) }
-                                    .unwrap_or(serde_json::Value::Null)
-                            })
-                            .collect();
-                        if !node_values.is_empty() {
-                            let result_json = serde_json::Value::Array(node_values);
-                            let result_jsonb: jsonb::Value = result_json.into();
-                            Some(result_jsonb.to_vec())
-                        } else {
-                            None
-                        }
+                        let node_values: Vec<simd_json::OwnedValue> =
+                            nodes.into_iter().map(|n| n.into_owned()).collect();
+                        let result_json = simd_json::OwnedValue::Array(Box::new(node_values));
+                        let json_bytes = simd_json::to_vec(&result_json).map_err(|e| {
+                            DataFusionError::Execution(format!("failed to serialize json: {e}"))
+                        })?;
+                        let result_jsonb: jsonb::Value =
+                            jsonb::from_slice(&json_bytes).map_err(|e| {
+                                DataFusionError::Execution(format!(
+                                    "failed to deserialize json: {e}"
+                                ))
+                            })?;
+                        Some(result_jsonb.to_vec())
                     } else {
                         None
                     }
