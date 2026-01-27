@@ -33,7 +33,7 @@ use crate::read::projection::read_column_ids_from_projection;
 use crate::sst::parquet::flat_format::sst_column_id_indices;
 use crate::sst::parquet::format::FormatProjection;
 use crate::sst::{
-    internal_fields, tag_maybe_to_dictionary_field, to_flat_sst_arrow_schema, FlatSchemaOptions,
+    FlatSchemaOptions, internal_fields, tag_maybe_to_dictionary_field, to_flat_sst_arrow_schema,
 };
 
 /// Handles projection and converts batches in flat format with correct schema.

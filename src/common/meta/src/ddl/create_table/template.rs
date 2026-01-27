@@ -21,7 +21,7 @@ use api::v1::{ColumnDef, CreateTableExpr, SemanticType};
 use common_telemetry::warn;
 use snafu::{OptionExt, ResultExt};
 use store_api::metric_engine_consts::{
-    is_metric_engine_internal_column, LOGICAL_TABLE_METADATA_KEY,
+    LOGICAL_TABLE_METADATA_KEY, is_metric_engine_internal_column,
 };
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::{RawTableInfo, TableId};
