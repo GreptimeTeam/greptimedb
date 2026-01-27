@@ -105,7 +105,7 @@ pub fn build_template_from_raw_table_info_for_physical_table(
             })?;
             let region_column_def = RegionColumnDef {
                 column_def: Some(column_def),
-                column_id: c.column_id as u32,
+                column_id: c.column_id,
             };
 
             Ok((c.column_id, region_column_def))

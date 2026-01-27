@@ -249,10 +249,18 @@ impl FlatProjectionMapper {
         &self,
         batch: &datatypes::arrow::record_batch::RecordBatch,
     ) -> common_recordbatch::error::Result<RecordBatch> {
-        if self.is_empty_projection {
-            return RecordBatch::new_with_count(self.output_schema.clone(), batch.num_rows());
-        }
+        let columns = self.project_vectors(batch)?;
+        RecordBatch::new(self.output_schema.clone(), columns)
+    }
 
+    /// Projects columns from the input batch and converts them into vectors.
+    pub(crate) fn project_vectors(
+        &self,
+        batch: &datatypes::arrow::record_batch::RecordBatch,
+    ) -> common_recordbatch::error::Result<Vec<datatypes::vectors::VectorRef>> {
+        if self.is_empty_projection {
+            return Ok(vec![]);
+        }
         let mut columns = Vec::with_capacity(self.output_schema.num_columns());
         for index in &self.batch_indices {
             let mut array = batch.column(*index).clone();
@@ -269,58 +277,7 @@ impl FlatProjectionMapper {
                 .context(ExternalSnafu)?;
             columns.push(vector);
         }
-
-        RecordBatch::new(self.output_schema.clone(), columns)
-    }
-
-    pub(crate) fn convert_with_internal_columns(
-        &self,
-        batch: &datatypes::arrow::record_batch::RecordBatch,
-    ) -> common_recordbatch::error::Result<DfRecordBatch> {
-        if self.is_empty_projection {
-            return RecordBatch::new_with_count(self.output_schema.clone(), batch.num_rows())
-                .map(|rb| rb.into_df_record_batch());
-        }
-        let num_columns = batch.columns().len();
-        // The last 3 columns are the internal columns.
-        let internal_indices = [num_columns - 3, num_columns - 2, num_columns - 1];
-        let mut columns =
-            Vec::with_capacity(self.output_schema.num_columns() + internal_indices.len());
-        for index in self.batch_indices.iter() {
-            let mut array = batch.column(*index).clone();
-            // Casts dictionary values to the target type.
-            if let datatypes::arrow::datatypes::DataType::Dictionary(_key_type, value_type) =
-                array.data_type()
-            {
-                let casted = datatypes::arrow::compute::cast(&array, value_type)
-                    .context(ArrowComputeSnafu)?;
-                array = casted;
-            }
-            let vector = Helper::try_into_vector(array)
-                .map_err(BoxedError::new)
-                .context(ExternalSnafu)?;
-            columns.push(vector);
-        }
-        for index in internal_indices.iter() {
-            let array = batch.column(*index).clone();
-            let vector = Helper::try_into_vector(array)
-                .map_err(BoxedError::new)
-                .context(ExternalSnafu)?;
-            columns.push(vector);
-        }
-
-        let fields = self
-            .output_schema
-            .arrow_schema()
-            .fields()
-            .into_iter()
-            .chain(internal_fields().iter())
-            .cloned()
-            .collect::<Vec<_>>();
-        let arrow_schema = datatypes::arrow::datatypes::Schema::new(fields);
-
-        let df_record_batch = RecordBatch::to_df_record_batch(Arc::new(arrow_schema), columns)?;
-        Ok(df_record_batch)
+        Ok(columns)
     }
 }
 
@@ -396,6 +353,7 @@ fn compute_input_arrow_schema(
 /// (fields + time index + __primary_key + __sequence + __op_type).
 pub(crate) struct CompactionProjectionMapper {
     mapper: FlatProjectionMapper,
+    assembler: DfBatchAssembler,
 }
 
 impl CompactionProjectionMapper {
@@ -423,17 +381,61 @@ impl CompactionProjectionMapper {
                 .map(|col| col.column_id)
                 .collect(),
         )?;
+        let assembler = DfBatchAssembler::new(mapper.output_schema());
 
-        Ok(Self { mapper })
+        Ok(Self { mapper, assembler })
     }
 
-    /// Make columns of the `batch` compatible.
+    /// Projects columns and appends internal columns for compaction output.
     pub(crate) fn project(&self, batch: DfRecordBatch) -> Result<DfRecordBatch> {
-        let output = self
+        let columns = self
             .mapper
-            .convert_with_internal_columns(&batch)
+            .project_vectors(&batch)
             .context(RecordBatchSnafu)?;
+        self.assembler
+            .build_df_record_batch_with_internal(&batch, columns)
+            .context(RecordBatchSnafu)
+    }
+}
 
-        Ok(output)
+/// Builds [DfRecordBatch] with internal columns appended.
+pub(crate) struct DfBatchAssembler {
+    output_arrow_schema_with_internal: datatypes::arrow::datatypes::SchemaRef,
+}
+
+impl DfBatchAssembler {
+    /// Precomputes the output schema with internal columns.
+    pub(crate) fn new(output_schema: SchemaRef) -> Self {
+        let fields = output_schema
+            .arrow_schema()
+            .fields()
+            .into_iter()
+            .chain(internal_fields().iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        let output_arrow_schema_with_internal =
+            Arc::new(datatypes::arrow::datatypes::Schema::new(fields));
+        Self {
+            output_arrow_schema_with_internal,
+        }
+    }
+
+    /// Builds a [DfRecordBatch] from projected vectors plus internal columns.
+    pub(crate) fn build_df_record_batch_with_internal(
+        &self,
+        batch: &datatypes::arrow::record_batch::RecordBatch,
+        mut columns: Vec<datatypes::vectors::VectorRef>,
+    ) -> common_recordbatch::error::Result<DfRecordBatch> {
+        let num_columns = batch.columns().len();
+        // The last 3 columns are the internal columns.
+        let internal_indices = [num_columns - 3, num_columns - 2, num_columns - 1];
+        for index in internal_indices.iter() {
+            let array = batch.column(*index).clone();
+            let vector = Helper::try_into_vector(array)
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?;
+            columns.push(vector);
+        }
+git log         RecordBatch::to_df_record_batch(self.output_arrow_schema_with_internal.clone(), columns)
     }
 }
