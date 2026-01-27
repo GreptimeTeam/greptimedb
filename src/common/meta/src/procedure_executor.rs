@@ -25,8 +25,8 @@ use crate::error::{
 };
 use crate::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use crate::rpc::procedure::{
-    self, ManageRegionFollowerRequest, MigrateRegionRequest, MigrateRegionResponse,
-    ProcedureStateResponse,
+    self, GcRegionsRequest, GcResponse, GcTableRequest, ManageRegionFollowerRequest,
+    MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
 };
 
 /// The context of procedure executor.
@@ -77,6 +77,30 @@ pub trait ProcedureExecutor: Send + Sync {
         ctx: &ExecutorContext,
         pid: &str,
     ) -> Result<ProcedureStateResponse>;
+
+    /// Manually trigger GC for the specified regions.
+    async fn gc_regions(
+        &self,
+        _ctx: &ExecutorContext,
+        _request: GcRegionsRequest,
+    ) -> Result<GcResponse> {
+        UnsupportedSnafu {
+            operation: "gc_regions",
+        }
+        .fail()
+    }
+
+    /// Manually trigger GC for the specified table.
+    async fn gc_table(
+        &self,
+        _ctx: &ExecutorContext,
+        _request: GcTableRequest,
+    ) -> Result<GcResponse> {
+        UnsupportedSnafu {
+            operation: "gc_table",
+        }
+        .fail()
+    }
 
     async fn list_procedures(&self, ctx: &ExecutorContext) -> Result<ProcedureDetailResponse>;
 }

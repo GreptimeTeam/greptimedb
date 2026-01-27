@@ -16,18 +16,28 @@ use std::time::Duration;
 
 use api::v1::meta::reconcile_request::Target;
 use api::v1::meta::{
-    DdlTaskRequest as PbDdlTaskRequest, DdlTaskResponse as PbDdlTaskResponse, MigrateRegionRequest,
+    DdlTaskRequest as PbDdlTaskRequest, DdlTaskResponse as PbDdlTaskResponse, GcRegionsRequest,
+    GcRegionsResponse, GcTableRequest, GcTableResponse, MigrateRegionRequest,
     MigrateRegionResponse, ProcedureDetailRequest, ProcedureDetailResponse, ProcedureStateResponse,
     QueryProcedureRequest, ReconcileCatalog, ReconcileDatabase, ReconcileRequest,
     ReconcileResponse, ReconcileTable, ResolveStrategy, procedure_service_server,
 };
+use common_meta::key::TableMetadataManagerRef;
+use common_meta::key::table_name::TableNameKey;
 use common_meta::procedure_executor::ExecutorContext;
 use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest};
-use common_meta::rpc::procedure;
+use common_meta::rpc::procedure::{
+    self, GcRegionsRequest as MetaGcRegionsRequest, GcResponse,
+    GcTableRequest as MetaGcTableRequest,
+};
+use common_procedure::{ProcedureWithId, watcher};
 use snafu::{OptionExt, ResultExt};
+use store_api::storage::RegionId;
 use table::table_reference::TableReference;
 use tonic::Request;
 
+use crate::error::{TableMetadataManagerSnafu, TableNotFoundSnafu};
+use crate::gc::{BatchGcProcedure, Region2Peers};
 use crate::metasrv::Metasrv;
 use crate::procedure::region_migration::manager::{
     RegionMigrationProcedureTask, RegionMigrationTriggerReason,
@@ -239,5 +249,193 @@ impl procedure_service_server::ProcedureService for Metasrv {
         Ok(Response::new(procedure::procedure_details_to_pb_response(
             metas,
         )))
+    }
+
+    async fn gc_regions(
+        &self,
+        request: Request<GcRegionsRequest>,
+    ) -> GrpcResult<GcRegionsResponse> {
+        check_leader!(self, request, GcRegionsResponse, "`gc_regions`");
+
+        let GcRegionsRequest {
+            header,
+            region_ids,
+            full_file_listing,
+            timeout_secs,
+        } = request.into_inner();
+
+        let _header = header.context(error::MissingRequestHeaderSnafu)?;
+
+        let response = self
+            .handle_gc_regions(MetaGcRegionsRequest {
+                region_ids,
+                full_file_listing,
+                timeout: Duration::from_secs(timeout_secs as u64),
+            })
+            .await?;
+
+        Ok(Response::new(gc_response_to_regions_pb(response)))
+    }
+
+    async fn gc_table(&self, request: Request<GcTableRequest>) -> GrpcResult<GcTableResponse> {
+        check_leader!(self, request, GcTableResponse, "`gc_table`");
+
+        let GcTableRequest {
+            header,
+            catalog_name,
+            schema_name,
+            table_name,
+            full_file_listing,
+            timeout_secs,
+        } = request.into_inner();
+
+        let _header = header.context(error::MissingRequestHeaderSnafu)?;
+
+        let response = self
+            .handle_gc_table(MetaGcTableRequest {
+                catalog_name,
+                schema_name,
+                table_name,
+                full_file_listing,
+                timeout: Duration::from_secs(timeout_secs as u64),
+            })
+            .await?;
+
+        Ok(Response::new(gc_response_to_table_pb(response)))
+    }
+}
+
+impl Metasrv {
+    async fn handle_gc_regions(&self, request: MetaGcRegionsRequest) -> error::Result<GcResponse> {
+        let region_ids = request
+            .region_ids
+            .into_iter()
+            .map(RegionId::from_u64)
+            .collect::<Vec<_>>();
+        let report = self
+            .run_gc_procedure(
+                region_ids.clone(),
+                request.full_file_listing,
+                request.timeout,
+            )
+            .await?;
+
+        Ok(gc_report_to_response(&report, region_ids.len() as u64))
+    }
+
+    async fn handle_gc_table(&self, request: MetaGcTableRequest) -> error::Result<GcResponse> {
+        let table_name_key = TableNameKey::new(
+            &request.catalog_name,
+            &request.schema_name,
+            &request.table_name,
+        );
+
+        let table_metadata_manager: &TableMetadataManagerRef = self.table_metadata_manager();
+        let table_id = table_metadata_manager
+            .table_name_manager()
+            .get(table_name_key)
+            .await
+            .context(TableMetadataManagerSnafu)?
+            .context(TableNotFoundSnafu {
+                name: request.table_name.clone(),
+            })?
+            .table_id();
+
+        let (_phy_table_id, route) = table_metadata_manager
+            .table_route_manager()
+            .get_physical_table_route(table_id)
+            .await
+            .context(TableMetadataManagerSnafu)?;
+
+        let region_ids = route
+            .region_routes
+            .iter()
+            .map(|r| r.region.id)
+            .collect::<Vec<_>>();
+
+        let report = self
+            .run_gc_procedure(
+                region_ids.clone(),
+                request.full_file_listing,
+                request.timeout,
+            )
+            .await?;
+
+        Ok(gc_report_to_response(&report, region_ids.len() as u64))
+    }
+
+    async fn run_gc_procedure(
+        &self,
+        region_ids: Vec<RegionId>,
+        full_file_listing: bool,
+        timeout: Duration,
+    ) -> error::Result<store_api::storage::GcReport> {
+        let procedure = BatchGcProcedure::new(
+            self.mailbox().clone(),
+            self.table_metadata_manager().clone(),
+            self.options().grpc.server_addr.clone(),
+            region_ids,
+            full_file_listing,
+            timeout,
+            Region2Peers::new(),
+        );
+
+        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+        let mut watcher = self
+            .procedure_manager()
+            .submit(procedure_with_id)
+            .await
+            .context(error::SubmitProcedureSnafu)?;
+
+        let res = watcher::wait(&mut watcher)
+            .await
+            .context(error::WaitProcedureSnafu)?
+            .with_context(|| error::UnexpectedSnafu {
+                violated: "GC procedure completed but returned no result".to_string(),
+            })?;
+
+        BatchGcProcedure::cast_result(res)
+    }
+}
+
+fn gc_report_to_response(
+    report: &store_api::storage::GcReport,
+    processed_regions: u64,
+) -> GcResponse {
+    let deleted_files = report.deleted_files.values().map(|v| v.len() as u64).sum();
+    let deleted_indexes = report
+        .deleted_indexes
+        .values()
+        .map(|v| v.len() as u64)
+        .sum();
+    GcResponse {
+        processed_regions,
+        need_retry_regions: report
+            .need_retry_regions
+            .iter()
+            .map(|id| id.as_u64())
+            .collect(),
+        deleted_files,
+        deleted_indexes,
+    }
+}
+
+fn gc_response_to_regions_pb(resp: GcResponse) -> GcRegionsResponse {
+    GcRegionsResponse {
+        processed_regions: resp.processed_regions,
+        need_retry_regions: resp.need_retry_regions,
+        deleted_files: resp.deleted_files,
+        deleted_indexes: resp.deleted_indexes,
+        ..Default::default()
+    }
+}
+
+fn gc_response_to_table_pb(resp: GcResponse) -> GcTableResponse {
+    GcTableResponse {
+        processed_regions: resp.processed_regions,
+        need_retry_regions: resp.need_retry_regions,
+        deleted_files: resp.deleted_files,
+        deleted_indexes: resp.deleted_indexes,
+        ..Default::default()
     }
 }
