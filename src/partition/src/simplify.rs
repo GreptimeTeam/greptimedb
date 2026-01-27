@@ -223,7 +223,7 @@ impl Interval {
             return None;
         }
 
-        let lower = union_lower(&left.lower, &right.lower);
+        let lower = left.lower;
         let upper = union_upper(&left.upper, &right.upper);
         let interval = Interval { lower, upper };
         if interval.is_unbounded() {
@@ -240,45 +240,37 @@ enum UnionInterval {
 }
 
 fn cmp_lower(a: &Bound<OrderedF64>, b: &Bound<OrderedF64>) -> std::cmp::Ordering {
-    use std::cmp::Ordering::*;
+    // Lower bound ordering:
+    // - Unbounded is -∞ (smallest)
+    // - For the same value, Included is smaller (less restrictive) than Excluded.
+    fn lower_key(bound: &Bound<OrderedF64>) -> (u8, Option<OrderedF64>, u8) {
+        use Bound::*;
 
-    use Bound::*;
-
-    match (a, b) {
-        (Unbounded, Unbounded) => Equal,
-        (Unbounded, _) => Less,
-        (_, Unbounded) => Greater,
-        (Included(av), Included(bv)) | (Excluded(av), Excluded(bv)) => av.cmp(bv),
-        (Included(av), Excluded(bv)) => match av.cmp(bv) {
-            Equal => Less,
-            ord => ord,
-        },
-        (Excluded(av), Included(bv)) => match av.cmp(bv) {
-            Equal => Greater,
-            ord => ord,
-        },
+        match bound {
+            Unbounded => (0, None, 0),
+            Included(v) => (1, Some(*v), 0),
+            Excluded(v) => (1, Some(*v), 1),
+        }
     }
+
+    lower_key(a).cmp(&lower_key(b))
 }
 
 fn cmp_upper(a: &Bound<OrderedF64>, b: &Bound<OrderedF64>) -> std::cmp::Ordering {
-    use std::cmp::Ordering::*;
+    // Upper bound ordering:
+    // - Unbounded is +∞ (largest)
+    // - For the same value, Excluded is smaller (more restrictive) than Included.
+    fn upper_key(bound: &Bound<OrderedF64>) -> (u8, Option<OrderedF64>, u8) {
+        use Bound::*;
 
-    use Bound::*;
-
-    match (a, b) {
-        (Unbounded, Unbounded) => Equal,
-        (Unbounded, _) => Greater,
-        (_, Unbounded) => Less,
-        (Included(av), Included(bv)) | (Excluded(av), Excluded(bv)) => av.cmp(bv),
-        (Included(av), Excluded(bv)) => match av.cmp(bv) {
-            Equal => Greater,
-            ord => ord,
-        },
-        (Excluded(av), Included(bv)) => match av.cmp(bv) {
-            Equal => Less,
-            ord => ord,
-        },
+        match bound {
+            Unbounded => (1, None, 0),
+            Included(v) => (0, Some(*v), 1),
+            Excluded(v) => (0, Some(*v), 0),
+        }
     }
+
+    upper_key(a).cmp(&upper_key(b))
 }
 
 fn has_gap(upper: &Bound<OrderedF64>, lower: &Bound<OrderedF64>) -> bool {
@@ -287,78 +279,16 @@ fn has_gap(upper: &Bound<OrderedF64>, lower: &Bound<OrderedF64>) -> bool {
     match (upper, lower) {
         (Unbounded, _) | (_, Unbounded) => false,
         (Included(u), Included(l)) => u < l,
-        (Included(u), Excluded(l)) | (Excluded(u), Included(l)) | (Excluded(u), Excluded(l)) => {
-            if u < l {
-                return true;
-            }
-            if u > l {
-                return false;
-            }
-            // u == l: gap only if both ends exclude the boundary
-            matches!((upper, lower), (Excluded(_), Excluded(_)))
+        (Included(u) | Excluded(u), Included(l) | Excluded(l)) => {
+            u < l || (u == l && matches!((upper, lower), (Excluded(_), Excluded(_))))
         }
-    }
-}
-
-fn union_lower(a: &Bound<OrderedF64>, b: &Bound<OrderedF64>) -> Bound<OrderedF64> {
-    use Bound::*;
-    match (a, b) {
-        (Unbounded, _) | (_, Unbounded) => Unbounded,
-        (Included(av), Included(bv)) => {
-            if av <= bv {
-                Included(*av)
-            } else {
-                Included(*bv)
-            }
-        }
-        (Excluded(av), Excluded(bv)) => {
-            if av <= bv {
-                Excluded(*av)
-            } else {
-                Excluded(*bv)
-            }
-        }
-        (Included(av), Excluded(bv)) => match av.cmp(bv) {
-            std::cmp::Ordering::Less => Included(*av),
-            std::cmp::Ordering::Greater => Excluded(*bv),
-            std::cmp::Ordering::Equal => Included(*av),
-        },
-        (Excluded(av), Included(bv)) => match av.cmp(bv) {
-            std::cmp::Ordering::Less => Excluded(*av),
-            std::cmp::Ordering::Greater => Included(*bv),
-            std::cmp::Ordering::Equal => Included(*bv),
-        },
     }
 }
 
 fn union_upper(a: &Bound<OrderedF64>, b: &Bound<OrderedF64>) -> Bound<OrderedF64> {
-    use Bound::*;
-    match (a, b) {
-        (Unbounded, _) | (_, Unbounded) => Unbounded,
-        (Included(av), Included(bv)) => {
-            if av >= bv {
-                Included(*av)
-            } else {
-                Included(*bv)
-            }
-        }
-        (Excluded(av), Excluded(bv)) => {
-            if av >= bv {
-                Excluded(*av)
-            } else {
-                Excluded(*bv)
-            }
-        }
-        (Included(av), Excluded(bv)) => match av.cmp(bv) {
-            std::cmp::Ordering::Greater => Included(*av),
-            std::cmp::Ordering::Less => Excluded(*bv),
-            std::cmp::Ordering::Equal => Included(*av),
-        },
-        (Excluded(av), Included(bv)) => match av.cmp(bv) {
-            std::cmp::Ordering::Greater => Excluded(*av),
-            std::cmp::Ordering::Less => Included(*bv),
-            std::cmp::Ordering::Equal => Included(*bv),
-        },
+    match cmp_upper(a, b) {
+        std::cmp::Ordering::Less => *b,
+        std::cmp::Ordering::Equal | std::cmp::Ordering::Greater => *a,
     }
 }
 
@@ -550,7 +480,9 @@ fn interval_to_exprs(
 
 #[cfg(test)]
 mod tests {
-    use datatypes::value::Value;
+    use std::ops::Bound;
+
+    use datatypes::value::{OrderedFloat, Value};
 
     use super::*;
     use crate::expr::Operand;
@@ -606,5 +538,71 @@ mod tests {
         let merged = or(left, right);
         let simplified = simplify_merged_partition_expr(merged.clone());
         assert_eq!(simplified, merged);
+    }
+
+    #[test]
+    fn interval_bound_helpers() {
+        use std::cmp::Ordering::*;
+
+        use Bound::*;
+
+        let v0 = OrderedFloat(0.0f64);
+        let v1 = OrderedFloat(1.0f64);
+
+        // cmp_lower: Unbounded < Included(v) < Excluded(v) and increasing by value.
+        let lower_order = [
+            Unbounded,
+            Included(v0),
+            Excluded(v0),
+            Included(v1),
+            Excluded(v1),
+        ];
+        for pair in lower_order.windows(2) {
+            assert_eq!(cmp_lower(&pair[0], &pair[1]), Less);
+            assert_eq!(cmp_lower(&pair[1], &pair[0]), Greater);
+        }
+        for bound in &lower_order {
+            assert_eq!(cmp_lower(bound, bound), Equal);
+        }
+
+        // cmp_upper: Excluded(v) < Included(v) and increasing by value; Unbounded is +∞ (largest).
+        let upper_order = [
+            Excluded(v0),
+            Included(v0),
+            Excluded(v1),
+            Included(v1),
+            Unbounded,
+        ];
+        for pair in upper_order.windows(2) {
+            assert_eq!(cmp_upper(&pair[0], &pair[1]), Less);
+            assert_eq!(cmp_upper(&pair[1], &pair[0]), Greater);
+        }
+        for bound in &upper_order {
+            assert_eq!(cmp_upper(bound, bound), Equal);
+        }
+
+        // has_gap: Unbounded never contributes a gap.
+        assert!(!has_gap(&Unbounded, &Included(v0)));
+        assert!(!has_gap(&Excluded(v0), &Unbounded));
+        // Separated bounds always have a gap.
+        assert!(has_gap(&Included(v0), &Included(v1)));
+        assert!(has_gap(&Excluded(v0), &Included(v1)));
+        assert!(!has_gap(&Included(v1), &Included(v0)));
+        assert!(!has_gap(&Excluded(v1), &Included(v0)));
+        // Touching at boundary has a gap only if both ends exclude.
+        assert!(!has_gap(&Included(v0), &Included(v0)));
+        assert!(!has_gap(&Included(v0), &Excluded(v0)));
+        assert!(!has_gap(&Excluded(v0), &Included(v0)));
+        assert!(has_gap(&Excluded(v0), &Excluded(v0)));
+
+        // union_upper: choose the less restrictive upper bound (max under cmp_upper).
+        assert_eq!(union_upper(&Unbounded, &Included(v0)), Unbounded);
+        assert_eq!(union_upper(&Included(v0), &Unbounded), Unbounded);
+        assert_eq!(union_upper(&Included(v0), &Included(v1)), Included(v1));
+        assert_eq!(union_upper(&Excluded(v1), &Included(v0)), Excluded(v1));
+        assert_eq!(union_upper(&Excluded(v0), &Included(v0)), Included(v0));
+        assert_eq!(union_upper(&Included(v0), &Excluded(v0)), Included(v0));
+        assert_eq!(union_upper(&Excluded(v0), &Excluded(v0)), Excluded(v0));
+        assert_eq!(union_upper(&Included(v0), &Included(v0)), Included(v0));
     }
 }
