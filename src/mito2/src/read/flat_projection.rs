@@ -33,7 +33,7 @@ use crate::read::projection::read_column_ids_from_projection;
 use crate::sst::parquet::flat_format::sst_column_id_indices;
 use crate::sst::parquet::format::FormatProjection;
 use crate::sst::{
-    FlatSchemaOptions, internal_fields, tag_maybe_to_dictionary_field, to_flat_sst_arrow_schema,
+    internal_fields, tag_maybe_to_dictionary_field, to_flat_sst_arrow_schema, FlatSchemaOptions,
 };
 
 /// Handles projection and converts batches in flat format with correct schema.
@@ -392,12 +392,13 @@ fn compute_input_arrow_schema(
     Arc::new(datatypes::arrow::datatypes::Schema::new(new_fields))
 }
 
-/// A helper struct to adapt schema of the batch to an expected schema.
-pub(crate) struct FlatSparseMapper {
+/// Helper to project compaction batches into flat format columns
+/// (fields + time index + __primary_key + __sequence + __op_type).
+pub(crate) struct CompactionProjectionMapper {
     mapper: FlatProjectionMapper,
 }
 
-impl FlatSparseMapper {
+impl CompactionProjectionMapper {
     pub(crate) fn try_new(metadata: &RegionMetadataRef) -> Result<Self> {
         let projection = metadata
             .column_metadatas

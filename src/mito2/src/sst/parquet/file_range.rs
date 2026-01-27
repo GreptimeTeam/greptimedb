@@ -44,7 +44,7 @@ use crate::error::{
 };
 use crate::read::Batch;
 use crate::read::compat::CompatBatch;
-use crate::read::flat_projection::FlatSparseMapper;
+use crate::read::flat_projection::CompactionProjectionMapper;
 use crate::read::last_row::RowGroupLastRowCachedReader;
 use crate::read::prune::{FlatPruneReader, PruneReader};
 use crate::sst::file::FileHandle;
@@ -271,7 +271,7 @@ impl FileRange {
     }
 
     /// Returns the helper to project batches.
-    pub(crate) fn compaction_projection_mapper(&self) -> Option<&FlatSparseMapper> {
+    pub(crate) fn compaction_projection_mapper(&self) -> Option<&CompactionProjectionMapper> {
         self.context.compaction_projection_mapper()
     }
 
@@ -331,7 +331,7 @@ impl FileRangeContext {
     }
 
     /// Returns the helper to project batches.
-    pub(crate) fn compaction_projection_mapper(&self) -> Option<&FlatSparseMapper> {
+    pub(crate) fn compaction_projection_mapper(&self) -> Option<&CompactionProjectionMapper> {
         self.base.compaction_projection_mapper.as_ref()
     }
 
@@ -418,7 +418,7 @@ pub(crate) struct RangeBase {
     /// Optional helper to compat batches.
     pub(crate) compat_batch: Option<CompatBatch>,
     /// Optional helper to project batches.
-    pub(crate) compaction_projection_mapper: Option<FlatSparseMapper>,
+    pub(crate) compaction_projection_mapper: Option<CompactionProjectionMapper>,
     /// Mode to pre-filter columns.
     pub(crate) pre_filter_mode: PreFilterMode,
     /// Partition filter.

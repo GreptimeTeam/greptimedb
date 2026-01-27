@@ -56,7 +56,7 @@ use crate::metrics::{
     PRECISE_FILTER_ROWS_TOTAL, READ_ROW_GROUPS_TOTAL, READ_ROWS_IN_ROW_GROUP_TOTAL,
     READ_ROWS_TOTAL, READ_STAGE_ELAPSED,
 };
-use crate::read::flat_projection::FlatSparseMapper;
+use crate::read::flat_projection::CompactionProjectionMapper;
 use crate::read::prune::{PruneReader, Source};
 use crate::read::{Batch, BatchReader};
 use crate::sst::file::FileHandle;
@@ -362,7 +362,7 @@ impl ParquetReaderBuilder {
             && self.flat_format
             && region_meta.primary_key_encoding == PrimaryKeyEncoding::Sparse
         {
-            Some(FlatSparseMapper::try_new(&region_meta)?)
+            Some(CompactionProjectionMapper::try_new(&region_meta)?)
         } else {
             None
         };
