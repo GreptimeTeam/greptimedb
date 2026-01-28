@@ -530,6 +530,12 @@ impl fmt::Debug for ScanMetricsSet {
                 let total_cost =
                     metrics.build_part_cost + metrics.build_reader_cost + metrics.scan_cost;
 
+                // If the file has been pruned by a pruner, the build part cost may be zero.
+                // If we didn't read any ranges from it, we don't output the file.
+                if total_cost.is_zero() && metrics.num_ranges == 0 {
+                    continue;
+                }
+
                 if heap.len() < 10 {
                     // Haven't reached 10 yet, just push
                     heap.push(CompareCostReverse {
