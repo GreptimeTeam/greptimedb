@@ -284,3 +284,82 @@ async fn test_cleanup_region_repartition_remove_when_tmp_refs_empty() {
         Some(&BTreeSet::from([dst_b_initial]))
     );
 }
+
+#[tokio::test]
+async fn test_cleanup_region_repartition_transitive_chain() {
+    let _ = dotenv::dotenv();
+    let (test_context, _guard) = distributed_with_gc(&StorageType::File).await;
+    let instance = test_context.frontend();
+    let metasrv = test_context.metasrv();
+
+    let create_table_sql = r#"
+        CREATE TABLE test_cleanup_repartition_chain (
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE,
+            host STRING
+        )PARTITION ON COLUMNS (host) (
+   host < 'a',
+   host >= 'a' AND host < 'm',
+   host >= 'm'
+ ) WITH (append_mode = 'true')
+    "#;
+    execute_sql(&instance, create_table_sql).await;
+
+    let table = instance
+        .catalog_manager()
+        .table(
+            "greptime",
+            "public",
+            "test_cleanup_repartition_chain",
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let table_id = table.table_info().table_id();
+
+    let (_routes, regions) = get_table_route(metasrv.table_metadata_manager(), table_id).await;
+    let base_region = *regions.first().expect("table has at least one region");
+
+    let region_a = base_region;
+    let region_b = RegionId::new(table_id, base_region.region_number() + 1);
+    let region_c = RegionId::new(table_id, base_region.region_number() + 2);
+
+    let repart_mgr = metasrv.table_metadata_manager().table_repart_manager();
+    let current = repart_mgr.get_with_raw_bytes(table_id).await.unwrap();
+    let mut initial_value = TableRepartValue::new();
+    initial_value.update_mappings(region_a, &[region_b]);
+    initial_value.update_mappings(region_b, &[region_c]);
+    repart_mgr
+        .upsert_value(table_id, current, &initial_value)
+        .await
+        .unwrap();
+
+    let manifest = FileRefsManifest::default();
+
+    let regions_to_gc = vec![region_a, region_b];
+
+    let mut procedure = BatchGcProcedure::new_update_repartition_for_test(
+        metasrv.mailbox().clone(),
+        metasrv.table_metadata_manager().clone(),
+        metasrv.options().grpc.server_addr.clone(),
+        regions_to_gc,
+        manifest,
+        Duration::from_secs(5),
+    );
+
+    let procedure_ctx = new_test_procedure_context();
+    let status = procedure.execute(&procedure_ctx).await.unwrap();
+    assert!(matches!(status, Status::Done { .. }));
+
+    let repart_after = repart_mgr.get(table_id).await.unwrap().unwrap();
+    assert_eq!(
+        repart_after.src_to_dst.get(&region_a),
+        Some(&BTreeSet::from([region_b])),
+        "A → {{B}} should be preserved because B had downstream (domino effect)"
+    );
+    assert!(
+        !repart_after.src_to_dst.contains_key(&region_b),
+        "B → {{C}} should be removed because C has no downstream"
+    );
+}

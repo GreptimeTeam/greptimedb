@@ -386,6 +386,11 @@ impl BatchGcProcedure {
                 .map(|v| (**v).clone())
                 .unwrap_or_else(TableRepartValue::new);
 
+            let original_src_to_dst = current
+                .as_ref()
+                .map(|v| v.src_to_dst.clone())
+                .unwrap_or_default();
+
             // We only touch regions involved in this GC batch for the current table to avoid
             // clobbering unrelated repart entries. Start from the batch regions of this table.
             let batch_src_regions: HashSet<RegionId> = self
@@ -436,14 +441,13 @@ impl BatchGcProcedure {
                     //      its direct downstream is clean
                     //   3. Eventually the entire chain collapses when the leaf is cleaned
                     //
-                    // We use `new_value.src_to_dst` (the in-progress state) to check if
-                    // a dst region still has downstream mappings in the current table.
-                    let direct_dsts = new_value.src_to_dst.get(&src_region);
+                    // We use `original_src_to_dst` (the snapshot before any modifications) to
+                    // check if a dst region still has downstream mappings. This ensures the
+                    // check is order-independent: even if B is processed before A and removed
+                    // from new_value, A's check still sees B in the original snapshot.
+                    let direct_dsts = original_src_to_dst.get(&src_region);
                     let any_dst_has_downstream = direct_dsts
-                        .map(|dsts| {
-                            dsts.iter()
-                                .any(|dst| new_value.src_to_dst.contains_key(dst))
-                        })
+                        .map(|dsts| dsts.iter().any(|dst| original_src_to_dst.contains_key(dst)))
                         .unwrap_or(false);
 
                     if !any_dst_has_downstream {
