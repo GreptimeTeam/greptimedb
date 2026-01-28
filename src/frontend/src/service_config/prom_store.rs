@@ -26,6 +26,8 @@ pub struct PromStoreOptions {
     pub max_batch_rows: usize,
     #[serde(default = "default_max_concurrent_flushes")]
     pub max_concurrent_flushes: usize,
+    #[serde(default = "default_worker_channel_capacity")]
+    pub worker_channel_capacity: usize,
 }
 
 fn default_max_batch_rows() -> usize {
@@ -36,6 +38,10 @@ fn default_max_concurrent_flushes() -> usize {
     256
 }
 
+fn default_worker_channel_capacity() -> usize {
+    65526
+}
+
 impl Default for PromStoreOptions {
     fn default() -> Self {
         Self {
@@ -44,6 +50,7 @@ impl Default for PromStoreOptions {
             pending_rows_flush_interval: Duration::from_secs(2),
             max_batch_rows: default_max_batch_rows(),
             max_concurrent_flushes: default_max_concurrent_flushes(),
+            worker_channel_capacity: default_worker_channel_capacity(),
         }
     }
 }
@@ -54,7 +61,7 @@ mod tests {
 
     use super::PromStoreOptions;
     use crate::service_config::prom_store::{
-        default_max_batch_rows, default_max_concurrent_flushes,
+        default_max_batch_rows, default_max_concurrent_flushes, default_worker_channel_capacity,
     };
 
     #[test]
@@ -67,6 +74,10 @@ mod tests {
         assert_eq!(
             default.max_concurrent_flushes,
             default_max_concurrent_flushes()
+        );
+        assert_eq!(
+            default.worker_channel_capacity,
+            default_worker_channel_capacity()
         );
     }
 }

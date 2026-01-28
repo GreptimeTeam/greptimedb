@@ -27,7 +27,6 @@ use crate::error::{Error, Result};
 use crate::metrics::{FLUSH_ROWS, FLUSH_TOTAL, PENDING_BATCHES, PENDING_ROWS};
 use crate::query_handler::PromStoreProtocolHandlerRef;
 
-const WORKER_CHANNEL_CAPACITY: usize = 1024;
 const PHYSICAL_TABLE_KEY: &str = "physical_table";
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
@@ -59,6 +58,7 @@ pub struct PendingRowsBatcher {
     prom_store_handler: PromStoreProtocolHandlerRef,
     with_metric_engine: bool,
     flush_semaphore: Arc<Semaphore>,
+    worker_channel_capacity: usize,
     shutdown: broadcast::Sender<()>,
 }
 
@@ -69,6 +69,7 @@ impl PendingRowsBatcher {
         flush_interval: Duration,
         max_batch_rows: usize,
         max_concurrent_flushes: usize,
+        worker_channel_capacity: usize,
     ) -> Option<Arc<Self>> {
         if flush_interval.is_zero() {
             return None;
@@ -82,6 +83,7 @@ impl PendingRowsBatcher {
             prom_store_handler,
             with_metric_engine,
             flush_semaphore: Arc::new(Semaphore::new(max_concurrent_flushes)),
+            worker_channel_capacity,
             shutdown,
         }))
     }
@@ -99,7 +101,7 @@ impl PendingRowsBatcher {
         match worker.tx.try_send(cmd) {
             Ok(()) => Ok(row_count as u64),
             Err(mpsc::error::TrySendError::Full(_)) => Err(Error::BatcherQueueFull {
-                capacity: WORKER_CHANNEL_CAPACITY,
+                capacity: self.worker_channel_capacity,
             }),
             Err(mpsc::error::TrySendError::Closed(_)) => Err(Error::BatcherChannelClosed),
         }
@@ -114,7 +116,7 @@ impl PendingRowsBatcher {
         match entry {
             Entry::Occupied(worker) => worker.get().clone(),
             Entry::Vacant(vacant) => {
-                let (tx, rx) = mpsc::channel(WORKER_CHANNEL_CAPACITY);
+                let (tx, rx) = mpsc::channel(self.worker_channel_capacity);
                 let worker = PendingWorker { tx };
 
                 start_worker(
