@@ -22,6 +22,7 @@ use catalog::CatalogManagerRef;
 use common_base::Plugins;
 use common_function::aggrs::aggr_wrapper::fix_order::FixStateUdafOrderingAnalyzer;
 use common_function::function_factory::ScalarFunctionFactory;
+use common_function::function_registry::FUNCTION_REGISTRY;
 use common_function::handlers::{
     FlowServiceHandlerRef, ProcedureServiceHandlerRef, TableMutationHandlerRef,
 };
@@ -45,6 +46,7 @@ use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner};
 use datafusion_expr::{AggregateUDF, LogicalPlan as DfLogicalPlan};
 use datafusion_optimizer::analyzer::Analyzer;
+use datafusion_optimizer::analyzer::function_rewrite::ApplyFunctionRewrites;
 use datafusion_optimizer::optimizer::Optimizer;
 use partition::manager::PartitionRuleManagerRef;
 use promql::extension_plan::PromExtensionPlanner;
@@ -147,16 +149,20 @@ impl QueryEngineState {
 
         // Apply the datafusion rules
         let mut analyzer = Analyzer::new();
+        // Add ApplyFunctionRewrites rule if we have function rewrites
+        if !FUNCTION_REGISTRY.function_rewrites().is_empty() {
+            analyzer.rules.insert(0, Arc::new(ApplyFunctionRewrites::new(
+                FUNCTION_REGISTRY.function_rewrites().to_vec(),
+            )));
+        }
         analyzer.rules.insert(0, Arc::new(TranscribeAtatRule));
         analyzer.rules.insert(0, Arc::new(StringNormalizationRule));
         analyzer
             .rules
             .insert(0, Arc::new(CountWildcardToTimeIndexRule));
-
         if with_dist_planner {
             analyzer.rules.push(Arc::new(DistPlannerAnalyzer));
         }
-
         analyzer.rules.push(Arc::new(FixStateUdafOrderingAnalyzer));
 
         let mut optimizer = Optimizer::new();

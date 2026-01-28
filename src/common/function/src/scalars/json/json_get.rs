@@ -24,7 +24,7 @@ use datafusion_common::arrow::array::{
     StringViewBuilder,
 };
 use datafusion_common::arrow::datatypes::DataType;
-use datafusion_common::{DataFusionError, Result, ScalarValue};
+use datafusion_common::{DataFusionError, Result};
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
 use datatypes::arrow_array::{int_array_value_at_index, string_array_value_at_index};
 use datatypes::json::JsonStructureSettings;
@@ -507,6 +507,9 @@ fn json_struct_to_value(raw: &str, jsons: &StructArray, i: usize) -> Result<Valu
     Ok(json)
 }
 
+/// This function is mostly called as `json_get(value, 'attr')::type` and rewritten by
+/// `json_get_rewriter::JsonGetRewriter` to `json_get(value, 'attr', NULL::type)`. So we
+/// use the third argument's type to determine the return type.
 #[derive(Debug, Display)]
 #[display("{}", Self::NAME.to_ascii_uppercase())]
 pub(super) struct JsonGetWithType {
@@ -514,7 +517,7 @@ pub(super) struct JsonGetWithType {
 }
 
 impl JsonGetWithType {
-    const NAME: &'static str = "json_get";
+    pub(crate) const NAME: &'static str = "json_get";
 }
 
 impl Default for JsonGetWithType {
@@ -541,27 +544,7 @@ impl Function for JsonGetWithType {
         args: datafusion_expr::ReturnFieldArgs<'_>,
     ) -> datafusion_common::Result<Arc<Field>> {
         match args.scalar_arguments[2] {
-            Some(ScalarValue::Utf8(Some(type_str)))
-            | Some(ScalarValue::Utf8View(Some(type_str)))
-            | Some(ScalarValue::LargeUtf8(Some(type_str))) => {
-                let type_str = type_str.to_ascii_lowercase();
-                match type_str.as_str() {
-                    "bool" | "boolean" => {
-                        Ok(Arc::new(Field::new(self.name(), DataType::Boolean, true)))
-                    }
-                    "int" | "integer" => {
-                        Ok(Arc::new(Field::new(self.name(), DataType::Int64, true)))
-                    }
-                    "float" | "double" => {
-                        Ok(Arc::new(Field::new(self.name(), DataType::Float64, true)))
-                    }
-                    "string" => Ok(Arc::new(Field::new(self.name(), DataType::Utf8View, true))),
-                    _ => Err(DataFusionError::Internal(format!(
-                        "Unsupported type: {}",
-                        type_str
-                    ))),
-                }
-            }
+            Some(v) => Ok(Arc::new(Field::new(self.name(), v.data_type(), true))),
             _ => Err(DataFusionError::Internal(
                 "Invalid argument provided for type".to_string(),
             )),
