@@ -309,10 +309,11 @@ impl UnorderedScan {
         let part_ranges = self.properties.partitions[partition].clone();
         let distinguish_range = self.properties.distinguish_partition_range;
         let pruner = self.pruner.clone();
-        // Initialize reference counts for the partition.
+        // Initializes ref counts for the pruner.
+        // If we call scan_batch_in_partition() multiple times but don't read all batches from the stream,
+        // then the ref count won't be decremented.
+        // This is a rare case and keeping all remaining entries still uses less memory than a per partition cache.
         pruner.add_partition_ranges(&part_ranges);
-
-        // Create PartitionPruner for this partition
         let partition_pruner = Arc::new(PartitionPruner::new(pruner, &part_ranges));
 
         let stream = try_stream! {
@@ -401,10 +402,11 @@ impl UnorderedScan {
         let stream_ctx = self.stream_ctx.clone();
         let part_ranges = self.properties.partitions[partition].clone();
         let pruner = self.pruner.clone();
-        // Initialize reference counts for the partition.
+        // Initializes ref counts for the pruner.
+        // If we call scan_batch_in_partition() multiple times but don't read all batches from the stream,
+        // then the ref count won't be decremented.
+        // This is a rare case and keeping all remaining entries still uses less memory than a per partition cache.
         pruner.add_partition_ranges(&part_ranges);
-
-        // Create PartitionPruner for this partition
         let partition_pruner = Arc::new(PartitionPruner::new(pruner, &part_ranges));
 
         let stream = try_stream! {

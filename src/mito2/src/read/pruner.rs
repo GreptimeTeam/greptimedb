@@ -37,6 +37,7 @@ use crate::sst::parquet::reader::ReaderMetrics;
 /// Number of files to pre-fetch ahead of the current position.
 const PREFETCH_COUNT: usize = 8;
 
+/// Local pruner in a partition that supports prefetching files to prune.
 pub struct PartitionPruner {
     pruner: Arc<Pruner>,
     /// Files to prune, in the order to scan.
@@ -116,13 +117,6 @@ impl PartitionPruner {
 }
 
 /// A pruner that prunes files for all partitions of a scanner.
-///
-/// The pruner:
-/// - Is created once and shared across all partitions
-/// - Spawns N parallel worker tasks on creation
-/// - Routes file pruning requests by `file_id % N` to workers
-/// - Maintains FileBuilderEntry with reference counting
-/// - Tracks remaining usage count per file for cleanup
 pub struct Pruner {
     /// Channels to send requests to workers.
     worker_senders: Vec<mpsc::Sender<PruneRequest>>,
@@ -220,10 +214,6 @@ impl Pruner {
     }
 
     /// Adds reference counts for all partitions' ranges.
-    /// Called from scanner's `prepare()` method.
-    ///
-    /// This method clears all existing builders first, then adds reference counts
-    /// based on all partition ranges.
     pub fn add_partition_ranges(&self, partition_ranges: &[PartitionRange]) {
         // Add reference counts for each partition range
         let num_memtables = self.inner.stream_ctx.input.num_memtables();
@@ -243,6 +233,9 @@ impl Pruner {
 
     /// Gets or creates the FileRangeBuilder for a file, builds ranges,
     /// and decrements ref count (cleans up if zero).
+    ///
+    /// Callers should invoke [add_partition_ranges()](Pruner::add_partition_ranges()) to initialize the
+    /// file entries and ref counts.
     pub async fn build_file_ranges(
         &self,
         index: RowGroupIndex,

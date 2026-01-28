@@ -180,10 +180,7 @@ impl SeqScan {
         part_metrics: &PartitionMetrics,
         pruner: Arc<Pruner>,
     ) -> Result<BoxedBatchReader> {
-        // Initialize pruner reference counts for compaction.
         pruner.add_partition_ranges(partition_ranges);
-
-        // Create PartitionPruner for compaction
         let partition_pruner = Arc::new(PartitionPruner::new(pruner, partition_ranges));
 
         let mut sources = Vec::new();
@@ -217,10 +214,7 @@ impl SeqScan {
         part_metrics: &PartitionMetrics,
         pruner: Arc<Pruner>,
     ) -> Result<BoxedRecordBatchStream> {
-        // Initialize pruner reference counts for compaction.
         pruner.add_partition_ranges(partition_ranges);
-
-        // Create PartitionPruner for compaction
         let partition_pruner = Arc::new(PartitionPruner::new(pruner, partition_ranges));
 
         let mut sources = Vec::new();
@@ -424,10 +418,11 @@ impl SeqScan {
         let distinguish_range = self.properties.distinguish_partition_range;
         let file_scan_semaphore = if compaction { None } else { semaphore.clone() };
         let pruner = self.pruner.clone();
-        // Initialize pruner reference counts for partition.
+        // Initializes ref counts for the pruner.
+        // If we call scan_batch_in_partition() multiple times but don't read all batches from the stream,
+        // then the ref count won't be decremented.
+        // This is a rare case and keeping all remaining entries still uses less memory than a per partition cache.
         pruner.add_partition_ranges(&partition_ranges);
-
-        // Create PartitionPruner for this partition
         let partition_pruner = Arc::new(PartitionPruner::new(pruner, &partition_ranges));
 
         let stream = try_stream! {
@@ -541,10 +536,11 @@ impl SeqScan {
         let compaction = self.stream_ctx.input.compaction;
         let file_scan_semaphore = if compaction { None } else { semaphore.clone() };
         let pruner = self.pruner.clone();
-        // Initialize pruner reference counts for partition.
+        // Initializes ref counts for the pruner.
+        // If we call scan_batch_in_partition() multiple times but don't read all batches from the stream,
+        // then the ref count won't be decremented.
+        // This is a rare case and keeping all remaining entries still uses less memory than a per partition cache.
         pruner.add_partition_ranges(&partition_ranges);
-
-        // Create PartitionPruner for this partition
         let partition_pruner = Arc::new(PartitionPruner::new(pruner, &partition_ranges));
 
         let stream = try_stream! {
