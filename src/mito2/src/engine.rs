@@ -98,7 +98,7 @@ use common_meta::key::SchemaMetadataManagerRef;
 use common_recordbatch::{MemoryPermit, QueryMemoryTracker, SendableRecordBatchStream};
 use common_stat::get_total_memory_bytes;
 use common_telemetry::{info, tracing, warn};
-use common_wal::options::{WAL_OPTIONS_KEY, WalOptions};
+use common_wal::options::WalOptions;
 use futures::future::{join_all, try_join_all};
 use futures::stream::{self, Stream, StreamExt};
 use object_store::manager::ObjectStoreManagerRef;
@@ -144,6 +144,7 @@ use crate::read::scan_region::{ScanRegion, Scanner};
 use crate::read::stream::ScanBatchStream;
 use crate::region::MitoRegionRef;
 use crate::region::opener::PartitionExprFetcherRef;
+use crate::region::options::parse_wal_options;
 use crate::request::{RegionEditRequest, WorkerRequest};
 use crate::sst::file::{FileMeta, RegionFileId, RegionIndexId};
 use crate::sst::file_ref::FileReferenceManagerRef;
@@ -726,12 +727,7 @@ fn prepare_batch_open_requests(
     let mut topic_to_regions: HashMap<String, Vec<(RegionId, RegionOpenRequest)>> = HashMap::new();
     let mut remaining_regions: Vec<(RegionId, RegionOpenRequest)> = Vec::new();
     for (region_id, request) in requests {
-        let options = if let Some(options) = request.options.get(WAL_OPTIONS_KEY) {
-            serde_json::from_str(options).context(SerdeJsonSnafu)?
-        } else {
-            WalOptions::RaftEngine
-        };
-        match options {
+        match parse_wal_options(&request.options).context(SerdeJsonSnafu)? {
             WalOptions::Kafka(options) => {
                 topic_to_regions
                     .entry(options.topic)
