@@ -154,7 +154,7 @@ NOTIFY
         assert_eq!("cpu_monitor", expr.trigger_name);
         assert!(expr.create_if_not_exists);
         assert_eq!(
-            "(SELECT host AS host_label, cpu, memory FROM machine_monitor WHERE cpu > 2)",
+            "SELECT host AS host_label, cpu, memory FROM machine_monitor WHERE cpu > 2",
             expr.sql
         );
         let expected: prost_types::Duration = Duration::from_secs(300).try_into().unwrap();
