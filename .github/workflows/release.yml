@@ -81,7 +81,7 @@ env:
   CARGO_PROFILE: nightly
 
   # Controls whether to run tests, include unit-test, integration-test and sqlness.
-  DISABLE_RUN_TESTS: ${{ inputs.skip_test || vars.DEFAULT_SKIP_TEST }}
+  DISABLE_RUN_TESTS: ${{ inputs.skip_test || vars.DEFAULT_SKIP_TEST == 'true' }}
 
   # The scheduled version is '${{ env.NEXT_RELEASE_VERSION }}-nightly-YYYYMMDD', like v0.2.0-nightly-20230313;
   NIGHTLY_RELEASE_PREFIX: nightly
@@ -213,7 +213,7 @@ jobs:
 
   run-multi-lang-tests:
     name: Run Multi-language SDK Tests
-    if: ${{ inputs.build_linux_artifacts || github.event_name == 'push' || github.event_name == 'schedule' }}
+    if: ${{ env.DISABLE_RUN_TESTS == 'false' && (inputs.build_linux_artifacts || github.event_name == 'push' || github.event_name == 'schedule') }}
     needs: [
       allocate-runners,
       build-linux-amd64-artifacts,
@@ -306,7 +306,13 @@ jobs:
 
   release-images-to-dockerhub:
     name: Build and push images to DockerHub
-    if: ${{ inputs.release_images || github.event_name == 'push' || github.event_name == 'schedule' }}
+    if: |
+      always() &&
+      (inputs.release_images || github.event_name == 'push' || github.event_name == 'schedule') &&
+      needs.allocate-runners.result == 'success' &&
+      needs.build-linux-amd64-artifacts.result == 'success' &&
+      needs.build-linux-arm64-artifacts.result == 'success' &&
+      (needs.run-multi-lang-tests.result == 'success' || needs.run-multi-lang-tests.result == 'skipped')
     needs: [
       allocate-runners,
       build-linux-amd64-artifacts,
