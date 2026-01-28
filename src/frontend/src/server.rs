@@ -132,6 +132,7 @@ where
                 opts.prom_store.with_metric_engine,
                 opts.prom_store.pending_rows_flush_interval,
                 opts.prom_store.max_batch_rows,
+                opts.prom_store.max_concurrent_flushes,
             );
             builder = builder
                 .with_prom_handler(

@@ -28,7 +28,6 @@ use crate::metrics::{FLUSH_ROWS, FLUSH_TOTAL, PENDING_BATCHES, PENDING_ROWS};
 use crate::query_handler::PromStoreProtocolHandlerRef;
 
 const WORKER_CHANNEL_CAPACITY: usize = 1024;
-const MAX_CONCURRENT_FLUSHES: usize = 64;
 const PHYSICAL_TABLE_KEY: &str = "physical_table";
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
@@ -69,6 +68,7 @@ impl PendingRowsBatcher {
         with_metric_engine: bool,
         flush_interval: Duration,
         max_batch_rows: usize,
+        max_concurrent_flushes: usize,
     ) -> Option<Arc<Self>> {
         if flush_interval.is_zero() {
             return None;
@@ -81,7 +81,7 @@ impl PendingRowsBatcher {
             max_batch_rows,
             prom_store_handler,
             with_metric_engine,
-            flush_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_FLUSHES)),
+            flush_semaphore: Arc::new(Semaphore::new(max_concurrent_flushes)),
             shutdown,
         }))
     }
