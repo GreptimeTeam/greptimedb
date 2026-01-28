@@ -55,6 +55,10 @@ pub struct ImportV2Command {
     #[clap(long)]
     dry_run: bool,
 
+    /// Use DDL files (schema/ddl/<schema>.sql) instead of JSON schema.
+    #[clap(long)]
+    use_ddl: bool,
+
     /// Concurrency level (for future use).
     #[clap(long, default_value = "1")]
     parallelism: usize,
@@ -118,6 +122,7 @@ impl ImportV2Command {
         Ok(Box::new(Import {
             schemas,
             dry_run: self.dry_run,
+            use_ddl: self.use_ddl,
             _parallelism: self.parallelism,
             storage: Box::new(storage),
             database_client,
@@ -129,6 +134,7 @@ impl ImportV2Command {
 pub struct Import {
     schemas: Option<Vec<String>>,
     dry_run: bool,
+    use_ddl: bool,
     _parallelism: usize,
     storage: Box<dyn SnapshotStorage>,
     database_client: DatabaseClient,
@@ -194,8 +200,12 @@ impl Import {
         info!("Importing schemas: {:?}", schemas_to_import);
 
         // 4. Generate DDL statements
-        let generator = DdlGenerator::new(&schema_snapshot);
-        let ddl_statements = generator.generate(&schemas_to_import)?;
+        let ddl_statements = if self.use_ddl {
+            self.read_ddl_statements(&schemas_to_import).await?
+        } else {
+            let generator = DdlGenerator::new(&schema_snapshot);
+            generator.generate(&schemas_to_import)?
+        };
 
         info!("Generated {} DDL statements", ddl_statements.len());
 
@@ -236,5 +246,61 @@ impl Import {
         }
 
         Ok(())
+    }
+
+    async fn read_ddl_statements(&self, schemas: &[String]) -> Result<Vec<String>> {
+        let mut statements = Vec::new();
+        for schema in schemas {
+            let path = ddl_path_for_schema(schema);
+            let content = self.storage.read_text(&path).await.context(ExportSnafu)?;
+            statements.extend(parse_ddl_statements(&content));
+        }
+
+        Ok(statements)
+    }
+}
+
+fn ddl_path_for_schema(schema: &str) -> String {
+    format!("schema/ddl/{}.sql", schema)
+}
+
+fn parse_ddl_statements(content: &str) -> Vec<String> {
+    let mut cleaned = String::new();
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("--") || trimmed.is_empty() {
+            continue;
+        }
+        cleaned.push_str(line);
+        cleaned.push('\n');
+    }
+
+    cleaned
+        .split(';')
+        .map(|stmt| stmt.trim())
+        .filter(|stmt| !stmt.is_empty())
+        .map(|stmt| stmt.to_string())
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_ddl_statements() {
+        let content = r#"
+-- Schema: public
+CREATE DATABASE public;
+CREATE TABLE t (ts TIMESTAMP TIME INDEX, host STRING, PRIMARY KEY (host)) ENGINE=mito;
+
+-- comment
+CREATE VIEW v AS SELECT * FROM t;
+"#;
+        let statements = parse_ddl_statements(content);
+        assert_eq!(statements.len(), 3);
+        assert!(statements[0].starts_with("CREATE DATABASE public"));
+        assert!(statements[1].starts_with("CREATE TABLE t"));
+        assert!(statements[2].starts_with("CREATE VIEW v"));
     }
 }

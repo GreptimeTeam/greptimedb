@@ -149,6 +149,9 @@ pub trait SnapshotStorage: Send + Sync {
     /// Writes a text file to a relative path under the snapshot root.
     async fn write_text(&self, path: &str, content: &str) -> Result<()>;
 
+    /// Reads a text file from a relative path under the snapshot root.
+    async fn read_text(&self, path: &str) -> Result<String>;
+
     /// Deletes the entire snapshot (for --force).
     async fn delete_snapshot(&self) -> Result<()>;
 
@@ -465,6 +468,11 @@ impl SnapshotStorage for OpenDalStorage {
 
     async fn write_text(&self, path: &str, content: &str) -> Result<()> {
         self.write_file(path, content.as_bytes().to_vec()).await
+    }
+
+    async fn read_text(&self, path: &str) -> Result<String> {
+        let data = self.read_file(path).await?;
+        Ok(String::from_utf8_lossy(&data).to_string())
     }
 
     async fn delete_snapshot(&self) -> Result<()> {
