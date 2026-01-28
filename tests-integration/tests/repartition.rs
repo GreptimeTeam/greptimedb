@@ -450,13 +450,13 @@ pub async fn test_repartition_mito(store_type: StorageType, flat_format: bool) {
     )
     .await
     .unwrap();
-    let expected_create_table_after_merge = r#"+---------------+--------------+------------------------+----------------+----------------------+----------------------------------+-----------------------+----------------------------+
-| table_catalog | table_schema | table_name             | partition_name | partition_expression | partition_description            | greptime_partition_id | partition_ordinal_position |
-+---------------+--------------+------------------------+----------------+----------------------+----------------------------------+-----------------------+----------------------------+
-| greptime      | public       | repartition_mito_table | p0             | id                   | id < 5                           | 4398046511104         | 1                          |
-| greptime      | public       | repartition_mito_table | p1             | id                   | id >= 10 AND id < 20 OR id >= 20 | 4398046511105         | 2                          |
-| greptime      | public       | repartition_mito_table | p2             | id                   | id >= 5 AND id < 10              | 4398046511107         | 3                          |
-+---------------+--------------+------------------------+----------------+----------------------+----------------------------------+-----------------------+----------------------------+"#;
+    let expected_create_table_after_merge = r#"+---------------+--------------+------------------------+----------------+----------------------+-----------------------+-----------------------+----------------------------+
+| table_catalog | table_schema | table_name             | partition_name | partition_expression | partition_description | greptime_partition_id | partition_ordinal_position |
++---------------+--------------+------------------------+----------------+----------------------+-----------------------+-----------------------+----------------------------+
+| greptime      | public       | repartition_mito_table | p0             | id                   | id < 5                | 4398046511104         | 1                          |
+| greptime      | public       | repartition_mito_table | p1             | id                   | id >= 10              | 4398046511105         | 2                          |
+| greptime      | public       | repartition_mito_table | p2             | id                   | id >= 5 AND id < 10   | 4398046511107         | 3                          |
++---------------+--------------+------------------------+----------------+----------------------+-----------------------+-----------------------+----------------------------+"#;
     check_output_stream(result.data, expected_create_table_after_merge).await;
 
     let sql =
@@ -749,12 +749,12 @@ pub async fn test_repartition_metric(
     )
     .await
     .unwrap();
-    let expected_create_table_after_merge = r#"+---------------+--------------+-------------------+----------------+----------------------+------------------------------------+-----------------------+----------------------------+
-| table_catalog | table_schema | table_name        | partition_name | partition_expression | partition_description              | greptime_partition_id | partition_ordinal_position |
-+---------------+--------------+-------------------+----------------+----------------------+------------------------------------+-----------------------+----------------------------+
-| greptime      | public       | repart_phy_metric | p0             | host                 | host < g OR host >= g AND host < m | 4398046511104         | 1                          |
-| greptime      | public       | repart_phy_metric | p1             | host                 | host >= m                          | 4398046511105         | 2                          |
-+---------------+--------------+-------------------+----------------+----------------------+------------------------------------+-----------------------+----------------------------+"#;
+    let expected_create_table_after_merge = r#"+---------------+--------------+-------------------+----------------+----------------------+-----------------------+-----------------------+----------------------------+
+| table_catalog | table_schema | table_name        | partition_name | partition_expression | partition_description | greptime_partition_id | partition_ordinal_position |
++---------------+--------------+-------------------+----------------+----------------------+-----------------------+-----------------------+----------------------------+
+| greptime      | public       | repart_phy_metric | p0             | host                 | host < m              | 4398046511104         | 1                          |
+| greptime      | public       | repart_phy_metric | p1             | host                 | host >= m             | 4398046511105         | 2                          |
++---------------+--------------+-------------------+----------------+----------------------+-----------------------+-----------------------+----------------------------+"#;
     check_output_stream(result.data, expected_create_table_after_merge).await;
 
     let result = run_sql(
