@@ -45,7 +45,7 @@ use datafusion::physical_optimizer::sanity_checker::SanityCheckPlan;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner};
 use datafusion_expr::{AggregateUDF, LogicalPlan as DfLogicalPlan};
-use datafusion_optimizer::analyzer::Analyzer;
+use datafusion_optimizer::AnalyzerRule;
 use datafusion_optimizer::analyzer::function_rewrite::ApplyFunctionRewrites;
 use datafusion_optimizer::optimizer::Optimizer;
 use partition::manager::PartitionRuleManagerRef;
@@ -148,22 +148,24 @@ impl QueryEngineState {
         extension_rules.insert(0, Arc::new(TypeConversionRule) as _);
 
         // Apply the datafusion rules
-        let mut analyzer = Analyzer::new();
+        let mut analyzer_rules: Vec<Arc<dyn AnalyzerRule + Send + Sync>> = Vec::new();
+
+        analyzer_rules.insert(0, Arc::new(TranscribeAtatRule));
+        analyzer_rules.insert(0, Arc::new(StringNormalizationRule));
+        analyzer_rules.insert(0, Arc::new(CountWildcardToTimeIndexRule));
         // Add ApplyFunctionRewrites rule if we have function rewrites
-        if !FUNCTION_REGISTRY.function_rewrites().is_empty() {
-            analyzer.rules.insert(0, Arc::new(ApplyFunctionRewrites::new(
-                FUNCTION_REGISTRY.function_rewrites().to_vec(),
-            )));
+        let function_rewrites = FUNCTION_REGISTRY.function_rewrites();
+        if !function_rewrites.is_empty() {
+            analyzer_rules.insert(
+                0,
+                Arc::new(ApplyFunctionRewrites::new(function_rewrites.to_vec())),
+            );
         }
-        analyzer.rules.insert(0, Arc::new(TranscribeAtatRule));
-        analyzer.rules.insert(0, Arc::new(StringNormalizationRule));
-        analyzer
-            .rules
-            .insert(0, Arc::new(CountWildcardToTimeIndexRule));
+
         if with_dist_planner {
-            analyzer.rules.push(Arc::new(DistPlannerAnalyzer));
+            analyzer_rules.push(Arc::new(DistPlannerAnalyzer));
         }
-        analyzer.rules.push(Arc::new(FixStateUdafOrderingAnalyzer));
+        analyzer_rules.push(Arc::new(FixStateUdafOrderingAnalyzer));
 
         let mut optimizer = Optimizer::new();
         optimizer.rules.push(Arc::new(ScanHintRule));
@@ -203,7 +205,7 @@ impl QueryEngineState {
             .with_config(session_config)
             .with_runtime_env(runtime_env)
             .with_default_features()
-            .with_analyzer_rules(analyzer.rules)
+            .with_analyzer_rules(analyzer_rules)
             .with_serializer_registry(Arc::new(DefaultSerializer))
             .with_query_planner(Arc::new(DfQueryPlanner::new(
                 catalog_list.clone(),

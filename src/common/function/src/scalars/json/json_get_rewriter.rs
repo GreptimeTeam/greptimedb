@@ -21,7 +21,6 @@ impl FunctionRewrite for JsonGetRewriter {
         _schema: &DFSchema,
         _config: &ConfigOptions,
     ) -> Result<Transformed<Expr>> {
-        dbg!(&expr);
         let transform = match &expr {
             Expr::Cast(cast) => rewrite_json_get_cast(cast),
             _ => None,
