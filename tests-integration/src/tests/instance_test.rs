@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::assert_matches::assert_matches;
 use std::env;
 use std::sync::Arc;
 
 use client::{DEFAULT_SCHEMA_NAME, OutputData};
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
+use common_error::ext::ErrorExt;
 use common_query::Output;
 use common_recordbatch::util;
 use common_test_util::recordbatch::check_output_stream;
@@ -25,11 +25,12 @@ use common_test_util::temp_dir;
 use datatypes::arrow::array::{
     ArrayRef, AsArray, StringArray, TimestampMillisecondArray, UInt64Array,
 };
-use frontend::error::{Error, Result};
+use frontend::error::Error;
 use frontend::instance::Instance;
 use operator::error::Error as OperatorError;
 use rstest::rstest;
 use rstest_reuse::apply;
+use servers::error as server_error;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{QueryContext, QueryContextRef};
 
@@ -176,7 +177,11 @@ async fn test_extra_external_table_options(instance: Arc<dyn MockInstance>) {
     );
 
     let result = try_execute_sql(&frontend, sql).await;
-    assert!(matches!(result, Err(Error::ParseSql { .. })));
+    let err = result.unwrap_err();
+    assert!(matches!(
+        unwrap_frontend_error(&err),
+        Error::ParseSql { .. }
+    ));
 }
 
 #[apply(both_instances_cases)]
@@ -385,19 +390,22 @@ async fn test_execute_insert_by_select(instance: Arc<dyn MockInstance>) {
     .data;
     assert!(matches!(output, OutputData::AffectedRows(2)));
 
+    let err = try_execute_sql(&instance, "insert into demo2(host) select * from demo1")
+        .await
+        .unwrap_err();
     assert!(matches!(
-        try_execute_sql(&instance, "insert into demo2(host) select * from demo1")
-            .await
-            .unwrap_err(),
+        unwrap_frontend_error(&err),
         Error::TableOperation {
             source: OperatorError::PlanStatement { .. },
             ..
         }
     ));
+
+    let err = try_execute_sql(&instance, "insert into demo2 select cpu,memory from demo1")
+        .await
+        .unwrap_err();
     assert!(matches!(
-        try_execute_sql(&instance, "insert into demo2 select cpu,memory from demo1")
-            .await
-            .unwrap_err(),
+        unwrap_frontend_error(&err),
         Error::TableOperation {
             source: OperatorError::PlanStatement { .. },
             ..
@@ -633,7 +641,11 @@ async fn test_execute_external_create_without_ts(instance: Arc<dyn MockInstance>
         ),
     )
     .await;
-    assert_matches!(result, Err(Error::ParseSql { .. }));
+    let err = result.unwrap_err();
+    assert!(matches!(
+        unwrap_frontend_error(&err),
+        Error::ParseSql { .. }
+    ));
 }
 
 #[apply(both_instances_cases)]
@@ -655,7 +667,11 @@ async fn test_execute_external_create_with_invalid_ts(instance: Arc<dyn MockInst
         ),
     )
     .await;
-    assert!(matches!(result, Err(Error::ParseSql { .. })));
+    let err = result.unwrap_err();
+    assert!(matches!(
+        unwrap_frontend_error(&err),
+        Error::ParseSql { .. }
+    ));
 
     let result = try_execute_sql(
         &instance,
@@ -669,7 +685,11 @@ async fn test_execute_external_create_with_invalid_ts(instance: Arc<dyn MockInst
         ),
     )
     .await;
-    assert!(matches!(result, Err(Error::ParseSql { .. })));
+    let err = result.unwrap_err();
+    assert!(matches!(
+        unwrap_frontend_error(&err),
+        Error::ParseSql { .. }
+    ));
 }
 
 #[apply(both_instances_cases)]
@@ -2081,11 +2101,29 @@ async fn test_information_schema_dot_columns(instance: Arc<dyn MockInstance>) {
     check_output_stream(output, expected).await;
 }
 
+fn unwrap_frontend_error(err: &server_error::Error) -> &Error {
+    match err {
+        server_error::Error::ExecuteQuery { source, .. }
+        | server_error::Error::ExecutePlan { source, .. }
+        | server_error::Error::ExecuteGrpcQuery { source, .. }
+        | server_error::Error::ExecuteGrpcRequest { source, .. }
+        | server_error::Error::CheckDatabaseValidity { source, .. } => source
+            .as_any()
+            .downcast_ref::<Error>()
+            .expect("Expected frontend::error::Error inside BoxedError"),
+        server_error::Error::DescribeStatement { source } => source
+            .as_any()
+            .downcast_ref::<Error>()
+            .expect("Expected frontend::error::Error inside BoxedError"),
+        other => panic!("Unexpected error type: {other}"),
+    }
+}
+
 async fn execute_sql(instance: &Arc<Instance>, sql: &str) -> Output {
     execute_sql_with(instance, sql, QueryContext::arc()).await
 }
 
-async fn try_execute_sql(instance: &Arc<Instance>, sql: &str) -> Result<Output> {
+async fn try_execute_sql(instance: &Arc<Instance>, sql: &str) -> server_error::Result<Output> {
     try_execute_sql_with(instance, sql, QueryContext::arc()).await
 }
 
@@ -2093,7 +2131,7 @@ async fn try_execute_sql_with(
     instance: &Arc<Instance>,
     sql: &str,
     query_ctx: QueryContextRef,
-) -> Result<Output> {
+) -> server_error::Result<Output> {
     instance.do_query(sql, query_ctx).await.remove(0)
 }
 

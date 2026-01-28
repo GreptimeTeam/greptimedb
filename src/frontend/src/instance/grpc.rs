@@ -37,10 +37,10 @@ use datafusion::datasource::DefaultTableSource;
 use futures::Stream;
 use futures::stream::StreamExt;
 use query::parser::PromQuery;
+use servers::error as server_error;
 use servers::http::prom_store::PHYSICAL_TABLE_PARAM;
 use servers::interceptor::{GrpcQueryInterceptor, GrpcQueryInterceptorRef};
 use servers::query_handler::grpc::GrpcQueryHandler;
-use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt, ensure};
 use table::TableRef;
@@ -59,197 +59,205 @@ use crate::metrics::{
 
 #[async_trait]
 impl GrpcQueryHandler for Instance {
-    type Error = Error;
+    async fn do_query(
+        &self,
+        request: Request,
+        ctx: QueryContextRef,
+    ) -> server_error::Result<Output> {
+        let result: Result<Output> = async {
+            let interceptor_ref = self.plugins.get::<GrpcQueryInterceptorRef<Error>>();
+            let interceptor = interceptor_ref.as_ref();
+            interceptor.pre_execute(&request, ctx.clone())?;
 
-    async fn do_query(&self, request: Request, ctx: QueryContextRef) -> Result<Output> {
-        let interceptor_ref = self.plugins.get::<GrpcQueryInterceptorRef<Error>>();
-        let interceptor = interceptor_ref.as_ref();
-        interceptor.pre_execute(&request, ctx.clone())?;
+            self.plugins
+                .get::<PermissionCheckerRef>()
+                .as_ref()
+                .check_permission(ctx.current_user(), PermissionReq::GrpcRequest(&request))
+                .context(PermissionSnafu)?;
 
-        self.plugins
-            .get::<PermissionCheckerRef>()
-            .as_ref()
-            .check_permission(ctx.current_user(), PermissionReq::GrpcRequest(&request))
-            .context(PermissionSnafu)?;
-
-        let output = match request {
-            Request::Inserts(requests) => self.handle_inserts(requests, ctx.clone()).await?,
-            Request::RowInserts(requests) => match ctx.extension(PHYSICAL_TABLE_PARAM) {
-                Some(physical_table) => {
-                    self.handle_metric_row_inserts(
-                        requests,
-                        ctx.clone(),
-                        physical_table.to_string(),
-                    )
-                    .await?
-                }
-                None => {
-                    self.handle_row_inserts(requests, ctx.clone(), false, false)
+            let output = match request {
+                Request::Inserts(requests) => self.handle_inserts(requests, ctx.clone()).await?,
+                Request::RowInserts(requests) => match ctx.extension(PHYSICAL_TABLE_PARAM) {
+                    Some(physical_table) => {
+                        self.handle_metric_row_inserts(
+                            requests,
+                            ctx.clone(),
+                            physical_table.to_string(),
+                        )
                         .await?
-                }
-            },
-            Request::Deletes(requests) => self.handle_deletes(requests, ctx.clone()).await?,
-            Request::RowDeletes(requests) => self.handle_row_deletes(requests, ctx.clone()).await?,
-            Request::Query(query_request) => {
-                let query = query_request.query.context(IncompleteGrpcRequestSnafu {
-                    err_msg: "Missing field 'QueryRequest.query'",
-                })?;
-                match query {
-                    Query::Sql(sql) => {
-                        let timer = GRPC_HANDLE_SQL_ELAPSED.start_timer();
-                        let mut result = SqlQueryHandler::do_query(self, &sql, ctx.clone()).await;
-                        ensure!(
-                            result.len() == 1,
-                            NotSupportedSnafu {
-                                feat: "execute multiple statements in SQL query string through GRPC interface"
-                            }
-                        );
-                        let output = result.remove(0)?;
-                        attach_timer(output, timer)
                     }
-                    Query::LogicalPlan(plan) => {
-                        // this path is useful internally when flownode needs to execute a logical plan through gRPC interface
-                        let timer = GRPC_HANDLE_PLAN_ELAPSED.start_timer();
+                    None => {
+                        self.handle_row_inserts(requests, ctx.clone(), false, false)
+                            .await?
+                    }
+                },
+                Request::Deletes(requests) => self.handle_deletes(requests, ctx.clone()).await?,
+                Request::RowDeletes(requests) => self.handle_row_deletes(requests, ctx.clone()).await?,
+                Request::Query(query_request) => {
+                    let query = query_request.query.context(IncompleteGrpcRequestSnafu {
+                        err_msg: "Missing field 'QueryRequest.query'",
+                    })?;
+                    match query {
+                        Query::Sql(sql) => {
+                            let timer = GRPC_HANDLE_SQL_ELAPSED.start_timer();
+                            let mut result = self.do_query_inner(&sql, ctx.clone()).await;
+                            ensure!(
+                                result.len() == 1,
+                                NotSupportedSnafu {
+                                    feat: "execute multiple statements in SQL query string through GRPC interface"
+                                }
+                            );
+                            let output = result.remove(0)?;
+                            attach_timer(output, timer)
+                        }
+                        Query::LogicalPlan(plan) => {
+                            // this path is useful internally when flownode needs to execute a logical plan through gRPC interface
+                            let timer = GRPC_HANDLE_PLAN_ELAPSED.start_timer();
 
-                        // use dummy catalog to provide table
-                        let plan_decoder = self
-                            .query_engine()
-                            .engine_context(ctx.clone())
-                            .new_plan_decoder()
-                            .context(PlanStatementSnafu)?;
+                            // use dummy catalog to provide table
+                            let plan_decoder = self
+                                .query_engine()
+                                .engine_context(ctx.clone())
+                                .new_plan_decoder()
+                                .context(PlanStatementSnafu)?;
 
-                        let dummy_catalog_list =
-                            Arc::new(catalog::table_source::dummy_catalog::DummyCatalogList::new(
-                                self.catalog_manager().clone(),
-                            ));
+                            let dummy_catalog_list =
+                                Arc::new(catalog::table_source::dummy_catalog::DummyCatalogList::new(
+                                    self.catalog_manager().clone(),
+                                ));
 
-                        let logical_plan = plan_decoder
-                            .decode(bytes::Bytes::from(plan), dummy_catalog_list, true)
-                            .await
-                            .context(SubstraitDecodeLogicalPlanSnafu)?;
-                        let output =
-                            SqlQueryHandler::do_exec_plan(self, None, logical_plan, ctx.clone())
+                            let logical_plan = plan_decoder
+                                .decode(bytes::Bytes::from(plan), dummy_catalog_list, true)
+                                .await
+                                .context(SubstraitDecodeLogicalPlanSnafu)?;
+                            let output =
+                                self.do_exec_plan_inner(None, logical_plan, ctx.clone()).await?;
+
+                            attach_timer(output, timer)
+                        }
+                        Query::InsertIntoPlan(insert) => {
+                            self.handle_insert_plan(insert, ctx.clone()).await?
+                        }
+                        Query::PromRangeQuery(promql) => {
+                            let timer = GRPC_HANDLE_PROMQL_ELAPSED.start_timer();
+                            let prom_query = PromQuery {
+                                query: promql.query,
+                                start: promql.start,
+                                end: promql.end,
+                                step: promql.step,
+                                lookback: promql.lookback,
+                                alias: None,
+                            };
+                            let mut result =
+                                self.do_promql_query_inner(&prom_query, ctx.clone()).await;
+                            ensure!(
+                                result.len() == 1,
+                                NotSupportedSnafu {
+                                    feat: "execute multiple statements in PromQL query string through GRPC interface"
+                                }
+                            );
+                            let output = result.remove(0)?;
+                            attach_timer(output, timer)
+                        }
+                    }
+                }
+                Request::Ddl(request) => {
+                    let mut expr = request.expr.context(IncompleteGrpcRequestSnafu {
+                        err_msg: "'expr' is absent in DDL request",
+                    })?;
+
+                    fill_catalog_and_schema_from_context(&mut expr, &ctx);
+
+                    match expr {
+                        DdlExpr::CreateTable(mut expr) => {
+                            let _ = self
+                                .statement_executor
+                                .create_table_inner(&mut expr, None, ctx.clone())
+                                .await?;
+                            Output::new_with_affected_rows(0)
+                        }
+                        DdlExpr::AlterDatabase(expr) => {
+                            let _ = self
+                                .statement_executor
+                                .alter_database_inner(expr, ctx.clone())
+                                .await?;
+                            Output::new_with_affected_rows(0)
+                        }
+                        DdlExpr::AlterTable(expr) => {
+                            self.statement_executor
+                                .alter_table_inner(expr, ctx.clone())
+                                .await?
+                        }
+                        DdlExpr::CreateDatabase(expr) => {
+                            self.statement_executor
+                                .create_database(
+                                    &expr.schema_name,
+                                    expr.create_if_not_exists,
+                                    expr.options,
+                                    ctx.clone(),
+                                )
+                                .await?
+                        }
+                        DdlExpr::DropTable(expr) => {
+                            let table_name =
+                                TableName::new(&expr.catalog_name, &expr.schema_name, &expr.table_name);
+                            self.statement_executor
+                                .drop_table(table_name, expr.drop_if_exists, ctx.clone())
+                                .await?
+                        }
+                        DdlExpr::TruncateTable(expr) => {
+                            let table_name =
+                                TableName::new(&expr.catalog_name, &expr.schema_name, &expr.table_name);
+                            let time_ranges = from_pb_time_ranges(expr.time_ranges.unwrap_or_default())
+                                .map_err(BoxedError::new)
+                                .context(ExternalSnafu)?;
+                            self.statement_executor
+                                .truncate_table(table_name, time_ranges, ctx.clone())
+                                .await?
+                        }
+                        DdlExpr::CreateFlow(expr) => {
+                            self.statement_executor
+                                .create_flow_inner(expr, ctx.clone())
+                                .await?
+                        }
+                        DdlExpr::DropFlow(DropFlowExpr {
+                            catalog_name,
+                            flow_name,
+                            drop_if_exists,
+                            ..
+                        }) => {
+                            self.statement_executor
+                                .drop_flow(catalog_name, flow_name, drop_if_exists, ctx.clone())
+                                .await?
+                        }
+                        DdlExpr::CreateView(expr) => {
+                            let _ = self
+                                .statement_executor
+                                .create_view_by_expr(expr, ctx.clone())
                                 .await?;
 
-                        attach_timer(output, timer)
-                    }
-                    Query::InsertIntoPlan(insert) => {
-                        self.handle_insert_plan(insert, ctx.clone()).await?
-                    }
-                    Query::PromRangeQuery(promql) => {
-                        let timer = GRPC_HANDLE_PROMQL_ELAPSED.start_timer();
-                        let prom_query = PromQuery {
-                            query: promql.query,
-                            start: promql.start,
-                            end: promql.end,
-                            step: promql.step,
-                            lookback: promql.lookback,
-                            alias: None,
-                        };
-                        let mut result =
-                            SqlQueryHandler::do_promql_query(self, &prom_query, ctx.clone()).await;
-                        ensure!(
-                            result.len() == 1,
-                            NotSupportedSnafu {
-                                feat: "execute multiple statements in PromQL query string through GRPC interface"
-                            }
-                        );
-                        let output = result.remove(0)?;
-                        attach_timer(output, timer)
+                            Output::new_with_affected_rows(0)
+                        }
+                        DdlExpr::DropView(_) => {
+                            todo!("implemented in the following PR")
+                        }
+                        DdlExpr::CommentOn(expr) => {
+                            self.statement_executor
+                                .comment_by_expr(expr, ctx.clone())
+                                .await?
+                        }
                     }
                 }
-            }
-            Request::Ddl(request) => {
-                let mut expr = request.expr.context(IncompleteGrpcRequestSnafu {
-                    err_msg: "'expr' is absent in DDL request",
-                })?;
+            };
 
-                fill_catalog_and_schema_from_context(&mut expr, &ctx);
+            let output = interceptor.post_execute(output, ctx)?;
+            Ok(output)
+        }
+        .await;
 
-                match expr {
-                    DdlExpr::CreateTable(mut expr) => {
-                        let _ = self
-                            .statement_executor
-                            .create_table_inner(&mut expr, None, ctx.clone())
-                            .await?;
-                        Output::new_with_affected_rows(0)
-                    }
-                    DdlExpr::AlterDatabase(expr) => {
-                        let _ = self
-                            .statement_executor
-                            .alter_database_inner(expr, ctx.clone())
-                            .await?;
-                        Output::new_with_affected_rows(0)
-                    }
-                    DdlExpr::AlterTable(expr) => {
-                        self.statement_executor
-                            .alter_table_inner(expr, ctx.clone())
-                            .await?
-                    }
-                    DdlExpr::CreateDatabase(expr) => {
-                        self.statement_executor
-                            .create_database(
-                                &expr.schema_name,
-                                expr.create_if_not_exists,
-                                expr.options,
-                                ctx.clone(),
-                            )
-                            .await?
-                    }
-                    DdlExpr::DropTable(expr) => {
-                        let table_name =
-                            TableName::new(&expr.catalog_name, &expr.schema_name, &expr.table_name);
-                        self.statement_executor
-                            .drop_table(table_name, expr.drop_if_exists, ctx.clone())
-                            .await?
-                    }
-                    DdlExpr::TruncateTable(expr) => {
-                        let table_name =
-                            TableName::new(&expr.catalog_name, &expr.schema_name, &expr.table_name);
-                        let time_ranges = from_pb_time_ranges(expr.time_ranges.unwrap_or_default())
-                            .map_err(BoxedError::new)
-                            .context(ExternalSnafu)?;
-                        self.statement_executor
-                            .truncate_table(table_name, time_ranges, ctx.clone())
-                            .await?
-                    }
-                    DdlExpr::CreateFlow(expr) => {
-                        self.statement_executor
-                            .create_flow_inner(expr, ctx.clone())
-                            .await?
-                    }
-                    DdlExpr::DropFlow(DropFlowExpr {
-                        catalog_name,
-                        flow_name,
-                        drop_if_exists,
-                        ..
-                    }) => {
-                        self.statement_executor
-                            .drop_flow(catalog_name, flow_name, drop_if_exists, ctx.clone())
-                            .await?
-                    }
-                    DdlExpr::CreateView(expr) => {
-                        let _ = self
-                            .statement_executor
-                            .create_view_by_expr(expr, ctx.clone())
-                            .await?;
-
-                        Output::new_with_affected_rows(0)
-                    }
-                    DdlExpr::DropView(_) => {
-                        todo!("implemented in the following PR")
-                    }
-                    DdlExpr::CommentOn(expr) => {
-                        self.statement_executor
-                            .comment_by_expr(expr, ctx.clone())
-                            .await?
-                    }
-                }
-            }
-        };
-
-        let output = interceptor.post_execute(output, ctx)?;
-        Ok(output)
+        result
+            .map_err(BoxedError::new)
+            .context(server_error::ExecuteGrpcQuerySnafu)
     }
 
     async fn put_record_batch(
@@ -257,51 +265,126 @@ impl GrpcQueryHandler for Instance {
         request: servers::grpc::flight::PutRecordBatchRequest,
         table_ref: &mut Option<TableRef>,
         ctx: QueryContextRef,
-    ) -> Result<AffectedRows> {
-        let table = if let Some(table) = table_ref {
-            table.clone()
-        } else {
-            let table = self
-                .catalog_manager()
-                .table(
-                    &request.table_name.catalog_name,
-                    &request.table_name.schema_name,
-                    &request.table_name.table_name,
-                    None,
+    ) -> server_error::Result<AffectedRows> {
+        let result: Result<AffectedRows> = async {
+            let table = if let Some(table) = table_ref {
+                table.clone()
+            } else {
+                let table = self
+                    .catalog_manager()
+                    .table(
+                        &request.table_name.catalog_name,
+                        &request.table_name.schema_name,
+                        &request.table_name.table_name,
+                        None,
+                    )
+                    .await
+                    .context(CatalogSnafu)?
+                    .with_context(|| TableNotFoundSnafu {
+                        table_name: request.table_name.to_string(),
+                    })?;
+                *table_ref = Some(table.clone());
+                table
+            };
+
+            let interceptor_ref = self.plugins.get::<GrpcQueryInterceptorRef<Error>>();
+            let interceptor = interceptor_ref.as_ref();
+            interceptor.pre_bulk_insert(table.clone(), ctx.clone())?;
+
+            self.plugins
+                .get::<PermissionCheckerRef>()
+                .as_ref()
+                .check_permission(ctx.current_user(), PermissionReq::BulkInsert)
+                .context(PermissionSnafu)?;
+
+            // do we check limit for bulk insert?
+
+            self.inserter
+                .handle_bulk_insert(
+                    table,
+                    request.flight_data,
+                    request.record_batch,
+                    request.schema_bytes,
                 )
                 .await
-                .context(CatalogSnafu)?
-                .with_context(|| TableNotFoundSnafu {
-                    table_name: request.table_name.to_string(),
-                })?;
-            *table_ref = Some(table.clone());
-            table
-        };
+                .context(TableOperationSnafu)
+        }
+        .await;
 
-        let interceptor_ref = self.plugins.get::<GrpcQueryInterceptorRef<Error>>();
-        let interceptor = interceptor_ref.as_ref();
-        interceptor.pre_bulk_insert(table.clone(), ctx.clone())?;
-
-        self.plugins
-            .get::<PermissionCheckerRef>()
-            .as_ref()
-            .check_permission(ctx.current_user(), PermissionReq::BulkInsert)
-            .context(PermissionSnafu)?;
-
-        // do we check limit for bulk insert?
-
-        self.inserter
-            .handle_bulk_insert(
-                table,
-                request.flight_data,
-                request.record_batch,
-                request.schema_bytes,
-            )
-            .await
-            .context(TableOperationSnafu)
+        result
+            .map_err(BoxedError::new)
+            .context(server_error::ExecuteGrpcRequestSnafu)
     }
 
     fn handle_put_record_batch_stream(
+        &self,
+        stream: servers::grpc::flight::PutRecordBatchRequestStream,
+        ctx: QueryContextRef,
+    ) -> Pin<Box<dyn Stream<Item = server_error::Result<DoPutResponse>> + Send>> {
+        Box::pin(
+            self.handle_put_record_batch_stream_inner(stream, ctx)
+                .map(|result| {
+                    result
+                        .map_err(BoxedError::new)
+                        .context(server_error::ExecuteGrpcRequestSnafu)
+                }),
+        )
+    }
+}
+
+fn fill_catalog_and_schema_from_context(ddl_expr: &mut DdlExpr, ctx: &QueryContextRef) {
+    let catalog = ctx.current_catalog();
+    let schema = ctx.current_schema();
+
+    macro_rules! check_and_fill {
+        ($expr:ident) => {
+            if $expr.catalog_name.is_empty() {
+                $expr.catalog_name = catalog.to_string();
+            }
+            if $expr.schema_name.is_empty() {
+                $expr.schema_name = schema.to_string();
+            }
+        };
+    }
+
+    match ddl_expr {
+        Expr::CreateDatabase(_) | Expr::AlterDatabase(_) => { /* do nothing*/ }
+        Expr::CreateTable(expr) => {
+            check_and_fill!(expr);
+        }
+        Expr::AlterTable(expr) => {
+            check_and_fill!(expr);
+        }
+        Expr::DropTable(expr) => {
+            check_and_fill!(expr);
+        }
+        Expr::TruncateTable(expr) => {
+            check_and_fill!(expr);
+        }
+        Expr::CreateFlow(expr) => {
+            if expr.catalog_name.is_empty() {
+                expr.catalog_name = catalog.to_string();
+            }
+        }
+        Expr::DropFlow(expr) => {
+            if expr.catalog_name.is_empty() {
+                expr.catalog_name = catalog.to_string();
+            }
+        }
+        Expr::CreateView(expr) => {
+            check_and_fill!(expr);
+        }
+        Expr::DropView(expr) => {
+            check_and_fill!(expr);
+        }
+        Expr::CommentOn(expr) => {
+            check_and_fill!(expr);
+        }
+    }
+}
+
+impl Instance {
+    fn handle_put_record_batch_stream_inner(
         &self,
         mut stream: servers::grpc::flight::PutRecordBatchRequestStream,
         ctx: QueryContextRef,
@@ -372,60 +455,7 @@ impl GrpcQueryHandler for Instance {
             }
         })
     }
-}
 
-fn fill_catalog_and_schema_from_context(ddl_expr: &mut DdlExpr, ctx: &QueryContextRef) {
-    let catalog = ctx.current_catalog();
-    let schema = ctx.current_schema();
-
-    macro_rules! check_and_fill {
-        ($expr:ident) => {
-            if $expr.catalog_name.is_empty() {
-                $expr.catalog_name = catalog.to_string();
-            }
-            if $expr.schema_name.is_empty() {
-                $expr.schema_name = schema.to_string();
-            }
-        };
-    }
-
-    match ddl_expr {
-        Expr::CreateDatabase(_) | Expr::AlterDatabase(_) => { /* do nothing*/ }
-        Expr::CreateTable(expr) => {
-            check_and_fill!(expr);
-        }
-        Expr::AlterTable(expr) => {
-            check_and_fill!(expr);
-        }
-        Expr::DropTable(expr) => {
-            check_and_fill!(expr);
-        }
-        Expr::TruncateTable(expr) => {
-            check_and_fill!(expr);
-        }
-        Expr::CreateFlow(expr) => {
-            if expr.catalog_name.is_empty() {
-                expr.catalog_name = catalog.to_string();
-            }
-        }
-        Expr::DropFlow(expr) => {
-            if expr.catalog_name.is_empty() {
-                expr.catalog_name = catalog.to_string();
-            }
-        }
-        Expr::CreateView(expr) => {
-            check_and_fill!(expr);
-        }
-        Expr::DropView(expr) => {
-            check_and_fill!(expr);
-        }
-        Expr::CommentOn(expr) => {
-            check_and_fill!(expr);
-        }
-    }
-}
-
-impl Instance {
     async fn handle_insert_plan(
         &self,
         insert: InsertIntoPlan,
@@ -493,7 +523,9 @@ impl Instance {
         // Optimize the plan
         let optimized_plan = state.optimize(&analyzed_plan).context(DataFusionSnafu)?;
 
-        let output = SqlQueryHandler::do_exec_plan(self, None, optimized_plan, ctx.clone()).await?;
+        let output = self
+            .do_exec_plan_inner(None, optimized_plan, ctx.clone())
+            .await?;
 
         Ok(attach_timer(output, timer))
     }

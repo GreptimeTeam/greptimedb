@@ -33,7 +33,6 @@ use common_wal::config::kafka::common::{KafkaConnectionConfig, KafkaTopicConfig}
 use common_wal::config::kafka::{DatanodeKafkaConfig, MetasrvKafkaConfig};
 use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
 use datanode::datanode::Datanode;
-use frontend::error::Result;
 use frontend::instance::Instance;
 use futures::TryStreamExt;
 use meta_srv::metasrv::Metasrv;
@@ -439,7 +438,10 @@ pub fn find_testing_resource(path: &str) -> String {
     prepare_path(&p)
 }
 
-pub async fn try_execute_sql(instance: &Arc<Instance>, sql: &str) -> Result<Output> {
+pub async fn try_execute_sql(
+    instance: &Arc<Instance>,
+    sql: &str,
+) -> servers::error::Result<Output> {
     try_execute_sql_with(instance, sql, QueryContext::arc()).await
 }
 
@@ -447,7 +449,7 @@ pub async fn try_execute_sql_with(
     instance: &Arc<Instance>,
     sql: &str,
     query_ctx: QueryContextRef,
-) -> Result<Output> {
+) -> servers::error::Result<Output> {
     instance.do_query(sql, query_ctx).await.remove(0)
 }
 
