@@ -1124,6 +1124,18 @@ impl EngineInner {
     }
 }
 
+fn map_batch_responses(responses: Vec<(RegionId, Result<AffectedRows>)>) -> BatchResponses {
+    responses
+        .into_iter()
+        .map(|(region_id, response)| {
+            (
+                region_id,
+                response.map(RegionResponse::new).map_err(BoxedError::new),
+            )
+        })
+        .collect()
+}
+
 #[async_trait]
 impl RegionEngine for MitoEngine {
     fn name(&self) -> &str {
@@ -1140,17 +1152,7 @@ impl RegionEngine for MitoEngine {
         self.inner
             .handle_batch_open_requests(parallelism, requests)
             .await
-            .map(|responses| {
-                responses
-                    .into_iter()
-                    .map(|(region_id, response)| {
-                        (
-                            region_id,
-                            response.map(RegionResponse::new).map_err(BoxedError::new),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            })
+            .map(map_batch_responses)
             .map_err(BoxedError::new)
     }
 
@@ -1163,17 +1165,7 @@ impl RegionEngine for MitoEngine {
         self.inner
             .handle_batch_catchup_requests(parallelism, requests)
             .await
-            .map(|responses| {
-                responses
-                    .into_iter()
-                    .map(|(region_id, response)| {
-                        (
-                            region_id,
-                            response.map(RegionResponse::new).map_err(BoxedError::new),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            })
+            .map(map_batch_responses)
             .map_err(BoxedError::new)
     }
 
