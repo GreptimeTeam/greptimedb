@@ -14,7 +14,7 @@
 
 //! Pruner for parallel file pruning across scanner partitions.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -30,7 +30,7 @@ use crate::error::{PruneFileSnafu, Result};
 use crate::metrics::PRUNER_ACTIVE_BUILDERS;
 use crate::read::range::{FileRangeBuilder, RowGroupIndex};
 use crate::read::scan_region::StreamContext;
-use crate::read::scan_util::PartitionMetrics;
+use crate::read::scan_util::{FileScanMetrics, PartitionMetrics};
 use crate::sst::parquet::file_range::FileRange;
 use crate::sst::parquet::reader::ReaderMetrics;
 
@@ -463,7 +463,21 @@ impl Pruner {
 
                     // Merge metrics to partition if provided
                     if let Some(part_metrics) = &partition_metrics {
-                        part_metrics.merge_reader_metrics(&metrics, None);
+                        let per_file_metrics = if part_metrics.explain_verbose() {
+                            let file_id = file.file_id();
+                            let mut map = HashMap::new();
+                            map.insert(
+                                file_id,
+                                FileScanMetrics {
+                                    build_part_cost: metrics.build_cost,
+                                    ..Default::default()
+                                },
+                            );
+                            Some(map)
+                        } else {
+                            None
+                        };
+                        part_metrics.merge_reader_metrics(&metrics, per_file_metrics.as_ref());
                     }
                 }
                 Err(e) => {
