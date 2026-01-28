@@ -70,8 +70,8 @@ async fn send_get_file_refs(
         Ok(reply_msg) => HeartbeatMailbox::json_reply(&reply_msg)?,
         Err(e) => {
             error!(
-                "Failed to receive reply from datanode {} for GetFileRefs: {}",
-                peer, e
+                e; "Failed to receive reply from datanode {} for GetFileRefs instruction",
+                peer,
             );
             return Err(e);
         }
@@ -117,8 +117,8 @@ async fn send_gc_regions(
         Ok(reply_msg) => HeartbeatMailbox::json_reply(&reply_msg)?,
         Err(e) => {
             error!(
-                "Failed to receive reply from datanode {} for {}: {}",
-                peer, description, e
+                e; "Failed to receive reply from datanode {} for {}",
+                peer, description
             );
             return Err(e);
         }
@@ -137,8 +137,8 @@ async fn send_gc_regions(
         Ok(report) => Ok(report),
         Err(e) => {
             error!(
-                "Datanode {} reported error during GC for regions {:?}: {}",
-                peer, gc_regions, e
+                e; "Datanode {} reported error during GC for regions {:?}",
+                peer, gc_regions
             );
             error::UnexpectedSnafu {
                 violated: format!(
@@ -702,7 +702,7 @@ impl Procedure for BatchGcProcedure {
                         Ok(Status::executing(false))
                     }
                     Err(e) => {
-                        error!("Failed to get file references: {}", e);
+                        error!(e; "Failed to get file references");
                         Err(ProcedureError::external(e))
                     }
                 }
@@ -717,7 +717,7 @@ impl Procedure for BatchGcProcedure {
                         Ok(Status::executing(false))
                     }
                     Err(e) => {
-                        error!("Failed to send GC instructions: {}", e);
+                        error!(e; "Failed to send GC instructions");
                         Err(ProcedureError::external(e))
                     }
                 }
@@ -741,7 +741,7 @@ impl Procedure for BatchGcProcedure {
                     Ok(Status::done_with_output(report))
                 }
                 Err(e) => {
-                    error!("Failed to cleanup region repartition info: {}", e);
+                    error!(e; "Failed to cleanup region repartition info");
                     Err(ProcedureError::external(e))
                 }
             },
