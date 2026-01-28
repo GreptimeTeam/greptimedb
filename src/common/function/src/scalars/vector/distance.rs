@@ -16,6 +16,10 @@ mod cos;
 mod dot;
 mod l2sq;
 
+pub const VEC_COS_DISTANCE: &str = "vec_cos_distance";
+pub const VEC_L2SQ_DISTANCE: &str = "vec_l2sq_distance";
+pub const VEC_DOT_PRODUCT: &str = "vec_dot_product";
+
 use std::borrow::Cow;
 use std::fmt::Display;
 
@@ -109,9 +113,9 @@ macro_rules! define_distance_function {
     };
 }
 
-define_distance_function!(CosDistanceFunction, "vec_cos_distance", cos::cos);
-define_distance_function!(L2SqDistanceFunction, "vec_l2sq_distance", l2sq::l2sq);
-define_distance_function!(DotProductFunction, "vec_dot_product", dot::dot);
+define_distance_function!(CosDistanceFunction, VEC_COS_DISTANCE, cos::cos);
+define_distance_function!(L2SqDistanceFunction, VEC_L2SQ_DISTANCE, l2sq::l2sq);
+define_distance_function!(DotProductFunction, VEC_DOT_PRODUCT, dot::dot);
 
 #[cfg(test)]
 mod tests {

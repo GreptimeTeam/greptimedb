@@ -979,6 +979,7 @@ impl ParquetReaderBuilder {
                 return;
             }
         };
+        metrics.rows_vector_selected += selection.row_count();
         apply_selection_and_update_metrics(output, &selection, metrics, INDEX_TYPE_VECTOR);
     }
 
@@ -1229,6 +1230,8 @@ pub(crate) struct ReaderFilterMetrics {
     pub(crate) rows_bloom_filtered: usize,
     /// Number of rows filtered by vector index.
     pub(crate) rows_vector_filtered: usize,
+    /// Number of rows selected by vector index.
+    pub(crate) rows_vector_selected: usize,
     /// Number of rows filtered by precise filter.
     pub(crate) rows_precise_filtered: usize,
 
@@ -1268,6 +1271,7 @@ impl ReaderFilterMetrics {
         self.rows_inverted_filtered += other.rows_inverted_filtered;
         self.rows_bloom_filtered += other.rows_bloom_filtered;
         self.rows_vector_filtered += other.rows_vector_filtered;
+        self.rows_vector_selected += other.rows_vector_selected;
         self.rows_precise_filtered += other.rows_precise_filtered;
 
         self.fulltext_index_cache_hit += other.fulltext_index_cache_hit;

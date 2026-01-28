@@ -28,6 +28,10 @@ use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 use store_api::storage::{TimeSeriesDistribution, TimeSeriesRowSelector};
 
 use crate::dummy_catalog::DummyTableProvider;
+#[cfg(feature = "vector_index")]
+mod vector_search;
+#[cfg(feature = "vector_index")]
+use vector_search::VectorSearchState;
 
 /// This rule will traverse the plan to collect necessary hints for leaf
 /// table scan node and set them in [`ScanRequest`]. Hints include:
@@ -59,13 +63,16 @@ impl ScanHintRule {
         let _ = plan.visit(&mut visitor)?;
 
         if visitor.need_rewrite() {
-            plan.transform_down(&|plan| Self::set_hints(plan, &visitor))
+            plan.transform_down(&mut |plan| Self::set_hints(plan, &mut visitor))
         } else {
             Ok(Transformed::no(plan))
         }
     }
 
-    fn set_hints(plan: LogicalPlan, visitor: &ScanHintVisitor) -> Result<Transformed<LogicalPlan>> {
+    fn set_hints(
+        plan: LogicalPlan,
+        visitor: &mut ScanHintVisitor,
+    ) -> Result<Transformed<LogicalPlan>> {
         match &plan {
             LogicalPlan::TableScan(table_scan) => {
                 let mut transformed = false;
@@ -94,6 +101,13 @@ impl ScanHintRule {
                             );
                         }
 
+                        #[cfg(feature = "vector_index")]
+                        if let Some(vector_request) = visitor
+                            .vector_search
+                            .take_vector_request_from_dummy(adapter, &table_scan.table_name)
+                        {
+                            adapter.with_vector_search_hint(vector_request);
+                        }
                         transformed = true;
                     }
                 }
@@ -221,15 +235,29 @@ struct ScanHintVisitor {
     /// This field stores saved `group_by` columns when all aggregate functions are `last_value`
     /// and the `order_by` column which should be time index.
     ts_row_selector: Option<(HashSet<Column>, Column)>,
+    #[cfg(feature = "vector_index")]
+    vector_search: VectorSearchState,
 }
 
 impl TreeNodeVisitor<'_> for ScanHintVisitor {
     type Node = LogicalPlan;
 
     fn f_down(&mut self, node: &Self::Node) -> Result<TreeNodeRecursion> {
+        #[cfg(feature = "vector_index")]
+        if let LogicalPlan::Limit(limit) = node {
+            // Track LIMIT so vector hint k can be derived within the same input chain.
+            self.vector_search.on_limit_enter(limit);
+        }
+
         // Get order requirement from sort plan
         if let LogicalPlan::Sort(sort) = node {
             self.order_expr = Some(sort.expr.clone());
+
+            #[cfg(feature = "vector_index")]
+            {
+                // Capture vector ORDER BY and TopK hints from sort nodes.
+                self.vector_search.on_sort_enter(sort);
+            }
         }
 
         // Get time series row selector from aggr plan
@@ -294,11 +322,16 @@ impl TreeNodeVisitor<'_> for ScanHintVisitor {
             }
         }
 
-        if self.ts_row_selector.is_some()
-            && (matches!(node, LogicalPlan::Subquery(_)) || node.inputs().len() > 1)
-        {
+        // Avoid carrying vector hints across branching inputs (join/subquery) to prevent
+        // pruning results before global ordering is applied.
+        let is_branching = matches!(node, LogicalPlan::Subquery(_)) || node.inputs().len() > 1;
+        if is_branching && self.ts_row_selector.is_some() {
             // clean previous time series selector hint when encounter subqueries or join
             self.ts_row_selector = None;
+        }
+        #[cfg(feature = "vector_index")]
+        if is_branching {
+            self.vector_search.on_branching_enter();
         }
 
         if let LogicalPlan::Filter(filter) = node
@@ -312,13 +345,56 @@ impl TreeNodeVisitor<'_> for ScanHintVisitor {
             }
         }
 
+        #[cfg(feature = "vector_index")]
+        if let LogicalPlan::Filter(filter) = node {
+            self.vector_search.on_filter_enter(&filter.predicate);
+        }
+
+        #[cfg(feature = "vector_index")]
+        if let LogicalPlan::TableScan(table_scan) = node {
+            // Record vector hints at leaf scans after scope checks.
+            self.vector_search.on_table_scan(table_scan);
+        }
+
+        Ok(TreeNodeRecursion::Continue)
+    }
+
+    fn f_up(&mut self, _node: &Self::Node) -> Result<TreeNodeRecursion> {
+        #[cfg(feature = "vector_index")]
+        match _node {
+            LogicalPlan::Limit(_) => {
+                self.vector_search.on_limit_exit();
+            }
+            LogicalPlan::Sort(_) => {
+                self.vector_search.on_sort_exit();
+            }
+            LogicalPlan::Filter(_) => {
+                self.vector_search.on_filter_exit();
+            }
+            LogicalPlan::Subquery(_) => {
+                self.vector_search.on_branching_exit();
+            }
+            _ if _node.inputs().len() > 1 => {
+                self.vector_search.on_branching_exit();
+            }
+            _ => {}
+        }
+
         Ok(TreeNodeRecursion::Continue)
     }
 }
 
 impl ScanHintVisitor {
     fn need_rewrite(&self) -> bool {
-        self.order_expr.is_some() || self.ts_row_selector.is_some()
+        let base = self.order_expr.is_some() || self.ts_row_selector.is_some();
+        #[cfg(feature = "vector_index")]
+        {
+            base || self.vector_search.need_rewrite()
+        }
+        #[cfg(not(feature = "vector_index"))]
+        {
+            base
+        }
     }
 }
 
