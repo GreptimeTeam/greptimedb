@@ -18,8 +18,8 @@ use std::sync::Arc;
 
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
-use common_recordbatch::RecordBatch;
 use common_recordbatch::error::{ArrowComputeSnafu, ExternalSnafu};
+use common_recordbatch::{DfRecordBatch, RecordBatch};
 use datatypes::arrow::datatypes::Field;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::schema::{Schema, SchemaRef};
@@ -28,7 +28,7 @@ use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
 
-use crate::error::{InvalidRequestSnafu, Result};
+use crate::error::{InvalidRequestSnafu, RecordBatchSnafu, Result};
 use crate::read::projection::read_column_ids_from_projection;
 use crate::sst::parquet::flat_format::sst_column_id_indices;
 use crate::sst::parquet::format::FormatProjection;
@@ -252,7 +252,15 @@ impl FlatProjectionMapper {
         if self.is_empty_projection {
             return RecordBatch::new_with_count(self.output_schema.clone(), batch.num_rows());
         }
+        let columns = self.project_vectors(batch)?;
+        RecordBatch::new(self.output_schema.clone(), columns)
+    }
 
+    /// Projects columns from the input batch and converts them into vectors.
+    pub(crate) fn project_vectors(
+        &self,
+        batch: &datatypes::arrow::record_batch::RecordBatch,
+    ) -> common_recordbatch::error::Result<Vec<datatypes::vectors::VectorRef>> {
         let mut columns = Vec::with_capacity(self.output_schema.num_columns());
         for index in &self.batch_indices {
             let mut array = batch.column(*index).clone();
@@ -269,8 +277,7 @@ impl FlatProjectionMapper {
                 .context(ExternalSnafu)?;
             columns.push(vector);
         }
-
-        RecordBatch::new(self.output_schema.clone(), columns)
+        Ok(columns)
     }
 }
 
@@ -340,4 +347,100 @@ fn compute_input_arrow_schema(
     new_fields.extend_from_slice(&internal_fields());
 
     Arc::new(datatypes::arrow::datatypes::Schema::new(new_fields))
+}
+
+/// Helper to project compaction batches into flat format columns
+/// (fields + time index + __primary_key + __sequence + __op_type).
+pub(crate) struct CompactionProjectionMapper {
+    mapper: FlatProjectionMapper,
+    assembler: DfBatchAssembler,
+}
+
+impl CompactionProjectionMapper {
+    pub(crate) fn try_new(metadata: &RegionMetadataRef) -> Result<Self> {
+        let projection = metadata
+            .column_metadatas
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, col)| {
+                if matches!(col.semantic_type, SemanticType::Field) {
+                    Some(idx)
+                } else {
+                    None
+                }
+            })
+            .chain([metadata.time_index_column_pos()])
+            .collect::<Vec<_>>();
+
+        let mapper = FlatProjectionMapper::new_with_read_columns(
+            metadata,
+            projection,
+            metadata
+                .column_metadatas
+                .iter()
+                .map(|col| col.column_id)
+                .collect(),
+        )?;
+        let assembler = DfBatchAssembler::new(mapper.output_schema());
+
+        Ok(Self { mapper, assembler })
+    }
+
+    /// Projects columns and appends internal columns for compaction output.
+    ///
+    /// The input batch is expected to be in flat format with internal columns appended.
+    pub(crate) fn project(&self, batch: DfRecordBatch) -> Result<DfRecordBatch> {
+        let columns = self
+            .mapper
+            .project_vectors(&batch)
+            .context(RecordBatchSnafu)?;
+        self.assembler
+            .build_df_record_batch_with_internal(&batch, columns)
+            .context(RecordBatchSnafu)
+    }
+}
+
+/// Builds [DfRecordBatch] with internal columns appended.
+pub(crate) struct DfBatchAssembler {
+    output_arrow_schema_with_internal: datatypes::arrow::datatypes::SchemaRef,
+}
+
+impl DfBatchAssembler {
+    /// Precomputes the output schema with internal columns.
+    pub(crate) fn new(output_schema: SchemaRef) -> Self {
+        let fields = output_schema
+            .arrow_schema()
+            .fields()
+            .into_iter()
+            .chain(internal_fields().iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        let output_arrow_schema_with_internal =
+            Arc::new(datatypes::arrow::datatypes::Schema::new(fields));
+        Self {
+            output_arrow_schema_with_internal,
+        }
+    }
+
+    /// Builds a [DfRecordBatch] from projected vectors plus internal columns.
+    ///
+    /// Assumes the input batch already contains internal columns as the last three fields
+    /// ("__primary_key", "__sequence", "__op_type").
+    pub(crate) fn build_df_record_batch_with_internal(
+        &self,
+        batch: &datatypes::arrow::record_batch::RecordBatch,
+        mut columns: Vec<datatypes::vectors::VectorRef>,
+    ) -> common_recordbatch::error::Result<DfRecordBatch> {
+        let num_columns = batch.columns().len();
+        // The last 3 columns are the internal columns.
+        let internal_indices = [num_columns - 3, num_columns - 2, num_columns - 1];
+        for index in internal_indices.iter() {
+            let array = batch.column(*index).clone();
+            let vector = Helper::try_into_vector(array)
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?;
+            columns.push(vector);
+        }
+        RecordBatch::to_df_record_batch(self.output_arrow_schema_with_internal.clone(), columns)
+    }
 }

@@ -36,7 +36,9 @@ use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, RowSelection};
 use parquet::arrow::{FieldLevels, ProjectionMask, parquet_to_arrow_field_levels};
 use parquet::file::metadata::{KeyValue, PageIndexPolicy, ParquetMetaData};
+use partition::expr::PartitionExpr;
 use snafu::{OptionExt, ResultExt};
+use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::region_request::PathType;
 use store_api::storage::{ColumnId, FileId};
@@ -54,6 +56,7 @@ use crate::metrics::{
     PRECISE_FILTER_ROWS_TOTAL, READ_ROW_GROUPS_TOTAL, READ_ROWS_IN_ROW_GROUP_TOTAL,
     READ_ROWS_TOTAL, READ_STAGE_ELAPSED,
 };
+use crate::read::flat_projection::CompactionProjectionMapper;
 use crate::read::prune::{PruneReader, Source};
 use crate::read::{Batch, BatchReader};
 use crate::sst::file::FileHandle;
@@ -336,6 +339,37 @@ impl ParquetReaderBuilder {
         let key_value_meta = parquet_meta.file_metadata().key_value_metadata();
         // Gets the metadata stored in the SST.
         let region_meta = Arc::new(Self::get_region_metadata(&file_path, key_value_meta)?);
+        let region_partition_expr = self
+            .expected_metadata
+            .as_ref()
+            .and_then(|meta| meta.partition_expr.as_ref());
+        let (_, is_same_region_partition) = Self::is_same_region_partition(
+            region_partition_expr.as_ref().map(|expr| expr.as_str()),
+            self.file_handle.meta_ref().partition_expr.as_ref(),
+        )?;
+        // Skip auto convert when:
+        // - compaction is enabled
+        // - region partition expr is same with file partition expr (no need to auto convert)
+        let skip_auto_convert = self.compaction && is_same_region_partition;
+
+        // Build a compaction projection helper when:
+        // - compaction is enabled
+        // - region partition expr differs from file partition expr
+        // - flat format is enabled
+        // - primary key encoding is sparse
+        //
+        // This is applied after row-group filtering to align batches with flat output schema
+        // before compat handling.
+        let compaction_projection_mapper = if self.compaction
+            && !is_same_region_partition
+            && self.flat_format
+            && region_meta.primary_key_encoding == PrimaryKeyEncoding::Sparse
+        {
+            Some(CompactionProjectionMapper::try_new(&region_meta)?)
+        } else {
+            None
+        };
+
         let mut read_format = if let Some(column_ids) = &self.projection {
             ReadFormat::new(
                 region_meta.clone(),
@@ -343,7 +377,7 @@ impl ParquetReaderBuilder {
                 self.flat_format,
                 Some(parquet_meta.file_metadata().schema_descr().num_columns()),
                 &file_path,
-                self.compaction,
+                skip_auto_convert,
             )?
         } else {
             // Lists all column ids to read, we always use the expected metadata if possible.
@@ -359,7 +393,7 @@ impl ParquetReaderBuilder {
                 self.flat_format,
                 Some(parquet_meta.file_metadata().schema_descr().num_columns()),
                 &file_path,
-                self.compaction,
+                skip_auto_convert,
             )?
         };
         if self.decode_primary_key_values {
@@ -454,6 +488,7 @@ impl ParquetReaderBuilder {
                 prune_schema,
                 codec,
                 compat_batch: None,
+                compaction_projection_mapper,
                 pre_filter_mode: self.pre_filter_mode,
                 partition_filter,
             },
@@ -462,6 +497,19 @@ impl ParquetReaderBuilder {
         metrics.build_cost += start.elapsed();
 
         Ok((context, selection))
+    }
+
+    fn is_same_region_partition(
+        region_partition_expr_str: Option<&str>,
+        file_partition_expr: Option<&PartitionExpr>,
+    ) -> Result<(Option<PartitionExpr>, bool)> {
+        let region_partition_expr = match region_partition_expr_str {
+            Some(expr_str) => crate::region::parse_partition_expr(Some(expr_str))?,
+            None => None,
+        };
+
+        let is_same = region_partition_expr.as_ref() == file_partition_expr;
+        Ok((region_partition_expr, is_same))
     }
 
     /// Compare partition expressions from expected metadata and file metadata,
@@ -477,18 +525,18 @@ impl ParquetReaderBuilder {
             .and_then(|meta| meta.partition_expr.as_ref());
         let file_partition_expr_ref = self.file_handle.meta_ref().partition_expr.as_ref();
 
-        let Some(region_str) = region_partition_expr_str else {
-            return Ok(None);
-        };
+        let (region_partition_expr, is_same_region_partition) = Self::is_same_region_partition(
+            region_partition_expr_str.map(|s| s.as_str()),
+            file_partition_expr_ref,
+        )?;
 
-        let Some(region_partition_expr) = crate::region::parse_partition_expr(Some(region_str))?
-        else {
-            return Ok(None);
-        };
-
-        if Some(&region_partition_expr) == file_partition_expr_ref {
+        if is_same_region_partition {
             return Ok(None);
         }
+
+        let Some(region_partition_expr) = region_partition_expr else {
+            return Ok(None);
+        };
 
         // Collect columns referenced by the partition expression.
         let mut referenced_columns = HashSet::new();

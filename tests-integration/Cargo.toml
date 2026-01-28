@@ -82,6 +82,7 @@ sqlx = { workspace = true, features = [
     "chrono",
 ] }
 standalone.workspace = true
+store-api.workspace = true
 substrait.workspace = true
 table.workspace = true
 tempfile.workspace = true

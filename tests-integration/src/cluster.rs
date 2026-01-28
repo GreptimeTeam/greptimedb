@@ -60,12 +60,14 @@ use meta_srv::gc::GcSchedulerOptions;
 use meta_srv::metasrv::{Metasrv, MetasrvOptions, SelectorRef};
 use meta_srv::mocks::MockInfo;
 use mito2::gc::GcConfig;
+use mito2::region::MitoRegionRef;
 use object_store::config::ObjectStoreConfig;
 use rand::Rng;
 use servers::grpc::GrpcOptions;
 use servers::grpc::flight::FlightCraftWrapper;
 use servers::grpc::region_server::RegionServerRequestHandler;
 use servers::server::ServerHandlers;
+use store_api::storage::RegionId;
 use tempfile::TempDir;
 use tonic::codec::CompressionEncoding;
 use tonic::transport::Server;
@@ -137,6 +139,20 @@ impl GreptimeDbCluster {
         }
 
         sst_files
+    }
+
+    pub async fn list_all_regions(&self) -> HashMap<RegionId, MitoRegionRef> {
+        let mut regions = HashMap::new();
+
+        for datanode in self.datanode_instances.values() {
+            let region_server = datanode.region_server();
+            let mito = region_server.mito_engine().unwrap();
+            for region in mito.regions() {
+                regions.insert(region.region_id(), region);
+            }
+        }
+
+        regions
     }
 }
 

@@ -488,6 +488,11 @@ impl PrimaryKeyReadFormat {
         &self.projection_indices
     }
 
+    /// Gets the field id to projected index.
+    pub(crate) fn field_id_to_projected_index(&self) -> &HashMap<ColumnId, usize> {
+        &self.field_id_to_projected_index
+    }
+
     /// Creates a sequence array to override.
     pub(crate) fn new_override_sequence_array(&self, length: usize) -> Option<ArrayRef> {
         self.override_sequence

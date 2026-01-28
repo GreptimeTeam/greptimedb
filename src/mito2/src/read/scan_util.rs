@@ -1443,7 +1443,16 @@ pub fn build_flat_file_range_scan_stream(
                     })
                 })
                 .transpose()?;
+
+            let mapper = range.compaction_projection_mapper();
             while let Some(record_batch) = reader.next_batch()? {
+                let record_batch = if let Some(mapper) = mapper {
+                    let batch = mapper.project(record_batch)?;
+                    batch
+                } else {
+                    record_batch
+                };
+
                 if let Some(flat_compat) = may_compat {
                     let batch = flat_compat.compat(record_batch)?;
                     yield batch;

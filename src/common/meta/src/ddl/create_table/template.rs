@@ -20,57 +20,107 @@ use api::v1::region::{CreateRequest, RegionColumnDef};
 use api::v1::{ColumnDef, CreateTableExpr, SemanticType};
 use common_telemetry::warn;
 use snafu::{OptionExt, ResultExt};
-use store_api::metric_engine_consts::{
-    LOGICAL_TABLE_METADATA_KEY, is_metric_engine_internal_column,
-};
+use store_api::metric_engine_consts::LOGICAL_TABLE_METADATA_KEY;
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::{RawTableInfo, TableId};
 
 use crate::error::{self, Result};
+use crate::reconciliation::utils::build_column_metadata_from_table_info;
 use crate::wal_provider::prepare_wal_options;
 
 /// Constructs a [CreateRequest] based on the provided [RawTableInfo].
 ///
-/// Note: This function is primarily intended for creating logical tables or allocating placeholder regions.
-pub fn build_template_from_raw_table_info(
-    raw_table_info: &RawTableInfo,
-    skip_internal_columns: bool,
-) -> Result<CreateRequest> {
+/// Note: This function is primarily intended for creating logical tables.
+///
+/// Logical table templates keep the original column order and primary key indices from
+/// `RawTableInfo` (including internal columns when present), because these are used to
+/// reconstruct the logical schema on the engine side.
+pub fn build_template_from_raw_table_info(raw_table_info: &RawTableInfo) -> Result<CreateRequest> {
     let primary_key_indices = &raw_table_info.meta.primary_key_indices;
-    let filtered = raw_table_info
+    let column_defs = raw_table_info
         .meta
         .schema
         .column_schemas
         .iter()
         .enumerate()
-        .filter(|(_, c)| !skip_internal_columns || !is_metric_engine_internal_column(&c.name))
         .map(|(i, c)| {
             let is_primary_key = primary_key_indices.contains(&i);
             let column_def = try_as_column_def(c, is_primary_key)
                 .context(error::ConvertColumnDefSnafu { column: &c.name })?;
-            Ok((
-                is_primary_key.then_some(i),
-                RegionColumnDef {
-                    column_def: Some(column_def),
-                    // The column id will be overridden by the metric engine.
-                    // So we just use the index as the column id.
-                    column_id: i as u32,
-                },
-            ))
+            Ok(RegionColumnDef {
+                column_def: Some(column_def),
+                // The column id will be overridden by the metric engine.
+                // So we just use the index as the column id.
+                column_id: i as u32,
+            })
         })
-        .collect::<Result<Vec<(Option<usize>, RegionColumnDef)>>>()?;
+        .collect::<Result<Vec<_>>>()?;
 
-    let (new_primary_key_indices, column_defs): (Vec<_>, Vec<_>) = filtered.into_iter().unzip();
     let options = HashMap::from(&raw_table_info.meta.options);
     let template = CreateRequest {
         region_id: 0,
         engine: raw_table_info.meta.engine.clone(),
         column_defs,
-        primary_key: new_primary_key_indices
+        primary_key: raw_table_info
+            .meta
+            .primary_key_indices
             .iter()
-            .flatten()
             .map(|i| *i as u32)
             .collect(),
+        path: String::new(),
+        options,
+        partition: None,
+    };
+
+    Ok(template)
+}
+
+/// Constructs a [CreateRequest] based on the provided [RawTableInfo] for physical table.
+///
+/// Note: This function is primarily intended for creating physical table.
+///
+/// Physical table templates mark primary
+/// keys by tag semantic type to match the physical storage layout.
+pub fn build_template_from_raw_table_info_for_physical_table(
+    raw_table_info: &RawTableInfo,
+) -> Result<CreateRequest> {
+    let name_to_ids = raw_table_info
+        .name_to_ids()
+        .context(error::MissingColumnIdsSnafu)?;
+    let column_metadatas = build_column_metadata_from_table_info(
+        &raw_table_info.meta.schema.column_schemas,
+        &raw_table_info.meta.primary_key_indices,
+        &name_to_ids,
+    )?;
+    let primary_key_ids = column_metadatas
+        .iter()
+        .filter(|c| c.semantic_type == SemanticType::Tag)
+        .map(|c| c.column_id)
+        .collect::<Vec<_>>();
+    let column_defs = column_metadatas
+        .iter()
+        .map(|c| {
+            let column_def =
+                try_as_column_def(&c.column_schema, c.semantic_type == SemanticType::Tag).context(
+                    error::ConvertColumnDefSnafu {
+                        column: &c.column_schema.name,
+                    },
+                )?;
+            let region_column_def = RegionColumnDef {
+                column_def: Some(column_def),
+                column_id: c.column_id,
+            };
+
+            Ok(region_column_def)
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let options = HashMap::from(&raw_table_info.meta.options);
+    let template = CreateRequest {
+        region_id: 0,
+        engine: raw_table_info.meta.engine.clone(),
+        column_defs,
+        primary_key: primary_key_ids,
         path: String::new(),
         options,
         partition: None,
