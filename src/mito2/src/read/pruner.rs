@@ -140,21 +140,8 @@ struct FileBuilderEntry {
     /// Number of remaining ranges to scan for this file.
     /// When this reaches 0, the builder is dropped for memory cleanup.
     remaining_ranges: usize,
-    /// Status of pruning.
-    status: PruneStatus,
     /// Waiters when pruning is in-progress.
     waiters: Vec<oneshot::Sender<Result<Arc<FileRangeBuilder>>>>,
-}
-
-/// Status of file pruning.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PruneStatus {
-    /// Not yet started pruning.
-    Pending,
-    /// Currently being pruned.
-    InProgress,
-    /// Pruning completed.
-    Complete,
 }
 
 /// Request to prune a file.
@@ -179,7 +166,6 @@ impl Pruner {
                 Mutex::new(FileBuilderEntry {
                     builder: None,
                     remaining_ranges: 0,
-                    status: PruneStatus::Pending,
                     waiters: Vec::new(),
                 })
             })
@@ -340,8 +326,7 @@ impl Pruner {
 
     fn get_worker_idx(&self, file_id: FileId) -> usize {
         let file_id_hash = Uuid::from(file_id).as_u128() as usize;
-        let worker_idx = file_id_hash % self.inner.num_workers;
-        worker_idx
+        file_id_hash % self.inner.num_workers
     }
 
     /// Prunes a file directly without going through a worker.
@@ -369,7 +354,6 @@ impl Pruner {
                 reader_metrics.num_range_builders += 1;
                 entry.builder = Some(arc_builder.clone());
                 PRUNER_ACTIVE_BUILDERS.inc();
-                entry.status = PruneStatus::Complete;
             }
         }
 
@@ -409,7 +393,7 @@ impl Pruner {
 
             // Check if already cached or in-progress
             {
-                let mut entry = inner.file_entries[file_index].lock().unwrap();
+                let entry = inner.file_entries[file_index].lock().unwrap();
 
                 if let Some(builder) = &entry.builder {
                     // Cache hit - send immediately
@@ -419,9 +403,6 @@ impl Pruner {
                     worker_cache_hit += 1;
                     continue;
                 }
-
-                // Mark as in-progress
-                entry.status = PruneStatus::InProgress;
             }
             worker_cache_miss += 1;
 
@@ -438,7 +419,6 @@ impl Pruner {
                     let arc_builder = Arc::new(builder);
                     entry.builder = Some(arc_builder.clone());
                     PRUNER_ACTIVE_BUILDERS.inc();
-                    entry.status = PruneStatus::Complete;
 
                     // Notify all waiters
                     for waiter in entry.waiters.drain(..) {
@@ -476,7 +456,6 @@ impl Pruner {
                     }
                 }
                 Err(e) => {
-                    entry.status = PruneStatus::Pending; // Reset status on error
                     let arc_error = Arc::new(e);
                     for waiter in entry.waiters.drain(..) {
                         let _ = waiter.send(Err(arc_error.clone()).context(PruneFileSnafu));
