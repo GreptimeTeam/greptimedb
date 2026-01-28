@@ -67,6 +67,7 @@ snapshot-20250101/
 - Self-contained (all information needed for restore)
 - Immutable (content never changes after creation)
 - Verifiable (checksums at file, chunk, and snapshot levels)
+- Schema-only snapshots contain only `manifest.json` and `schema/`; `data/` is absent, `chunks` is empty, and later data append is rejected (use `--force` to recreate)
 
 ### Chunk
 
@@ -115,6 +116,8 @@ greptime export create \
 greptime export create \
   --schema-only \
   --to s3://my-bucket/snapshots/prod-schema-only
+
+Schema-only snapshots cannot be resumed with data; use `--force` to recreate.
 
 # Export with specific format (default: parquet)
 greptime export create \
@@ -173,7 +176,9 @@ The manifest is a JSON file containing snapshot metadata and chunk index:
 - `snapshot_id`: Unique identifier (UUID)
 - `catalog`, `schemas`: Catalog and schema list
 - `time_range`: Overall time range covered
+- `schema_only`: Whether the snapshot contains schema only
 - `chunks[]`: Array of chunk metadata
+- `format`: Data format for exported files
 - `checksum`: Snapshot-level SHA256 checksum
 
 **Chunk metadata structure**:
@@ -182,7 +187,7 @@ Each chunk entry in the manifest contains:
 
 - `id`: Chunk identifier (sequential number)
 - `time_range`: Start and end timestamps
-- `status`: Export status (Pending, Completed, Failed)
+- `status`: Export status (Pending, InProgress, Completed, Failed)
 - `files`: List of data files in the chunk directory
 - `checksum`: Chunk-level checksum for integrity verification
 
@@ -292,9 +297,9 @@ Checksums are verified during import before data is written to the database.
 
 **Resume capability**:
 
-- Manifest tracks chunk status (Pending, Completed, Failed)
+- Manifest tracks chunk status (Pending, InProgress, Completed, Failed)
 - Export/import automatically resumes when executed on existing snapshot
-- Skips completed chunks, retries failed chunks, processes pending chunks
+- Skips completed chunks, retries failed/in-progress chunks, processes pending chunks
 - Works across process restarts
 - Use `--force` (export only) to delete existing snapshot and start over
 

@@ -29,7 +29,7 @@ pub use database::DatabaseClient;
 use error::Result;
 
 pub use crate::bench::BenchTableMetadataCommand;
-pub use crate::data::DataCommand;
+pub use crate::data::{DataCommand, export_v2, import_v2};
 pub use crate::metadata::MetadataCommand;
 
 #[async_trait]
