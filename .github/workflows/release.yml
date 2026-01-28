@@ -213,7 +213,7 @@ jobs:
 
   run-multi-lang-tests:
     name: Run Multi-language SDK Tests
-    if: ${{ env.DISABLE_RUN_TESTS == 'false' && (inputs.build_linux_artifacts || github.event_name == 'push' || github.event_name == 'schedule') }}
+    if: ${{ !(inputs.skip_test || vars.DEFAULT_SKIP_TEST == 'true') && (inputs.build_linux_artifacts || github.event_name == 'push' || github.event_name == 'schedule') }}
     needs: [
       allocate-runners,
       build-linux-amd64-artifacts,
