@@ -318,6 +318,13 @@ impl BatchGcProcedure {
             while let Some(current) = pending.pop() {
                 if let Some(dst_regions) = global_src_to_dst.get(&current) {
                     for dst in dst_regions {
+                        // Skip self-references to avoid treating a region as related to itself.
+                        // This prevents cyclic mappings (e.g., A→B→C→A) from causing
+                        // get_snapshot_of_file_refs to scan the region's own manifest
+                        // and producing self-referencing cross_region_refs.
+                        if *dst == *src_region {
+                            continue;
+                        }
                         if all_dst_regions.insert(*dst) {
                             pending.push(*dst);
                         }
@@ -478,8 +485,16 @@ impl BatchGcProcedure {
                         .get(&src_region)
                         .cloned()
                         .unwrap_or_default();
-                    set.extend(dst_regions.iter().copied());
-                    new_value.src_to_dst.insert(src_region, set);
+                    // Filter out self-references to avoid creating self-mappings
+                    set.extend(
+                        dst_regions
+                            .iter()
+                            .filter(|&&dst| dst != src_region)
+                            .copied(),
+                    );
+                    if !set.is_empty() {
+                        new_value.src_to_dst.insert(src_region, set);
+                    }
                 } else if has_tmp_ref {
                     // Region has tmp refs - preserve the existing mapping.
                     // The mapping is needed so future GC can find where files were moved.
