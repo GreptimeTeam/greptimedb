@@ -290,22 +290,36 @@ impl BatchGcProcedure {
         regions: &[RegionId],
     ) -> Result<HashMap<RegionId, HashSet<RegionId>>> {
         let repart_mgr = self.table_metadata_manager.table_repart_manager();
-        let mut related_regions: HashMap<RegionId, HashSet<RegionId>> = HashMap::new();
 
+        // Batch get all table repartition mappings for the involved tables
+        let table_ids: Vec<_> = regions.iter().map(|r| r.table_id()).collect();
+        let table_reparts = repart_mgr
+            .batch_get(&table_ids)
+            .await
+            .context(KvBackendSnafu)?;
+
+        // Build a combined src_to_dst map from all tables
+        let mut global_src_to_dst: HashMap<RegionId, HashSet<RegionId>> = HashMap::new();
+        for repart in table_reparts.into_iter().flatten() {
+            for (src, dsts) in repart.src_to_dst {
+                global_src_to_dst
+                    .entry(src)
+                    .or_default()
+                    .extend(dsts.into_iter());
+            }
+        }
+
+        // Compute transitive closure for each source region using in-memory map
+        let mut related_regions: HashMap<RegionId, HashSet<RegionId>> = HashMap::new();
         for src_region in regions {
             let mut all_dst_regions: HashSet<RegionId> = HashSet::new();
             let mut pending: Vec<RegionId> = vec![*src_region];
 
             while let Some(current) = pending.pop() {
-                // TODO(discord9): batch get
-                if let Some(dst_regions) = repart_mgr
-                    .get_dst_regions(current)
-                    .await
-                    .context(KvBackendSnafu)?
-                {
+                if let Some(dst_regions) = global_src_to_dst.get(&current) {
                     for dst in dst_regions {
-                        if all_dst_regions.insert(dst) {
-                            pending.push(dst);
+                        if all_dst_regions.insert(*dst) {
+                            pending.push(*dst);
                         }
                     }
                 }
