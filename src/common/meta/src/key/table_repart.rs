@@ -310,51 +310,17 @@ impl TableRepartManager {
         table_id: TableId,
         region_mapping: &HashMap<RegionId, Vec<RegionId>>,
     ) -> Result<()> {
-        // Get current table repart with raw bytes for CAS operation
-        let Some(current_table_repart) = self.get_with_raw_bytes(table_id).await? else {
-            let mut new_table_repart_value = TableRepartValue::new();
-            for (src, dsts) in region_mapping.iter() {
-                new_table_repart_value.update_mappings(*src, dsts);
-            }
+        let current = self.get_with_raw_bytes(table_id).await?;
+        let mut new_value = current
+            .as_ref()
+            .map(|c| c.inner.clone())
+            .unwrap_or_else(TableRepartValue::new);
 
-            let (txn, _) = self.build_create_txn(table_id, &new_table_repart_value)?;
-            let result = self.kv_backend.txn(txn).await?;
-            ensure!(
-                result.succeeded,
-                crate::error::MetadataCorruptionSnafu {
-                    err_msg: format!(
-                        "Failed to create table repart for table {}: CAS operation failed",
-                        table_id
-                    ),
-                }
-            );
-
-            return Ok(());
-        };
-
-        // Clone the current repart value and update mappings
-        let mut new_table_repart_value = current_table_repart.inner.clone();
         for (src, dsts) in region_mapping.iter() {
-            new_table_repart_value.update_mappings(*src, dsts);
+            new_value.update_mappings(*src, dsts);
         }
 
-        // Execute atomic update
-        let (txn, _) =
-            self.build_update_txn(table_id, &current_table_repart, &new_table_repart_value)?;
-
-        let result = self.kv_backend.txn(txn).await?;
-
-        ensure!(
-            result.succeeded,
-            crate::error::MetadataCorruptionSnafu {
-                err_msg: format!(
-                    "Failed to update mappings for table {}: CAS operation failed",
-                    table_id
-                ),
-            }
-        );
-
-        Ok(())
+        self.upsert_value(table_id, current, &new_value).await
     }
 
     /// Removes mappings from src region to dst regions.
@@ -364,33 +330,59 @@ impl TableRepartManager {
         table_id: TableId,
         region_mapping: &HashMap<RegionId, Vec<RegionId>>,
     ) -> Result<()> {
-        // Get current table repart with raw bytes for CAS operation
-        let current_table_repart = self
+        let current = self
             .get_with_raw_bytes(table_id)
             .await?
             .context(crate::error::TableRepartNotFoundSnafu { table_id })?;
 
-        // Clone the current repart value and remove mappings
-        let mut new_table_repart_value = current_table_repart.inner.clone();
+        let mut new_value = current.inner.clone();
         for (src, dsts) in region_mapping.iter() {
-            new_table_repart_value.remove_mappings(*src, dsts);
+            new_value.remove_mappings(*src, dsts);
         }
 
-        // Execute atomic update
-        let (txn, _) =
-            self.build_update_txn(table_id, &current_table_repart, &new_table_repart_value)?;
+        self.upsert_value(table_id, Some(current), &new_value).await
+    }
 
-        let result = self.kv_backend.txn(txn).await?;
+    /// Upserts the full repartition value with CAS semantics using the caller-provided snapshot.
+    /// If the value is empty and no existing repartition entry is present, it no-ops.
+    pub async fn upsert_value(
+        &self,
+        table_id: TableId,
+        current: Option<DeserializedValueWithBytes<TableRepartValue>>,
+        new_value: &TableRepartValue,
+    ) -> Result<()> {
+        if new_value.src_to_dst.is_empty() && current.is_none() {
+            // Nothing to persist and caller confirmed no existing entry.
+            return Ok(());
+        }
 
-        ensure!(
-            result.succeeded,
-            crate::error::MetadataCorruptionSnafu {
-                err_msg: format!(
-                    "Failed to remove mappings for table {}: CAS operation failed",
-                    table_id
-                ),
-            }
-        );
+        if let Some(current) = current {
+            let (txn, _) = self.build_update_txn(table_id, &current, new_value)?;
+            let result = self.kv_backend.txn(txn).await?;
+
+            ensure!(
+                result.succeeded,
+                crate::error::MetadataCorruptionSnafu {
+                    err_msg: format!(
+                        "Failed to update repartition mappings for table {}: CAS operation failed",
+                        table_id
+                    ),
+                }
+            );
+        } else {
+            let (txn, _) = self.build_create_txn(table_id, new_value)?;
+            let result = self.kv_backend.txn(txn).await?;
+
+            ensure!(
+                result.succeeded,
+                crate::error::MetadataCorruptionSnafu {
+                    err_msg: format!(
+                        "Failed to create repartition mappings for table {}: CAS operation failed",
+                        table_id
+                    ),
+                }
+            );
+        }
 
         Ok(())
     }

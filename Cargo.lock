@@ -13724,6 +13724,7 @@ dependencies = [
  "common-memory-manager",
  "common-meta",
  "common-procedure",
+ "common-procedure-test",
  "common-query",
  "common-recordbatch",
  "common-runtime",

@@ -33,8 +33,10 @@ use crate::cluster::GreptimeDbClusterBuilder;
 use crate::test_util::{StorageType, TempDirGuard, execute_sql, get_test_store_config};
 use crate::tests::test_util::{MockInstanceBuilder, TestContext, wait_procedure};
 
+mod repart;
+
 /// Helper function to get table route information for GC procedure
-async fn get_table_route(
+pub(super) async fn get_table_route(
     table_metadata_manager: &TableMetadataManagerRef,
     table_id: TableId,
 ) -> (Region2Peers, Vec<RegionId>) {
@@ -62,7 +64,7 @@ async fn get_table_route(
 }
 
 /// Helper function to list all SST files
-async fn list_sst_files(test_context: &TestContext) -> HashSet<String> {
+pub(super) async fn list_sst_files(test_context: &TestContext) -> HashSet<String> {
     let mut sst_files = HashSet::new();
 
     for datanode in test_context.datanodes().values() {
@@ -82,7 +84,7 @@ async fn list_sst_files(test_context: &TestContext) -> HashSet<String> {
     sst_files
 }
 
-async fn distributed_with_gc(store_type: &StorageType) -> (TestContext, TempDirGuard) {
+pub(super) async fn distributed_with_gc(store_type: &StorageType) -> (TestContext, TempDirGuard) {
     common_telemetry::init_default_ut_logging();
     let test_name = uuid::Uuid::new_v4().to_string();
     let (store_config, guard) = get_test_store_config(store_type);
