@@ -281,15 +281,15 @@ pub fn set_allow_query_fallback(exprs: Vec<Expr>, ctx: QueryContextRef) -> Resul
 
 pub fn set_intervalstyle(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
     let Some((var_value, [])) = exprs.split_first() else {
-        return (NotSupportedSnafu {
+        return NotSupportedSnafu {
             feat: "Set variable value must have one and only one value for intervalstyle",
-        })
+        }
         .fail();
     };
     let Expr::Value(value) = var_value else {
-        return (NotSupportedSnafu {
+        return NotSupportedSnafu {
             feat: "Set variable value must be a value",
-        })
+        }
         .fail();
     };
     ctx.configuration_parameter().set_pg_intervalstyle_format(
