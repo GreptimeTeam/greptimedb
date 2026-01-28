@@ -407,7 +407,11 @@ impl PromPlanner {
                 };
                 // calculate columns to group by
                 // Need to append time index column into group by columns
-                let mut group_exprs = self.agg_modifier_to_col(input.schema(), modifier, true)?;
+                let mut group_exprs = Self::dedup_group_exprs_by_name(self.agg_modifier_to_col(
+                    input.schema(),
+                    modifier,
+                    true,
+                )?);
                 // convert op and value columns to aggregate exprs
                 let (mut aggr_exprs, prev_field_exprs) =
                     self.create_aggregate_exprs(*op, param, &input)?;
@@ -435,6 +439,7 @@ impl PromPlanner {
                     // `count_values` must be grouped by fields,
                     // and project the fields to the new label.
                     group_exprs.extend(prev_field_exprs.clone());
+                    group_exprs = Self::dedup_group_exprs_by_name(group_exprs);
                     let project_fields = self
                         .create_field_column_exprs()?
                         .into_iter()
@@ -483,7 +488,11 @@ impl PromPlanner {
         });
         self.ctx.use_tsid = input_has_tsid;
 
-        let group_exprs = self.agg_modifier_to_col(input.schema(), modifier, false)?;
+        let group_exprs = Self::dedup_group_exprs_by_name(self.agg_modifier_to_col(
+            input.schema(),
+            modifier,
+            false,
+        )?);
 
         let val = Self::get_param_as_literal_expr(param, Some(*op), Some(ArrowDataType::Float64))?;
 
@@ -1354,7 +1363,15 @@ impl PromPlanner {
                     }
                 }
                 // add timestamp column
-                exprs.push(self.create_time_index_column_expr()?);
+                let time_index = self.create_time_index_column_expr()?;
+                let time_index_name = time_index.schema_name().to_string();
+                let exists = exprs
+                    .iter()
+                    .any(|expr| expr.schema_name().to_string() == time_index_name);
+
+                if !exists {
+                    exprs.push(time_index);
+                }
 
                 Ok(exprs)
             }
@@ -1400,6 +1417,21 @@ impl PromPlanner {
                 Ok(exprs)
             }
         }
+    }
+
+    /// Deduplicates group expressions by their schema names while preserving the first occurrence order.
+    fn dedup_group_exprs_by_name(exprs: Vec<DfExpr>) -> Vec<DfExpr> {
+        let mut seen = HashSet::new();
+        let mut deduped = Vec::with_capacity(exprs.len());
+
+        for expr in exprs {
+            let name = expr.schema_name().to_string();
+            if seen.insert(name.clone()) {
+                deduped.push(expr);
+            }
+        }
+
+        deduped
     }
 
     // TODO(ruihang): ignore `MetricNameLabel` (`__name__`) matcher
