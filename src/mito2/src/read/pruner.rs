@@ -23,6 +23,7 @@ use common_telemetry::debug;
 use smallvec::SmallVec;
 use snafu::ResultExt;
 use store_api::region_engine::PartitionRange;
+use store_api::storage::FileId;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
@@ -266,7 +267,7 @@ impl Pruner {
         partition_metrics: &PartitionMetrics,
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<Arc<FileRangeBuilder>> {
-        // Fast path: check cache
+        // Fast path: checks cache
         {
             let entry = self.inner.file_entries[file_index].lock().unwrap();
             if let Some(builder) = &entry.builder {
@@ -275,13 +276,11 @@ impl Pruner {
             }
         }
 
-        // Slow path: route to worker by file_id % num_workers
         reader_metrics.filter_metrics.pruner_cache_miss += 1;
         let prune_start = Instant::now();
         let file = &self.inner.stream_ctx.input.files[file_index];
-        let file_id = file.file_id().file_id(); // RegionFileId -> FileId
-        let file_id_hash = Uuid::from(file_id).as_u128() as usize;
-        let worker_idx = file_id_hash % self.inner.num_workers;
+        let file_id = file.file_id().file_id();
+        let worker_idx = self.get_worker_idx(file_id);
 
         let (response_tx, response_rx) = oneshot::channel();
         let request = PruneRequest {
@@ -290,20 +289,19 @@ impl Pruner {
             partition_metrics: Some(partition_metrics.clone()),
         };
 
-        // Send request to worker
         let result = if self.worker_senders[worker_idx].send(request).await.is_err() {
             common_telemetry::warn!("Worker channel closed, falling back to direct pruning");
-            // Worker channel closed, fall back to direct pruning
+            // Worker channel closed, falls back to direct pruning
             self.prune_file_directly(file_index, reader_metrics).await
         } else {
-            // Wait for response
+            // Waits for response
             match response_rx.await {
                 Ok(result) => result,
                 Err(_) => {
                     common_telemetry::warn!(
                         "Response channel closed, falling back to direct pruning"
                     );
-                    // Channel closed, fall back to direct pruning
+                    // Channel closed, falls back to direct pruning
                     self.prune_file_directly(file_index, reader_metrics).await
                 }
             }
@@ -318,7 +316,7 @@ impl Pruner {
         file_index: usize,
         partition_metrics: Option<PartitionMetrics>,
     ) {
-        // Fast path: check cache
+        // Fast path: checks cache
         {
             let entry = self.inner.file_entries[file_index].lock().unwrap();
             if entry.builder.is_some() {
@@ -326,11 +324,9 @@ impl Pruner {
             }
         }
 
-        // Slow path: route to worker by file_id % num_workers
         let file = &self.inner.stream_ctx.input.files[file_index];
-        let file_id = file.file_id().file_id(); // RegionFileId -> FileId
-        let file_id_hash = Uuid::from(file_id).as_u128() as usize;
-        let worker_idx = file_id_hash % self.inner.num_workers;
+        let file_id = file.file_id().file_id();
+        let worker_idx = self.get_worker_idx(file_id);
 
         let request = PruneRequest {
             file_index,
@@ -338,8 +334,14 @@ impl Pruner {
             partition_metrics,
         };
 
-        // Send request to worker
+        // Sends request to worker
         let _ = self.worker_senders[worker_idx].try_send(request);
+    }
+
+    fn get_worker_idx(&self, file_id: FileId) -> usize {
+        let file_id_hash = Uuid::from(file_id).as_u128() as usize;
+        let worker_idx = file_id_hash % self.inner.num_workers;
+        worker_idx
     }
 
     /// Prunes a file directly without going through a worker.
@@ -359,7 +361,7 @@ impl Pruner {
 
         let arc_builder = Arc::new(builder);
 
-        // Cache the builder
+        // Caches the builder
         {
             let mut entry = self.inner.file_entries[file_index].lock().unwrap();
             if entry.builder.is_none() {
