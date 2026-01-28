@@ -97,7 +97,7 @@ pub(crate) fn scan_config(
 pub async fn setup_stream_to_json_test(origin_path: &str, threshold: impl Fn(usize) -> usize) {
     let store = test_store("/");
 
-    let schema = test_basic_schema();
+    let schema = basic_schema_with_time_format();
 
     let json_opener = JsonOpener::new(
         test_util::TEST_BATCH_SIZE,

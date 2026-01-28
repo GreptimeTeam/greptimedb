@@ -66,15 +66,9 @@ impl TryFrom<&HashMap<String, String>> for JsonFormat {
                     .build()
                 })?);
         };
-        if let Some(timestamp_format) = value.get("timestamp_format") {
-            format.timestamp_format = Some(timestamp_format.clone());
-        }
-        if let Some(time_format) = value.get("time_format") {
-            format.time_format = Some(time_format.clone());
-        }
-        if let Some(date_format) = value.get("date_format") {
-            format.date_format = Some(date_format.clone());
-        }
+        format.timestamp_format = value.get("timestamp_format").cloned();
+        format.time_format = value.get("time_format").cloned();
+        format.date_format = value.get("date_format").cloned();
         Ok(format)
     }
 }
