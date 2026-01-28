@@ -1590,7 +1590,8 @@ impl PromPlanner {
 
         let logical_table = self.table_from_source(&provider)?;
 
-        let mut curr_relation = table_ref.clone();
+        // Try to rewrite the table scan to physical table scan if possible.
+        let mut maybe_phy_table_ref = table_ref.clone();
         let mut scan_provider = provider;
         let mut table_id_filter: Option<u32> = None;
 
@@ -1639,7 +1640,7 @@ impl PromPlanner {
 
                 if has_table_id && has_tsid {
                     scan_provider = physical_provider;
-                    curr_relation = physical_table_ref;
+                    maybe_phy_table_ref = physical_table_ref;
                     table_id_filter = Some(logical_table.table_info().ident.table_id);
                 }
             }
@@ -1677,7 +1678,7 @@ impl PromPlanner {
             .schema()
             .timestamp_column()
             .with_context(|| TimeIndexNotFoundSnafu {
-                table: curr_relation.to_quoted_string(),
+                table: maybe_phy_table_ref.to_quoted_string(),
             })?
             .data_type
             == ConcreteDataType::timestamp_millisecond_datatype();
@@ -1687,7 +1688,7 @@ impl PromPlanner {
             required_columns.insert(DATA_SCHEMA_TABLE_ID_COLUMN_NAME.to_string());
             required_columns.insert(self.ctx.time_index_column.clone().with_context(|| {
                 TimeIndexNotFoundSnafu {
-                    table: curr_relation.to_quoted_string(),
+                    table: maybe_phy_table_ref.to_quoted_string(),
                 }
             })?);
             for col in &scan_tag_columns {
@@ -1715,7 +1716,7 @@ impl PromPlanner {
         };
 
         let mut scan_plan =
-            LogicalPlanBuilder::scan(curr_relation.clone(), scan_provider, scan_projection)
+            LogicalPlanBuilder::scan(maybe_phy_table_ref.clone(), scan_provider, scan_projection)
                 .context(DataFusionPlanningSnafu)?
                 .build()
                 .context(DataFusionPlanningSnafu)?;
@@ -1731,10 +1732,6 @@ impl PromPlanner {
                 .context(DataFusionPlanningSnafu)?
                 .build()
                 .context(DataFusionPlanningSnafu)?;
-            // The current plan now uses the logical table name as relation;
-            // keep qualifiers in follow-up projections consistent with that
-            // alias.
-            curr_relation = table_ref;
         }
 
         if !is_time_index_ms {
@@ -1751,7 +1748,7 @@ impl PromPlanner {
                     self.ctx
                         .use_tsid
                         .then_some(DfExpr::Column(Column::new(
-                            Some(curr_relation.clone()),
+                            Some(table_ref.clone()),
                             DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
                         )))
                         .into_iter(),
@@ -1761,13 +1758,13 @@ impl PromPlanner {
                         expr: Box::new(self.create_time_index_column_expr()?),
                         data_type: ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
                     })),
-                    relation: Some(curr_relation.clone()),
+                    relation: Some(table_ref.clone()),
                     name: self
                         .ctx
                         .time_index_column
                         .as_ref()
                         .with_context(|| TimeIndexNotFoundSnafu {
-                            table: curr_relation.to_quoted_string(),
+                            table: table_ref.to_quoted_string(),
                         })?
                         .clone(),
                     metadata: None,
