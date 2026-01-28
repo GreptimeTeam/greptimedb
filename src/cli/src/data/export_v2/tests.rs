@@ -320,3 +320,116 @@ async fn export_import_v2_schema_parity_e2e() -> Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+#[ignore]
+async fn import_v2_use_ddl_dry_run_e2e() -> Result<()> {
+    let addr = env::var("GREPTIME_ADDR").unwrap_or_else(|_| "127.0.0.1:4000".to_string());
+    let catalog = env::var("GREPTIME_CATALOG").unwrap_or_else(|_| "greptime".to_string());
+    let auth_basic = env::var("GREPTIME_AUTH_BASIC").ok();
+
+    let database_client = DatabaseClient::new(
+        addr.clone(),
+        catalog.clone(),
+        auth_basic.clone(),
+        Duration::from_secs(60),
+        None,
+        false,
+    );
+
+    database_client
+        .sql_in_public("DROP DATABASE IF EXISTS test_db")
+        .await?;
+    database_client
+        .sql_in_public("CREATE DATABASE test_db")
+        .await?;
+    database_client
+        .sql(
+            "CREATE TABLE metrics (\
+                ts TIMESTAMP TIME INDEX, \
+                host STRING PRIMARY KEY, \
+                cpu DOUBLE DEFAULT 0.0, \
+                region_name STRING \
+            ) ENGINE = mito WITH (ttl='7d', 'compaction.type'='twcs')",
+            "test_db",
+        )
+        .await?;
+    database_client
+        .sql(
+            "CREATE TABLE logs (\
+                ts TIMESTAMP TIME INDEX, \
+                app STRING PRIMARY KEY, \
+                msg STRING NOT NULL COMMENT 'log message' \
+            ) ENGINE = mito",
+            "test_db",
+        )
+        .await?;
+
+    let src_dir = tempdir().context(FileIoSnafu)?;
+    let src_uri = Url::from_directory_path(src_dir.path())
+        .map_err(|_| {
+            InvalidArgumentsSnafu {
+                msg: "invalid temp dir path".to_string(),
+            }
+            .build()
+        })?
+        .to_string();
+
+    let mut export_args = vec![
+        "export-v2-create",
+        "--addr",
+        &addr,
+        "--to",
+        &src_uri,
+        "--catalog",
+        &catalog,
+        "--schemas",
+        "test_db",
+        "--schema-only",
+        "--include-ddl",
+    ];
+    if let Some(auth) = &auth_basic {
+        export_args.push("--auth-basic");
+        export_args.push(auth);
+    }
+    let export_cmd = ExportCreateCommand::parse_from(export_args);
+    export_cmd
+        .build()
+        .await
+        .context(OtherSnafu)?
+        .do_work()
+        .await
+        .context(OtherSnafu)?;
+
+    let mut import_args = vec![
+        "import-v2",
+        "--addr",
+        &addr,
+        "--from",
+        &src_uri,
+        "--catalog",
+        &catalog,
+        "--schemas",
+        "test_db",
+        "--use-ddl",
+        "--dry-run",
+    ];
+    if let Some(auth) = &auth_basic {
+        import_args.push("--auth-basic");
+        import_args.push(auth);
+    }
+    let import_cmd = ImportV2Command::parse_from(import_args);
+    import_cmd
+        .build()
+        .await
+        .context(OtherSnafu)?
+        .do_work()
+        .await
+        .context(OtherSnafu)?;
+
+    database_client
+        .sql_in_public("DROP DATABASE IF EXISTS test_db")
+        .await?;
+
+    Ok(())
+}
