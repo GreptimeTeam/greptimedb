@@ -121,11 +121,32 @@ lazy_static! {
     /// Duration to convert prometheus write request to gRPC request.
     pub static ref METRIC_HTTP_PROM_STORE_CONVERT_ELAPSED: Histogram = METRIC_HTTP_PROM_STORE_CODEC_ELAPSED
         .with_label_values(&["convert"]);
-        /// The samples count of Prometheus remote write.
+    /// The samples count of Prometheus remote write.
     pub static ref PROM_STORE_REMOTE_WRITE_SAMPLES: IntCounterVec = register_int_counter_vec!(
         "greptime_servers_prometheus_remote_write_samples",
         "frontend prometheus remote write samples",
         &[METRIC_DB_LABEL]
+    )
+    .unwrap();
+    pub static ref PENDING_BATCHES: IntGauge = register_int_gauge!(
+        "greptime_prom_store_pending_batches",
+        "Number of pending batches waiting to be flushed"
+    )
+    .unwrap();
+    pub static ref PENDING_ROWS: IntGauge = register_int_gauge!(
+        "greptime_prom_store_pending_rows",
+        "Number of pending rows waiting to be flushed"
+    )
+    .unwrap();
+    pub static ref FLUSH_TOTAL: IntCounter = register_int_counter!(
+        "greptime_prom_store_flush_total",
+        "Total number of batch flushes"
+    )
+    .unwrap();
+    pub static ref FLUSH_ROWS: Histogram = register_histogram!(
+        "greptime_prom_store_flush_rows",
+        "Number of rows per flush",
+        vec![100.0, 1000.0, 10000.0, 50000.0, 100000.0, 500000.0]
     )
     .unwrap();
     /// Http prometheus read duration per database.
