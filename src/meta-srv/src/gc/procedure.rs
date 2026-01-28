@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -331,6 +331,59 @@ impl BatchGcProcedure {
         Ok(related_regions)
     }
 
+    /// Check if a region's mapping can be safely removed.
+    ///
+    /// A mapping can be removed only if all reachable destinations are in the cleanable set.
+    /// If we can reach any destination that is NOT in the cleanable set, we preserve the mapping.
+    ///
+    /// This is conservative but safe - we keep extra mappings rather than risk losing track
+    /// of where files were moved. Extra mappings don't cause problems as long as they don't
+    /// grow indefinitely.
+    ///
+    /// This handles:
+    /// - **Chain A → B → C** where batch is [A, B]:
+    ///   - A → B: B is cleanable, but B → C leads to C which is not cleanable → preserve A
+    ///   - B → C: C is not cleanable → preserve B
+    /// - **Cycle A → B → C → A** where all are cleanable: all can be removed
+    fn can_remove_mapping(
+        src: &RegionId,
+        src_to_dst: &BTreeMap<RegionId, BTreeSet<RegionId>>,
+        cleanable: &HashSet<RegionId>,
+    ) -> bool {
+        let mut visited = HashSet::new();
+        let mut queue = VecDeque::new();
+
+        if let Some(dsts) = src_to_dst.get(src) {
+            for dst in dsts {
+                queue.push_back(*dst);
+            }
+        } else {
+            return true;
+        }
+
+        while let Some(current) = queue.pop_front() {
+            if !visited.insert(current) {
+                continue;
+            }
+
+            if cleanable.contains(&current) {
+                // Cleanable destination - continue traversing its downstream
+                if let Some(dsts) = src_to_dst.get(&current) {
+                    for dst in dsts {
+                        if !visited.contains(dst) {
+                            queue.push_back(*dst);
+                        }
+                    }
+                }
+            } else {
+                // Non-cleanable destination found - preserve the mapping
+                return false;
+            }
+        }
+
+        true
+    }
+
     /// Clean up region repartition info in kvbackend after GC
     /// according to cross reference in `FileRefsManifest`.
     async fn cleanup_region_repartition(&self, procedure_ctx: &ProcedureContext) -> Result<()> {
@@ -401,6 +454,12 @@ impl BatchGcProcedure {
                 .filter(|r| r.table_id() == table_id)
                 .collect();
 
+            let cleanable_regions: HashSet<RegionId> = batch_src_regions
+                .iter()
+                .copied()
+                .filter(|r| !cross_refs.contains_key(r) && !tmp_refs.contains(r))
+                .collect();
+
             // Merge targets: only the batch regions of this table. This avoids touching unrelated
             // repart entries; we just reconcile mappings for regions involved in the current GC
             // cycle for this table.
@@ -411,49 +470,30 @@ impl BatchGcProcedure {
                 let has_tmp_ref = tmp_refs.contains(&src_region);
 
                 if let Some(dst_regions) = cross_dst {
-                    let mut set = BTreeSet::new();
+                    // Region has cross-region refs - update mapping to include new destinations.
+                    // This is defensive: if get_file_ref returns cross refs for this region,
+                    // we should include them in the mapping.
+                    let mut set = new_value
+                        .src_to_dst
+                        .get(&src_region)
+                        .cloned()
+                        .unwrap_or_default();
                     set.extend(dst_regions.iter().copied());
                     new_value.src_to_dst.insert(src_region, set);
                 } else if has_tmp_ref {
-                    // Keep a tombstone entry with an empty set so dropped regions that still
-                    // have tmp refs are preserved; removing it would lose the repartition trace.
-                    new_value.src_to_dst.insert(src_region, BTreeSet::new());
+                    // Region has tmp refs - preserve the existing mapping.
+                    // The mapping is needed so future GC can find where files were moved.
+                    // Do nothing - keep the existing mapping in new_value.
                 } else {
-                    // Before removing a mapping, we must check if any transitive destination
-                    // still has downstream mappings. This handles the chain case:
-                    //
-                    // Example: A → B → C (files moved from A to B, then from B to C)
-                    //   - Stored mappings: A → {B}, B → {C}
-                    //   - GC batch only includes [A]
-                    //   - A has no cross_refs or tmp_refs (appears clean)
-                    //
-                    // Problem: If we remove A → {B} now, future GC of A won't find C
-                    // (the transitive destination where A's files may still exist).
-                    //
-                    // Solution: Check if any direct destination (B) still has its own
-                    // downstream mapping (B → {C}). If so, the chain is still active
-                    // and we must preserve A → {B} as a tombstone.
-                    //
-                    // Note: We only check direct destinations (not full transitive closure)
-                    // because:
-                    //   1. If B → {C} exists, B's cleanup will preserve it until C is clean
-                    //   2. This creates a "domino effect" - each edge is preserved until
-                    //      its direct downstream is clean
-                    //   3. Eventually the entire chain collapses when the leaf is cleaned
-                    //
-                    // We use `original_src_to_dst` (the snapshot before any modifications) to
-                    // check if a dst region still has downstream mappings. This ensures the
-                    // check is order-independent: even if B is processed before A and removed
-                    // from new_value, A's check still sees B in the original snapshot.
-                    let direct_dsts = original_src_to_dst.get(&src_region);
-                    let any_dst_has_downstream = direct_dsts
-                        .map(|dsts| dsts.iter().any(|dst| original_src_to_dst.contains_key(dst)))
-                        .unwrap_or(false);
+                    let can_remove = Self::can_remove_mapping(
+                        &src_region,
+                        &original_src_to_dst,
+                        &cleanable_regions,
+                    );
 
-                    if !any_dst_has_downstream {
+                    if can_remove {
                         new_value.src_to_dst.remove(&src_region);
                     }
-                    // Otherwise keep original mapping (e.g., A → {B}) unchanged
                 }
             }
 

@@ -101,15 +101,24 @@ CREATE TABLE test_cleanup_repartition (
     assert!(matches!(status, Status::Done { .. }));
 
     let repart_after = repart_mgr.get(table_id).await.unwrap().unwrap();
+    // Mappings are updated to include new cross refs when region has cross refs
     assert_eq!(
         repart_after.src_to_dst.get(&region_a),
-        Some(&BTreeSet::from([dst_a_new]))
+        Some(&BTreeSet::from([dst_a_initial, dst_a_new])),
+        "A's mapping should include both initial and new destinations"
     );
     assert_eq!(
         repart_after.src_to_dst.get(&region_b),
-        Some(&BTreeSet::new())
+        Some(&BTreeSet::from([dst_b_initial])),
+        "B's mapping should be preserved (region has tmp refs)"
     );
-    assert!(!repart_after.src_to_dst.contains_key(&region_c));
+    // C has no cross refs or tmp refs, but mapping is preserved
+    // (extra mappings are OK as long as they don't grow indefinitely)
+    assert_eq!(
+        repart_after.src_to_dst.get(&region_c),
+        Some(&BTreeSet::from([dst_c_initial])),
+        "C's mapping is preserved (no harm in keeping extra mappings)"
+    );
 }
 
 #[tokio::test]
@@ -194,15 +203,30 @@ async fn test_cleanup_region_repartition_preserve_uninvolved_entries() {
     assert!(matches!(status, Status::Done { .. }));
 
     let repart_after = repart_mgr.get(table_id).await.unwrap().unwrap();
+    // A has cross refs - mapping is updated to include new destinations
     assert_eq!(
         repart_after.src_to_dst.get(&region_a),
-        Some(&BTreeSet::from([dst_a_new]))
+        Some(&BTreeSet::from([dst_a_initial, dst_a_new])),
+        "A's mapping should include both initial and new destinations"
     );
-    assert_eq!(repart_after.src_to_dst.get(&region_b), None);
-    assert!(!repart_after.src_to_dst.contains_key(&region_c));
+    // B has tmp refs (empty) - mapping is preserved
+    assert_eq!(
+        repart_after.src_to_dst.get(&region_b),
+        Some(&BTreeSet::from([dst_b_initial])),
+        "B's mapping should be preserved (has tmp refs)"
+    );
+    // C has no cross refs or tmp refs, but mapping is preserved
+    // (extra mappings are OK as long as they don't grow indefinitely)
+    assert_eq!(
+        repart_after.src_to_dst.get(&region_c),
+        Some(&BTreeSet::from([dst_c_initial])),
+        "C's mapping is preserved (no harm in keeping extra mappings)"
+    );
+    // D is not in batch - mapping is preserved
     assert_eq!(
         repart_after.src_to_dst.get(&region_d),
-        Some(&BTreeSet::from([dst_d_initial]))
+        Some(&BTreeSet::from([dst_d_initial])),
+        "D's mapping should be preserved (not in batch)"
     );
 }
 
@@ -278,10 +302,17 @@ async fn test_cleanup_region_repartition_remove_when_tmp_refs_empty() {
     assert!(matches!(status, Status::Done { .. }));
 
     let repart_after = repart_mgr.get(table_id).await.unwrap().unwrap();
-    assert!(!repart_after.src_to_dst.contains_key(&region_a));
+    // A has tmp refs (empty) - mapping is preserved, not removed
+    assert_eq!(
+        repart_after.src_to_dst.get(&region_a),
+        Some(&BTreeSet::from([dst_a_initial])),
+        "A's mapping should be preserved (has tmp refs even if empty)"
+    );
+    // B is not in batch - mapping is preserved
     assert_eq!(
         repart_after.src_to_dst.get(&region_b),
-        Some(&BTreeSet::from([dst_b_initial]))
+        Some(&BTreeSet::from([dst_b_initial])),
+        "B's mapping should be preserved (not in batch)"
     );
 }
 
@@ -307,12 +338,7 @@ async fn test_cleanup_region_repartition_transitive_chain() {
 
     let table = instance
         .catalog_manager()
-        .table(
-            "greptime",
-            "public",
-            "test_cleanup_repartition_chain",
-            None,
-        )
+        .table("greptime", "public", "test_cleanup_repartition_chain", None)
         .await
         .unwrap()
         .unwrap();
@@ -356,10 +382,82 @@ async fn test_cleanup_region_repartition_transitive_chain() {
     assert_eq!(
         repart_after.src_to_dst.get(&region_a),
         Some(&BTreeSet::from([region_b])),
-        "A → {{B}} should be preserved because B had downstream (domino effect)"
+        "A → {{B}} should be preserved because B has downstream to C outside batch"
     );
+    assert_eq!(
+        repart_after.src_to_dst.get(&region_b),
+        Some(&BTreeSet::from([region_c])),
+        "B → {{C}} should be preserved because C is not in batch (future GC needs this)"
+    );
+}
+
+#[tokio::test]
+async fn test_cleanup_region_repartition_cycle() {
+    let _ = dotenv::dotenv();
+    let (test_context, _guard) = distributed_with_gc(&StorageType::File).await;
+    let instance = test_context.frontend();
+    let metasrv = test_context.metasrv();
+
+    let create_table_sql = r#"
+        CREATE TABLE test_cleanup_repartition_cycle (
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE,
+            host STRING
+        )PARTITION ON COLUMNS (host) (
+   host < 'a',
+   host >= 'a' AND host < 'm',
+   host >= 'm'
+ ) WITH (append_mode = 'true')
+    "#;
+    execute_sql(&instance, create_table_sql).await;
+
+    let table = instance
+        .catalog_manager()
+        .table("greptime", "public", "test_cleanup_repartition_cycle", None)
+        .await
+        .unwrap()
+        .unwrap();
+    let table_id = table.table_info().table_id();
+
+    let (_routes, regions) = get_table_route(metasrv.table_metadata_manager(), table_id).await;
+    let base_region = *regions.first().expect("table has at least one region");
+
+    let region_a = base_region;
+    let region_b = RegionId::new(table_id, base_region.region_number() + 1);
+    let region_c = RegionId::new(table_id, base_region.region_number() + 2);
+
+    let repart_mgr = metasrv.table_metadata_manager().table_repart_manager();
+    let current = repart_mgr.get_with_raw_bytes(table_id).await.unwrap();
+    let mut initial_value = TableRepartValue::new();
+    initial_value.update_mappings(region_a, &[region_b]);
+    initial_value.update_mappings(region_b, &[region_c]);
+    initial_value.update_mappings(region_c, &[region_a]);
+    repart_mgr
+        .upsert_value(table_id, current, &initial_value)
+        .await
+        .unwrap();
+
+    let manifest = FileRefsManifest::default();
+
+    let regions_to_gc = vec![region_a, region_b, region_c];
+
+    let mut procedure = BatchGcProcedure::new_update_repartition_for_test(
+        metasrv.mailbox().clone(),
+        metasrv.table_metadata_manager().clone(),
+        metasrv.options().grpc.server_addr.clone(),
+        regions_to_gc,
+        manifest,
+        Duration::from_secs(5),
+    );
+
+    let procedure_ctx = new_test_procedure_context();
+    let status = procedure.execute(&procedure_ctx).await.unwrap();
+    assert!(matches!(status, Status::Done { .. }));
+
+    let repart_after = repart_mgr.get(table_id).await.unwrap();
     assert!(
-        !repart_after.src_to_dst.contains_key(&region_b),
-        "B → {{C}} should be removed because C has no downstream"
+        repart_after.is_none() || repart_after.as_ref().unwrap().src_to_dst.is_empty(),
+        "All cycle mappings should be removed when all regions are in GC batch with no refs. Got: {:?}",
+        repart_after
     );
 }
