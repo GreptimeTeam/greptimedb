@@ -17,6 +17,7 @@ use std::io::BufReader;
 use std::str::FromStr;
 
 use arrow::json;
+use arrow::json::WriterBuilder;
 use arrow::json::reader::{ValueIter, infer_json_schema_from_iterator};
 use arrow::json::writer::LineDelimited;
 use arrow::record_batch::RecordBatch;
@@ -35,10 +36,13 @@ use crate::error::{self, Result};
 use crate::file_format::{self, FileFormat, stream_to_file};
 use crate::share_buffer::SharedBuffer;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JsonFormat {
     pub schema_infer_max_record: Option<usize>,
     pub compression_type: CompressionType,
+    pub timestamp_format: Option<String>,
+    pub time_format: Option<String>,
+    pub date_format: Option<String>,
 }
 
 impl TryFrom<&HashMap<String, String>> for JsonFormat {
@@ -61,6 +65,9 @@ impl TryFrom<&HashMap<String, String>> for JsonFormat {
                     .build()
                 })?);
         };
+        format.timestamp_format = value.get("timestamp_format").cloned();
+        format.time_format = value.get("time_format").cloned();
+        format.date_format = value.get("date_format").cloned();
         Ok(format)
     }
 }
@@ -70,6 +77,9 @@ impl Default for JsonFormat {
         Self {
             schema_infer_max_record: Some(file_format::DEFAULT_SCHEMA_INFER_MAX_RECORD),
             compression_type: CompressionType::Uncompressed,
+            timestamp_format: None,
+            time_format: None,
+            date_format: None,
         }
     }
 }
@@ -124,7 +134,19 @@ pub async fn stream_to_json(
         threshold,
         concurrency,
         format.compression_type,
-        json::LineDelimitedWriter::new,
+        |buffer| {
+            let mut builder = WriterBuilder::new();
+            if let Some(timestamp_format) = &format.timestamp_format {
+                builder = builder.with_timestamp_format(timestamp_format.to_owned());
+            }
+            if let Some(time_format) = &format.time_format {
+                builder = builder.with_time_format(time_format.to_owned());
+            }
+            if let Some(date_format) = &format.date_format {
+                builder = builder.with_date_format(date_format.to_owned());
+            }
+            builder.build::<_, LineDelimited>(buffer)
+        },
     )
     .await
 }
@@ -218,6 +240,7 @@ mod tests {
             JsonFormat {
                 compression_type: CompressionType::Zstd,
                 schema_infer_max_record: Some(2000),
+                ..JsonFormat::default()
             }
         );
     }
