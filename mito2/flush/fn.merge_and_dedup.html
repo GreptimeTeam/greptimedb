@@ -1,0 +1,49 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Merges multiple record batch iterators and applies deduplication based on the specified mode."><title>merge_and_dedup in mito2::flush - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-e56847b5.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="mito2" data-themes="" data-resource-suffix="" data-rustdoc-version="1.92.0-nightly (fa3155a64 2025-09-30)" data-channel="nightly" data-search-js="search-e256b49e.js" data-stringdex-js="stringdex-828709d0.js" data-settings-js="settings-c38705f0.js" ><script src="../../static.files/storage-e2aeef58.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../static.files/main-ce535bd0.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-263c88ec.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc fn"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">merge_and_dedup</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../mito2/index.html">mito2</a><span class="version">1.0.0-beta.4</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">merge_<wbr>and_<wbr>dedup</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#arguments" title="Arguments">Arguments</a></li><li><a href="#returns" title="Returns">Returns</a></li><li><a href="#behavior" title="Behavior">Behavior</a></li><li><a href="#examples" title="Examples">Examples</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="index.html">In mito2::<wbr>flush</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">mito2</a>::<wbr><a href="index.html">flush</a></div><h1>Function <span class="fn">merge_<wbr>and_<wbr>dedup</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/mito2/flush.rs.html#901-925">Source</a> </span></div><pre class="rust item-decl"><code>pub fn merge_and_dedup(
+    schema: &amp;SchemaRef,
+    append_mode: <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.bool.html">bool</a>,
+    merge_mode: <a class="enum" href="../region/options/enum.MergeMode.html" title="enum mito2::region::options::MergeMode">MergeMode</a>,
+    field_column_start: <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.usize.html">usize</a>,
+    input_iters: <a class="struct" href="https://doc.rust-lang.org/nightly/alloc/vec/struct.Vec.html" title="struct alloc::vec::Vec">Vec</a>&lt;<a class="type" href="../memtable/type.BoxedRecordBatchIterator.html" title="type mito2::memtable::BoxedRecordBatchIterator">BoxedRecordBatchIterator</a>&gt;,
+) -&gt; <a class="type" href="../error/type.Result.html" title="type mito2::error::Result">Result</a>&lt;<a class="type" href="../memtable/type.BoxedRecordBatchIterator.html" title="type mito2::memtable::BoxedRecordBatchIterator">BoxedRecordBatchIterator</a>&gt;</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Merges multiple record batch iterators and applies deduplication based on the specified mode.</p>
+<p>This function is used during the flush process to combine data from multiple memtable ranges
+into a single stream while handling duplicate records according to the configured merge strategy.</p>
+<h2 id="arguments"><a class="doc-anchor" href="#arguments">§</a>Arguments</h2>
+<ul>
+<li><code>schema</code> - The Arrow schema reference that defines the structure of the record batches</li>
+<li><code>append_mode</code> - When true, no deduplication is performed and all records are preserved.
+This is used for append-only workloads where duplicate handling is not required.</li>
+<li><code>merge_mode</code> - The strategy used for deduplication when not in append mode:
+<ul>
+<li><code>MergeMode::LastRow</code>: Keeps the last record for each primary key</li>
+<li><code>MergeMode::LastNonNull</code>: Keeps the last non-null values for each field</li>
+</ul>
+</li>
+<li><code>field_column_start</code> - The starting column index for fields in the record batch.
+Used when <code>MergeMode::LastNonNull</code> to identify which columns
+contain field values versus primary key columns.</li>
+<li><code>input_iters</code> - A vector of record batch iterators to be merged and deduplicated</li>
+</ul>
+<h2 id="returns"><a class="doc-anchor" href="#returns">§</a>Returns</h2>
+<p>Returns a boxed record batch iterator that yields the merged and potentially deduplicated
+record batches.</p>
+<h2 id="behavior"><a class="doc-anchor" href="#behavior">§</a>Behavior</h2>
+<ol>
+<li>Creates a <code>FlatMergeIterator</code> to merge all input iterators in sorted order based on
+primary key and timestamp</li>
+<li>If <code>append_mode</code> is true, returns the merge iterator directly without deduplication</li>
+<li>If <code>append_mode</code> is false, wraps the merge iterator with a <code>FlatDedupIterator</code> that
+applies the specified merge mode:
+<ul>
+<li><code>LastRow</code>: Removes duplicate rows, keeping only the last one</li>
+<li><code>LastNonNull</code>: Removes duplicates but preserves the last non-null value for each field</li>
+</ul>
+</li>
+</ol>
+<h2 id="examples"><a class="doc-anchor" href="#examples">§</a>Examples</h2>
+<div class="example-wrap ignore"><a href="#" class="tooltip" title="This example is not tested">ⓘ</a><pre class="rust rust-example-rendered"><code><span class="kw">let </span>merged_iter = merge_and_dedup(
+    <span class="kw-2">&amp;</span>schema,
+    <span class="bool-val">false</span>,  <span class="comment">// not append mode, apply dedup
+    </span>MergeMode::LastRow,
+    <span class="number">2</span>,  <span class="comment">// fields start at column 2 after primary key columns
+    </span><span class="macro">vec!</span>[iter1, iter2, iter3],
+)<span class="question-mark">?</span>;</code></pre></div></div></details></section></div></main></body></html>

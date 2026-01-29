@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["absent_over_time","avg_over_time","count_over_time","last_over_time","max_over_time","min_over_time","present_over_time","stddev_over_time","stdvar_over_time","sum_over_time"],"struct":["AbsentOverTime","AvgOverTime","CountOverTime","LastOverTime","MaxOverTime","MinOverTime","PresentOverTime","StddevOverTime","StdvarOverTime","SumOverTime"]};

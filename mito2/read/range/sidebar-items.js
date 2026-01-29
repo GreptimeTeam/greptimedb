@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["ALL_ROW_GROUPS"],"fn":["file_range_counts","group_ranges_for_seq_scan","maybe_split_ranges_for_seq_scan"],"struct":["FileBuilderEntry","FileRangeBuilder","MemRangeBuilder","RangeBuilderList","RangeMeta","RowGroupIndex","SourceIndex"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["NAME"],"fn":["add_thousand_separators","format_number_float","format_number_integer","get_decimal_places","get_float_value"],"struct":["FormatFunction"]};
