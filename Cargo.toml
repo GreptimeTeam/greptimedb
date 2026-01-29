@@ -220,7 +220,7 @@ sea-query = "0.32"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["float_roundtrip"] }
 serde_with = "3"
-simd-json = "0.15"
+simd-json = "0.16"
 similar-asserts = "1.6.0"
 smallvec = { version = "1", features = ["serde"] }
 snafu = "0.8"
