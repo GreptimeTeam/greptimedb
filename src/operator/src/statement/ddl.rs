@@ -54,7 +54,7 @@ use common_time::{Timestamp, Timezone};
 use datafusion_common::tree_node::TreeNodeVisitor;
 use datafusion_expr::LogicalPlan;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{ColumnSchema, RawSchema, Schema};
+use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::value::Value;
 use datatypes::vectors::{StringVector, VectorRef};
 use humantime::parse_duration;
@@ -83,7 +83,7 @@ use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::TableRef;
 use table::dist_table::DistTable;
-use table::metadata::{self, RawTableInfo, RawTableMeta, TableId, TableInfo, TableType};
+use table::metadata::{self, RawTableInfo, TableId, TableInfo, TableMeta, TableType};
 use table::requests::{
     AlterKind, AlterTableRequest, COMMENT_KEY, DDL_TIMEOUT, DDL_WAIT, TableOptions,
 };
@@ -898,7 +898,7 @@ impl StatementExecutor {
             catalog_name: expr.catalog_name.clone(),
             schema_name: expr.schema_name.clone(),
             // The meta doesn't make sense for views, so using a default one.
-            meta: RawTableMeta::default(),
+            meta: TableMeta::empty(),
             table_type: TableType::View,
         };
 
@@ -2038,15 +2038,8 @@ pub fn create_table_info(
         let _ = column_name_to_index_map.insert(column.name.clone(), idx);
     }
 
-    let timestamp_index = column_name_to_index_map
-        .get(&create_table.time_index)
-        .cloned();
-
-    let raw_schema = RawSchema {
-        column_schemas: column_schemas.clone(),
-        timestamp_index,
-        version: 0,
-    };
+    let next_column_id = column_schemas.len() as u32;
+    let raw_schema = Arc::new(Schema::new(column_schemas));
 
     let primary_key_indices = create_table
         .primary_keys
@@ -2072,12 +2065,12 @@ pub fn create_table_info(
     let table_options = TableOptions::try_from_iter(&create_table.table_options)
         .context(UnrecognizedTableOptionSnafu)?;
 
-    let meta = RawTableMeta {
+    let meta = TableMeta {
         schema: raw_schema,
         primary_key_indices,
         value_indices: vec![],
         engine: create_table.engine.clone(),
-        next_column_id: column_schemas.len() as u32,
+        next_column_id,
         options: table_options,
         created_on: Utc::now(),
         updated_on: Utc::now(),

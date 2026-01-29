@@ -485,13 +485,13 @@ impl StreamingEngine {
                 .await?
                 .unwrap();
             let meta = table_info.table_info.meta;
+            let schema = meta.schema.column_schemas().to_vec();
             let primary_keys = meta
                 .primary_key_indices
                 .into_iter()
-                .map(|i| meta.schema.column_schemas[i].name.clone())
+                .map(|i| schema[i].name.clone())
                 .collect_vec();
-            let schema = meta.schema.column_schemas;
-            let time_index = meta.schema.timestamp_index;
+            let time_index = meta.schema.timestamp_index();
             Ok(Some((primary_keys, time_index, schema)))
         } else {
             Ok(None)

@@ -52,7 +52,7 @@ fn create_proto_alter_kind(
             let existing_columns: HashSet<_> = table_info
                 .meta
                 .schema
-                .column_schemas
+                .column_schemas()
                 .iter()
                 .map(|col| &col.name)
                 .collect();

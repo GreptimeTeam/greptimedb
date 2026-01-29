@@ -44,7 +44,7 @@ use datafusion::common::ScalarValue;
 use datafusion::prelude::SessionContext;
 use datafusion_expr::{Expr, SortExpr, case, col, lit};
 use datatypes::prelude::*;
-use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, RawSchema, Schema};
+use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, Schema};
 use datatypes::vectors::StringVector;
 use itertools::Itertools;
 use object_store::ObjectStore;
@@ -1203,14 +1203,12 @@ pub async fn infer_file_table_schema(
     object_store: &ObjectStore,
     files: &[String],
     options: &HashMap<String, String>,
-) -> Result<RawSchema> {
+) -> Result<Schema> {
     let format = parse_file_table_format(options)?;
     let merged = infer_schemas(object_store, files, format.as_ref())
         .await
         .context(error::InferSchemaSnafu)?;
-    Ok(RawSchema::from(
-        &Schema::try_from(merged).context(error::ConvertSchemaSnafu)?,
-    ))
+    Schema::try_from(merged).context(error::ConvertSchemaSnafu)
 }
 
 // Converts the file column schemas to table column schemas.

@@ -40,7 +40,7 @@ pub fn build_template_from_raw_table_info(raw_table_info: &RawTableInfo) -> Resu
     let column_defs = raw_table_info
         .meta
         .schema
-        .column_schemas
+        .column_schemas()
         .iter()
         .enumerate()
         .map(|(i, c)| {
@@ -88,7 +88,7 @@ pub fn build_template_from_raw_table_info_for_physical_table(
         .name_to_ids()
         .context(error::MissingColumnIdsSnafu)?;
     let column_metadatas = build_column_metadata_from_table_info(
-        &raw_table_info.meta.schema.column_schemas,
+        raw_table_info.meta.schema.column_schemas(),
         &raw_table_info.meta.primary_key_indices,
         &name_to_ids,
     )?;
