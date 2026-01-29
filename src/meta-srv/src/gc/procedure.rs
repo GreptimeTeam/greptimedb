@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -280,26 +280,115 @@ impl BatchGcProcedure {
     /// The returned map uses the source regions (where those files originally came from) as the key,
     /// and the destination regions (where files are currently stored) as the value.
     /// If a region is not found in the repartition manager, the returned map still have this region as key,
-    /// just empty value
+    /// just empty value.
+    ///
+    /// This function computes the transitive closure of the destination regions:
+    /// for each discovered dst_region, it continues to find get_dst_regions(dst_region)
+    /// until no new regions are discovered.
     async fn find_related_regions(
         &self,
         regions: &[RegionId],
     ) -> Result<HashMap<RegionId, HashSet<RegionId>>> {
         let repart_mgr = self.table_metadata_manager.table_repart_manager();
-        let mut related_regions: HashMap<RegionId, HashSet<RegionId>> = HashMap::new();
-        for src_region in regions {
-            // TODO(discord9): batch get
-            if let Some(dst_regions) = repart_mgr
-                .get_dst_regions(*src_region)
-                .await
-                .context(KvBackendSnafu)?
-            {
-                related_regions.insert(*src_region, dst_regions.into_iter().collect());
-            } else {
-                related_regions.insert(*src_region, Default::default());
+
+        // Batch get all table repartition mappings for the involved tables
+        let table_ids: Vec<_> = regions.iter().map(|r| r.table_id()).collect();
+        let table_reparts = repart_mgr
+            .batch_get(&table_ids)
+            .await
+            .context(KvBackendSnafu)?;
+
+        // Build a combined src_to_dst map from all tables
+        let mut global_src_to_dst: HashMap<RegionId, HashSet<RegionId>> = HashMap::new();
+        for repart in table_reparts.into_iter().flatten() {
+            for (src, dsts) in repart.src_to_dst {
+                global_src_to_dst
+                    .entry(src)
+                    .or_default()
+                    .extend(dsts.into_iter());
             }
         }
+
+        // Compute transitive closure for each source region using in-memory map
+        let mut related_regions: HashMap<RegionId, HashSet<RegionId>> = HashMap::new();
+        for src_region in regions {
+            let mut all_dst_regions: HashSet<RegionId> = HashSet::new();
+            let mut pending: Vec<RegionId> = vec![*src_region];
+
+            while let Some(current) = pending.pop() {
+                if let Some(dst_regions) = global_src_to_dst.get(&current) {
+                    for dst in dst_regions {
+                        // Skip self-references to avoid treating a region as related to itself.
+                        // This prevents cyclic mappings (e.g., A→B→C→A) from causing
+                        // get_snapshot_of_file_refs to scan the region's own manifest
+                        // and producing self-referencing cross_region_refs.
+                        if *dst == *src_region {
+                            continue;
+                        }
+                        if all_dst_regions.insert(*dst) {
+                            pending.push(*dst);
+                        }
+                    }
+                }
+            }
+
+            related_regions.insert(*src_region, all_dst_regions);
+        }
+
         Ok(related_regions)
+    }
+
+    /// Check if a region's mapping can be safely removed.
+    ///
+    /// A mapping can be removed only if all reachable destinations are in the cleanable set.
+    /// If we can reach any destination that is NOT in the cleanable set, we preserve the mapping.
+    ///
+    /// This is conservative but safe - we keep extra mappings rather than risk losing track
+    /// of where files were moved. Extra mappings don't cause problems as long as they don't
+    /// grow indefinitely.
+    ///
+    /// This handles:
+    /// - **Chain A → B → C** where batch is [A, B]:
+    ///   - A → B: B is cleanable, but B → C leads to C which is not cleanable → preserve A
+    ///   - B → C: C is not cleanable → preserve B
+    /// - **Cycle A → B → C → A** where all are cleanable: all can be removed
+    fn can_remove_mapping(
+        src: &RegionId,
+        src_to_dst: &BTreeMap<RegionId, BTreeSet<RegionId>>,
+        cleanable: &HashSet<RegionId>,
+    ) -> bool {
+        let mut visited = HashSet::new();
+        let mut queue = VecDeque::new();
+
+        if let Some(dsts) = src_to_dst.get(src) {
+            for dst in dsts {
+                queue.push_back(*dst);
+            }
+        } else {
+            return true;
+        }
+
+        while let Some(current) = queue.pop_front() {
+            if !visited.insert(current) {
+                continue;
+            }
+
+            if cleanable.contains(&current) {
+                // Cleanable destination - continue traversing its downstream
+                if let Some(dsts) = src_to_dst.get(&current) {
+                    for dst in dsts {
+                        if !visited.contains(dst) {
+                            queue.push_back(*dst);
+                        }
+                    }
+                }
+            } else {
+                // Non-cleanable destination found - preserve the mapping
+                return false;
+            }
+        }
+
+        true
     }
 
     /// Clean up region repartition info in kvbackend after GC
@@ -357,6 +446,11 @@ impl BatchGcProcedure {
                 .map(|v| (**v).clone())
                 .unwrap_or_else(TableRepartValue::new);
 
+            let original_src_to_dst = current
+                .as_ref()
+                .map(|v| v.src_to_dst.clone())
+                .unwrap_or_default();
+
             // We only touch regions involved in this GC batch for the current table to avoid
             // clobbering unrelated repart entries. Start from the batch regions of this table.
             let batch_src_regions: HashSet<RegionId> = self
@@ -365,6 +459,12 @@ impl BatchGcProcedure {
                 .iter()
                 .copied()
                 .filter(|r| r.table_id() == table_id)
+                .collect();
+
+            let cleanable_regions: HashSet<RegionId> = batch_src_regions
+                .iter()
+                .copied()
+                .filter(|r| !cross_refs.contains_key(r) && !tmp_refs.contains(r))
                 .collect();
 
             // Merge targets: only the batch regions of this table. This avoids touching unrelated
@@ -377,15 +477,38 @@ impl BatchGcProcedure {
                 let has_tmp_ref = tmp_refs.contains(&src_region);
 
                 if let Some(dst_regions) = cross_dst {
-                    let mut set = BTreeSet::new();
-                    set.extend(dst_regions.iter().copied());
-                    new_value.src_to_dst.insert(src_region, set);
+                    // Region has cross-region refs - update mapping to include new destinations.
+                    // This is defensive: if get_file_ref returns cross refs for this region,
+                    // we should include them in the mapping.
+                    let mut set = new_value
+                        .src_to_dst
+                        .get(&src_region)
+                        .cloned()
+                        .unwrap_or_default();
+                    // Filter out self-references to avoid creating self-mappings
+                    set.extend(
+                        dst_regions
+                            .iter()
+                            .filter(|&&dst| dst != src_region)
+                            .copied(),
+                    );
+                    if !set.is_empty() {
+                        new_value.src_to_dst.insert(src_region, set);
+                    }
                 } else if has_tmp_ref {
-                    // Keep a tombstone entry with an empty set so dropped regions that still
-                    // have tmp refs are preserved; removing it would lose the repartition trace.
-                    new_value.src_to_dst.insert(src_region, BTreeSet::new());
+                    // Region has tmp refs - preserve the existing mapping.
+                    // The mapping is needed so future GC can find where files were moved.
+                    // Do nothing - keep the existing mapping in new_value.
                 } else {
-                    new_value.src_to_dst.remove(&src_region);
+                    let can_remove = Self::can_remove_mapping(
+                        &src_region,
+                        &original_src_to_dst,
+                        &cleanable_regions,
+                    );
+
+                    if can_remove {
+                        new_value.src_to_dst.remove(&src_region);
+                    }
                 }
             }
 

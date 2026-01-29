@@ -356,8 +356,8 @@ impl TableRepartManager {
             return Ok(());
         }
 
-        if let Some(current) = current {
-            let (txn, _) = self.build_update_txn(table_id, &current, new_value)?;
+        if let Some(current) = &current {
+            let (txn, _) = self.build_update_txn(table_id, current, new_value)?;
             let result = self.kv_backend.txn(txn).await?;
 
             ensure!(
