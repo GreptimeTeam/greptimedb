@@ -38,7 +38,8 @@ use sql::statements::{self, OptionMap};
 use store_api::metric_engine_consts::{is_metric_engine, is_metric_engine_internal_column};
 use table::metadata::{TableInfoRef, TableMeta};
 use table::requests::{
-    COMMENT_KEY as TABLE_COMMENT_KEY, FILE_TABLE_META_KEY, TTL_KEY, WRITE_BUFFER_SIZE_KEY,
+    COMMENT_KEY as TABLE_COMMENT_KEY, FILE_TABLE_META_KEY, SKIP_WAL_KEY, TTL_KEY,
+    WRITE_BUFFER_SIZE_KEY,
 };
 
 use crate::error::{
@@ -65,6 +66,10 @@ fn create_sql_options(table_meta: &TableMeta, schema_options: Option<SchemaOptio
     {
         options.insert(TTL_KEY.to_string(), database_ttl);
     };
+
+    if table_opts.skip_wal {
+        options.insert(SKIP_WAL_KEY.to_string(), "true".to_string());
+    }
 
     for (k, v) in table_opts
         .extra_options

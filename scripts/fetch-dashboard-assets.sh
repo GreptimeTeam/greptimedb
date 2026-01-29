@@ -23,7 +23,7 @@ function retry_fetch() {
     local url=$1
     local filename=$2
 
-    curl --connect-timeout 10 --retry 3 -fsSL $url --output $filename || {
+    curl --connect-timeout 30 --max-time 60 --retry 3 -fsSL $url --output $filename || {
         echo "Failed to download $url"
         echo "You may try to set http_proxy and https_proxy environment variables."
         if [[ -z "$GITHUB_PROXY_URL" ]]; then
