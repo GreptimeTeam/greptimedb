@@ -1302,6 +1302,13 @@ pub(crate) struct ReaderFilterMetrics {
     pub(crate) bloom_filter_apply_metrics: Option<BloomFilterIndexApplyMetrics>,
     /// Optional metrics for fulltext index applier.
     pub(crate) fulltext_index_apply_metrics: Option<FulltextIndexApplyMetrics>,
+
+    /// Number of pruner builder cache hits.
+    pub(crate) pruner_cache_hit: usize,
+    /// Number of pruner builder cache misses.
+    pub(crate) pruner_cache_miss: usize,
+    /// Duration spent waiting for pruner to build file ranges.
+    pub(crate) pruner_prune_cost: Duration,
 }
 
 impl ReaderFilterMetrics {
@@ -1328,6 +1335,10 @@ impl ReaderFilterMetrics {
         self.inverted_index_cache_miss += other.inverted_index_cache_miss;
         self.bloom_filter_cache_hit += other.bloom_filter_cache_hit;
         self.bloom_filter_cache_miss += other.bloom_filter_cache_miss;
+
+        self.pruner_cache_hit += other.pruner_cache_hit;
+        self.pruner_cache_miss += other.pruner_cache_miss;
+        self.pruner_prune_cost += other.pruner_prune_cost;
 
         // Merge optional applier metrics
         if let Some(other_metrics) = &other.inverted_index_apply_metrics {
