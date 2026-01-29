@@ -293,41 +293,53 @@ SELECT json_get_int(json_get_object(j, '[9]'), 'a.i') FROM jsons;
 |                                                                |
 +----------------------------------------------------------------+
 
-SELECT json_get(j, '[0]')::int FROM jsons;
+SELECT json_get(j, '[0]')::int8 FROM jsons;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: The function 'json_get' expected 3 arguments but received 2 No function matches the given name and argument types 'json_get(Binary, Utf8)'. You might need to add explicit type casts.
-	Candidate functions:
-	json_get(Any, Any, Any)
+Error: 3001(EngineExecuteQuery), Execution error: json_get function requires 3 arguments, got 2
 
-SELECT json_get(j, '[0]')::float FROM jsons;
+SELECT json_get(j, '[0]')::double FROM jsons;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: The function 'json_get' expected 3 arguments but received 2 No function matches the given name and argument types 'json_get(Binary, Utf8)'. You might need to add explicit type casts.
-	Candidate functions:
-	json_get(Any, Any, Any)
++-------------------------------+
+| json_get(jsons.j,Utf8("[0]")) |
++-------------------------------+
+|                               |
+| 1.0                           |
+| 1.0                           |
+| 1.2                           |
+|                               |
++-------------------------------+
 
-SELECT json_get(j, '[1]')::int FROM jsons;
+SELECT json_get(j, '[1]')::int8 FROM jsons;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: The function 'json_get' expected 3 arguments but received 2 No function matches the given name and argument types 'json_get(Binary, Utf8)'. You might need to add explicit type casts.
-	Candidate functions:
-	json_get(Any, Any, Any)
+Error: 3001(EngineExecuteQuery), Execution error: json_get function requires 3 arguments, got 2
 
-SELECT json_get(j, '[1]')::float FROM jsons;
+SELECT json_get(j, '[1]')::double FROM jsons;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: The function 'json_get' expected 3 arguments but received 2 No function matches the given name and argument types 'json_get(Binary, Utf8)'. You might need to add explicit type casts.
-	Candidate functions:
-	json_get(Any, Any, Any)
++-------------------------------+
+| json_get(jsons.j,Utf8("[1]")) |
++-------------------------------+
+|                               |
+| 0.0                           |
+| 0.0                           |
+| 3.141592653589793             |
+|                               |
++-------------------------------+
 
 SELECT json_get(j, '[2]')::bool FROM jsons;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: The function 'json_get' expected 3 arguments but received 2 No function matches the given name and argument types 'json_get(Binary, Utf8)'. You might need to add explicit type casts.
-	Candidate functions:
-	json_get(Any, Any, Any)
+Error: 3001(EngineExecuteQuery), Execution error: json_get function requires 3 arguments, got 2
 
 SELECT json_get(j, '[3]')::string FROM jsons;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: The function 'json_get' expected 3 arguments but received 2 No function matches the given name and argument types 'json_get(Binary, Utf8)'. You might need to add explicit type casts.
-	Candidate functions:
-	json_get(Any, Any, Any)
++--------------------------------------------------------+
+| json_get(jsons.j,Utf8("[3]"))                          |
++--------------------------------------------------------+
+| Long time ago, there is a little pig flying in the sky |
+| false                                                  |
+| 2147483648                                             |
+| 1e100                                                  |
+|                                                        |
++--------------------------------------------------------+
 
 DROP TABLE jsons;
 
