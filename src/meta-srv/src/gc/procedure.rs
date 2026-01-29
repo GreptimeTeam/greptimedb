@@ -277,28 +277,52 @@ impl BatchGcProcedure {
     }
 
     /// Return related regions for the given regions.
-    /// The returned map uses the source regions (where those files originally came from) as the key,
-    /// and the destination regions (where files are currently stored) as the value.
-    /// If a region is not found in the repartition manager, the returned map still have this region as key,
-    /// just empty value
+    /// The returned map uses the input region as key, and all other regions
+    /// from the same table as values (excluding the input region itself).
     async fn find_related_regions(
         &self,
         regions: &[RegionId],
     ) -> Result<HashMap<RegionId, HashSet<RegionId>>> {
-        let repart_mgr = self.table_metadata_manager.table_repart_manager();
-        let mut related_regions: HashMap<RegionId, HashSet<RegionId>> = HashMap::new();
-        for src_region in regions {
-            // TODO(discord9): batch get
-            if let Some(dst_regions) = repart_mgr
-                .get_dst_regions(*src_region)
-                .await
-                .context(KvBackendSnafu)?
-            {
-                related_regions.insert(*src_region, dst_regions.into_iter().collect());
-            } else {
-                related_regions.insert(*src_region, Default::default());
+        let mut table_to_regions: HashMap<TableId, HashSet<RegionId>> = HashMap::new();
+        for region_id in regions {
+            table_to_regions
+                .entry(region_id.table_id())
+                .or_default()
+                .insert(*region_id);
+        }
+
+        let mut table_all_regions: HashMap<TableId, HashSet<RegionId>> = HashMap::new();
+        for table_id in table_to_regions.keys() {
+            match self.get_table_route(*table_id).await {
+                Ok((_phy_table_id, table_route)) => {
+                    let all_regions: HashSet<RegionId> = table_route
+                        .region_routes
+                        .iter()
+                        .map(|r| r.region.id)
+                        .collect();
+                    table_all_regions.insert(*table_id, all_regions);
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to get table route for table {}: {}, skipping",
+                        table_id, e
+                    );
+                }
             }
         }
+
+        let mut related_regions: HashMap<RegionId, HashSet<RegionId>> = HashMap::new();
+        for region_id in regions {
+            let table_id = region_id.table_id();
+            if let Some(all_regions) = table_all_regions.get(&table_id) {
+                let mut related: HashSet<RegionId> = all_regions.clone();
+                related.remove(region_id);
+                related_regions.insert(*region_id, related);
+            } else {
+                related_regions.insert(*region_id, Default::default());
+            }
+        }
+
         Ok(related_regions)
     }
 
