@@ -5743,7 +5743,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=d8e09e8487c344323ee364b67f7187b1e0a6102c#d8e09e8487c344323ee364b67f7187b1e0a6102c"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=2d3d2e3328b2c1d793348030ee8f2ae9a208e818#2d3d2e3328b2c1d793348030ee8f2ae9a208e818"
 dependencies = [
  "prost 0.14.1",
  "prost-types 0.14.1",
@@ -7913,6 +7913,7 @@ dependencies = [
  "chrono",
  "common-base",
  "common-error",
+ "common-function",
  "common-macro",
  "common-meta",
  "common-query",
@@ -7935,6 +7936,7 @@ dependencies = [
  "moka",
  "mur3",
  "object-store",
+ "partition",
  "prometheus 0.13.4",
  "serde",
  "serde_json",
