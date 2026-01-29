@@ -40,11 +40,12 @@ use crate::error::{
     RegionTruncatedSnafu, Result,
 };
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
+use crate::memtable::bulk::ENCODE_ROW_THRESHOLD;
 use crate::memtable::{
     BoxedRecordBatchIterator, EncodedRange, IterBuilder, MemtableRanges, RangesOptions,
 };
 use crate::metrics::{
-    FLUSH_BYTES_TOTAL, FLUSH_ELAPSED, FLUSH_FAILURE_TOTAL, FLUSH_REQUESTS_TOTAL,
+    FLUSH_BYTES_TOTAL, FLUSH_ELAPSED, FLUSH_FAILURE_TOTAL, FLUSH_FILE_TOTAL, FLUSH_REQUESTS_TOTAL,
     INFLIGHT_FLUSH_COUNT,
 };
 use crate::read::dedup::{DedupReader, LastNonNull, LastRow};
@@ -367,6 +368,7 @@ impl RegionFlushTask {
             file_metas,
             flushed_bytes,
             series_count,
+            encoded_part_count,
             flush_metrics,
         } = self.do_flush_memtables(version, write_opts).await?;
 
@@ -383,7 +385,7 @@ impl RegionFlushTask {
             total_bytes += meta.file_size;
         }
         info!(
-            "Successfully flush memtables, region: {}, reason: {}, files: {:?}, series count: {}, total_rows: {}, total_bytes: {}, cost: {:?}, metrics: {:?}",
+            "Successfully flush memtables, region: {}, reason: {}, files: {:?}, series count: {}, total_rows: {}, total_bytes: {}, cost: {:?}, encoded_part_count: {}, metrics: {:?}",
             self.region_id,
             self.reason.as_str(),
             file_ids,
@@ -391,6 +393,7 @@ impl RegionFlushTask {
             total_rows,
             total_bytes,
             timer.stop_and_record(),
+            encoded_part_count,
             flush_metrics,
         );
         flush_metrics.observe();
@@ -448,6 +451,7 @@ impl RegionFlushTask {
         let mut file_metas = Vec::with_capacity(memtables.len());
         let mut flushed_bytes = 0;
         let mut series_count = 0;
+        let mut encoded_part_count = 0;
         let mut flush_metrics = Metrics::new(WriteType::Flush);
         let partition_expr = parse_partition_expr(self.partition_expr.as_deref())?;
         for mem in memtables {
@@ -485,6 +489,7 @@ impl RegionFlushTask {
                 } = self
                     .flush_flat_mem_ranges(version, &write_opts, mem_ranges)
                     .await?;
+                encoded_part_count += num_encoded;
                 for (source_idx, result) in results.into_iter().enumerate() {
                     let (max_sequence, ssts_written, metrics) = result?;
                     if ssts_written.is_empty() {
@@ -538,6 +543,7 @@ impl RegionFlushTask {
                     .access_layer
                     .write_sst(write_request, &write_opts, &mut metrics)
                     .await?;
+                FLUSH_FILE_TOTAL.inc_by(ssts_written.len() as u64);
                 if ssts_written.is_empty() {
                     // No data written.
                     continue;
@@ -566,6 +572,7 @@ impl RegionFlushTask {
             file_metas,
             flushed_bytes,
             series_count,
+            encoded_part_count,
             flush_metrics,
         })
     }
@@ -600,6 +607,7 @@ impl RegionFlushTask {
                 let ssts = access_layer
                     .write_sst(write_request, &write_opts, &mut metrics)
                     .await?;
+                FLUSH_FILE_TOTAL.inc_by(ssts.len() as u64);
                 Ok((max_sequence, ssts, metrics))
             });
             tasks.push(task);
@@ -614,6 +622,7 @@ impl RegionFlushTask {
                 let metrics = access_layer
                     .put_sst(&encoded.data, region_id, &encoded.sst_info, &cache_manager)
                     .await?;
+                FLUSH_FILE_TOTAL.inc();
                 Ok((max_sequence, smallvec![encoded.sst_info], metrics))
             });
             tasks.push(task);
@@ -709,6 +718,7 @@ struct DoFlushMemtablesResult {
     file_metas: Vec<FileMeta>,
     flushed_bytes: u64,
     series_count: usize,
+    encoded_part_count: usize,
     flush_metrics: Metrics,
 }
 
@@ -766,6 +776,8 @@ fn memtable_flat_sources(
     };
 
     if ranges.len() == 1 {
+        debug!("Flushing single flat range");
+
         let only_range = ranges.into_values().next().unwrap();
         let max_sequence = only_range.stats().max_sequence();
         if let Some(encoded) = only_range.encoded() {
@@ -785,10 +797,20 @@ fn memtable_flat_sources(
                 .push((FlatSource::Iter(iter), max_sequence));
         };
     } else {
-        // Calculate total rows from all ranges for min_flush_rows calculation
-        let total_rows: usize = ranges.values().map(|r| r.stats().num_rows()).sum();
-        let min_flush_rows = total_rows / 8;
-        let min_flush_rows = min_flush_rows.max(DEFAULT_ROW_GROUP_SIZE);
+        let min_flush_rows = *ENCODE_ROW_THRESHOLD;
+        // Calculate total rows from non-encoded ranges.
+        let total_rows: usize = ranges
+            .values()
+            .filter(|r| r.encoded().is_none())
+            .map(|r| r.num_rows())
+            .sum();
+        debug!(
+            "Flushing multiple flat ranges, total_rows: {}, min_flush_rows: {}, num_ranges: {}",
+            total_rows,
+            min_flush_rows,
+            ranges.len()
+        );
+        let mut rows_remaining = total_rows;
         let mut last_iter_rows = 0;
         let num_ranges = ranges.len();
         let mut input_iters = Vec::with_capacity(num_ranges);
@@ -802,10 +824,24 @@ fn memtable_flat_sources(
 
             let iter = range.build_record_batch_iter(None)?;
             input_iters.push(iter);
-            last_iter_rows += range.num_rows();
+            let range_rows = range.num_rows();
+            last_iter_rows += range_rows;
+            rows_remaining -= range_rows;
             current_ranges.push(range);
 
-            if last_iter_rows > min_flush_rows {
+            // Flush if we have enough rows, but don't flush if the remaining rows
+            // would be less than DEFAULT_ROW_GROUP_SIZE (to avoid small last files).
+            if last_iter_rows >= min_flush_rows
+                && (rows_remaining == 0 || rows_remaining >= DEFAULT_ROW_GROUP_SIZE)
+            {
+                debug!(
+                    "Flush batch ready, rows: {}, min_rows: {}, num_iters: {}, remaining: {}",
+                    last_iter_rows,
+                    min_flush_rows,
+                    input_iters.len(),
+                    rows_remaining
+                );
+
                 // Calculate max_sequence from all merged ranges
                 let max_sequence = current_ranges
                     .iter()
@@ -831,6 +867,13 @@ fn memtable_flat_sources(
 
         // Handle remaining iters.
         if !input_iters.is_empty() {
+            debug!(
+                "Flush remaining batch, rows: {}, min_rows: {}, num_iters: {}, remaining: {}",
+                last_iter_rows,
+                min_flush_rows,
+                input_iters.len(),
+                rows_remaining
+            );
             let max_sequence = current_ranges
                 .iter()
                 .map(|r| r.stats().max_sequence())
@@ -1485,6 +1528,7 @@ mod tests {
         let build_ranges = |append_mode: bool| -> MemtableRanges {
             let memtable = crate::memtable::bulk::BulkMemtable::new(
                 1,
+                crate::memtable::bulk::BulkMemtableConfig::default(),
                 metadata.clone(),
                 None,
                 None,

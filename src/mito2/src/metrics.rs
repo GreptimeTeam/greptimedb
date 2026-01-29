@@ -534,6 +534,10 @@ lazy_static! {
         "mito_cache_fill_pending_files",
         "mito cache fill pending files count",
     ).unwrap();
+
+    /// Counter of flush files.
+    pub static ref FLUSH_FILE_TOTAL: IntCounter =
+        register_int_counter!("greptime_mito_flush_file_total", "mito flushed file count").unwrap();
 }
 
 /// Stager notifier to collect metrics.
