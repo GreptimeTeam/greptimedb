@@ -51,6 +51,7 @@ meta-srv.workspace = true
 nu-ansi-term = "0.46"
 object-store.workspace = true
 operator.workspace = true
+partition.workspace = true
 paste.workspace = true
 query.workspace = true
 rand.workspace = true
