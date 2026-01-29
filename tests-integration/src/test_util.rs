@@ -48,8 +48,7 @@ use servers::metrics_handler::MetricsHandler;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
 use servers::otel_arrow::OtelArrowServiceHandler;
 use servers::postgres::PostgresServer;
-use servers::query_handler::grpc::ServerGrpcQueryHandlerAdapter;
-use servers::query_handler::sql::{ServerSqlQueryHandlerAdapter, SqlQueryHandler};
+use servers::query_handler::sql::SqlQueryHandler;
 use servers::request_memory_limiter::ServerMemoryLimiter;
 use servers::server::Server;
 use servers::tls::ReloadableTlsServerConfig;
@@ -416,9 +415,7 @@ pub async fn setup_test_http_app(store_type: StorageType, name: &str) -> (Router
         ..Default::default()
     };
     let http_server = HttpServerBuilder::new(http_opts)
-        .with_sql_handler(ServerSqlQueryHandlerAdapter::arc(
-            instance.fe_instance().clone(),
-        ))
+        .with_sql_handler(instance.fe_instance().clone())
         .with_logs_handler(instance.fe_instance().clone())
         .with_metrics_handler(MetricsHandler)
         .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
@@ -474,9 +471,7 @@ pub async fn setup_test_http_app_with_frontend_and_custom_options(
     });
 
     let mut http_server = HttpServerBuilder::new(http_opts)
-        .with_sql_handler(ServerSqlQueryHandlerAdapter::arc(
-            instance.fe_instance().clone(),
-        ))
+        .with_sql_handler(instance.fe_instance().clone())
         .with_log_ingest_handler(instance.fe_instance().clone(), None, None)
         .with_logs_handler(instance.fe_instance().clone())
         .with_influxdb_handler(instance.fe_instance().clone())
@@ -563,7 +558,7 @@ pub async fn setup_test_prom_app_with_frontend(
     };
     let frontend_ref = instance.fe_instance().clone();
     let http_server = HttpServerBuilder::new(http_opts)
-        .with_sql_handler(ServerSqlQueryHandlerAdapter::arc(frontend_ref.clone()))
+        .with_sql_handler(frontend_ref.clone())
         .with_logs_handler(instance.fe_instance().clone())
         .with_prom_handler(
             frontend_ref.clone(),
@@ -611,7 +606,7 @@ pub async fn setup_grpc_server_with(
     let fe_instance_ref = instance.fe_instance().clone();
 
     let greptime_request_handler = GreptimeRequestHandler::new(
-        ServerGrpcQueryHandlerAdapter::arc(fe_instance_ref.clone()),
+        fe_instance_ref.clone(),
         user_provider.clone(),
         Some(runtime.clone()),
         FlightCompression::default(),
@@ -677,10 +672,7 @@ pub async fn setup_mysql_server_with_user_provider(
     };
     let mut mysql_server = MysqlServer::create_server(
         runtime,
-        Arc::new(MysqlSpawnRef::new(
-            ServerSqlQueryHandlerAdapter::arc(fe_instance_ref),
-            user_provider,
-        )),
+        Arc::new(MysqlSpawnRef::new(fe_instance_ref, user_provider)),
         Arc::new(MysqlSpawnConfig::new(
             false,
             Arc::new(
@@ -735,7 +727,7 @@ pub async fn setup_pg_server_with_user_provider(
     );
 
     let mut pg_server = Box::new(PostgresServer::new(
-        ServerSqlQueryHandlerAdapter::arc(fe_instance_ref),
+        fe_instance_ref,
         opts.tls.should_force_tls(),
         tls_server_config,
         0,
