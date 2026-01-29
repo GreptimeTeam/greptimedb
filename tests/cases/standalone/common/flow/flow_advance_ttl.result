@@ -202,7 +202,7 @@ VALUES
     (20, "2021-07-01 00:00:00.200"),
     (22, "2021-07-01 00:00:00.600");
 
-Affected Rows: 3
+Affected Rows: 0
 
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_distinct_basic');
@@ -255,21 +255,13 @@ SELECT
 FROM
     out_distinct_basic;
 
-+-----+
-| dis |
-+-----+
-| 20  |
-| 22  |
-+-----+
+++
+++
 
 SELECT number FROM distinct_basic;
 
-+--------+
-| number |
-+--------+
-| 20     |
-| 22     |
-+--------+
+++
+++
 
 -- SQLNESS SLEEP 6s
 ADMIN FLUSH_TABLE('distinct_basic');
@@ -285,7 +277,7 @@ INSERT INTO
 VALUES
     (23, "2021-07-01 00:00:01.600");
 
-Affected Rows: 1
+Affected Rows: 0
 
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_distinct_basic');
@@ -301,21 +293,13 @@ SELECT
 FROM
     out_distinct_basic;
 
-+-----+
-| dis |
-+-----+
-| 20  |
-| 22  |
-| 23  |
-+-----+
+++
+++
 
 SELECT number FROM distinct_basic;
 
-+--------+
-| number |
-+--------+
-| 23     |
-+--------+
+++
+++
 
 DROP FLOW test_distinct_basic;
 

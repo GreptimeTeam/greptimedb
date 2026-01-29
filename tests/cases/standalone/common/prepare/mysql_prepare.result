@@ -95,8 +95,7 @@ CREATE TABLE IF NOT EXISTS "cake" (
     PRIMARY KEY ("domain")
 ) ENGINE=mito
 WITH(
-    append_mode = 'true',
-    ttl='7days'
+    append_mode = 'true'
 );
 
 Affected Rows: 0

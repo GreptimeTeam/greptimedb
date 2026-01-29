@@ -36,6 +36,7 @@ impl<'a> Partitioner<'a> {
         rows: Rows,
     ) -> Result<Vec<InsertRequest>> {
         let table_id = table_info.table_id();
+
         let requests = self
             .partition_manager
             .split_rows(table_info, rows)
