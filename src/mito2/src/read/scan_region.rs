@@ -1576,6 +1576,10 @@ impl StreamContext {
                     let exprs: Vec<_> = predicate.exprs().iter().map(|e| e.to_string()).collect();
                     write!(f, ", \"filters\": {:?}", exprs)?;
                 }
+                #[cfg(feature = "vector_index")]
+                if let Some(vector_index_k) = self.input.vector_index_k {
+                    write!(f, ", \"vector_index_k\": {}", vector_index_k)?;
+                }
                 if !self.input.files.is_empty() {
                     write!(f, ", \"files\": ")?;
                     f.debug_list()

@@ -241,21 +241,41 @@ impl VectorSearchState {
     fn extract_distance_from_sort(
         sort: &datafusion_expr::logical_plan::Sort,
     ) -> Option<VectorDistanceInfo> {
-        if sort.expr.len() != 1 {
-            debug!(
-                "Skip vector hint: Sort has {} expressions, expected 1",
-                sort.expr.len()
-            );
+        if sort.expr.is_empty() {
+            debug!("Skip vector hint: Sort has no expressions");
             return None;
         }
         let sort_expr: &SortExpr = &sort.expr[0];
         let info = Self::extract_distance_info(&sort_expr.expr)?;
         let expected_asc = info.metric != VectorDistanceMetric::InnerProduct;
-        if sort_expr.asc == expected_asc {
+        if sort_expr.asc == expected_asc && Self::tie_breakers_allowed(&sort.expr[1..], &info) {
             Some(info)
         } else {
+            if sort.expr.len() > 1 {
+                debug!(
+                    "Skip vector hint: Sort has unsupported tie-breakers ({} expressions)",
+                    sort.expr.len()
+                );
+            }
             None
         }
+    }
+
+    fn tie_breakers_allowed(sort_exprs: &[SortExpr], distance_info: &VectorDistanceInfo) -> bool {
+        if sort_exprs.is_empty() {
+            return true;
+        }
+
+        sort_exprs.iter().all(|sort_expr| {
+            let Expr::Column(col) = &sort_expr.expr else {
+                return false;
+            };
+
+            match &distance_info.table_reference {
+                Some(table) => col.relation.as_ref() == Some(table),
+                None => col.relation.is_none(),
+            }
+        })
     }
 
     fn extract_limit_info(limit: &datafusion_expr::logical_plan::Limit) -> Option<VectorLimitInfo> {
