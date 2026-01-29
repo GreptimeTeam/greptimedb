@@ -89,6 +89,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 | logical_plan after TranscribeAtatRule_| SAME TEXT AS ABOVE_|
 | logical_plan after resolve_grouping_function_| SAME TEXT AS ABOVE_|
 | logical_plan after type_coercion_| SAME TEXT AS ABOVE_|
+| logical_plan after apply_function_rewrites_| SAME TEXT AS ABOVE_|
 | logical_plan after DistPlannerAnalyzer_| Projection: test.i, test.j, test.k_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
 |_| PromInstantManipulate: range=[0..0], lookback=[300000], interval=[300000], time index=[j]_|
@@ -227,6 +228,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test AS series;
 | logical_plan after TranscribeAtatRule_| SAME TEXT AS ABOVE_|
 | logical_plan after resolve_grouping_function_| SAME TEXT AS ABOVE_|
 | logical_plan after type_coercion_| SAME TEXT AS ABOVE_|
+| logical_plan after apply_function_rewrites_| SAME TEXT AS ABOVE_|
 | logical_plan after DistPlannerAnalyzer_| Projection: test.i, test.j, test.k_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
 |_| PromInstantManipulate: range=[0..0], lookback=[300000], interval=[300000], time index=[j]_|
