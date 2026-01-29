@@ -303,10 +303,11 @@ impl BatchGcProcedure {
                     table_all_regions.insert(*table_id, all_regions);
                 }
                 Err(e) => {
-                    warn!(
-                        "Failed to get table route for table {}: {}, skipping",
-                        table_id, e
+                    error!(
+                        e; "Failed to get table route for table {}",
+                        table_id,
                     );
+                    return Err(e);
                 }
             }
         }
