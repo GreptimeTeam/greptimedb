@@ -295,7 +295,15 @@ SELECT json_get_int(json_get_object(j, '[9]'), 'a.i') FROM jsons;
 
 SELECT json_get(j, '[0]')::int8 FROM jsons;
 
-Error: 3001(EngineExecuteQuery), Execution error: json_get function requires 3 arguments, got 2
++---------------------------------------------------------+
+| arrow_cast(json_get(jsons.j,Utf8("[0]")),Utf8("Int64")) |
++---------------------------------------------------------+
+|                                                         |
+| 1                                                       |
+| 1                                                       |
+|                                                         |
+|                                                         |
++---------------------------------------------------------+
 
 SELECT json_get(j, '[0]')::double FROM jsons;
 
@@ -311,7 +319,15 @@ SELECT json_get(j, '[0]')::double FROM jsons;
 
 SELECT json_get(j, '[1]')::int8 FROM jsons;
 
-Error: 3001(EngineExecuteQuery), Execution error: json_get function requires 3 arguments, got 2
++---------------------------------------------------------+
+| arrow_cast(json_get(jsons.j,Utf8("[1]")),Utf8("Int64")) |
++---------------------------------------------------------+
+|                                                         |
+| 0                                                       |
+| 0                                                       |
+|                                                         |
+|                                                         |
++---------------------------------------------------------+
 
 SELECT json_get(j, '[1]')::double FROM jsons;
 
@@ -327,7 +343,15 @@ SELECT json_get(j, '[1]')::double FROM jsons;
 
 SELECT json_get(j, '[2]')::bool FROM jsons;
 
-Error: 3001(EngineExecuteQuery), Execution error: json_get function requires 3 arguments, got 2
++-----------------------------------------------------------+
+| arrow_cast(json_get(jsons.j,Utf8("[2]")),Utf8("Boolean")) |
++-----------------------------------------------------------+
+|                                                           |
+| false                                                     |
+|                                                           |
+|                                                           |
+|                                                           |
++-----------------------------------------------------------+
 
 SELECT json_get(j, '[3]')::string FROM jsons;
 
