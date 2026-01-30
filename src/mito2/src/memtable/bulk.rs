@@ -14,6 +14,7 @@
 
 //! Memtable implementation for bulk load
 
+pub(crate) mod chunk_reader;
 #[allow(unused)]
 pub mod context;
 #[allow(unused)]

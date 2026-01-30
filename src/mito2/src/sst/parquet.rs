@@ -25,6 +25,7 @@ use crate::sst::file::FileTimeRange;
 use crate::sst::index::IndexOutput;
 
 pub mod file_range;
+pub(crate) mod async_reader;
 pub mod flat_format;
 pub mod format;
 pub(crate) mod helper;

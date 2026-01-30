@@ -30,7 +30,6 @@ use crate::memtable::{MemScanMetrics, MemScanMetricsData};
 use crate::metrics::{READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
 use crate::sst::parquet::file_range::{PreFilterMode, TagDecodeState};
 use crate::sst::parquet::flat_format::sequence_column_index;
-use crate::sst::parquet::reader::RowGroupReaderContext;
 
 /// Iterator for reading data inside a bulk part.
 pub struct EncodedBulkPartIter {
