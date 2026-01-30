@@ -142,3 +142,60 @@ DROP TABLE approx_rate;
 
 Affected Rows: 0
 
+CREATE TABLE bytes_log (
+    byte INT,
+    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    -- event time
+    TIME INDEX(ts)
+);
+
+Affected Rows: 0
+
+-- TODO(discord9): remove this after auto infer table's time index is impl
+CREATE TABLE approx_rate (
+    rate DOUBLE NULL,
+    time_window TIMESTAMP,
+    update_at TIMESTAMP,
+    bb DOUBLE NULL,
+    TIME INDEX(time_window)
+);
+
+Affected Rows: 0
+
+CREATE FLOW find_approx_rate SINK TO approx_rate AS
+SELECT
+    (max(byte) - min(byte)) / 30.0 as rate,
+    date_bin(INTERVAL '30 second', ts) as time_window,
+    TIMESTAMP '2023-01-01 00:00:10' as update_at
+from
+    bytes_log
+GROUP BY
+    time_window;
+
+Affected Rows: 0
+
+INSERT INTO
+    bytes_log
+VALUES
+    (NULL, '2023-01-01 00:00:01'),
+    (300, '2023-01-01 00:00:31');
+
+Affected Rows: 2
+
+-- should return error
+ADMIN FLUSH_FLOW('find_approx_rate');
+
+Error: 1002(Unexpected), Failed to execute admin function: Failed to execute admin function flush_flow, error: Execution error: Function execution error: Internal error: 1003: Execution error: Function execution error: Internal error: 1003
+
+DROP FLOW find_approx_rate;
+
+Affected Rows: 0
+
+DROP TABLE bytes_log;
+
+Affected Rows: 0
+
+DROP TABLE approx_rate;
+
+Affected Rows: 0
+

@@ -398,8 +398,8 @@ impl ColumnMatcherRewriter {
         }
 
         let name_to_expr: HashMap<String, Expr> = exprs
-            .iter()
-            .cloned()
+            .clone()
+            .into_iter()
             .map(|e| (e.qualified_name().1, e))
             .collect();
 
