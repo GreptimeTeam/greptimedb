@@ -24,11 +24,12 @@ use catalog::CatalogManagerRef;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_meta::cache::{LayeredCacheRegistryRef, TableFlownodeSetCacheRef, TableRouteCacheRef};
+use common_meta::flow_rpc::FlowRpcRef;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::flow::FlowMetadataManagerRef;
 use common_meta::kv_backend::KvBackendRef;
-use common_meta::node_manager::{Flownode, NodeManagerRef};
 use common_meta::procedure_executor::ProcedureExecutorRef;
+use common_meta::region_rpc::RegionRpcRef;
 use common_query::Output;
 use common_runtime::JoinHandle;
 use common_telemetry::tracing::info;
@@ -533,7 +534,8 @@ impl FrontendInvoker {
         kv_backend: KvBackendRef,
         layered_cache_registry: LayeredCacheRegistryRef,
         procedure_executor: ProcedureExecutorRef,
-        node_manager: NodeManagerRef,
+        region_rpc: RegionRpcRef,
+        flow_rpc: FlowRpcRef,
     ) -> Result<FrontendInvoker, Error> {
         let table_route_cache: TableRouteCacheRef =
             layered_cache_registry.get().context(CacheRequiredSnafu {
@@ -558,14 +560,15 @@ impl FrontendInvoker {
         let inserter = Arc::new(Inserter::new(
             catalog_manager.clone(),
             partition_manager.clone(),
-            node_manager.clone(),
+            region_rpc.clone(),
+            flow_rpc,
             table_flownode_cache,
         ));
 
         let deleter = Arc::new(Deleter::new(
             catalog_manager.clone(),
             partition_manager.clone(),
-            node_manager.clone(),
+            region_rpc.clone(),
         ));
 
         let query_engine = flow_streaming_engine.query_engine.clone();

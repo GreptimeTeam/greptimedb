@@ -149,7 +149,6 @@ impl CreateLogicalTablesProcedure {
         let mut create_region_tasks = Vec::with_capacity(leaders.len());
 
         for peer in leaders {
-            let requester = self.context.node_manager.datanode(&peer).await;
             let Some(request) = self.make_request(&peer, region_routes)? else {
                 debug!("no region request to send to datanode {}", peer);
                 // We can skip the rest of the datanodes,
@@ -157,9 +156,10 @@ impl CreateLogicalTablesProcedure {
                 break;
             };
 
+            let region_rpc = self.context.region_rpc.clone();
             create_region_tasks.push(async move {
-                requester
-                    .handle(request)
+                region_rpc
+                    .handle_region(&peer, request)
                     .await
                     .map_err(add_peer_context_if_needed(peer))
             });

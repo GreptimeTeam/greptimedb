@@ -117,9 +117,9 @@ impl Inserter {
             let _datanode_handle_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
                 .with_label_values(&["datanode_handle"])
                 .start_timer();
-            let datanode = self.node_manager.datanode(&datanode).await;
-            let result = datanode
-                .handle(request)
+            let result = self
+                .region_rpc
+                .handle_region(&datanode, request)
                 .await
                 .context(error::RequestRegionSnafu)
                 .map(|r| r.affected_rows);
@@ -162,7 +162,7 @@ impl Inserter {
                     .unwrap_or_default();
                 let rb = record_batch.clone();
                 let schema_bytes = schema_bytes.clone();
-                let node_manager = self.node_manager.clone();
+                let region_rpc = self.region_rpc.clone();
                 let peer = peer.clone();
                 let raw_header_and_data = if mask.select_all() {
                     Some((
@@ -228,9 +228,8 @@ impl Inserter {
                             })),
                         };
 
-                        let datanode = node_manager.datanode(&peer).await;
-                        datanode
-                            .handle(request)
+                        region_rpc
+                            .handle_region(&peer, request)
                             .await
                             .context(error::RequestRegionSnafu)
                     });
@@ -255,7 +254,7 @@ impl Inserter {
     fn maybe_update_flow_dirty_window(&self, table_info: TableInfoRef, record_batch: RecordBatch) {
         let table_id = table_info.table_id();
         let table_flownode_set_cache = self.table_flownode_set_cache.clone();
-        let node_manager = self.node_manager.clone();
+        let flow_rpc = self.flow_rpc.clone();
         common_runtime::spawn_global(async move {
             let result = table_flownode_set_cache
                 .get(table_id)
@@ -291,18 +290,19 @@ impl Inserter {
             };
 
             for peer in peers {
-                let node_manager = node_manager.clone();
+                let flow_rpc = flow_rpc.clone();
                 let timestamps = timestamps.clone();
                 common_runtime::spawn_global(async move {
-                    if let Err(e) = node_manager
-                        .flownode(&peer)
-                        .await
-                        .handle_mark_window_dirty(DirtyWindowRequests {
-                            requests: vec![DirtyWindowRequest {
-                                table_id,
-                                timestamps,
-                            }],
-                        })
+                    if let Err(e) = flow_rpc
+                        .handle_mark_window_dirty(
+                            &peer,
+                            DirtyWindowRequests {
+                                requests: vec![DirtyWindowRequest {
+                                    table_id,
+                                    timestamps,
+                                }],
+                            },
+                        )
                         .await
                         .context(error::RequestInsertsSnafu)
                     {

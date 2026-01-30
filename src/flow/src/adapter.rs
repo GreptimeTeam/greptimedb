@@ -679,9 +679,8 @@ impl StreamingEngine {
                 _ = tokio::time::sleep(new_wait) => ()
             }
         }
-        // flow is now shutdown, drop frontend_invoker early so a ref cycle(in standalone mode) can be prevent:
-        // FlowWorkerManager.frontend_invoker -> FrontendInvoker.inserter
-        // -> Inserter.node_manager -> NodeManager.flownode -> Flownode.flow_streaming_engine.frontend_invoker
+        // Flow is now shutdown; drop `frontend_invoker` early to break potential Arc cycles
+        // (standalone mode).
         self.frontend_invoker.write().await.take();
     }
 

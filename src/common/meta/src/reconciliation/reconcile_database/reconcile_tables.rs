@@ -129,7 +129,7 @@ impl ReconcileTables {
         let mut procedures = Vec::with_capacity(tables.len());
         for (table_id, table_name) in tables {
             let context = Context {
-                node_manager: ctx.node_manager.clone(),
+                region_rpc: ctx.region_rpc.clone(),
                 table_metadata_manager: ctx.table_metadata_manager.clone(),
                 cache_invalidator: ctx.cache_invalidator.clone(),
             };

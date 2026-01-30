@@ -36,8 +36,8 @@ use crate::error::{self, Result};
 use crate::instruction::CacheIdent;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
-use crate::node_manager::NodeManagerRef;
 use crate::region_registry::LeaderRegionRegistryRef;
+use crate::region_rpc::RegionRpcRef;
 use crate::rpc::router::{
     RegionRoute, find_follower_regions, find_followers, find_leader_regions, find_leaders,
     operating_leader_regions,
@@ -214,7 +214,7 @@ impl DropTableExecutor {
     /// Drops region on datanode.
     pub async fn on_drop_regions(
         &self,
-        node_manager: &NodeManagerRef,
+        region_rpc: &RegionRpcRef,
         leader_region_registry: &LeaderRegionRegistryRef,
         region_routes: &[RegionRoute],
         fast_path: bool,
@@ -226,7 +226,6 @@ impl DropTableExecutor {
         let mut drop_region_tasks = Vec::with_capacity(leaders.len());
         let table_id = self.table_id;
         for datanode in leaders {
-            let requester = node_manager.datanode(&datanode).await;
             let regions = find_leader_regions(region_routes, &datanode);
             let region_ids = regions
                 .iter()
@@ -247,13 +246,13 @@ impl DropTableExecutor {
                         partial_drop,
                     })),
                 };
-                let datanode = datanode.clone();
-                let requester = requester.clone();
+                let peer = datanode.clone();
+                let region_rpc = region_rpc.clone();
                 drop_region_tasks.push(async move {
-                    if let Err(err) = requester.handle(request).await
+                    if let Err(err) = region_rpc.handle_region(&peer, request).await
                         && err.status_code() != StatusCode::RegionNotFound
                     {
-                        return Err(add_peer_context_if_needed(datanode)(err));
+                        return Err(add_peer_context_if_needed(peer)(err));
                     }
                     Ok(())
                 });
@@ -269,7 +268,6 @@ impl DropTableExecutor {
         let followers = find_followers(region_routes);
         let mut close_region_tasks = Vec::with_capacity(followers.len());
         for datanode in followers {
-            let requester = node_manager.datanode(&datanode).await;
             let regions = find_follower_regions(region_routes, &datanode);
             let region_ids = regions
                 .iter()
@@ -288,13 +286,13 @@ impl DropTableExecutor {
                     })),
                 };
 
-                let datanode = datanode.clone();
-                let requester = requester.clone();
+                let peer = datanode.clone();
+                let region_rpc = region_rpc.clone();
                 close_region_tasks.push(async move {
-                    if let Err(err) = requester.handle(request).await
+                    if let Err(err) = region_rpc.handle_region(&peer, request).await
                         && err.status_code() != StatusCode::RegionNotFound
                     {
-                        return Err(add_peer_context_if_needed(datanode)(err));
+                        return Err(add_peer_context_if_needed(peer)(err));
                     }
                     Ok(())
                 });

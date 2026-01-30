@@ -20,8 +20,8 @@ use common_meta::ddl::create_table::template::{
     CreateRequestBuilder, build_template_from_raw_table_info_for_physical_table,
 };
 use common_meta::lock_key::TableLock;
-use common_meta::node_manager::NodeManagerRef;
 use common_meta::region_keeper::{MemoryRegionKeeperRef, OperatingRegionGuard};
+use common_meta::region_rpc::RegionRpcRef;
 use common_meta::rpc::router::{RegionRoute, operating_leader_regions};
 use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::info;
@@ -128,7 +128,7 @@ impl State for AllocateRegion {
         )?;
         // Allocates the regions on datanodes.
         Self::allocate_regions(
-            &ctx.node_manager,
+            &ctx.region_rpc,
             &table_info_value.table_info,
             &new_allocated_region_routes,
             &wal_options,
@@ -257,7 +257,7 @@ impl AllocateRegion {
     }
 
     async fn allocate_regions(
-        node_manager: &NodeManagerRef,
+        region_rpc: &RegionRpcRef,
         raw_table_info: &RawTableInfo,
         region_routes: &[RegionRoute],
         wal_options: &HashMap<RegionNumber, String>,
@@ -286,7 +286,7 @@ impl AllocateRegion {
         );
         let executor = CreateTableExecutor::new(table_ref.into(), false, builder);
         executor
-            .on_create_regions(node_manager, table_id, region_routes, wal_options)
+            .on_create_regions(region_rpc, table_id, region_routes, wal_options)
             .await
             .context(error::AllocateRegionsSnafu { table_id })?;
 

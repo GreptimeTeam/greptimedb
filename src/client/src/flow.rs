@@ -15,7 +15,6 @@
 use api::v1::flow::{DirtyWindowRequests, FlowRequest, FlowResponse};
 use api::v1::region::InsertRequests;
 use common_error::ext::BoxedError;
-use common_meta::node_manager::Flownode;
 use snafu::ResultExt;
 
 use crate::Client;
@@ -26,16 +25,22 @@ pub struct FlowRequester {
     client: Client,
 }
 
-#[async_trait::async_trait]
-impl Flownode for FlowRequester {
-    async fn handle(&self, request: FlowRequest) -> common_meta::error::Result<FlowResponse> {
+impl FlowRequester {
+    pub fn new(client: Client) -> Self {
+        Self { client }
+    }
+
+    pub async fn handle_flow(
+        &self,
+        request: FlowRequest,
+    ) -> common_meta::error::Result<FlowResponse> {
         self.handle_inner(request)
             .await
             .map_err(BoxedError::new)
             .context(common_meta::error::ExternalSnafu)
     }
 
-    async fn handle_inserts(
+    pub async fn handle_flow_inserts(
         &self,
         request: InsertRequests,
     ) -> common_meta::error::Result<FlowResponse> {
@@ -45,20 +50,14 @@ impl Flownode for FlowRequester {
             .context(common_meta::error::ExternalSnafu)
     }
 
-    async fn handle_mark_window_dirty(
+    pub async fn handle_mark_window_dirty(
         &self,
         req: DirtyWindowRequests,
     ) -> common_meta::error::Result<FlowResponse> {
-        self.handle_mark_window_dirty(req)
+        self.handle_mark_window_dirty_inner(req)
             .await
             .map_err(BoxedError::new)
             .context(common_meta::error::ExternalSnafu)
-    }
-}
-
-impl FlowRequester {
-    pub fn new(client: Client) -> Self {
-        Self { client }
     }
 
     async fn handle_inner(&self, request: FlowRequest) -> Result<FlowResponse> {
@@ -103,7 +102,10 @@ impl FlowRequester {
         Ok(response)
     }
 
-    async fn handle_mark_window_dirty(&self, req: DirtyWindowRequests) -> Result<FlowResponse> {
+    async fn handle_mark_window_dirty_inner(
+        &self,
+        req: DirtyWindowRequests,
+    ) -> Result<FlowResponse> {
         let (addr, mut client) = self.client.raw_flow_client()?;
         let response = client
             .handle_mark_dirty_time_window(req)

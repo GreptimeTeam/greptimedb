@@ -157,7 +157,7 @@ impl DropTableProcedure {
     pub async fn on_datanode_drop_regions(&mut self) -> Result<Status> {
         self.executor
             .on_drop_regions(
-                &self.context.node_manager,
+                &self.context.region_rpc,
                 &self.context.leader_region_registry,
                 &self.data.physical_region_routes,
                 false,

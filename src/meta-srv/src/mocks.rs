@@ -102,7 +102,7 @@ pub async fn mock(
     };
 
     let builder = match datanode_clients {
-        Some(clients) => builder.node_manager(clients),
+        Some(clients) => builder.region_rpc(clients.clone()).flow_rpc(clients),
         None => builder,
     };
 

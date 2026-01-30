@@ -22,11 +22,12 @@ use common_base::Plugins;
 use common_event_recorder::EventRecorderImpl;
 use common_meta::cache::{LayeredCacheRegistryRef, TableRouteCacheRef};
 use common_meta::cache_invalidator::{CacheInvalidatorRef, DummyCacheInvalidator};
+use common_meta::flow_rpc::FlowRpcRef;
 use common_meta::key::TableMetadataManager;
 use common_meta::key::flow::FlowMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
-use common_meta::node_manager::NodeManagerRef;
 use common_meta::procedure_executor::ProcedureExecutorRef;
+use common_meta::region_rpc::RegionRpcRef;
 use dashmap::DashMap;
 use operator::delete::Deleter;
 use operator::flow::FlowServiceOperator;
@@ -58,7 +59,8 @@ pub struct FrontendBuilder {
     layered_cache_registry: LayeredCacheRegistryRef,
     local_cache_invalidator: Option<CacheInvalidatorRef>,
     catalog_manager: CatalogManagerRef,
-    node_manager: NodeManagerRef,
+    region_rpc: RegionRpcRef,
+    flow_rpc: FlowRpcRef,
     plugins: Option<Plugins>,
     procedure_executor: ProcedureExecutorRef,
     process_manager: ProcessManagerRef,
@@ -71,7 +73,8 @@ impl FrontendBuilder {
         kv_backend: KvBackendRef,
         layered_cache_registry: LayeredCacheRegistryRef,
         catalog_manager: CatalogManagerRef,
-        node_manager: NodeManagerRef,
+        region_rpc: RegionRpcRef,
+        flow_rpc: FlowRpcRef,
         procedure_executor: ProcedureExecutorRef,
         process_manager: ProcessManagerRef,
     ) -> Self {
@@ -81,7 +84,8 @@ impl FrontendBuilder {
             layered_cache_registry,
             local_cache_invalidator: None,
             catalog_manager,
-            node_manager,
+            region_rpc,
+            flow_rpc,
             plugins: None,
             procedure_executor,
             process_manager,
@@ -116,6 +120,7 @@ impl FrontendBuilder {
             layered_cache_registry,
             catalog::memory::MemoryCatalogManager::with_default_setup(),
             Arc::new(client::client_manager::NodeClients::default()),
+            Arc::new(client::client_manager::NodeClients::default()),
             meta_client,
             Arc::new(catalog::process_manager::ProcessManager::new(
                 "".to_string(),
@@ -140,7 +145,8 @@ impl FrontendBuilder {
 
     pub async fn try_build(self) -> Result<Instance> {
         let kv_backend = self.kv_backend;
-        let node_manager = self.node_manager;
+        let region_rpc = self.region_rpc;
+        let flow_rpc = self.flow_rpc;
         let plugins = self.plugins.unwrap_or_default();
         let process_manager = self.process_manager;
         let table_route_cache: TableRouteCacheRef =
@@ -167,9 +173,9 @@ impl FrontendBuilder {
 
         let region_query_handler =
             if let Some(factory) = plugins.get::<RegionQueryHandlerFactoryRef>() {
-                factory.build(partition_manager.clone(), node_manager.clone())
+                factory.build(partition_manager.clone(), region_rpc.clone())
             } else {
-                FrontendRegionQueryHandler::arc(partition_manager.clone(), node_manager.clone())
+                FrontendRegionQueryHandler::arc(partition_manager.clone(), region_rpc.clone())
             };
 
         let table_flownode_cache =
@@ -182,18 +188,19 @@ impl FrontendBuilder {
         let inserter = Arc::new(Inserter::new(
             self.catalog_manager.clone(),
             partition_manager.clone(),
-            node_manager.clone(),
+            region_rpc.clone(),
+            flow_rpc.clone(),
             table_flownode_cache,
         ));
         let deleter = Arc::new(Deleter::new(
             self.catalog_manager.clone(),
             partition_manager.clone(),
-            node_manager.clone(),
+            region_rpc.clone(),
         ));
         let requester = Arc::new(Requester::new(
             self.catalog_manager.clone(),
             partition_manager.clone(),
-            node_manager.clone(),
+            region_rpc.clone(),
         ));
         let table_mutation_handler = Arc::new(TableMutationOperator::new(
             inserter.clone(),
@@ -208,7 +215,7 @@ impl FrontendBuilder {
 
         let flow_metadata_manager: Arc<FlowMetadataManager> =
             Arc::new(FlowMetadataManager::new(kv_backend.clone()));
-        let flow_service = FlowServiceOperator::new(flow_metadata_manager, node_manager.clone());
+        let flow_service = FlowServiceOperator::new(flow_metadata_manager, flow_rpc.clone());
 
         let query_engine = QueryEngineFactory::new_with_plugins(
             self.catalog_manager.clone(),

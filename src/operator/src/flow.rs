@@ -16,29 +16,24 @@ use api::v1::flow::FlowRequestHeader;
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_function::handlers::FlowServiceHandler;
+use common_meta::flow_rpc::FlowRpcRef;
 use common_meta::key::flow::FlowMetadataManagerRef;
-use common_meta::node_manager::NodeManagerRef;
 use common_query::error::Result;
 use common_telemetry::tracing_context::TracingContext;
-use futures::StreamExt;
-use futures::stream::FuturesUnordered;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 
 /// The operator for flow service which implements [`FlowServiceHandler`].
 pub struct FlowServiceOperator {
     flow_metadata_manager: FlowMetadataManagerRef,
-    node_manager: NodeManagerRef,
+    flow_rpc: FlowRpcRef,
 }
 
 impl FlowServiceOperator {
-    pub fn new(
-        flow_metadata_manager: FlowMetadataManagerRef,
-        node_manager: NodeManagerRef,
-    ) -> Self {
+    pub fn new(flow_metadata_manager: FlowMetadataManagerRef, flow_rpc: FlowRpcRef) -> Self {
         Self {
             flow_metadata_manager,
-            node_manager,
+            flow_rpc,
         }
     }
 
@@ -89,17 +84,9 @@ impl FlowServiceOperator {
             .map_err(BoxedError::new)
             .context(common_query::error::ExecuteSnafu)?;
 
-        // order of flownodes doesn't matter here
-        let all_flow_nodes = FuturesUnordered::from_iter(
-            all_flownode_peers
-                .iter()
-                .map(|(_key, peer)| self.node_manager.flownode(peer.peer())),
-        )
-        .collect::<Vec<_>>()
-        .await;
-
         let mut final_result: Option<api::v1::flow::FlowResponse> = None;
-        for node in all_flow_nodes {
+        for (_key, peer) in all_flownode_peers.iter() {
+            let peer = peer.peer();
             let res = {
                 use api::v1::flow::{FlowRequest, FlushFlow, flow_request};
                 let flush_req = FlowRequest {
@@ -113,7 +100,8 @@ impl FlowServiceOperator {
                         flow_id: Some(api::v1::FlowId { id }),
                     })),
                 };
-                node.handle(flush_req)
+                self.flow_rpc
+                    .handle_flow(peer, flush_req)
                     .await
                     .map_err(BoxedError::new)
                     .context(common_query::error::ExecuteSnafu)?

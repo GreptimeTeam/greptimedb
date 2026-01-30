@@ -27,13 +27,13 @@ use crate::cache_invalidator::CacheInvalidatorRef;
 use crate::error::{self, Result, TableNotFoundSnafu};
 use crate::key::TableMetadataManagerRef;
 use crate::key::table_name::TableNameKey;
-use crate::node_manager::NodeManagerRef;
 use crate::reconciliation::reconcile_catalog::ReconcileCatalogProcedure;
 use crate::reconciliation::reconcile_database::{DEFAULT_PARALLELISM, ReconcileDatabaseProcedure};
 use crate::reconciliation::reconcile_logical_tables::ReconcileLogicalTablesProcedure;
 use crate::reconciliation::reconcile_table::ReconcileTableProcedure;
 use crate::reconciliation::reconcile_table::resolve_column_metadata::ResolveStrategy;
 use crate::reconciliation::utils::Context;
+use crate::region_rpc::RegionRpcRef;
 
 pub type ReconciliationManagerRef = Arc<ReconciliationManager>;
 
@@ -64,7 +64,7 @@ macro_rules! register_reconcile_loader {
 
 impl ReconciliationManager {
     pub fn new(
-        node_manager: NodeManagerRef,
+        region_rpc: RegionRpcRef,
         table_metadata_manager: TableMetadataManagerRef,
         cache_invalidator: CacheInvalidatorRef,
         procedure_manager: ProcedureManagerRef,
@@ -72,7 +72,7 @@ impl ReconciliationManager {
         Self {
             procedure_manager,
             context: Context {
-                node_manager,
+                region_rpc,
                 table_metadata_manager,
                 cache_invalidator,
             },

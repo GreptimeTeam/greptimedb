@@ -41,12 +41,12 @@ use crate::key::table_route::PhysicalTableRouteValue;
 use crate::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock};
 use crate::metrics;
-use crate::node_manager::NodeManagerRef;
 use crate::reconciliation::reconcile_logical_tables::reconciliation_start::ReconciliationStart;
 use crate::reconciliation::utils::{Context, ReconcileLogicalTableMetrics};
+use crate::region_rpc::RegionRpcRef;
 
 pub struct ReconcileLogicalTablesContext {
-    pub node_manager: NodeManagerRef,
+    pub region_rpc: RegionRpcRef,
     pub table_metadata_manager: TableMetadataManagerRef,
     pub cache_invalidator: CacheInvalidatorRef,
     pub persistent_ctx: PersistentContext,
@@ -57,7 +57,7 @@ impl ReconcileLogicalTablesContext {
     /// Creates a new [`ReconcileLogicalTablesContext`] with the given [`Context`] and [`PersistentContext`].
     pub fn new(ctx: Context, persistent_ctx: PersistentContext) -> Self {
         Self {
-            node_manager: ctx.node_manager,
+            region_rpc: ctx.region_rpc,
             table_metadata_manager: ctx.table_metadata_manager,
             cache_invalidator: ctx.cache_invalidator,
             persistent_ctx,

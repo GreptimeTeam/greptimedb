@@ -121,7 +121,7 @@ impl State for DropDatabaseExecutor {
         executor.invalidate_table_cache(ddl_ctx).await?;
         executor
             .on_drop_regions(
-                &ddl_ctx.node_manager,
+                &ddl_ctx.region_rpc,
                 &ddl_ctx.leader_region_registry,
                 &self.physical_region_routes,
                 true,

@@ -39,10 +39,10 @@ use crate::error::{
 };
 use crate::key::TableMetadataManagerRef;
 use crate::metrics;
-use crate::node_manager::NodeManagerRef;
 use crate::reconciliation::reconcile_logical_tables::ReconcileLogicalTablesProcedure;
 use crate::reconciliation::reconcile_table::ReconcileTableProcedure;
 use crate::reconciliation::reconcile_table::resolve_column_metadata::ResolveStrategy;
+use crate::region_rpc::RegionRpcRef;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct PartialRegionMetadata<'a> {
@@ -493,7 +493,7 @@ pub(crate) async fn wait_for_inflight_subprocedures<'a>(
 
 #[derive(Clone)]
 pub struct Context {
-    pub node_manager: NodeManagerRef,
+    pub region_rpc: RegionRpcRef,
     pub table_metadata_manager: TableMetadataManagerRef,
     pub cache_invalidator: CacheInvalidatorRef,
 }

@@ -297,13 +297,14 @@ pub mod test_data {
     use common_meta::ddl::flow_meta::FlowMetadataAllocator;
     use common_meta::ddl::table_meta::TableMetadataAllocator;
     use common_meta::ddl::{DdlContext, NoopRegionFailureDetectorControl};
+    use common_meta::flow_rpc::FlowRpcRef;
     use common_meta::key::TableMetadataManager;
     use common_meta::key::flow::FlowMetadataManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
-    use common_meta::node_manager::NodeManagerRef;
     use common_meta::peer::Peer;
     use common_meta::region_keeper::MemoryRegionKeeper;
     use common_meta::region_registry::LeaderRegionRegistry;
+    use common_meta::region_rpc::RegionRpcRef;
     use common_meta::rpc::router::RegionRoute;
     use common_meta::sequence::SequenceBuilder;
     use common_meta::wal_provider::WalProvider;
@@ -381,7 +382,7 @@ pub mod test_data {
         }
     }
 
-    pub(crate) fn new_ddl_context(node_manager: NodeManagerRef) -> DdlContext {
+    pub(crate) fn new_ddl_context(region_rpc: RegionRpcRef, flow_rpc: FlowRpcRef) -> DdlContext {
         let kv_backend = Arc::new(MemoryKvBackend::new());
 
         let mailbox_sequence =
@@ -397,7 +398,8 @@ pub mod test_data {
             Arc::new(SequenceBuilder::new("test", kv_backend).build()),
         ));
         DdlContext {
-            node_manager,
+            region_rpc,
+            flow_rpc,
             cache_invalidator: Arc::new(MetasrvCacheInvalidator::new(
                 mailbox,
                 MetasrvInfo {

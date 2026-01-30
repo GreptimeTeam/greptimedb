@@ -17,8 +17,8 @@ use std::collections::{HashMap, HashSet};
 
 use common_meta::ddl::drop_table::executor::DropTableExecutor;
 use common_meta::lock_key::TableLock;
-use common_meta::node_manager::NodeManagerRef;
 use common_meta::region_registry::LeaderRegionRegistryRef;
+use common_meta::region_rpc::RegionRpcRef;
 use common_meta::rpc::router::RegionRoute;
 use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::{info, warn};
@@ -90,7 +90,7 @@ impl State for DeallocateRegion {
         );
         // Deallocates the regions on datanodes.
         Self::deallocate_regions(
-            &ctx.node_manager,
+            &ctx.region_rpc,
             &ctx.leader_region_registry,
             table_ref.into(),
             table_id,
@@ -117,7 +117,7 @@ impl State for DeallocateRegion {
 
 impl DeallocateRegion {
     async fn deallocate_regions(
-        node_manager: &NodeManagerRef,
+        region_rpc: &RegionRpcRef,
         leader_region_registry: &LeaderRegionRegistryRef,
         table: TableName,
         table_id: TableId,
@@ -128,7 +128,7 @@ impl DeallocateRegion {
         // which would involve dropping all logical regions associated with that physical region.
         executor
             .on_drop_regions(
-                node_manager,
+                region_rpc,
                 leader_region_registry,
                 region_routes,
                 false,

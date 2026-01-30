@@ -143,7 +143,6 @@ impl TruncateTableProcedure {
         let mut truncate_region_tasks = Vec::with_capacity(leaders.len());
 
         for datanode in leaders {
-            let requester = self.context.node_manager.datanode(&datanode).await;
             let regions = find_leader_regions(region_routes, &datanode);
 
             for region in regions {
@@ -175,14 +174,14 @@ impl TruncateTableProcedure {
                     })),
                 };
 
-                let datanode = datanode.clone();
-                let requester = requester.clone();
+                let peer = datanode.clone();
+                let region_rpc = self.context.region_rpc.clone();
 
                 truncate_region_tasks.push(async move {
-                    requester
-                        .handle(request)
+                    region_rpc
+                        .handle_region(&peer, request)
                         .await
-                        .map_err(add_peer_context_if_needed(datanode))
+                        .map_err(add_peer_context_if_needed(peer))
                 });
             }
         }

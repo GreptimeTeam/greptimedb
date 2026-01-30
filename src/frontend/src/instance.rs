@@ -45,8 +45,8 @@ use common_event_recorder::EventRecorderRef;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::table_name::TableNameKey;
-use common_meta::node_manager::NodeManagerRef;
 use common_meta::procedure_executor::ProcedureExecutorRef;
+use common_meta::region_rpc::RegionRpcRef;
 use common_query::Output;
 use common_recordbatch::RecordBatchStreamWrapper;
 use common_recordbatch::error::StreamTimeoutSnafu;
@@ -89,7 +89,7 @@ use sql::statements::copy::{CopyDatabase, CopyTable};
 use sql::statements::statement::Statement;
 use sql::statements::tql::Tql;
 use sqlparser::ast::ObjectName;
-pub use standalone::StandaloneDatanodeManager;
+pub use standalone::{StandaloneFlowRpc, StandaloneRegionRpc};
 use table::requests::{OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM};
 use tracing::Span;
 
@@ -158,8 +158,8 @@ impl Instance {
         &self.process_manager
     }
 
-    pub fn node_manager(&self) -> &NodeManagerRef {
-        self.inserter.node_manager()
+    pub fn region_rpc(&self) -> &RegionRpcRef {
+        self.inserter.region_rpc()
     }
 
     pub fn partition_manager(&self) -> &PartitionRuleManagerRef {

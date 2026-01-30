@@ -106,7 +106,6 @@ impl DropFlowProcedure {
         let mut drop_flow_tasks = Vec::with_capacity(flownode_ids.len());
 
         for FlowRouteValue { peer } in &self.data.flow_route_values {
-            let requester = self.context.node_manager.flownode(peer).await;
             let request = FlowRequest {
                 body: Some(flow_request::Body::Drop(DropRequest {
                     flow_id: Some(api::v1::FlowId { id: flow_id }),
@@ -114,11 +113,13 @@ impl DropFlowProcedure {
                 ..Default::default()
             };
 
+            let flow_rpc = self.context.flow_rpc.clone();
+            let peer = peer.clone();
             drop_flow_tasks.push(async move {
-                if let Err(err) = requester.handle(request).await
+                if let Err(err) = flow_rpc.handle_flow(&peer, request).await
                     && err.status_code() != StatusCode::FlowNotFound
                 {
-                    return Err(add_peer_context_if_needed(peer.clone())(err));
+                    return Err(add_peer_context_if_needed(peer)(err));
                 }
                 Ok(())
             });

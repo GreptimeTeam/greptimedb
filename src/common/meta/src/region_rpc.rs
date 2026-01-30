@@ -14,34 +14,29 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use common_meta::region_rpc::RegionRpcRef;
+use api::region::RegionResponse;
+use api::v1::region::RegionRequest;
 use common_query::request::QueryRequest;
 use common_recordbatch::SendableRecordBatchStream;
-use partition::manager::PartitionRuleManagerRef;
-use session::ReadPreference;
 
 use crate::error::Result;
+use crate::peer::Peer;
 
-/// A factory to create a [`RegionQueryHandler`].
-pub trait RegionQueryHandlerFactory: Send + Sync {
-    /// Build a [`RegionQueryHandler`] with the given partition manager and node manager.
-    fn build(
+/// RPC surface for communicating with datanode's region service.
+///
+/// This is a transport-facing API (network gRPC/Flight vs in-process) and should not encode
+/// business logic.
+#[async_trait::async_trait]
+pub trait RegionRpc: Send + Sync {
+    /// Handles DML and DDL requests to datanode's region server.
+    async fn handle_region(&self, peer: &Peer, request: RegionRequest) -> Result<RegionResponse>;
+
+    /// Handles query requests to datanode (Arrow Flight).
+    async fn handle_query(
         &self,
-        partition_manager: PartitionRuleManagerRef,
-        region_rpc: RegionRpcRef,
-    ) -> RegionQueryHandlerRef;
-}
-
-pub type RegionQueryHandlerFactoryRef = Arc<dyn RegionQueryHandlerFactory>;
-
-#[async_trait]
-pub trait RegionQueryHandler: Send + Sync {
-    async fn do_get(
-        &self,
-        read_preference: ReadPreference,
+        peer: &Peer,
         request: QueryRequest,
     ) -> Result<SendableRecordBatchStream>;
 }
 
-pub type RegionQueryHandlerRef = Arc<dyn RegionQueryHandler>;
+pub type RegionRpcRef = Arc<dyn RegionRpc>;

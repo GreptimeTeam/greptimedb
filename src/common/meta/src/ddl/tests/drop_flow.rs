@@ -27,7 +27,7 @@ use crate::ddl::tests::create_flow::create_test_flow;
 use crate::error;
 use crate::key::table_route::TableRouteValue;
 use crate::rpc::ddl::DropFlowTask;
-use crate::test_util::{MockFlownodeManager, new_ddl_context};
+use crate::test_util::{MockFlownodeManager, new_ddl_context_with_flow};
 
 fn test_drop_flow_task(flow_name: &str, flow_id: u32, drop_if_exists: bool) -> DropFlowTask {
     DropFlowTask {
@@ -42,7 +42,7 @@ fn test_drop_flow_task(flow_name: &str, flow_id: u32, drop_if_exists: bool) -> D
 async fn test_drop_flow_not_found() {
     let flow_id = 1024;
     let node_manager = Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler));
-    let ddl_context = new_ddl_context(node_manager);
+    let ddl_context = new_ddl_context_with_flow(node_manager);
     let task = test_drop_flow_task("my_flow", flow_id, false);
     let mut procedure = DropFlowProcedure::new(task, ddl_context);
     let err = procedure.on_prepare().await.unwrap_err();
@@ -61,7 +61,7 @@ async fn test_drop_flow() {
     let sink_table_name =
         TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table");
     let node_manager = Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler));
-    let ddl_context = new_ddl_context(node_manager);
+    let ddl_context = new_ddl_context_with_flow(node_manager);
 
     let task = test_create_table_task("my_source_table", table_id);
     ddl_context

@@ -102,6 +102,7 @@ impl State for ReconcileRegions {
             .into_iter()
             .map(|p| (p.id, p))
             .collect::<HashMap<_, _>>();
+        let region_rpc = ctx.region_rpc.clone();
         let mut sync_column_tsks = Vec::with_capacity(self.region_ids.len());
         for (datanode_id, region_role_set) in region_distribution {
             if region_role_set.leader_regions.is_empty() {
@@ -112,13 +113,13 @@ impl State for ReconcileRegions {
             for region_id in region_role_set.leader_regions {
                 let region_id = RegionId::new(ctx.persistent_ctx.table_id, region_id);
                 if self.region_ids.contains(&region_id) {
-                    let requester = ctx.node_manager.datanode(peer).await;
                     let request = make_alter_region_request(region_id, &column_defs);
                     let peer = peer.clone();
+                    let region_rpc = region_rpc.clone();
 
                     sync_column_tsks.push(async move {
-                        requester
-                            .handle(request)
+                        region_rpc
+                            .handle_region(&peer, request)
                             .await
                             .map_err(add_peer_context_if_needed(peer))
                     });

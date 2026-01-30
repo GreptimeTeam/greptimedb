@@ -425,8 +425,8 @@ async fn test_on_part_duplicate_alter_request() {
     let column_metadatas = test_column_metadatas(&["col_0", "new_col_1", "new_col_2"]);
     let handler =
         DatanodeWatcher::new(tx).with_handler(make_alters_request_handler(column_metadatas));
-    let node_manager = Arc::new(MockDatanodeManager::new(handler));
-    ddl_context.node_manager = node_manager;
+    let region_rpc = Arc::new(MockDatanodeManager::new(handler));
+    ddl_context.region_rpc = region_rpc;
 
     // re-alter
     let tasks = vec![

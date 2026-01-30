@@ -487,15 +487,18 @@ impl GreptimeDbClusterBuilder {
         .build();
 
         let fe_opts = self.build_frontend_options();
+        let process_manager =
+            Arc::new(ProcessManager::new(fe_opts.grpc.server_addr.clone(), None));
 
         let instance = FrontendBuilder::new(
             fe_opts.clone(),
             cached_meta_backend.clone(),
             cache_registry.clone(),
             catalog_manager,
+            datanode_clients.clone(),
             datanode_clients,
             meta_client.clone(),
-            Arc::new(ProcessManager::new(fe_opts.grpc.server_addr.clone(), None)),
+            process_manager,
         )
         .with_local_cache_invalidator(cache_registry)
         .try_build()

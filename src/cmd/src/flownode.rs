@@ -418,6 +418,7 @@ impl StartCommand {
             cached_meta_backend.clone(),
             layered_cache_registry.clone(),
             meta_client.clone(),
+            client.clone(),
             client,
         )
         .await

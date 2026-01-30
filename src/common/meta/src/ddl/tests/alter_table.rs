@@ -53,9 +53,9 @@ use crate::error::{Error, Result};
 use crate::key::datanode_table::DatanodeTableKey;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
-use crate::node_manager::NodeManagerRef;
 use crate::peer::Peer;
 use crate::poison_key::table_poison_key;
+use crate::region_rpc::RegionRpcRef;
 use crate::rpc::ddl::AlterTableTask;
 use crate::rpc::router::{Region, RegionRoute};
 use crate::test_util::{MockDatanodeManager, new_ddl_context};
@@ -590,10 +590,10 @@ async fn test_on_update_table_options() {
 }
 
 async fn prepare_alter_table_procedure(
-    node_manager: NodeManagerRef,
+    region_rpc: RegionRpcRef,
 ) -> (AlterTableProcedure, ProcedureId) {
     common_telemetry::init_default_ut_logging();
-    let ddl_context = new_ddl_context(node_manager);
+    let ddl_context = new_ddl_context(region_rpc);
     let table_id = 1024;
     let table_name = "foo";
     let task = test_create_table_task(table_name, table_id);

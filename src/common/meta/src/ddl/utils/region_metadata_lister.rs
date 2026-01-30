@@ -24,18 +24,18 @@ use store_api::storage::{RegionId, TableId};
 
 use crate::ddl::utils::add_peer_context_if_needed;
 use crate::error::{DecodeJsonSnafu, Result};
-use crate::node_manager::NodeManagerRef;
+use crate::region_rpc::RegionRpcRef;
 use crate::rpc::router::{RegionRoute, find_leaders, region_distribution};
 
 /// Collects the region metadata from the datanodes.
 pub struct RegionMetadataLister {
-    node_manager: NodeManagerRef,
+    region_rpc: RegionRpcRef,
 }
 
 impl RegionMetadataLister {
-    /// Creates a new [`RegionMetadataLister`] with the given [`NodeManagerRef`].
-    pub fn new(node_manager: NodeManagerRef) -> Self {
-        Self { node_manager }
+    /// Creates a new [`RegionMetadataLister`] with the given [`RegionRpcRef`].
+    pub fn new(region_rpc: RegionRpcRef) -> Self {
+        Self { region_rpc }
     }
 
     /// Collects the region metadata from the datanodes.
@@ -64,7 +64,6 @@ impl RegionMetadataLister {
             }
             // Safety: must exists.
             let peer = leaders.get(&datanode_id).unwrap();
-            let requester = self.node_manager.datanode(peer).await;
             let region_ids = region_role_set
                 .leader_regions
                 .iter()
@@ -73,9 +72,10 @@ impl RegionMetadataLister {
             let request = Self::build_list_metadata_request(region_ids);
 
             let peer = peer.clone();
+            let region_rpc = self.region_rpc.clone();
             list_metadata_tasks.push(async move {
-                requester
-                    .handle(request)
+                region_rpc
+                    .handle_region(&peer, request)
                     .await
                     .map_err(add_peer_context_if_needed(peer))
             });

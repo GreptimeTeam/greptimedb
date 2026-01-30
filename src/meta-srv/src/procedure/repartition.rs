@@ -39,9 +39,9 @@ use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
 use common_meta::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
-use common_meta::node_manager::NodeManagerRef;
 use common_meta::region_keeper::MemoryRegionKeeperRef;
 use common_meta::region_registry::LeaderRegionRegistryRef;
+use common_meta::region_rpc::RegionRpcRef;
 use common_meta::rpc::router::RegionRoute;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
@@ -122,7 +122,7 @@ pub struct Context {
     pub volatile_ctx: VolatileContext,
     pub table_metadata_manager: TableMetadataManagerRef,
     pub memory_region_keeper: MemoryRegionKeeperRef,
-    pub node_manager: NodeManagerRef,
+    pub region_rpc: RegionRpcRef,
     pub leader_region_registry: LeaderRegionRegistryRef,
     pub mailbox: MailboxRef,
     pub server_addr: String,
@@ -221,7 +221,7 @@ impl Context {
             persistent_ctx,
             table_metadata_manager: ddl_ctx.table_metadata_manager.clone(),
             memory_region_keeper: ddl_ctx.memory_region_keeper.clone(),
-            node_manager: ddl_ctx.node_manager.clone(),
+            region_rpc: ddl_ctx.region_rpc.clone(),
             leader_region_registry: ddl_ctx.leader_region_registry.clone(),
             mailbox,
             server_addr,

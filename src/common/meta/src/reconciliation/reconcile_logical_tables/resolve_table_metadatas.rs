@@ -67,7 +67,7 @@ impl State for ResolveTableMetadatas {
             .as_ref()
             .unwrap()
             .region_routes;
-        let region_metadata_lister = RegionMetadataLister::new(ctx.node_manager.clone());
+        let region_metadata_lister = RegionMetadataLister::new(ctx.region_rpc.clone());
         let mut metadata_consistent_count = 0;
         let mut metadata_inconsistent_count = 0;
         let mut create_tables_count = 0;

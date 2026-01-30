@@ -36,7 +36,7 @@ use crate::error::{self, Result};
 use crate::key::TableMetadataManagerRef;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::{PhysicalTableRouteValue, TableRouteValue};
-use crate::node_manager::NodeManagerRef;
+use crate::region_rpc::RegionRpcRef;
 use crate::rpc::router::{RegionRoute, find_leader_regions, find_leaders};
 
 /// [CreateTableExecutor] performs:
@@ -98,7 +98,7 @@ impl CreateTableExecutor {
 
     pub async fn on_create_regions(
         &self,
-        node_manager: &NodeManagerRef,
+        region_rpc: &RegionRpcRef,
         table_id: TableId,
         region_routes: &[RegionRoute],
         region_wal_options: &HashMap<RegionNumber, String>,
@@ -113,8 +113,6 @@ impl CreateTableExecutor {
             .collect::<HashMap<_, _>>();
 
         for datanode in leaders {
-            let requester = node_manager.datanode(&datanode).await;
-
             let regions = find_leader_regions(region_routes, &datanode);
             let mut requests = Vec::with_capacity(regions.len());
             for region_number in regions {
@@ -138,10 +136,10 @@ impl CreateTableExecutor {
                 };
 
                 let datanode = datanode.clone();
-                let requester = requester.clone();
+                let region_rpc = region_rpc.clone();
                 create_region_tasks.push(async move {
-                    requester
-                        .handle(request)
+                    region_rpc
+                        .handle_region(&datanode, request)
                         .await
                         .map_err(add_peer_context_if_needed(datanode))
                 });

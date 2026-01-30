@@ -20,12 +20,10 @@ use api::v1::region::RegionRequest;
 use arc_swap::ArcSwapOption;
 use arrow_flight::Ticket;
 use async_stream::stream;
-use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_error::status_code::StatusCode;
 use common_grpc::flight::{FlightDecoder, FlightMessage};
 use common_meta::error::{self as meta_error, Result as MetaResult};
-use common_meta::node_manager::Datanode;
 use common_query::request::QueryRequest;
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{RecordBatch, RecordBatchStreamWrapper, SendableRecordBatchStream};
@@ -51,9 +49,16 @@ pub struct RegionRequester {
     accept_compression: bool,
 }
 
-#[async_trait]
-impl Datanode for RegionRequester {
-    async fn handle(&self, request: RegionRequest) -> MetaResult<RegionResponse> {
+impl RegionRequester {
+    pub fn new(client: Client, send_compression: bool, accept_compression: bool) -> Self {
+        Self {
+            client,
+            send_compression,
+            accept_compression,
+        }
+    }
+
+    pub async fn handle_region(&self, request: RegionRequest) -> MetaResult<RegionResponse> {
         self.handle_inner(request).await.map_err(|err| {
             if err.should_retry() {
                 meta_error::Error::RetryLater {
@@ -69,7 +74,10 @@ impl Datanode for RegionRequester {
         })
     }
 
-    async fn handle_query(&self, request: QueryRequest) -> MetaResult<SendableRecordBatchStream> {
+    pub async fn handle_query(
+        &self,
+        request: QueryRequest,
+    ) -> MetaResult<SendableRecordBatchStream> {
         let plan = DFLogicalSubstraitConvertor
             .encode(&request.plan, DefaultSerializer)
             .map_err(BoxedError::new)
@@ -89,18 +97,8 @@ impl Datanode for RegionRequester {
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)
     }
-}
 
-impl RegionRequester {
-    pub fn new(client: Client, send_compression: bool, accept_compression: bool) -> Self {
-        Self {
-            client,
-            send_compression,
-            accept_compression,
-        }
-    }
-
-    pub async fn do_get_inner(&self, ticket: Ticket) -> Result<SendableRecordBatchStream> {
+    async fn do_get_inner(&self, ticket: Ticket) -> Result<SendableRecordBatchStream> {
         let mut flight_client = self
             .client
             .make_flight_client(self.send_compression, self.accept_compression)?;
@@ -279,10 +277,6 @@ impl RegionRequester {
         check_response_header(&response.header)?;
 
         Ok(RegionResponse::from_region_response(response))
-    }
-
-    pub async fn handle(&self, request: RegionRequest) -> Result<RegionResponse> {
-        self.handle_inner(request).await
     }
 }
 

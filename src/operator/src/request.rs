@@ -17,9 +17,10 @@ use std::sync::Arc;
 use api::v1::region::region_request::Body as RegionRequestBody;
 use api::v1::region::{BuildIndexRequest, CompactRequest, FlushRequest, RegionRequestHeader};
 use catalog::CatalogManagerRef;
+use common_base::AffectedRows;
 use common_catalog::build_db_string;
-use common_meta::node_manager::{AffectedRows, NodeManagerRef};
 use common_meta::peer::Peer;
+use common_meta::region_rpc::RegionRpcRef;
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{debug, error, info};
 use futures_util::future;
@@ -40,7 +41,7 @@ use crate::region_req_factory::RegionRequestFactory;
 pub struct Requester {
     catalog_manager: CatalogManagerRef,
     partition_manager: PartitionRuleManagerRef,
-    node_manager: NodeManagerRef,
+    region_rpc: RegionRpcRef,
 }
 
 pub type RequesterRef = Arc<Requester>;
@@ -49,12 +50,12 @@ impl Requester {
     pub fn new(
         catalog_manager: CatalogManagerRef,
         partition_manager: PartitionRuleManagerRef,
-        node_manager: NodeManagerRef,
+        region_rpc: RegionRpcRef,
     ) -> Self {
         Self {
             catalog_manager,
             partition_manager,
-            node_manager,
+            region_rpc,
         }
     }
 
@@ -213,14 +214,12 @@ impl Requester {
         let tasks = requests.into_iter().map(|req_body| {
             let request = request_factory.build_request(req_body.clone());
             let partition_manager = self.partition_manager.clone();
-            let node_manager = self.node_manager.clone();
+            let region_rpc = self.region_rpc.clone();
             common_runtime::spawn_global(async move {
                 let peer =
                     Self::find_region_leader_by_request(partition_manager, &req_body).await?;
-                node_manager
-                    .datanode(&peer)
-                    .await
-                    .handle(request)
+                region_rpc
+                    .handle_region(&peer, request)
                     .await
                     .context(RequestRegionSnafu)
             })

@@ -365,7 +365,6 @@ pub async fn sync_follower_regions(
     }
     let mut sync_region_tasks = Vec::with_capacity(followers.len());
     for datanode in followers {
-        let requester = context.node_manager.datanode(&datanode).await;
         let regions = find_follower_regions(region_routes, &datanode);
         for region in regions {
             let region_id = RegionId::new(table_id, region);
@@ -412,13 +411,13 @@ pub async fn sync_follower_regions(
                 })),
             };
 
-            let datanode = datanode.clone();
-            let requester = requester.clone();
+            let peer = datanode.clone();
+            let region_rpc = context.region_rpc.clone();
             sync_region_tasks.push(async move {
-                requester
-                    .handle(request)
+                region_rpc
+                    .handle_region(&peer, request)
                     .await
-                    .map_err(add_peer_context_if_needed(datanode))
+                    .map_err(add_peer_context_if_needed(peer))
             });
         }
     }

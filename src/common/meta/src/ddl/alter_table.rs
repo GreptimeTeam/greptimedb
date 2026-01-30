@@ -181,7 +181,7 @@ impl AlterTableProcedure {
         let results = self
             .executor
             .on_alter_regions(
-                &self.context.node_manager,
+                &self.context.region_rpc,
                 &physical_table_route.region_routes,
                 alter_kind,
             )

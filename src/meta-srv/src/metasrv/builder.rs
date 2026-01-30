@@ -30,16 +30,17 @@ use common_meta::ddl::{
 };
 use common_meta::ddl_manager::{DdlManager, DdlManagerConfiguratorRef};
 use common_meta::distributed_time_constants::default_distributed_time_constants;
+use common_meta::flow_rpc::FlowRpcRef;
 use common_meta::key::TableMetadataManager;
 use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::flow::flow_state::FlowStateManager;
 use common_meta::key::runtime_switch::{RuntimeSwitchManager, RuntimeSwitchManagerRef};
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
-use common_meta::node_manager::NodeManagerRef;
 use common_meta::reconciliation::manager::ReconciliationManager;
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::region_registry::LeaderRegionRegistry;
+use common_meta::region_rpc::RegionRpcRef;
 use common_meta::sequence::SequenceBuilder;
 use common_meta::state_store::KvStateStore;
 use common_meta::stats::topic::TopicStatsRegistry;
@@ -98,7 +99,8 @@ pub struct MetasrvBuilder {
     handler_group_builder: Option<HeartbeatHandlerGroupBuilder>,
     election: Option<ElectionRef>,
     meta_peer_client: Option<MetaPeerClientRef>,
-    node_manager: Option<NodeManagerRef>,
+    region_rpc: Option<RegionRpcRef>,
+    flow_rpc: Option<FlowRpcRef>,
     plugins: Option<Plugins>,
     table_metadata_allocator: Option<TableMetadataAllocatorRef>,
 }
@@ -113,7 +115,8 @@ impl MetasrvBuilder {
             meta_peer_client: None,
             election: None,
             options: None,
-            node_manager: None,
+            region_rpc: None,
+            flow_rpc: None,
             plugins: None,
             table_metadata_allocator: None,
         }
@@ -157,8 +160,13 @@ impl MetasrvBuilder {
         self
     }
 
-    pub fn node_manager(mut self, node_manager: NodeManagerRef) -> Self {
-        self.node_manager = Some(node_manager);
+    pub fn region_rpc(mut self, region_rpc: RegionRpcRef) -> Self {
+        self.region_rpc = Some(region_rpc);
+        self
+    }
+
+    pub fn flow_rpc(mut self, flow_rpc: FlowRpcRef) -> Self {
+        self.flow_rpc = Some(flow_rpc);
         self
     }
 
@@ -184,7 +192,8 @@ impl MetasrvBuilder {
             in_memory,
             selector,
             handler_group_builder,
-            node_manager,
+            region_rpc,
+            flow_rpc,
             plugins,
             table_metadata_allocator,
         } = self;
@@ -292,13 +301,13 @@ impl MetasrvBuilder {
             FlowStateHandler::new(FlowStateManager::new(in_memory.clone().as_kv_backend_ref()));
 
         let memory_region_keeper = Arc::new(MemoryRegionKeeper::default());
-        let node_manager = node_manager.unwrap_or_else(|| {
-            let datanode_client_channel_config = ChannelConfig::new()
-                .timeout(Some(options.datanode.client.timeout))
-                .connect_timeout(options.datanode.client.connect_timeout)
-                .tcp_nodelay(options.datanode.client.tcp_nodelay);
-            Arc::new(NodeClients::new(datanode_client_channel_config))
-        });
+        let datanode_client_channel_config = ChannelConfig::new()
+            .timeout(Some(options.datanode.client.timeout))
+            .connect_timeout(options.datanode.client.connect_timeout)
+            .tcp_nodelay(options.datanode.client.tcp_nodelay);
+        let default_node_clients = Arc::new(NodeClients::new(datanode_client_channel_config));
+        let region_rpc = region_rpc.unwrap_or_else(|| default_node_clients.clone() as _);
+        let flow_rpc = flow_rpc.unwrap_or_else(|| default_node_clients.clone() as _);
         let cache_invalidator = Arc::new(MetasrvCacheInvalidator::new(
             mailbox.clone(),
             MetasrvInfo {
@@ -390,7 +399,8 @@ impl MetasrvBuilder {
         let topic_stats_registry = Arc::new(TopicStatsRegistry::default());
 
         let ddl_context = DdlContext {
-            node_manager: node_manager.clone(),
+            region_rpc: region_rpc.clone(),
+            flow_rpc: flow_rpc.clone(),
             cache_invalidator: cache_invalidator.clone(),
             memory_region_keeper: memory_region_keeper.clone(),
             leader_region_registry: leader_region_registry.clone(),
@@ -547,7 +557,7 @@ impl MetasrvBuilder {
             .to_string();
 
         let reconciliation_manager = Arc::new(ReconciliationManager::new(
-            node_manager.clone(),
+            region_rpc.clone(),
             table_metadata_manager.clone(),
             cache_invalidator.clone(),
             procedure_manager.clone(),

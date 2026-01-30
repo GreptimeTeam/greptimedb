@@ -13,12 +13,17 @@
 // limitations under the License.
 
 use std::fmt::{Debug, Formatter};
-use std::sync::Arc;
 use std::time::Duration;
 
+use api::region::RegionResponse;
+use api::v1::flow::{DirtyWindowRequests, FlowRequest, FlowResponse};
+use api::v1::region::{InsertRequests, RegionRequest};
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
-use common_meta::node_manager::{DatanodeManager, DatanodeRef, FlownodeManager, FlownodeRef};
+use common_meta::flow_rpc::FlowRpc;
 use common_meta::peer::Peer;
+use common_meta::region_rpc::RegionRpc;
+use common_query::request::QueryRequest;
+use common_recordbatch::SendableRecordBatchStream;
 use moka::future::{Cache, CacheBuilder};
 
 use crate::Client;
@@ -45,29 +50,71 @@ impl Debug for NodeClients {
 }
 
 #[async_trait::async_trait]
-impl DatanodeManager for NodeClients {
-    async fn datanode(&self, datanode: &Peer) -> DatanodeRef {
-        let client = self.get_client(datanode).await;
-
+impl RegionRpc for NodeClients {
+    async fn handle_region(
+        &self,
+        peer: &Peer,
+        request: RegionRequest,
+    ) -> common_meta::error::Result<RegionResponse> {
+        let client = self.get_client(peer).await;
         let ChannelConfig {
             send_compression,
             accept_compression,
             ..
         } = self.channel_manager.config();
-        Arc::new(RegionRequester::new(
-            client,
-            *send_compression,
-            *accept_compression,
-        ))
+        RegionRequester::new(client, *send_compression, *accept_compression)
+            .handle_region(request)
+            .await
+    }
+
+    async fn handle_query(
+        &self,
+        peer: &Peer,
+        request: QueryRequest,
+    ) -> common_meta::error::Result<SendableRecordBatchStream> {
+        let client = self.get_client(peer).await;
+        let ChannelConfig {
+            send_compression,
+            accept_compression,
+            ..
+        } = self.channel_manager.config();
+        RegionRequester::new(client, *send_compression, *accept_compression)
+            .handle_query(request)
+            .await
     }
 }
 
 #[async_trait::async_trait]
-impl FlownodeManager for NodeClients {
-    async fn flownode(&self, flownode: &Peer) -> FlownodeRef {
-        let client = self.get_client(flownode).await;
+impl FlowRpc for NodeClients {
+    async fn handle_flow(
+        &self,
+        peer: &Peer,
+        request: FlowRequest,
+    ) -> common_meta::error::Result<FlowResponse> {
+        let client = self.get_client(peer).await;
+        FlowRequester::new(client).handle_flow(request).await
+    }
 
-        Arc::new(FlowRequester::new(client))
+    async fn handle_flow_inserts(
+        &self,
+        peer: &Peer,
+        request: InsertRequests,
+    ) -> common_meta::error::Result<FlowResponse> {
+        let client = self.get_client(peer).await;
+        FlowRequester::new(client)
+            .handle_flow_inserts(request)
+            .await
+    }
+
+    async fn handle_mark_window_dirty(
+        &self,
+        peer: &Peer,
+        req: DirtyWindowRequests,
+    ) -> common_meta::error::Result<FlowResponse> {
+        let client = self.get_client(peer).await;
+        FlowRequester::new(client)
+            .handle_mark_window_dirty(req)
+            .await
     }
 }
 

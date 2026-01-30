@@ -17,8 +17,8 @@ use common_error::ext::BoxedError;
 use common_meta::cluster::{ClusterInfo, NodeInfo, Role};
 use common_meta::datanode::RegionStat;
 use common_meta::key::flow::flow_state::FlowStat;
-use common_meta::node_manager::DatanodeManagerRef;
 use common_meta::procedure_executor::{ExecutorContext, ProcedureExecutor};
+use common_meta::region_rpc::RegionRpcRef;
 use common_meta::rpc::procedure;
 use common_procedure::{ProcedureInfo, ProcedureState};
 use common_query::request::QueryRequest;
@@ -33,14 +33,14 @@ use crate::information_schema::{DatanodeInspectRequest, InformationExtension};
 
 pub struct DistributedInformationExtension {
     meta_client: MetaClientRef,
-    datanode_manager: DatanodeManagerRef,
+    region_rpc: RegionRpcRef,
 }
 
 impl DistributedInformationExtension {
-    pub fn new(meta_client: MetaClientRef, datanode_manager: DatanodeManagerRef) -> Self {
+    pub fn new(meta_client: MetaClientRef, region_rpc: RegionRpcRef) -> Self {
         Self {
             meta_client,
-            datanode_manager,
+            region_rpc,
         }
     }
 }
@@ -126,13 +126,16 @@ impl InformationExtension for DistributedInformationExtension {
 
         let mut streams = Vec::with_capacity(nodes.len());
         for node in nodes {
-            let client = self.datanode_manager.datanode(&node.peer).await;
-            let stream = client
-                .handle_query(QueryRequest {
-                    plan: plan.clone(),
-                    region_id: RegionId::default(),
-                    header: None,
-                })
+            let stream = self
+                .region_rpc
+                .handle_query(
+                    &node.peer,
+                    QueryRequest {
+                        plan: plan.clone(),
+                        region_id: RegionId::default(),
+                        header: None,
+                    },
+                )
                 .await
                 .context(crate::error::HandleQuerySnafu)?;
             streams.push(stream);

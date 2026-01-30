@@ -59,6 +59,7 @@ impl State for ReconcileRegions {
             .into_iter()
             .map(|p| (p.id, p))
             .collect::<HashMap<_, _>>();
+        let region_rpc = ctx.region_rpc.clone();
         let mut create_table_tasks = Vec::with_capacity(leaders.len());
         for (datanode_id, region_role_set) in region_distribution {
             if region_role_set.leader_regions.is_empty() {
@@ -67,10 +68,10 @@ impl State for ReconcileRegions {
             // Safety: It contains all leaders in the region routes.
             let peer = leaders.get(&datanode_id).unwrap().clone();
             let request = self.make_request(&region_role_set.leader_regions, ctx)?;
-            let requester = ctx.node_manager.datanode(&peer).await;
+            let region_rpc = region_rpc.clone();
             create_table_tasks.push(async move {
-                requester
-                    .handle(request)
+                region_rpc
+                    .handle_region(&peer, request)
                     .await
                     .map_err(add_peer_context_if_needed(peer))
             });

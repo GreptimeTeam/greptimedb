@@ -40,16 +40,16 @@ use crate::key::TableMetadataManagerRef;
 use crate::key::table_name::TableNameValue;
 use crate::lock_key::{CatalogLock, SchemaLock};
 use crate::metrics;
-use crate::node_manager::NodeManagerRef;
 use crate::reconciliation::reconcile_database::start::ReconcileDatabaseStart;
 use crate::reconciliation::reconcile_table::resolve_column_metadata::ResolveStrategy;
 use crate::reconciliation::utils::{
     Context, ReconcileDatabaseMetrics, SubprocedureMeta, wait_for_inflight_subprocedures,
 };
+use crate::region_rpc::RegionRpcRef;
 pub(crate) const DEFAULT_PARALLELISM: usize = 64;
 
 pub(crate) struct ReconcileDatabaseContext {
-    pub node_manager: NodeManagerRef,
+    pub region_rpc: RegionRpcRef,
     pub table_metadata_manager: TableMetadataManagerRef,
     pub cache_invalidator: CacheInvalidatorRef,
     persistent_ctx: PersistentContext,
@@ -59,7 +59,7 @@ pub(crate) struct ReconcileDatabaseContext {
 impl ReconcileDatabaseContext {
     pub fn new(ctx: Context, persistent_ctx: PersistentContext) -> Self {
         Self {
-            node_manager: ctx.node_manager,
+            region_rpc: ctx.region_rpc,
             table_metadata_manager: ctx.table_metadata_manager,
             cache_invalidator: ctx.cache_invalidator,
             persistent_ctx,

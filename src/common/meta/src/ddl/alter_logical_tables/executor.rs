@@ -32,7 +32,7 @@ use crate::error::Result;
 use crate::instruction::CacheIdent;
 use crate::key::table_info::TableInfoValue;
 use crate::key::{DeserializedValueWithBytes, RegionDistribution, TableMetadataManagerRef};
-use crate::node_manager::NodeManagerRef;
+use crate::region_rpc::RegionRpcRef;
 use crate::rpc::router::{RegionRoute, find_leaders, region_distribution};
 
 /// [AlterLogicalTablesExecutor] performs:
@@ -53,7 +53,7 @@ impl<'a> AlterLogicalTablesExecutor<'a> {
     /// Alters logical regions on the datanodes.
     pub(crate) async fn on_alter_regions(
         &self,
-        node_manager: &NodeManagerRef,
+        region_rpc: &RegionRpcRef,
         region_routes: &[RegionRoute],
     ) -> Result<Vec<RegionResponse>> {
         let region_distribution = region_distribution(region_routes);
@@ -68,15 +68,14 @@ impl<'a> AlterLogicalTablesExecutor<'a> {
             }
             // Safety: must exists.
             let peer = leaders.get(&datanode_id).unwrap();
-            let requester = node_manager.datanode(peer).await;
             let requests = self.make_alter_region_request(&region_role_set.leader_regions);
-            let requester = requester.clone();
             let peer = peer.clone();
+            let region_rpc = region_rpc.clone();
 
             debug!("Sending alter region requests to datanode {}", peer);
             alter_region_tasks.push(async move {
-                requester
-                    .handle(make_request(requests))
+                region_rpc
+                    .handle_region(&peer, make_request(requests))
                     .await
                     .map_err(add_peer_context_if_needed(peer))
             });

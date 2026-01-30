@@ -29,8 +29,8 @@ use common_grpc::channel_manager::ChannelConfig;
 use common_meta::error::Error as CommonMetaError;
 use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
-use common_meta::node_manager::NodeManagerRef;
 use common_meta::peer::Peer;
+use common_meta::region_rpc::RegionRpcRef;
 use common_meta::rpc::router::{RegionRoute, find_leaders};
 use common_telemetry::{error, info, warn};
 use futures::TryStreamExt;
@@ -98,7 +98,7 @@ impl RepairLogicalTablesCommand {
         let node_client_channel_config = ChannelConfig::new()
             .timeout(Some(Duration::from_secs(self.client_timeout_secs)))
             .connect_timeout(Duration::from_secs(self.client_connect_timeout_secs));
-        let node_manager = Arc::new(NodeClients::new(node_client_channel_config));
+        let region_rpc: RegionRpcRef = Arc::new(NodeClients::new(node_client_channel_config));
 
         Ok(Box::new(RepairTool {
             table_names: self.table_names.clone(),
@@ -107,7 +107,7 @@ impl RepairLogicalTablesCommand {
             catalog_name: self.catalog_name.clone(),
             fail_fast: self.fail_fast,
             kv_backend,
-            node_manager,
+            region_rpc,
         }))
     }
 }
@@ -119,7 +119,7 @@ struct RepairTool {
     catalog_name: String,
     fail_fast: bool,
     kv_backend: KvBackendRef,
-    node_manager: NodeManagerRef,
+    region_rpc: RegionRpcRef,
 }
 
 #[async_trait]
@@ -222,7 +222,7 @@ impl RepairTool {
         let alter_table_expr = alter_table::generate_alter_table_expr_for_all_columns(
             &full_table_metadata.table_info,
         )?;
-        let node_manager = self.node_manager.clone();
+        let region_rpc = self.region_rpc.clone();
 
         let mut failed_peers = Vec::new();
         info!(
@@ -238,8 +238,7 @@ impl RepairTool {
                 peer,
                 physical_region_routes,
             )?;
-            let datanode = node_manager.datanode(peer).await;
-            if let Err(err) = datanode.handle(alter_table_request).await {
+            if let Err(err) = region_rpc.handle_region(peer, alter_table_request).await {
                 failed_peers.push((peer.clone(), err));
             }
         }
@@ -255,8 +254,7 @@ impl RepairTool {
         peer: &Peer,
         physical_region_routes: &[RegionRoute],
     ) -> Result<()> {
-        let node_manager = self.node_manager.clone();
-        let datanode = node_manager.datanode(peer).await;
+        let region_rpc = self.region_rpc.clone();
         let create_table_request = create_table::make_create_region_request_for_peer(
             logical_table_id,
             physical_table_id,
@@ -265,8 +263,8 @@ impl RepairTool {
             physical_region_routes,
         )?;
 
-        datanode
-            .handle(create_table_request)
+        region_rpc
+            .handle_region(peer, create_table_request)
             .await
             .with_context(|_| SendRequestToDatanodeSnafu { peer: peer.clone() })?;
 

@@ -162,7 +162,7 @@ impl AlterLogicalTablesProcedure {
         let executor = build_executor_from_alter_expr(&self.data);
         let mut results = executor
             .on_alter_regions(
-                &self.context.node_manager,
+                &self.context.region_rpc,
                 // Avoid double-borrowing self by extracting the region_routes first
                 region_routes,
             )

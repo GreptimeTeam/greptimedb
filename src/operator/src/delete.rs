@@ -19,8 +19,9 @@ use std::{iter, mem};
 use api::v1::region::{DeleteRequests as RegionDeleteRequests, RegionRequestHeader};
 use api::v1::{DeleteRequests, RowDeleteRequests};
 use catalog::CatalogManagerRef;
-use common_meta::node_manager::{AffectedRows, NodeManagerRef};
+use common_base::AffectedRows;
 use common_meta::peer::Peer;
+use common_meta::region_rpc::RegionRpcRef;
 use common_query::Output;
 use common_telemetry::tracing_context::TracingContext;
 use futures_util::future;
@@ -41,7 +42,7 @@ use crate::req_convert::delete::{ColumnToRow, RowToRegion, TableToRegion};
 pub struct Deleter {
     catalog_manager: CatalogManagerRef,
     partition_manager: PartitionRuleManagerRef,
-    node_manager: NodeManagerRef,
+    region_rpc: RegionRpcRef,
 }
 
 pub type DeleterRef = Arc<Deleter>;
@@ -50,12 +51,12 @@ impl Deleter {
     pub fn new(
         catalog_manager: CatalogManagerRef,
         partition_manager: PartitionRuleManagerRef,
-        node_manager: NodeManagerRef,
+        region_rpc: RegionRpcRef,
     ) -> Self {
         Self {
             catalog_manager,
             partition_manager,
-            node_manager,
+            region_rpc,
         }
     }
 
@@ -135,12 +136,10 @@ impl Deleter {
             .into_iter()
             .map(|(peer, deletes)| {
                 let request = request_factory.build_delete(deletes);
-                let node_manager = self.node_manager.clone();
+                let region_rpc = self.region_rpc.clone();
                 common_runtime::spawn_global(async move {
-                    node_manager
-                        .datanode(&peer)
-                        .await
-                        .handle(request)
+                    region_rpc
+                        .handle_region(&peer, request)
                         .await
                         .context(RequestDeletesSnafu)
                 })

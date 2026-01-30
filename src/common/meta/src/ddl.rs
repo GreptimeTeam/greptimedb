@@ -21,12 +21,13 @@ use crate::DatanodeId;
 use crate::cache_invalidator::CacheInvalidatorRef;
 use crate::ddl::flow_meta::FlowMetadataAllocatorRef;
 use crate::ddl::table_meta::TableMetadataAllocatorRef;
+use crate::flow_rpc::FlowRpcRef;
 use crate::key::TableMetadataManagerRef;
 use crate::key::flow::FlowMetadataManagerRef;
 use crate::key::table_route::PhysicalTableRouteValue;
-use crate::node_manager::NodeManagerRef;
 use crate::region_keeper::MemoryRegionKeeperRef;
 use crate::region_registry::LeaderRegionRegistryRef;
+use crate::region_rpc::RegionRpcRef;
 
 pub mod allocator;
 pub mod alter_database;
@@ -94,8 +95,10 @@ impl RegionFailureDetectorController for NoopRegionFailureDetectorControl {
 /// The context of ddl.
 #[derive(Clone)]
 pub struct DdlContext {
-    /// Sends querying and requests to nodes.
-    pub node_manager: NodeManagerRef,
+    /// Sends DDL/DML/query requests to datanode.
+    pub region_rpc: RegionRpcRef,
+    /// Sends flow requests to flownode.
+    pub flow_rpc: FlowRpcRef,
     /// Cache invalidation.
     pub cache_invalidator: CacheInvalidatorRef,
     /// Keep tracking operating regions.

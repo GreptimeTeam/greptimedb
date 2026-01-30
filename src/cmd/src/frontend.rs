@@ -448,6 +448,7 @@ impl StartCommand {
             cached_meta_backend.clone(),
             layered_cache_registry.clone(),
             catalog_manager,
+            client.clone(),
             client,
             meta_client.clone(),
             process_manager,

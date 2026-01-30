@@ -72,7 +72,7 @@ impl ReconcileDatabases {
         schema: String,
     ) -> Result<(Box<dyn State>, Status)> {
         let context = Context {
-            node_manager: ctx.node_manager.clone(),
+            region_rpc: ctx.region_rpc.clone(),
             table_metadata_manager: ctx.table_metadata_manager.clone(),
             cache_invalidator: ctx.cache_invalidator.clone(),
         };

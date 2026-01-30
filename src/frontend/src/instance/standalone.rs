@@ -12,18 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use api::region::RegionResponse;
-use api::v1::region::{RegionRequest, RegionResponse as RegionResponseV1};
-use async_trait::async_trait;
+use api::v1::flow::{DirtyWindowRequests, FlowRequest, FlowResponse};
+use api::v1::region::{InsertRequests, RegionRequest, RegionResponse as RegionResponseV1};
+use client::flow::FlowRequester;
 use client::region::check_response_header;
 use common_error::ext::BoxedError;
 use common_meta::error::{self as meta_error, Result as MetaResult};
-use common_meta::node_manager::{
-    Datanode, DatanodeManager, DatanodeRef, FlownodeManager, FlownodeRef,
-};
+use common_meta::flow_rpc::FlowRpc;
 use common_meta::peer::Peer;
+use common_meta::region_rpc::RegionRpc;
 use common_query::request::QueryRequest;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::tracing;
@@ -34,58 +32,25 @@ use snafu::{OptionExt, ResultExt};
 
 use crate::error::{InvalidRegionRequestSnafu, InvokeRegionServerSnafu, Result};
 
-pub struct StandaloneDatanodeManager {
+pub struct StandaloneRegionRpc {
     pub region_server: RegionServer,
-    pub flow_server: FlownodeRef,
 }
 
-#[async_trait]
-impl DatanodeManager for StandaloneDatanodeManager {
-    async fn datanode(&self, _datanode: &Peer) -> DatanodeRef {
-        RegionInvoker::arc(self.region_server.clone())
-    }
-}
-
-#[async_trait]
-impl FlownodeManager for StandaloneDatanodeManager {
-    async fn flownode(&self, _node: &Peer) -> FlownodeRef {
-        self.flow_server.clone()
-    }
-}
-
-/// Relative to [client::region::RegionRequester]
-pub struct RegionInvoker {
-    region_server: RegionServer,
-}
-
-impl RegionInvoker {
-    pub fn arc(region_server: RegionServer) -> Arc<Self> {
-        Arc::new(Self { region_server })
-    }
-
-    async fn handle_inner(&self, request: RegionRequest) -> Result<RegionResponseV1> {
-        let body = request.body.with_context(|| InvalidRegionRequestSnafu {
-            reason: "body not found",
-        })?;
-
-        self.region_server
-            .handle(body)
-            .await
-            .context(InvokeRegionServerSnafu)
-    }
-}
-
-#[async_trait]
-impl Datanode for RegionInvoker {
-    async fn handle(&self, request: RegionRequest) -> MetaResult<RegionResponse> {
+#[async_trait::async_trait]
+impl RegionRpc for StandaloneRegionRpc {
+    async fn handle_region(
+        &self,
+        _peer: &Peer,
+        request: RegionRequest,
+    ) -> MetaResult<RegionResponse> {
         let span = request
             .header
             .as_ref()
             .map(|h| TracingContext::from_w3c(&h.tracing_context))
             .unwrap_or_default()
-            .attach(tracing::info_span!("RegionInvoker::handle_region_request"));
+            .attach(tracing::info_span!("StandaloneRegionRpc::handle_region"));
         let response = self
-            .handle_inner(request)
+            .handle_region_inner(request)
             .trace(span)
             .await
             .map_err(BoxedError::new)
@@ -96,7 +61,11 @@ impl Datanode for RegionInvoker {
         Ok(RegionResponse::from_region_response(response))
     }
 
-    async fn handle_query(&self, request: QueryRequest) -> MetaResult<SendableRecordBatchStream> {
+    async fn handle_query(
+        &self,
+        _peer: &Peer,
+        request: QueryRequest,
+    ) -> MetaResult<SendableRecordBatchStream> {
         let region_id = request.region_id.to_string();
         let span = request
             .header
@@ -104,7 +73,7 @@ impl Datanode for RegionInvoker {
             .map(|h| TracingContext::from_w3c(&h.tracing_context))
             .unwrap_or_default()
             .attach(tracing::info_span!(
-                "RegionInvoker::handle_query",
+                "StandaloneRegionRpc::handle_query",
                 region_id = region_id
             ));
         self.region_server
@@ -113,5 +82,45 @@ impl Datanode for RegionInvoker {
             .await
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)
+    }
+}
+
+pub struct StandaloneFlowRpc {
+    pub flow_server: FlowRequester,
+}
+
+#[async_trait::async_trait]
+impl FlowRpc for StandaloneFlowRpc {
+    async fn handle_flow(&self, _peer: &Peer, request: FlowRequest) -> MetaResult<FlowResponse> {
+        self.flow_server.handle_flow(request).await
+    }
+
+    async fn handle_flow_inserts(
+        &self,
+        _peer: &Peer,
+        request: InsertRequests,
+    ) -> MetaResult<FlowResponse> {
+        self.flow_server.handle_flow_inserts(request).await
+    }
+
+    async fn handle_mark_window_dirty(
+        &self,
+        _peer: &Peer,
+        req: DirtyWindowRequests,
+    ) -> MetaResult<FlowResponse> {
+        self.flow_server.handle_mark_window_dirty(req).await
+    }
+}
+
+impl StandaloneRegionRpc {
+    async fn handle_region_inner(&self, request: RegionRequest) -> Result<RegionResponseV1> {
+        let body = request.body.with_context(|| InvalidRegionRequestSnafu {
+            reason: "body not found",
+        })?;
+
+        self.region_server
+            .handle(body)
+            .await
+            .context(InvokeRegionServerSnafu)
     }
 }

@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
-use common_meta::node_manager::NodeManagerRef;
+use common_meta::region_rpc::RegionRpcRef;
 use common_query::request::QueryRequest;
 use common_recordbatch::SendableRecordBatchStream;
 use partition::manager::PartitionRuleManagerRef;
@@ -29,17 +29,14 @@ use crate::error::{FindRegionPeerSnafu, RequestQuerySnafu, Result};
 
 pub(crate) struct FrontendRegionQueryHandler {
     partition_manager: PartitionRuleManagerRef,
-    node_manager: NodeManagerRef,
+    region_rpc: RegionRpcRef,
 }
 
 impl FrontendRegionQueryHandler {
-    pub fn arc(
-        partition_manager: PartitionRuleManagerRef,
-        node_manager: NodeManagerRef,
-    ) -> Arc<Self> {
+    pub fn arc(partition_manager: PartitionRuleManagerRef, region_rpc: RegionRpcRef) -> Arc<Self> {
         Arc::new(Self {
             partition_manager,
-            node_manager,
+            region_rpc,
         })
     }
 }
@@ -75,10 +72,8 @@ impl FrontendRegionQueryHandler {
                 read_preference,
             })?;
 
-        let client = self.node_manager.datanode(peer).await;
-
-        client
-            .handle_query(request)
+        self.region_rpc
+            .handle_query(peer, request)
             .await
             .context(RequestQuerySnafu)
     }

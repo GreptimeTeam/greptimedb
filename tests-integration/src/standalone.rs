@@ -22,6 +22,8 @@ use cache::{
 use catalog::information_schema::NoopInformationExtension;
 use catalog::kvbackend::KvBackendCatalogManagerBuilder;
 use catalog::process_manager::ProcessManager;
+use client::Client;
+use client::flow::FlowRequester;
 use cmd::error::StartFlownodeSnafu;
 use common_base::Plugins;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
@@ -44,10 +46,12 @@ use common_procedure::options::ProcedureConfig;
 use common_telemetry::logging::SlowQueryOptions;
 use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
 use datanode::datanode::DatanodeBuilder;
-use flow::{FlownodeBuilder, FrontendClient, GrpcQueryHandlerWithBoxedError};
+use flow::{
+    FlownodeBuilder, FlownodeServiceBuilder, FrontendClient, GrpcQueryHandlerWithBoxedError,
+};
 use frontend::frontend::Frontend;
 use frontend::instance::builder::FrontendBuilder;
-use frontend::instance::{Instance, StandaloneDatanodeManager};
+use frontend::instance::{Instance, StandaloneFlowRpc, StandaloneRegionRpc};
 use frontend::server::Services;
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
 use servers::grpc::GrpcOptions;
@@ -64,6 +68,7 @@ pub struct GreptimeDbStandalone {
     // Used in rebuild.
     pub kv_backend: KvBackendRef,
     pub procedure_manager: ProcedureManagerRef,
+    _flownode: Arc<flow::FlownodeInstance>,
 }
 
 impl GreptimeDbStandalone {
@@ -189,19 +194,38 @@ impl GreptimeDbStandaloneBuilder {
 
         let (frontend_client, frontend_instance_handler) =
             FrontendClient::from_empty_grpc_handler(opts.query.clone());
+        let mut flownode_opts: flow::FlownodeOptions = Default::default();
+        let flownode_grpc_addr = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            drop(listener);
+            addr.to_string()
+        };
+        flownode_opts.grpc.bind_addr = flownode_grpc_addr.clone();
+        flownode_opts.grpc.server_addr = flownode_grpc_addr.clone();
+
         let flow_builder = FlownodeBuilder::new(
-            Default::default(),
+            flownode_opts.clone(),
             plugins.clone(),
             table_metadata_manager.clone(),
             catalog_manager.clone(),
             flow_metadata_manager.clone(),
             Arc::new(frontend_client),
         );
-        let flownode = Arc::new(flow_builder.build().await.unwrap());
+        let mut flownode = flow_builder.build().await.unwrap();
+        let flownode_services = FlownodeServiceBuilder::new(&flownode_opts)
+            .with_default_grpc_server(flownode.flownode_server())
+            .build()
+            .unwrap();
+        flownode.setup_services(flownode_services);
+        flownode.start().await.context(StartFlownodeSnafu).unwrap();
+        let flownode = Arc::new(flownode);
 
-        let node_manager = Arc::new(StandaloneDatanodeManager {
+        let region_rpc = Arc::new(StandaloneRegionRpc {
             region_server: datanode.region_server(),
-            flow_server: flownode.flow_engine(),
+        });
+        let flow_rpc = Arc::new(StandaloneFlowRpc {
+            flow_server: FlowRequester::new(Client::with_urls(vec![flownode_grpc_addr])),
         });
 
         let table_id_allocator = Arc::new(
@@ -233,7 +257,8 @@ impl GreptimeDbStandaloneBuilder {
         let ddl_manager = Arc::new(
             DdlManager::try_new(
                 DdlContext {
-                    node_manager: node_manager.clone(),
+                    region_rpc: region_rpc.clone(),
+                    flow_rpc: flow_rpc.clone(),
                     cache_invalidator: cache_registry.clone(),
                     memory_region_keeper: Arc::new(MemoryRegionKeeper::default()),
                     leader_region_registry: Arc::new(LeaderRegionRegistry::default()),
@@ -261,7 +286,8 @@ impl GreptimeDbStandaloneBuilder {
             kv_backend.clone(),
             cache_registry.clone(),
             catalog_manager.clone(),
-            node_manager.clone(),
+            region_rpc.clone(),
+            flow_rpc.clone(),
             procedure_executor.clone(),
             Arc::new(ProcessManager::new(server_addr, None)),
         )
@@ -285,7 +311,8 @@ impl GreptimeDbStandaloneBuilder {
             kv_backend.clone(),
             cache_registry.clone(),
             procedure_executor.clone(),
-            node_manager.clone(),
+            region_rpc,
+            flow_rpc,
         )
         .await
         .context(StartFlownodeSnafu)
@@ -313,6 +340,7 @@ impl GreptimeDbStandaloneBuilder {
             guard,
             kv_backend,
             procedure_manager,
+            _flownode: flownode,
         }
     }
 

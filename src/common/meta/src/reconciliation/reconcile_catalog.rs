@@ -30,19 +30,19 @@ use crate::error::Result;
 use crate::key::TableMetadataManagerRef;
 use crate::lock_key::CatalogLock;
 use crate::metrics;
-use crate::node_manager::NodeManagerRef;
 use crate::reconciliation::reconcile_catalog::start::ReconcileCatalogStart;
 use crate::reconciliation::reconcile_table::resolve_column_metadata::ResolveStrategy;
 use crate::reconciliation::utils::{
     Context, ReconcileCatalogMetrics, SubprocedureMeta, wait_for_inflight_subprocedures,
 };
+use crate::region_rpc::RegionRpcRef;
 
 pub(crate) mod end;
 pub(crate) mod reconcile_databases;
 pub(crate) mod start;
 
 pub(crate) struct ReconcileCatalogContext {
-    pub node_manager: NodeManagerRef,
+    pub region_rpc: RegionRpcRef,
     pub table_metadata_manager: TableMetadataManagerRef,
     pub cache_invalidator: CacheInvalidatorRef,
     persistent_ctx: PersistentContext,
@@ -52,7 +52,7 @@ pub(crate) struct ReconcileCatalogContext {
 impl ReconcileCatalogContext {
     pub fn new(ctx: Context, persistent_ctx: PersistentContext) -> Self {
         Self {
-            node_manager: ctx.node_manager,
+            region_rpc: ctx.region_rpc,
             table_metadata_manager: ctx.table_metadata_manager,
             cache_invalidator: ctx.cache_invalidator,
             persistent_ctx,

@@ -27,6 +27,7 @@ use api::v1::{
 };
 use catalog::CatalogManagerRef;
 use client::{OutputData, OutputMeta};
+use common_base::AffectedRows;
 use common_catalog::consts::{
     PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN, TRACE_ID_COLUMN, TRACE_TABLE_NAME,
     TRACE_TABLE_NAME_SESSION_KEY, default_engine, trace_operations_table_name,
@@ -34,8 +35,9 @@ use common_catalog::consts::{
 };
 use common_grpc_expr::util::ColumnExpr;
 use common_meta::cache::TableFlownodeSetCacheRef;
-use common_meta::node_manager::{AffectedRows, NodeManagerRef};
+use common_meta::flow_rpc::FlowRpcRef;
 use common_meta::peer::Peer;
+use common_meta::region_rpc::RegionRpcRef;
 use common_query::Output;
 use common_query::prelude::{greptime_timestamp, greptime_value};
 use common_telemetry::tracing_context::TracingContext;
@@ -81,7 +83,8 @@ use crate::statement::StatementExecutor;
 pub struct Inserter {
     catalog_manager: CatalogManagerRef,
     pub(crate) partition_manager: PartitionRuleManagerRef,
-    pub(crate) node_manager: NodeManagerRef,
+    pub(crate) region_rpc: RegionRpcRef,
+    pub(crate) flow_rpc: FlowRpcRef,
     pub(crate) table_flownode_set_cache: TableFlownodeSetCacheRef,
 }
 
@@ -133,13 +136,15 @@ impl Inserter {
     pub fn new(
         catalog_manager: CatalogManagerRef,
         partition_manager: PartitionRuleManagerRef,
-        node_manager: NodeManagerRef,
+        region_rpc: RegionRpcRef,
+        flow_rpc: FlowRpcRef,
         table_flownode_set_cache: TableFlownodeSetCacheRef,
     ) -> Self {
         Self {
             catalog_manager,
             partition_manager,
-            node_manager,
+            region_rpc,
+            flow_rpc,
             table_flownode_set_cache,
         }
     }
@@ -403,7 +408,7 @@ impl Inserter {
                 .chain(instant_requests.requests.iter()),
         )
         .await?;
-        flow_mirror_task.detach(self.node_manager.clone())?;
+        flow_mirror_task.detach(self.flow_rpc.clone())?;
 
         // Write requests to datanode and wait for response
         let write_tasks = self
@@ -411,13 +416,11 @@ impl Inserter {
             .await?
             .into_iter()
             .map(|(peer, inserts)| {
-                let node_manager = self.node_manager.clone();
+                let region_rpc = self.region_rpc.clone();
                 let request = request_factory.build_insert(inserts);
                 common_runtime::spawn_global(async move {
-                    node_manager
-                        .datanode(&peer)
-                        .await
-                        .handle(request)
+                    region_rpc
+                        .handle_region(&peer, request)
                         .await
                         .context(RequestInsertsSnafu)
                 })
@@ -995,8 +998,8 @@ impl Inserter {
         }
     }
 
-    pub fn node_manager(&self) -> &NodeManagerRef {
-        &self.node_manager
+    pub fn region_rpc(&self) -> &RegionRpcRef {
+        &self.region_rpc
     }
 
     pub fn partition_manager(&self) -> &PartitionRuleManagerRef {
@@ -1172,15 +1175,13 @@ impl FlowMirrorTask {
         })
     }
 
-    fn detach(self, node_manager: NodeManagerRef) -> Result<()> {
+    fn detach(self, flow_rpc: FlowRpcRef) -> Result<()> {
         crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.add(self.num_rows as i64);
         for (peer, inserts) in self.requests {
-            let node_manager = node_manager.clone();
+            let flow_rpc = flow_rpc.clone();
             common_runtime::spawn_global(async move {
-                let result = node_manager
-                    .flownode(&peer)
-                    .await
-                    .handle_inserts(inserts)
+                let result = flow_rpc
+                    .handle_flow_inserts(&peer, inserts)
                     .await
                     .context(RequestInsertsSnafu);
 
@@ -1290,15 +1291,17 @@ mod tests {
         ));
 
         let kv_backend = prepare_mocked_backend().await;
+        let table_flownode_set_cache = Arc::new(new_table_flownode_set_cache(
+            String::new(),
+            Cache::new(100),
+            kv_backend.clone(),
+        ));
         let inserter = Inserter::new(
             catalog::memory::MemoryCatalogManager::new(),
             create_partition_rule_manager(kv_backend.clone()).await,
             Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler)),
-            Arc::new(new_table_flownode_set_cache(
-                String::new(),
-                Cache::new(100),
-                kv_backend.clone(),
-            )),
+            Arc::new(client::client_manager::NodeClients::default()),
+            table_flownode_set_cache,
         );
         let alter_expr = inserter
             .get_alter_table_expr_on_demand(&mut req, &table, &ctx, true, true)

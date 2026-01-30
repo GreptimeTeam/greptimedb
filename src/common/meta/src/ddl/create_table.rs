@@ -188,7 +188,7 @@ impl CreateTableProcedure {
         let column_metadatas = self
             .executor
             .on_create_regions(
-                &self.context.node_manager,
+                &self.context.region_rpc,
                 table_id,
                 region_routes,
                 region_wal_options,

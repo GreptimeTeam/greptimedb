@@ -200,7 +200,6 @@ impl CreateFlowProcedure {
         // Safety: must be allocated.
         let mut create_flow = Vec::with_capacity(self.data.peers.len());
         for peer in &self.data.peers {
-            let requester = self.context.node_manager.flownode(peer).await;
             let request = FlowRequest {
                 header: Some(FlowRequestHeader {
                     tracing_context: TracingContext::from_current_span().to_w3c(),
@@ -209,11 +208,13 @@ impl CreateFlowProcedure {
                 }),
                 body: Some(PbFlowRequest::Create((&self.data).into())),
             };
+            let flow_rpc = self.context.flow_rpc.clone();
+            let peer = peer.clone();
             create_flow.push(async move {
-                requester
-                    .handle(request)
+                flow_rpc
+                    .handle_flow(&peer, request)
                     .await
-                    .map_err(add_peer_context_if_needed(peer.clone()))
+                    .map_err(add_peer_context_if_needed(peer))
             });
         }
         info!(

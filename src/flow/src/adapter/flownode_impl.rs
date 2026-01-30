@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! impl `FlowNode` trait for FlowNodeManager so standalone can call them
+//! Transport-facing request handlers for flownode.
+//!
+//! These entrypoints are used by the flownode gRPC service.
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -763,9 +765,9 @@ impl FlowEngine for FlowDualEngine {
     }
 }
 
-#[async_trait::async_trait]
-impl common_meta::node_manager::Flownode for FlowDualEngine {
-    async fn handle(&self, request: FlowRequest) -> MetaResult<FlowResponse> {
+impl FlowDualEngine {
+    /// Handles DDL requests from flownode gRPC service (create/drop/flush).
+    pub(crate) async fn handle(&self, request: FlowRequest) -> MetaResult<FlowResponse> {
         let query_ctx = request
             .header
             .and_then(|h| h.query_context)
@@ -844,14 +846,19 @@ impl common_meta::node_manager::Flownode for FlowDualEngine {
         }
     }
 
-    async fn handle_inserts(&self, request: InsertRequests) -> MetaResult<FlowResponse> {
+    /// Handles mirrored inserts from datanodes.
+    pub(crate) async fn handle_inserts(&self, request: InsertRequests) -> MetaResult<FlowResponse> {
         FlowEngine::handle_flow_inserts(self, request)
             .await
             .map(|_| Default::default())
             .map_err(to_meta_err(snafu::location!()))
     }
 
-    async fn handle_mark_window_dirty(&self, req: DirtyWindowRequests) -> MetaResult<FlowResponse> {
+    /// Marks a time window as dirty for the batching engine.
+    pub(crate) async fn handle_mark_window_dirty(
+        &self,
+        req: DirtyWindowRequests,
+    ) -> MetaResult<FlowResponse> {
         self.batching_engine()
             .handle_mark_dirty_time_window(req)
             .await

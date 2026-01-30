@@ -1109,30 +1109,64 @@ mod tests {
     use crate::ddl::truncate_table::TruncateTableProcedure;
     use crate::ddl::{DdlContext, NoopRegionFailureDetectorControl};
     use crate::ddl_manager::RepartitionProcedureFactory;
+    use crate::flow_rpc::FlowRpc;
     use crate::key::TableMetadataManager;
     use crate::key::flow::FlowMetadataManager;
     use crate::kv_backend::memory::MemoryKvBackend;
-    use crate::node_manager::{DatanodeManager, DatanodeRef, FlownodeManager, FlownodeRef};
     use crate::peer::Peer;
     use crate::region_keeper::MemoryRegionKeeper;
     use crate::region_registry::LeaderRegionRegistry;
+    use crate::region_rpc::RegionRpc;
     use crate::sequence::SequenceBuilder;
     use crate::state_store::KvStateStore;
     use crate::wal_provider::WalProvider;
 
-    /// A dummy implemented [NodeManager].
-    pub struct DummyDatanodeManager;
+    pub struct DummyRegionRpc;
 
     #[async_trait::async_trait]
-    impl DatanodeManager for DummyDatanodeManager {
-        async fn datanode(&self, _datanode: &Peer) -> DatanodeRef {
+    impl RegionRpc for DummyRegionRpc {
+        async fn handle_region(
+            &self,
+            _peer: &Peer,
+            _request: api::v1::region::RegionRequest,
+        ) -> crate::error::Result<api::region::RegionResponse> {
+            unimplemented!()
+        }
+
+        async fn handle_query(
+            &self,
+            _peer: &Peer,
+            _request: common_query::request::QueryRequest,
+        ) -> crate::error::Result<common_recordbatch::SendableRecordBatchStream> {
             unimplemented!()
         }
     }
 
+    pub struct DummyFlowRpc;
+
     #[async_trait::async_trait]
-    impl FlownodeManager for DummyDatanodeManager {
-        async fn flownode(&self, _node: &Peer) -> FlownodeRef {
+    impl FlowRpc for DummyFlowRpc {
+        async fn handle_flow(
+            &self,
+            _peer: &Peer,
+            _request: api::v1::flow::FlowRequest,
+        ) -> crate::error::Result<api::v1::flow::FlowResponse> {
+            unimplemented!()
+        }
+
+        async fn handle_flow_inserts(
+            &self,
+            _peer: &Peer,
+            _request: api::v1::region::InsertRequests,
+        ) -> crate::error::Result<api::v1::flow::FlowResponse> {
+            unimplemented!()
+        }
+
+        async fn handle_mark_window_dirty(
+            &self,
+            _peer: &Peer,
+            _req: api::v1::flow::DirtyWindowRequests,
+        ) -> crate::error::Result<api::v1::flow::FlowResponse> {
             unimplemented!()
         }
     }
@@ -1187,7 +1221,8 @@ mod tests {
 
         let _ = DdlManager::try_new(
             DdlContext {
-                node_manager: Arc::new(DummyDatanodeManager),
+                region_rpc: Arc::new(DummyRegionRpc),
+                flow_rpc: Arc::new(DummyFlowRpc),
                 cache_invalidator: Arc::new(DummyCacheInvalidator),
                 table_metadata_manager,
                 table_metadata_allocator,

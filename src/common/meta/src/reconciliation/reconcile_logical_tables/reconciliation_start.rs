@@ -61,7 +61,7 @@ impl State for ReconciliationStart {
             }
         );
 
-        let region_metadata_lister = RegionMetadataLister::new(ctx.node_manager.clone());
+        let region_metadata_lister = RegionMetadataLister::new(ctx.region_rpc.clone());
         let region_metadatas = {
             let _timer = metrics::METRIC_META_RECONCILIATION_LIST_REGION_METADATA_DURATION
                 .with_label_values(&[metrics::TABLE_TYPE_PHYSICAL])

@@ -24,6 +24,8 @@ use catalog::information_schema::InformationExtensionRef;
 use catalog::kvbackend::{CatalogManagerConfiguratorRef, KvBackendCatalogManagerBuilder};
 use catalog::process_manager::ProcessManager;
 use clap::Parser;
+use client::Client;
+use client::flow::FlowRequester;
 use common_base::Plugins;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_config::{Configurable, metadata_store_dir};
@@ -54,8 +56,8 @@ use flow::{
     GrpcQueryHandlerWithBoxedError,
 };
 use frontend::frontend::Frontend;
-use frontend::instance::StandaloneDatanodeManager;
 use frontend::instance::builder::FrontendBuilder;
+use frontend::instance::{StandaloneFlowRpc, StandaloneRegionRpc};
 use frontend::server::Services;
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
 use plugins::frontend::context::{
@@ -440,6 +442,7 @@ impl StartCommand {
             flow: opts.flow.clone(),
             ..Default::default()
         };
+        let flownode_grpc_addr = flownode_options.grpc.bind_addr.clone();
 
         let flow_builder = FlownodeBuilder::new(
             flownode_options,
@@ -463,10 +466,11 @@ impl StartCommand {
                 .await;
         }
 
-        let node_manager = Arc::new(StandaloneDatanodeManager {
+        let flow_server = FlowRequester::new(Client::with_urls(vec![flownode_grpc_addr]));
+        let region_rpc = Arc::new(StandaloneRegionRpc {
             region_server: datanode.region_server(),
-            flow_server: flownode.flow_engine(),
         });
+        let flow_rpc = Arc::new(StandaloneFlowRpc { flow_server });
 
         let table_id_allocator = Arc::new(
             SequenceBuilder::new(TABLE_ID_SEQ, kv_backend.clone())
@@ -498,7 +502,8 @@ impl StartCommand {
         ));
 
         let ddl_context = DdlContext {
-            node_manager: node_manager.clone(),
+            region_rpc: region_rpc.clone(),
+            flow_rpc: flow_rpc.clone(),
             cache_invalidator: layered_cache_registry.clone(),
             memory_region_keeper: Arc::new(MemoryRegionKeeper::default()),
             leader_region_registry: Arc::new(LeaderRegionRegistry::default()),
@@ -543,7 +548,8 @@ impl StartCommand {
             kv_backend.clone(),
             layered_cache_registry.clone(),
             catalog_manager.clone(),
-            node_manager.clone(),
+            region_rpc.clone(),
+            flow_rpc.clone(),
             procedure_executor.clone(),
             process_manager,
         )
@@ -569,7 +575,8 @@ impl StartCommand {
             kv_backend.clone(),
             layered_cache_registry.clone(),
             procedure_executor,
-            node_manager,
+            region_rpc,
+            flow_rpc,
         )
         .await
         .context(StartFlownodeSnafu)?;

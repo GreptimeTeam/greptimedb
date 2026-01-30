@@ -65,7 +65,7 @@ impl State for ReconcileLogicalTables {
         let pending_logical_tables = &mut ctx.volatile_ctx.pending_logical_tables;
         let mut pending_procedures = Vec::with_capacity(parallelism);
         let context = Context {
-            node_manager: ctx.node_manager.clone(),
+            region_rpc: ctx.region_rpc.clone(),
             table_metadata_manager: ctx.table_metadata_manager.clone(),
             cache_invalidator: ctx.cache_invalidator.clone(),
         };

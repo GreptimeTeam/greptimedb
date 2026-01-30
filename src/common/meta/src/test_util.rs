@@ -29,16 +29,15 @@ use crate::ddl::flow_meta::FlowMetadataAllocator;
 use crate::ddl::table_meta::TableMetadataAllocator;
 use crate::ddl::{DdlContext, NoopRegionFailureDetectorControl};
 use crate::error::Result;
+use crate::flow_rpc::{FlowRpc, FlowRpcRef};
 use crate::key::TableMetadataManager;
 use crate::key::flow::FlowMetadataManager;
 use crate::kv_backend::KvBackendRef;
 use crate::kv_backend::memory::MemoryKvBackend;
-use crate::node_manager::{
-    Datanode, DatanodeManager, DatanodeRef, Flownode, FlownodeManager, FlownodeRef, NodeManagerRef,
-};
 use crate::peer::{Peer, PeerResolver};
 use crate::region_keeper::MemoryRegionKeeper;
 use crate::region_registry::LeaderRegionRegistry;
+use crate::region_rpc::{RegionRpc, RegionRpcRef};
 use crate::sequence::SequenceBuilder;
 use crate::wal_provider::topic_pool::KafkaTopicPool;
 use crate::wal_provider::{WalProvider, build_kafka_topic_creator};
@@ -78,106 +77,125 @@ pub trait MockFlownodeHandler: Sync + Send + Clone {
     }
 }
 
-/// A mock struct implements [NodeManager] only implement the `datanode` method.
+/// A mock struct implements [`RegionRpc`] only for datanode-related methods.
 #[derive(Clone)]
-pub struct MockDatanodeManager<T> {
+pub struct MockDatanodeRpc<T> {
     handler: T,
 }
 
-impl<T> MockDatanodeManager<T> {
+impl<T> MockDatanodeRpc<T> {
     pub fn new(handler: T) -> Self {
         Self { handler }
     }
 }
 
-/// A mock struct implements [NodeManager] only implement the `flownode` method.
+/// A mock struct implements [`FlowRpc`] only for flownode-related methods.
 #[derive(Clone)]
-pub struct MockFlownodeManager<T> {
+pub struct MockFlownodeRpc<T> {
     handler: T,
 }
 
-impl<T> MockFlownodeManager<T> {
+impl<T> MockFlownodeRpc<T> {
     pub fn new(handler: T) -> Self {
         Self { handler }
     }
 }
 
-/// A mock struct implements [Datanode].
-#[derive(Clone)]
-struct MockNode<T> {
-    peer: Peer,
-    handler: T,
-}
+/// Backward-compatible aliases for tests that still use the old names.
+pub type MockDatanodeManager<T> = MockDatanodeRpc<T>;
+pub type MockFlownodeManager<T> = MockFlownodeRpc<T>;
 
 #[async_trait::async_trait]
-impl<T: MockDatanodeHandler> Datanode for MockNode<T> {
-    async fn handle(&self, request: RegionRequest) -> Result<RegionResponse> {
-        self.handler.handle(&self.peer, request).await
+impl<T: MockDatanodeHandler> RegionRpc for MockDatanodeRpc<T> {
+    async fn handle_region(&self, peer: &Peer, request: RegionRequest) -> Result<RegionResponse> {
+        self.handler.handle(peer, request).await
     }
 
-    async fn handle_query(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
-        self.handler.handle_query(&self.peer, request).await
-    }
-}
-
-#[async_trait::async_trait]
-impl<T: MockDatanodeHandler + 'static> DatanodeManager for MockDatanodeManager<T> {
-    async fn datanode(&self, peer: &Peer) -> DatanodeRef {
-        Arc::new(MockNode {
-            peer: peer.clone(),
-            handler: self.handler.clone(),
-        })
+    async fn handle_query(
+        &self,
+        peer: &Peer,
+        request: QueryRequest,
+    ) -> Result<SendableRecordBatchStream> {
+        self.handler.handle_query(peer, request).await
     }
 }
 
 #[async_trait::async_trait]
-impl<T: 'static + Send + Sync> FlownodeManager for MockDatanodeManager<T> {
-    async fn flownode(&self, _peer: &Peer) -> FlownodeRef {
+impl<T: MockFlownodeHandler> FlowRpc for MockFlownodeRpc<T> {
+    async fn handle_flow(&self, peer: &Peer, request: FlowRequest) -> Result<FlowResponse> {
+        self.handler.handle(peer, request).await
+    }
+
+    async fn handle_flow_inserts(
+        &self,
+        peer: &Peer,
+        request: InsertRequests,
+    ) -> Result<FlowResponse> {
+        self.handler.handle_inserts(peer, request).await
+    }
+
+    async fn handle_mark_window_dirty(
+        &self,
+        peer: &Peer,
+        req: DirtyWindowRequests,
+    ) -> Result<FlowResponse> {
+        self.handler.handle_mark_window_dirty(peer, req).await
+    }
+}
+
+#[derive(Debug, Default)]
+struct UnimplementedFlowRpc;
+
+#[async_trait::async_trait]
+impl FlowRpc for UnimplementedFlowRpc {
+    async fn handle_flow(&self, _peer: &Peer, _request: FlowRequest) -> Result<FlowResponse> {
+        unimplemented!()
+    }
+
+    async fn handle_flow_inserts(
+        &self,
+        _peer: &Peer,
+        _request: InsertRequests,
+    ) -> Result<FlowResponse> {
+        unimplemented!()
+    }
+
+    async fn handle_mark_window_dirty(
+        &self,
+        _peer: &Peer,
+        _req: DirtyWindowRequests,
+    ) -> Result<FlowResponse> {
         unimplemented!()
     }
 }
 
-#[async_trait::async_trait]
-impl<T: MockFlownodeHandler> Flownode for MockNode<T> {
-    async fn handle(&self, request: FlowRequest) -> Result<FlowResponse> {
-        self.handler.handle(&self.peer, request).await
-    }
-
-    async fn handle_inserts(&self, requests: InsertRequests) -> Result<FlowResponse> {
-        self.handler.handle_inserts(&self.peer, requests).await
-    }
-
-    async fn handle_mark_window_dirty(&self, req: DirtyWindowRequests) -> Result<FlowResponse> {
-        self.handler.handle_mark_window_dirty(&self.peer, req).await
-    }
-}
+#[derive(Debug, Default)]
+struct UnimplementedRegionRpc;
 
 #[async_trait::async_trait]
-impl<T: MockFlownodeHandler + 'static> FlownodeManager for MockFlownodeManager<T> {
-    async fn flownode(&self, peer: &Peer) -> FlownodeRef {
-        Arc::new(MockNode {
-            peer: peer.clone(),
-            handler: self.handler.clone(),
-        })
+impl RegionRpc for UnimplementedRegionRpc {
+    async fn handle_region(&self, _peer: &Peer, _request: RegionRequest) -> Result<RegionResponse> {
+        unimplemented!()
     }
-}
 
-#[async_trait::async_trait]
-impl<T: 'static + Send + Sync> DatanodeManager for MockFlownodeManager<T> {
-    async fn datanode(&self, _peer: &Peer) -> DatanodeRef {
+    async fn handle_query(
+        &self,
+        _peer: &Peer,
+        _request: QueryRequest,
+    ) -> Result<SendableRecordBatchStream> {
         unimplemented!()
     }
 }
 
-/// Returns a test purpose [DdlContext].
-pub fn new_ddl_context(node_manager: NodeManagerRef) -> DdlContext {
+/// Returns a test purpose [DdlContext] with a [`RegionRpcRef`].
+pub fn new_ddl_context(region_rpc: RegionRpcRef) -> DdlContext {
     let kv_backend = Arc::new(MemoryKvBackend::new());
-    new_ddl_context_with_kv_backend(node_manager, kv_backend)
+    new_ddl_context_with_kv_backend(region_rpc, kv_backend)
 }
 
-/// Returns a test purpose [DdlContext] with a specified [KvBackendRef].
+/// Returns a test purpose [DdlContext] with a specified [KvBackendRef] and a [`RegionRpcRef`].
 pub fn new_ddl_context_with_kv_backend(
-    node_manager: NodeManagerRef,
+    region_rpc: RegionRpcRef,
     kv_backend: KvBackendRef,
 ) -> DdlContext {
     let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
@@ -197,7 +215,50 @@ pub fn new_ddl_context_with_kv_backend(
                 .build(),
         )));
     DdlContext {
-        node_manager,
+        region_rpc,
+        flow_rpc: Arc::new(UnimplementedFlowRpc),
+        cache_invalidator: Arc::new(DummyCacheInvalidator),
+        memory_region_keeper: Arc::new(MemoryRegionKeeper::new()),
+        leader_region_registry: Arc::new(LeaderRegionRegistry::default()),
+        table_metadata_allocator,
+        table_metadata_manager,
+        flow_metadata_allocator,
+        flow_metadata_manager,
+        region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
+    }
+}
+
+/// Returns a test purpose [DdlContext] with a [`FlowRpcRef`].
+pub fn new_ddl_context_with_flow(flow_rpc: FlowRpcRef) -> DdlContext {
+    let kv_backend = Arc::new(MemoryKvBackend::new());
+    new_ddl_context_with_flow_and_kv_backend(flow_rpc, kv_backend)
+}
+
+/// Returns a test purpose [DdlContext] with a specified [KvBackendRef] and a [`FlowRpcRef`].
+pub fn new_ddl_context_with_flow_and_kv_backend(
+    flow_rpc: FlowRpcRef,
+    kv_backend: KvBackendRef,
+) -> DdlContext {
+    let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
+    let table_metadata_allocator = Arc::new(TableMetadataAllocator::new(
+        Arc::new(
+            SequenceBuilder::new("test", kv_backend.clone())
+                .initial(1024)
+                .build(),
+        ),
+        Arc::new(WalProvider::default()),
+    ));
+    let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
+    let flow_metadata_allocator =
+        Arc::new(FlowMetadataAllocator::with_noop_peer_allocator(Arc::new(
+            SequenceBuilder::new("flow-test", kv_backend)
+                .initial(1024)
+                .build(),
+        )));
+
+    DdlContext {
+        region_rpc: Arc::new(UnimplementedRegionRpc),
+        flow_rpc,
         cache_invalidator: Arc::new(DummyCacheInvalidator),
         memory_region_keeper: Arc::new(MemoryRegionKeeper::new()),
         leader_region_registry: Arc::new(LeaderRegionRegistry::default()),

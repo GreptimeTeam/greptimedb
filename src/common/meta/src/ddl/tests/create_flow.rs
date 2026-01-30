@@ -29,7 +29,7 @@ use crate::error;
 use crate::key::FlowId;
 use crate::key::table_route::TableRouteValue;
 use crate::rpc::ddl::{CreateFlowTask, FlowQueryContext, QueryContext};
-use crate::test_util::{MockFlownodeManager, new_ddl_context};
+use crate::test_util::{MockFlownodeManager, new_ddl_context_with_flow};
 
 pub(crate) fn test_create_flow_task(
     name: &str,
@@ -63,7 +63,7 @@ async fn test_create_flow_source_table_not_found() {
         TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table");
     let task = test_create_flow_task("my_flow", source_table_names, sink_table_name, false);
     let node_manager = Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler));
-    let ddl_context = new_ddl_context(node_manager);
+    let ddl_context = new_ddl_context_with_flow(node_manager);
     let query_ctx = SessionQueryContext::arc().into();
     let mut procedure = CreateFlowProcedure::new(task, query_ctx, ddl_context);
     let err = procedure.on_prepare().await.unwrap_err();
@@ -101,7 +101,7 @@ async fn test_create_flow() {
     let sink_table_name =
         TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table");
     let node_manager = Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler));
-    let ddl_context = new_ddl_context(node_manager);
+    let ddl_context = new_ddl_context_with_flow(node_manager);
 
     let task = test_create_table_task("my_source_table", table_id);
     ddl_context
@@ -153,7 +153,7 @@ async fn test_create_flow_same_source_and_sink_table() {
     let sink_table_name = table_name.clone();
 
     let node_manager = Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler));
-    let ddl_context = new_ddl_context(node_manager);
+    let ddl_context = new_ddl_context_with_flow(node_manager);
 
     // Create the table first so it exists
     let task = test_create_table_task("same_table", table_id);
