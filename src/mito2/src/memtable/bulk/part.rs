@@ -51,6 +51,7 @@ use parquet::basic::{Compression, ZstdLevel};
 use parquet::data_type::AsBytes;
 use parquet::file::metadata::ParquetMetaData;
 use parquet::file::properties::WriterProperties;
+use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt, Snafu};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
@@ -1079,6 +1080,7 @@ impl EncodedBulkPart {
     }
 }
 
+// TODO(yingwen): max_sequence
 #[derive(Debug, Clone)]
 pub struct BulkPartMeta {
     /// Total rows in part.
@@ -1245,6 +1247,155 @@ impl BulkPartEncoder {
                 max_sequence: part.sequence,
             },
         }))
+    }
+}
+
+/// A collection of ordered RecordBatches representing a bulk part without parquet encoding.
+///
+/// Similar to `EncodedBulkPart` but stores raw RecordBatches instead of encoded parquet data.
+/// The RecordBatches must be ordered by (primary key, timestamp, sequence desc).
+/// Uses SmallVec to optimize for the common case of few batches while avoiding heap allocation.
+#[derive(Debug, Clone)]
+pub struct MultiBulkPart {
+    /// Ordered record batches. SmallVec optimized for up to 4 batches inline.
+    batches: SmallVec<[RecordBatch; 4]>,
+    /// Total rows across all batches.
+    total_rows: usize,
+    /// Max timestamp in part.
+    max_timestamp: i64,
+    /// Min timestamp in part.
+    min_timestamp: i64,
+    /// Max sequence number in part.
+    max_sequence: SequenceNumber,
+    /// Number of series.
+    series_count: usize,
+}
+
+impl MultiBulkPart {
+    /// Creates a new MultiBulkPart from a single BulkPart.
+    pub fn from_bulk_part(part: BulkPart) -> Self {
+        let num_rows = part.num_rows();
+        let series_count = part.estimated_series_count();
+        let mut batches = SmallVec::new();
+        batches.push(part.batch);
+
+        Self {
+            batches,
+            total_rows: num_rows,
+            max_timestamp: part.max_timestamp,
+            min_timestamp: part.min_timestamp,
+            max_sequence: part.sequence,
+            series_count,
+        }
+    }
+
+    /// Creates a new MultiBulkPart from multiple ordered RecordBatches.
+    ///
+    /// # Arguments
+    /// * `batches` - Ordered record batches
+    /// * `min_timestamp` - Minimum timestamp across all batches
+    /// * `max_timestamp` - Maximum timestamp across all batches
+    /// * `max_sequence` - Maximum sequence number across all batches
+    /// * `series_count` - Number of series in the batches
+    ///
+    /// # Panics
+    /// Panics if batches is empty.
+    pub fn new(
+        batches: Vec<RecordBatch>,
+        min_timestamp: i64,
+        max_timestamp: i64,
+        max_sequence: SequenceNumber,
+        series_count: usize,
+    ) -> Self {
+        assert!(!batches.is_empty(), "batches must not be empty");
+
+        let total_rows = batches.iter().map(|b| b.num_rows()).sum();
+
+        Self {
+            batches: SmallVec::from_vec(batches),
+            total_rows,
+            max_timestamp,
+            min_timestamp,
+            max_sequence,
+            series_count,
+        }
+    }
+
+    /// Returns the total number of rows across all batches.
+    pub fn num_rows(&self) -> usize {
+        self.total_rows
+    }
+
+    /// Returns the minimum timestamp.
+    pub fn min_timestamp(&self) -> i64 {
+        self.min_timestamp
+    }
+
+    /// Returns the maximum timestamp.
+    pub fn max_timestamp(&self) -> i64 {
+        self.max_timestamp
+    }
+
+    /// Returns the maximum sequence number.
+    pub fn max_sequence(&self) -> SequenceNumber {
+        self.max_sequence
+    }
+
+    /// Returns the number of series.
+    pub fn series_count(&self) -> usize {
+        self.series_count
+    }
+
+    /// Returns the number of record batches in this part.
+    pub fn num_batches(&self) -> usize {
+        self.batches.len()
+    }
+
+    /// Returns an iterator over the record batches.
+    pub(crate) fn batches(&self) -> impl Iterator<Item = &RecordBatch> {
+        self.batches.iter()
+    }
+
+    /// Returns the estimated memory size of all batches.
+    pub(crate) fn estimated_size(&self) -> usize {
+        self.batches.iter().map(record_batch_estimated_size).sum()
+    }
+
+    /// Reads data from this part with the given context and filters.
+    pub(crate) fn read(
+        &self,
+        context: BulkIterContextRef,
+        sequence: Option<SequenceRange>,
+        mem_scan_metrics: Option<MemScanMetrics>,
+    ) -> Result<Option<BoxedRecordBatchIterator>> {
+        if self.batches.is_empty() {
+            return Ok(None);
+        }
+
+        let iter = crate::memtable::bulk::part_reader::BulkPartBatchIter::new(
+            self.batches.iter().cloned().collect(),
+            context,
+            sequence,
+            self.series_count,
+            mem_scan_metrics,
+        );
+        Ok(Some(Box::new(iter) as BoxedRecordBatchIterator))
+    }
+
+    /// Converts this `MultiBulkPart` to `MemtableStats`.
+    pub fn to_memtable_stats(&self, region_metadata: &RegionMetadataRef) -> MemtableStats {
+        let ts_type = region_metadata.time_index_type();
+        let min_ts = ts_type.create_timestamp(self.min_timestamp);
+        let max_ts = ts_type.create_timestamp(self.max_timestamp);
+
+        MemtableStats {
+            estimated_bytes: self.estimated_size(),
+            time_range: Some((min_ts, max_ts)),
+            num_rows: self.num_rows(),
+            num_ranges: 1,
+            max_sequence: self.max_sequence,
+            series_count: self.series_count,
+        }
     }
 }
 

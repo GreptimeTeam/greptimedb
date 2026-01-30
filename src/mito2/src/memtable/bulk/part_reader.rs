@@ -196,11 +196,13 @@ impl Drop for EncodedBulkPartIter {
     }
 }
 
-/// Iterator for a record batch in a bulk part.
-pub struct BulkPartRecordBatchIter {
-    /// The RecordBatch to read from
-    record_batch: Option<RecordBatch>,
-    /// Iterator context for filtering
+/// Iterator for reading record batches from a bulk part.
+///
+/// Iterates through one or more RecordBatches, applying filters and projections.
+pub struct BulkPartBatchIter {
+    /// Queue of RecordBatches to process.
+    batches: VecDeque<RecordBatch>,
+    /// Iterator context for filtering and projection.
     context: BulkIterContextRef,
     /// Sequence number filter.
     sequence: Option<SequenceRange>,
@@ -210,10 +212,10 @@ pub struct BulkPartRecordBatchIter {
     mem_scan_metrics: Option<MemScanMetrics>,
 }
 
-impl BulkPartRecordBatchIter {
-    /// Creates a new [BulkPartRecordBatchIter] from a RecordBatch.
+impl BulkPartBatchIter {
+    /// Creates a new [BulkPartBatchIter] from multiple RecordBatches.
     pub fn new(
-        record_batch: RecordBatch,
+        batches: Vec<RecordBatch>,
         context: BulkIterContextRef,
         sequence: Option<SequenceRange>,
         series_count: usize,
@@ -222,7 +224,7 @@ impl BulkPartRecordBatchIter {
         assert!(context.read_format().as_flat().is_some());
 
         Self {
-            record_batch: Some(record_batch),
+            batches: VecDeque::from(batches),
             context,
             sequence,
             metrics: MemScanMetricsData {
@@ -231,6 +233,23 @@ impl BulkPartRecordBatchIter {
             },
             mem_scan_metrics,
         }
+    }
+
+    /// Creates a new [BulkPartBatchIter] from a single RecordBatch.
+    pub fn from_single(
+        record_batch: RecordBatch,
+        context: BulkIterContextRef,
+        sequence: Option<SequenceRange>,
+        series_count: usize,
+        mem_scan_metrics: Option<MemScanMetrics>,
+    ) -> Self {
+        Self::new(
+            vec![record_batch],
+            context,
+            sequence,
+            series_count,
+            mem_scan_metrics,
+        )
     }
 
     fn report_mem_scan_metrics(&mut self) {
@@ -256,13 +275,14 @@ impl BulkPartRecordBatchIter {
 
         // Apply projection first.
         let projected_batch = self.apply_projection(record_batch)?;
+
         // Apply combined filtering (both predicate and sequence filters)
-        // For BulkPartRecordBatchIter, we don't have row group information.
         let skip_fields = match self.context.pre_filter_mode() {
             PreFilterMode::All => false,
             PreFilterMode::SkipFields => true,
             PreFilterMode::SkipFieldsOnDelete => true,
         };
+
         let Some(filtered_batch) =
             apply_combined_filters(&self.context, &self.sequence, projected_batch, skip_fields)?
         else {
@@ -279,31 +299,32 @@ impl BulkPartRecordBatchIter {
     }
 }
 
-impl Iterator for BulkPartRecordBatchIter {
+impl Iterator for BulkPartBatchIter {
     type Item = error::Result<RecordBatch>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let Some(record_batch) = self.record_batch.take() else {
-            // `take()` should be cheap, we report the metrics directly.
-            self.report_mem_scan_metrics();
-            return None;
-        };
-
-        let result = self.process_batch(record_batch).transpose();
-
-        // Reports metrics when iteration is complete
-        if result.is_none() {
-            self.report_mem_scan_metrics();
+        // Process batches until we find a non-empty one or run out
+        while let Some(batch) = self.batches.pop_front() {
+            match self.process_batch(batch) {
+                Ok(Some(result)) => return Some(Ok(result)),
+                Ok(None) => continue, // This batch was filtered out, try next
+                Err(e) => {
+                    self.report_mem_scan_metrics();
+                    return Some(Err(e));
+                }
+            }
         }
 
-        result
+        // No more batches
+        self.report_mem_scan_metrics();
+        None
     }
 }
 
-impl Drop for BulkPartRecordBatchIter {
+impl Drop for BulkPartBatchIter {
     fn drop(&mut self) {
         common_telemetry::debug!(
-            "BulkPartRecordBatchIter region: {}, metrics: total_series={}, num_rows={}, num_batches={}, scan_cost={:?}",
+            "BulkPartBatchIter region: {}, metrics: total_series={}, num_rows={}, num_batches={}, scan_cost={:?}",
             self.context.region_id(),
             self.metrics.total_series,
             self.metrics.num_rows,
@@ -399,7 +420,10 @@ mod tests {
 
     use api::v1::SemanticType;
     use datafusion_expr::{col, lit};
-    use datatypes::arrow::array::{ArrayRef, Int64Array, StringArray, UInt8Array, UInt64Array};
+    use datatypes::arrow::array::{
+        ArrayRef, BinaryArray, DictionaryArray, Int64Array, StringArray, UInt8Array, UInt32Array,
+        UInt64Array,
+    };
     use datatypes::arrow::datatypes::{DataType, Field, Schema};
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
@@ -411,7 +435,7 @@ mod tests {
     use crate::memtable::bulk::context::BulkIterContext;
 
     #[test]
-    fn test_bulk_part_record_batch_iter() {
+    fn test_bulk_part_batch_iter() {
         // Create a simple schema
         let schema = Arc::new(Schema::new(vec![
             Field::new("key1", DataType::Utf8, false),
@@ -505,14 +529,14 @@ mod tests {
         );
         // Iterates all rows.
         let iter =
-            BulkPartRecordBatchIter::new(record_batch.clone(), context.clone(), None, 0, None);
+            BulkPartBatchIter::from_single(record_batch.clone(), context.clone(), None, 0, None);
         let result: Vec<_> = iter.map(|rb| rb.unwrap()).collect();
         assert_eq!(1, result.len());
         assert_eq!(3, result[0].num_rows());
         assert_eq!(6, result[0].num_columns(),);
 
         // Creates iter with sequence filter (only include sequences <= 2)
-        let iter = BulkPartRecordBatchIter::new(
+        let iter = BulkPartBatchIter::from_single(
             record_batch.clone(),
             context,
             Some(SequenceRange::LtEq { max: 2 }),
@@ -539,7 +563,7 @@ mod tests {
         );
         // Creates iter with projection and predicate.
         let iter =
-            BulkPartRecordBatchIter::new(record_batch.clone(), context.clone(), None, 0, None);
+            BulkPartBatchIter::from_single(record_batch.clone(), context.clone(), None, 0, None);
         let result: Vec<_> = iter.map(|rb| rb.unwrap()).collect();
         assert_eq!(1, result.len());
         assert_eq!(1, result[0].num_rows());
@@ -549,5 +573,129 @@ mod tests {
             &expect_sequence,
             result[0].column(result[0].num_columns() - 2)
         );
+    }
+
+    #[test]
+    fn test_bulk_part_batch_iter_multiple_batches() {
+        // Create a simple schema
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("key1", DataType::Utf8, false),
+            Field::new("field1", DataType::Int64, false),
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(datatypes::arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new(
+                "__primary_key",
+                DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Binary)),
+                false,
+            ),
+            Field::new("__sequence", DataType::UInt64, false),
+            Field::new("__op_type", DataType::UInt8, false),
+        ]));
+
+        // Create first batch with 2 rows
+        let key1_1 = Arc::new(StringArray::from_iter_values(["key1", "key2"]));
+        let field1_1 = Arc::new(Int64Array::from(vec![11, 12]));
+        let timestamp_1 = Arc::new(datatypes::arrow::array::TimestampMillisecondArray::from(
+            vec![1000, 2000],
+        ));
+        let values_1 = Arc::new(BinaryArray::from_iter_values([b"key1", b"key2"]));
+        let keys_1 = UInt32Array::from(vec![0, 1]);
+        let primary_key_1 = Arc::new(DictionaryArray::new(keys_1, values_1));
+        let sequence_1 = Arc::new(UInt64Array::from(vec![1, 2]));
+        let op_type_1 = Arc::new(UInt8Array::from(vec![1, 1]));
+
+        let batch1 = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                key1_1,
+                field1_1,
+                timestamp_1,
+                primary_key_1,
+                sequence_1,
+                op_type_1,
+            ],
+        )
+        .unwrap();
+
+        // Create second batch with 3 rows
+        let key1_2 = Arc::new(StringArray::from_iter_values(["key3", "key4", "key5"]));
+        let field1_2 = Arc::new(Int64Array::from(vec![13, 14, 15]));
+        let timestamp_2 = Arc::new(datatypes::arrow::array::TimestampMillisecondArray::from(
+            vec![3000, 4000, 5000],
+        ));
+        let values_2 = Arc::new(BinaryArray::from_iter_values([b"key3", b"key4", b"key5"]));
+        let keys_2 = UInt32Array::from(vec![0, 1, 2]);
+        let primary_key_2 = Arc::new(DictionaryArray::new(keys_2, values_2));
+        let sequence_2 = Arc::new(UInt64Array::from(vec![3, 4, 5]));
+        let op_type_2 = Arc::new(UInt8Array::from(vec![1, 1, 1]));
+
+        let batch2 = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                key1_2,
+                field1_2,
+                timestamp_2,
+                primary_key_2,
+                sequence_2,
+                op_type_2,
+            ],
+        )
+        .unwrap();
+
+        // Create region metadata
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "key1",
+                    ConcreteDataType::string_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 0,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "field1",
+                    ConcreteDataType::int64_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "timestamp",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 2,
+            })
+            .primary_key(vec![0]);
+
+        let region_metadata = builder.build().unwrap();
+
+        // Create context
+        let context = Arc::new(
+            BulkIterContext::new(
+                Arc::new(region_metadata),
+                None, // No projection
+                None, // No predicate
+                false,
+            )
+            .unwrap(),
+        );
+
+        // Create iterator with multiple batches
+        let expect_batches = vec![batch1, batch2];
+        let iter = BulkPartBatchIter::new(expect_batches.clone(), context.clone(), None, 0, None);
+
+        // Collect all results
+        let result: Vec<_> = iter.map(|rb| rb.unwrap()).collect();
+        assert_eq!(expect_batches, result);
     }
 }
