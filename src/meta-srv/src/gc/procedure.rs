@@ -29,7 +29,7 @@ use common_procedure::{
     Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
     Result as ProcedureResult, Status,
 };
-use common_telemetry::{error, info, warn};
+use common_telemetry::{debug, error, info, warn};
 use itertools::Itertools as _;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt as _;
@@ -277,28 +277,61 @@ impl BatchGcProcedure {
     }
 
     /// Return related regions for the given regions.
-    /// The returned map uses the source regions (where those files originally came from) as the key,
-    /// and the destination regions (where files are currently stored) as the value.
-    /// If a region is not found in the repartition manager, the returned map still have this region as key,
-    /// just empty value
+    /// The returned map uses the input region as key, and all other regions
+    /// from the same table as values (excluding the input region itself).
     async fn find_related_regions(
         &self,
         regions: &[RegionId],
     ) -> Result<HashMap<RegionId, HashSet<RegionId>>> {
-        let repart_mgr = self.table_metadata_manager.table_repart_manager();
-        let mut related_regions: HashMap<RegionId, HashSet<RegionId>> = HashMap::new();
-        for src_region in regions {
-            // TODO(discord9): batch get
-            if let Some(dst_regions) = repart_mgr
-                .get_dst_regions(*src_region)
-                .await
-                .context(KvBackendSnafu)?
-            {
-                related_regions.insert(*src_region, dst_regions.into_iter().collect());
-            } else {
-                related_regions.insert(*src_region, Default::default());
+        let table_ids: HashSet<TableId> = regions.iter().map(|r| r.table_id()).collect();
+        let table_ids = table_ids.into_iter().collect::<Vec<_>>();
+
+        let table_routes = self
+            .table_metadata_manager
+            .table_route_manager()
+            .batch_get_physical_table_routes(&table_ids)
+            .await
+            .context(TableMetadataManagerSnafu)?;
+
+        if table_routes.len() != table_ids.len() {
+            // batch_get_physical_table_routes returns a subset on misses; treat that as error
+            for table_id in &table_ids {
+                if !table_routes.contains_key(table_id) {
+                    // indicate is a logical table id
+                    return error::InvalidArgumentsSnafu {
+                    err_msg: format!(
+                        "Unexpected logical table route: table {} resolved to physical table regions",
+                        table_id
+                    ),
+                }
+                    .fail();
+                }
             }
         }
+
+        let mut table_all_regions: HashMap<TableId, HashSet<RegionId>> = HashMap::new();
+        for (table_id, table_route) in table_routes {
+            let all_regions: HashSet<RegionId> = table_route
+                .region_routes
+                .iter()
+                .map(|r| r.region.id)
+                .collect();
+
+            table_all_regions.insert(table_id, all_regions);
+        }
+
+        let mut related_regions: HashMap<RegionId, HashSet<RegionId>> = HashMap::new();
+        for region_id in regions {
+            let table_id = region_id.table_id();
+            if let Some(all_regions) = table_all_regions.get(&table_id) {
+                let mut related: HashSet<RegionId> = all_regions.clone();
+                related.remove(region_id);
+                related_regions.insert(*region_id, related);
+            } else {
+                related_regions.insert(*region_id, Default::default());
+            }
+        }
+
         Ok(related_regions)
     }
 
@@ -554,8 +587,8 @@ impl BatchGcProcedure {
             }
 
             let instruction = GetFileRefs {
-                query_regions: regions,
-                related_regions: related_regions_for_peer,
+                query_regions: regions.clone(),
+                related_regions: related_regions_for_peer.clone(),
             };
 
             let reply = send_get_file_refs(
@@ -566,6 +599,10 @@ impl BatchGcProcedure {
                 timeout,
             )
             .await?;
+            debug!(
+                "Got file references from datanode: {:?}, query_regions: {:?}, related_regions: {:?}, reply: {:?}",
+                peer, regions, related_regions_for_peer, reply
+            );
 
             if !reply.success {
                 return error::UnexpectedSnafu {
@@ -738,6 +775,7 @@ impl Procedure for BatchGcProcedure {
                         }
                         .fail();
                     };
+                    info!("GC report: {:?}", report);
                     Ok(Status::done_with_output(report))
                 }
                 Err(e) => {

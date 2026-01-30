@@ -441,8 +441,8 @@ impl LocalGcWorker {
 
         let unused_file_cnt = deletable_files.len();
 
-        debug!(
-            "gc: for region{}{region_id}: In manifest files: {}, Tmp ref file cnt: {}, recently removed files: {}, Unused files to delete: {}",
+        info!(
+            "gc: for region{}{region_id}: In manifest file cnt: {}, Tmp ref file cnt: {}, recently removed files: {}, Unused files to delete: {:?}",
             if region.is_none() {
                 "(region dropped)"
             } else {
@@ -451,7 +451,7 @@ impl LocalGcWorker {
             current_files.map(|c| c.len()).unwrap_or(0),
             tmp_ref_files.len(),
             removed_file_cnt,
-            deletable_files.len()
+            &deletable_files,
         );
 
         debug!(

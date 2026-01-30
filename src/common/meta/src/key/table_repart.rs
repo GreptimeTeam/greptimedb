@@ -15,6 +15,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Display;
 
+use common_telemetry::debug;
 use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt as _, ResultExt, ensure};
@@ -356,8 +357,8 @@ impl TableRepartManager {
             return Ok(());
         }
 
-        if let Some(current) = current {
-            let (txn, _) = self.build_update_txn(table_id, &current, new_value)?;
+        if let Some(current) = &current {
+            let (txn, _) = self.build_update_txn(table_id, current, new_value)?;
             let result = self.kv_backend.txn(txn).await?;
 
             ensure!(
@@ -384,6 +385,10 @@ impl TableRepartManager {
             );
         }
 
+        debug!(
+            "Upserted repartition value for table {}: current: {:?}, new: {:?}",
+            table_id, current, new_value
+        );
         Ok(())
     }
 
