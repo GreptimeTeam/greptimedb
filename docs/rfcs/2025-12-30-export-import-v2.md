@@ -236,18 +236,18 @@ Data is partitioned into time-range chunks for efficient parallel processing and
 
 **Algorithm**:
 
-- Generate non-overlapping half-open intervals with configurable time window (default: 1 day)
+- Generate non-overlapping half-open intervals only when chunk time window is specified; otherwise export as a single chunk
 - Chunks are numbered sequentially (1, 2, 3, ...)
 - Each chunk's time range is recorded in manifest.json
 - Empty chunks (no data in time window) are skipped and not recorded in manifest
 - Guarantees: no gaps, no overlaps, complete coverage of time range
 
-**Chunk time window selection**:
+**Chunk time window selection** (only applicable when chunking is enabled):
 
 The optimal chunk time window depends on data density (volume per unit time):
 
 - **Target**: 100MB - 1GB per chunk (balances parallelism and retry cost)
-- **Default**: 1 day (suitable for most workloads)
+- **Default**: disabled (uses a single chunk)
 - **Recommendations**:
     - High density (>1GB/day): Use smaller windows like 1h, 6h, or 12h
     - Low density (<100MB/day): Use larger windows like 7d or 30d
@@ -332,7 +332,7 @@ Optional:
   --schemas <SCHEMAS>             Comma-separated schema list (default: all)
   --start-time <TIMESTAMP>        Time range start (default: earliest)
   --end-time <TIMESTAMP>          Time range end (default: now)
-  --chunk-time-window <DURATION>  Chunk time window (default: 1d)
+  --chunk-time-window <DURATION>  Optional; uses single chunk if not specified; requires both --start-time and --end-time when specified
   --parallelism <N>               Concurrency level (default: 1)
   --format <FORMAT>               Export format for data file: parquet (default), csv, json, or other formats supported by COPY DATABASE
   --schema-only                   Export schema only, no data

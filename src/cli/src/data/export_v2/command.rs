@@ -24,6 +24,7 @@ use common_telemetry::info;
 use serde_json::Value;
 use snafu::{OptionExt, ResultExt};
 
+use super::coordinator::export_data;
 use super::error::{
     CannotResumeSchemaOnlySnafu, DatabaseSnafu, EmptyResultSnafu, Result, UnexpectedValueTypeSnafu,
 };
@@ -79,12 +80,20 @@ pub struct ExportCreateCommand {
     include_ddl: bool,
 
     /// Time range start (ISO 8601 format, e.g., 2024-01-01T00:00:00Z).
+    /// If only start is provided, export data from start (inclusive) to now.
     #[clap(long)]
     start_time: Option<String>,
 
     /// Time range end (ISO 8601 format, e.g., 2024-12-31T23:59:59Z).
+    /// If only end is provided, export data from earliest available to end (exclusive).
     #[clap(long)]
     end_time: Option<String>,
+
+    /// Chunk time window (e.g., 1h, 6h, 1d, 7d).
+    /// If omitted, export uses a single chunk.
+    /// Requires both --start-time and --end-time when specified.
+    #[clap(long, value_parser = humantime::parse_duration)]
+    chunk_time_window: Option<Duration>,
 
     /// Data format: parquet, csv, json.
     #[clap(long, value_enum, default_value = "parquet")]
@@ -94,7 +103,7 @@ pub struct ExportCreateCommand {
     #[clap(long)]
     force: bool,
 
-    /// Concurrency level (for future use).
+    /// Parallelism for COPY DATABASE execution (server-side, per schema per chunk).
     #[clap(long, default_value = "1")]
     parallelism: usize,
 
@@ -129,6 +138,15 @@ impl ExportCreateCommand {
         // Validate URI format
         validate_uri(&self.to).map_err(BoxedError::new)?;
 
+        // Parse and validate time range
+        let time_range = TimeRange::parse(self.start_time.as_deref(), self.end_time.as_deref())
+            .map_err(BoxedError::new)?;
+        if self.chunk_time_window.is_some() && !time_range.is_bounded() {
+            return Err(BoxedError::new(
+                super::error::ChunkTimeWindowRequiresBoundsSnafu.build(),
+            ));
+        }
+
         // Parse schemas (empty vec means all schemas)
         let schemas = if self.schemas.is_empty() {
             None
@@ -151,13 +169,19 @@ impl ExportCreateCommand {
         );
 
         Ok(Box::new(ExportCreate {
-            catalog: self.catalog.clone(),
-            schemas,
-            schema_only: self.schema_only,
-            include_ddl: self.include_ddl,
-            format: self.format,
-            force: self.force,
-            _parallelism: self.parallelism,
+            config: ExportConfig {
+                catalog: self.catalog.clone(),
+                schemas,
+                schema_only: self.schema_only,
+                include_ddl: self.include_ddl,
+                format: self.format,
+                force: self.force,
+                time_range,
+                parallelism: self.parallelism,
+                chunk_time_window: self.chunk_time_window,
+                snapshot_uri: self.to.clone(),
+                storage_config: self.storage.clone(),
+            },
             storage: Box::new(storage),
             database_client,
         }))
@@ -166,15 +190,23 @@ impl ExportCreateCommand {
 
 /// Export tool implementation.
 pub struct ExportCreate {
+    config: ExportConfig,
+    storage: Box<dyn SnapshotStorage>,
+    database_client: DatabaseClient,
+}
+
+struct ExportConfig {
     catalog: String,
     schemas: Option<Vec<String>>,
     schema_only: bool,
     include_ddl: bool,
     format: DataFormat,
     force: bool,
-    _parallelism: usize,
-    storage: Box<dyn SnapshotStorage>,
-    database_client: DatabaseClient,
+    time_range: TimeRange,
+    chunk_time_window: Option<Duration>,
+    parallelism: usize,
+    snapshot_uri: String,
+    storage_config: ObjectStoreConfig,
 }
 
 #[async_trait]
@@ -190,7 +222,7 @@ impl ExportCreate {
         let exists = self.storage.exists().await?;
 
         if exists {
-            if self.force {
+            if self.config.force {
                 info!("Deleting existing snapshot (--force)");
                 self.storage.delete_snapshot().await?;
             } else {
@@ -206,7 +238,7 @@ impl ExportCreate {
                 }
 
                 // Cannot resume schema-only with data export
-                if manifest.schema_only && !self.schema_only {
+                if manifest.schema_only && !self.config.schema_only {
                     return CannotResumeSchemaOnlySnafu.fail();
                 }
 
@@ -231,8 +263,8 @@ impl ExportCreate {
         }
 
         // 2. Get schema list
-        let extractor = SchemaExtractor::new(&self.database_client, &self.catalog);
-        let schema_snapshot = extractor.extract(self.schemas.as_deref()).await?;
+        let extractor = SchemaExtractor::new(&self.database_client, &self.config.catalog);
+        let schema_snapshot = extractor.extract(self.config.schemas.as_deref()).await?;
 
         let schema_names: Vec<String> = schema_snapshot
             .schemas
@@ -242,18 +274,14 @@ impl ExportCreate {
         info!("Exporting schemas: {:?}", schema_names);
 
         // 3. Create manifest
-        let manifest = if self.schema_only {
-            Manifest::new_schema_only(self.catalog.clone(), schema_names.clone())
-        } else {
-            // For M1, we create a schema-only manifest even for full export
-            // M2 will add time range parsing and chunk generation
-            Manifest::new_full(
-                self.catalog.clone(),
-                schema_names.clone(),
-                TimeRange::unbounded(),
-                self.format,
-            )
-        };
+        let mut manifest = Manifest::new_for_export(
+            self.config.catalog.clone(),
+            schema_names.clone(),
+            self.config.schema_only,
+            self.config.time_range.clone(),
+            self.config.format,
+            self.config.chunk_time_window,
+        );
 
         // 4. Write schema files
         self.storage.write_schema(&schema_snapshot).await?;
@@ -265,7 +293,7 @@ impl ExportCreate {
         );
 
         // 5. Optional DDL export (SHOW CREATE)
-        if self.include_ddl {
+        if self.config.include_ddl {
             let ddl_by_schema = self.build_ddl_by_schema(&schema_snapshot).await?;
             for (schema, ddl) in ddl_by_schema {
                 let ddl_path = ddl_path_for_schema(&schema);
@@ -278,9 +306,17 @@ impl ExportCreate {
         self.storage.write_manifest(&manifest).await?;
         info!("Snapshot created: {}", manifest.snapshot_id);
 
-        // 7. If not schema-only, data export would happen here (M2)
-        if !self.schema_only {
-            info!("Data export not yet implemented (M2). Schema export completed.");
+        // 7. Export data if not schema-only
+        if !self.config.schema_only {
+            export_data(
+                self.storage.as_ref(),
+                &self.database_client,
+                &self.config.snapshot_uri,
+                &self.config.storage_config,
+                &mut manifest,
+                self.config.parallelism,
+            )
+            .await?;
         }
 
         Ok(())
@@ -347,7 +383,7 @@ impl ExportCreate {
         let sql = format!(
             "SELECT DISTINCT table_name FROM information_schema.columns \
              WHERE table_catalog = '{}' AND table_schema = '{}' AND column_name = '__tsid'",
-            self.catalog, schema
+            self.config.catalog, schema
         );
         let records: Option<Vec<Vec<Value>>> = self
             .database_client
@@ -378,11 +414,11 @@ impl ExportCreate {
         let sql = match table {
             Some(table) => format!(
                 r#"SHOW CREATE {} "{}"."{}"."{}""#,
-                show_type, self.catalog, schema, table
+                show_type, self.config.catalog, schema, table
             ),
             None => format!(
                 r#"SHOW CREATE {} "{}"."{}""#,
-                show_type, self.catalog, schema
+                show_type, self.config.catalog, schema
             ),
         };
 

@@ -14,11 +14,16 @@
 
 //! Manifest data structures for Export/Import V2.
 
+use std::time::Duration;
 use std::{fmt, str};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+use super::chunker::generate_chunks;
+use super::error::{Error, Result, TimeParseEndBeforeStartSnafu, TimeParseInvalidFormatSnafu};
+use crate::export_v2::error::InvalidFormatSnafu;
 
 /// Current manifest format version.
 pub const MANIFEST_VERSION: u32 = 1;
@@ -51,10 +56,46 @@ impl TimeRange {
         }
     }
 
-    /// Returns true if this time range is unbounded.
+    /// Returns true if both bounds are missing.
     pub fn is_unbounded(&self) -> bool {
         self.start.is_none() && self.end.is_none()
     }
+
+    /// Returns true if both start and end are specified.
+    pub fn is_bounded(&self) -> bool {
+        self.start.is_some() && self.end.is_some()
+    }
+
+    /// Returns true if either bound is missing.
+    pub fn is_open_range(&self) -> bool {
+        self.start.is_none() || self.end.is_none()
+    }
+
+    /// Parses a time range from optional ISO 8601 strings.
+    ///
+    /// Semantics:
+    /// - Both start and end: [start, end)
+    /// - Only start: [start, now)
+    /// - Only end: [earliest, end)
+    /// - Neither: unbounded (all data)
+    pub fn parse(start: Option<&str>, end: Option<&str>) -> Result<Self> {
+        let start = start.map(parse_time).transpose()?;
+        let end = end.map(parse_time).transpose()?;
+
+        if let (Some(start), Some(end)) = (start, end)
+            && end < start
+        {
+            return TimeParseEndBeforeStartSnafu.fail();
+        }
+
+        Ok(Self::new(start, end))
+    }
+}
+
+fn parse_time(input: &str) -> Result<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(input)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|_| TimeParseInvalidFormatSnafu { input }.build())
 }
 
 impl Default for TimeRange {
@@ -74,6 +115,8 @@ pub enum ChunkStatus {
     InProgress,
     /// Chunk export completed successfully.
     Completed,
+    /// Chunk export completed with no data.
+    Skipped,
     /// Chunk export failed.
     Failed,
 }
@@ -90,9 +133,6 @@ pub struct ChunkMeta {
     /// List of data files in this chunk (relative paths from snapshot root).
     #[serde(default)]
     pub files: Vec<String>,
-    /// SHA256 checksum of all files in this chunk (aggregated).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub checksum: Option<String>,
     /// Error message if status is Failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -106,7 +146,6 @@ impl ChunkMeta {
             time_range,
             status: ChunkStatus::Pending,
             files: vec![],
-            checksum: None,
             error: None,
         }
     }
@@ -117,11 +156,17 @@ impl ChunkMeta {
         self.error = None;
     }
 
-    /// Marks this chunk as completed with the given files and checksum.
-    pub fn mark_completed(&mut self, files: Vec<String>, checksum: Option<String>) {
+    /// Marks this chunk as completed with the given files.
+    pub fn mark_completed(&mut self, files: Vec<String>) {
         self.status = ChunkStatus::Completed;
         self.files = files;
-        self.checksum = checksum;
+        self.error = None;
+    }
+
+    /// Marks this chunk as skipped with no data.
+    pub fn mark_skipped(&mut self) {
+        self.status = ChunkStatus::Skipped;
+        self.files.clear();
         self.error = None;
     }
 
@@ -157,17 +202,14 @@ impl fmt::Display for DataFormat {
 }
 
 impl str::FromStr for DataFormat {
-    type Err = String;
+    type Err = Error;
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
+    fn from_str(s: &str) -> Result<Self> {
         match s.to_lowercase().as_str() {
             "parquet" => Ok(DataFormat::Parquet),
             "csv" => Ok(DataFormat::Csv),
             "json" => Ok(DataFormat::Json),
-            _ => Err(format!(
-                "invalid format '{}': expected one of parquet, csv, json",
-                s
-            )),
+            _ => Err(InvalidFormatSnafu { format: s }.build()),
         }
     }
 }
@@ -180,7 +222,6 @@ impl str::FromStr for DataFormat {
 /// - Scope (catalog, schemas, time range)
 /// - Export configuration (format, schema_only)
 /// - Chunk metadata for resume support
-/// - Integrity checksums
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
     /// Manifest format version for compatibility checking.
@@ -200,9 +241,6 @@ pub struct Manifest {
     /// Chunk metadata (empty for schema-only snapshots).
     #[serde(default)]
     pub chunks: Vec<ChunkMeta>,
-    /// Snapshot-level SHA256 checksum (aggregated from all chunks).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub checksum: Option<String>,
     /// Creation timestamp.
     pub created_at: DateTime<Utc>,
     /// Last updated timestamp.
@@ -210,8 +248,33 @@ pub struct Manifest {
 }
 
 impl Manifest {
+    pub fn new_for_export(
+        catalog: String,
+        schemas: Vec<String>,
+        schema_only: bool,
+        time_range: TimeRange,
+        format: DataFormat,
+        chunk_time_window: Option<Duration>,
+    ) -> Self {
+        let mut manifest = if schema_only {
+            Manifest::new_schema_only(catalog, schemas)
+        } else {
+            Manifest::new_full(catalog, schemas, time_range, format)
+        };
+
+        if !schema_only {
+            manifest.chunks = match chunk_time_window {
+                Some(window) => generate_chunks(&manifest.time_range, window),
+                None => generate_single_chunk(&manifest.time_range),
+            };
+            manifest.touch();
+        }
+
+        manifest
+    }
+
     /// Creates a new manifest for schema-only export.
-    pub fn new_schema_only(catalog: String, schemas: Vec<String>) -> Self {
+    pub(crate) fn new_schema_only(catalog: String, schemas: Vec<String>) -> Self {
         let now = Utc::now();
         Self {
             version: MANIFEST_VERSION,
@@ -222,14 +285,13 @@ impl Manifest {
             schema_only: true,
             format: DataFormat::Parquet,
             chunks: vec![],
-            checksum: None,
             created_at: now,
             updated_at: now,
         }
     }
 
     /// Creates a new manifest for full export with time range and format.
-    pub fn new_full(
+    pub(crate) fn new_full(
         catalog: String,
         schemas: Vec<String>,
         time_range: TimeRange,
@@ -245,7 +307,6 @@ impl Manifest {
             schema_only: false,
             format,
             chunks: vec![],
-            checksum: None,
             created_at: now,
             updated_at: now,
         }
@@ -257,7 +318,7 @@ impl Manifest {
             || self
                 .chunks
                 .iter()
-                .all(|c| c.status == ChunkStatus::Completed)
+                .all(|c| matches!(c.status, ChunkStatus::Completed | ChunkStatus::Skipped))
     }
 
     /// Returns the number of pending chunks.
@@ -280,7 +341,15 @@ impl Manifest {
     pub fn completed_count(&self) -> usize {
         self.chunks
             .iter()
-            .filter(|c| c.status == ChunkStatus::Completed)
+            .filter(|c| matches!(c.status, ChunkStatus::Completed | ChunkStatus::Skipped))
+            .count()
+    }
+
+    /// Returns the number of skipped chunks.
+    pub fn skipped_count(&self) -> usize {
+        self.chunks
+            .iter()
+            .filter(|c| c.status == ChunkStatus::Skipped)
             .count()
     }
 
@@ -312,8 +381,19 @@ impl Manifest {
     }
 }
 
+fn generate_single_chunk(time_range: &TimeRange) -> Vec<ChunkMeta> {
+    if let (Some(start), Some(end)) = (time_range.start, time_range.end)
+        && start >= end
+    {
+        return Vec::new();
+    }
+    vec![ChunkMeta::new(1, time_range.clone())]
+}
+
 #[cfg(test)]
 mod tests {
+    use chrono::{TimeZone, Utc};
+
     use super::*;
 
     #[test]
@@ -370,11 +450,46 @@ mod tests {
         chunk.mark_in_progress();
         assert_eq!(chunk.status, ChunkStatus::InProgress);
 
-        chunk.mark_completed(
-            vec!["file1.parquet".to_string()],
-            Some("abc123".to_string()),
-        );
+        chunk.mark_completed(vec!["file1.parquet".to_string()]);
         assert_eq!(chunk.status, ChunkStatus::Completed);
         assert_eq!(chunk.files.len(), 1);
+
+        chunk.mark_skipped();
+        assert_eq!(chunk.status, ChunkStatus::Skipped);
+        assert!(chunk.files.is_empty());
+    }
+
+    #[test]
+    fn test_manifest_chunk_time_window_none_single_chunk() {
+        let start = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+        let end = Utc.with_ymd_and_hms(2025, 1, 2, 0, 0, 0).unwrap();
+        let range = TimeRange::new(Some(start), Some(end));
+        let manifest = Manifest::new_for_export(
+            "greptime".to_string(),
+            vec!["public".to_string()],
+            false,
+            range.clone(),
+            DataFormat::Parquet,
+            None,
+        );
+
+        assert_eq!(manifest.chunks.len(), 1);
+        assert_eq!(manifest.chunks[0].time_range, range);
+    }
+
+    #[test]
+    fn test_time_range_unbounded_partial() {
+        let start = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+        let end = Utc.with_ymd_and_hms(2025, 1, 2, 0, 0, 0).unwrap();
+
+        let range_start_only = TimeRange::new(Some(start), None);
+        assert!(!range_start_only.is_bounded());
+        assert!(range_start_only.is_open_range());
+        assert!(!range_start_only.is_unbounded());
+
+        let range_end_only = TimeRange::new(None, Some(end));
+        assert!(!range_end_only.is_bounded());
+        assert!(range_end_only.is_open_range());
+        assert!(!range_end_only.is_unbounded());
     }
 }

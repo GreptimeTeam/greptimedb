@@ -38,7 +38,10 @@
 //!   --end-time 2025-01-31T23:59:59Z
 //! ```
 
+mod chunker;
 mod command;
+mod coordinator;
+mod data;
 pub mod error;
 pub mod extractor;
 pub mod manifest;
