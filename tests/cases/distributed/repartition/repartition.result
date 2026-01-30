@@ -53,25 +53,25 @@ Affected Rows: 0
 
 SHOW CREATE TABLE alter_repartition_table;
 
-+-------------------------+------------------------------------------------------------------------------+
-| Table                   | Create Table                                                                 |
-+-------------------------+------------------------------------------------------------------------------+
-| alter_repartition_table | CREATE TABLE IF NOT EXISTS "alter_repartition_table" (                       |
-|                         |   "device_id" INT NULL,                                                      |
-|                         |   "area" STRING NULL,                                                        |
-|                         |   "ty" STRING NULL,                                                          |
-|                         |   "ts" TIMESTAMP(3) NOT NULL,                                                |
-|                         |   TIME INDEX ("ts"),                                                         |
-|                         |   PRIMARY KEY ("device_id")                                                  |
-|                         | )                                                                            |
-|                         | PARTITION ON COLUMNS ("device_id", "area") (                                 |
-|                         |   device_id < 100 AND area < 'South' OR device_id < 100 AND area >= 'South', |
-|                         |   device_id >= 100 AND device_id < 200,                                      |
-|                         |   device_id >= 200                                                           |
-|                         | )                                                                            |
-|                         | ENGINE=mito                                                                  |
-|                         |                                                                              |
-+-------------------------+------------------------------------------------------------------------------+
++-------------------------+--------------------------------------------------------+
+| Table                   | Create Table                                           |
++-------------------------+--------------------------------------------------------+
+| alter_repartition_table | CREATE TABLE IF NOT EXISTS "alter_repartition_table" ( |
+|                         |   "device_id" INT NULL,                                |
+|                         |   "area" STRING NULL,                                  |
+|                         |   "ty" STRING NULL,                                    |
+|                         |   "ts" TIMESTAMP(3) NOT NULL,                          |
+|                         |   TIME INDEX ("ts"),                                   |
+|                         |   PRIMARY KEY ("device_id")                            |
+|                         | )                                                      |
+|                         | PARTITION ON COLUMNS ("device_id", "area") (           |
+|                         |   device_id < 100,                                     |
+|                         |   device_id >= 100 AND device_id < 200,                |
+|                         |   device_id >= 200                                     |
+|                         | )                                                      |
+|                         | ENGINE=mito                                            |
+|                         |                                                        |
++-------------------------+--------------------------------------------------------+
 
 -- FIXME(weny): Object store is not configured for the test environment,
 -- so staging manifest may not be applied in some cases.
@@ -248,7 +248,7 @@ SHOW CREATE TABLE metric_physical_table;
 |                       |   PRIMARY KEY ("host")                               |
 |                       | )                                                    |
 |                       | PARTITION ON COLUMNS ("host") (                      |
-|                       |   host < 'h0' OR host >= 'h0' AND host < 'h1',       |
+|                       |   host < 'h1',                                       |
 |                       |   host >= 'h1' AND host < 'h2',                      |
 |                       |   host >= 'h2'                                       |
 |                       | )                                                    |

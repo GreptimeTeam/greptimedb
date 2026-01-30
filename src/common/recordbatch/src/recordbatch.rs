@@ -71,6 +71,30 @@ impl RecordBatch {
         })
     }
 
+    pub fn to_df_record_batch<I: IntoIterator<Item = VectorRef>>(
+        arrow_schema: ArrowSchemaRef,
+        columns: I,
+    ) -> Result<DfRecordBatch> {
+        let columns: Vec<_> = columns.into_iter().collect();
+        let arrow_arrays = columns.iter().map(|v| v.to_arrow_array()).collect();
+
+        // Casting the arrays here to match the schema, is a temporary solution to support Arrow's
+        // view array types (`StringViewArray` and `BinaryViewArray`).
+        // As to "support": the arrays here are created from vectors, which do not have types
+        // corresponding to view arrays. What we can do is to only cast them.
+        // As to "temporary": we are planing to use Arrow's RecordBatch directly in the read path.
+        // the casting here will be removed in the end.
+        // TODO(LFC): Remove the casting here once `Batch` is no longer used.
+        let arrow_arrays = Self::cast_view_arrays(&arrow_schema, arrow_arrays)?;
+
+        let arrow_arrays = maybe_align_json_array_with_schema(&arrow_schema, arrow_arrays)?;
+
+        let df_record_batch = DfRecordBatch::try_new(arrow_schema, arrow_arrays)
+            .context(error::NewDfRecordBatchSnafu)?;
+
+        Ok(df_record_batch)
+    }
+
     fn cast_view_arrays(
         schema: &ArrowSchemaRef,
         mut arrays: Vec<ArrayRef>,

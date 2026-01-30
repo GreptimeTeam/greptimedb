@@ -165,6 +165,8 @@ pub(crate) struct ScanMetricsSet {
     rows_bloom_filtered: usize,
     /// Number of rows filtered by vector index.
     rows_vector_filtered: usize,
+    /// Number of rows selected by vector index.
+    rows_vector_selected: usize,
     /// Number of rows filtered by precise filter.
     rows_precise_filtered: usize,
     /// Number of index result cache hits for fulltext index.
@@ -291,6 +293,7 @@ impl fmt::Debug for ScanMetricsSet {
             rows_inverted_filtered,
             rows_bloom_filtered,
             rows_vector_filtered,
+            rows_vector_selected,
             rows_precise_filtered,
             fulltext_index_cache_hit,
             fulltext_index_cache_miss,
@@ -383,6 +386,9 @@ impl fmt::Debug for ScanMetricsSet {
         }
         if *rows_vector_filtered > 0 {
             write!(f, ", \"rows_vector_filtered\":{rows_vector_filtered}")?;
+        }
+        if *rows_vector_selected > 0 {
+            write!(f, ", \"rows_vector_selected\":{rows_vector_selected}")?;
         }
         if *rows_precise_filtered > 0 {
             write!(f, ", \"rows_precise_filtered\":{rows_precise_filtered}")?;
@@ -600,6 +606,7 @@ impl ScanMetricsSet {
                     rows_inverted_filtered,
                     rows_bloom_filtered,
                     rows_vector_filtered,
+                    rows_vector_selected,
                     rows_precise_filtered,
                     fulltext_index_cache_hit,
                     fulltext_index_cache_miss,
@@ -636,6 +643,7 @@ impl ScanMetricsSet {
         self.rows_inverted_filtered += *rows_inverted_filtered;
         self.rows_bloom_filtered += *rows_bloom_filtered;
         self.rows_vector_filtered += *rows_vector_filtered;
+        self.rows_vector_selected += *rows_vector_selected;
         self.rows_precise_filtered += *rows_precise_filtered;
 
         self.fulltext_index_cache_hit += *fulltext_index_cache_hit;
@@ -1435,7 +1443,16 @@ pub fn build_flat_file_range_scan_stream(
                     })
                 })
                 .transpose()?;
+
+            let mapper = range.compaction_projection_mapper();
             while let Some(record_batch) = reader.next_batch()? {
+                let record_batch = if let Some(mapper) = mapper {
+                    let batch = mapper.project(record_batch)?;
+                    batch
+                } else {
+                    record_batch
+                };
+
                 if let Some(flat_compat) = may_compat {
                     let batch = flat_compat.compat(record_batch)?;
                     yield batch;

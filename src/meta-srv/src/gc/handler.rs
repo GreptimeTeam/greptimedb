@@ -203,7 +203,7 @@ impl GcScheduler {
                     report.per_datanode_reports.insert(peer.id, dn_report);
                 }
                 Err(e) => {
-                    error!("Failed to process datanode GC for peer {}: {:#?}", peer, e);
+                    error!(e; "Failed to process datanode GC for peer {}", peer);
                     // Note: We don't have a direct way to map peer to table_id here,
                     // so we just log the error. The table_reports will contain individual region failures.
                     report.failed_datanodes.entry(peer.id).or_default().push(e);
@@ -277,8 +277,8 @@ impl GcScheduler {
                     Ok(report) => combined_report.merge(report),
                     Err(e) => {
                         error!(
-                            "Failed to GC regions {:?} on datanode {}: {}",
-                            fast_list_regions, peer, e
+                            e; "Failed to GC regions {:?} on datanode {}",
+                            fast_list_regions, peer,
                         );
 
                         // Add to need_retry_regions since it failed
@@ -303,8 +303,8 @@ impl GcScheduler {
                     Ok(report) => combined_report.merge(report),
                     Err(e) => {
                         error!(
-                            "Failed to GC regions {:?} on datanode {}: {}",
-                            need_full_list_regions, peer, e
+                            e; "Failed to GC regions {:?} on datanode {}",
+                            need_full_list_regions, peer,
                         );
 
                         // Add to need_retry_regions since it failed

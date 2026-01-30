@@ -31,6 +31,7 @@ use store_api::metric_engine_consts::{
     METADATA_SCHEMA_KEY_COLUMN_INDEX, METADATA_SCHEMA_KEY_COLUMN_NAME,
     METADATA_SCHEMA_TIMESTAMP_COLUMN_INDEX, METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME,
     METADATA_SCHEMA_VALUE_COLUMN_INDEX, METADATA_SCHEMA_VALUE_COLUMN_NAME,
+    is_metric_engine_internal_column,
 };
 use store_api::mito_engine_options::{TTL_KEY, WAL_OPTIONS_KEY};
 use store_api::region_engine::RegionEngine;
@@ -361,15 +362,18 @@ impl MetricEngineInner {
             .map(|(idx, metadata)| (metadata.column_schema.name.clone(), idx))
             .collect::<HashMap<String, usize>>();
 
-        // check if internal columns are not occupied
+        let table_id_col_def = request.column_metadatas.iter().any(is_metric_name_col);
+        let tsid_col_def = request.column_metadatas.iter().any(is_tsid_col);
+
+        // check if internal columns are not occupied or defined in the request
         ensure!(
-            !name_to_index.contains_key(DATA_SCHEMA_TABLE_ID_COLUMN_NAME),
+            !name_to_index.contains_key(DATA_SCHEMA_TABLE_ID_COLUMN_NAME) || table_id_col_def,
             InternalColumnOccupiedSnafu {
                 column: DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
             }
         );
         ensure!(
-            !name_to_index.contains_key(DATA_SCHEMA_TSID_COLUMN_NAME),
+            !name_to_index.contains_key(DATA_SCHEMA_TSID_COLUMN_NAME) || tsid_col_def,
             InternalColumnOccupiedSnafu {
                 column: DATA_SCHEMA_TSID_COLUMN_NAME,
             }
@@ -389,6 +393,10 @@ impl MetricEngineInner {
         // check if only one field column is declared, and all tag columns are string
         let mut field_col: Option<&ColumnMetadata> = None;
         for col in &request.column_metadatas {
+            // Verified in above steps.
+            if is_metric_engine_internal_column(&col.column_schema.name) {
+                continue;
+            }
             match col.semantic_type {
                 SemanticType::Tag => ensure!(
                     col.column_schema.data_type == ConcreteDataType::string_datatype(),
@@ -508,21 +516,30 @@ impl MetricEngineInner {
         data_region_request.table_dir = request.table_dir.clone();
         data_region_request.path_type = PathType::Data;
 
+        let table_id_col_def = request.column_metadatas.iter().any(is_metric_name_col);
+        let tsid_col_def = request.column_metadatas.iter().any(is_tsid_col);
+
         // change nullability for tag columns
         data_region_request
             .column_metadatas
             .iter_mut()
             .for_each(|metadata| {
-                if metadata.semantic_type == SemanticType::Tag {
+                if metadata.semantic_type == SemanticType::Tag
+                    && !is_metric_name_col(metadata)
+                    && !is_tsid_col(metadata)
+                {
                     metadata.column_schema.set_nullable();
                     primary_key.push(metadata.column_id);
                 }
             });
 
-        // add internal columns
-        let [table_id_col, tsid_col] = Self::internal_column_metadata();
-        data_region_request.column_metadatas.push(table_id_col);
-        data_region_request.column_metadatas.push(tsid_col);
+        // add internal columns if not defined in the request
+        if !table_id_col_def {
+            data_region_request.column_metadatas.push(table_id_col());
+        }
+        if !tsid_col_def {
+            data_region_request.column_metadatas.push(tsid_col());
+        }
         data_region_request.primary_key = primary_key;
 
         // set data region options
@@ -533,39 +550,55 @@ impl MetricEngineInner {
 
         data_region_request
     }
+}
 
-    /// Generate internal column metadata.
-    ///
-    /// Return `[table_id_col, tsid_col]`
-    fn internal_column_metadata() -> [ColumnMetadata; 2] {
-        // Safety: BloomFilter is a valid skipping index type
-        let metric_name_col = ColumnMetadata {
-            column_id: ReservedColumnId::table_id(),
-            semantic_type: SemanticType::Tag,
-            column_schema: ColumnSchema::new(
-                DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
-                ConcreteDataType::uint32_datatype(),
-                false,
-            )
-            .with_skipping_options(SkippingIndexOptions::new_unchecked(
-                DEFAULT_TABLE_ID_SKIPPING_INDEX_GRANULARITY,
-                DEFAULT_TABLE_ID_SKIPPING_INDEX_FALSE_POSITIVE_RATE,
-                datatypes::schema::SkippingIndexType::BloomFilter,
-            ))
-            .unwrap(),
-        };
-        let tsid_col = ColumnMetadata {
-            column_id: ReservedColumnId::tsid(),
-            semantic_type: SemanticType::Tag,
-            column_schema: ColumnSchema::new(
-                DATA_SCHEMA_TSID_COLUMN_NAME,
-                ConcreteDataType::uint64_datatype(),
-                false,
-            )
-            .with_inverted_index(false),
-        };
-        [metric_name_col, tsid_col]
+fn table_id_col() -> ColumnMetadata {
+    ColumnMetadata {
+        column_id: ReservedColumnId::table_id(),
+        semantic_type: SemanticType::Tag,
+        column_schema: ColumnSchema::new(
+            DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+            ConcreteDataType::uint32_datatype(),
+            false,
+        )
+        .with_skipping_options(SkippingIndexOptions::new_unchecked(
+            DEFAULT_TABLE_ID_SKIPPING_INDEX_GRANULARITY,
+            DEFAULT_TABLE_ID_SKIPPING_INDEX_FALSE_POSITIVE_RATE,
+            datatypes::schema::SkippingIndexType::BloomFilter,
+        ))
+        .unwrap(),
     }
+}
+
+fn tsid_col() -> ColumnMetadata {
+    ColumnMetadata {
+        column_id: ReservedColumnId::tsid(),
+        semantic_type: SemanticType::Tag,
+        column_schema: ColumnSchema::new(
+            DATA_SCHEMA_TSID_COLUMN_NAME,
+            ConcreteDataType::uint64_datatype(),
+            false,
+        )
+        .with_inverted_index(false),
+    }
+}
+
+/// Returns true if the column is the metric name column.
+pub(crate) fn is_metric_name_col(column: &ColumnMetadata) -> bool {
+    column.column_id == ReservedColumnId::table_id()
+        && column.semantic_type == SemanticType::Tag
+        && column.column_schema.data_type == ConcreteDataType::uint32_datatype()
+        && column.column_schema.name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME
+        && !column.column_schema.is_nullable()
+}
+
+/// Returns true if the column is the tsid column.
+pub(crate) fn is_tsid_col(column: &ColumnMetadata) -> bool {
+    column.column_id == ReservedColumnId::tsid()
+        && column.semantic_type == SemanticType::Tag
+        && column.column_schema.data_type == ConcreteDataType::uint64_datatype()
+        && column.column_schema.name == DATA_SCHEMA_TSID_COLUMN_NAME
+        && !column.column_schema.is_nullable()
 }
 
 /// Groups the create logical region requests by physical region id.
@@ -629,6 +662,14 @@ mod test {
     use crate::test_util::{TestEnv, create_logical_region_request};
 
     #[test]
+    fn test_internal_column_metadata() {
+        let table_id_col = table_id_col();
+        let tsid_col = tsid_col();
+        assert!(is_metric_name_col(&table_id_col));
+        assert!(is_tsid_col(&tsid_col));
+    }
+
+    #[test]
     fn test_verify_region_create_request() {
         // internal column is occupied
         let request = RegionCreateRequest {
@@ -665,6 +706,50 @@ mod test {
             result.unwrap_err().to_string(),
             "Internal column __table_id is reserved".to_string()
         );
+
+        // allow reserved internal columns when defined properly
+        let request = RegionCreateRequest {
+            column_metadatas: vec![
+                ColumnMetadata {
+                    column_id: 0,
+                    semantic_type: SemanticType::Timestamp,
+                    column_schema: ColumnSchema::new(
+                        METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME,
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        false,
+                    ),
+                },
+                ColumnMetadata {
+                    column_id: 1,
+                    semantic_type: SemanticType::Tag,
+                    column_schema: ColumnSchema::new(
+                        "column1".to_string(),
+                        ConcreteDataType::string_datatype(),
+                        false,
+                    ),
+                },
+                ColumnMetadata {
+                    column_id: 2,
+                    semantic_type: SemanticType::Field,
+                    column_schema: ColumnSchema::new(
+                        "column2".to_string(),
+                        ConcreteDataType::float64_datatype(),
+                        false,
+                    ),
+                },
+                table_id_col(),
+                tsid_col(),
+            ],
+            table_dir: "test_dir".to_string(),
+            path_type: PathType::Bare,
+            engine: METRIC_ENGINE_NAME.to_string(),
+            primary_key: vec![],
+            options: [(PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new())]
+                .into_iter()
+                .collect(),
+            partition_expr_json: Some("".to_string()),
+        };
+        MetricEngineInner::verify_region_create_request(&request).unwrap();
 
         // valid request
         let request = RegionCreateRequest {
@@ -818,6 +903,100 @@ mod test {
             "forever"
         );
         assert!(!metadata_region_request.options.contains_key("skip_wal"));
+    }
+
+    #[tokio::test]
+    async fn test_create_request_for_physical_regions_with_internal_columns() {
+        let options: HashMap<_, _> = [
+            ("ttl".to_string(), "60m".to_string()),
+            ("skip_wal".to_string(), "true".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let request = RegionCreateRequest {
+            engine: METRIC_ENGINE_NAME.to_string(),
+            column_metadatas: vec![
+                ColumnMetadata {
+                    column_id: 0,
+                    semantic_type: SemanticType::Timestamp,
+                    column_schema: ColumnSchema::new(
+                        "timestamp",
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        false,
+                    ),
+                },
+                ColumnMetadata {
+                    column_id: 1,
+                    semantic_type: SemanticType::Tag,
+                    column_schema: ColumnSchema::new(
+                        "tag",
+                        ConcreteDataType::string_datatype(),
+                        false,
+                    ),
+                },
+                ColumnMetadata {
+                    column_id: 2,
+                    semantic_type: SemanticType::Field,
+                    column_schema: ColumnSchema::new(
+                        "value",
+                        ConcreteDataType::float64_datatype(),
+                        false,
+                    ),
+                },
+                table_id_col(),
+                tsid_col(),
+            ],
+            primary_key: vec![0],
+            options,
+            table_dir: "/test_dir".to_string(),
+            path_type: PathType::Bare,
+            partition_expr_json: Some("".to_string()),
+        };
+
+        let env = TestEnv::new().await;
+        let engine = MetricEngine::try_new(env.mito(), EngineConfig::default()).unwrap();
+        let engine_inner = engine.inner;
+
+        let data_region_request = engine_inner.create_request_for_data_region(&request);
+        assert_eq!(data_region_request.column_metadatas.len(), 5);
+        assert_eq!(
+            data_region_request.primary_key,
+            vec![ReservedColumnId::table_id(), ReservedColumnId::tsid(), 1]
+        );
+
+        let table_id_count = data_region_request
+            .column_metadatas
+            .iter()
+            .filter(|metadata| metadata.column_schema.name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
+            .count();
+        let tsid_count = data_region_request
+            .column_metadatas
+            .iter()
+            .filter(|metadata| metadata.column_schema.name == DATA_SCHEMA_TSID_COLUMN_NAME)
+            .count();
+        assert_eq!(table_id_count, 1);
+        assert_eq!(tsid_count, 1);
+
+        let tag_metadata = data_region_request
+            .column_metadatas
+            .iter()
+            .find(|metadata| metadata.column_schema.name == "tag")
+            .unwrap();
+        assert!(tag_metadata.column_schema.is_nullable());
+
+        let table_id_metadata = data_region_request
+            .column_metadatas
+            .iter()
+            .find(|metadata| metadata.column_schema.name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
+            .unwrap();
+        assert!(is_metric_name_col(table_id_metadata));
+
+        let tsid_metadata = data_region_request
+            .column_metadatas
+            .iter()
+            .find(|metadata| metadata.column_schema.name == DATA_SCHEMA_TSID_COLUMN_NAME)
+            .unwrap();
+        assert!(is_tsid_col(tsid_metadata));
     }
 
     #[tokio::test]

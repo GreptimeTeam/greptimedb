@@ -16,17 +16,57 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use common_function::aggrs::aggr_wrapper::{StateMergeHelper, is_all_aggr_exprs_steppable};
+#[cfg(feature = "vector_index")]
+use common_function::scalars::vector::distance::{
+    VEC_COS_DISTANCE, VEC_DOT_PRODUCT, VEC_L2SQ_DISTANCE,
+};
 use common_telemetry::debug;
 use datafusion::error::Result as DfResult;
+#[cfg(feature = "vector_index")]
+use datafusion_common::DataFusionError;
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
+#[cfg(feature = "vector_index")]
+use datafusion_expr::Sort;
 use datafusion_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
 use promql::extension_plan::{
     EmptyMetric, InstantManipulate, RangeManipulate, SeriesDivide, SeriesNormalize,
 };
+use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 
 use crate::dist_plan::MergeScanLogicalPlan;
 use crate::dist_plan::analyzer::AliasMapping;
 use crate::dist_plan::merge_sort::{MergeSortLogicalPlan, merge_sort_transformer};
+
+#[cfg(feature = "vector_index")]
+fn is_vector_sort(sort: &Sort) -> bool {
+    if sort.expr.len() != 1 {
+        return false;
+    }
+    let sort_expr = &sort.expr[0].expr;
+    let Expr::ScalarFunction(func) = sort_expr else {
+        return false;
+    };
+    matches!(
+        func.name().to_lowercase().as_str(),
+        VEC_L2SQ_DISTANCE | VEC_COS_DISTANCE | VEC_DOT_PRODUCT
+    )
+}
+
+#[cfg(feature = "vector_index")]
+fn vector_sort_transformer(plan: &LogicalPlan) -> DfResult<TransformerAction> {
+    let LogicalPlan::Sort(sort) = plan else {
+        return Err(DataFusionError::Internal(format!(
+            "vector_sort_transformer expects Sort, got {plan}"
+        )));
+    };
+    Ok(TransformerAction {
+        extra_parent_plans: vec![
+            MergeSortLogicalPlan::new(sort.input.clone(), sort.expr.clone(), sort.fetch)
+                .into_logical_plan(),
+        ],
+        new_child_plan: Some(LogicalPlan::Sort(sort.clone())),
+    })
+}
 
 pub struct StepTransformAction {
     extra_parent_plans: Vec<LogicalPlan>,
@@ -149,14 +189,19 @@ impl Categorizer {
                 // commutativity is needed under this situation.
                 Commutativity::ConditionalCommutative(None)
             }
-            LogicalPlan::Sort(_) => {
+            LogicalPlan::Sort(_sort) => {
                 if partition_cols.is_empty() {
                     return Ok(Commutativity::Commutative);
                 }
 
                 // sort plan needs to consider column priority
-                // Change Sort to MergeSort which assumes the input streams are already sorted hence can be more efficient
-                // We should ensure the number of partition is not smaller than the number of region at present. Otherwise this would result in incorrect output.
+                // Change Sort to MergeSort which assumes the input streams are already sorted hence can be more efficient.
+                #[cfg(feature = "vector_index")]
+                if is_vector_sort(_sort) {
+                    return Ok(Commutativity::TransformedCommutative {
+                        transformer: Some(Arc::new(vector_sort_transformer)),
+                    });
+                }
                 Commutativity::ConditionalCommutative(Some(Arc::new(merge_sort_transformer)))
             }
             LogicalPlan::Join(_) => Commutativity::NonCommutative,
@@ -212,6 +257,16 @@ impl Categorizer {
         match plan.name() {
             name if name == SeriesDivide::name() => {
                 let series_divide = plan.as_any().downcast_ref::<SeriesDivide>().unwrap();
+                // Metric engine `__tsid` uniquely identifies a time-series. Treat a series divide
+                // that keys by `__tsid` as commutative across regions so it can be pushed down.
+                if series_divide
+                    .tags()
+                    .iter()
+                    .any(|tag| tag == DATA_SCHEMA_TSID_COLUMN_NAME)
+                {
+                    return Commutativity::Commutative;
+                }
+
                 let tags = series_divide.tags().iter().collect::<HashSet<_>>();
 
                 for all_alias in partition_cols.values() {
@@ -311,6 +366,34 @@ impl Categorizer {
         }
 
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use datafusion_common::Column;
+    use datafusion_expr::LogicalPlanBuilder;
+
+    use super::*;
+
+    #[test]
+    fn series_divide_by_tsid_is_commutative() {
+        let input = LogicalPlanBuilder::empty(false).build().unwrap();
+        let series_divide = SeriesDivide::new(
+            vec![DATA_SCHEMA_TSID_COLUMN_NAME.to_string()],
+            "ts".to_string(),
+            input,
+        );
+
+        let partition_cols: AliasMapping = BTreeMap::from([(
+            "some_partition_col".to_string(),
+            BTreeSet::from([Column::from_name("some_partition_col")]),
+        )]);
+
+        let commutativity = Categorizer::check_extension_plan(&series_divide, &partition_cols);
+        assert!(matches!(commutativity, Commutativity::Commutative));
     }
 }
 

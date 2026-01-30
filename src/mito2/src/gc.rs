@@ -129,8 +129,6 @@ pub struct GcConfig {
     /// Should be long enough to allow long running queries to finish.
     /// If set to None, then unused files will be deleted immediately.
     ///
-    /// TODO(discord9): long running queries should actively write tmp manifest files
-    /// to prevent deletion of files they are using.
     #[serde(with = "humantime_serde")]
     pub lingering_time: Option<Duration>,
     /// Lingering time before deleting unknown files(files with undetermine expel time).

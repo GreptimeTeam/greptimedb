@@ -67,7 +67,7 @@ impl<S> Wal<S> {
 impl<S> Clone for Wal<S> {
     fn clone(&self) -> Self {
         Self {
-            store: self.store.clone(),
+            store: Arc::clone(&self.store),
         }
     }
 }
@@ -137,18 +137,8 @@ impl<S: LogStore> Wal<S> {
         start_id: EntryId,
         provider: &'a Provider,
     ) -> Result<WalEntryStream<'a>> {
-        match provider {
-            Provider::RaftEngine(_) => {
-                LogStoreEntryReader::new(LogStoreRawEntryReader::new(self.store.clone()))
-                    .read(provider, start_id)
-            }
-            Provider::Kafka(_) => LogStoreEntryReader::new(RegionRawEntryReader::new(
-                LogStoreRawEntryReader::new(self.store.clone()),
-                region_id,
-            ))
-            .read(provider, start_id),
-            Provider::Noop => Ok(Box::pin(futures::stream::empty())),
-        }
+        let mut reader = self.wal_entry_reader(provider, region_id, None);
+        reader.read(provider, start_id)
     }
 
     /// Mark entries whose ids `<= last_id` as deleted.

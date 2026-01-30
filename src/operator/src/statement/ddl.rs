@@ -1386,11 +1386,20 @@ impl StatementExecutor {
             .map(|expr| convert_one_expr(expr, &column_name_and_type, &timezone))
             .collect::<Result<Vec<_>>>()?;
 
-        let into_partition_exprs = request
+        let mut into_partition_exprs = request
             .into_exprs
             .iter()
             .map(|expr| convert_one_expr(expr, &column_name_and_type, &timezone))
             .collect::<Result<Vec<_>>>()?;
+
+        // `MERGE PARTITION` (and some `REPARTITION`) generates a single `OR` expression from
+        // multiple source partitions; try to simplify it for better readability and stability.
+        if from_partition_exprs.len() > 1
+            && into_partition_exprs.len() == 1
+            && let Some(expr) = into_partition_exprs.pop()
+        {
+            into_partition_exprs.push(partition::simplify::simplify_merged_partition_expr(expr));
+        }
 
         // Parse existing partition expressions from region routes.
         let mut existing_partition_exprs =

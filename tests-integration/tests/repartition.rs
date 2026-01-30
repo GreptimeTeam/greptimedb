@@ -30,6 +30,8 @@ use meta_srv::metasrv::Metasrv;
 use mito2::gc::GcConfig;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{QueryContext, QueryContextRef};
+use store_api::codec::PrimaryKeyEncoding;
+use store_api::storage::RegionId;
 use tests_integration::cluster::GreptimeDbClusterBuilder;
 use tests_integration::test_util::{StorageType, get_test_store_config};
 use tokio::sync::oneshot;
@@ -45,7 +47,11 @@ macro_rules! repartition_tests {
                         let store_type = tests_integration::test_util::StorageType::$service;
                         if store_type.test_on() {
                             common_telemetry::init_default_ut_logging();
-                            $crate::repartition::test_repartition_mito(store_type).await
+                            // Cover both storage formats for repartition behavior.
+                            // for flat format
+                            $crate::repartition::test_repartition_mito(store_type, true).await;
+                            // for primary key format
+                            $crate::repartition::test_repartition_mito(store_type, false).await;
                         }
                     }
 
@@ -53,8 +59,17 @@ macro_rules! repartition_tests {
                     async fn [< test_repartition_metric >]() {
                         let store_type = tests_integration::test_util::StorageType::$service;
                         if store_type.test_on() {
+                            use store_api::codec::PrimaryKeyEncoding;
                             common_telemetry::init_default_ut_logging();
-                            $crate::repartition::test_repartition_metric(store_type).await
+                            // Exercise format + primary key encoding matrix for metric engine.
+                            // for flat format with sparse primary key encoding
+                            $crate::repartition::test_repartition_metric(store_type, true, PrimaryKeyEncoding::Sparse).await;
+                            // for flat format with dense primary key encoding
+                            $crate::repartition::test_repartition_metric(store_type, true, PrimaryKeyEncoding::Dense).await;
+                            // for primary key format with sparse primary key encoding
+                            $crate::repartition::test_repartition_metric(store_type, false, PrimaryKeyEncoding::Sparse).await;
+                            // for primary key format with dense primary key encoding
+                            $crate::repartition::test_repartition_metric(store_type, false, PrimaryKeyEncoding::Dense).await;
                         }
                     }
                 }
@@ -114,7 +129,25 @@ async fn trigger_full_gc(ticker: &GcTickerRef) {
     let _ = rx.await.unwrap();
 }
 
-pub async fn test_repartition_mito(store_type: StorageType) {
+fn query_partitions_sql(table_name: &str) -> String {
+    // We query information_schema.partitions to assert repartition results across engines,
+    // rather than relying on SHOW CREATE TABLE formatting differences.
+    format!(
+        "\
+SELECT table_catalog, table_schema, table_name, partition_name, partition_expression, \
+partition_description, greptime_partition_id, partition_ordinal_position \
+FROM information_schema.partitions \
+WHERE table_name = '{}' \
+ORDER BY partition_ordinal_position;",
+        table_name
+    )
+}
+
+pub async fn test_repartition_mito(store_type: StorageType, flat_format: bool) {
+    info!(
+        "test_repartition_mito: store_type: {:?}, flat_format: {:?}",
+        store_type, flat_format
+    );
     let cluster_name = "test_repartition_mito";
     let (store_config, _guard) = get_test_store_config(&store_type);
     let datanodes = 3u64;
@@ -147,8 +180,9 @@ pub async fn test_repartition_mito(store_type: StorageType) {
     let query_ctx = QueryContext::arc();
     let instance = cluster.fe_instance();
 
-    // 1. Setup: Create a table with partitions
-    let sql = r#"
+    // 1. Setup: Create a table with partitions (format varies by test case)
+    let sql = if flat_format {
+        r#"
         CREATE TABLE `repartition_mito_table`(
           `id` INT,
           `city` STRING,
@@ -158,8 +192,25 @@ pub async fn test_repartition_mito(store_type: StorageType) {
           `id` < 10,
           `id` >= 10 AND `id` < 20,
           `id` >= 20
-        );
-    "#;
+        ) ENGINE = mito 
+         WITH (
+         'sst_format' = 'flat'
+         );
+    "#
+    } else {
+        r#"
+        CREATE TABLE `repartition_mito_table`(
+          `id` INT,
+          `city` STRING,
+          `ts` TIMESTAMP TIME INDEX,
+          PRIMARY KEY(`id`, `city`)
+        ) PARTITION ON COLUMNS (`id`) (
+          `id` < 10,
+          `id` >= 10 AND `id` < 20,
+          `id` >= 20
+        ) ENGINE = mito;
+    "#
+    };
     run_sql(instance, sql, query_ctx.clone()).await.unwrap();
 
     let sql = r#"
@@ -273,30 +324,19 @@ pub async fn test_repartition_mito(store_type: StorageType) {
 
     let result = run_sql(
         instance,
-        "SHOW CREATE TABLE `repartition_mito_table`",
+        &query_partitions_sql("repartition_mito_table"),
         query_ctx.clone(),
     )
     .await
     .unwrap();
-    let expected_create_table_after_split = r#"+------------------------+-------------------------------------------------------+
-| Table                  | Create Table                                          |
-+------------------------+-------------------------------------------------------+
-| repartition_mito_table | CREATE TABLE IF NOT EXISTS "repartition_mito_table" ( |
-|                        |   "id" INT NULL,                                      |
-|                        |   "city" STRING NULL,                                 |
-|                        |   "ts" TIMESTAMP(3) NOT NULL,                         |
-|                        |   TIME INDEX ("ts"),                                  |
-|                        |   PRIMARY KEY ("id", "city")                          |
-|                        | )                                                     |
-|                        | PARTITION ON COLUMNS ("id") (                         |
-|                        |   id < 5,                                             |
-|                        |   id >= 10 AND id < 20,                               |
-|                        |   id >= 20,                                           |
-|                        |   id >= 5 AND id < 10                                 |
-|                        | )                                                     |
-|                        | ENGINE=mito                                           |
-|                        |                                                       |
-+------------------------+-------------------------------------------------------+"#;
+    let expected_create_table_after_split = r#"+---------------+--------------+------------------------+----------------+----------------------+-----------------------+-----------------------+----------------------------+
+| table_catalog | table_schema | table_name             | partition_name | partition_expression | partition_description | greptime_partition_id | partition_ordinal_position |
++---------------+--------------+------------------------+----------------+----------------------+-----------------------+-----------------------+----------------------------+
+| greptime      | public       | repartition_mito_table | p0             | id                   | id < 5                | 4398046511104         | 1                          |
+| greptime      | public       | repartition_mito_table | p1             | id                   | id >= 10 AND id < 20  | 4398046511105         | 2                          |
+| greptime      | public       | repartition_mito_table | p2             | id                   | id >= 20              | 4398046511106         | 3                          |
+| greptime      | public       | repartition_mito_table | p3             | id                   | id >= 5 AND id < 10   | 4398046511107         | 4                          |
++---------------+--------------+------------------------+----------------+----------------------+-----------------------+-----------------------+----------------------------+"#;
     check_output_stream(result.data, expected_create_table_after_split).await;
 
     let sql =
@@ -405,29 +445,18 @@ pub async fn test_repartition_mito(store_type: StorageType) {
 
     let result = run_sql(
         instance,
-        "SHOW CREATE TABLE `repartition_mito_table`",
+        &query_partitions_sql("repartition_mito_table"),
         query_ctx.clone(),
     )
     .await
     .unwrap();
-    let expected_create_table_after_merge = r#"+------------------------+-------------------------------------------------------+
-| Table                  | Create Table                                          |
-+------------------------+-------------------------------------------------------+
-| repartition_mito_table | CREATE TABLE IF NOT EXISTS "repartition_mito_table" ( |
-|                        |   "id" INT NULL,                                      |
-|                        |   "city" STRING NULL,                                 |
-|                        |   "ts" TIMESTAMP(3) NOT NULL,                         |
-|                        |   TIME INDEX ("ts"),                                  |
-|                        |   PRIMARY KEY ("id", "city")                          |
-|                        | )                                                     |
-|                        | PARTITION ON COLUMNS ("id") (                         |
-|                        |   id < 5,                                             |
-|                        |   id >= 10 AND id < 20 OR id >= 20,                   |
-|                        |   id >= 5 AND id < 10                                 |
-|                        | )                                                     |
-|                        | ENGINE=mito                                           |
-|                        |                                                       |
-+------------------------+-------------------------------------------------------+"#;
+    let expected_create_table_after_merge = r#"+---------------+--------------+------------------------+----------------+----------------------+-----------------------+-----------------------+----------------------------+
+| table_catalog | table_schema | table_name             | partition_name | partition_expression | partition_description | greptime_partition_id | partition_ordinal_position |
++---------------+--------------+------------------------+----------------+----------------------+-----------------------+-----------------------+----------------------------+
+| greptime      | public       | repartition_mito_table | p0             | id                   | id < 5                | 4398046511104         | 1                          |
+| greptime      | public       | repartition_mito_table | p1             | id                   | id >= 10              | 4398046511105         | 2                          |
+| greptime      | public       | repartition_mito_table | p2             | id                   | id >= 5 AND id < 10   | 4398046511107         | 3                          |
++---------------+--------------+------------------------+----------------+----------------------+-----------------------+-----------------------+----------------------------+"#;
     check_output_stream(result.data, expected_create_table_after_merge).await;
 
     let sql =
@@ -463,7 +492,15 @@ pub async fn test_repartition_mito(store_type: StorageType) {
     .unwrap();
 }
 
-pub async fn test_repartition_metric(store_type: StorageType) {
+pub async fn test_repartition_metric(
+    store_type: StorageType,
+    flat_format: bool,
+    primary_key_encoding: PrimaryKeyEncoding,
+) {
+    info!(
+        "test_repartition_metric: store_type: {:?}, flat_format: {:?}, primary_key_encoding: {:?}",
+        store_type, flat_format, primary_key_encoding
+    );
     let cluster_name = "test_repartition_metric";
     let (store_config, _guard) = get_test_store_config(&store_type);
     let datanodes = 3u64;
@@ -495,7 +532,15 @@ pub async fn test_repartition_metric(store_type: StorageType) {
     let query_ctx = QueryContext::arc();
     let instance = cluster.fe_instance();
 
-    let sql = r#"
+    // Explicitly configure sst_format and primary key encoding to cover the matrix.
+    let sst_format = if flat_format { "flat" } else { "primary_key" };
+    let primary_key_encoding = match primary_key_encoding {
+        PrimaryKeyEncoding::Dense => "dense",
+        PrimaryKeyEncoding::Sparse => "sparse",
+    };
+
+    let sql = format!(
+        r#"
         CREATE TABLE `repart_phy_metric`(
           `ts` TIMESTAMP TIME INDEX,
           `val` DOUBLE,
@@ -503,15 +548,34 @@ pub async fn test_repartition_metric(store_type: StorageType) {
         ) PARTITION ON COLUMNS (`host`) (
           `host` < 'm',
           `host` >= 'm'
-        ) ENGINE = metric WITH ("physical_metric_table" = "");
-    "#;
-    run_sql(instance, sql, query_ctx.clone()).await.unwrap();
+        ) ENGINE = metric 
+        WITH (
+        "physical_metric_table" = "",
+        "memtable.type" = "partition_tree",
+        'sst_format' = '{sst_format}',
+        "memtable.partition_tree.primary_key_encoding" = "{primary_key_encoding}",
+        "index.type" = "inverted",
+    );
+    "#
+    );
+    run_sql(instance, &sql, query_ctx.clone()).await.unwrap();
 
+    // A second logical table exercises repartition behavior across multiple logical tables
+    // sharing the same physical metric table.
     let sql = r#"
         CREATE TABLE `repart_log_metric`(
           `ts` TIMESTAMP TIME INDEX,
           `val` DOUBLE,
           `host` STRING PRIMARY KEY
+        ) ENGINE = metric WITH ("on_physical_table" = "repart_phy_metric");
+    "#;
+    run_sql(instance, sql, query_ctx.clone()).await.unwrap();
+
+    let sql = r#"
+        CREATE TABLE `repart_log_metric_job`(
+          `ts` TIMESTAMP TIME INDEX,
+          `val` DOUBLE,
+          `job` STRING PRIMARY KEY
         ) ENGINE = metric WITH ("on_physical_table" = "repart_phy_metric");
     "#;
     run_sql(instance, sql, query_ctx.clone()).await.unwrap();
@@ -552,32 +616,41 @@ pub async fn test_repartition_metric(store_type: StorageType) {
 
     let result = run_sql(
         instance,
-        "SHOW CREATE TABLE `repart_phy_metric`",
+        &query_partitions_sql("repart_phy_metric"),
         query_ctx.clone(),
     )
     .await
     .unwrap();
-    let expected_create_table_after_split = r#"+-------------------+--------------------------------------------------+
-| Table             | Create Table                                     |
-+-------------------+--------------------------------------------------+
-| repart_phy_metric | CREATE TABLE IF NOT EXISTS "repart_phy_metric" ( |
-|                   |   "ts" TIMESTAMP(3) NOT NULL,                    |
-|                   |   "val" DOUBLE NULL,                             |
-|                   |   "host" STRING NULL,                            |
-|                   |   TIME INDEX ("ts"),                             |
-|                   |   PRIMARY KEY ("host")                           |
-|                   | )                                                |
-|                   | PARTITION ON COLUMNS ("host") (                  |
-|                   |   host < 'g',                                    |
-|                   |   host >= 'm',                                   |
-|                   |   host >= 'g' AND host < 'm'                     |
-|                   | )                                                |
-|                   | ENGINE=metric                                    |
-|                   | WITH(                                            |
-|                   |   physical_metric_table = ''                     |
-|                   | )                                                |
-+-------------------+--------------------------------------------------+"#;
+    // Partition ids and order are expected to be stable within a single test run.
+    let expected_create_table_after_split = r#"+---------------+--------------+-------------------+----------------+----------------------+------------------------+-----------------------+----------------------------+
+| table_catalog | table_schema | table_name        | partition_name | partition_expression | partition_description  | greptime_partition_id | partition_ordinal_position |
++---------------+--------------+-------------------+----------------+----------------------+------------------------+-----------------------+----------------------------+
+| greptime      | public       | repart_phy_metric | p0             | host                 | host < g               | 4398046511104         | 1                          |
+| greptime      | public       | repart_phy_metric | p1             | host                 | host >= m              | 4398046511105         | 2                          |
+| greptime      | public       | repart_phy_metric | p2             | host                 | host >= g AND host < m | 4398046511106         | 3                          |
++---------------+--------------+-------------------+----------------+----------------------+------------------------+-----------------------+----------------------------+"#;
     check_output_stream(result.data, expected_create_table_after_split).await;
+    let regions = cluster.list_all_regions().await;
+    let region0 = regions.get(&RegionId::new(1024, 0)).unwrap();
+    let region2 = regions.get(&RegionId::new(1024, 2)).unwrap();
+    let primary_keys_in_region_0 = region0
+        .metadata()
+        .primary_key_columns()
+        .cloned()
+        .collect::<Vec<_>>();
+    let primary_keys_in_region_2 = region2
+        .metadata()
+        .primary_key_columns()
+        .cloned()
+        .collect::<Vec<_>>();
+    info!("primary_keys_in_region_0: {:?}", primary_keys_in_region_0);
+    info!("primary_keys_in_region_2: {:?}", primary_keys_in_region_2);
+    assert_eq!(primary_keys_in_region_0, primary_keys_in_region_2);
+
+    let sql = r#"
+    ALTER TABLE `repart_log_metric_job` ADD COLUMN `cpu` STRING PRIMARY KEY;
+"#;
+    run_sql(instance, sql, query_ctx.clone()).await.unwrap();
 
     let result = run_sql(
         instance,
@@ -671,30 +744,17 @@ pub async fn test_repartition_metric(store_type: StorageType) {
 
     let result = run_sql(
         instance,
-        "SHOW CREATE TABLE `repart_phy_metric`",
+        &query_partitions_sql("repart_phy_metric"),
         query_ctx.clone(),
     )
     .await
     .unwrap();
-    let expected_create_table_after_merge = r#"+-------------------+--------------------------------------------------+
-| Table             | Create Table                                     |
-+-------------------+--------------------------------------------------+
-| repart_phy_metric | CREATE TABLE IF NOT EXISTS "repart_phy_metric" ( |
-|                   |   "ts" TIMESTAMP(3) NOT NULL,                    |
-|                   |   "val" DOUBLE NULL,                             |
-|                   |   "host" STRING NULL,                            |
-|                   |   TIME INDEX ("ts"),                             |
-|                   |   PRIMARY KEY ("host")                           |
-|                   | )                                                |
-|                   | PARTITION ON COLUMNS ("host") (                  |
-|                   |   host < 'g' OR host >= 'g' AND host < 'm',      |
-|                   |   host >= 'm'                                    |
-|                   | )                                                |
-|                   | ENGINE=metric                                    |
-|                   | WITH(                                            |
-|                   |   physical_metric_table = ''                     |
-|                   | )                                                |
-+-------------------+--------------------------------------------------+"#;
+    let expected_create_table_after_merge = r#"+---------------+--------------+-------------------+----------------+----------------------+-----------------------+-----------------------+----------------------------+
+| table_catalog | table_schema | table_name        | partition_name | partition_expression | partition_description | greptime_partition_id | partition_ordinal_position |
++---------------+--------------+-------------------+----------------+----------------------+-----------------------+-----------------------+----------------------------+
+| greptime      | public       | repart_phy_metric | p0             | host                 | host < m              | 4398046511104         | 1                          |
+| greptime      | public       | repart_phy_metric | p1             | host                 | host >= m             | 4398046511105         | 2                          |
++---------------+--------------+-------------------+----------------+----------------------+-----------------------+-----------------------+----------------------------+"#;
     check_output_stream(result.data, expected_create_table_after_merge).await;
 
     let result = run_sql(
@@ -780,7 +840,13 @@ pub async fn test_repartition_metric(store_type: StorageType) {
 | c_host | 2022-01-03T00:00:00 | 5.0 |
 +--------+---------------------+-----+";
     check_output_stream(result.data, expected).await;
-
+    run_sql(
+        instance,
+        "DROP TABLE `repart_log_metric_job`",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
     run_sql(
         instance,
         "DROP TABLE `repart_log_metric`",

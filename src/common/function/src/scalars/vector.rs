@@ -13,7 +13,7 @@
 // limitations under the License.
 
 mod convert;
-mod distance;
+pub mod distance;
 mod elem_avg;
 mod elem_product;
 mod elem_sum;
@@ -33,6 +33,7 @@ use std::borrow::Cow;
 
 use datafusion_common::{DataFusionError, Result, ScalarValue, utils};
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs};
+use datatypes::arrow::array::new_empty_array;
 
 use crate::function_registry::FunctionRegistry;
 use crate::scalars::vector::impl_conv::as_veclit;
@@ -128,6 +129,11 @@ where
         }
 
         let len = ensure_same_length(&[arg0, arg1])?;
+        if len == 0 {
+            return Ok(ColumnarValue::Array(new_empty_array(
+                args.return_field.data_type(),
+            )));
+        }
         let mut results = Vec::with_capacity(len);
         for i in 0..len {
             let v0 = try_get_scalar_value!(arg0, i);
@@ -155,6 +161,11 @@ where
         }
 
         let len = ensure_same_length(&[arg0, arg1])?;
+        if len == 0 {
+            return Ok(ColumnarValue::Array(new_empty_array(
+                args.return_field.data_type(),
+            )));
+        }
         let mut results = Vec::with_capacity(len);
 
         match (arg0, arg1) {
@@ -210,6 +221,11 @@ where
         };
 
         let len = arg0.len();
+        if len == 0 {
+            return Ok(ColumnarValue::Array(new_empty_array(
+                args.return_field.data_type(),
+            )));
+        }
         let mut results = Vec::with_capacity(len);
         for i in 0..len {
             let v = ScalarValue::try_from_array(arg0, i)?;

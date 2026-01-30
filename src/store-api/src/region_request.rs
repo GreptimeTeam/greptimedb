@@ -272,6 +272,7 @@ fn parse_region_drop(drop: DropRequest) -> Result<(RegionId, RegionDropRequest)>
         RegionDropRequest {
             fast_path: drop.fast_path,
             force: drop.force,
+            partial_drop: drop.partial_drop,
         },
     ))
 }
@@ -542,6 +543,10 @@ pub struct RegionDropRequest {
     /// Forces the drop of a physical region and all its associated logical regions.
     /// Only relevant for physical regions managed by the Metric Engine.
     pub force: bool,
+
+    /// If true, indicates that only a portion of the region is being dropped, and files may still be referenced by other regions.
+    /// This is used to prevent deletion of files that are still in use by other regions.
+    pub partial_drop: bool,
 }
 
 /// Open region request.

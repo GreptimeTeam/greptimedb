@@ -35,7 +35,9 @@ use session::context::{QueryContext, QueryContextRef};
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::RegionEngineRef;
-use store_api::storage::{RegionId, ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector};
+use store_api::storage::{
+    RegionId, ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector, VectorSearchRequest,
+};
 use table::TableRef;
 use table::metadata::{TableId, TableInfoRef};
 use table::table::scan::RegionScanExec;
@@ -254,6 +256,14 @@ impl DummyTableProvider {
     /// Sets the time series selector hint of the query to the provider.
     pub fn with_time_series_selector_hint(&self, selector: TimeSeriesRowSelector) {
         self.scan_request.lock().unwrap().series_row_selector = Some(selector);
+    }
+
+    pub fn with_vector_search_hint(&self, hint: VectorSearchRequest) {
+        self.scan_request.lock().unwrap().vector_search = Some(hint);
+    }
+
+    pub fn get_vector_search_hint(&self) -> Option<VectorSearchRequest> {
+        self.scan_request.lock().unwrap().vector_search.clone()
     }
 
     pub fn with_sequence(&self, sequence: u64) {

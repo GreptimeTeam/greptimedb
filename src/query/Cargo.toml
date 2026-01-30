@@ -9,6 +9,7 @@ workspace = true
 
 [features]
 enterprise = []
+vector_index = []
 
 [dependencies]
 ahash.workspace = true

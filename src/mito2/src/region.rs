@@ -186,7 +186,7 @@ impl MitoRegion {
     }
 
     /// Returns current metadata of the region.
-    pub(crate) fn metadata(&self) -> RegionMetadataRef {
+    pub fn metadata(&self) -> RegionMetadataRef {
         let version_data = self.version_control.current();
         version_data.version.metadata.clone()
     }

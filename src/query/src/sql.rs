@@ -742,6 +742,12 @@ pub fn show_variable(stmt: ShowVariables, query_ctx: QueryContextRef) -> Result<
             let (style, order) = *query_ctx.configuration_parameter().pg_datetime_style();
             format!("{}, {}", style, order)
         }
+        "INTERVALSTYLE" => {
+            let style = *query_ctx
+                .configuration_parameter()
+                .pg_intervalstyle_format();
+            style.to_string()
+        }
         "MAX_EXECUTION_TIME" => {
             if query_ctx.channel() == Channel::Mysql {
                 query_ctx.query_timeout_as_millis().to_string()

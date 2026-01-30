@@ -315,6 +315,13 @@ ttl = "0s"
 ## The minimum value is `10m`, if the value is less than `10m`, it will be overridden to `10m`.
 interval = "10m"
 
+[gc]
+## Whether GC is enabled. Default to false. Need to be the same with datanode's `mito.gc.enable`
+## If set to false, no GC will be performed
+enable = false
+## Cooldown period between GC operations on the same region.
+gc_cooldown_period = "5m"
+
 ## The logging options.
 [logging]
 ## The directory to store the log files. If set to empty, logs will not be written to files.

@@ -158,7 +158,10 @@ fn recordbatches_to_query_response<S>(
 where
     S: Stream<Item = RecordBatchResult<RecordBatch>> + Send + Unpin + 'static,
 {
-    let pg_schema = Arc::new(schema_to_pg(schema.as_ref(), field_format).map_err(convert_err)?);
+    let format_options = format_options_from_query_ctx(&query_ctx);
+    let pg_schema = Arc::new(
+        schema_to_pg(schema.as_ref(), field_format, Some(format_options)).map_err(convert_err)?,
+    );
     let pg_schema_ref = pg_schema.clone();
     let data_row_stream = recordbatches_stream
         .map(move |result| match result {
@@ -405,7 +408,7 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
             .collect::<Vec<_>>();
 
         if let Some(schema) = &sql_plan.schema {
-            schema_to_pg(schema, &Format::UnifiedBinary)
+            schema_to_pg(schema, &Format::UnifiedBinary, None)
                 .map(|fields| DescribeStatementResponse::new(param_types, fields))
                 .map_err(convert_err)
         } else {
@@ -438,7 +441,7 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
             Some(Statement::Query(_)) => {
                 // if the query has a schema, it is managed by datafusion, use the schema
                 if let Some(schema) = &sql_plan.schema {
-                    schema_to_pg(schema, format)
+                    schema_to_pg(schema, format, None)
                         .map(DescribePortalResponse::new)
                         .map_err(convert_err)
                 } else {
