@@ -540,6 +540,7 @@ impl Inserter {
 
         let mut create_tables = vec![];
         let mut alter_tables = vec![];
+        let mut need_refresh_table_infos = HashSet::new();
         let mut instant_table_ids = HashSet::new();
 
         for req in &mut requests.inserts {
@@ -549,7 +550,6 @@ impl Inserter {
                     if table_info.is_ttl_instant_table() {
                         instant_table_ids.insert(table_info.table_id());
                     }
-                    table_infos.insert(table_info.table_id(), table.table_info());
                     if let Some(alter_expr) = self.get_alter_table_expr_on_demand(
                         req,
                         &table,
@@ -558,6 +558,9 @@ impl Inserter {
                         is_single_value,
                     )? {
                         alter_tables.push(alter_expr);
+                        need_refresh_table_infos.insert(table_info.table_id());
+                    } else {
+                        table_infos.insert(table_info.table_id(), table.table_info());
                     }
                 }
                 None => {
@@ -694,6 +697,19 @@ impl Inserter {
                         .await?;
                 }
             }
+        }
+
+        // refresh table infos for altered tables
+        for table_id in need_refresh_table_infos {
+            let table_info = self
+                .catalog_manager
+                .table_info_by_id(table_id)
+                .await
+                .context(CatalogSnafu)?
+                .context(TableNotFoundSnafu {
+                    table_name: format!("table id {}", table_id),
+                })?;
+            table_infos.insert(table_id, table_info);
         }
 
         Ok(CreateAlterTableResult {
