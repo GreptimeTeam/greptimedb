@@ -449,6 +449,14 @@ impl ColumnMatcherRewriter {
             new_exprs.push(Self::null_expr(col_schema));
         }
 
+        if !remap.is_empty() {
+            let extra: Vec<_> = remap.keys().cloned().collect();
+            return Err(DataFusionError::Plan(format!(
+                "Flow output has extra column(s) {:?} not found in sink schema when merge_mode=last_non_null",
+                extra
+            )));
+        }
+
         Ok(new_exprs)
     }
 
