@@ -26,12 +26,9 @@ ADMIN FLUSH_TABLE('vectors_explain');
 -- SQLNESS REPLACE Hash\(\[vec_id@0\],.* Hash([vec_id@0],REDACTED
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
--- SQLNESS REPLACE ("file_id":"[^"]+") "file_id":"REDACTED"
--- SQLNESS REPLACE ("time_range_start":"[^"]+") "time_range_start":"REDACTED"
--- SQLNESS REPLACE ("time_range_end":"[^"]+") "time_range_end":"REDACTED"
+-- SQLNESS REPLACE "(file_id|time_range_start|time_range_end)":"[^"]+" "$1":"REDACTED"
 -- SQLNESS REPLACE ("[a-z_]+":"[0-9\.]+(ns|us|µs|ms|s)") "DURATION": REDACTED
--- SQLNESS REPLACE ("size":\d+) "size":REDACTED
--- SQLNESS REPLACE ("flat_format":\s*(true|false)) "flat_format":REDACTED
+-- SQLNESS REPLACE "(size|flat_format)":\s*(\d+|true|false) "$1":REDACTED
 -- SQLNESS REPLACE ,\s*filter=.*?metrics=  metrics=
 -- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
@@ -80,12 +77,9 @@ ADMIN FLUSH_TABLE('vectors_explain_left');
 -- SQLNESS REPLACE Hash\(\[vec_id@0\],.* Hash([vec_id@0],REDACTED
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
--- SQLNESS REPLACE ("file_id":"[^"]+") "file_id":"REDACTED"
--- SQLNESS REPLACE ("time_range_start":"[^"]+") "time_range_start":"REDACTED"
--- SQLNESS REPLACE ("time_range_end":"[^"]+") "time_range_end":"REDACTED"
+-- SQLNESS REPLACE "(file_id|time_range_start|time_range_end)":"[^"]+" "$1":"REDACTED"
 -- SQLNESS REPLACE ("[a-z_]+":"[0-9\.]+(ns|us|µs|ms|s)") "DURATION": REDACTED
--- SQLNESS REPLACE ("size":\d+) "size":REDACTED
--- SQLNESS REPLACE ("flat_format":\s*(true|false)) "flat_format":REDACTED
+-- SQLNESS REPLACE "(size|flat_format)":\s*(\d+|true|false) "$1":REDACTED
 -- SQLNESS REPLACE ,\s*filter=.*?metrics=  metrics=
 -- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
@@ -125,12 +119,9 @@ ADMIN FLUSH_TABLE('vectors_explain_metric');
 -- SQLNESS REPLACE Hash\(\[vec_id@0\],.* Hash([vec_id@0],REDACTED
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
--- SQLNESS REPLACE ("file_id":"[^"]+") "file_id":"REDACTED"
--- SQLNESS REPLACE ("time_range_start":"[^"]+") "time_range_start":"REDACTED"
--- SQLNESS REPLACE ("time_range_end":"[^"]+") "time_range_end":"REDACTED"
+-- SQLNESS REPLACE "(file_id|time_range_start|time_range_end)":"[^"]+" "$1":"REDACTED"
 -- SQLNESS REPLACE ("[a-z_]+":"[0-9\.]+(ns|us|µs|ms|s)") "DURATION": REDACTED
--- SQLNESS REPLACE ("size":\d+) "size":REDACTED
--- SQLNESS REPLACE ("flat_format":\s*(true|false)) "flat_format":REDACTED
+-- SQLNESS REPLACE "(size|flat_format)":\s*(\d+|true|false) "$1":REDACTED
 -- SQLNESS REPLACE ,\s*filter=.*?metrics=  metrics=
 -- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
@@ -148,12 +139,9 @@ LIMIT 2;
 -- SQLNESS REPLACE Hash\(\[vec_id@0\],.* Hash([vec_id@0],REDACTED
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
--- SQLNESS REPLACE ("file_id":"[^"]+") "file_id":"REDACTED"
--- SQLNESS REPLACE ("time_range_start":"[^"]+") "time_range_start":"REDACTED"
--- SQLNESS REPLACE ("time_range_end":"[^"]+") "time_range_end":"REDACTED"
+-- SQLNESS REPLACE "(file_id|time_range_start|time_range_end)":"[^"]+" "$1":"REDACTED"
 -- SQLNESS REPLACE ("[a-z_]+":"[0-9\.]+(ns|us|µs|ms|s)") "DURATION": REDACTED
--- SQLNESS REPLACE ("size":\d+) "size":REDACTED
--- SQLNESS REPLACE ("flat_format":\s*(true|false)) "flat_format":REDACTED
+-- SQLNESS REPLACE "(size|flat_format)":\s*(\d+|true|false) "$1":REDACTED
 -- SQLNESS REPLACE ,\s*filter=.*?metrics=  metrics=
 -- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
