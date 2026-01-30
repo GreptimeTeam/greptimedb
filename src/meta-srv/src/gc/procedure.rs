@@ -283,33 +283,41 @@ impl BatchGcProcedure {
         &self,
         regions: &[RegionId],
     ) -> Result<HashMap<RegionId, HashSet<RegionId>>> {
-        let mut table_to_regions: HashMap<TableId, HashSet<RegionId>> = HashMap::new();
-        for region_id in regions {
-            table_to_regions
-                .entry(region_id.table_id())
-                .or_default()
-                .insert(*region_id);
+        let table_ids: HashSet<TableId> = regions.iter().map(|r| r.table_id()).collect();
+        let table_ids = table_ids.into_iter().collect::<Vec<_>>();
+
+        let table_routes = self
+            .table_metadata_manager
+            .table_route_manager()
+            .batch_get_physical_table_routes(&table_ids)
+            .await
+            .context(TableMetadataManagerSnafu)?;
+
+        if table_routes.len() != table_ids.len() {
+            // batch_get_physical_table_routes returns a subset on misses; treat that as error
+            for table_id in &table_ids {
+                if !table_routes.contains_key(table_id) {
+                    // indicate is a logical table id
+                    return error::InvalidArgumentsSnafu {
+                    err_msg: format!(
+                        "Unexpected logical table route: table {} resolved to physical table regions",
+                        table_id
+                    ),
+                }
+                    .fail();
+                }
+            }
         }
 
         let mut table_all_regions: HashMap<TableId, HashSet<RegionId>> = HashMap::new();
-        for table_id in table_to_regions.keys() {
-            match self.get_table_route(*table_id).await {
-                Ok((_phy_table_id, table_route)) => {
-                    let all_regions: HashSet<RegionId> = table_route
-                        .region_routes
-                        .iter()
-                        .map(|r| r.region.id)
-                        .collect();
-                    table_all_regions.insert(*table_id, all_regions);
-                }
-                Err(e) => {
-                    error!(
-                        e; "Failed to get table route for table {}",
-                        table_id,
-                    );
-                    return Err(e);
-                }
-            }
+        for (table_id, table_route) in table_routes {
+            let all_regions: HashSet<RegionId> = table_route
+                .region_routes
+                .iter()
+                .map(|r| r.region.id)
+                .collect();
+
+            table_all_regions.insert(table_id, all_regions);
         }
 
         let mut related_regions: HashMap<RegionId, HashSet<RegionId>> = HashMap::new();
