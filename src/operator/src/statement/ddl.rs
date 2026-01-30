@@ -448,11 +448,7 @@ impl StatementExecutor {
         // metadata (e.g. partition_key_indices) from their physical tables.
         // And the returned table info also included extra partition columns that are in physical table but not in logical table's create table expr
         let mut tables_info = Vec::with_capacity(table_ids.len());
-        for ((table_id, create_table), raw_info) in table_ids
-            .iter()
-            .zip(create_table_exprs.iter())
-            .zip(raw_tables_info.iter())
-        {
+        for (table_id, create_table) in table_ids.iter().zip(create_table_exprs.iter()) {
             let table = self
                 .catalog_manager
                 .table(
@@ -464,11 +460,10 @@ impl StatementExecutor {
                 .await
                 .context(CatalogSnafu)?
                 .with_context(|| TableNotFoundSnafu {
-                    table_name: format!(
-                        "{}.{}.{}",
-                        create_table.catalog_name,
-                        create_table.schema_name,
-                        create_table.table_name
+                    table_name: format_full_table_name(
+                        &create_table.catalog_name,
+                        &create_table.schema_name,
+                        &create_table.table_name,
                     ),
                 })?;
 
@@ -478,13 +473,14 @@ impl StatementExecutor {
                 table_info.table_id() == *table_id,
                 CreateLogicalTablesSnafu {
                     reason: format!(
-                        "Table id mismatch after creation, expected {}, got {} for table {}.{}.{} (raw id hint: {})",
+                        "Table id mismatch after creation, expected {}, got {} for table {}",
                         table_id,
                         table_info.table_id(),
-                        create_table.catalog_name,
-                        create_table.schema_name,
-                        create_table.table_name,
-                        raw_info.ident.table_id
+                        format_full_table_name(
+                            &create_table.catalog_name,
+                            &create_table.schema_name,
+                            &create_table.table_name
+                        )
                     )
                 }
             );
