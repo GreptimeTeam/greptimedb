@@ -29,7 +29,7 @@ use common_procedure::{
     Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
     Result as ProcedureResult, Status,
 };
-use common_telemetry::{error, info, warn};
+use common_telemetry::{debug, error, info, warn};
 use itertools::Itertools as _;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt as _;
@@ -587,8 +587,8 @@ impl BatchGcProcedure {
             }
 
             let instruction = GetFileRefs {
-                query_regions: regions,
-                related_regions: related_regions_for_peer,
+                query_regions: regions.clone(),
+                related_regions: related_regions_for_peer.clone(),
             };
 
             let reply = send_get_file_refs(
@@ -599,6 +599,10 @@ impl BatchGcProcedure {
                 timeout,
             )
             .await?;
+            debug!(
+                "Got file references from datanode: {:?}, query_regions: {:?}, related_regions: {:?}, reply: {:?}",
+                peer, regions, related_regions_for_peer, reply
+            );
 
             if !reply.success {
                 return error::UnexpectedSnafu {
@@ -771,6 +775,7 @@ impl Procedure for BatchGcProcedure {
                         }
                         .fail();
                     };
+                    info!("GC report: {:?}", report);
                     Ok(Status::done_with_output(report))
                 }
                 Err(e) => {
