@@ -248,7 +248,11 @@ impl VectorSearchState {
         let sort_expr: &SortExpr = &sort.expr[0];
         let info = Self::extract_distance_info(&sort_expr.expr)?;
         let expected_asc = info.metric != VectorDistanceMetric::InnerProduct;
-        if sort_expr.asc == expected_asc && Self::tie_breakers_allowed(&sort.expr[1..], &info) {
+        if sort_expr.asc != expected_asc {
+            return None;
+        }
+
+        if Self::tie_breakers_allowed(&sort.expr[1..], &info) {
             Some(info)
         } else {
             if sort.expr.len() > 1 {

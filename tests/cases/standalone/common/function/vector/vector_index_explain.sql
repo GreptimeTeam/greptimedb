@@ -23,6 +23,7 @@ ADMIN FLUSH_TABLE('vectors_explain');
 -- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
 -- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE Hash\(\[vec_id@0\],.* Hash([vec_id@0],REDACTED
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE ("file_id":"[^"]+") "file_id":"REDACTED"
@@ -74,6 +75,7 @@ ADMIN FLUSH_TABLE('vectors_explain_left');
 -- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
 -- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE Hash\(\[vec_id@0\],.* Hash([vec_id@0],REDACTED
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE ("file_id":"[^"]+") "file_id":"REDACTED"
@@ -116,6 +118,7 @@ ADMIN FLUSH_TABLE('vectors_explain_metric');
 -- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
 -- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE Hash\(\[vec_id@0\],.* Hash([vec_id@0],REDACTED
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE ("file_id":"[^"]+") "file_id":"REDACTED"
@@ -136,6 +139,7 @@ LIMIT 2;
 -- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
 -- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE Hash\(\[vec_id@0\],.* Hash([vec_id@0],REDACTED
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE ("file_id":"[^"]+") "file_id":"REDACTED"

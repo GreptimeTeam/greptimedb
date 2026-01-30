@@ -31,6 +31,7 @@ ADMIN FLUSH_TABLE('vectors_explain');
 -- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
 -- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE Hash\(\[vec_id@0\],.* Hash([vec_id@0],REDACTED
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE ("file_id":"[^"]+") "file_id":"REDACTED"
@@ -113,6 +114,7 @@ ADMIN FLUSH_TABLE('vectors_explain_left');
 -- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
 -- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE Hash\(\[vec_id@0\],.* Hash([vec_id@0],REDACTED
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE ("file_id":"[^"]+") "file_id":"REDACTED"
@@ -139,12 +141,12 @@ LIMIT 1;
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 metrics=REDACTED_|
 |_|_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(vec_id@0, vec_id@0)], projection=[vec_id@0, embedding@1] metrics=REDACTED_|
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 metrics=REDACTED_|
-|_|_|_RepartitionExec: partitioning=Hash([vec_id@0], 16), input_partitions=16 metrics=REDACTED_|
+|_|_|_RepartitionExec: partitioning=Hash([vec_id@0],REDACTED
 |_|_|_ProjectionExec: expr=[vec_id@0 as vec_id, embedding@2 as embedding] metrics=REDACTED_|
 |_|_|_CooperativeExec metrics=REDACTED_|
 |_|_|_MergeScanExec: REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 metrics=REDACTED_|
-|_|_|_RepartitionExec: partitioning=Hash([vec_id@0], 16), input_partitions=16 metrics=REDACTED_|
+|_|_|_RepartitionExec: partitioning=Hash([vec_id@0],REDACTED
 |_|_|_ProjectionExec: expr=[vec_id@0 as vec_id] metrics=REDACTED_|
 |_|_|_CooperativeExec metrics=REDACTED_|
 |_|_|_MergeScanExec: REDACTED
@@ -198,6 +200,7 @@ ADMIN FLUSH_TABLE('vectors_explain_metric');
 -- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
 -- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE Hash\(\[vec_id@0\],.* Hash([vec_id@0],REDACTED
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE ("file_id":"[^"]+") "file_id":"REDACTED"
@@ -233,6 +236,7 @@ LIMIT 2;
 -- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
 -- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE Hash\(\[vec_id@0\],.* Hash([vec_id@0],REDACTED
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE ("file_id":"[^"]+") "file_id":"REDACTED"
