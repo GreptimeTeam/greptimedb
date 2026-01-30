@@ -464,12 +464,11 @@ impl ColumnMatcherRewriter {
             }
         }
 
-        if let Some(ts_idx) = self.schema.timestamp_index() {
-            if let Some(col) = self.schema.column_schemas().get(ts_idx) {
-                if col.name != AUTO_CREATED_PLACEHOLDER_TS_COL {
-                    required.insert(col.name.clone());
-                }
-            }
+        if let Some(ts_idx) = self.schema.timestamp_index()
+            && let Some(col) = self.schema.column_schemas().get(ts_idx)
+            && col.name != AUTO_CREATED_PLACEHOLDER_TS_COL
+        {
+            required.insert(col.name.clone());
         }
 
         required

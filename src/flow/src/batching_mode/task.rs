@@ -660,7 +660,7 @@ impl BatchingTask {
                         query_ctx,
                         engine,
                         sink_table_schema.clone(),
-                        &primary_key_indices,
+                        primary_key_indices,
                         allow_partial,
                     )
                     .await?;
@@ -676,7 +676,7 @@ impl BatchingTask {
                         query_ctx,
                         engine,
                         sink_table_schema.clone(),
-                        &primary_key_indices,
+                        primary_key_indices,
                         allow_partial,
                     )
                     .await?;
