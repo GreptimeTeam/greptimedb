@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -37,6 +37,7 @@ use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt, ensure};
 use sql::parser::{ParseOptions, ParserContext};
 use sql::statements::statement::Statement;
+use store_api::mito_engine_options::MERGE_MODE_KEY;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::table::adapter::DfTableProviderAdapter;
 use tokio::sync::oneshot;
@@ -99,6 +100,13 @@ fn determine_query_type(query: &str, query_ctx: &QueryContextRef) -> Result<Quer
         Statement::Tql(_) => Ok(QueryType::Tql),
         _ => Ok(QueryType::Sql),
     }
+}
+
+fn is_merge_mode_last_non_null(options: &HashMap<String, String>) -> bool {
+    options
+        .get(MERGE_MODE_KEY)
+        .map(|mode| mode.eq_ignore_ascii_case("last_non_null"))
+        .unwrap_or(false)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -260,10 +268,17 @@ impl BatchingTask {
         )
         .await?;
 
+        let table_meta = &table.table_info().meta;
+        let merge_mode_last_non_null =
+            is_merge_mode_last_non_null(&table_meta.options.extra_options);
+        let primary_key_indices = table_meta.primary_key_indices.clone();
+
         let new_query = self
             .gen_query_with_time_window(
                 engine.clone(),
                 &table.table_info().meta.schema,
+                &primary_key_indices,
+                merge_mode_last_non_null,
                 max_window_cnt,
             )
             .await?;
@@ -596,6 +611,8 @@ impl BatchingTask {
         &self,
         engine: QueryEngineRef,
         sink_table_schema: &Arc<Schema>,
+        primary_key_indices: &[usize],
+        allow_partial: bool,
         max_window_cnt: Option<usize>,
     ) -> Result<Option<PlanInfo>, Error> {
         let query_ctx = self.state.read().unwrap().query_ctx.clone();
@@ -643,6 +660,8 @@ impl BatchingTask {
                         query_ctx,
                         engine,
                         sink_table_schema.clone(),
+                        &primary_key_indices,
+                        allow_partial,
                     )
                     .await?;
 
@@ -657,6 +676,8 @@ impl BatchingTask {
                         query_ctx,
                         engine,
                         sink_table_schema.clone(),
+                        &primary_key_indices,
+                        allow_partial,
                     )
                     .await?;
 
@@ -725,7 +746,11 @@ impl BatchingTask {
         };
 
         let mut add_filter = AddFilterRewriter::new(expr.expr.clone());
-        let mut add_auto_column = ColumnMatcherRewriter::new(sink_table_schema.clone());
+        let mut add_auto_column = ColumnMatcherRewriter::new(
+            sink_table_schema.clone(),
+            primary_key_indices.to_vec(),
+            allow_partial,
+        );
 
         let plan =
             sql_to_df_plan(query_ctx.clone(), engine.clone(), &self.config.query, false).await?;
