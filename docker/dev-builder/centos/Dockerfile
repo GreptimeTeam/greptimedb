@@ -14,6 +14,22 @@ RUN yum install -y epel-release  \
     centos-release-scl  \
     which
 
+# Fix SCL repo URLs (also EOL, need to use vault.centos.org)
+# Install devtoolset-11 for GCC 11 (required for cxx crate which needs full C++11 support)
+# CentOS 7's default GCC 4.8 lacks std::is_trivially_* type traits
+RUN sed -i \
+        -e 's/mirror.centos.org/vault.centos.org/g' \
+        -e 's/^#.*baseurl=http/baseurl=http/g' \
+        -e 's/^mirrorlist=http/#mirrorlist=http/g' \
+        /etc/yum.repos.d/CentOS-SCLo-*.repo && \
+    yum install -y devtoolset-11-gcc devtoolset-11-gcc-c++ devtoolset-11-binutils && \
+    yum clean all
+
+# Set compiler environment variables for cc-rs/cxx crates
+ENV CC=/opt/rh/devtoolset-11/root/usr/bin/gcc
+ENV CXX=/opt/rh/devtoolset-11/root/usr/bin/g++
+ENV PATH=/opt/rh/devtoolset-11/root/usr/bin:$PATH
+
 # Install protoc
 ARG PROTOBUF_VERSION=29.3
 
