@@ -23,11 +23,11 @@ use common_telemetry::info;
 use common_test_util::recordbatch::check_output_stream;
 use common_test_util::temp_dir::create_temp_dir;
 use common_wal::config::DatanodeWalConfig;
-use frontend::error::Result as FrontendResult;
 use frontend::instance::Instance;
 use meta_srv::gc::{self, BatchGcProcedure, GcSchedulerOptions, GcTickerRef};
 use meta_srv::metasrv::Metasrv;
 use mito2::gc::GcConfig;
+use servers::error::Result as ServerResult;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{QueryContext, QueryContextRef};
 use store_api::codec::PrimaryKeyEncoding;
@@ -867,7 +867,7 @@ async fn run_sql(
     instance: &Arc<Instance>,
     sql: &str,
     query_ctx: QueryContextRef,
-) -> FrontendResult<Output> {
+) -> ServerResult<Output> {
     info!("Run SQL: {sql}");
     instance.do_query(sql, query_ctx).await.remove(0)
 }

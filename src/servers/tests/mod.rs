@@ -27,7 +27,7 @@ use query::options::QueryOptions;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::query_engine::DescribeResult;
 use query::{QueryEngineFactory, QueryEngineRef};
-use servers::error::{Error, NotSupportedSnafu, Result};
+use servers::error::{NotSupportedSnafu, Result};
 use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::{ServerSqlQueryHandlerRef, SqlQueryHandler};
 use session::context::QueryContextRef;
@@ -52,8 +52,6 @@ impl DummyInstance {
 
 #[async_trait]
 impl SqlQueryHandler for DummyInstance {
-    type Error = Error;
-
     async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
         let stmt = QueryLanguageParser::parse_sql(query, &query_ctx).unwrap();
         let plan = self
@@ -75,11 +73,7 @@ impl SqlQueryHandler for DummyInstance {
         Ok(self.query_engine.execute(plan, query_ctx).await.unwrap())
     }
 
-    async fn do_promql_query(
-        &self,
-        _: &PromQuery,
-        _: QueryContextRef,
-    ) -> Vec<std::result::Result<Output, Self::Error>> {
+    async fn do_promql_query(&self, _: &PromQuery, _: QueryContextRef) -> Vec<Result<Output>> {
         unimplemented!()
     }
 
@@ -109,13 +103,7 @@ impl SqlQueryHandler for DummyInstance {
 
 #[async_trait]
 impl GrpcQueryHandler for DummyInstance {
-    type Error = Error;
-
-    async fn do_query(
-        &self,
-        request: Request,
-        ctx: QueryContextRef,
-    ) -> std::result::Result<Output, Self::Error> {
+    async fn do_query(&self, request: Request, ctx: QueryContextRef) -> Result<Output> {
         let output = match request {
             Request::Inserts(_)
             | Request::Deletes(_)
@@ -166,7 +154,7 @@ impl GrpcQueryHandler for DummyInstance {
         _request: servers::grpc::flight::PutRecordBatchRequest,
         _table_ref: &mut Option<TableRef>,
         _ctx: QueryContextRef,
-    ) -> std::result::Result<AffectedRows, Self::Error> {
+    ) -> Result<AffectedRows> {
         unimplemented!()
     }
 
@@ -174,9 +162,7 @@ impl GrpcQueryHandler for DummyInstance {
         &self,
         _stream: servers::grpc::flight::PutRecordBatchRequestStream,
         _ctx: QueryContextRef,
-    ) -> std::pin::Pin<
-        Box<dyn futures::Stream<Item = std::result::Result<DoPutResponse, Self::Error>> + Send>,
-    > {
+    ) -> std::pin::Pin<Box<dyn futures::Stream<Item = Result<DoPutResponse>> + Send>> {
         unimplemented!()
     }
 }

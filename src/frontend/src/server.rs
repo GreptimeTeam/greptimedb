@@ -38,8 +38,6 @@ use servers::metrics_handler::MetricsHandler;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
 use servers::otel_arrow::OtelArrowServiceHandler;
 use servers::postgres::PostgresServer;
-use servers::query_handler::grpc::ServerGrpcQueryHandlerAdapter;
-use servers::query_handler::sql::ServerSqlQueryHandlerAdapter;
 use servers::request_memory_limiter::ServerMemoryLimiter;
 use servers::server::{Server, ServerHandlers};
 use servers::tls::{ReloadableTlsServerConfig, maybe_watch_server_tls_config};
@@ -105,7 +103,7 @@ where
     ) -> HttpServerBuilder {
         let mut builder = HttpServerBuilder::new(opts.http.clone())
             .with_memory_limiter(request_memory_limiter)
-            .with_sql_handler(ServerSqlQueryHandlerAdapter::arc(self.instance.clone()));
+            .with_sql_handler(self.instance.clone());
 
         let validator = self.plugins.get::<LogValidatorRef>();
         let ingest_interceptor = self.plugins.get::<LogIngestInterceptorRef<ServerError>>();
@@ -212,7 +210,7 @@ where
         };
 
         let greptime_request_handler = GreptimeRequestHandler::new(
-            ServerGrpcQueryHandlerAdapter::arc(self.instance.clone()),
+            self.instance.clone(),
             user_provider.clone(),
             runtime,
             grpc.flight_compression,
@@ -336,10 +334,7 @@ where
 
             let mysql_server = MysqlServer::create_server(
                 common_runtime::global_runtime(),
-                Arc::new(MysqlSpawnRef::new(
-                    ServerSqlQueryHandlerAdapter::arc(instance.clone()),
-                    user_provider.clone(),
-                )),
+                Arc::new(MysqlSpawnRef::new(instance.clone(), user_provider.clone())),
                 Arc::new(MysqlSpawnConfig::new(
                     opts.tls.should_force_tls(),
                     tls_server_config,
@@ -364,7 +359,7 @@ where
             maybe_watch_server_tls_config(tls_server_config.clone()).context(StartServerSnafu)?;
 
             let pg_server = Box::new(PostgresServer::new(
-                ServerSqlQueryHandlerAdapter::arc(instance.clone()),
+                instance.clone(),
                 opts.tls.should_force_tls(),
                 tls_server_config,
                 opts.keep_alive.as_secs(),
