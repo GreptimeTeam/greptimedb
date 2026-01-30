@@ -558,7 +558,11 @@ impl Inserter {
                         is_single_value,
                     )? {
                         alter_tables.push(alter_expr);
-                        need_refresh_table_infos.insert(table_info.table_id());
+                        need_refresh_table_infos.insert((
+                            catalog.to_string(),
+                            schema.clone(),
+                            req.table_name.clone(),
+                        ));
                     } else {
                         table_infos.insert(table_info.table_id(), table.table_info());
                     }
@@ -700,16 +704,19 @@ impl Inserter {
         }
 
         // refresh table infos for altered tables
-        for table_id in need_refresh_table_infos {
-            let table_info = self
-                .catalog_manager
-                .table_info_by_id(table_id)
-                .await
-                .context(CatalogSnafu)?
+        for (catalog, schema, table_name) in need_refresh_table_infos {
+            let table = self
+                .get_table(&catalog, &schema, &table_name)
+                .await?
                 .context(TableNotFoundSnafu {
-                    table_name: format!("table id {}", table_id),
+                    table_name: common_catalog::format_full_table_name(
+                        &catalog,
+                        &schema,
+                        &table_name,
+                    ),
                 })?;
-            table_infos.insert(table_id, table_info);
+            let table_info = table.table_info();
+            table_infos.insert(table_info.table_id(), table.table_info());
         }
 
         Ok(CreateAlterTableResult {

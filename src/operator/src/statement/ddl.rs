@@ -492,10 +492,7 @@ impl StatementExecutor {
             tables_info.push(table_info);
         }
 
-        Ok(tables_info
-            .into_iter()
-            .map(|x| DistTable::table(x))
-            .collect())
+        Ok(tables_info.into_iter().map(DistTable::table).collect())
     }
 
     async fn validate_logical_table_partition_rule(
