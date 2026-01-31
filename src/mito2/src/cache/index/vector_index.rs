@@ -14,10 +14,10 @@
 
 use std::sync::Arc;
 
+use index::vector::apply::IndexApplier;
 use moka::notification::RemovalCause;
 use moka::sync::Cache;
-use roaring::RoaringBitmap;
-use store_api::storage::{ColumnId, FileId, IndexVersion, VectorDistanceMetric, VectorIndexEngine};
+use store_api::storage::{ColumnId, FileId, IndexVersion};
 
 use crate::metrics::{CACHE_BYTES, CACHE_EVICTION};
 
@@ -40,36 +40,32 @@ impl VectorIndexCacheKey {
     }
 }
 
+/// Cached vector index wrapping an `IndexApplier` for efficient searches.
 pub struct CachedVectorIndex {
-    pub engine: Box<dyn VectorIndexEngine>,
-    pub null_bitmap: RoaringBitmap,
-    pub size_bytes: usize,
-    pub dimensions: u32,
-    pub metric: VectorDistanceMetric,
-    pub total_rows: u64,
-    pub indexed_rows: u64,
+    /// The underlying vector index applier.
+    applier: Box<dyn IndexApplier>,
+    /// Size in bytes for cache weighing.
+    size_bytes: usize,
 }
 
 impl CachedVectorIndex {
-    pub fn new(
-        engine: Box<dyn VectorIndexEngine>,
-        null_bitmap: RoaringBitmap,
-        dimensions: u32,
-        metric: VectorDistanceMetric,
-        total_rows: u64,
-        indexed_rows: u64,
-    ) -> Self {
-        let size_bytes =
-            engine.memory_usage() + null_bitmap.serialized_size() + std::mem::size_of::<Self>();
+    /// Creates a new `CachedVectorIndex` from an `IndexApplier`.
+    pub fn new(applier: Box<dyn IndexApplier>) -> Self {
+        let size_bytes = applier.memory_usage();
         Self {
-            engine,
-            null_bitmap,
+            applier,
             size_bytes,
-            dimensions,
-            metric,
-            total_rows,
-            indexed_rows,
         }
+    }
+
+    /// Returns the underlying applier for searching.
+    pub fn applier(&self) -> &dyn IndexApplier {
+        self.applier.as_ref()
+    }
+
+    /// Returns the cache size in bytes.
+    pub fn size_bytes(&self) -> usize {
+        self.size_bytes
     }
 }
 
@@ -77,11 +73,10 @@ impl std::fmt::Debug for CachedVectorIndex {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CachedVectorIndex")
             .field("size_bytes", &self.size_bytes)
-            .field("dimensions", &self.dimensions)
-            .field("metric", &self.metric)
-            .field("total_rows", &self.total_rows)
-            .field("indexed_rows", &self.indexed_rows)
-            .field("null_bitmap_len", &self.null_bitmap.len())
+            .field("dimensions", &self.applier.dimensions())
+            .field("metric", &self.applier.metric())
+            .field("total_rows", &self.applier.total_rows())
+            .field("indexed_rows", &self.applier.indexed_rows())
             .finish()
     }
 }
@@ -105,11 +100,11 @@ impl VectorIndexCache {
 
         let inner = Cache::builder()
             .max_capacity(capacity)
-            .weigher(|_k, v: &Arc<CachedVectorIndex>| v.size_bytes as u32)
+            .weigher(|_k, v: &Arc<CachedVectorIndex>| v.size_bytes() as u32)
             .eviction_listener(|_k, v, cause| {
                 CACHE_BYTES
                     .with_label_values(&[VECTOR_INDEX_CACHE_TYPE])
-                    .sub(v.size_bytes as i64);
+                    .sub(v.size_bytes() as i64);
                 CACHE_EVICTION
                     .with_label_values(&[VECTOR_INDEX_CACHE_TYPE, to_str(cause)])
                     .inc();
@@ -125,7 +120,7 @@ impl VectorIndexCache {
     pub fn insert(&self, key: VectorIndexCacheKey, value: Arc<CachedVectorIndex>) {
         CACHE_BYTES
             .with_label_values(&[VECTOR_INDEX_CACHE_TYPE])
-            .add(value.size_bytes as i64);
+            .add(value.size_bytes() as i64);
         self.inner.insert(key, value);
     }
 

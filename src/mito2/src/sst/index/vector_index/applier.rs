@@ -18,12 +18,12 @@ use std::sync::Arc;
 
 use common_base::range_read::RangeReader;
 use common_telemetry::warn;
-use index::vector::distance_metric_to_usearch;
+use index::vector::VectorDistanceMetric;
+use index::vector::apply::HnswVectorIndexApplier;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
 use puffin::puffin_manager::{PuffinManager, PuffinReader};
-use roaring::RoaringBitmap;
 use snafu::ResultExt;
-use store_api::storage::{ColumnId, VectorDistanceMetric};
+use store_api::storage::ColumnId;
 
 use crate::access_layer::{RegionFilePathFactory, WriteCachePathProvider};
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
@@ -34,15 +34,17 @@ use crate::error::{ApplyVectorIndexSnafu, PuffinBuildReaderSnafu, PuffinReadBlob
 use crate::sst::file::RegionIndexId;
 use crate::sst::index::puffin_manager::{BlobReader, PuffinManagerFactory};
 use crate::sst::index::trigger_index_background_download;
-use crate::sst::index::vector_index::creator::VectorIndexConfig;
-use crate::sst::index::vector_index::format::VectorIndexBlobHeader;
-use crate::sst::index::vector_index::{INDEX_BLOB_TYPE, engine};
+use crate::sst::index::vector_index::INDEX_BLOB_TYPE;
 
 /// Result of applying vector index.
 #[derive(Debug)]
 pub struct VectorIndexApplyOutput {
     /// Row offsets in the SST file.
     pub row_offsets: Vec<u64>,
+    /// Distances to the query vector.
+    /// TODO(dennis): Not used yet, reserved for future use.
+    #[allow(dead_code)]
+    pub distances: Vec<f32>,
 }
 
 /// Vector index applier for KNN search against SST blobs.
@@ -118,59 +120,51 @@ impl VectorIndexApplier {
         if k == 0 {
             return Ok(VectorIndexApplyOutput {
                 row_offsets: Vec::new(),
+                distances: Vec::new(),
             });
         }
 
-        let index = self.load_or_read_index(file_id, file_size_hint).await?;
-        let Some(index) = index else {
+        let cached = self.load_or_read_index(file_id, file_size_hint).await?;
+        let Some(cached) = cached else {
             return Ok(VectorIndexApplyOutput {
                 row_offsets: Vec::new(),
+                distances: Vec::new(),
             });
         };
 
-        if self.query_vector.len() != index.dimensions as usize {
+        let applier = cached.applier();
+        if self.query_vector.len() != applier.dimensions() as usize {
             return ApplyVectorIndexSnafu {
                 reason: format!(
                     "Query vector dimension {} does not match index dimension {}",
                     self.query_vector.len(),
-                    index.dimensions
+                    applier.dimensions()
                 ),
             }
             .fail();
         }
-        if self.metric != index.metric {
+        if self.metric != applier.metric() {
             return ApplyVectorIndexSnafu {
                 reason: format!(
                     "Query metric {} does not match index metric {}",
-                    self.metric, index.metric
+                    self.metric,
+                    applier.metric()
                 ),
             }
             .fail();
         }
-        if index.indexed_rows == 0 {
-            return Ok(VectorIndexApplyOutput {
-                row_offsets: Vec::new(),
-            });
-        }
 
-        let matches = index
-            .engine
-            .search(&self.query_vector, k.min(index.indexed_rows as usize))
-            .map_err(|e| {
-                ApplyVectorIndexSnafu {
-                    reason: e.to_string(),
-                }
-                .build()
-            })?;
+        let output = applier.search(&self.query_vector, k).map_err(|e| {
+            ApplyVectorIndexSnafu {
+                reason: e.to_string(),
+            }
+            .build()
+        })?;
 
-        let row_offsets = map_hnsw_keys_to_row_offsets(
-            &index.null_bitmap,
-            index.total_rows,
-            index.indexed_rows,
-            matches.keys,
-        )?;
-
-        Ok(VectorIndexApplyOutput { row_offsets })
+        Ok(VectorIndexApplyOutput {
+            row_offsets: output.row_offsets,
+            distances: output.distances,
+        })
     }
 
     async fn load_or_read_index(
@@ -204,7 +198,16 @@ impl VectorIndexApplier {
             return Ok(None);
         }
 
-        let cached = Arc::new(parse_vector_index_blob(&blob_data)?);
+        // Load the vector index applier from blob
+        let applier = HnswVectorIndexApplier::from_blob(&blob_data).map_err(|e| {
+            ApplyVectorIndexSnafu {
+                reason: e.to_string(),
+            }
+            .build()
+        })?;
+
+        // Wrap in CachedVectorIndex for moka cache
+        let cached = Arc::new(CachedVectorIndex::new(Box::new(applier)));
         if let Some(cache) = &self.vector_index_cache {
             cache.insert(cache_key, cached.clone());
         }
@@ -327,146 +330,26 @@ async fn read_all_blob(reader: BlobReader, file_size_hint: Option<u64>) -> Resul
     Ok(bytes.to_vec())
 }
 
-fn parse_vector_index_blob(data: &[u8]) -> Result<CachedVectorIndex> {
-    let (header, mut offset) = VectorIndexBlobHeader::decode(data).map_err(|e| {
-        ApplyVectorIndexSnafu {
-            reason: e.to_string(),
-        }
-        .build()
-    })?;
-    let null_bitmap_len = header.null_bitmap_len as usize;
-
-    if data.len() < offset + null_bitmap_len {
-        return ApplyVectorIndexSnafu {
-            reason: "Vector index blob truncated while reading null bitmap".to_string(),
-        }
-        .fail();
-    }
-
-    let null_bitmap_bytes = &data[offset..offset + null_bitmap_len];
-    offset += null_bitmap_len;
-    let null_bitmap = RoaringBitmap::deserialize_from(null_bitmap_bytes).map_err(|e| {
-        ApplyVectorIndexSnafu {
-            reason: format!("Failed to deserialize null bitmap: {}", e),
-        }
-        .build()
-    })?;
-
-    let index_bytes = &data[offset..];
-    let config = VectorIndexConfig {
-        engine: header.engine_type,
-        dim: header.dim as usize,
-        metric: distance_metric_to_usearch(header.metric),
-        distance_metric: header.metric,
-        connectivity: header.connectivity as usize,
-        expansion_add: header.expansion_add as usize,
-        expansion_search: header.expansion_search as usize,
-    };
-    let engine = engine::load_engine(header.engine_type, &config, index_bytes).map_err(|e| {
-        ApplyVectorIndexSnafu {
-            reason: e.to_string(),
-        }
-        .build()
-    })?;
-
-    Ok(CachedVectorIndex::new(
-        engine,
-        null_bitmap,
-        header.dim,
-        header.metric,
-        header.total_rows,
-        header.indexed_rows,
-    ))
-}
-
-fn map_hnsw_keys_to_row_offsets(
-    null_bitmap: &RoaringBitmap,
-    total_rows: u64,
-    indexed_rows: u64,
-    keys: Vec<u64>,
-) -> Result<Vec<u64>> {
-    if total_rows == 0 {
-        return Ok(Vec::new());
-    }
-    let total_rows_u32 = u32::try_from(total_rows).map_err(|_| {
-        ApplyVectorIndexSnafu {
-            reason: format!("Total rows {} exceeds u32::MAX", total_rows),
-        }
-        .build()
-    })?;
-
-    let mut row_offsets = Vec::with_capacity(keys.len());
-    for key in keys {
-        let offset = hnsw_key_to_row_offset(null_bitmap, total_rows_u32, indexed_rows, key)?;
-        row_offsets.push(offset as u64);
-    }
-    Ok(row_offsets)
-}
-
-fn hnsw_key_to_row_offset(
-    null_bitmap: &RoaringBitmap,
-    total_rows: u32,
-    indexed_rows: u64,
-    key: u64,
-) -> Result<u32> {
-    if total_rows == 0 {
-        return ApplyVectorIndexSnafu {
-            reason: "Total rows is zero".to_string(),
-        }
-        .fail();
-    }
-    if key >= indexed_rows {
-        return ApplyVectorIndexSnafu {
-            reason: format!("HNSW key {} exceeds indexed rows {}", key, indexed_rows),
-        }
-        .fail();
-    }
-
-    if null_bitmap.is_empty() {
-        return Ok(key as u32);
-    }
-
-    let mut left: u32 = 0;
-    let mut right: u32 = total_rows - 1;
-    while left <= right {
-        let mid = left + (right - left) / 2;
-        let nulls_before = null_bitmap.rank(mid);
-        let non_nulls = (mid as u64 + 1).saturating_sub(nulls_before);
-        if non_nulls > key {
-            if mid == 0 {
-                break;
-            }
-            right = mid - 1;
-        } else {
-            left = mid + 1;
-        }
-    }
-
-    if left >= total_rows {
-        return ApplyVectorIndexSnafu {
-            reason: "Failed to map HNSW key to row offset".to_string(),
-        }
-        .fail();
-    }
-
-    Ok(left)
-}
-
 #[cfg(test)]
 mod tests {
     use common_test_util::temp_dir::TempDir;
     use futures::io::Cursor;
+    use greptime_proto::v1::index::{VectorIndexMeta, VectorIndexStats};
+    use index::vector::engine::{self, VectorIndexConfig};
+    use index::vector::format::{distance_metric_to_proto, engine_type_to_proto};
     use object_store::ObjectStore;
     use object_store::services::Memory;
+    use prost::Message;
     use puffin::puffin_manager::PuffinWriter;
+    use roaring::RoaringBitmap;
     use store_api::region_request::PathType;
-    use store_api::storage::{ColumnId, FileId, VectorDistanceMetric, VectorIndexEngineType};
+    use store_api::storage::{ColumnId, FileId, VectorIndexEngineType};
+    use usearch::MetricKind;
 
     use super::*;
     use crate::access_layer::RegionFilePathFactory;
     use crate::sst::file::RegionFileId;
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
-    use crate::sst::index::vector_index::creator::VectorIndexConfig;
 
     async fn build_applier_with_blob(
         blob: Vec<u8>,
@@ -529,66 +412,49 @@ mod tests {
         let mut null_bitmap_bytes = Vec::new();
         null_bitmap.serialize_into(&mut null_bitmap_bytes).unwrap();
 
-        let header = VectorIndexBlobHeader::new(
-            config.engine,
-            config.dim as u32,
-            config.distance_metric,
-            config.connectivity as u16,
-            config.expansion_add as u16,
-            config.expansion_search as u16,
-            total_rows,
-            indexed_rows,
-            null_bitmap_bytes.len() as u32,
-        )
-        .unwrap();
+        let null_count = total_rows - indexed_rows;
+        let meta = VectorIndexMeta {
+            engine: engine_type_to_proto(config.engine).into(),
+            dim: config.dim as u32,
+            metric: distance_metric_to_proto(config.distance_metric).into(),
+            connectivity: config.connectivity as u32,
+            expansion_add: config.expansion_add as u32,
+            expansion_search: config.expansion_search as u32,
+            null_bitmap_size: null_bitmap_bytes.len() as u32,
+            index_size: index_bytes.len() as u64,
+            stats: Some(VectorIndexStats {
+                total_row_count: total_rows,
+                indexed_row_count: indexed_rows,
+                null_count,
+            }),
+        };
+        let meta_bytes = meta.encode_to_vec();
+        let meta_size = meta_bytes.len() as u32;
+
+        // Build blob: null_bitmap | index_data | meta | meta_size
         let mut blob = Vec::new();
-        header.encode_into(&mut blob);
         blob.extend_from_slice(&null_bitmap_bytes);
         blob.extend_from_slice(&index_bytes);
+        blob.extend_from_slice(&meta_bytes);
+        blob.extend_from_slice(&meta_size.to_le_bytes());
         blob
     }
 
-    #[test]
-    fn test_hnsw_key_to_row_offset_with_nulls() {
-        let mut bitmap = RoaringBitmap::new();
-        bitmap.insert(1);
-        bitmap.insert(3);
-
-        assert_eq!(hnsw_key_to_row_offset(&bitmap, 6, 4, 0).unwrap(), 0);
-        assert_eq!(hnsw_key_to_row_offset(&bitmap, 6, 4, 1).unwrap(), 2);
-        assert_eq!(hnsw_key_to_row_offset(&bitmap, 6, 4, 2).unwrap(), 4);
-    }
-
-    #[test]
-    fn test_hnsw_key_to_row_offset_without_nulls() {
-        let bitmap = RoaringBitmap::new();
-        assert_eq!(hnsw_key_to_row_offset(&bitmap, 4, 4, 3).unwrap(), 3);
-    }
-
-    #[test]
-    fn test_hnsw_key_to_row_offset_out_of_range() {
-        let bitmap = RoaringBitmap::new();
-        assert!(hnsw_key_to_row_offset(&bitmap, 4, 4, 4).is_err());
-    }
-
-    #[test]
-    fn test_map_hnsw_keys_to_row_offsets_multiple_keys() {
-        let bitmap = RoaringBitmap::new();
-        let offsets = map_hnsw_keys_to_row_offsets(&bitmap, 4, 4, vec![0, 2, 3]).unwrap();
-        assert_eq!(offsets, vec![0, 2, 3]);
-    }
-
-    #[tokio::test]
-    async fn test_apply_with_k_returns_offsets() {
-        let config = VectorIndexConfig {
+    fn test_config() -> VectorIndexConfig {
+        VectorIndexConfig {
             engine: VectorIndexEngineType::Usearch,
             dim: 2,
-            metric: distance_metric_to_usearch(VectorDistanceMetric::L2sq),
+            metric: MetricKind::L2sq,
             distance_metric: VectorDistanceMetric::L2sq,
             connectivity: 16,
             expansion_add: 128,
             expansion_search: 64,
-        };
+        }
+    }
+
+    #[tokio::test]
+    async fn test_apply_with_k_returns_offsets() {
+        let config = test_config();
         let mut null_bitmap = RoaringBitmap::new();
         null_bitmap.insert(1);
         let blob = build_blob_with_vectors(
@@ -609,15 +475,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_apply_with_k_dimension_mismatch() {
-        let config = VectorIndexConfig {
-            engine: VectorIndexEngineType::Usearch,
-            dim: 2,
-            metric: distance_metric_to_usearch(VectorDistanceMetric::L2sq),
-            distance_metric: VectorDistanceMetric::L2sq,
-            connectivity: 16,
-            expansion_add: 128,
-            expansion_search: 64,
-        };
+        let config = test_config();
         let null_bitmap = RoaringBitmap::new();
         let blob = build_blob_with_vectors(&config, vec![(0, vec![1.0, 0.0])], &null_bitmap, 1, 1);
         let (_dir, applier, index_id, size_bytes) =
@@ -631,7 +489,7 @@ mod tests {
         let config = VectorIndexConfig {
             engine: VectorIndexEngineType::Usearch,
             dim: 1,
-            metric: distance_metric_to_usearch(VectorDistanceMetric::L2sq),
+            metric: MetricKind::L2sq,
             distance_metric: VectorDistanceMetric::L2sq,
             connectivity: 16,
             expansion_add: 128,

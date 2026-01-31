@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Vector index creator using pluggable vector index engines.
+//! Vector indexer for managing vector indexes across multiple columns.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -23,18 +23,17 @@ use datatypes::arrow::array::{Array, BinaryArray};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::ValueRef;
-use index::vector::{VectorDistanceMetric, VectorIndexOptions, distance_metric_to_usearch};
-use puffin::puffin_manager::{PuffinWriter, PutOptions};
-use roaring::RoaringBitmap;
-use snafu::{ResultExt, ensure};
+use index::vector::create::{HnswVectorIndexCreator, IndexCreator};
+use index::vector::engine::VectorIndexConfig;
+use index::vector::util::bytes_to_f32_slice;
+use index::vector::{VectorIndexOptions, distance_metric_to_usearch};
+use puffin::puffin_manager::PutOptions;
+use snafu::ensure;
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{ColumnId, FileId, VectorIndexEngine, VectorIndexEngineType};
-use tokio_util::compat::TokioAsyncReadCompatExt;
-use usearch::MetricKind;
+use store_api::storage::{ColumnId, FileId};
 
 use crate::error::{
-    BiErrorsSnafu, OperateAbortedIndexSnafu, PuffinAddBlobSnafu, Result, VectorIndexBuildSnafu,
-    VectorIndexFinishSnafu,
+    OperateAbortedIndexSnafu, Result, VectorIndexBuildSnafu, VectorIndexFinishSnafu,
 };
 use crate::metrics::{INDEX_CREATE_BYTES_TOTAL, INDEX_CREATE_ROWS_TOTAL};
 use crate::read::Batch;
@@ -44,163 +43,25 @@ use crate::sst::index::intermediate::{
 };
 use crate::sst::index::puffin_manager::SstPuffinWriter;
 use crate::sst::index::statistics::{ByteCount, RowCount, Statistics};
-use crate::sst::index::vector_index::format::{
-    VECTOR_INDEX_BLOB_HEADER_SIZE, VectorIndexBlobHeader,
-};
-use crate::sst::index::vector_index::util::bytes_to_f32_slice;
-use crate::sst::index::vector_index::{INDEX_BLOB_TYPE, engine};
+use crate::sst::index::vector_index::INDEX_BLOB_TYPE;
 
-/// The buffer size for the pipe used to send index data to the puffin blob.
-const PIPE_BUFFER_SIZE_FOR_SENDING_BLOB: usize = 8192;
-
-/// Configuration for a single column's vector index.
-#[derive(Debug, Clone)]
-pub struct VectorIndexConfig {
-    /// The vector index engine type.
-    pub engine: VectorIndexEngineType,
-    /// The dimension of vectors in this column.
-    pub dim: usize,
-    /// The distance metric to use (e.g., L2, Cosine, IP) - usearch format.
-    pub metric: MetricKind,
-    /// The original distance metric (for serialization).
-    pub distance_metric: VectorDistanceMetric,
-    /// HNSW connectivity parameter (M in the paper).
-    /// Higher values give better recall but use more memory.
-    pub connectivity: usize,
-    /// Expansion factor during index construction (ef_construction).
-    pub expansion_add: usize,
-    /// Expansion factor during search (ef_search).
-    pub expansion_search: usize,
-}
-
-impl VectorIndexConfig {
-    /// Creates a new vector index config from VectorIndexOptions.
-    pub fn new(dim: usize, options: &VectorIndexOptions) -> Self {
-        Self {
-            engine: options.engine,
-            dim,
-            metric: distance_metric_to_usearch(options.metric),
-            distance_metric: options.metric,
-            connectivity: options.connectivity as usize,
-            expansion_add: options.expansion_add as usize,
-            expansion_search: options.expansion_search as usize,
-        }
-    }
-}
-
-/// Creator for a single column's vector index.
-struct VectorIndexCreator {
-    /// The vector index engine (e.g., USearch HNSW).
-    engine: Box<dyn VectorIndexEngine>,
-    /// Configuration for this index.
-    config: VectorIndexConfig,
-    /// Bitmap tracking which row offsets have NULL vectors.
-    /// HNSW keys are sequential (0, 1, 2...) but row offsets may have gaps due to NULLs.
-    null_bitmap: RoaringBitmap,
-    /// Current row offset (including NULLs).
-    current_row_offset: u64,
-    /// Next HNSW key to assign (only for non-NULL vectors).
-    next_hnsw_key: u64,
-    /// Memory usage estimation.
-    memory_usage: usize,
-}
-
-impl VectorIndexCreator {
-    /// Creates a new vector index creator.
-    fn new(config: VectorIndexConfig) -> Result<Self> {
-        let engine_instance = engine::create_engine(config.engine, &config)?;
-
-        Ok(Self {
-            engine: engine_instance,
-            config,
-            null_bitmap: RoaringBitmap::new(),
-            current_row_offset: 0,
-            next_hnsw_key: 0,
-            memory_usage: 0,
-        })
-    }
-
-    /// Reserves capacity for the expected number of vectors.
-    #[allow(dead_code)]
-    fn reserve(&mut self, capacity: usize) -> Result<()> {
-        self.engine.reserve(capacity).map_err(|e| {
-            VectorIndexBuildSnafu {
-                reason: format!("Failed to reserve capacity: {}", e),
-            }
-            .build()
-        })
-    }
-
-    /// Adds a vector to the index.
-    /// Returns the HNSW key assigned to this vector.
-    fn add_vector(&mut self, vector: &[f32]) -> Result<u64> {
-        let key = self.next_hnsw_key;
-        self.engine.add(key, vector).map_err(|e| {
-            VectorIndexBuildSnafu {
-                reason: e.to_string(),
-            }
-            .build()
-        })?;
-        self.next_hnsw_key += 1;
-        self.current_row_offset += 1;
-        self.memory_usage = self.engine.memory_usage();
-        Ok(key)
-    }
-
-    /// Records a NULL vector at the current row offset.
-    fn add_null(&mut self) {
-        self.null_bitmap.insert(self.current_row_offset as u32);
-        self.current_row_offset += 1;
-    }
-
-    /// Records multiple NULL vectors starting at the current row offset.
-    fn add_nulls(&mut self, n: usize) {
-        let start = self.current_row_offset as u32;
-        let end = start + n as u32;
-        self.null_bitmap.insert_range(start..end);
-        self.current_row_offset += n as u64;
-    }
-
-    /// Returns the serialized size of the index.
-    fn serialized_length(&self) -> usize {
-        self.engine.serialized_length()
-    }
-
-    /// Serializes the index to a buffer.
-    fn save_to_buffer(&self, buffer: &mut [u8]) -> Result<()> {
-        self.engine.save_to_buffer(buffer).map_err(|e| {
-            VectorIndexFinishSnafu {
-                reason: format!("Failed to serialize index: {}", e),
-            }
-            .build()
-        })
-    }
-
-    /// Returns the memory usage of this creator.
-    fn memory_usage(&self) -> usize {
-        self.memory_usage + self.null_bitmap.serialized_size()
-    }
-
-    /// Returns the number of vectors in the index (excluding NULLs).
-    fn size(&self) -> usize {
-        self.engine.size()
-    }
-
-    /// Returns the engine type.
-    fn engine_type(&self) -> VectorIndexEngineType {
-        self.config.engine
-    }
-
-    /// Returns the distance metric.
-    fn metric(&self) -> VectorDistanceMetric {
-        self.config.distance_metric
+/// Helper to create VectorIndexConfig from VectorIndexOptions.
+fn create_config(dim: usize, options: &VectorIndexOptions) -> VectorIndexConfig {
+    VectorIndexConfig {
+        engine: options.engine,
+        dim,
+        metric: distance_metric_to_usearch(options.metric),
+        distance_metric: options.metric,
+        connectivity: options.connectivity as usize,
+        expansion_add: options.expansion_add as usize,
+        expansion_search: options.expansion_search as usize,
     }
 }
 
 /// The indexer for vector indexes across multiple columns.
 pub struct VectorIndexer {
     /// Per-column vector index creators.
-    creators: HashMap<ColumnId, VectorIndexCreator>,
+    creators: HashMap<ColumnId, HnswVectorIndexCreator>,
     /// Provider for intermediate files.
     temp_file_provider: Arc<TempFileProvider>,
     /// Whether the indexing process has been aborted.
@@ -211,7 +72,6 @@ pub struct VectorIndexer {
     #[allow(dead_code)]
     global_memory_usage: Arc<AtomicUsize>,
     /// Region metadata for column lookups.
-    #[allow(dead_code)]
     metadata: RegionMetadataRef,
     /// Memory usage threshold.
     memory_usage_threshold: Option<usize>,
@@ -248,8 +108,13 @@ impl VectorIndexer {
                 continue;
             };
 
-            let config = VectorIndexConfig::new(vector_type.dim as usize, options);
-            let creator = VectorIndexCreator::new(config)?;
+            let config = create_config(vector_type.dim as usize, options);
+            let creator = HnswVectorIndexCreator::new(config).map_err(|e| {
+                VectorIndexBuildSnafu {
+                    reason: e.to_string(),
+                }
+                .build()
+            })?;
             creators.insert(column.column_id, creator);
         }
 
@@ -326,7 +191,12 @@ impl VectorIndexer {
 
         for (col_id, creator) in &mut self.creators {
             let Some(values) = batch.field_col_value(*col_id) else {
-                creator.add_nulls(n);
+                creator.push_nulls(n).map_err(|e| {
+                    VectorIndexBuildSnafu {
+                        reason: e.to_string(),
+                    }
+                    .build()
+                })?;
                 continue;
             };
 
@@ -334,24 +204,39 @@ impl VectorIndexer {
             for i in 0..n {
                 let value = values.data.get_ref(i);
                 if value.is_null() {
-                    creator.add_null();
+                    creator.push_null().map_err(|e| {
+                        VectorIndexBuildSnafu {
+                            reason: e.to_string(),
+                        }
+                        .build()
+                    })?;
                 } else {
                     // Extract the vector bytes and convert to f32 slice
                     if let ValueRef::Binary(bytes) = value {
                         let floats = bytes_to_f32_slice(bytes);
-                        if floats.len() != creator.config.dim {
+                        if floats.len() != creator.config().dim {
                             return VectorIndexBuildSnafu {
                                 reason: format!(
                                     "Vector dimension mismatch: expected {}, got {}",
-                                    creator.config.dim,
+                                    creator.config().dim,
                                     floats.len()
                                 ),
                             }
                             .fail();
                         }
-                        creator.add_vector(&floats)?;
+                        creator.push_vector(&floats).map_err(|e| {
+                            VectorIndexBuildSnafu {
+                                reason: e.to_string(),
+                            }
+                            .build()
+                        })?;
                     } else {
-                        creator.add_null();
+                        creator.push_null().map_err(|e| {
+                            VectorIndexBuildSnafu {
+                                reason: e.to_string(),
+                            }
+                            .build()
+                        })?;
                     }
                 }
             }
@@ -399,7 +284,12 @@ impl VectorIndexer {
             let column_name = &column_meta.column_schema.name;
             // Column not in batch is normal for flat format - treat as NULLs
             let Some(column_array) = batch.column_by_name(column_name) else {
-                creator.add_nulls(n);
+                creator.push_nulls(n).map_err(|e| {
+                    VectorIndexBuildSnafu {
+                        reason: e.to_string(),
+                    }
+                    .build()
+                })?;
                 continue;
             };
 
@@ -420,21 +310,31 @@ impl VectorIndexer {
 
             for i in 0..n {
                 if !binary_array.is_valid(i) {
-                    creator.add_null();
+                    creator.push_null().map_err(|e| {
+                        VectorIndexBuildSnafu {
+                            reason: e.to_string(),
+                        }
+                        .build()
+                    })?;
                 } else {
                     let bytes = binary_array.value(i);
                     let floats = bytes_to_f32_slice(bytes);
-                    if floats.len() != creator.config.dim {
+                    if floats.len() != creator.config().dim {
                         return VectorIndexBuildSnafu {
                             reason: format!(
                                 "Vector dimension mismatch: expected {}, got {}",
-                                creator.config.dim,
+                                creator.config().dim,
                                 floats.len()
                             ),
                         }
                         .fail();
                     }
-                    creator.add_vector(&floats)?;
+                    creator.push_vector(&floats).map_err(|e| {
+                        VectorIndexBuildSnafu {
+                            reason: e.to_string(),
+                        }
+                        .build()
+                    })?;
                 }
             }
 
@@ -512,146 +412,27 @@ impl VectorIndexer {
         Ok(())
     }
 
-    /// Finishes a single column's vector index.
-    ///
-    /// The blob format v1 (header = 33 bytes):
-    /// ```text
-    /// +------------------+
-    /// | Version          | 1 byte (u8, = 1)
-    /// +------------------+
-    /// | Engine type      | 1 byte (u8, engine identifier)
-    /// +------------------+
-    /// | Dimension        | 4 bytes (u32, little-endian)
-    /// +------------------+
-    /// | Metric           | 1 byte (u8, distance metric)
-    /// +------------------+
-    /// | Connectivity     | 2 bytes (u16, little-endian, HNSW M parameter)
-    /// +------------------+
-    /// | Expansion add    | 2 bytes (u16, little-endian, ef_construction)
-    /// +------------------+
-    /// | Expansion search | 2 bytes (u16, little-endian, ef_search)
-    /// +------------------+
-    /// | Total rows       | 8 bytes (u64, little-endian, total rows in SST)
-    /// +------------------+
-    /// | Indexed rows     | 8 bytes (u64, little-endian, non-NULL rows indexed)
-    /// +------------------+
-    /// | NULL bitmap len  | 4 bytes (u32, little-endian)
-    /// +------------------+
-    /// | NULL bitmap      | variable length (serialized RoaringBitmap)
-    /// +------------------+
-    /// | Vector index     | variable length (engine-specific serialized format)
-    /// +------------------+
-    /// ```
+    /// Finishes a single column's vector index using the VectorIndexCreator trait.
     async fn do_finish_single_creator(
         col_id: ColumnId,
-        creator: &mut VectorIndexCreator,
+        creator: &mut HnswVectorIndexCreator,
         puffin_writer: &mut SstPuffinWriter,
     ) -> Result<ByteCount> {
-        // Serialize the NULL bitmap
-        let mut null_bitmap_bytes = Vec::new();
-        creator
-            .null_bitmap
-            .serialize_into(&mut null_bitmap_bytes)
+        // Create blob name following the same pattern as bloom filter
+        let blob_name = format!("{}-{}", INDEX_BLOB_TYPE, col_id);
+
+        // Use the trait's finish method which handles blob building and puffin writing
+        let written_bytes = creator
+            .finish(puffin_writer, &blob_name, PutOptions::default())
+            .await
             .map_err(|e| {
                 VectorIndexFinishSnafu {
-                    reason: format!("Failed to serialize NULL bitmap: {}", e),
+                    reason: e.to_string(),
                 }
                 .build()
             })?;
 
-        // Serialize the vector index
-        let index_size = creator.serialized_length();
-        let mut index_bytes = vec![0u8; index_size];
-        creator.save_to_buffer(&mut index_bytes)?;
-
-        // Header size: version(1) + engine(1) + dim(4) + metric(1) +
-        // connectivity(2) + expansion_add(2) + expansion_search(2) +
-        // total_rows(8) + indexed_rows(8) + bitmap_len(4) = 33 bytes.
-        let total_size =
-            VECTOR_INDEX_BLOB_HEADER_SIZE + null_bitmap_bytes.len() + index_bytes.len();
-        let mut blob_data = Vec::with_capacity(total_size);
-
-        let bitmap_len: u32 = null_bitmap_bytes.len().try_into().map_err(|_| {
-            VectorIndexBuildSnafu {
-                reason: format!(
-                    "NULL bitmap size {} exceeds maximum allowed size {}",
-                    null_bitmap_bytes.len(),
-                    u32::MAX
-                ),
-            }
-            .build()
-        })?;
-        let header = VectorIndexBlobHeader::new(
-            creator.engine_type(),
-            creator.config.dim as u32,
-            creator.metric(),
-            creator.config.connectivity as u16,
-            creator.config.expansion_add as u16,
-            creator.config.expansion_search as u16,
-            creator.current_row_offset,
-            creator.next_hnsw_key,
-            bitmap_len,
-        )
-        .map_err(|e| {
-            VectorIndexFinishSnafu {
-                reason: e.to_string(),
-            }
-            .build()
-        })?;
-        header.encode_into(&mut blob_data);
-        // Write NULL bitmap
-        blob_data.extend_from_slice(&null_bitmap_bytes);
-        // Write vector index
-        blob_data.extend_from_slice(&index_bytes);
-
-        // Create blob name following the same pattern as bloom filter
-        let blob_name = format!("{}-{}", INDEX_BLOB_TYPE, col_id);
-
-        // Write to puffin using a pipe
-        let (tx, rx) = tokio::io::duplex(PIPE_BUFFER_SIZE_FOR_SENDING_BLOB);
-
-        // Writer task writes the blob data to the pipe
-        let write_index = async move {
-            use tokio::io::AsyncWriteExt;
-            let mut writer = tx;
-            writer.write_all(&blob_data).await?;
-            writer.shutdown().await?;
-            Ok::<(), std::io::Error>(())
-        };
-
-        let (index_write_result, puffin_add_blob) = futures::join!(
-            write_index,
-            puffin_writer.put_blob(
-                &blob_name,
-                rx.compat(),
-                PutOptions::default(),
-                Default::default()
-            )
-        );
-
-        match (
-            puffin_add_blob.context(PuffinAddBlobSnafu),
-            index_write_result.map_err(|e| {
-                VectorIndexFinishSnafu {
-                    reason: format!("Failed to write blob data: {}", e),
-                }
-                .build()
-            }),
-        ) {
-            (Err(e1), Err(e2)) => BiErrorsSnafu {
-                first: Box::new(e1),
-                second: Box::new(e2),
-            }
-            .fail()?,
-
-            (Ok(_), e @ Err(_)) => e?,
-            (e @ Err(_), Ok(_)) => e.map(|_| ())?,
-            (Ok(written_bytes), Ok(_)) => {
-                return Ok(written_bytes);
-            }
-        }
-
-        Ok(0)
+        Ok(written_bytes)
     }
 
     /// Aborts index creation and cleans up garbage.
@@ -756,204 +537,6 @@ mod tests {
         .unwrap()
     }
 
-    #[test]
-    fn test_vector_index_creator() {
-        let options = VectorIndexOptions::default();
-        let config = VectorIndexConfig::new(4, &options);
-        let mut creator = VectorIndexCreator::new(config).unwrap();
-
-        creator.reserve(10).unwrap();
-
-        // Add some vectors
-        let v1 = vec![1.0f32, 0.0, 0.0, 0.0];
-        let v2 = vec![0.0f32, 1.0, 0.0, 0.0];
-
-        creator.add_vector(&v1).unwrap();
-        creator.add_null();
-        creator.add_vector(&v2).unwrap();
-
-        assert_eq!(creator.size(), 2); // 2 vectors (excluding NULL)
-        assert_eq!(creator.current_row_offset, 3); // 3 rows total
-        assert!(creator.null_bitmap.contains(1)); // Row 1 is NULL
-    }
-
-    #[test]
-    fn test_vector_index_creator_serialization() {
-        let options = VectorIndexOptions::default();
-        let config = VectorIndexConfig::new(4, &options);
-        let mut creator = VectorIndexCreator::new(config).unwrap();
-
-        creator.reserve(10).unwrap();
-
-        // Add vectors
-        let vectors = vec![
-            vec![1.0f32, 0.0, 0.0, 0.0],
-            vec![0.0f32, 1.0, 0.0, 0.0],
-            vec![0.0f32, 0.0, 1.0, 0.0],
-        ];
-
-        for v in &vectors {
-            creator.add_vector(v).unwrap();
-        }
-
-        // Test serialization
-        let size = creator.serialized_length();
-        assert!(size > 0);
-
-        let mut buffer = vec![0u8; size];
-        creator.save_to_buffer(&mut buffer).unwrap();
-
-        // Verify buffer is not empty and starts with some data
-        assert!(!buffer.iter().all(|&b| b == 0));
-    }
-
-    #[test]
-    fn test_vector_index_creator_null_bitmap_serialization() {
-        let options = VectorIndexOptions::default();
-        let config = VectorIndexConfig::new(4, &options);
-        let mut creator = VectorIndexCreator::new(config).unwrap();
-
-        creator.reserve(10).unwrap();
-
-        // Add pattern: vector, null, vector, null, null, vector
-        creator.add_vector(&[1.0, 0.0, 0.0, 0.0]).unwrap();
-        creator.add_null();
-        creator.add_vector(&[0.0, 1.0, 0.0, 0.0]).unwrap();
-        creator.add_nulls(2);
-        creator.add_vector(&[0.0, 0.0, 1.0, 0.0]).unwrap();
-
-        assert_eq!(creator.size(), 3); // 3 vectors
-        assert_eq!(creator.current_row_offset, 6); // 6 rows total
-        assert!(!creator.null_bitmap.contains(0));
-        assert!(creator.null_bitmap.contains(1));
-        assert!(!creator.null_bitmap.contains(2));
-        assert!(creator.null_bitmap.contains(3));
-        assert!(creator.null_bitmap.contains(4));
-        assert!(!creator.null_bitmap.contains(5));
-
-        // Test NULL bitmap serialization
-        let mut bitmap_bytes = Vec::new();
-        creator
-            .null_bitmap
-            .serialize_into(&mut bitmap_bytes)
-            .unwrap();
-
-        // Deserialize and verify
-        let restored = RoaringBitmap::deserialize_from(&bitmap_bytes[..]).unwrap();
-        assert_eq!(restored.len(), 3); // 3 NULLs
-        assert!(restored.contains(1));
-        assert!(restored.contains(3));
-        assert!(restored.contains(4));
-    }
-
-    #[test]
-    fn test_vector_index_config() {
-        use index::vector::VectorDistanceMetric;
-
-        let options = VectorIndexOptions {
-            engine: VectorIndexEngineType::default(),
-            metric: VectorDistanceMetric::Cosine,
-            connectivity: 32,
-            expansion_add: 256,
-            expansion_search: 128,
-        };
-        let config = VectorIndexConfig::new(128, &options);
-        assert_eq!(config.engine, VectorIndexEngineType::Usearch);
-        assert_eq!(config.dim, 128);
-        assert_eq!(config.metric, MetricKind::Cos);
-        assert_eq!(config.connectivity, 32);
-        assert_eq!(config.expansion_add, 256);
-        assert_eq!(config.expansion_search, 128);
-    }
-
-    #[test]
-    fn test_vector_index_header_format() {
-        use index::vector::VectorDistanceMetric;
-
-        // Create config with specific HNSW parameters
-        let options = VectorIndexOptions {
-            engine: VectorIndexEngineType::Usearch,
-            metric: VectorDistanceMetric::L2sq,
-            connectivity: 24,
-            expansion_add: 200,
-            expansion_search: 100,
-        };
-        let config = VectorIndexConfig::new(4, &options);
-        let mut creator = VectorIndexCreator::new(config).unwrap();
-
-        creator.reserve(10).unwrap();
-
-        // Add pattern: vector, null, vector, null, vector
-        creator.add_vector(&[1.0, 0.0, 0.0, 0.0]).unwrap();
-        creator.add_null();
-        creator.add_vector(&[0.0, 1.0, 0.0, 0.0]).unwrap();
-        creator.add_null();
-        creator.add_vector(&[0.0, 0.0, 1.0, 0.0]).unwrap();
-
-        // Verify counts
-        assert_eq!(creator.current_row_offset, 5); // total_rows
-        assert_eq!(creator.next_hnsw_key, 3); // indexed_rows
-
-        // Build blob data manually (simulating write_to_puffin header writing)
-        let mut null_bitmap_bytes = Vec::new();
-        creator
-            .null_bitmap
-            .serialize_into(&mut null_bitmap_bytes)
-            .unwrap();
-
-        let index_size = creator.serialized_length();
-        let mut index_bytes = vec![0u8; index_size];
-        creator.save_to_buffer(&mut index_bytes).unwrap();
-
-        let total_size =
-            VECTOR_INDEX_BLOB_HEADER_SIZE + null_bitmap_bytes.len() + index_bytes.len();
-        let mut blob_data = Vec::with_capacity(total_size);
-
-        let bitmap_len: u32 = null_bitmap_bytes.len().try_into().unwrap();
-        let header = VectorIndexBlobHeader::new(
-            creator.engine_type(),
-            creator.config.dim as u32,
-            creator.metric(),
-            creator.config.connectivity as u16,
-            creator.config.expansion_add as u16,
-            creator.config.expansion_search as u16,
-            creator.current_row_offset,
-            creator.next_hnsw_key,
-            bitmap_len,
-        )
-        .unwrap();
-        header.encode_into(&mut blob_data);
-        blob_data.extend_from_slice(&null_bitmap_bytes);
-        blob_data.extend_from_slice(&index_bytes);
-
-        // Verify header size
-        assert_eq!(blob_data.len(), total_size);
-
-        // Parse header and verify values
-        let (decoded, header_size) = VectorIndexBlobHeader::decode(&blob_data).unwrap();
-        assert_eq!(header_size, VECTOR_INDEX_BLOB_HEADER_SIZE);
-        assert_eq!(decoded.engine_type, VectorIndexEngineType::Usearch);
-        assert_eq!(decoded.dim, 4);
-        assert_eq!(
-            decoded.metric,
-            datatypes::schema::VectorDistanceMetric::L2sq
-        );
-        assert_eq!(decoded.connectivity, 24);
-        assert_eq!(decoded.expansion_add, 200);
-        assert_eq!(decoded.expansion_search, 100);
-        assert_eq!(decoded.total_rows, 5);
-        assert_eq!(decoded.indexed_rows, 3);
-        assert_eq!(decoded.null_bitmap_len as usize, null_bitmap_bytes.len());
-
-        // Verify null bitmap can be deserialized
-        let null_bitmap_data =
-            &blob_data[header_size..header_size + decoded.null_bitmap_len as usize];
-        let restored_bitmap = RoaringBitmap::deserialize_from(null_bitmap_data).unwrap();
-        assert_eq!(restored_bitmap.len(), 2); // 2 nulls
-        assert!(restored_bitmap.contains(1));
-        assert!(restored_bitmap.contains(3));
-    }
-
     #[tokio::test]
     async fn test_vector_index_missing_column_as_nulls() {
         let tempdir = common_test_util::temp_dir::create_temp_dir(
@@ -982,10 +565,10 @@ mod tests {
 
         let creator = indexer.creators.get(&3).unwrap();
         assert_eq!(creator.size(), 0);
-        assert_eq!(creator.current_row_offset, 3);
-        assert_eq!(creator.null_bitmap.len(), 3);
+        assert_eq!(creator.current_row_offset(), 3);
+        assert_eq!(creator.null_bitmap().len(), 3);
         for idx in 0..3 {
-            assert!(creator.null_bitmap.contains(idx as u32));
+            assert!(creator.null_bitmap().contains(idx as u32));
         }
     }
 }

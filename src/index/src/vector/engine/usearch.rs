@@ -16,10 +16,11 @@
 
 use common_error::ext::BoxedError;
 use store_api::storage::{VectorIndexEngine, VectorSearchMatches};
+pub use usearch::MetricKind;
 use usearch::{Index, IndexOptions, ScalarKind};
 
-use crate::error::{Result, VectorIndexBuildSnafu};
-use crate::sst::index::vector_index::creator::VectorIndexConfig;
+use super::VectorIndexConfig;
+use crate::vector::error::{EngineSnafu, Result};
 
 /// USearch-based vector index engine using HNSW algorithm.
 pub struct UsearchEngine {
@@ -40,7 +41,7 @@ impl UsearchEngine {
         };
 
         let index = Index::new(&options).map_err(|e| {
-            VectorIndexBuildSnafu {
+            EngineSnafu {
                 reason: format!("Failed to create USearch index: {}", e),
             }
             .build()
@@ -64,14 +65,14 @@ impl UsearchEngine {
         };
 
         let index = Index::new(&options).map_err(|e| {
-            VectorIndexBuildSnafu {
+            EngineSnafu {
                 reason: format!("Failed to create USearch index for loading: {}", e),
             }
             .build()
         })?;
 
         index.load_from_buffer(data).map_err(|e| {
-            VectorIndexBuildSnafu {
+            EngineSnafu {
                 reason: format!("Failed to load USearch index from buffer: {}", e),
             }
             .build()
@@ -79,42 +80,37 @@ impl UsearchEngine {
 
         Ok(Self { index })
     }
+
+    /// Helper to create a BoxedError from a reason string.
+    fn boxed_engine_error(reason: String) -> BoxedError {
+        BoxedError::new(EngineSnafu { reason }.build())
+    }
 }
 
 impl VectorIndexEngine for UsearchEngine {
-    fn add(&mut self, key: u64, vector: &[f32]) -> Result<(), BoxedError> {
+    fn add(&mut self, key: u64, vector: &[f32]) -> std::result::Result<(), BoxedError> {
         // Reserve capacity if needed
         if self.index.size() >= self.index.capacity() {
             let new_capacity = std::cmp::max(1, self.index.capacity() * 2);
             self.index.reserve(new_capacity).map_err(|e| {
-                BoxedError::new(
-                    VectorIndexBuildSnafu {
-                        reason: format!("Failed to reserve capacity: {}", e),
-                    }
-                    .build(),
-                )
+                Self::boxed_engine_error(format!("Failed to reserve capacity: {}", e))
             })?;
         }
 
-        self.index.add(key, vector).map_err(|e| {
-            BoxedError::new(
-                VectorIndexBuildSnafu {
-                    reason: format!("Failed to add vector: {}", e),
-                }
-                .build(),
-            )
-        })
+        self.index
+            .add(key, vector)
+            .map_err(|e| Self::boxed_engine_error(format!("Failed to add vector: {}", e)))
     }
 
-    fn search(&self, query: &[f32], k: usize) -> Result<VectorSearchMatches, BoxedError> {
-        let matches = self.index.search(query, k).map_err(|e| {
-            BoxedError::new(
-                VectorIndexBuildSnafu {
-                    reason: format!("Failed to search: {}", e),
-                }
-                .build(),
-            )
-        })?;
+    fn search(
+        &self,
+        query: &[f32],
+        k: usize,
+    ) -> std::result::Result<VectorSearchMatches, BoxedError> {
+        let matches = self
+            .index
+            .search(query, k)
+            .map_err(|e| Self::boxed_engine_error(format!("Failed to search: {}", e)))?;
 
         Ok(VectorSearchMatches {
             keys: matches.keys,
@@ -126,26 +122,16 @@ impl VectorIndexEngine for UsearchEngine {
         self.index.serialized_length()
     }
 
-    fn save_to_buffer(&self, buffer: &mut [u8]) -> Result<(), BoxedError> {
-        self.index.save_to_buffer(buffer).map_err(|e| {
-            BoxedError::new(
-                VectorIndexBuildSnafu {
-                    reason: format!("Failed to save to buffer: {}", e),
-                }
-                .build(),
-            )
-        })
+    fn save_to_buffer(&self, buffer: &mut [u8]) -> std::result::Result<(), BoxedError> {
+        self.index
+            .save_to_buffer(buffer)
+            .map_err(|e| Self::boxed_engine_error(format!("Failed to save to buffer: {}", e)))
     }
 
-    fn reserve(&mut self, capacity: usize) -> Result<(), BoxedError> {
-        self.index.reserve(capacity).map_err(|e| {
-            BoxedError::new(
-                VectorIndexBuildSnafu {
-                    reason: format!("Failed to reserve: {}", e),
-                }
-                .build(),
-            )
-        })
+    fn reserve(&mut self, capacity: usize) -> std::result::Result<(), BoxedError> {
+        self.index
+            .reserve(capacity)
+            .map_err(|e| Self::boxed_engine_error(format!("Failed to reserve: {}", e)))
     }
 
     fn size(&self) -> usize {
@@ -163,11 +149,10 @@ impl VectorIndexEngine for UsearchEngine {
 
 #[cfg(test)]
 mod tests {
-    use index::vector::VectorDistanceMetric;
     use store_api::storage::VectorIndexEngineType;
-    use usearch::MetricKind;
 
     use super::*;
+    use crate::vector::VectorDistanceMetric;
 
     fn test_config() -> VectorIndexConfig {
         VectorIndexConfig {

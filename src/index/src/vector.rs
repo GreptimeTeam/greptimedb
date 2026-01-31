@@ -12,11 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Vector index types and options.
+//! Vector index implementation for KNN search.
 //!
-//! This module re-exports types from `datatypes` and provides conversions
-//! to USearch types, as well as distance computation functions.
+//! This module provides the core algorithms for vector index creation, reading,
+//! and search operations. The architecture follows the same pattern as other indexes:
+//!
+//! - `error.rs`: Error types for vector index operations
+//! - `format.rs`: Proto conversion helpers for blob format
+//! - `util.rs`: Byte utilities for vector data
+//! - `engine/`: Pluggable vector index engines (e.g., USearch HNSW)
+//! - `create.rs`: `VectorIndexCreator` trait and implementations for building indices
+//! - `apply.rs`: `VectorIndexApplier` trait and implementations for searching indices
 
+pub mod apply;
+pub mod create;
+pub mod engine;
+pub mod error;
+pub mod format;
+pub mod util;
+
+pub use apply::{HnswVectorIndexApplier, IndexApplier, VectorSearchOutput};
+pub use create::{HnswVectorIndexCreator, IndexCreator};
 pub use datatypes::schema::{VectorDistanceMetric, VectorIndexOptions};
 use nalgebra::DVectorView;
 pub use usearch::MetricKind;

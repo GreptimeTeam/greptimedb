@@ -14,13 +14,34 @@
 
 //! Pluggable vector index engine implementations.
 
-mod usearch_impl;
+mod usearch;
 
 use store_api::storage::{VectorIndexEngine, VectorIndexEngineType};
-pub use usearch_impl::UsearchEngine;
+use usearch::MetricKind;
+pub use usearch::UsearchEngine;
 
-use crate::error::Result;
-use crate::sst::index::vector_index::creator::VectorIndexConfig;
+use super::VectorDistanceMetric;
+use super::error::Result;
+
+/// Configuration for creating a vector index.
+#[derive(Debug, Clone)]
+pub struct VectorIndexConfig {
+    /// The vector index engine type.
+    pub engine: VectorIndexEngineType,
+    /// The dimension of vectors in this column.
+    pub dim: usize,
+    /// The distance metric to use (e.g., L2, Cosine, IP) - usearch format.
+    pub metric: MetricKind,
+    /// The original distance metric (for serialization).
+    pub distance_metric: VectorDistanceMetric,
+    /// HNSW connectivity parameter (M in the paper).
+    /// Higher values give better recall but use more memory.
+    pub connectivity: usize,
+    /// Expansion factor during index construction (ef_construction).
+    pub expansion_add: usize,
+    /// Expansion factor during search (ef_search).
+    pub expansion_search: usize,
+}
 
 /// Creates a new vector index engine based on the engine type.
 pub fn create_engine(
