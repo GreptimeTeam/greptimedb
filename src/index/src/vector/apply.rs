@@ -105,7 +105,7 @@ impl HnswVectorIndexApplier {
 
         if blob_len < META_SIZE_LEN + meta_size {
             return BlobTruncatedSnafu {
-                reason: "blob truncated while reading meta".to_string(),
+                reason: "blob truncated while reading meta",
             }
             .fail();
         }
@@ -120,7 +120,7 @@ impl HnswVectorIndexApplier {
 
         if null_bitmap_size + index_size > meta_start {
             return InvalidBlobSnafu {
-                reason: "invalid size fields".to_string(),
+                reason: "invalid size fields",
             }
             .fail();
         }
@@ -173,7 +173,12 @@ impl HnswVectorIndexApplier {
 
         let engine = engine::load_engine(engine_type, &config, index_bytes)?;
 
-        let stats = meta.stats.unwrap_or_default();
+        let stats = meta.stats.ok_or_else(|| {
+            InvalidBlobSnafu {
+                reason: "missing stats in vector index metadata",
+            }
+            .build()
+        })?;
 
         Ok(Self {
             engine,
@@ -209,7 +214,7 @@ impl HnswVectorIndexApplier {
     fn hnsw_key_to_row_offset(&self, total_rows: u32, key: u64) -> Result<u32> {
         if total_rows == 0 {
             return KeyMappingSnafu {
-                reason: "Total rows is zero".to_string(),
+                reason: "Total rows is zero",
             }
             .fail();
         }
@@ -247,7 +252,7 @@ impl HnswVectorIndexApplier {
 
         if left >= total_rows {
             return KeyMappingSnafu {
-                reason: "Failed to map HNSW key to row offset".to_string(),
+                reason: "Failed to map HNSW key to row offset",
             }
             .fail();
         }

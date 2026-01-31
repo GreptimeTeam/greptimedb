@@ -234,7 +234,7 @@ impl IndexCreator for HnswVectorIndexCreator {
         }
 
         let start = self.current_row_offset as u32;
-        let end = start + n as u32;
+        let end = (self.current_row_offset + increment) as u32;
         self.null_bitmap.insert_range(start..end);
         self.current_row_offset += increment;
         Ok(())
@@ -248,7 +248,7 @@ impl IndexCreator for HnswVectorIndexCreator {
     ) -> Result<u64> {
         if self.finished {
             return FinishSnafu {
-                reason: "Index already finished".to_string(),
+                reason: "Index already finished"
             }
             .fail();
         }
