@@ -71,12 +71,14 @@ impl CachedVectorIndex {
 
 impl std::fmt::Debug for CachedVectorIndex {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let null_count = self.applier.total_rows() - self.applier.indexed_rows();
         f.debug_struct("CachedVectorIndex")
             .field("size_bytes", &self.size_bytes)
             .field("dimensions", &self.applier.dimensions())
             .field("metric", &self.applier.metric())
             .field("total_rows", &self.applier.total_rows())
             .field("indexed_rows", &self.applier.indexed_rows())
+            .field("null_count", &null_count)
             .finish()
     }
 }

@@ -22,6 +22,8 @@ use usearch::{Index, IndexOptions, ScalarKind};
 use super::VectorIndexConfig;
 use crate::vector::error::{EngineSnafu, Result};
 
+type EngineResult<T> = std::result::Result<T, BoxedError>;
+
 /// USearch-based vector index engine using HNSW algorithm.
 pub struct UsearchEngine {
     index: Index,
@@ -88,7 +90,7 @@ impl UsearchEngine {
 }
 
 impl VectorIndexEngine for UsearchEngine {
-    fn add(&mut self, key: u64, vector: &[f32]) -> std::result::Result<(), BoxedError> {
+    fn add(&mut self, key: u64, vector: &[f32]) -> EngineResult<()> {
         // Reserve capacity if needed
         if self.index.size() >= self.index.capacity() {
             let new_capacity = std::cmp::max(1, self.index.capacity() * 2);
@@ -102,11 +104,7 @@ impl VectorIndexEngine for UsearchEngine {
             .map_err(|e| Self::boxed_engine_error(format!("Failed to add vector: {}", e)))
     }
 
-    fn search(
-        &self,
-        query: &[f32],
-        k: usize,
-    ) -> std::result::Result<VectorSearchMatches, BoxedError> {
+    fn search(&self, query: &[f32], k: usize) -> EngineResult<VectorSearchMatches> {
         let matches = self
             .index
             .search(query, k)
@@ -122,13 +120,13 @@ impl VectorIndexEngine for UsearchEngine {
         self.index.serialized_length()
     }
 
-    fn save_to_buffer(&self, buffer: &mut [u8]) -> std::result::Result<(), BoxedError> {
+    fn save_to_buffer(&self, buffer: &mut [u8]) -> EngineResult<()> {
         self.index
             .save_to_buffer(buffer)
             .map_err(|e| Self::boxed_engine_error(format!("Failed to save to buffer: {}", e)))
     }
 
-    fn reserve(&mut self, capacity: usize) -> std::result::Result<(), BoxedError> {
+    fn reserve(&mut self, capacity: usize) -> EngineResult<()> {
         self.index
             .reserve(capacity)
             .map_err(|e| Self::boxed_engine_error(format!("Failed to reserve: {}", e)))
