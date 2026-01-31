@@ -20,13 +20,13 @@ use roaring::RoaringBitmap;
 use snafu::ResultExt;
 use store_api::storage::VectorIndexEngine;
 
-use super::engine::{self, VectorIndexConfig};
-use super::error::{
+use crate::vector::engine::{self, VectorIndexConfig};
+use crate::vector::error::{
     BlobTooSmallSnafu, BlobTruncatedSnafu, DecodeProtoSnafu, DeserializeBitmapSnafu, EngineSnafu,
     InvalidBlobSnafu, KeyMappingSnafu, Result, UnknownDistanceMetricSnafu, UnknownEngineTypeSnafu,
 };
-use super::format::{META_SIZE_LEN, distance_metric_from_proto, engine_type_from_proto};
-use super::{VectorDistanceMetric, distance_metric_to_usearch};
+use crate::vector::format::{META_SIZE_LEN, distance_metric_from_proto, engine_type_from_proto};
+use crate::vector::{VectorDistanceMetric, distance_metric_to_usearch};
 
 /// Output of a vector index search.
 #[derive(Debug, Clone)]

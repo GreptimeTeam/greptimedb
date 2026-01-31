@@ -20,8 +20,8 @@ use store_api::storage::{VectorIndexEngine, VectorIndexEngineType};
 use usearch::MetricKind;
 pub use usearch::UsearchEngine;
 
-use super::VectorDistanceMetric;
-use super::error::Result;
+use crate::vector::VectorDistanceMetric;
+use crate::vector::error::Result;
 
 /// Configuration for creating a vector index.
 #[derive(Debug, Clone)]

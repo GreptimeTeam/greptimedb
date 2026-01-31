@@ -19,7 +19,7 @@ use store_api::storage::{VectorIndexEngine, VectorSearchMatches};
 pub use usearch::MetricKind;
 use usearch::{Index, IndexOptions, ScalarKind};
 
-use super::VectorIndexConfig;
+use crate::vector::engine::VectorIndexConfig;
 use crate::vector::error::{EngineSnafu, Result};
 
 type EngineResult<T> = std::result::Result<T, BoxedError>;

@@ -24,11 +24,11 @@ use roaring::RoaringBitmap;
 use snafu::ResultExt;
 use store_api::storage::{VectorIndexEngine, VectorIndexEngineType};
 
-use super::engine::{self, VectorIndexConfig};
-use super::error::{
+use crate::vector::engine::{self, VectorIndexConfig};
+use crate::vector::error::{
     EngineSnafu, ExternalSnafu, FinishSnafu, Result, RowCountOverflowSnafu, SerializeBitmapSnafu,
 };
-use super::format::{META_SIZE_LEN, distance_metric_to_proto, engine_type_to_proto};
+use crate::vector::format::{META_SIZE_LEN, distance_metric_to_proto, engine_type_to_proto};
 
 /// `IndexCreator` is for creating a vector index.
 #[async_trait]
