@@ -16,9 +16,9 @@
 
 use common_error::ext::BoxedError;
 use store_api::storage::{VectorIndexEngine, VectorSearchMatches};
-pub use usearch::MetricKind;
 use usearch::{Index, IndexOptions, ScalarKind};
 
+use crate::vector::distance_metric_to_usearch;
 use crate::vector::engine::VectorIndexConfig;
 use crate::vector::error::{EngineSnafu, Result};
 
@@ -34,7 +34,7 @@ impl UsearchEngine {
     pub fn create(config: &VectorIndexConfig) -> Result<Self> {
         let options = IndexOptions {
             dimensions: config.dim,
-            metric: config.metric,
+            metric: distance_metric_to_usearch(config.distance_metric),
             quantization: ScalarKind::F32,
             connectivity: config.connectivity,
             expansion_add: config.expansion_add,
@@ -57,7 +57,7 @@ impl UsearchEngine {
     pub fn load(config: &VectorIndexConfig, data: &[u8]) -> Result<Self> {
         let options = IndexOptions {
             dimensions: config.dim,
-            metric: config.metric,
+            metric: distance_metric_to_usearch(config.distance_metric),
             quantization: ScalarKind::F32,
             // These will be loaded from serialized data
             connectivity: 0,
@@ -156,7 +156,6 @@ mod tests {
         VectorIndexConfig {
             engine: VectorIndexEngineType::Usearch,
             dim: 4,
-            metric: MetricKind::L2sq,
             distance_metric: VectorDistanceMetric::L2sq,
             connectivity: 16,
             expansion_add: 128,

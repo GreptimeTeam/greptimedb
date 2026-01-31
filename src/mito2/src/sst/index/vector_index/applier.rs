@@ -344,7 +344,6 @@ mod tests {
     use roaring::RoaringBitmap;
     use store_api::region_request::PathType;
     use store_api::storage::{ColumnId, FileId, VectorIndexEngineType};
-    use usearch::MetricKind;
 
     use super::*;
     use crate::access_layer::RegionFilePathFactory;
@@ -444,7 +443,6 @@ mod tests {
         VectorIndexConfig {
             engine: VectorIndexEngineType::Usearch,
             dim: 2,
-            metric: MetricKind::L2sq,
             distance_metric: VectorDistanceMetric::L2sq,
             connectivity: 16,
             expansion_add: 128,
@@ -489,7 +487,6 @@ mod tests {
         let config = VectorIndexConfig {
             engine: VectorIndexEngineType::Usearch,
             dim: 1,
-            metric: MetricKind::L2sq,
             distance_metric: VectorDistanceMetric::L2sq,
             connectivity: 16,
             expansion_add: 128,

@@ -8,7 +8,7 @@ license.workspace = true
 default = []
 test = ["common-test-util", "rstest", "rstest_reuse", "rskafka"]
 enterprise = []
-vector_index = ["dep:usearch", "dep:roaring", "index/vector_index"]
+vector_index = ["dep:roaring", "index/vector_index"]
 
 [lints]
 workspace = true
@@ -86,7 +86,6 @@ tokio.workspace = true
 tokio-stream.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
-usearch = { version = "2.21", default-features = false, features = ["fp16lib"], optional = true }
 uuid.workspace = true
 
 [dev-dependencies]

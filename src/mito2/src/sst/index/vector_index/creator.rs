@@ -23,10 +23,10 @@ use datatypes::arrow::array::{Array, BinaryArray};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::ValueRef;
+use index::vector::VectorIndexOptions;
 use index::vector::create::{HnswVectorIndexCreator, IndexCreator};
 use index::vector::engine::VectorIndexConfig;
 use index::vector::util::bytes_to_f32_slice;
-use index::vector::{VectorIndexOptions, distance_metric_to_usearch};
 use puffin::puffin_manager::PutOptions;
 use snafu::ensure;
 use store_api::metadata::RegionMetadataRef;
@@ -50,7 +50,6 @@ fn create_config(dim: usize, options: &VectorIndexOptions) -> VectorIndexConfig 
     VectorIndexConfig {
         engine: options.engine,
         dim,
-        metric: distance_metric_to_usearch(options.metric),
         distance_metric: options.metric,
         connectivity: options.connectivity as usize,
         expansion_add: options.expansion_add as usize,

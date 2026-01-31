@@ -248,7 +248,7 @@ impl IndexCreator for HnswVectorIndexCreator {
     ) -> Result<u64> {
         if self.finished {
             return FinishSnafu {
-                reason: "Index already finished"
+                reason: "Index already finished",
             }
             .fail();
         }
@@ -285,7 +285,6 @@ impl IndexCreator for HnswVectorIndexCreator {
 #[cfg(test)]
 mod tests {
     use store_api::storage::VectorIndexEngineType;
-    use usearch::MetricKind;
 
     use super::*;
     use crate::vector::VectorDistanceMetric;
@@ -294,7 +293,6 @@ mod tests {
         VectorIndexConfig {
             engine: VectorIndexEngineType::Usearch,
             dim: 4,
-            metric: MetricKind::L2sq,
             distance_metric: VectorDistanceMetric::L2sq,
             connectivity: 16,
             expansion_add: 128,

@@ -17,7 +17,6 @@
 mod usearch;
 
 use store_api::storage::{VectorIndexEngine, VectorIndexEngineType};
-use usearch::MetricKind;
 pub use usearch::UsearchEngine;
 
 use crate::vector::VectorDistanceMetric;
@@ -30,9 +29,7 @@ pub struct VectorIndexConfig {
     pub engine: VectorIndexEngineType,
     /// The dimension of vectors in this column.
     pub dim: usize,
-    /// The distance metric to use (e.g., L2, Cosine, IP) - usearch format.
-    pub metric: MetricKind,
-    /// The original distance metric (for serialization).
+    /// The distance metric (e.g., L2sq, Cosine, InnerProduct).
     pub distance_metric: VectorDistanceMetric,
     /// HNSW connectivity parameter (M in the paper).
     /// Higher values give better recall but use more memory.

@@ -20,13 +20,13 @@ use roaring::RoaringBitmap;
 use snafu::ResultExt;
 use store_api::storage::VectorIndexEngine;
 
+use crate::vector::VectorDistanceMetric;
 use crate::vector::engine::{self, VectorIndexConfig};
 use crate::vector::error::{
     BlobTooSmallSnafu, BlobTruncatedSnafu, DecodeProtoSnafu, DeserializeBitmapSnafu, EngineSnafu,
     InvalidBlobSnafu, KeyMappingSnafu, Result, UnknownDistanceMetricSnafu, UnknownEngineTypeSnafu,
 };
 use crate::vector::format::{META_SIZE_LEN, distance_metric_from_proto, engine_type_from_proto};
-use crate::vector::{VectorDistanceMetric, distance_metric_to_usearch};
 
 /// Output of a vector index search.
 #[derive(Debug, Clone)]
@@ -164,7 +164,6 @@ impl HnswVectorIndexApplier {
         let config = VectorIndexConfig {
             engine: engine_type,
             dim: meta.dim as usize,
-            metric: distance_metric_to_usearch(distance_metric),
             distance_metric,
             connectivity: meta.connectivity as usize,
             expansion_add: meta.expansion_add as usize,
@@ -315,7 +314,6 @@ mod tests {
     use prost::Message;
     use roaring::RoaringBitmap;
     use store_api::storage::VectorIndexEngineType;
-    use usearch::MetricKind;
 
     use super::*;
     use crate::vector::engine::VectorIndexConfig;
@@ -370,7 +368,6 @@ mod tests {
         VectorIndexConfig {
             engine: VectorIndexEngineType::Usearch,
             dim: 2,
-            metric: MetricKind::L2sq,
             distance_metric: VectorDistanceMetric::L2sq,
             connectivity: 16,
             expansion_add: 128,
