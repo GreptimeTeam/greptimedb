@@ -16,23 +16,19 @@
 
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
+use futures::io::Cursor;
 use greptime_proto::v1::index::{VectorIndexMeta, VectorIndexStats};
 use prost::Message;
 use puffin::puffin_manager::{PuffinWriter, PutOptions};
 use roaring::RoaringBitmap;
 use snafu::ResultExt;
 use store_api::storage::{VectorIndexEngine, VectorIndexEngineType};
-use tokio::io::AsyncWriteExt;
-use tokio_util::compat::TokioAsyncReadCompatExt;
 
 use super::engine::{self, VectorIndexConfig};
 use super::error::{
     EngineSnafu, ExternalSnafu, FinishSnafu, Result, RowCountOverflowSnafu, SerializeBitmapSnafu,
 };
 use super::format::{META_SIZE_LEN, distance_metric_to_proto, engine_type_to_proto};
-
-/// The buffer size for the pipe used to send index data to the puffin blob.
-const PIPE_BUFFER_SIZE_FOR_SENDING_BLOB: usize = 8192;
 
 /// `IndexCreator` is for creating a vector index.
 #[async_trait]
@@ -260,38 +256,16 @@ impl IndexCreator for HnswVectorIndexCreator {
 
         let blob_data = self.build_blob()?;
 
-        // Write to puffin using a pipe
-        let (tx, rx) = tokio::io::duplex(PIPE_BUFFER_SIZE_FOR_SENDING_BLOB);
-
-        // Writer task writes the blob data to the pipe
-        let write_index = async move {
-            let mut writer = tx;
-            writer.write_all(&blob_data).await?;
-            writer.shutdown().await?;
-            Ok::<(), std::io::Error>(())
-        };
-
-        let (index_write_result, puffin_add_blob) = futures::join!(
-            write_index,
-            puffin_writer.put_blob(blob_key, rx.compat(), put_options, Default::default())
-        );
-
-        // Handle errors
-        let puffin_result = puffin_add_blob
+        puffin_writer
+            .put_blob(
+                blob_key,
+                Cursor::new(blob_data),
+                put_options,
+                Default::default(),
+            )
+            .await
             .map_err(BoxedError::new)
-            .context(ExternalSnafu);
-        let write_result = index_write_result.map_err(|e| {
-            FinishSnafu {
-                reason: format!("Failed to write blob data: {}", e),
-            }
-            .build()
-        });
-
-        match (puffin_result, write_result) {
-            (Err(e), _) => Err(e),
-            (_, Err(e)) => Err(e),
-            (Ok(written_bytes), Ok(_)) => Ok(written_bytes),
-        }
+            .context(ExternalSnafu)
     }
 
     async fn abort(&mut self) -> Result<()> {

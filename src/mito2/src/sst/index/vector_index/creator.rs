@@ -58,6 +58,13 @@ fn create_config(dim: usize, options: &VectorIndexOptions) -> VectorIndexConfig 
     }
 }
 
+fn build_err(e: impl std::fmt::Display) -> crate::error::Error {
+    VectorIndexBuildSnafu {
+        reason: e.to_string(),
+    }
+    .build()
+}
+
 /// The indexer for vector indexes across multiple columns.
 pub struct VectorIndexer {
     /// Per-column vector index creators.
@@ -109,12 +116,7 @@ impl VectorIndexer {
             };
 
             let config = create_config(vector_type.dim as usize, options);
-            let creator = HnswVectorIndexCreator::new(config).map_err(|e| {
-                VectorIndexBuildSnafu {
-                    reason: e.to_string(),
-                }
-                .build()
-            })?;
+            let creator = HnswVectorIndexCreator::new(config).map_err(build_err)?;
             creators.insert(column.column_id, creator);
         }
 
@@ -191,12 +193,7 @@ impl VectorIndexer {
 
         for (col_id, creator) in &mut self.creators {
             let Some(values) = batch.field_col_value(*col_id) else {
-                creator.push_nulls(n).map_err(|e| {
-                    VectorIndexBuildSnafu {
-                        reason: e.to_string(),
-                    }
-                    .build()
-                })?;
+                creator.push_nulls(n).map_err(build_err)?;
                 continue;
             };
 
@@ -204,12 +201,7 @@ impl VectorIndexer {
             for i in 0..n {
                 let value = values.data.get_ref(i);
                 if value.is_null() {
-                    creator.push_null().map_err(|e| {
-                        VectorIndexBuildSnafu {
-                            reason: e.to_string(),
-                        }
-                        .build()
-                    })?;
+                    creator.push_null().map_err(build_err)?;
                 } else {
                     // Extract the vector bytes and convert to f32 slice
                     if let ValueRef::Binary(bytes) = value {
@@ -224,19 +216,9 @@ impl VectorIndexer {
                             }
                             .fail();
                         }
-                        creator.push_vector(&floats).map_err(|e| {
-                            VectorIndexBuildSnafu {
-                                reason: e.to_string(),
-                            }
-                            .build()
-                        })?;
+                        creator.push_vector(&floats).map_err(build_err)?;
                     } else {
-                        creator.push_null().map_err(|e| {
-                            VectorIndexBuildSnafu {
-                                reason: e.to_string(),
-                            }
-                            .build()
-                        })?;
+                        creator.push_null().map_err(build_err)?;
                     }
                 }
             }
@@ -284,12 +266,7 @@ impl VectorIndexer {
             let column_name = &column_meta.column_schema.name;
             // Column not in batch is normal for flat format - treat as NULLs
             let Some(column_array) = batch.column_by_name(column_name) else {
-                creator.push_nulls(n).map_err(|e| {
-                    VectorIndexBuildSnafu {
-                        reason: e.to_string(),
-                    }
-                    .build()
-                })?;
+                creator.push_nulls(n).map_err(build_err)?;
                 continue;
             };
 
@@ -310,12 +287,7 @@ impl VectorIndexer {
 
             for i in 0..n {
                 if !binary_array.is_valid(i) {
-                    creator.push_null().map_err(|e| {
-                        VectorIndexBuildSnafu {
-                            reason: e.to_string(),
-                        }
-                        .build()
-                    })?;
+                    creator.push_null().map_err(build_err)?;
                 } else {
                     let bytes = binary_array.value(i);
                     let floats = bytes_to_f32_slice(bytes);
@@ -329,12 +301,7 @@ impl VectorIndexer {
                         }
                         .fail();
                     }
-                    creator.push_vector(&floats).map_err(|e| {
-                        VectorIndexBuildSnafu {
-                            reason: e.to_string(),
-                        }
-                        .build()
-                    })?;
+                    creator.push_vector(&floats).map_err(build_err)?;
                 }
             }
 
