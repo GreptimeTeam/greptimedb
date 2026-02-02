@@ -524,7 +524,7 @@ impl StatementExecutor {
             })?;
 
         let physical_table_info = physical_table.table_info();
-        let partition_rule = self
+        let (partition_rule, _) = self
             .partition_manager
             .find_table_partition_rule(&physical_table_info)
             .await

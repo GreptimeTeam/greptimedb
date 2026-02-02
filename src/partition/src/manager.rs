@@ -172,26 +172,36 @@ impl PartitionRuleManager {
     pub async fn find_table_partition_rule(
         &self,
         table_info: &TableInfo,
-    ) -> Result<PartitionRuleRef> {
-        let partitions = self.find_table_partitions(table_info.table_id()).await?;
-        let regions = partitions
-            .iter()
-            .map(|x| x.id.region_number())
-            .collect::<Vec<RegionNumber>>();
-
-        let exprs = partitions
-            .iter()
-            .filter_map(|x| x.partition_expr.as_ref())
-            .cloned()
-            .collect::<Vec<_>>();
-
+    ) -> Result<(PartitionRuleRef, HashMap<RegionNumber, u64>)> {
         let partition_columns = table_info
             .meta
             .partition_column_names()
             .cloned()
             .collect::<Vec<_>>();
-        let rule = MultiDimPartitionRule::try_new(partition_columns, regions, exprs, false)?;
-        Ok(Arc::new(rule) as _)
+
+        let partitions_with_version = self
+            .find_table_partitions_with_version(table_info.table_id())
+            .await?;
+        let partition_versions = partitions_with_version
+            .iter()
+            .map(|r| (r.id.region_number(), r.partition_rule_version))
+            .collect::<HashMap<RegionNumber, u64>>();
+        let regions = partitions_with_version
+            .iter()
+            .map(|x| x.id.region_number())
+            .collect::<Vec<RegionNumber>>();
+        let exprs = partitions_with_version
+            .iter()
+            .filter_map(|x| x.partition_expr.as_ref())
+            .cloned()
+            .collect::<Vec<_>>();
+        let partition_rule = Arc::new(MultiDimPartitionRule::try_new(
+            partition_columns,
+            regions,
+            exprs,
+            false,
+        )?) as _;
+        Ok((partition_rule, partition_versions))
     }
 
     /// Find the leader of the region.
@@ -213,9 +223,28 @@ impl PartitionRuleManager {
         &self,
         table_info: &TableInfo,
         rows: Rows,
-    ) -> Result<HashMap<RegionNumber, Rows>> {
-        let partition_rule = self.find_table_partition_rule(table_info).await?;
-        RowSplitter::new(partition_rule).split(rows)
+    ) -> Result<HashMap<RegionNumber, (Rows, u64)>> {
+        let (partition_rule, partition_versions) =
+            self.find_table_partition_rule(table_info).await?;
+
+        let result = RowSplitter::new(partition_rule)
+            .split(rows)?
+            .into_iter()
+            .map(|(region_number, rows)| {
+                (
+                    region_number,
+                    (
+                        rows,
+                        partition_versions
+                            .get(&region_number)
+                            .copied()
+                            .unwrap_or_default(),
+                    ),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+
+        Ok(result)
     }
 }
 

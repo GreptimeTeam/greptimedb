@@ -66,21 +66,7 @@ impl Inserter {
         let partition_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
             .with_label_values(&["partition"])
             .start_timer();
-        let partitions = self
-            .partition_manager
-            .find_table_partitions_with_version(table_id)
-            .await
-            .context(error::FindTablePartitionRuleSnafu {
-                table_name: table_info.name.clone(),
-            })?;
-        let mut partition_rule_versions = HashMap::with_capacity(partitions.len());
-        for partition in partitions {
-            partition_rule_versions.insert(
-                partition.id.region_number(),
-                partition.partition_rule_version,
-            );
-        }
-        let partition_rule = self
+        let (partition_rule, partition_versions) = self
             .partition_manager
             .find_table_partition_rule(&table_info)
             .await
@@ -101,7 +87,7 @@ impl Inserter {
             // SAFETY: region masks length checked
             let (region_number, _) = region_masks.into_iter().next().unwrap();
             let region_id = RegionId::new(table_id, region_number);
-            let partition_rule_version = partition_rule_versions
+            let partition_rule_version = partition_versions
                 .get(&region_number)
                 .copied()
                 .unwrap_or_default();
@@ -169,7 +155,7 @@ impl Inserter {
                 if mask.select_none() {
                     continue;
                 }
-                let partition_rule_version = partition_rule_versions
+                let partition_rule_version = partition_versions
                     .get(&region_id.region_number())
                     .copied()
                     .unwrap_or_default();
