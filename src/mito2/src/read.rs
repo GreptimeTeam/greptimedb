@@ -508,9 +508,9 @@ impl Batch {
                     }
 
                     if !missing_fields.is_empty() {
-                        'search: for row_idx in (start + 1)..end {
+                        for row_idx in (start + 1)..end {
                             if op_types[row_idx] == OpType::Delete as u8 {
-                                break 'search;
+                                break;
                             }
 
                             missing_fields.retain(|&field_idx| {
@@ -523,7 +523,7 @@ impl Batch {
                             });
 
                             if missing_fields.is_empty() {
-                                break 'search;
+                                break;
                             }
                         }
                     }
