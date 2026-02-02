@@ -49,11 +49,14 @@ impl FunctionRewrite for JsonGetRewriter {
     }
 }
 
+fn is_json_get_function_call(scalar_func: &ScalarFunction) -> bool {
+    scalar_func.func.name().to_ascii_lowercase() == JsonGetWithType::NAME
+        && scalar_func.args.len() == 2
+}
+
 fn rewrite_json_get_cast(cast: &Cast) -> Option<Transformed<Expr>> {
     let scalar_func = extract_scalar_function(&cast.expr)?;
-    if scalar_func.func.name().to_ascii_lowercase() == JsonGetWithType::NAME
-        && scalar_func.args.len() == 2
-    {
+    if is_json_get_function_call(scalar_func) {
         let null_expr = Expr::Literal(ScalarValue::Null, None);
         let null_cast = Expr::Cast(datafusion::logical_expr::expr::Cast {
             expr: Box::new(null_expr),
@@ -77,7 +80,7 @@ fn rewrite_arrow_cast_json_get(scalar_func: &ScalarFunction) -> Option<Transform
     // Check if this is an Arrow cast function
     // The function name might be "arrow_cast" or similar
     let func_name = scalar_func.func.name().to_ascii_lowercase();
-    if !func_name.contains("arrow_cast") && !func_name.contains("cast") {
+    if !func_name.contains("arrow_cast") {
         return None;
     }
 
@@ -92,31 +95,29 @@ fn rewrite_arrow_cast_json_get(scalar_func: &ScalarFunction) -> Option<Transform
     let json_get_func = extract_scalar_function(&scalar_func.args[0])?;
 
     // Check if it's a json_get function
-    if json_get_func.func.name().to_ascii_lowercase() != JsonGetWithType::NAME
-        || json_get_func.args.len() != 2
-    {
-        return None;
+    if is_json_get_function_call(json_get_func) {
+        // Get the target type from the second argument
+        let target_type = extract_string_literal(&scalar_func.args[1])?;
+        let data_type = parse_data_type_from_string(&target_type)?;
+
+        // Create the null expression with the same type
+        let null_expr = Expr::Literal(ScalarValue::Null, None);
+        let null_cast = Expr::Cast(datafusion::logical_expr::expr::Cast {
+            expr: Box::new(null_expr),
+            data_type,
+        });
+
+        // Create the new json_get_with_type function with the null parameter
+        let mut args = json_get_func.args.clone();
+        args.push(null_cast);
+
+        Some(Transformed::yes(Expr::ScalarFunction(ScalarFunction {
+            func: json_get_func.func.clone(),
+            args,
+        })))
+    } else {
+        None
     }
-
-    // Get the target type from the second argument
-    let target_type = extract_string_literal(&scalar_func.args[1])?;
-    let data_type = parse_data_type_from_string(&target_type)?;
-
-    // Create the null expression with the same type
-    let null_expr = Expr::Literal(ScalarValue::Null, None);
-    let null_cast = Expr::Cast(datafusion::logical_expr::expr::Cast {
-        expr: Box::new(null_expr),
-        data_type,
-    });
-
-    // Create the new json_get_with_type function with the null parameter
-    let mut args = json_get_func.args.clone();
-    args.push(null_cast);
-
-    Some(Transformed::yes(Expr::ScalarFunction(ScalarFunction {
-        func: json_get_func.func.clone(),
-        args,
-    })))
 }
 
 // Extract string literal from an expression
