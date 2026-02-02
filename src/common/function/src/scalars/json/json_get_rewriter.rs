@@ -158,12 +158,12 @@ fn extract_scalar_function(expr: &Expr) -> Option<&ScalarFunction> {
 #[cfg(test)]
 mod tests {
     use arrow_schema::DataType;
-    use datafusion::common::config::ConfigOptions;
     use datafusion::common::DFSchema;
+    use datafusion::common::config::ConfigOptions;
     use datafusion::logical_expr::expr::Cast;
     use datafusion::scalar::ScalarValue;
-    use datafusion_expr::expr::ScalarFunction;
     use datafusion_expr::Expr;
+    use datafusion_expr::expr::ScalarFunction;
 
     use super::*;
 
@@ -285,11 +285,13 @@ mod tests {
                 match &func.args[0] {
                     Expr::ScalarFunction(parse_func) => {
                         // Verify it's a parse_json function with the right argument
-                        assert!(parse_func
-                            .func
-                            .name()
-                            .to_ascii_lowercase()
-                            .contains("parse_json"));
+                        assert!(
+                            parse_func
+                                .func
+                                .name()
+                                .to_ascii_lowercase()
+                                .contains("parse_json")
+                        );
                         assert_eq!(parse_func.args.len(), 1);
                         match &parse_func.args[0] {
                             Expr::Literal(ScalarValue::Utf8(Some(json)), _) => {
