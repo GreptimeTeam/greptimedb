@@ -258,18 +258,14 @@ impl Memtable for SimpleBulkMemtable {
         let contexts = values
             .into_par_iter()
             .filter_map(|v| {
-                let filtered = match v
-                    .to_batch(
-                        &[],
-                        &self.region_metadata,
-                        &projection,
-                        self.dedup,
-                        self.merge_mode,
-                    )
-                    .and_then(|mut b| {
-                        b.filter_by_sequence(sequence)?;
-                        Ok(b)
-                    }) {
+                let filtered = match v.to_batch(
+                    &[],
+                    &self.region_metadata,
+                    &projection,
+                    sequence,
+                    self.dedup,
+                    self.merge_mode,
+                ) {
                     Ok(filtered) => filtered,
                     Err(e) => {
                         return Some(Err(e));

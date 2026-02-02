@@ -76,13 +76,10 @@ impl IterBuilder for BatchIterBuilderDeprecated {
                 &[],
                 &self.region_metadata,
                 &self.projection,
+                self.sequence,
                 self.dedup,
                 self.merge_mode,
             )
-            .and_then(|mut b| {
-                b.filter_by_sequence(self.sequence)?;
-                Ok(b)
-            })
             .map(Some)
             .transpose();
 
