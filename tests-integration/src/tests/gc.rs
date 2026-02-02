@@ -33,8 +33,8 @@ use crate::cluster::GreptimeDbClusterBuilder;
 use crate::test_util::{StorageType, TempDirGuard, execute_sql, get_test_store_config};
 use crate::tests::test_util::{MockInstanceBuilder, TestContext, wait_procedure};
 
-mod repart;
 mod admin;
+mod repart;
 
 /// Helper function to get table route information for GC procedure
 pub(super) async fn get_table_route(
