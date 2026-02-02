@@ -443,6 +443,118 @@ impl Batch {
         self.take_in_place(&indices)
     }
 
+    /// Merges duplicated timestamps in the batch by keeping the latest non-null field values.
+    ///
+    /// Rows must already be sorted by timestamp (ascending) and sequence (descending).
+    ///
+    /// This method deduplicates rows with the same timestamp (keeping the first row in each
+    /// timestamp range as the base row) and fills null fields from subsequent rows until all
+    /// fields are filled or a delete operation is encountered.
+    pub(crate) fn merge_last_non_null(&mut self) -> Result<()> {
+        let num_rows = self.num_rows();
+        if num_rows < 2 {
+            return Ok(());
+        }
+
+        let Some(timestamps) = self.timestamps_native() else {
+            return Ok(());
+        };
+
+        // Fast path: check if there are any duplicate timestamps.
+        let mut has_dup = false;
+        let mut group_count = 1;
+        for i in 1..num_rows {
+            has_dup |= timestamps[i] == timestamps[i - 1];
+            group_count += (timestamps[i] != timestamps[i - 1]) as usize;
+        }
+        if !has_dup {
+            return Ok(());
+        }
+
+        let num_fields = self.fields.len();
+        let op_types = self.op_types.as_arrow().values();
+
+        let mut base_indices: Vec<u32> = Vec::with_capacity(group_count);
+        let mut field_indices: Vec<Vec<u32>> = (0..num_fields)
+            .map(|_| Vec::with_capacity(group_count))
+            .collect();
+
+        let mut start = 0;
+        while start < num_rows {
+            let ts = timestamps[start];
+            let mut end = start + 1;
+            while end < num_rows && timestamps[end] == ts {
+                end += 1;
+            }
+
+            let group_pos = base_indices.len();
+            base_indices.push(start as u32);
+
+            if num_fields > 0 {
+                // Default: take the base row for all fields.
+                for idx in &mut field_indices {
+                    idx.push(start as u32);
+                }
+
+                let base_deleted = op_types[start] == OpType::Delete as u8;
+                if !base_deleted {
+                    // Track fields that are null in the base row and try to fill them from older
+                    // rows in the same timestamp range.
+                    let mut missing_fields = Vec::new();
+                    for (field_idx, col) in self.fields.iter().enumerate() {
+                        if col.data.is_null(start) {
+                            missing_fields.push(field_idx);
+                        }
+                    }
+
+                    if !missing_fields.is_empty() {
+                        'search: for row_idx in (start + 1)..end {
+                            if op_types[row_idx] == OpType::Delete as u8 {
+                                break 'search;
+                            }
+
+                            missing_fields.retain(|&field_idx| {
+                                if self.fields[field_idx].data.is_null(row_idx) {
+                                    true
+                                } else {
+                                    field_indices[field_idx][group_pos] = row_idx as u32;
+                                    false
+                                }
+                            });
+
+                            if missing_fields.is_empty() {
+                                break 'search;
+                            }
+                        }
+                    }
+                }
+            }
+
+            start = end;
+        }
+
+        let base_indices = UInt32Vector::from_vec(base_indices);
+        self.timestamps = self
+            .timestamps
+            .take(&base_indices)
+            .context(ComputeVectorSnafu)?;
+        let array = arrow::compute::take(self.sequences.as_arrow(), base_indices.as_arrow(), None)
+            .context(ComputeArrowSnafu)?;
+        // Safety: We know the array and vector type.
+        self.sequences = Arc::new(UInt64Vector::try_from_arrow_array(array).unwrap());
+        let array = arrow::compute::take(self.op_types.as_arrow(), base_indices.as_arrow(), None)
+            .context(ComputeArrowSnafu)?;
+        // Safety: We know the array and vector type.
+        self.op_types = Arc::new(UInt8Vector::try_from_arrow_array(array).unwrap());
+
+        for (field_idx, batch_column) in self.fields.iter_mut().enumerate() {
+            let idx = UInt32Vector::from_vec(std::mem::take(&mut field_indices[field_idx]));
+            batch_column.data = batch_column.data.take(&idx).context(ComputeVectorSnafu)?;
+        }
+
+        Ok(())
+    }
+
     /// Returns the estimated memory size of the batch.
     pub fn memory_size(&self) -> usize {
         let mut size = std::mem::size_of::<Self>();

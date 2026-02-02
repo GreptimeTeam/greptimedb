@@ -146,11 +146,6 @@ impl TimeSeriesMemtable {
     ) -> Self {
         let row_codec = Arc::new(DensePrimaryKeyCodec::new(&region_metadata));
         let series_set = SeriesSet::new(region_metadata.clone(), row_codec.clone());
-        let dedup = if merge_mode == MergeMode::LastNonNull {
-            false
-        } else {
-            dedup
-        };
         Self {
             id,
             region_metadata,
@@ -288,9 +283,14 @@ impl Memtable for TimeSeriesMemtable {
                 .collect()
         };
 
-        let iter = self
-            .series_set
-            .iter_series(projection, filters, self.dedup, sequence, None)?;
+        let iter = self.series_set.iter_series(
+            projection,
+            filters,
+            self.dedup,
+            self.merge_mode,
+            sequence,
+            None,
+        )?;
 
         if self.merge_mode == MergeMode::LastNonNull {
             let iter = LastNonNullIter::new(iter);
@@ -468,6 +468,7 @@ impl SeriesSet {
         projection: HashSet<ColumnId>,
         predicate: Option<Predicate>,
         dedup: bool,
+        merge_mode: MergeMode,
         sequence: Option<SequenceRange>,
         mem_scan_metrics: Option<MemScanMetrics>,
     ) -> Result<Iter> {
@@ -487,6 +488,7 @@ impl SeriesSet {
             primary_key_datatypes,
             self.codec.clone(),
             dedup,
+            merge_mode,
             sequence,
             mem_scan_metrics,
         )
@@ -536,6 +538,7 @@ struct Iter {
     pk_datatypes: Vec<ConcreteDataType>,
     codec: Arc<DensePrimaryKeyCodec>,
     dedup: bool,
+    merge_mode: MergeMode,
     sequence: Option<SequenceRange>,
     metrics: Metrics,
     mem_scan_metrics: Option<MemScanMetrics>,
@@ -552,6 +555,7 @@ impl Iter {
         pk_datatypes: Vec<ConcreteDataType>,
         codec: Arc<DensePrimaryKeyCodec>,
         dedup: bool,
+        merge_mode: MergeMode,
         sequence: Option<SequenceRange>,
         mem_scan_metrics: Option<MemScanMetrics>,
     ) -> Result<Self> {
@@ -574,6 +578,7 @@ impl Iter {
             pk_datatypes,
             codec,
             dedup,
+            merge_mode,
             sequence,
             metrics: Metrics::default(),
             mem_scan_metrics,
@@ -648,7 +653,13 @@ impl Iterator for Iter {
 
             let values = series.compact(&self.metadata);
             let batch = values.and_then(|v| {
-                v.to_batch(primary_key, &self.metadata, &self.projection, self.dedup)
+                v.to_batch(
+                    primary_key,
+                    &self.metadata,
+                    &self.projection,
+                    self.dedup,
+                    self.merge_mode,
+                )
             });
 
             // Update metrics.
@@ -1134,6 +1145,7 @@ impl Values {
         metadata: &RegionMetadataRef,
         projection: &HashSet<ColumnId>,
         dedup: bool,
+        merge_mode: MergeMode,
     ) -> Result<Batch> {
         let builder = BatchBuilder::with_required_columns(
             primary_key.to_vec(),
@@ -1154,7 +1166,18 @@ impl Values {
             .collect();
 
         let mut batch = builder.with_fields(fields).build()?;
-        batch.sort(dedup)?;
+
+        match (dedup, merge_mode) {
+            // append-only, keep duplicate rows.
+            (false, _) => batch.sort(false)?,
+            // keep the last row for each timestamp.
+            (true, MergeMode::LastRow) => batch.sort(true)?,
+            // keep the last non-null value for each field.
+            (true, MergeMode::LastNonNull) => {
+                batch.sort(false)?;
+                batch.merge_last_non_null()?;
+            }
+        }
         Ok(batch)
     }
 
@@ -1256,10 +1279,10 @@ impl IterBuilder for TimeSeriesIterBuilder {
             self.projection.clone(),
             self.predicate.clone(),
             self.dedup,
+            self.merge_mode,
             self.sequence,
             metrics,
         )?;
-
         if self.merge_mode == MergeMode::LastNonNull {
             let iter = LastNonNullIter::new(iter);
             Ok(Box::new(iter))
@@ -1466,6 +1489,7 @@ mod tests {
                 &schema,
                 &[0, 1, 2, 3, 4].into_iter().collect(),
                 true,
+                MergeMode::LastRow,
             )
             .unwrap();
         check_value(

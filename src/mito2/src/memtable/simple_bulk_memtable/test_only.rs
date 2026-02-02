@@ -72,7 +72,13 @@ impl IterBuilder for BatchIterBuilderDeprecated {
         };
 
         let maybe_batch = values
-            .to_batch(&[], &self.region_metadata, &self.projection, self.dedup)
+            .to_batch(
+                &[],
+                &self.region_metadata,
+                &self.projection,
+                self.dedup,
+                self.merge_mode,
+            )
             .and_then(|mut b| {
                 b.filter_by_sequence(self.sequence)?;
                 Ok(b)
