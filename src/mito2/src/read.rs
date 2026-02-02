@@ -1182,6 +1182,7 @@ pub(crate) struct ScannerMetrics {
 
 #[cfg(test)]
 mod tests {
+    use datatypes::arrow::array::{TimestampMillisecondArray, UInt8Array, UInt64Array};
     use mito_codec::row_converter::{self, build_primary_key_codec_with_fields};
     use store_api::codec::PrimaryKeyEncoding;
     use store_api::storage::consts::ReservedColumnId;
@@ -1199,6 +1200,68 @@ mod tests {
         new_batch_builder(b"test", timestamps, sequences, op_types, 1, field)
             .build()
             .unwrap()
+    }
+
+    fn new_batch_with_u64_fields(
+        timestamps: &[i64],
+        sequences: &[u64],
+        op_types: &[OpType],
+        fields: &[(ColumnId, &[Option<u64>])],
+    ) -> Batch {
+        assert_eq!(timestamps.len(), sequences.len());
+        assert_eq!(timestamps.len(), op_types.len());
+        for (_, values) in fields {
+            assert_eq!(timestamps.len(), values.len());
+        }
+
+        let mut builder = BatchBuilder::new(b"test".to_vec());
+        builder
+            .timestamps_array(Arc::new(TimestampMillisecondArray::from_iter_values(
+                timestamps.iter().copied(),
+            )))
+            .unwrap()
+            .sequences_array(Arc::new(UInt64Array::from_iter_values(
+                sequences.iter().copied(),
+            )))
+            .unwrap()
+            .op_types_array(Arc::new(UInt8Array::from_iter_values(
+                op_types.iter().map(|v| *v as u8),
+            )))
+            .unwrap();
+
+        for (col_id, values) in fields {
+            builder
+                .push_field_array(*col_id, Arc::new(UInt64Array::from(values.to_vec())))
+                .unwrap();
+        }
+
+        builder.build().unwrap()
+    }
+
+    fn new_batch_without_fields(
+        timestamps: &[i64],
+        sequences: &[u64],
+        op_types: &[OpType],
+    ) -> Batch {
+        assert_eq!(timestamps.len(), sequences.len());
+        assert_eq!(timestamps.len(), op_types.len());
+
+        let mut builder = BatchBuilder::new(b"test".to_vec());
+        builder
+            .timestamps_array(Arc::new(TimestampMillisecondArray::from_iter_values(
+                timestamps.iter().copied(),
+            )))
+            .unwrap()
+            .sequences_array(Arc::new(UInt64Array::from_iter_values(
+                sequences.iter().copied(),
+            )))
+            .unwrap()
+            .op_types_array(Arc::new(UInt8Array::from_iter_values(
+                op_types.iter().map(|v| *v as u8),
+            )))
+            .unwrap();
+
+        builder.build().unwrap()
     }
 
     #[test]
@@ -1534,6 +1597,128 @@ mod tests {
             .filter_by_sequence(Some(SequenceRange::GtLtEq { min: 20, max: 25 }))
             .unwrap();
         assert!(batch.is_empty());
+    }
+
+    #[test]
+    fn test_merge_last_non_null_no_dup() {
+        let mut batch = new_batch_with_u64_fields(
+            &[1, 2],
+            &[2, 1],
+            &[OpType::Put, OpType::Put],
+            &[(1, &[Some(10), None]), (2, &[Some(100), Some(200)])],
+        );
+        let expect = batch.clone();
+        batch.merge_last_non_null().unwrap();
+        assert_eq!(expect, batch);
+    }
+
+    #[test]
+    fn test_merge_last_non_null_fill_null_fields() {
+        // Rows are already sorted by timestamp asc and sequence desc.
+        let mut batch = new_batch_with_u64_fields(
+            &[1, 1, 1],
+            &[3, 2, 1],
+            &[OpType::Put, OpType::Put, OpType::Put],
+            &[
+                (1, &[None, Some(10), Some(11)]),
+                (2, &[Some(100), Some(200), Some(300)]),
+            ],
+        );
+        batch.merge_last_non_null().unwrap();
+
+        // Field 1 is filled from the first older row (seq=2). Field 2 keeps the base value.
+        // Filled fields must not be overwritten by even older duplicates.
+        let expect = new_batch_with_u64_fields(
+            &[1],
+            &[3],
+            &[OpType::Put],
+            &[(1, &[Some(10)]), (2, &[Some(100)])],
+        );
+        assert_eq!(expect, batch);
+    }
+
+    #[test]
+    fn test_merge_last_non_null_stop_at_delete_row() {
+        // A delete row in older duplicates should stop filling to avoid resurrecting values before
+        // deletion.
+        let mut batch = new_batch_with_u64_fields(
+            &[1, 1, 1],
+            &[3, 2, 1],
+            &[OpType::Put, OpType::Delete, OpType::Put],
+            &[
+                (1, &[None, Some(10), Some(11)]),
+                (2, &[Some(100), Some(200), Some(300)]),
+            ],
+        );
+        batch.merge_last_non_null().unwrap();
+
+        let expect = new_batch_with_u64_fields(
+            &[1],
+            &[3],
+            &[OpType::Put],
+            &[(1, &[None]), (2, &[Some(100)])],
+        );
+        assert_eq!(expect, batch);
+    }
+
+    #[test]
+    fn test_merge_last_non_null_base_delete_no_merge() {
+        let mut batch = new_batch_with_u64_fields(
+            &[1, 1],
+            &[3, 2],
+            &[OpType::Delete, OpType::Put],
+            &[(1, &[None, Some(10)]), (2, &[None, Some(200)])],
+        );
+        batch.merge_last_non_null().unwrap();
+
+        // Base row is delete, keep it as is and don't merge fields from older rows.
+        let expect =
+            new_batch_with_u64_fields(&[1], &[3], &[OpType::Delete], &[(1, &[None]), (2, &[None])]);
+        assert_eq!(expect, batch);
+    }
+
+    #[test]
+    fn test_merge_last_non_null_multiple_timestamp_groups() {
+        let mut batch = new_batch_with_u64_fields(
+            &[1, 1, 2, 3, 3],
+            &[5, 4, 3, 2, 1],
+            &[
+                OpType::Put,
+                OpType::Put,
+                OpType::Put,
+                OpType::Put,
+                OpType::Put,
+            ],
+            &[
+                (1, &[None, Some(10), Some(20), None, Some(30)]),
+                (2, &[Some(100), Some(110), Some(120), None, Some(130)]),
+            ],
+        );
+        batch.merge_last_non_null().unwrap();
+
+        let expect = new_batch_with_u64_fields(
+            &[1, 2, 3],
+            &[5, 3, 2],
+            &[OpType::Put, OpType::Put, OpType::Put],
+            &[
+                (1, &[Some(10), Some(20), Some(30)]),
+                (2, &[Some(100), Some(120), Some(130)]),
+            ],
+        );
+        assert_eq!(expect, batch);
+    }
+
+    #[test]
+    fn test_merge_last_non_null_no_fields() {
+        let mut batch = new_batch_without_fields(
+            &[1, 1, 2],
+            &[3, 2, 1],
+            &[OpType::Put, OpType::Put, OpType::Put],
+        );
+        batch.merge_last_non_null().unwrap();
+
+        let expect = new_batch_without_fields(&[1, 2], &[3, 1], &[OpType::Put, OpType::Put]);
+        assert_eq!(expect, batch);
     }
 
     #[test]
