@@ -132,13 +132,15 @@ impl ErrorExt for Error {
             | BlobTooSmall { .. }
             | BlobTruncated { .. }
             | InvalidBlob { .. }
-            | UnknownEngineType { .. }
-            | UnknownDistanceMetric { .. }
             | Engine { .. }
             | KeyMapping { .. }
-            | External { .. }
-            | Finish { .. }
-            | RowCountOverflow { .. } => StatusCode::Unexpected,
+            | Finish { .. } => StatusCode::Unexpected,
+
+            UnknownEngineType { .. } | UnknownDistanceMetric { .. } | RowCountOverflow { .. } => {
+                StatusCode::InvalidArguments
+            }
+
+            External { error, .. } => error.status_code(),
         }
     }
 

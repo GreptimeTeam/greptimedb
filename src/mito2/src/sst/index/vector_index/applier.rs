@@ -198,7 +198,6 @@ impl VectorIndexApplier {
             return Ok(None);
         }
 
-        // Load the vector index applier from blob
         let applier = HnswVectorIndexApplier::from_blob(&blob_data).map_err(|e| {
             ApplyVectorIndexSnafu {
                 reason: e.to_string(),
@@ -206,7 +205,6 @@ impl VectorIndexApplier {
             .build()
         })?;
 
-        // Wrap in CachedVectorIndex for moka cache
         let cached = Arc::new(CachedVectorIndex::new(Box::new(applier)));
         if let Some(cache) = &self.vector_index_cache {
             cache.insert(cache_key, cached.clone());

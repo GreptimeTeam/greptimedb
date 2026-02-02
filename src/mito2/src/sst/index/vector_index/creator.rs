@@ -196,13 +196,11 @@ impl VectorIndexer {
                 continue;
             };
 
-            // Process each row in the batch
             for i in 0..n {
                 let value = values.data.get_ref(i);
                 if value.is_null() {
                     creator.push_null().map_err(build_err)?;
                 } else {
-                    // Extract the vector bytes and convert to f32 slice
                     if let ValueRef::Binary(bytes) = value {
                         let floats = bytes_to_f32_slice(bytes);
                         if floats.len() != creator.config().dim {
@@ -269,7 +267,6 @@ impl VectorIndexer {
                 continue;
             };
 
-            // Vector type must be stored as binary array
             let binary_array = column_array
                 .as_any()
                 .downcast_ref::<BinaryArray>()
@@ -348,7 +345,6 @@ impl VectorIndexer {
             }
         }
 
-        // Report metrics on successful finish
         if finish_res.is_ok() {
             INDEX_CREATE_ROWS_TOTAL
                 .with_label_values(&[TYPE_VECTOR_INDEX])
@@ -384,10 +380,8 @@ impl VectorIndexer {
         creator: &mut HnswVectorIndexCreator,
         puffin_writer: &mut SstPuffinWriter,
     ) -> Result<ByteCount> {
-        // Create blob name following the same pattern as bloom filter
         let blob_name = format!("{}-{}", INDEX_BLOB_TYPE, col_id);
 
-        // Use the trait's finish method which handles blob building and puffin writing
         let written_bytes = creator
             .finish(puffin_writer, &blob_name, PutOptions::default())
             .await

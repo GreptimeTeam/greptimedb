@@ -134,7 +134,6 @@ impl HnswVectorIndexApplier {
         let index_end = index_start + index_size;
         let index_bytes = &data[index_start..index_end];
 
-        // Convert proto enums to Rust types
         let engine_proto = meta.engine.try_into().map_err(|_| {
             UnknownEngineTypeSnafu {
                 engine_type: meta.engine,
