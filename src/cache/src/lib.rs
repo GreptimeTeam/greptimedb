@@ -25,6 +25,7 @@ use common_meta::cache::{
 };
 use common_meta::kv_backend::KvBackendRef;
 use moka::future::CacheBuilder;
+use partition::cache::new_partition_info_cache;
 use snafu::OptionExt;
 
 use crate::error::Result;
@@ -41,6 +42,7 @@ pub const SCHEMA_CACHE_NAME: &str = "schema_cache";
 pub const TABLE_SCHEMA_NAME_CACHE_NAME: &str = "table_schema_name_cache";
 pub const TABLE_FLOWNODE_SET_CACHE_NAME: &str = "table_flownode_set_cache";
 pub const TABLE_ROUTE_CACHE_NAME: &str = "table_route_cache";
+pub const PARTITION_INFO_CACHE_NAME: &str = "partition_info_cache";
 
 /// Builds cache registry for datanode, including:
 /// - Schema cache.
@@ -170,6 +172,9 @@ pub fn with_default_composite_cache_registry(
     let table_name_cache = builder.get().context(error::CacheRequiredSnafu {
         name: TABLE_NAME_CACHE_NAME,
     })?;
+    let table_route_cache = builder.get().context(error::CacheRequiredSnafu {
+        name: TABLE_ROUTE_CACHE_NAME,
+    })?;
 
     // Builds table cache
     let cache = CacheBuilder::new(DEFAULT_CACHE_MAX_CAPACITY)
@@ -183,8 +188,19 @@ pub fn with_default_composite_cache_registry(
         table_name_cache,
     ));
 
+    let cache = CacheBuilder::new(DEFAULT_CACHE_MAX_CAPACITY)
+        .time_to_live(DEFAULT_CACHE_TTL)
+        .time_to_idle(DEFAULT_CACHE_TTI)
+        .build();
+    let partition_info_cache = Arc::new(new_partition_info_cache(
+        PARTITION_INFO_CACHE_NAME.to_string(),
+        cache,
+        table_route_cache,
+    ));
+
     let registry = CacheRegistryBuilder::default()
         .add_cache(table_cache)
+        .add_cache(partition_info_cache)
         .build();
 
     Ok(builder.add_cache_registry(registry))

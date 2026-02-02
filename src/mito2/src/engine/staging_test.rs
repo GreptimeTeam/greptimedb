@@ -355,7 +355,7 @@ async fn test_staging_write_partition_rule_version_with_format(flat_format: bool
             RegionRequest::Put(RegionPutRequest {
                 rows: exit_rows,
                 hint: None,
-                partition_rule_version: expected_version.wrapping_add(1),
+                partition_rule_version: expected_version,
             }),
         )
         .await
@@ -379,6 +379,14 @@ async fn test_staging_write_partition_rule_version_with_format(flat_format: bool
         .unwrap();
     assert_eq!(result.affected_rows, 3);
 
+    let committed_version = engine
+        .get_region(region_id)
+        .unwrap()
+        .version()
+        .metadata
+        .partition_rule_version;
+    assert_ne!(0, committed_version);
+
     let commit_rows = Rows {
         schema: column_schemas,
         rows: build_rows(15, 18),
@@ -389,7 +397,7 @@ async fn test_staging_write_partition_rule_version_with_format(flat_format: bool
             RegionRequest::Put(RegionPutRequest {
                 rows: commit_rows,
                 hint: None,
-                partition_rule_version: expected_version,
+                partition_rule_version: committed_version,
             }),
         )
         .await
@@ -449,8 +457,11 @@ async fn test_staging_manifest_directory_with_format(flat_format: bool) {
         .await
         .unwrap();
     let region = engine.get_region(region_id).unwrap();
-    let staging_partition_expr = region.staging_partition_expr.lock().unwrap().clone();
-    assert_eq!(staging_partition_expr.unwrap(), partition_expr);
+    let staging_partition_info = region.staging_partition_info.lock().unwrap().clone();
+    assert_eq!(
+        staging_partition_info.unwrap().partition_expr,
+        partition_expr
+    );
     {
         let manager = region.manifest_ctx.manifest_manager.read().await;
         assert_eq!(

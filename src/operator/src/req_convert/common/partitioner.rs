@@ -14,16 +14,13 @@
 
 use api::v1::Rows;
 use api::v1::region::{DeleteRequest, InsertRequest};
-use common_function::utils::partition_rule_version;
-use partition::manager::{PartitionInfo, PartitionRuleManager};
+use partition::cache::PartitionInfoWithVersion;
+use partition::manager::PartitionRuleManager;
 use snafu::ResultExt;
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableInfo;
 
-use crate::error::{
-    FindTablePartitionRuleSnafu, Result, SerializePartitionExprSnafu, SplitDeleteSnafu,
-    SplitInsertSnafu,
-};
+use crate::error::{FindTablePartitionRuleSnafu, Result, SplitDeleteSnafu, SplitInsertSnafu};
 
 pub struct Partitioner<'a> {
     partition_manager: &'a PartitionRuleManager,
@@ -35,18 +32,16 @@ impl<'a> Partitioner<'a> {
     }
 
     fn build_partition_rule_versions(
-        partitions: Vec<PartitionInfo>,
-    ) -> Result<std::collections::HashMap<RegionNumber, u64>> {
+        partitions: Vec<PartitionInfoWithVersion>,
+    ) -> std::collections::HashMap<RegionNumber, u64> {
         let mut versions = std::collections::HashMap::with_capacity(partitions.len());
         for partition in partitions {
-            let expr_json = match &partition.partition_expr {
-                Some(expr) => Some(expr.as_json_str().context(SerializePartitionExprSnafu)?),
-                None => None,
-            };
-            let version = partition_rule_version(expr_json.as_deref());
-            versions.insert(partition.id.region_number(), version);
+            versions.insert(
+                partition.id.region_number(),
+                partition.partition_rule_version,
+            );
         }
-        Ok(versions)
+        versions
     }
 
     pub async fn partition_insert_requests(
@@ -57,12 +52,12 @@ impl<'a> Partitioner<'a> {
         let table_id = table_info.table_id();
         let partition_rule_versions = Self::build_partition_rule_versions(
             self.partition_manager
-                .find_table_partitions(table_id)
+                .find_table_partitions_with_version(table_id)
                 .await
                 .context(FindTablePartitionRuleSnafu {
                     table_name: table_info.name.clone(),
                 })?,
-        )?;
+        );
         let requests = self
             .partition_manager
             .split_rows(table_info, rows)
@@ -89,12 +84,12 @@ impl<'a> Partitioner<'a> {
         let table_id = table_info.table_id();
         let partition_rule_versions = Self::build_partition_rule_versions(
             self.partition_manager
-                .find_table_partitions(table_id)
+                .find_table_partitions_with_version(table_id)
                 .await
                 .context(FindTablePartitionRuleSnafu {
                     table_name: table_info.name.clone(),
                 })?,
-        )?;
+        );
         let requests = self
             .partition_manager
             .split_rows(table_info, rows)

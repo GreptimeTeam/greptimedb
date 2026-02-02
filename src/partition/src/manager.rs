@@ -25,6 +25,7 @@ use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::{TableId, TableInfo};
 
+use crate::cache::{PartitionInfoCacheRef, PartitionInfoWithVersion};
 use crate::error::{FindLeaderSnafu, Result};
 use crate::expr::PartitionExpr;
 use crate::multi_dim::MultiDimPartitionRule;
@@ -47,6 +48,7 @@ pub type PartitionRuleManagerRef = Arc<PartitionRuleManager>;
 pub struct PartitionRuleManager {
     table_route_manager: TableRouteManager,
     table_route_cache: TableRouteCacheRef,
+    partition_info_cache: PartitionInfoCacheRef,
 }
 
 #[derive(Debug)]
@@ -56,10 +58,15 @@ pub struct PartitionInfo {
 }
 
 impl PartitionRuleManager {
-    pub fn new(kv_backend: KvBackendRef, table_route_cache: TableRouteCacheRef) -> Self {
+    pub fn new(
+        kv_backend: KvBackendRef,
+        table_route_cache: TableRouteCacheRef,
+        partition_info_cache: PartitionInfoCacheRef,
+    ) -> Self {
         Self {
             table_route_manager: TableRouteManager::new(kv_backend),
             table_route_cache,
+            partition_info_cache,
         }
     }
 
@@ -129,6 +136,19 @@ impl PartitionRuleManager {
         );
 
         create_partitions_from_region_routes(table_id, region_routes)
+    }
+
+    pub async fn find_table_partitions_with_version(
+        &self,
+        table_id: TableId,
+    ) -> Result<Vec<PartitionInfoWithVersion>> {
+        let cached = self
+            .partition_info_cache
+            .get(table_id)
+            .await
+            .context(error::TableRouteManagerSnafu)?
+            .context(error::TableRouteNotFoundSnafu { table_id })?;
+        Ok(cached.partitions.clone())
     }
 
     pub async fn batch_find_table_partitions(

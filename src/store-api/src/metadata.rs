@@ -24,6 +24,7 @@ use std::sync::Arc;
 use api::v1::SemanticType;
 use api::v1::column_def::try_as_column_schema;
 use api::v1::region::RegionColumnDef;
+use common_base::hash::partition_rule_version;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
@@ -160,6 +161,8 @@ pub struct RegionMetadata {
     /// - None: no partition expr was ever set in the manifest (legacy regions).
     /// - Some(""): an explicit “single-region/no-partition” designation. This is distinct from None and should be preserved as-is.
     pub partition_expr: Option<String>,
+    #[serde(skip)]
+    pub partition_rule_version: u64,
 }
 
 impl fmt::Debug for RegionMetadata {
@@ -199,6 +202,9 @@ impl<'de> Deserialize<'de> for RegionMetadata {
         let skipped =
             SkippedFields::new(&without_schema.column_metadatas).map_err(D::Error::custom)?;
 
+        let partition_rule_version =
+            partition_rule_version(without_schema.partition_expr.as_deref());
+
         Ok(Self {
             schema: skipped.schema,
             time_index: skipped.time_index,
@@ -209,6 +215,7 @@ impl<'de> Deserialize<'de> for RegionMetadata {
             schema_version: without_schema.schema_version,
             primary_key_encoding: without_schema.primary_key_encoding,
             partition_expr: without_schema.partition_expr,
+            partition_rule_version,
         })
     }
 }
@@ -222,6 +229,11 @@ impl RegionMetadata {
     /// Encode the metadata to a JSON string.
     pub fn to_json(&self) -> Result<String> {
         serde_json::to_string(&self).context(SerdeJsonSnafu)
+    }
+
+    pub fn set_partition_expr(&mut self, expr: Option<String>) {
+        self.partition_rule_version = partition_rule_version(expr.as_deref());
+        self.partition_expr = expr;
     }
 
     /// Find column by id.
@@ -362,6 +374,7 @@ impl RegionMetadata {
             schema_version: self.schema_version,
             primary_key_encoding: self.primary_key_encoding,
             partition_expr: self.partition_expr.clone(),
+            partition_rule_version: partition_rule_version(self.partition_expr.as_deref()),
         })
     }
 
@@ -670,6 +683,7 @@ impl RegionMetadataBuilder {
     fn build_with_options(self, validate: bool) -> Result<RegionMetadata> {
         let skipped = SkippedFields::new(&self.column_metadatas)?;
 
+        let partition_rule_version = partition_rule_version(self.partition_expr.as_deref());
         let meta = RegionMetadata {
             schema: skipped.schema,
             time_index: skipped.time_index,
@@ -680,6 +694,7 @@ impl RegionMetadataBuilder {
             schema_version: self.schema_version,
             primary_key_encoding: self.primary_key_encoding,
             partition_expr: self.partition_expr,
+            partition_rule_version,
         };
 
         if validate {

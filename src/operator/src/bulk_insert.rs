@@ -24,7 +24,6 @@ use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
 use bytes::Bytes;
 use common_base::AffectedRows;
-use common_function::utils::partition_rule_version;
 use common_grpc::FlightData;
 use common_grpc::flight::{FlightEncoder, FlightMessage};
 use common_telemetry::error;
@@ -69,22 +68,17 @@ impl Inserter {
             .start_timer();
         let partitions = self
             .partition_manager
-            .find_table_partitions(table_id)
+            .find_table_partitions_with_version(table_id)
             .await
             .context(error::FindTablePartitionRuleSnafu {
                 table_name: table_info.name.clone(),
             })?;
         let mut partition_rule_versions = HashMap::with_capacity(partitions.len());
         for partition in partitions {
-            let expr_json = match &partition.partition_expr {
-                Some(expr) => Some(
-                    expr.as_json_str()
-                        .context(error::SerializePartitionExprSnafu)?,
-                ),
-                None => None,
-            };
-            let version = partition_rule_version(expr_json.as_deref());
-            partition_rule_versions.insert(partition.id.region_number(), version);
+            partition_rule_versions.insert(
+                partition.id.region_number(),
+                partition.partition_rule_version,
+            );
         }
         let partition_rule = self
             .partition_manager

@@ -75,12 +75,18 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         }
 
-        let staging_partition_expr = region.staging_partition_expr.lock().unwrap().clone();
+        let staging_partition_info = region.staging_partition_info.lock().unwrap().clone();
         // If the partition expr mismatch, return error.
-        if staging_partition_expr.as_ref() != Some(&request.partition_expr) {
+        if staging_partition_info
+            .as_ref()
+            .map(|info| &info.partition_expr)
+            != Some(&request.partition_expr)
+        {
             sender.send(
                 StagingPartitionExprMismatchSnafu {
-                    manifest_expr: staging_partition_expr,
+                    manifest_expr: staging_partition_info
+                        .as_ref()
+                        .map(|info| info.partition_expr.clone()),
                     request_expr: request.partition_expr,
                 }
                 .fail(),

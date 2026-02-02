@@ -102,7 +102,7 @@ impl RemapManifest {
                 })?
                 .as_json_str()
                 .context(error::SerializePartitionExprSnafu)?;
-            new_metadata.partition_expr = Some(new_partition_expr);
+            new_metadata.set_partition_expr(Some(new_partition_expr));
 
             let manifest = RegionManifest {
                 metadata: Arc::new(new_metadata),

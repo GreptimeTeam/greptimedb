@@ -15,6 +15,7 @@ anymap2 = "0.13"
 async-trait.workspace = true
 bitvec = "1.0"
 bytes.workspace = true
+ahash.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
 futures.workspace = true

@@ -15,7 +15,7 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use cache::{TABLE_FLOWNODE_SET_CACHE_NAME, TABLE_ROUTE_CACHE_NAME};
+use cache::{PARTITION_INFO_CACHE_NAME, TABLE_FLOWNODE_SET_CACHE_NAME, TABLE_ROUTE_CACHE_NAME};
 use catalog::CatalogManagerRef;
 use catalog::process_manager::ProcessManagerRef;
 use common_base::Plugins;
@@ -38,6 +38,7 @@ use operator::statement::{
     StatementExecutorRef,
 };
 use operator::table::TableMutationOperator;
+use partition::cache::PartitionInfoCacheRef;
 use partition::manager::PartitionRuleManager;
 use pipeline::pipeline_operator::PipelineOperator;
 use query::QueryEngineFactory;
@@ -141,9 +142,16 @@ impl FrontendBuilder {
                 .context(error::CacheRequiredSnafu {
                     name: TABLE_ROUTE_CACHE_NAME,
                 })?;
+        let partition_info_cache: PartitionInfoCacheRef = self
+            .layered_cache_registry
+            .get()
+            .context(error::CacheRequiredSnafu {
+                name: PARTITION_INFO_CACHE_NAME,
+            })?;
         let partition_manager = Arc::new(PartitionRuleManager::new(
             kv_backend.clone(),
             table_route_cache.clone(),
+            partition_info_cache.clone(),
         ));
 
         let local_cache_invalidator = self
@@ -215,7 +223,7 @@ impl FrontendBuilder {
             kv_backend.clone(),
             local_cache_invalidator,
             inserter.clone(),
-            table_route_cache,
+            partition_manager,
             Some(process_manager.clone()),
         );
 

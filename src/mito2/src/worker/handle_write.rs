@@ -18,7 +18,6 @@ use std::collections::{HashMap, hash_map};
 use std::sync::Arc;
 
 use api::v1::OpType;
-use common_function::utils::partition_rule_version;
 use common_telemetry::{debug, error};
 use common_wal::options::WalOptions;
 use snafu::ensure;
@@ -306,10 +305,10 @@ impl<S> RegionWorkerLoop<S> {
             else {
                 continue;
             };
-            let expected_partition_expr = region.maybe_staging_partition_expr_str();
+            let expected_version = region.expected_partition_rule_version();
             if let Err(e) = check_partition_rule_version(
                 region_id,
-                expected_partition_expr.as_deref(),
+                expected_version,
                 sender_req.request.partition_rule_version,
             ) {
                 sender_req.sender.send(Err(e));
@@ -421,10 +420,10 @@ impl<S> RegionWorkerLoop<S> {
             let Some(region) = self.regions.get_region_or(region_id, &mut bulk_req.sender) else {
                 continue;
             };
-            let expected_partition_expr = region.maybe_staging_partition_expr_str();
+            let expected_version = region.expected_partition_rule_version();
             if let Err(e) = check_partition_rule_version(
                 region_id,
-                expected_partition_expr.as_deref(),
+                expected_version,
                 bulk_req.partition_rule_version,
             ) {
                 bulk_req.sender.send(Err(e));
@@ -498,13 +497,12 @@ fn check_op_type(append_mode: bool, request: &WriteRequest) -> Result<()> {
 
 fn check_partition_rule_version(
     region_id: RegionId,
-    expected_partition_expr: Option<&str>,
+    expected_version: u64,
     request_version: u64,
 ) -> Result<()> {
     if request_version == 0 {
         return Ok(());
     }
-    let expected_version = partition_rule_version(expected_partition_expr);
     if request_version != expected_version {
         return PartitionRuleVersionMismatchSnafu {
             region_id,
