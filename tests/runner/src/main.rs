@@ -33,9 +33,14 @@ mod version;
 async fn main() {
     let cmd = Command::parse();
 
-    match cmd.subcmd {
+    let result = match cmd.subcmd {
         SubCommand::Bare(cmd) => cmd.run().await,
         SubCommand::Kube(cmd) => cmd.run().await,
         SubCommand::Compat(cmd) => cmd.run().await,
+    };
+
+    if let Err(err) = result {
+        println!("\x1b[31mError: {err:?}\x1b[0m");
+        std::process::exit(1);
     }
 }

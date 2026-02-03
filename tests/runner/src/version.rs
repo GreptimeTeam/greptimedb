@@ -111,8 +111,43 @@ impl Version {
                 let rank2 = Self::pre_release_rank(&v2.pre);
                 rank1
                     .cmp(&rank2)
-                    .then_with(|| v1.pre.as_str().cmp(v2.pre.as_str()))
+                    .then_with(|| Self::compare_pre_release_identifiers(&v1.pre, &v2.pre))
             }
+        }
+    }
+
+    fn compare_pre_release_identifiers(pre1: &Prerelease, pre2: &Prerelease) -> Ordering {
+        let mut parts1 = pre1.as_str().split('.');
+        let mut parts2 = pre2.as_str().split('.');
+
+        loop {
+            match (parts1.next(), parts2.next()) {
+                (None, None) => return Ordering::Equal,
+                (None, Some(_)) => return Ordering::Less,
+                (Some(_), None) => return Ordering::Greater,
+                (Some(a), Some(b)) => {
+                    let ordering = Self::compare_pre_release_part(a, b);
+                    if ordering != Ordering::Equal {
+                        return ordering;
+                    }
+                }
+            }
+        }
+    }
+
+    fn compare_pre_release_part(a: &str, b: &str) -> Ordering {
+        let a_numeric = a.chars().all(|c| c.is_ascii_digit());
+        let b_numeric = b.chars().all(|c| c.is_ascii_digit());
+
+        match (a_numeric, b_numeric) {
+            (true, true) => {
+                let a_num = a.parse::<u64>().unwrap_or(u64::MAX);
+                let b_num = b.parse::<u64>().unwrap_or(u64::MAX);
+                a_num.cmp(&b_num)
+            }
+            (true, false) => Ordering::Less,
+            (false, true) => Ordering::Greater,
+            (false, false) => a.cmp(b),
         }
     }
 
@@ -194,6 +229,7 @@ mod tests {
             Version::parse("1.0.0-alpha.1").unwrap() < Version::parse("1.0.0-alpha.2").unwrap()
         );
         assert!(Version::parse("1.0.0-alpha.2").unwrap() < Version::parse("1.0.0-beta.1").unwrap());
+        assert!(Version::parse("1.0.0-beta.2").unwrap() < Version::parse("1.0.0-beta.10").unwrap());
         assert!(Version::parse("1.0.0-beta.1").unwrap() < Version::parse("1.0.0-rc.1").unwrap());
         assert!(Version::parse("1.0.0-rc.1").unwrap() < Version::parse("1.0.0").unwrap());
     }
