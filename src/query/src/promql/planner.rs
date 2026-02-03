@@ -762,12 +762,81 @@ impl PromPlanner {
                     Ok(binary_expr)
                 };
                 if is_comparison_op && !should_return_bool {
-                    self.filter_on_field_column(join_plan, bin_expr_builder)
+                    // PromQL comparison operators without `bool` are filters:
+                    //   - keep LHS sample values
+                    //   - drop samples where the comparison is false
+                    //
+                    // So we filter on the join result and then project the LHS columns only.
+                    let filtered = self.filter_on_field_column(join_plan, bin_expr_builder)?;
+                    self.project_left_side_of_binary_join(filtered, &left_table_ref, &left_context)
                 } else {
                     self.projection_for_each_field_column(join_plan, bin_expr_builder)
                 }
             }
         }
+    }
+
+    fn project_left_side_of_binary_join(
+        &mut self,
+        input: LogicalPlan,
+        left_table_ref: &TableReference,
+        left_context: &PromPlannerContext,
+    ) -> Result<LogicalPlan> {
+        let schema = input.schema();
+
+        let mut project_exprs = Vec::with_capacity(
+            left_context.tag_columns.len() + left_context.field_columns.len() + 2,
+        );
+
+        // Project time index from the left side.
+        if let Some(time_index_column) = &left_context.time_index_column {
+            let time_index_col = schema
+                .qualified_field_with_name(Some(left_table_ref), time_index_column)
+                .context(DataFusionPlanningSnafu)?
+                .into();
+            project_exprs.push(DfExpr::Column(time_index_col));
+        }
+
+        // Project field columns from the left side.
+        for field_column in &left_context.field_columns {
+            let field_col = schema
+                .qualified_field_with_name(Some(left_table_ref), field_column)
+                .context(DataFusionPlanningSnafu)?
+                .into();
+            project_exprs.push(DfExpr::Column(field_col));
+        }
+
+        // Project tag columns from the left side.
+        for tag_column in &left_context.tag_columns {
+            let tag_col = schema
+                .qualified_field_with_name(Some(left_table_ref), tag_column)
+                .context(DataFusionPlanningSnafu)?
+                .into();
+            project_exprs.push(DfExpr::Column(tag_col));
+        }
+
+        // Preserve `__tsid` if present, so it can still be used internally downstream. It's
+        // stripped from the final output anyway.
+        if left_context.use_tsid
+            && let Ok(tsid_col) =
+                schema.qualified_field_with_name(Some(left_table_ref), DATA_SCHEMA_TSID_COLUMN_NAME)
+        {
+            project_exprs.push(DfExpr::Column(tsid_col.into()));
+        }
+
+        let plan = LogicalPlanBuilder::from(input)
+            .project(project_exprs)
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)?;
+
+        // Update context to reflect the projected schema. Don't keep a table qualifier since
+        // the result is a derived expression.
+        self.ctx = left_context.clone();
+        self.ctx.table_name = None;
+        self.ctx.schema_name = None;
+
+        Ok(plan)
     }
 
     fn prom_number_lit_to_plan(&mut self, number_literal: &NumberLiteral) -> Result<LogicalPlan> {
@@ -2695,8 +2764,15 @@ impl PromPlanner {
             exprs.push(expr);
         }
 
-        conjunction(exprs).context(ValueNotFoundSnafu {
-            table: self.table_ref()?.to_quoted_string(),
+        // This error context should be computed lazily: the planner may set `ctx.table_name` to
+        // `None` for derived expressions (e.g. after projecting the LHS of a vector-vector
+        // comparison filter). Eagerly calling `table_ref()?` here can turn a valid plan into
+        // a `TableNameNotFound` error even when `conjunction(exprs)` succeeds.
+        conjunction(exprs).with_context(|| ValueNotFoundSnafu {
+            table: self
+                .table_ref()
+                .map(|t| t.to_quoted_string())
+                .unwrap_or_else(|_| "unknown".to_string()),
         })
     }
 
