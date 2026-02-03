@@ -69,7 +69,7 @@ impl CompatibilityRunner {
             },
             wal_config: WalConfig::RaftEngine,
             store_config: StoreConfig {
-                store_addrs: vec![],
+                store_addrs: vec!["127.0.0.1:2379".to_string()],
                 setup_etcd: false,
                 setup_pg: None,
                 setup_mysql: None,
@@ -100,13 +100,15 @@ impl CompatibilityRunner {
         }
 
         let bins_dir = Self::resolve_bins_dir(version).await?;
+        let mut store_config = self.store_config.clone();
+        store_config.setup_etcd = phase == "1.feature";
         let env = Env::new_bare(
             self.data_dir.clone(),
             self.server_addr.clone(),
             self.wal_config.clone(),
             self.pull_version_on_need,
             bins_dir.clone(),
-            self.store_config.clone(),
+            store_config,
             self.extra_args.clone(),
         );
 

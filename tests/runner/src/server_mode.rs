@@ -495,11 +495,8 @@ impl ServerMode {
                 metasrv_addr,
                 node_id,
             } => {
-                let data_home = sqlness_home.join(format!(
-                    "greptimedb_{}_datanode_{}_{node_id}",
-                    id,
-                    db_ctx.time()
-                ));
+                let data_home =
+                    sqlness_home.join(format!("greptimedb-{}-datanode-{}", id, node_id));
                 args.extend([
                     format!("--rpc-addr={rpc_bind_addr}"),
                     format!("--rpc-server-addr={rpc_server_addr}"),

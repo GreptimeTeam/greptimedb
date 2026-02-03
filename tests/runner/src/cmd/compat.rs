@@ -94,6 +94,8 @@ impl CompatCommand {
         }
 
         if !self.preserve_state {
+            println!("Stopping etcd");
+            crate::util::stop_rm_etcd();
             tokio::fs::remove_dir_all(data_dir).await.unwrap();
         }
     }

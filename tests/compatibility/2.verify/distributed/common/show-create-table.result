@@ -1,4 +1,18 @@
 SHOW CREATE TABLE granularity_and_false_positive_rate;
 
-Error: 4001(TableNotFound), Table not found: granularity_and_false_positive_rate
++-------------------------------------+--------------------------------------------------------------------+
+| Table                               | Create Table                                                       |
++-------------------------------------+--------------------------------------------------------------------+
+| granularity_and_false_positive_rate | CREATE TABLE IF NOT EXISTS "granularity_and_false_positive_rate" ( |
+|                                     |   "ts" TIMESTAMP(3) NOT NULL,                                      |
+|                                     |   "val" DOUBLE NULL,                                               |
+|                                     |   TIME INDEX ("ts")                                                |
+|                                     | )                                                                  |
+|                                     |                                                                    |
+|                                     | ENGINE=mito                                                        |
+|                                     | WITH(                                                              |
+|                                     |   'index.false_positive_rate' = '0.01',                            |
+|                                     |   'index.granularity' = '8192'                                     |
+|                                     | )                                                                  |
++-------------------------------------+--------------------------------------------------------------------+
 
