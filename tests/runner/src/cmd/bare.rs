@@ -15,6 +15,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use anyhow::{Context, Result, ensure};
 use clap::{Parser, ValueEnum};
 use sqlness::interceptor::Registry;
 use sqlness::{ConfigBuilder, Runner};
@@ -110,11 +111,11 @@ pub struct BareCommand {
 }
 
 impl BareCommand {
-    pub async fn run(mut self) {
+    pub async fn run(mut self) -> Result<()> {
         let temp_dir = tempfile::Builder::new()
             .prefix("sqlness")
             .tempdir()
-            .unwrap();
+            .context("Failed to create sqlness temp dir")?;
         let sqlness_home = temp_dir.keep();
 
         let mut interceptor_registry: Registry = Default::default();
@@ -127,10 +128,8 @@ impl BareCommand {
             Arc::new(ignore_result::IgnoreResultInterceptorFactory),
         );
 
-        if let Some(d) = &self.config.case_dir
-            && !d.is_dir()
-        {
-            panic!("{} is not a directory", d.display());
+        if let Some(d) = &self.config.case_dir {
+            ensure!(d.is_dir(), "{} is not a directory", d.display());
         }
         if self.jobs == 0 {
             self.jobs = num_cpus::get() / 2;
@@ -160,7 +159,7 @@ impl BareCommand {
             .interceptor_registry(interceptor_registry)
             .parallelism(self.jobs)
             .build()
-            .unwrap();
+            .context("Failed to build sqlness config")?;
 
         let wal = match self.wal {
             Wal::RaftEngine => WalConfig::RaftEngine,
@@ -194,13 +193,7 @@ impl BareCommand {
                 self.extra_args,
             ),
         );
-        match runner.run().await {
-            Ok(_) => println!("\x1b[32mAll sqlness tests passed!\x1b[0m"),
-            Err(e) => {
-                println!("\x1b[31mTest failed: {}\x1b[0m", e);
-                std::process::exit(1);
-            }
-        }
+        let run_result = runner.run().await;
 
         // clean up and exit
         if !self.preserve_state {
@@ -210,7 +203,20 @@ impl BareCommand {
             }
             // TODO(weny): remove postgre and mysql containers
             println!("Removing state in {:?}", sqlness_home);
-            tokio::fs::remove_dir_all(sqlness_home).await.unwrap();
+            if let Err(err) = tokio::fs::remove_dir_all(&sqlness_home).await {
+                println!(
+                    "Warning: failed to remove sqlness state dir {}: {}",
+                    sqlness_home.display(),
+                    err
+                );
+            }
         }
+
+        if let Err(err) = run_result {
+            return Err(err).context("Sqlness tests failed");
+        }
+
+        println!("\x1b[32mAll sqlness tests passed!\x1b[0m");
+        Ok(())
     }
 }
