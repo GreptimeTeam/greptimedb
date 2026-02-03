@@ -40,6 +40,7 @@ use crate::error::{self, KvBackendSnafu, Result, SerializeToJsonSnafu, TableMeta
 use crate::gc::util::table_route_to_region;
 use crate::gc::{Peer2Regions, Region2Peers};
 use crate::handler::HeartbeatMailbox;
+use crate::metrics::{METRIC_META_GC_DATANODE_CALLS_TOTAL, METRIC_META_GC_FAILED_REGIONS_TOTAL};
 use crate::service::mailbox::{Channel, MailboxRef};
 
 /// Helper function to send GetFileRefs instruction and wait for reply.
@@ -50,42 +51,56 @@ async fn send_get_file_refs(
     instruction: GetFileRefs,
     timeout: Duration,
 ) -> Result<GetFileRefsReply> {
-    let instruction = instruction::Instruction::GetFileRefs(instruction);
-    let msg = MailboxMessage::json_message(
-        &format!("Get file references: {}", instruction),
-        &format!("Metasrv@{}", server_addr),
-        &format!("Datanode-{}@{}", peer.id, peer.addr),
-        common_time::util::current_time_millis(),
-        &instruction,
-    )
-    .with_context(|_| SerializeToJsonSnafu {
-        input: instruction.to_string(),
-    })?;
+    let result: Result<GetFileRefsReply> = async {
+        let instruction = instruction::Instruction::GetFileRefs(instruction);
+        let msg = MailboxMessage::json_message(
+            &format!("Get file references: {}", instruction),
+            &format!("Metasrv@{}", server_addr),
+            &format!("Datanode-{}@{}", peer.id, peer.addr),
+            common_time::util::current_time_millis(),
+            &instruction,
+        )
+        .with_context(|_| SerializeToJsonSnafu {
+            input: instruction.to_string(),
+        })?;
 
-    let mailbox_rx = mailbox
-        .send(&Channel::Datanode(peer.id), msg, timeout)
-        .await?;
+        let mailbox_rx = mailbox
+            .send(&Channel::Datanode(peer.id), msg, timeout)
+            .await?;
 
-    let reply = match mailbox_rx.await {
-        Ok(reply_msg) => HeartbeatMailbox::json_reply(&reply_msg)?,
-        Err(e) => {
-            error!(
-                e; "Failed to receive reply from datanode {} for GetFileRefs instruction",
-                peer,
-            );
-            return Err(e);
-        }
-    };
+        let reply = match mailbox_rx.await {
+            Ok(reply_msg) => HeartbeatMailbox::json_reply(&reply_msg)?,
+            Err(e) => {
+                error!(
+                    e; "Failed to receive reply from datanode {} for GetFileRefs instruction",
+                    peer,
+                );
+                return Err(e);
+            }
+        };
 
-    let InstructionReply::GetFileRefs(reply) = reply else {
-        return error::UnexpectedInstructionReplySnafu {
-            mailbox_message: format!("{:?}", reply),
-            reason: "Unexpected reply of the GetFileRefs instruction",
-        }
-        .fail();
-    };
+        let InstructionReply::GetFileRefs(reply) = reply else {
+            return error::UnexpectedInstructionReplySnafu {
+                mailbox_message: format!("{:?}", reply),
+                reason: "Unexpected reply of the GetFileRefs instruction",
+            }
+            .fail();
+        };
 
-    Ok(reply)
+        Ok(reply)
+    }
+    .await;
+
+    match &result {
+        Ok(_) => METRIC_META_GC_DATANODE_CALLS_TOTAL
+            .with_label_values(&["get_file_refs", "success"])
+            .inc(),
+        Err(_) => METRIC_META_GC_DATANODE_CALLS_TOTAL
+            .with_label_values(&["get_file_refs", "error"])
+            .inc(),
+    }
+
+    result
 }
 
 /// Helper function to send GcRegions instruction and wait for reply.
@@ -97,58 +112,78 @@ async fn send_gc_regions(
     timeout: Duration,
     description: &str,
 ) -> Result<GcReport> {
-    let instruction = instruction::Instruction::GcRegions(gc_regions.clone());
-    let msg = MailboxMessage::json_message(
-        &format!("{}: {}", description, instruction),
-        &format!("Metasrv@{}", server_addr),
-        &format!("Datanode-{}@{}", peer.id, peer.addr),
-        common_time::util::current_time_millis(),
-        &instruction,
-    )
-    .with_context(|_| SerializeToJsonSnafu {
-        input: instruction.to_string(),
-    })?;
+    let failed_region_count = gc_regions.regions.len() as u64;
+    let result: Result<GcReport> = async {
+        let instruction = instruction::Instruction::GcRegions(gc_regions.clone());
+        let msg = MailboxMessage::json_message(
+            &format!("{}: {}", description, instruction),
+            &format!("Metasrv@{}", server_addr),
+            &format!("Datanode-{}@{}", peer.id, peer.addr),
+            common_time::util::current_time_millis(),
+            &instruction,
+        )
+        .with_context(|_| SerializeToJsonSnafu {
+            input: instruction.to_string(),
+        })?;
 
-    let mailbox_rx = mailbox
-        .send(&Channel::Datanode(peer.id), msg, timeout)
-        .await?;
+        let mailbox_rx = mailbox
+            .send(&Channel::Datanode(peer.id), msg, timeout)
+            .await?;
 
-    let reply = match mailbox_rx.await {
-        Ok(reply_msg) => HeartbeatMailbox::json_reply(&reply_msg)?,
-        Err(e) => {
-            error!(
-                e; "Failed to receive reply from datanode {} for {}",
-                peer, description
-            );
-            return Err(e);
-        }
-    };
-
-    let InstructionReply::GcRegions(reply) = reply else {
-        return error::UnexpectedInstructionReplySnafu {
-            mailbox_message: format!("{:?}", reply),
-            reason: "Unexpected reply of the GcRegions instruction",
-        }
-        .fail();
-    };
-
-    let res = reply.result;
-    match res {
-        Ok(report) => Ok(report),
-        Err(e) => {
-            error!(
-                e; "Datanode {} reported error during GC for regions {:?}",
-                peer, gc_regions
-            );
-            error::UnexpectedSnafu {
-                violated: format!(
-                    "Datanode {} reported error during GC for regions {:?}: {}",
-                    peer, gc_regions, e
-                ),
+        let reply = match mailbox_rx.await {
+            Ok(reply_msg) => HeartbeatMailbox::json_reply(&reply_msg)?,
+            Err(e) => {
+                error!(
+                    e; "Failed to receive reply from datanode {} for {}",
+                    peer, description
+                );
+                return Err(e);
             }
-            .fail()
+        };
+
+        let InstructionReply::GcRegions(reply) = reply else {
+            return error::UnexpectedInstructionReplySnafu {
+                mailbox_message: format!("{:?}", reply),
+                reason: "Unexpected reply of the GcRegions instruction",
+            }
+            .fail();
+        };
+
+        let res = reply.result;
+        match res {
+            Ok(report) => Ok(report),
+            Err(e) => {
+                error!(
+                    e; "Datanode {} reported error during GC for regions {:?}",
+                    peer, gc_regions
+                );
+                error::UnexpectedSnafu {
+                    violated: format!(
+                        "Datanode {} reported error during GC for regions {:?}: {}",
+                        peer, gc_regions, e
+                    ),
+                }
+                .fail()
+            }
         }
     }
+    .await;
+
+    match &result {
+        Ok(_) => METRIC_META_GC_DATANODE_CALLS_TOTAL
+            .with_label_values(&["gc_regions", "success"])
+            .inc(),
+        Err(_) => {
+            METRIC_META_GC_DATANODE_CALLS_TOTAL
+                .with_label_values(&["gc_regions", "error"])
+                .inc();
+            if failed_region_count > 0 {
+                METRIC_META_GC_FAILED_REGIONS_TOTAL.inc_by(failed_region_count);
+            }
+        }
+    }
+
+    result
 }
 
 /// Procedure to perform get file refs then batch GC for multiple regions,
