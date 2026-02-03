@@ -54,11 +54,12 @@ impl Version {
         if lower == "current" {
             Ok(Version::Current)
         } else {
-            let inner = SemverVersion::parse(s).map_err(|e| VersionError::ParseError(e))?;
+            let inner = SemverVersion::parse(s).map_err(VersionError::ParseError)?;
             Ok(Version::Semantic(inner))
         }
     }
 
+    #[allow(unused)]
     pub fn is_current(&self) -> bool {
         matches!(self, Version::Current)
     }
@@ -131,7 +132,7 @@ impl Version {
 
 impl PartialOrd for Version {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.compare(other))
+        Some(Ord::cmp(self, other))
     }
 }
 
