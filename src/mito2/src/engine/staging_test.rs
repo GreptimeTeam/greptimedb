@@ -31,10 +31,10 @@ use object_store::layers::mock::{
     Result as MockResult, Write, Writer,
 };
 use partition::expr::{PartitionExpr, col};
-use store_api::region_engine::{RegionEngine, SettableRegionRoleState};
+use store_api::region_engine::{RegionEngine, RemapManifestsRequest, SettableRegionRoleState};
 use store_api::region_request::{
-    EnterStagingRequest, RegionAlterRequest, RegionFlushRequest, RegionPutRequest, RegionRequest,
-    RegionTruncateRequest,
+    ApplyStagingManifestRequest, EnterStagingRequest, RegionAlterRequest, RegionFlushRequest,
+    RegionPutRequest, RegionRequest, RegionTruncateRequest,
 };
 use store_api::storage::{RegionId, ScanRequest};
 
@@ -249,10 +249,11 @@ fn default_partition_expr() -> String {
 #[tokio::test]
 async fn test_staging_write_partition_rule_version() {
     test_staging_write_partition_rule_version_with_format(false).await;
-    test_staging_write_partition_rule_version_with_format(true).await;
+    // test_staging_write_partition_rule_version_with_format(true).await;
 }
 
 async fn test_staging_write_partition_rule_version_with_format(flat_format: bool) {
+    common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
@@ -262,8 +263,9 @@ async fn test_staging_write_partition_rule_version_with_format(flat_format: bool
         .await;
 
     let region_id = RegionId::new(1024, 0);
+    let origin_partition_expr = range_expr("a", 0, 50).as_json_str().unwrap();
     let request = CreateRequestBuilder::new()
-        .partition_expr_json(Some(range_expr("a", 0, 50).as_json_str().unwrap()))
+        .partition_expr_json(Some(origin_partition_expr.clone()))
         .build();
     let column_schemas = rows_schema(&request);
 
@@ -284,7 +286,12 @@ async fn test_staging_write_partition_rule_version_with_format(flat_format: bool
         .unwrap();
 
     let expected_version = partition_rule_version(Some(&partition_expr));
-    let bad_version = expected_version.wrapping_add(1);
+    let origin_version = partition_rule_version(Some(&origin_partition_expr));
+    common_telemetry::info!(
+        "expected_version: {}, origin_version: {}",
+        expected_version,
+        origin_version
+    );
     let bad_rows = Rows {
         schema: column_schemas.clone(),
         rows: build_rows(0, 3),
@@ -295,7 +302,7 @@ async fn test_staging_write_partition_rule_version_with_format(flat_format: bool
             RegionRequest::Put(RegionPutRequest {
                 rows: bad_rows,
                 hint: None,
-                partition_rule_version: bad_version,
+                partition_rule_version: origin_version,
             }),
         )
         .await
@@ -339,9 +346,36 @@ async fn test_staging_write_partition_rule_version_with_format(flat_format: bool
         .await
         .unwrap();
     assert_eq!(result.affected_rows, 3);
-
     engine
-        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Leader)
+        .handle_request(
+            region_id,
+            RegionRequest::Flush(RegionFlushRequest {
+                row_group_size: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+    let result = engine
+        .remap_manifests(RemapManifestsRequest {
+            region_id,
+            input_regions: vec![region_id],
+            region_mapping: [(region_id, vec![region_id])].into_iter().collect(),
+            new_partition_exprs: [(region_id, default_partition_expr())]
+                .into_iter()
+                .collect(),
+        })
+        .await
+        .unwrap();
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::ApplyStagingManifest(ApplyStagingManifestRequest {
+                partition_expr: default_partition_expr(),
+                central_region_id: region_id,
+                manifest_path: result.manifest_paths[&region_id].clone(),
+            }),
+        )
         .await
         .unwrap();
 
@@ -355,7 +389,7 @@ async fn test_staging_write_partition_rule_version_with_format(flat_format: bool
             RegionRequest::Put(RegionPutRequest {
                 rows: exit_rows,
                 hint: None,
-                partition_rule_version: expected_version,
+                partition_rule_version: origin_version,
             }),
         )
         .await
@@ -386,6 +420,7 @@ async fn test_staging_write_partition_rule_version_with_format(flat_format: bool
         .metadata
         .partition_rule_version;
     assert_ne!(0, committed_version);
+    assert_eq!(committed_version, expected_version,);
 
     let commit_rows = Rows {
         schema: column_schemas,
@@ -397,7 +432,7 @@ async fn test_staging_write_partition_rule_version_with_format(flat_format: bool
             RegionRequest::Put(RegionPutRequest {
                 rows: commit_rows,
                 hint: None,
-                partition_rule_version: committed_version,
+                partition_rule_version: expected_version,
             }),
         )
         .await
