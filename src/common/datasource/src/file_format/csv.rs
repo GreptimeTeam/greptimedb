@@ -32,6 +32,7 @@ use crate::compression::CompressionType;
 use crate::error::{self, Result};
 use crate::file_format::{self, FileFormat, stream_to_file};
 use crate::share_buffer::SharedBuffer;
+use crate::util::normalize_infer_schema;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CsvFormat {
@@ -142,7 +143,8 @@ impl FileFormat for CsvFormat {
             let (schema, _records_read) = format
                 .infer_schema(reader, schema_infer_max_record)
                 .context(error::InferSchemaSnafu)?;
-            Ok(schema)
+
+            Ok(normalize_infer_schema(schema))
         })
         .await
         .context(error::JoinHandleSnafu)?
@@ -241,13 +243,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn infer_schema_with_limit() {
-        let json = CsvFormat {
+    async fn normalize_infer_schema() {
+        let csv = CsvFormat {
             schema_infer_max_record: Some(3),
             ..CsvFormat::default()
         };
         let store = test_store(&test_data_root());
-        let schema = json
+        let schema = csv.infer_schema(&store, "max_infer.csv").await.unwrap();
+        let formatted: Vec<_> = format_schema(schema);
+
+        assert_eq!(
+            vec![
+                "num: Int64: NULL",
+                "str: Utf8: NULL",
+                "ts: Utf8: NULL",
+                "t: Utf8: NULL",
+                "date: Date32: NULL"
+            ],
+            formatted,
+        );
+    }
+
+    #[tokio::test]
+    async fn infer_schema_with_limit() {
+        let csv = CsvFormat {
+            schema_infer_max_record: Some(3),
+            ..CsvFormat::default()
+        };
+        let store = test_store(&test_data_root());
+        let schema = csv
             .infer_schema(&store, "schema_infer_limit.csv")
             .await
             .unwrap();
@@ -263,9 +287,9 @@ mod tests {
             formatted
         );
 
-        let json = CsvFormat::default();
+        let csv = CsvFormat::default();
         let store = test_store(&test_data_root());
-        let schema = json
+        let schema = csv
             .infer_schema(&store, "schema_infer_limit.csv")
             .await
             .unwrap();
