@@ -7,6 +7,7 @@ typ = "typ"
 typs = "typs"
 unqualifed = "unqualifed"
 excluder = "excluder"
+consts = "consts"
 
 [files]
 extend-exclude = [
