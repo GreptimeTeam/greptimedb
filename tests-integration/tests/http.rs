@@ -2535,7 +2535,7 @@ pub async fn test_identity_pipeline_with_null_column(store_type: StorageType) {
     // Test resolve_value function with various data types
     // Covers: VrlValue::Null, Integer, Float, Boolean, Bytes (string)
     // Note: Array and Object are flattened/stringified by identity pipeline before resolve_value
-    let body_all_types = r#"{"null_col":null,"int_col":42,"float_col":3.14,"bool_col":true,"str_col":"hello","array_col":[1,2,3],"obj_col":{"nested":"value"}}"#;
+    let body_all_types = r#"{"null_col":null,"int_col":42,"float_col":3.10,"bool_col":true,"str_col":"hello","array_col":[1,2,3],"obj_col":{"nested":"value"}}"#;
 
     let res = client
         .post("/v1/ingest?db=public&table=all_types_test&pipeline_name=greptime_identity")
@@ -2570,7 +2570,7 @@ pub async fn test_identity_pipeline_with_null_column(store_type: StorageType) {
     let rows = resp["output"][0]["records"]["rows"].as_array().unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0][0], 42); // int_col
-    assert_eq!(rows[0][1], 3.14); // float_col
+    assert_eq!(rows[0][1], 3.10); // float_col
     assert_eq!(rows[0][2], true); // bool_col
     assert_eq!(rows[0][3], "hello"); // str_col
 
