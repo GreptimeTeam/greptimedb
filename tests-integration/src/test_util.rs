@@ -395,6 +395,18 @@ async fn setup_standalone_instance(
         .await
 }
 
+async fn setup_standalone_instance_with_slow_query_threshold(
+    test_name: &str,
+    store_type: StorageType,
+    slow_query_threshold: std::time::Duration,
+) -> GreptimeDbStandalone {
+    GreptimeDbStandaloneBuilder::new(test_name)
+        .with_default_store_type(store_type)
+        .with_slow_query_threshold(slow_query_threshold)
+        .build()
+        .await
+}
+
 async fn setup_standalone_instance_with_plugins(
     test_name: &str,
     store_type: StorageType,
@@ -403,6 +415,20 @@ async fn setup_standalone_instance_with_plugins(
     GreptimeDbStandaloneBuilder::new(test_name)
         .with_default_store_type(store_type)
         .with_plugin(plugins)
+        .build()
+        .await
+}
+
+async fn setup_standalone_instance_with_plugins_and_slow_query_threshold(
+    test_name: &str,
+    store_type: StorageType,
+    plugins: Plugins,
+    slow_query_threshold: std::time::Duration,
+) -> GreptimeDbStandalone {
+    GreptimeDbStandaloneBuilder::new(test_name)
+        .with_default_store_type(store_type)
+        .with_plugin(plugins)
+        .with_slow_query_threshold(slow_query_threshold)
         .build()
         .await
 }
@@ -431,6 +457,36 @@ pub async fn setup_test_http_app_with_frontend(
     name: &str,
 ) -> (Router, TestGuard) {
     setup_test_http_app_with_frontend_and_user_provider(store_type, name, None).await
+}
+
+pub async fn setup_test_http_app_with_frontend_and_slow_query_threshold(
+    store_type: StorageType,
+    name: &str,
+    slow_query_threshold: std::time::Duration,
+) -> (Router, TestGuard) {
+    let instance =
+        setup_standalone_instance_with_slow_query_threshold(name, store_type, slow_query_threshold)
+            .await;
+
+    create_test_table(instance.fe_instance(), "demo").await;
+
+    let http_opts = HttpOptions {
+        addr: format!("127.0.0.1:{}", ports::get_port()),
+        ..Default::default()
+    };
+
+    let http_server = HttpServerBuilder::new(http_opts)
+        .with_sql_handler(instance.fe_instance().clone())
+        .with_log_ingest_handler(instance.fe_instance().clone(), None, None)
+        .with_logs_handler(instance.fe_instance().clone())
+        .with_influxdb_handler(instance.fe_instance().clone())
+        .with_otlp_handler(instance.fe_instance().clone(), true)
+        .with_jaeger_handler(instance.fe_instance().clone())
+        .with_greptime_config_options(instance.opts.to_toml().unwrap())
+        .build();
+
+    let app = http_server.build(http_server.make_app()).unwrap();
+    (app, instance.guard)
 }
 
 pub async fn setup_test_http_app_with_frontend_and_user_provider(
@@ -644,6 +700,57 @@ pub async fn setup_mysql_server(
     setup_mysql_server_with_user_provider(store_type, name, None).await
 }
 
+pub async fn setup_mysql_server_with_slow_query_threshold(
+    store_type: StorageType,
+    name: &str,
+    slow_query_threshold: std::time::Duration,
+) -> (TestGuard, Arc<Box<dyn Server>>) {
+    let plugins = Plugins::new();
+    let instance = setup_standalone_instance_with_plugins_and_slow_query_threshold(
+        name,
+        store_type,
+        plugins,
+        slow_query_threshold,
+    )
+    .await;
+
+    let runtime = RuntimeBuilder::default()
+        .worker_threads(2)
+        .thread_name("mysql-runtime")
+        .build()
+        .unwrap();
+
+    let fe_mysql_addr = format!("127.0.0.1:{}", ports::get_port());
+
+    let fe_instance_ref = instance.fe_instance().clone();
+    let opts = MysqlOptions {
+        addr: fe_mysql_addr.clone(),
+        ..Default::default()
+    };
+    let mut mysql_server = MysqlServer::create_server(
+        runtime,
+        Arc::new(MysqlSpawnRef::new(fe_instance_ref, None)),
+        Arc::new(MysqlSpawnConfig::new(
+            false,
+            Arc::new(
+                ReloadableTlsServerConfig::try_new(opts.tls.clone())
+                    .expect("Failed to load certificates and keys"),
+            ),
+            0,
+            opts.reject_no_database.unwrap_or(false),
+            opts.prepared_stmt_cache_size,
+        )),
+        None,
+    );
+
+    mysql_server
+        .start(fe_mysql_addr.parse::<SocketAddr>().unwrap())
+        .await
+        .unwrap();
+
+    (instance.guard, Arc::new(mysql_server))
+}
+
 pub async fn setup_mysql_server_with_user_provider(
     store_type: StorageType,
     name: &str,
@@ -699,6 +806,51 @@ pub async fn setup_pg_server(
     name: &str,
 ) -> (TestGuard, Arc<Box<dyn Server>>) {
     setup_pg_server_with_user_provider(store_type, name, None).await
+}
+
+pub async fn setup_pg_server_with_slow_query_threshold(
+    store_type: StorageType,
+    name: &str,
+    slow_query_threshold: std::time::Duration,
+) -> (TestGuard, Arc<Box<dyn Server>>) {
+    let instance =
+        setup_standalone_instance_with_slow_query_threshold(name, store_type, slow_query_threshold)
+            .await;
+
+    let runtime = RuntimeBuilder::default()
+        .worker_threads(2)
+        .thread_name("pg-runtime")
+        .build()
+        .unwrap();
+
+    let fe_pg_addr = format!("127.0.0.1:{}", ports::get_port());
+
+    let fe_instance_ref = instance.fe_instance().clone();
+    let opts = PostgresOptions {
+        addr: fe_pg_addr.clone(),
+        ..Default::default()
+    };
+    let tls_server_config = Arc::new(
+        ReloadableTlsServerConfig::try_new(opts.tls.clone())
+            .expect("Failed to load certificates and keys"),
+    );
+
+    let mut pg_server = Box::new(PostgresServer::new(
+        fe_instance_ref,
+        opts.tls.should_force_tls(),
+        tls_server_config,
+        0,
+        runtime,
+        None,
+        None,
+    ));
+
+    pg_server
+        .start(fe_pg_addr.parse::<SocketAddr>().unwrap())
+        .await
+        .unwrap();
+
+    (instance.guard, Arc::new(pg_server))
 }
 
 pub async fn setup_pg_server_with_user_provider(

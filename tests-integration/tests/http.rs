@@ -60,6 +60,7 @@ use servers::request_memory_limiter::ServerMemoryLimiter;
 use table::table_name::TableName;
 use tests_integration::test_util::{
     StorageType, setup_test_http_app, setup_test_http_app_with_frontend,
+    setup_test_http_app_with_frontend_and_slow_query_threshold,
     setup_test_http_app_with_frontend_and_user_provider, setup_test_prom_app_with_frontend,
 };
 use urlencoding::encode;
@@ -665,24 +666,29 @@ async fn test_sql_format_api() {
 }
 
 pub async fn test_http_sql_slow_query(store_type: StorageType) {
-    let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "sql_api").await;
+    let (app, mut guard) = setup_test_http_app_with_frontend_and_slow_query_threshold(
+        store_type,
+        "sql_api",
+        Duration::from_millis(100),
+    )
+    .await;
     let client = TestClient::new(app).await;
 
-    let slow_query = "SELECT count(*) FROM generate_series(1, 1000000000)";
+    let slow_query = "SELECT count(*) FROM generate_series(1, 50000000)";
     let encoded_slow_query = encode(slow_query);
 
     let query_params = format!("/v1/sql?sql={encoded_slow_query}");
     let res = client.get(&query_params).send().await;
     assert_eq!(res.status(), StatusCode::OK);
 
-    // Wait for the slow query to be recorded.
-    tokio::time::sleep(Duration::from_secs(5)).await;
-
     let table = format!("{}.{}", DEFAULT_PRIVATE_SCHEMA_NAME, SLOW_QUERY_TABLE_NAME);
-    let query = format!("SELECT {} FROM {table}", SLOW_QUERY_TABLE_QUERY_COLUMN_NAME);
+    let query = format!(
+        "SELECT {} FROM {table} WHERE {} = '{slow_query}'",
+        SLOW_QUERY_TABLE_QUERY_COLUMN_NAME, SLOW_QUERY_TABLE_QUERY_COLUMN_NAME
+    );
 
     let expected = format!(r#"[["{}"]]"#, slow_query);
-    validate_data("test_http_sql_slow_query", &client, &query, &expected).await;
+    wait_for_data(&client, &query, &expected).await;
 
     guard.remove_all().await;
 }
@@ -7295,6 +7301,32 @@ async fn validate_data(test_name: &str, client: &TestClient, sql: &str, expected
         expected, v,
         "validate {test_name} fail, expected: {expected}, actual: {v}"
     );
+}
+
+async fn wait_for_data(client: &TestClient, sql: &str, expected: &str) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let encoded_sql = encode(sql);
+        loop {
+            let res = client
+                .get(format!("/v1/sql?sql={encoded_sql}").as_str())
+                .send()
+                .await;
+            if res.status() != StatusCode::OK {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                continue;
+            }
+            let resp = res.text().await;
+            let v = get_rows_from_output(&resp);
+
+            if expected == v {
+                break;
+            }
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
 }
 
 async fn send_req(
