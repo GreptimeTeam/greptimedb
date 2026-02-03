@@ -634,9 +634,8 @@ impl LocalGcWorker {
         let listers = self
             .partition_region_files(region_id, concurrency)
             .await
-            .map_err(|err| {
+            .inspect_err(|_| {
                 GC_ERRORS_TOTAL.with_label_values(&["list_failed"]).inc();
-                err
             })?;
         let lister_cnt = listers.len();
 
@@ -644,9 +643,8 @@ impl LocalGcWorker {
         let all_entries = self
             .list_region_files_concurrent(listers)
             .await
-            .map_err(|err| {
+            .inspect_err(|_| {
                 GC_ERRORS_TOTAL.with_label_values(&["list_failed"]).inc();
-                err
             })?;
         let cnt = all_entries.len();
         info!(
