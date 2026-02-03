@@ -12709,6 +12709,7 @@ dependencies = [
 name = "sqlness-runner"
 version = "1.0.0-rc.1"
 dependencies = [
+ "anyhow",
  "async-trait",
  "clap 4.5.40",
  "client",
@@ -12723,9 +12724,11 @@ dependencies = [
  "mysql",
  "num_cpus",
  "reqwest",
+ "semver",
  "serde",
  "serde_json",
  "sha2",
+ "snafu 0.8.6",
  "sqlness",
  "tar",
  "tempfile",

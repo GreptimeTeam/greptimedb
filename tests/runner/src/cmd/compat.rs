@@ -14,6 +14,7 @@
 
 use std::path::PathBuf;
 
+use anyhow::{Context, Result};
 use clap::Parser;
 
 use crate::compatibility_runner::CompatibilityRunner;
@@ -43,30 +44,20 @@ pub struct CompatCommand {
 }
 
 impl CompatCommand {
-    pub async fn run(self) {
-        let from_version = match Version::parse(&self.from) {
-            Ok(v) => v,
-            Err(e) => {
-                println!("Error parsing 'from' version: {}", e);
-                std::process::exit(1);
-            }
-        };
+    pub async fn run(self) -> Result<()> {
+        let from_version = Version::parse(&self.from)
+            .with_context(|| format!("Error parsing 'from' version: {}", self.from))?;
 
-        let to_version = match Version::parse(&self.to) {
-            Ok(v) => v,
-            Err(e) => {
-                println!("Error parsing 'to' version: {}", e);
-                std::process::exit(1);
-            }
-        };
+        let to_version = Version::parse(&self.to)
+            .with_context(|| format!("Error parsing 'to' version: {}", self.to))?;
 
         let temp_dir = tempfile::Builder::new()
             .prefix("compat-test")
             .tempdir()
-            .unwrap();
+            .context("Failed to create compatibility temp dir")?;
         let data_dir = temp_dir.keep();
 
-        let runner = match CompatibilityRunner::new(
+        let runner = CompatibilityRunner::new(
             from_version,
             to_version,
             self.case_dir,
@@ -75,28 +66,27 @@ impl CompatCommand {
             self.fail_fast,
         )
         .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                println!("Failed to create compatibility runner: {}", e);
-                std::process::exit(1);
-            }
-        };
+        .context("Failed to create compatibility runner")?;
 
-        match runner.run().await {
-            Ok(_) => {
-                println!("\x1b[32mCompatibility tests passed!\x1b[0m");
-            }
-            Err(e) => {
-                println!("\x1b[31mCompatibility tests failed: {}\x1b[0m", e);
-                std::process::exit(1);
-            }
-        }
+        let run_result = runner.run().await;
 
         if !self.preserve_state {
             println!("Stopping etcd");
             crate::util::stop_rm_etcd();
-            tokio::fs::remove_dir_all(data_dir).await.unwrap();
+            if let Err(err) = tokio::fs::remove_dir_all(&data_dir).await {
+                println!(
+                    "Warning: failed to remove compatibility data dir {}: {}",
+                    data_dir.display(),
+                    err
+                );
+            }
         }
+
+        if let Err(err) = run_result {
+            return Err(err).context("Compatibility tests failed");
+        }
+
+        println!("\x1b[32mCompatibility tests passed!\x1b[0m");
+        Ok(())
     }
 }
