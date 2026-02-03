@@ -66,9 +66,9 @@ impl TryFrom<&HashMap<String, String>> for JsonFormat {
                     .build()
                 })?);
         };
-        format.timestamp_format = value.get("timestamp_format").cloned();
-        format.time_format = value.get("time_format").cloned();
-        format.date_format = value.get("date_format").cloned();
+        format.timestamp_format = value.get(file_format::TIMESTAMP_FORMAT).cloned();
+        format.time_format = value.get(file_format::TIME_FORMAT).cloned();
+        format.date_format = value.get(file_format::DATE_FORMAT).cloned();
         Ok(format)
     }
 }
