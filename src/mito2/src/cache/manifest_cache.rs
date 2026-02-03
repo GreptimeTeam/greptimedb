@@ -187,7 +187,7 @@ impl ManifestCache {
                 .context(OpenDalSnafu)?;
             let file_size = meta.content_length() as u32;
             let key = entry.path().trim_start_matches(MANIFEST_DIR).to_string();
-            common_telemetry::info!("Manifest cache recover {}, size: {}", key, file_size);
+            common_telemetry::debug!("Manifest cache recover {}, size: {}", key, file_size);
             self.index.insert(key, IndexValue { file_size }).await;
             let size = i64::from(file_size);
             total_size += size;
