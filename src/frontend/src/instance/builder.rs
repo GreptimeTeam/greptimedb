@@ -93,14 +93,21 @@ impl FrontendBuilder {
         options: &FrontendOptions,
         meta_client: meta_client::MetaClientRef,
     ) -> Self {
+        use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
+        use common_meta::cache::LayeredCacheRegistryBuilder;
         use common_meta::kv_backend::memory::MemoryKvBackend;
 
         let kv_backend = Arc::new(MemoryKvBackend::new());
 
+        // Builds cache registry
+        let layered_cache_builder = LayeredCacheRegistryBuilder::default();
+        let fundamental_cache_registry = build_fundamental_cache_registry(kv_backend.clone());
         let layered_cache_registry = Arc::new(
-            common_meta::cache::LayeredCacheRegistryBuilder::default()
-                .add_cache_registry(cache::build_fundamental_cache_registry(kv_backend.clone()))
-                .build(),
+            with_default_composite_cache_registry(
+                layered_cache_builder.add_cache_registry(fundamental_cache_registry),
+            )
+            .unwrap()
+            .build(),
         );
 
         Self::new(

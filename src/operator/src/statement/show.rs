@@ -18,7 +18,7 @@ use common_error::ext::BoxedError;
 use common_meta::key::schema_name::SchemaNameKey;
 use common_query::Output;
 use common_telemetry::tracing;
-use partition::manager::PartitionInfo;
+use partition::manager::PartitionInfoWithVersion;
 use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
 use snafu::{OptionExt, ResultExt};
@@ -165,15 +165,15 @@ impl StatementExecutor {
             .context(TableMetadataManagerSnafu)?
             .map(|v| v.into_inner());
 
-        let partitions = self
+        let partition_info = self
             .partition_manager
-            .find_table_partitions(table_info.table_id())
+            .find_physical_partition_info(table_info.table_id())
             .await
             .context(error::FindTablePartitionRuleSnafu {
                 table_name: &table_name.table_name,
             })?;
 
-        let partitions = create_partitions_stmt(&table_info, partitions)?;
+        let partitions = create_partitions_stmt(&table_info, &partition_info.partitions)?;
 
         query::sql::show_create_table(table_info, schema_options, partitions, query_ctx)
             .context(ExecuteStatementSnafu)
@@ -385,7 +385,7 @@ impl StatementExecutor {
 
 pub(crate) fn create_partitions_stmt(
     table_info: &TableInfo,
-    partitions: Vec<PartitionInfo>,
+    partitions: &[PartitionInfoWithVersion],
 ) -> Result<Option<Partitions>> {
     if partitions.is_empty() {
         return Ok(None);

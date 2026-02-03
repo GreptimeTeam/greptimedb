@@ -206,9 +206,9 @@ impl StatementExecutor {
             .await
             .context(CatalogSnafu)?
             .context(TableNotFoundSnafu { table_name: &table })?;
-        let partitions = self
+        let partition_info = self
             .partition_manager
-            .find_table_partitions(table_ref.table_info().table_id())
+            .find_physical_partition_info(table_ref.table_info().table_id())
             .await
             .context(error::FindTablePartitionRuleSnafu { table_name: table })?;
 
@@ -232,15 +232,16 @@ impl StatementExecutor {
         create_stmt.if_not_exists = false;
 
         let table_info = table_ref.table_info();
-        let partitions =
-            create_partitions_stmt(&table_info, partitions)?.and_then(|mut partitions| {
+        let partitions = create_partitions_stmt(&table_info, &partition_info.partitions)?.and_then(
+            |mut partitions| {
                 if !partitions.column_list.is_empty() {
                     partitions.set_quote(quote_style);
                     Some(partitions)
                 } else {
                     None
                 }
-            });
+            },
+        );
 
         let create_expr = &mut expr_helper::create_to_expr(&create_stmt, &ctx)?;
         self.create_table_inner(create_expr, partitions, ctx).await

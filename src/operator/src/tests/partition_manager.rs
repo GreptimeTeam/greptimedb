@@ -202,9 +202,11 @@ async fn test_partition_rule_version_cache() {
     let kv_backend = Arc::new(common_meta::kv_backend::memory::MemoryKvBackend::new());
     let partition_manager = create_partition_rule_manager(kv_backend).await;
     let partitions = partition_manager
-        .find_table_partitions_with_version(1)
+        .find_physical_partition_info(1)
         .await
-        .unwrap();
+        .unwrap()
+        .partitions
+        .clone();
 
     let mut version_by_region = HashMap::new();
     for partition in partitions {
@@ -222,7 +224,7 @@ async fn test_partition_rule_version_cache() {
     }
 
     assert_eq!(3, version_by_region.len());
-    assert_eq!(0, *version_by_region.get(&1).unwrap());
+    assert_ne!(0, *version_by_region.get(&1).unwrap());
     assert_ne!(0, *version_by_region.get(&2).unwrap());
     assert_ne!(0, *version_by_region.get(&3).unwrap());
 }

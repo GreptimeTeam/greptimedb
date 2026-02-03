@@ -21,23 +21,16 @@ use common_meta::key::table_route::{PhysicalTableRouteValue, TableRouteManager};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{self, RegionRoute};
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{OptionExt, ResultExt};
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::{TableId, TableInfo};
 
-use crate::cache::{PartitionInfoCacheRef, PartitionInfoWithVersion};
+use crate::cache::{CachedPartitionInfo, PartitionInfoCacheRef, PhysicalPartitionInfo};
 use crate::error::{FindLeaderSnafu, Result};
 use crate::expr::PartitionExpr;
 use crate::multi_dim::MultiDimPartitionRule;
 use crate::splitter::RowSplitter;
 use crate::{PartitionRuleRef, error};
-
-#[async_trait::async_trait]
-pub trait TableRouteCacheInvalidator: Send + Sync {
-    async fn invalidate_table_route(&self, table: TableId);
-}
-
-pub type TableRouteCacheInvalidatorRef = Arc<dyn TableRouteCacheInvalidator>;
 
 pub type PartitionRuleManagerRef = Arc<PartitionRuleManager>;
 
@@ -51,10 +44,17 @@ pub struct PartitionRuleManager {
     partition_info_cache: PartitionInfoCacheRef,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PartitionInfo {
     pub id: RegionId,
     pub partition_expr: Option<PartitionExpr>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PartitionInfoWithVersion {
+    pub id: RegionId,
+    pub partition_expr: Option<PartitionExpr>,
+    pub partition_rule_version: u64,
 }
 
 impl PartitionRuleManager {
@@ -125,30 +125,37 @@ impl PartitionRuleManager {
         Ok(table_region_routes)
     }
 
-    pub async fn find_table_partitions(&self, table_id: TableId) -> Result<Vec<PartitionInfo>> {
-        let region_routes = &self
-            .find_physical_table_route(table_id)
-            .await?
-            .region_routes;
-        ensure!(
-            !region_routes.is_empty(),
-            error::FindTableRoutesSnafu { table_id }
-        );
-
-        create_partitions_from_region_routes(table_id, region_routes)
-    }
-
-    pub async fn find_table_partitions_with_version(
+    /// Returns the physical partition info with version.
+    pub async fn find_physical_partition_info(
         &self,
         table_id: TableId,
-    ) -> Result<Vec<PartitionInfoWithVersion>> {
+    ) -> Result<Arc<PhysicalPartitionInfo>> {
         let cached = self
             .partition_info_cache
             .get(table_id)
             .await
-            .context(error::TableRouteManagerSnafu)?
+            .context(error::GetPartitionInfoSnafu)?
             .context(error::TableRouteNotFoundSnafu { table_id })?;
-        Ok(cached.partitions.clone())
+        match cached {
+            CachedPartitionInfo::Physical(info) => Ok(info),
+            CachedPartitionInfo::Logical(physical_table_id) => {
+                let cached = self
+                    .partition_info_cache
+                    .get(physical_table_id)
+                    .await
+                    .context(error::GetPartitionInfoSnafu)?
+                    .context(error::TableRouteNotFoundSnafu {
+                        table_id: physical_table_id,
+                    })?;
+                let info= cached.into_physical().context(error::UnexpectedSnafu{
+                        err_msg: format!(
+                            "Expected the physical partition info, but got logical partable route, table: {physical_table_id}"
+                        )
+                    })?;
+
+                Ok(info)
+            }
+        }
     }
 
     pub async fn batch_find_table_partitions(
@@ -179,18 +186,21 @@ impl PartitionRuleManager {
             .cloned()
             .collect::<Vec<_>>();
 
-        let partitions_with_version = self
-            .find_table_partitions_with_version(table_info.table_id())
+        let partition_info = self
+            .find_physical_partition_info(table_info.table_id())
             .await?;
-        let partition_versions = partitions_with_version
+        let partition_versions = partition_info
+            .partitions
             .iter()
             .map(|r| (r.id.region_number(), r.partition_rule_version))
             .collect::<HashMap<RegionNumber, u64>>();
-        let regions = partitions_with_version
+        let regions = partition_info
+            .partitions
             .iter()
             .map(|x| x.id.region_number())
             .collect::<Vec<RegionNumber>>();
-        let exprs = partitions_with_version
+        let exprs = partition_info
+            .partitions
             .iter()
             .filter_map(|x| x.partition_expr.as_ref())
             .cloned()

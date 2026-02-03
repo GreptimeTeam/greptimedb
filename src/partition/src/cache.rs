@@ -20,25 +20,34 @@ use common_meta::cache::{CacheContainer, Initializer, TableRoute, TableRouteCach
 use common_meta::instruction::CacheIdent;
 use common_meta::rpc::router::RegionRoute;
 use moka::future::Cache;
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 use store_api::storage::{RegionId, TableId};
 
 use crate::expr::PartitionExpr;
+use crate::manager::PartitionInfoWithVersion;
 
 #[derive(Debug, Clone)]
-pub struct PartitionInfoWithVersion {
-    pub id: RegionId,
-    pub partition_expr: Option<PartitionExpr>,
-    pub partition_rule_version: u64,
-}
-
-#[derive(Clone)]
-pub struct CachedPartitionInfo {
-    pub table_route_version: u64,
+pub struct PhysicalPartitionInfo {
     pub partitions: Vec<PartitionInfoWithVersion>,
 }
 
-pub type PartitionInfoCache = CacheContainer<TableId, Arc<CachedPartitionInfo>, CacheIdent>;
+#[derive(Debug, Clone)]
+pub enum CachedPartitionInfo {
+    Physical(Arc<PhysicalPartitionInfo>),
+    Logical(TableId),
+}
+
+impl CachedPartitionInfo {
+    /// Returns the physical partitions if the cached partition info is physical.
+    pub fn into_physical(self) -> Option<Arc<PhysicalPartitionInfo>> {
+        match self {
+            CachedPartitionInfo::Physical(partitions) => Some(partitions),
+            CachedPartitionInfo::Logical(_) => None,
+        }
+    }
+}
+
+pub type PartitionInfoCache = CacheContainer<TableId, CachedPartitionInfo, CacheIdent>;
 
 pub type PartitionInfoCacheRef = Arc<PartitionInfoCache>;
 
@@ -70,7 +79,7 @@ pub fn create_partitions_with_version_from_region_routes(
 
 fn init_factory(
     table_route_cache: TableRouteCacheRef,
-) -> Initializer<TableId, Arc<CachedPartitionInfo>> {
+) -> Initializer<TableId, CachedPartitionInfo> {
     Arc::new(move |table_id: &TableId| {
         let table_route_cache = table_route_cache.clone();
         Box::pin(async move {
@@ -78,41 +87,29 @@ fn init_factory(
                 return Ok(None);
             };
 
-            let physical_route = match table_route.as_ref() {
-                TableRoute::Physical(physical) => physical.clone(),
+            let cached = match table_route.as_ref() {
+                TableRoute::Physical(physical) => {
+                    let partitions = create_partitions_with_version_from_region_routes(
+                        *table_id,
+                        &physical.region_routes,
+                    )?;
+
+                    CachedPartitionInfo::Physical(Arc::new(PhysicalPartitionInfo { partitions }))
+                }
                 TableRoute::Logical(logical) => {
-                    let physical_table_id = logical.physical_table_id();
-                    let Some(physical_table_route) =
-                        table_route_cache.get(physical_table_id).await?
-                    else {
-                        return Ok(None);
-                    };
-                    physical_table_route
-                        .as_physical_table_route_ref()
-                        .context(common_meta::error::UnexpectedLogicalRouteTableSnafu {
-                            err_msg: format!(
-                                "Expected the physical table route, but got logical table route, table: {table_id}"
-                            ),
-                        })?
-                        .clone()
+                    let table_id = logical.physical_table_id();
+                    CachedPartitionInfo::Logical(table_id)
                 }
             };
 
-            let partitions = create_partitions_with_version_from_region_routes(
-                *table_id,
-                &physical_route.region_routes,
-            )?;
-            Ok(Some(Arc::new(CachedPartitionInfo {
-                table_route_version: physical_route.version(),
-                partitions,
-            })))
+            Ok(Some(cached))
         })
     })
 }
 
 pub fn new_partition_info_cache(
     name: String,
-    cache: Cache<TableId, Arc<CachedPartitionInfo>>,
+    cache: Cache<TableId, CachedPartitionInfo>,
     table_route_cache: TableRouteCacheRef,
 ) -> PartitionInfoCache {
     CacheContainer::new(
@@ -126,7 +123,7 @@ pub fn new_partition_info_cache(
                 Ok(())
             })
         }),
-        init_factory(table_route_cache.clone()),
+        init_factory(table_route_cache),
         |ident| matches!(ident, CacheIdent::TableId(_)),
     )
 }
