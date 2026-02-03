@@ -47,7 +47,7 @@ impl CompatCommand {
         let from_version = match Version::parse(&self.from) {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("Error parsing 'from' version: {}", e);
+                println!("Error parsing 'from' version: {}", e);
                 std::process::exit(1);
             }
         };
@@ -55,7 +55,7 @@ impl CompatCommand {
         let to_version = match Version::parse(&self.to) {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("Error parsing 'to' version: {}", e);
+                println!("Error parsing 'to' version: {}", e);
                 std::process::exit(1);
             }
         };
@@ -78,7 +78,7 @@ impl CompatCommand {
         {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("Failed to create compatibility runner: {}", e);
+                println!("Failed to create compatibility runner: {}", e);
                 std::process::exit(1);
             }
         };
@@ -88,7 +88,7 @@ impl CompatCommand {
                 println!("\x1b[32mCompatibility tests passed!\x1b[0m");
             }
             Err(e) => {
-                eprintln!("\x1b[31mCompatibility tests failed: {}\x1b[0m", e);
+                println!("\x1b[31mCompatibility tests failed: {}\x1b[0m", e);
                 std::process::exit(1);
             }
         }
