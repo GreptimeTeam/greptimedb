@@ -2463,6 +2463,17 @@ pub async fn test_identity_pipeline(store_type: StorageType) {
 /// - Row 1: {"a": null, "b": null} → row has [ts, null, null] (3 elements), schema has [ts] (1 col)
 /// - Row 2: {"c": "value"} → row has [ts, "value"] (2 elements), schema has [ts, c] (2 cols)
 /// - Padding: column_count=2, Row1.len()=3 → diff = 2-3 = underflow!
+///
+/// This test also covers resolve_value function branches:
+/// - VrlValue::Null (null values)
+/// - VrlValue::Integer (integer values)
+/// - VrlValue::Float (floating point values)
+/// - VrlValue::Boolean (boolean values)
+/// - VrlValue::Bytes (string values)
+///
+/// Note: VrlValue::Array and VrlValue::Object branches are NOT covered because
+/// the identity pipeline flattens nested objects and stringifies arrays before
+/// resolve_value is called. Testing those branches would require a custom pipeline.
 pub async fn test_identity_pipeline_with_null_column(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, mut guard) =
@@ -2518,6 +2529,106 @@ pub async fn test_identity_pipeline_with_null_column(store_type: StorageType) {
 
     // Row 2 has "value" for c
     assert_eq!(rows[1][0], "value");
+
+    // Test resolve_value function with various data types
+    // Covers: VrlValue::Null, Integer, Float, Boolean, Bytes (string)
+    // Note: Array and Object are flattened/stringified by identity pipeline before resolve_value
+    let body_all_types = r#"{"null_col":null,"int_col":42,"float_col":3.14,"bool_col":true,"str_col":"hello","array_col":[1,2,3],"obj_col":{"nested":"value"}}"#;
+
+    let res = client
+        .post("/v1/ingest?db=public&table=all_types_test&pipeline_name=greptime_identity")
+        .header("Content-Type", "application/json")
+        .body(body_all_types)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body: serde_json::Value = res.json().await;
+    assert_eq!(body["output"][0]["affectedrows"], 1);
+
+    // Verify the schema contains all non-null column types
+    // null_col should NOT be in schema since it only has null value
+    // Note: arrays are converted to strings, nested objects are flattened (obj_col.nested)
+    let expected = r#"[["greptime_timestamp","TimestampNanosecond","PRI","NO","","TIMESTAMP"],["array_col","String","","YES","","FIELD"],["bool_col","Boolean","","YES","","FIELD"],["float_col","Float64","","YES","","FIELD"],["int_col","Int64","","YES","","FIELD"],["obj_col.nested","String","","YES","","FIELD"],["str_col","String","","YES","","FIELD"]]"#;
+    validate_data(
+        "test_identity_pipeline_all_types_schema",
+        &client,
+        "desc all_types_test",
+        expected,
+    )
+    .await;
+
+    // Verify the data values are correct
+    let res = client
+        .get("/v1/sql?sql=select int_col, float_col, bool_col, str_col from all_types_test")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let resp: serde_json::Value = res.json().await;
+    let rows = resp["output"][0]["records"]["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0], 42); // int_col
+    assert_eq!(rows[0][1], 3.14); // float_col
+    assert_eq!(rows[0][2], true); // bool_col
+    assert_eq!(rows[0][3], "hello"); // str_col
+
+    // Test with multiple rows containing different combinations of types
+    // This ensures the schema evolution works correctly across rows
+    let body_multi_rows = r#"{"int_val":100,"str_val":"first"}
+{"int_val":200,"float_val":2.5,"bool_val":false}
+{"str_val":"third","array_val":[4,5,6],"nested_obj":{"key":"val"}}"#;
+
+    let res = client
+        .post("/v1/ingest?db=public&table=multi_types_test&pipeline_name=greptime_identity")
+        .header("Content-Type", "application/json")
+        .body(body_multi_rows)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body: serde_json::Value = res.json().await;
+    assert_eq!(body["output"][0]["affectedrows"], 3);
+
+    // Verify all columns from all rows are in the schema
+    // Note: arrays are converted to strings, nested objects are flattened (nested_obj.key)
+    // Columns appear in order they were first encountered: Row1(int_val,str_val), Row2(float_val,bool_val), Row3(array_val,nested_obj.key)
+    let expected = r#"[["greptime_timestamp","TimestampNanosecond","PRI","NO","","TIMESTAMP"],["int_val","Int64","","YES","","FIELD"],["str_val","String","","YES","","FIELD"],["bool_val","Boolean","","YES","","FIELD"],["float_val","Float64","","YES","","FIELD"],["array_val","String","","YES","","FIELD"],["nested_obj.key","String","","YES","","FIELD"]]"#;
+    validate_data(
+        "test_identity_pipeline_multi_types_schema",
+        &client,
+        "desc multi_types_test",
+        expected,
+    )
+    .await;
+
+    // Verify data with nulls for columns not present in each row
+    // ORDER BY int_val sorts nulls last
+    let res = client
+        .get("/v1/sql?sql=select int_val, str_val, float_val, bool_val from multi_types_test order by int_val")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let resp: serde_json::Value = res.json().await;
+    let rows = resp["output"][0]["records"]["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 3);
+
+    // Row 1: int_val=100, str_val="first", float_val=null, bool_val=null
+    assert_eq!(rows[0][0], 100);
+    assert_eq!(rows[0][1], "first");
+    assert!(rows[0][2].is_null());
+    assert!(rows[0][3].is_null());
+
+    // Row 2: int_val=200, str_val=null, float_val=2.5, bool_val=false
+    assert_eq!(rows[1][0], 200);
+    assert!(rows[1][1].is_null());
+    assert_eq!(rows[1][2], 2.5);
+    assert_eq!(rows[1][3], false);
+
+    // Row 3: int_val=null, str_val="third", float_val=null, bool_val=null (nulls sorted last)
+    assert!(rows[2][0].is_null());
+    assert_eq!(rows[2][1], "third");
+    assert!(rows[2][2].is_null());
+    assert!(rows[2][3].is_null());
 
     guard.remove_all().await;
 }
