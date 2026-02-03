@@ -2445,7 +2445,7 @@ pub async fn test_identity_pipeline(store_type: StorageType) {
 /// Test for identity pipeline with null values for new columns.
 /// This test verifies that null values for columns not yet in the schema
 /// are handled correctly - they should NOT push to the row without updating schema.
-/// Regression test for: https://github.com/GreptimeTeam/greptimedb/issues/XXXX
+/// Regression test for: https://github.com/GreptimeTeam/greptimedb/issues/7654
 ///
 /// The bug was that when a null value appeared for a column not in schema:
 /// 1. The schema was not updated (correct)
@@ -2516,7 +2516,9 @@ pub async fn test_identity_pipeline_with_null_column(store_type: StorageType) {
 
     // Verify the data is correct
     let res = client
-        .get("/v1/sql?sql=select c from null_test")
+        .get(
+            "/v1/sql?sql=select c from null_test order by case when c is null then 0 else 1 end, c",
+        )
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
@@ -2602,9 +2604,9 @@ pub async fn test_identity_pipeline_with_null_column(store_type: StorageType) {
     .await;
 
     // Verify data with nulls for columns not present in each row
-    // ORDER BY int_val sorts nulls last
+    // ORDER BY with explicit NULLS LAST
     let res = client
-        .get("/v1/sql?sql=select int_val, str_val, float_val, bool_val from multi_types_test order by int_val")
+        .get("/v1/sql?sql=select int_val, str_val, float_val, bool_val from multi_types_test order by case when int_val is null then 1 else 0 end, int_val")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
