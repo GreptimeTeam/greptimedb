@@ -117,6 +117,7 @@ macro_rules! http_tests {
                 test_pipeline_auto_transform,
                 test_pipeline_auto_transform_with_select,
                 test_identity_pipeline,
+                test_identity_pipeline_with_null_column,
                 test_identity_pipeline_with_flatten,
                 test_identity_pipeline_with_custom_ts,
                 test_pipeline_dispatcher,
@@ -2437,6 +2438,86 @@ pub async fn test_identity_pipeline(store_type: StorageType) {
 
     let expected = r#"[["greptime_timestamp","TimestampNanosecond","PRI","NO","","TIMESTAMP"],["__source__","String","","YES","","FIELD"],["__time__","Int64","","YES","","FIELD"],["__topic__","String","","YES","","FIELD"],["ip","String","","YES","","FIELD"],["json_array","String","","YES","","FIELD"],["json_object.a","Int64","","YES","","FIELD"],["json_object.b","Int64","","YES","","FIELD"],["status","String","","YES","","FIELD"],["time","String","","YES","","FIELD"],["url","String","","YES","","FIELD"],["user-agent","String","","YES","","FIELD"],["dongdongdong","String","","YES","","FIELD"],["hasagei","String","","YES","","FIELD"]]"#;
     validate_data("identity_schema", &client, "desc logs", expected).await;
+
+    guard.remove_all().await;
+}
+
+/// Test for identity pipeline with null values for new columns.
+/// This test verifies that null values for columns not yet in the schema
+/// are handled correctly - they should NOT push to the row without updating schema.
+/// Regression test for: https://github.com/GreptimeTeam/greptimedb/issues/XXXX
+///
+/// The bug was that when a null value appeared for a column not in schema:
+/// 1. The schema was not updated (correct)
+/// 2. But row.push() was still called (BUG!)
+///
+/// This caused row.len() > schema.len(), leading to integer underflow in the
+/// padding loop: `let diff = column_count - row.values.len()` where column_count < row.values.len()
+/// causes usize underflow, making the loop try to push billions of elements → OOM.
+///
+/// To trigger this bug:
+/// - Row 1 must have ONLY null values for NEW columns (pushes to row without schema update)
+/// - Row 2 must have FEWER new non-null columns than Row 1's null columns
+///
+/// Example that triggers the bug:
+/// - Row 1: {"a": null, "b": null} → row has [ts, null, null] (3 elements), schema has [ts] (1 col)
+/// - Row 2: {"c": "value"} → row has [ts, "value"] (2 elements), schema has [ts, c] (2 cols)
+/// - Padding: column_count=2, Row1.len()=3 → diff = 2-3 = underflow!
+pub async fn test_identity_pipeline_with_null_column(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_identity_pipeline_with_null_column")
+            .await;
+
+    let client = TestClient::new(app).await;
+
+    // Row 1 has 2 null values for new columns (a, b) - these push to row but don't add to schema
+    // Row 2 has 1 non-null value for new column (c) - this adds to schema
+    // Result: Row 1 has 3 elements [ts, null, null], schema has 2 columns [ts, c]
+    // The padding loop: diff = 2 - 3 = usize underflow → OOM
+    let body = r#"{"a":null,"b":null}
+{"c":"value"}"#;
+
+    let res = client
+        .post("/v1/ingest?db=public&table=null_test&pipeline_name=greptime_identity")
+        .header("Content-Type", "application/json")
+        .body(body)
+        .send()
+        .await;
+
+    // The buggy code would OOM or panic here due to the integer underflow causing
+    // billions of push operations. If we get here, the bug is fixed.
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body: serde_json::Value = res.json().await;
+    assert_eq!(body["output"][0]["affectedrows"], 2);
+
+    // Verify the schema only contains columns that had non-null values
+    // a and b should NOT be in the schema since they only had null values
+    let expected = r#"[["greptime_timestamp","TimestampNanosecond","PRI","NO","","TIMESTAMP"],["c","String","","YES","","FIELD"]]"#;
+    validate_data(
+        "test_identity_pipeline_null_column_schema",
+        &client,
+        "desc null_test",
+        expected,
+    )
+    .await;
+
+    // Verify the data is correct
+    let res = client
+        .get("/v1/sql?sql=select c from null_test")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let resp: serde_json::Value = res.json().await;
+    let rows = resp["output"][0]["records"]["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+
+    // Row 1 has null for c (column didn't exist when row 1 was processed)
+    assert!(rows[0][0].is_null());
+
+    // Row 2 has "value" for c
+    assert_eq!(rows[1][0], "value");
 
     guard.remove_all().await;
 }
