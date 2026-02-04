@@ -12710,11 +12710,12 @@ dependencies = [
 [[package]]
 name = "sqlness"
 version = "0.6.1"
-source = "git+https://github.com/GreptimeTeam/sqlness?rev=ea88d764e44c03c0d45f63a9a3121ba4ea8f6ad1#ea88d764e44c03c0d45f63a9a3121ba4ea8f6ad1"
+source = "git+https://github.com/GreptimeTeam/sqlness?rev=6bc85ce077a87756e68ef5a5cd5707071a9da380#6bc85ce077a87756e68ef5a5cd5707071a9da380"
 dependencies = [
  "async-trait",
  "derive_builder 0.11.2",
  "duration-str",
+ "futures",
  "minijinja",
  "prettydiff",
  "regex",
