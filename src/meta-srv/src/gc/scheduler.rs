@@ -14,20 +14,21 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use common_meta::DatanodeId;
 use common_meta::key::TableMetadataManagerRef;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::tracing::Instrument as _;
 use common_telemetry::{error, info};
-use store_api::storage::GcReport;
+use store_api::storage::{GcReport, RegionId};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{Mutex, oneshot};
 
 use crate::cluster::MetaPeerClientRef;
 use crate::define_ticker;
 use crate::error::{Error, Result};
+use crate::gc::Region2Peers;
 use crate::gc::ctx::{DefaultGcSchedulerCtx, SchedulerCtx};
 use crate::gc::options::{GcSchedulerOptions, TICKER_INTERVAL};
 use crate::gc::tracker::RegionGcTracker;
@@ -49,9 +50,19 @@ pub struct GcJobReport {
 /// - `Tick`: This event is used to trigger gc periodically.
 /// - `Manually`: This event is used to trigger a manual gc run and provides a channel
 ///   to send back the [`GcJobReport`] for that run.
+///   Optional parameters allow specifying target regions and GC behavior.
 pub enum Event {
     Tick,
-    Manually(oneshot::Sender<GcJobReport>),
+    Manually {
+        /// Channel sender to return the GC job report
+        sender: oneshot::Sender<GcJobReport>,
+        /// Optional specific region IDs to GC. If None, scheduler will select candidates automatically.
+        region_ids: Option<Vec<RegionId>>,
+        /// Optional override for full file listing. If None, uses scheduler config.
+        full_file_listing: Option<bool>,
+        /// Optional override for timeout. If None, uses scheduler config.
+        timeout: Option<Duration>,
+    },
 }
 
 #[allow(unused)]
@@ -130,17 +141,27 @@ impl GcScheduler {
                         error!(e; "Failed to handle gc tick");
                     }
                 }
-                Event::Manually(sender) => {
+                Event::Manually {
+                    sender,
+                    region_ids,
+                    full_file_listing,
+                    timeout,
+                } => {
                     info!("Received manually gc request");
                     let span =
                         common_telemetry::tracing::info_span!("meta_gc_tick", trigger = "manual");
-                    match self.handle_tick().instrument(span).await {
+                    match self
+                        .handle_manual_gc(region_ids, full_file_listing, timeout)
+                        .await
+                    {
                         Ok(report) => {
                             // ignore error
                             let _ = sender.send(report);
                         }
                         Err(e) => {
-                            error!(e; "Failed to handle gc tick");
+                            error!(e; "Failed to handle manual gc");
+                            // Send empty report on error to avoid blocking caller
+                            let _ = sender.send(GcJobReport::default());
                         }
                     };
                 }
@@ -160,6 +181,42 @@ impl GcScheduler {
 
         info!("Finished gc trigger");
 
+        Ok(report)
+    }
+
+    /// Handles a manual GC request with optional specific parameters.
+    ///
+    /// If `region_ids` is specified, GC will be performed only on those regions.
+    /// Otherwise, falls back to automatic candidate selection.
+    pub(crate) async fn handle_manual_gc(
+        &self,
+        region_ids: Option<Vec<RegionId>>,
+        full_file_listing: Option<bool>,
+        timeout: Option<Duration>,
+    ) -> Result<GcJobReport> {
+        info!("Start to handle manual gc request");
+
+        let report = if let Some(regions) = region_ids {
+            let full_listing = full_file_listing.unwrap_or(false);
+            let gc_timeout = timeout.unwrap_or(self.config.mailbox_timeout);
+
+            let gc_report = self
+                .ctx
+                .gc_regions(&regions, full_listing, gc_timeout, Region2Peers::new())
+                .await?;
+
+            let mut per_datanode_reports = HashMap::new();
+            per_datanode_reports.insert(0, gc_report);
+            GcJobReport {
+                per_datanode_reports,
+                failed_datanodes: HashMap::new(),
+            }
+        } else {
+            // No specific regions, use default tick behavior
+            self.trigger_gc().await?
+        };
+
+        info!("Finished manual gc request");
         Ok(report)
     }
 }
