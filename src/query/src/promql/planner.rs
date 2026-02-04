@@ -66,6 +66,7 @@ use promql::functions::{
 };
 use promql_parser::label::{METRIC_NAME, MatchOp, Matcher, Matchers};
 use promql_parser::parser::token::TokenType;
+use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
     AggregateExpr, BinModifier, BinaryExpr as PromBinaryExpr, Call, EvalStmt, Expr as PromExpr,
     Function, FunctionArgs as PromFunctionArgs, LabelModifier, MatrixSelector, NumberLiteral,
@@ -761,12 +762,88 @@ impl PromPlanner {
                     Ok(binary_expr)
                 };
                 if is_comparison_op && !should_return_bool {
-                    self.filter_on_field_column(join_plan, bin_expr_builder)
+                    // PromQL comparison operators without `bool` are filters:
+                    //   - keep the instant-vector side sample values
+                    //   - drop samples where the comparison is false
+                    //
+                    // So we filter on the join result and then project only the side that should
+                    // be preserved according to PromQL semantics.
+                    let filtered = self.filter_on_field_column(join_plan, bin_expr_builder)?;
+                    let (project_table_ref, project_context) =
+                        match (lhs.value_type(), rhs.value_type()) {
+                            (ValueType::Scalar, ValueType::Vector) => {
+                                (&right_table_ref, &right_context)
+                            }
+                            _ => (&left_table_ref, &left_context),
+                        };
+                    self.project_binary_join_side(filtered, project_table_ref, project_context)
                 } else {
                     self.projection_for_each_field_column(join_plan, bin_expr_builder)
                 }
             }
         }
+    }
+
+    fn project_binary_join_side(
+        &mut self,
+        input: LogicalPlan,
+        table_ref: &TableReference,
+        context: &PromPlannerContext,
+    ) -> Result<LogicalPlan> {
+        let schema = input.schema();
+
+        let mut project_exprs =
+            Vec::with_capacity(context.tag_columns.len() + context.field_columns.len() + 2);
+
+        // Project time index from the chosen side.
+        if let Some(time_index_column) = &context.time_index_column {
+            let time_index_col = schema
+                .qualified_field_with_name(Some(table_ref), time_index_column)
+                .context(DataFusionPlanningSnafu)?
+                .into();
+            project_exprs.push(DfExpr::Column(time_index_col));
+        }
+
+        // Project field columns from the chosen side.
+        for field_column in &context.field_columns {
+            let field_col = schema
+                .qualified_field_with_name(Some(table_ref), field_column)
+                .context(DataFusionPlanningSnafu)?
+                .into();
+            project_exprs.push(DfExpr::Column(field_col));
+        }
+
+        // Project tag columns from the chosen side.
+        for tag_column in &context.tag_columns {
+            let tag_col = schema
+                .qualified_field_with_name(Some(table_ref), tag_column)
+                .context(DataFusionPlanningSnafu)?
+                .into();
+            project_exprs.push(DfExpr::Column(tag_col));
+        }
+
+        // Preserve `__tsid` if present, so it can still be used internally downstream. It's
+        // stripped from the final output anyway.
+        if context.use_tsid
+            && let Ok(tsid_col) =
+                schema.qualified_field_with_name(Some(table_ref), DATA_SCHEMA_TSID_COLUMN_NAME)
+        {
+            project_exprs.push(DfExpr::Column(tsid_col.into()));
+        }
+
+        let plan = LogicalPlanBuilder::from(input)
+            .project(project_exprs)
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)?;
+
+        // Update context to reflect the projected schema. Don't keep a table qualifier since
+        // the result is a derived expression.
+        self.ctx = context.clone();
+        self.ctx.table_name = None;
+        self.ctx.schema_name = None;
+
+        Ok(plan)
     }
 
     fn prom_number_lit_to_plan(&mut self, number_literal: &NumberLiteral) -> Result<LogicalPlan> {
@@ -2694,8 +2771,15 @@ impl PromPlanner {
             exprs.push(expr);
         }
 
-        conjunction(exprs).context(ValueNotFoundSnafu {
-            table: self.table_ref()?.to_quoted_string(),
+        // This error context should be computed lazily: the planner may set `ctx.table_name` to
+        // `None` for derived expressions (e.g. after projecting the LHS of a vector-vector
+        // comparison filter). Eagerly calling `table_ref()?` here can turn a valid plan into
+        // a `TableNameNotFound` error even when `conjunction(exprs)` succeeds.
+        conjunction(exprs).with_context(|| ValueNotFoundSnafu {
+            table: self
+                .table_ref()
+                .map(|t| t.to_quoted_string())
+                .unwrap_or_else(|_| "unknown".to_string()),
         })
     }
 
