@@ -557,12 +557,6 @@ lazy_static! {
         &[FILE_TYPE_LABEL],
     ).unwrap();
 
-    /// Counter for total bytes deleted by GC.
-    pub static ref GC_BYTES_DELETED_TOTAL: IntCounter = register_int_counter!(
-        "greptime_mito_gc_bytes_deleted_total",
-        "Total bytes deleted by GC",
-    ).unwrap();
-
     /// Total number of files downloaded during cache fill on region open.
     pub static ref CACHE_FILL_DOWNLOADED_FILES: IntCounter = register_int_counter!(
         "mito_cache_fill_downloaded_files",
