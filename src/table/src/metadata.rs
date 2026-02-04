@@ -28,7 +28,9 @@ use derive_builder::Builder;
 use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
-use store_api::mito_engine_options::{COMPACTION_TYPE, COMPACTION_TYPE_TWCS, SST_FORMAT_KEY};
+use store_api::mito_engine_options::{
+    APPEND_MODE_KEY, COMPACTION_TYPE, COMPACTION_TYPE_TWCS, SST_FORMAT_KEY,
+};
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 use store_api::storage::{ColumnDescriptor, ColumnDescriptorBuilder, ColumnId};
 
@@ -363,6 +365,11 @@ impl TableMeta {
                     new_options
                         .extra_options
                         .insert(SST_FORMAT_KEY.to_string(), value.clone());
+                }
+                SetRegionOption::AppendMode(value) => {
+                    new_options
+                        .extra_options
+                        .insert(APPEND_MODE_KEY.to_string(), value.to_string());
                 }
             }
         }

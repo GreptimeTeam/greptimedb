@@ -161,13 +161,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
         };
         // Persist the metadata to region's manifest.
+        let options = new_options.as_ref().unwrap_or(&version.options);
         let change = RegionChange {
             metadata: new_meta,
-            sst_format: new_options
-                .as_ref()
-                .unwrap_or(&version.options)
-                .sst_format
-                .unwrap_or_default(),
+            sst_format: options.sst_format.unwrap_or_default(),
+            append_mode: Some(options.append_mode),
         };
         self.handle_manifest_region_change(region, change, need_index, new_options, sender);
     }
@@ -229,6 +227,20 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         );
                     }
                 }
+                SetRegionOption::AppendMode(new_append_mode) => {
+                    // If the append mode is unchanged, we consider the option is altered.
+                    if new_append_mode != current_options.append_mode {
+                        // Validates: only allow changing from false to true.
+                        ensure!(
+                            !current_options.append_mode && new_append_mode,
+                            store_api::metadata::InvalidRegionRequestSnafu {
+                                region_id: region.region_id,
+                                err: "Only allow changing append_mode from false to true",
+                            }
+                        );
+                        all_options_altered = false;
+                    }
+                }
             }
         }
         region.version_control.alter_options(current_options);
@@ -263,6 +275,12 @@ fn new_region_options_on_empty_memtable(
                 assert_eq!(FormatType::Flat, new_format);
 
                 current_options.sst_format = Some(new_format);
+            }
+            SetRegionOption::AppendMode(new_append_mode) => {
+                // Safety: handle_alter_region_options_fast() has validated this.
+                assert!(*new_append_mode && !current_options.append_mode);
+
+                current_options.append_mode = true;
             }
         }
     }

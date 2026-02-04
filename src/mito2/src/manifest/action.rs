@@ -78,6 +78,10 @@ pub struct RegionChange {
     /// Format of the SST.
     #[serde(default)]
     pub sst_format: FormatType,
+    /// Whether the region is in append mode.
+    /// This is optional to maintain backward compatibility with existing code.
+    #[serde(default)]
+    pub append_mode: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -160,6 +164,9 @@ pub struct RegionManifest {
     /// Format of the SST file.
     #[serde(default)]
     pub sst_format: FormatType,
+    /// Whether the region is in append mode.
+    #[serde(default)]
+    pub append_mode: Option<bool>,
 }
 
 #[cfg(test)]
@@ -188,6 +195,7 @@ pub struct RegionManifestBuilder {
     compaction_time_window: Option<Duration>,
     committed_sequence: Option<SequenceNumber>,
     sst_format: FormatType,
+    append_mode: Option<bool>,
 }
 
 impl RegionManifestBuilder {
@@ -205,6 +213,7 @@ impl RegionManifestBuilder {
                 compaction_time_window: s.compaction_time_window,
                 committed_sequence: s.committed_sequence,
                 sst_format: s.sst_format,
+                append_mode: s.append_mode,
             }
         } else {
             Default::default()
@@ -215,6 +224,8 @@ impl RegionManifestBuilder {
         self.metadata = Some(change.metadata);
         self.manifest_version = manifest_version;
         self.sst_format = change.sst_format;
+        // Only update append_mode if the change specifies a value.
+        self.append_mode = change.append_mode.or(self.append_mode);
     }
 
     /// Applies a partition-expression-only metadata change.
@@ -344,6 +355,7 @@ impl RegionManifestBuilder {
             truncated_entry_id: self.truncated_entry_id,
             compaction_time_window: self.compaction_time_window,
             sst_format: self.sst_format,
+            append_mode: self.append_mode,
         })
     }
 }
@@ -896,6 +908,7 @@ mod tests {
                 }],
             },
             sst_format: FormatType::PrimaryKey,
+            append_mode: None,
         };
 
         let json = serde_json::to_string(&manifest).unwrap();
@@ -998,6 +1011,7 @@ mod tests {
                 truncated_entry_id: None,
                 compaction_time_window: None,
                 sst_format: FormatType::PrimaryKey,
+                append_mode: None,
             }
         );
 
@@ -1012,6 +1026,7 @@ mod tests {
             truncated_entry_id: None,
             compaction_time_window: None,
             sst_format: FormatType::PrimaryKey,
+            append_mode: None,
         };
         let json = serde_json::to_string(&new_manifest).unwrap();
         let old_from_new: RegionManifestV1 = serde_json::from_str(&json).unwrap();
@@ -1111,6 +1126,7 @@ mod tests {
         let region_change = RegionChange {
             metadata: region_change.metadata.clone(),
             sst_format: FormatType::Flat,
+            append_mode: None,
         };
 
         let serialized = serde_json::to_string(&region_change).unwrap();
