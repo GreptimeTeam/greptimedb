@@ -34,6 +34,7 @@ use crate::compression::CompressionType;
 use crate::error::{self, Result};
 use crate::file_format::{self, FileFormat, stream_to_file};
 use crate::share_buffer::SharedBuffer;
+use crate::util::normalize_infer_schema;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JsonFormat {
@@ -102,7 +103,7 @@ impl FileFormat for JsonFormat {
 
             let schema = infer_json_schema_from_iterator(iter).context(error::InferSchemaSnafu)?;
 
-            Ok(schema)
+            Ok(normalize_infer_schema(schema))
         })
         .await
         .context(error::JoinHandleSnafu)?
@@ -124,7 +125,11 @@ pub async fn stream_to_json(
         threshold,
         concurrency,
         format.compression_type,
-        json::LineDelimitedWriter::new,
+        |b| {
+            arrow::json::writer::WriterBuilder::new()
+                .with_explicit_nulls(true)
+                .build::<_, LineDelimited>(b)
+        },
     )
     .await
 }
@@ -176,6 +181,19 @@ mod tests {
             ],
             formatted
         );
+    }
+
+    #[tokio::test]
+    async fn normalize_infer_schema() {
+        let json = JsonFormat {
+            schema_infer_max_record: Some(3),
+            ..JsonFormat::default()
+        };
+        let store = test_store(&test_data_root());
+        let schema = json.infer_schema(&store, "max_infer.json").await.unwrap();
+        let formatted: Vec<_> = format_schema(schema);
+
+        assert_eq!(vec!["num: Int64: NULL", "str: Utf8: NULL"], formatted,);
     }
 
     #[tokio::test]

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use auth::user_provider_from_option;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, SecondsFormat, Utc};
@@ -27,8 +28,9 @@ use sqlx::postgres::{PgDatabaseError, PgPoolOptions};
 use sqlx::types::Decimal;
 use sqlx::{Connection, Executor, Row};
 use tests_integration::test_util::{
-    StorageType, setup_mysql_server, setup_mysql_server_with_user_provider, setup_pg_server,
-    setup_pg_server_with_user_provider,
+    StorageType, setup_mysql_server, setup_mysql_server_with_slow_query_threshold,
+    setup_mysql_server_with_user_provider, setup_pg_server,
+    setup_pg_server_with_slow_query_threshold, setup_pg_server_with_user_provider,
 };
 use tokio_postgres::{Client, NoTls, SimpleQueryMessage};
 
@@ -693,8 +695,12 @@ pub async fn test_postgres_crud(store_type: StorageType) {
 pub async fn test_mysql_slow_query(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
 
-    let (mut guard, fe_mysql_server) =
-        setup_mysql_server(store_type, "test_mysql_slow_query").await;
+    let (mut guard, fe_mysql_server) = setup_mysql_server_with_slow_query_threshold(
+        store_type,
+        "test_mysql_slow_query",
+        Duration::from_millis(100),
+    )
+    .await;
     let addr = fe_mysql_server.bind_addr().unwrap().to_string();
 
     let pool = MySqlPoolOptions::new()
@@ -703,29 +709,38 @@ pub async fn test_mysql_slow_query(store_type: StorageType) {
         .await
         .unwrap();
 
-    // The slow query will run at least longer than 1s.
-    let slow_query = "SELECT count(*) FROM generate_series(1, 1000000000)";
+    // The slow query should run longer than the configured threshold.
+    let slow_query = "SELECT count(*) FROM generate_series(1, 50000000)";
 
     // Simulate a slow query.
     sqlx::query(slow_query).fetch_all(&pool).await.unwrap();
 
-    // Wait for the slow query to be recorded.
-    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-
     let table = format!("{}.{}", DEFAULT_PRIVATE_SCHEMA_NAME, SLOW_QUERY_TABLE_NAME);
     let query = format!(
-        "SELECT {}, {}, {}, {} FROM {table}",
+        "SELECT {}, {}, {}, {} FROM {table} WHERE {} = ?",
         SLOW_QUERY_TABLE_COST_COLUMN_NAME,
         SLOW_QUERY_TABLE_THRESHOLD_COLUMN_NAME,
         SLOW_QUERY_TABLE_QUERY_COLUMN_NAME,
-        SLOW_QUERY_TABLE_IS_PROMQL_COLUMN_NAME
+        SLOW_QUERY_TABLE_IS_PROMQL_COLUMN_NAME,
+        SLOW_QUERY_TABLE_QUERY_COLUMN_NAME,
     );
 
-    let rows = sqlx::query(&query).fetch_all(&pool).await.unwrap();
-    assert_eq!(rows.len(), 1);
+    let row = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Ok(Some(row)) = sqlx::query(&query)
+                .bind(slow_query)
+                .fetch_optional(&pool)
+                .await
+            {
+                break row;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
 
     // Check the results.
-    let row = &rows[0];
     let cost: u64 = row.get(0);
     let threshold: u64 = row.get(1);
     let query: String = row.get(2);
@@ -810,7 +825,12 @@ pub async fn test_postgres_bytea(store_type: StorageType) {
 }
 
 pub async fn test_postgres_slow_query(store_type: StorageType) {
-    let (mut guard, fe_pg_server) = setup_pg_server(store_type, "test_postgres_slow_query").await;
+    let (mut guard, fe_pg_server) = setup_pg_server_with_slow_query_threshold(
+        store_type,
+        "test_postgres_slow_query",
+        Duration::from_millis(100),
+    )
+    .await;
     let addr = fe_pg_server.bind_addr().unwrap().to_string();
 
     let pool = PgPoolOptions::new()
@@ -819,23 +839,34 @@ pub async fn test_postgres_slow_query(store_type: StorageType) {
         .await
         .unwrap();
 
-    let slow_query = "SELECT count(*) FROM generate_series(1, 1000000000)";
+    let slow_query = "SELECT count(*) FROM generate_series(1, 50000000)";
     let _ = sqlx::query(slow_query).fetch_all(&pool).await.unwrap();
-
-    // Wait for the slow query to be recorded.
-    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
     let table = format!("{}.{}", DEFAULT_PRIVATE_SCHEMA_NAME, SLOW_QUERY_TABLE_NAME);
     let query = format!(
-        "SELECT {}, {}, {}, {} FROM {table}",
+        "SELECT {}, {}, {}, {} FROM {table} WHERE {} = $1",
         SLOW_QUERY_TABLE_COST_COLUMN_NAME,
         SLOW_QUERY_TABLE_THRESHOLD_COLUMN_NAME,
         SLOW_QUERY_TABLE_QUERY_COLUMN_NAME,
-        SLOW_QUERY_TABLE_IS_PROMQL_COLUMN_NAME
+        SLOW_QUERY_TABLE_IS_PROMQL_COLUMN_NAME,
+        SLOW_QUERY_TABLE_QUERY_COLUMN_NAME,
     );
-    let rows = sqlx::query(&query).fetch_all(&pool).await.unwrap();
-    assert_eq!(rows.len(), 1);
-    let row = &rows[0];
+
+    let row = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Ok(Some(row)) = sqlx::query(&query)
+                .bind(slow_query)
+                .fetch_optional(&pool)
+                .await
+            {
+                break row;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
+
     let cost: Decimal = row.get(0);
     let threshold: Decimal = row.get(1);
     let query: String = row.get(2);

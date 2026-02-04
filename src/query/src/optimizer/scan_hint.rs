@@ -323,14 +323,18 @@ impl TreeNodeVisitor<'_> for ScanHintVisitor {
         }
 
         // Avoid carrying vector hints across branching inputs (join/subquery) to prevent
-        // pruning results before global ordering is applied.
-        let is_branching = matches!(node, LogicalPlan::Subquery(_)) || node.inputs().len() > 1;
-        if is_branching && self.ts_row_selector.is_some() {
+        // pruning results before global ordering is applied. Only treat a subquery as a
+        // barrier when it contains non-inlineable operators.
+        let is_branching_for_ts = matches!(
+            node,
+            LogicalPlan::Subquery(_) | LogicalPlan::SubqueryAlias(_)
+        ) || node.inputs().len() > 1;
+        if is_branching_for_ts && self.ts_row_selector.is_some() {
             // clean previous time series selector hint when encounter subqueries or join
             self.ts_row_selector = None;
         }
         #[cfg(feature = "vector_index")]
-        if is_branching {
+        if is_branching_for_vector(node) {
             self.vector_search.on_branching_enter();
         }
 
@@ -371,8 +375,10 @@ impl TreeNodeVisitor<'_> for ScanHintVisitor {
             LogicalPlan::Filter(_) => {
                 self.vector_search.on_filter_exit();
             }
-            LogicalPlan::Subquery(_) => {
-                self.vector_search.on_branching_exit();
+            LogicalPlan::Subquery(_) | LogicalPlan::SubqueryAlias(_) => {
+                if is_branching_for_vector(_node) {
+                    self.vector_search.on_branching_exit();
+                }
             }
             _ if _node.inputs().len() > 1 => {
                 self.vector_search.on_branching_exit();
@@ -396,6 +402,43 @@ impl ScanHintVisitor {
             base
         }
     }
+}
+
+#[cfg(feature = "vector_index")]
+fn is_branching_for_vector(node: &LogicalPlan) -> bool {
+    if node.inputs().len() > 1 {
+        return true;
+    }
+
+    match node {
+        LogicalPlan::Subquery(subquery) => has_non_inlineable_ops(subquery.subquery.as_ref()),
+        LogicalPlan::SubqueryAlias(alias) => has_non_inlineable_ops(alias.input.as_ref()),
+        _ => false,
+    }
+}
+
+#[cfg(feature = "vector_index")]
+fn has_non_inlineable_ops(plan: &LogicalPlan) -> bool {
+    if matches!(
+        plan,
+        LogicalPlan::Limit(_)
+            | LogicalPlan::Sort(_)
+            | LogicalPlan::Distinct(_)
+            | LogicalPlan::Aggregate(_)
+            | LogicalPlan::Window(_)
+            | LogicalPlan::Union(_)
+            | LogicalPlan::Join(_)
+    ) {
+        return true;
+    }
+
+    for input in plan.inputs() {
+        if has_non_inlineable_ops(input) {
+            return true;
+        }
+    }
+
+    false
 }
 
 #[cfg(test)]

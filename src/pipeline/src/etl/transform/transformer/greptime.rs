@@ -609,7 +609,7 @@ fn resolve_value(
     let index = schema_info.index.get(&column_name).copied();
 
     let value_data = match value {
-        VrlValue::Null => None,
+        VrlValue::Null => return Ok(()),
 
         VrlValue::Integer(v) => {
             // safe unwrap after type matched
@@ -820,6 +820,12 @@ fn identity_pipeline_inner(
     let column_count = schema_info.schema.len();
     for (_, row) in opt_map.iter_mut() {
         for row in row.iter_mut() {
+            assert!(
+                column_count >= row.values.len(),
+                "column_count: {}, row.values.len(): {}",
+                column_count,
+                row.values.len()
+            );
             let diff = column_count - row.values.len();
             for _ in 0..diff {
                 row.values.push(GreptimeValue { value_data: None });

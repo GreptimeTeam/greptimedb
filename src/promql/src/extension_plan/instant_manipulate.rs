@@ -22,7 +22,7 @@ use datafusion::arrow::array::{Array, Float64Array, TimestampMillisecondArray, U
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::stats::Precision;
-use datafusion::common::{ColumnStatistics, DFSchema, DFSchemaRef};
+use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{EmptyRelation, Expr, LogicalPlan, UserDefinedLogicalNodeCore};
@@ -388,10 +388,7 @@ impl ExecutionPlan for InstantManipulateExec {
             num_rows: Precision::Inexact(estimated_row_num.floor() as _),
             total_byte_size: estimated_total_bytes,
             // TODO(ruihang): support this column statistics
-            column_statistics: vec![
-                ColumnStatistics::new_unknown();
-                self.schema().flattened_fields().len()
-            ],
+            column_statistics: Statistics::unknown_column(&self.schema()),
         })
     }
 
