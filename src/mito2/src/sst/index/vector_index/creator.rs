@@ -200,23 +200,24 @@ impl VectorIndexer {
                 let value = values.data.get_ref(i);
                 if value.is_null() {
                     creator.push_null().map_err(build_err)?;
-                } else {
-                    if let ValueRef::Binary(bytes) = value {
-                        let floats = bytes_to_f32_slice(bytes);
-                        if floats.len() != creator.config().dim {
-                            return VectorIndexBuildSnafu {
-                                reason: format!(
-                                    "Vector dimension mismatch: expected {}, got {}",
-                                    creator.config().dim,
-                                    floats.len()
-                                ),
-                            }
-                            .fail();
+                } else if let ValueRef::Binary(bytes) = value {
+                    let floats = bytes_to_f32_slice(bytes);
+                    if floats.len() != creator.config().dim {
+                        return VectorIndexBuildSnafu {
+                            reason: format!(
+                                "Vector dimension mismatch: expected {}, got {}",
+                                creator.config().dim,
+                                floats.len()
+                            ),
                         }
-                        creator.push_vector(&floats).map_err(build_err)?;
-                    } else {
-                        creator.push_null().map_err(build_err)?;
+                        .fail();
                     }
+                    creator.push_vector(&floats).map_err(build_err)?;
+                } else {
+                    common_telemetry::debug!(
+                        "Unexpected non-binary value for vector index column, treating as null"
+                    );
+                    creator.push_null().map_err(build_err)?;
                 }
             }
 
