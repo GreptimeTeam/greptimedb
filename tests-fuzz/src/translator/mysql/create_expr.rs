@@ -74,7 +74,12 @@ impl CreateTableExprTranslator {
         input.partition.as_ref().map(|partition| {
             format!(
                 "PARTITION ON COLUMNS({}) (\n{}\n)",
-                partition.columns.join(", "),
+                partition
+                    .columns
+                    .iter()
+                    .map(|c| c.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", "),
                 partition
                     .exprs
                     .iter()
@@ -172,6 +177,7 @@ mod tests {
     use partition::expr::{Operand, PartitionExpr, RestrictedOp};
 
     use super::CreateTableExprTranslator;
+    use crate::ir::Ident;
     use crate::ir::create_expr::{CreateDatabaseExprBuilder, CreateTableExprBuilder, PartitionDef};
     use crate::test_utils;
     use crate::translator::DslTranslator;
@@ -185,7 +191,7 @@ mod tests {
             .engine("mito")
             .primary_keys(vec![0, 1])
             .partition(PartitionDef {
-                columns: vec!["idc".to_string()],
+                columns: vec![Ident::new("idc")],
                 exprs: vec![
                     PartitionExpr::new(
                         Operand::Column("idc".to_string()),

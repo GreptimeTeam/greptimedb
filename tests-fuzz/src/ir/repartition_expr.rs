@@ -12,8 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod alter_expr;
-pub mod create_expr;
-pub mod insert_expr;
-pub mod repartition_expr;
-pub mod select_expr;
+use partition::expr::PartitionExpr;
+use serde::{Deserialize, Serialize};
+
+use crate::ir::Ident;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SplitPartitionExpr {
+    pub table_name: Ident,
+    pub target: PartitionExpr,
+    pub into: Vec<PartitionExpr>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergePartitionExpr {
+    pub table_name: Ident,
+    pub targets: Vec<PartitionExpr>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RepartitionExpr {
+    Split(SplitPartitionExpr),
+    Merge(MergePartitionExpr),
+}
