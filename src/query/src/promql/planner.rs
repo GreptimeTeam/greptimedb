@@ -2722,6 +2722,14 @@ impl PromPlanner {
     ) -> Result<(Vec<DfExpr>, Vec<DfExpr>)> {
         let mut non_col_args = Vec::new();
         let is_group_agg = op.id() == token::T_GROUP;
+        if is_group_agg {
+            ensure!(
+                self.ctx.field_columns.len() == 1,
+                MultiFieldsNotSupportedSnafu {
+                    operator: "group()"
+                }
+            );
+        }
         let aggr = match op.id() {
             token::T_SUM => sum_udaf(),
             token::T_QUANTILE => {

@@ -19,3 +19,22 @@ TQL EVAL (0, 0, '1s') sum(group by (cluster_name)(kubernetes_build_info{service_
 
 DROP TABLE kubernetes_build_info;
 
+-- `group()` doesn't support multi-field input without selecting a single field.
+CREATE TABLE kubernetes_build_info_multi (
+  ts timestamp(3) time index,
+  cluster_name STRING,
+  service_name STRING,
+  job_name STRING,
+  instance STRING,
+  cpu DOUBLE,
+  mem DOUBLE,
+  PRIMARY KEY(cluster_name, service_name, job_name, instance),
+);
+
+INSERT INTO TABLE kubernetes_build_info_multi VALUES
+    (0, 'cluster_a', 'kubernetes', 'apiserver', '0', 1.0, 2.0),
+    (0, 'cluster_b', 'kubernetes', 'apiserver', '0', 3.0, 4.0);
+
+TQL EVAL (0, 0, '1s') group by (cluster_name)(kubernetes_build_info_multi{service_name="kubernetes",job_name="apiserver"});
+
+DROP TABLE kubernetes_build_info_multi;

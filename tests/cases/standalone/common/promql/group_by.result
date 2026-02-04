@@ -30,3 +30,31 @@ DROP TABLE kubernetes_build_info;
 
 Affected Rows: 0
 
+-- `group()` doesn't support multi-field input without selecting a single field.
+CREATE TABLE kubernetes_build_info_multi (
+  ts timestamp(3) time index,
+  cluster_name STRING,
+  service_name STRING,
+  job_name STRING,
+  instance STRING,
+  cpu DOUBLE,
+  mem DOUBLE,
+  PRIMARY KEY(cluster_name, service_name, job_name, instance),
+);
+
+Affected Rows: 0
+
+INSERT INTO TABLE kubernetes_build_info_multi VALUES
+    (0, 'cluster_a', 'kubernetes', 'apiserver', '0', 1.0, 2.0),
+    (0, 'cluster_b', 'kubernetes', 'apiserver', '0', 3.0, 4.0);
+
+Affected Rows: 2
+
+TQL EVAL (0, 0, '1s') group by (cluster_name)(kubernetes_build_info_multi{service_name="kubernetes",job_name="apiserver"});
+
+Error: 1001(Unsupported), Multi fields calculation is not supported in group()
+
+DROP TABLE kubernetes_build_info_multi;
+
+Affected Rows: 0
+
