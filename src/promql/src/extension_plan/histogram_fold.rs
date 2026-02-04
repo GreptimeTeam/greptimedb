@@ -25,7 +25,7 @@ use datafusion::arrow::compute::{SortOptions, concat_batches};
 use datafusion::arrow::datatypes::{DataType, Float64Type, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::stats::Precision;
-use datafusion::common::{ColumnStatistics, DFSchema, DFSchemaRef, Statistics};
+use datafusion::common::{DFSchema, DFSchemaRef, Statistics};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::TaskContext;
 use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore};
@@ -554,11 +554,7 @@ impl ExecutionPlan for HistogramFoldExec {
         Ok(Statistics {
             num_rows: Precision::Absent,
             total_byte_size: Precision::Absent,
-            column_statistics: vec![
-                ColumnStatistics::new_unknown();
-                // plus one more for the removed column by function `convert_schema`
-                self.schema().flattened_fields().len() + 1
-            ],
+            column_statistics: Statistics::unknown_column(&self.schema()),
         })
     }
 
