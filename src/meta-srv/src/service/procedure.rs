@@ -17,7 +17,7 @@ use std::time::Duration;
 use api::v1::meta::reconcile_request::Target;
 use api::v1::meta::{
     DdlTaskRequest as PbDdlTaskRequest, DdlTaskResponse as PbDdlTaskResponse, GcRegionsRequest,
-    GcRegionsResponse, GcTableRequest, GcTableResponse, MigrateRegionRequest,
+    GcRegionsResponse, GcStats, GcTableRequest, GcTableResponse, MigrateRegionRequest,
     MigrateRegionResponse, ProcedureDetailRequest, ProcedureDetailResponse, ProcedureStateResponse,
     QueryProcedureRequest, ReconcileCatalog, ReconcileDatabase, ReconcileRequest,
     ReconcileResponse, ReconcileTable, ResolveStrategy, procedure_service_server,
@@ -422,20 +422,24 @@ fn gc_report_to_response(
 
 fn gc_response_to_regions_pb(resp: GcResponse) -> GcRegionsResponse {
     GcRegionsResponse {
-        processed_regions: resp.processed_regions,
-        need_retry_regions: resp.need_retry_regions,
-        deleted_files: resp.deleted_files,
-        deleted_indexes: resp.deleted_indexes,
+        stats: Some(GcStats {
+            processed_regions: resp.processed_regions,
+            need_retry_regions: resp.need_retry_regions,
+            deleted_files: resp.deleted_files,
+            deleted_indexes: resp.deleted_indexes,
+        }),
         ..Default::default()
     }
 }
 
 fn gc_response_to_table_pb(resp: GcResponse) -> GcTableResponse {
     GcTableResponse {
-        processed_regions: resp.processed_regions,
-        need_retry_regions: resp.need_retry_regions,
-        deleted_files: resp.deleted_files,
-        deleted_indexes: resp.deleted_indexes,
+        stats: Some(GcStats {
+            processed_regions: resp.processed_regions,
+            need_retry_regions: resp.need_retry_regions,
+            deleted_files: resp.deleted_files,
+            deleted_indexes: resp.deleted_indexes,
+        }),
         ..Default::default()
     }
 }

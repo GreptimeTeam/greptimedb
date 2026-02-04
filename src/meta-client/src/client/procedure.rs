@@ -300,11 +300,12 @@ impl Inner {
             )
             .await?;
 
+        let stats = resp.stats.unwrap_or_default();
         Ok(MetaGcResponse {
-            processed_regions: resp.processed_regions,
-            need_retry_regions: resp.need_retry_regions,
-            deleted_files: resp.deleted_files,
-            deleted_indexes: resp.deleted_indexes,
+            processed_regions: stats.processed_regions,
+            need_retry_regions: stats.need_retry_regions,
+            deleted_files: stats.deleted_files,
+            deleted_indexes: stats.deleted_indexes,
         })
     }
 
@@ -335,11 +336,12 @@ impl Inner {
             )
             .await?;
 
+        let stats = resp.stats.unwrap_or_default();
         Ok(MetaGcResponse {
-            processed_regions: resp.processed_regions,
-            need_retry_regions: resp.need_retry_regions,
-            deleted_files: resp.deleted_files,
-            deleted_indexes: resp.deleted_indexes,
+            processed_regions: stats.processed_regions,
+            need_retry_regions: stats.need_retry_regions,
+            deleted_files: stats.deleted_files,
+            deleted_indexes: stats.deleted_indexes,
         })
     }
 
