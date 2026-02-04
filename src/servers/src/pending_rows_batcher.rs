@@ -17,14 +17,14 @@ use std::time::{Duration, Instant};
 
 use api::v1::{RowInsertRequest, RowInsertRequests};
 use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
-use common_telemetry::warn;
+use common_telemetry::{error, info, warn};
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 use session::context::QueryContextRef;
 use tokio::sync::{Semaphore, broadcast, mpsc};
 
 use crate::error::{Error, Result};
-use crate::metrics::{FLUSH_ROWS, FLUSH_TOTAL, PENDING_BATCHES, PENDING_ROWS};
+use crate::metrics::{FLUSH_ELAPSED, FLUSH_ROWS, FLUSH_TOTAL, PENDING_BATCHES, PENDING_ROWS};
 use crate::query_handler::PromStoreProtocolHandlerRef;
 
 const PHYSICAL_TABLE_KEY: &str = "physical_table";
@@ -319,16 +319,25 @@ async fn flush_batch(
         row_count,
         ctx,
     } = flush;
+    let start = Instant::now();
 
     let result = prom_store_handler
         .write(requests, ctx, with_metric_engine)
         .await;
 
+    let elapsed = start.elapsed().as_secs_f64();
+
     FLUSH_TOTAL.inc();
     FLUSH_ROWS.observe(row_count as f64);
+    FLUSH_ELAPSED.observe(elapsed);
 
     if let Err(err) = result {
-        common_telemetry::error!(err; "Pending rows batch flush failed");
+        error!(err; "Pending rows batch flush failed, elapsed time: {}s", elapsed);
+    } else {
+        info!(
+            "Pending rows batch flushed successfully, total rows: {}, elapsed time: {}s",
+            row_count, elapsed
+        );
     }
 }
 

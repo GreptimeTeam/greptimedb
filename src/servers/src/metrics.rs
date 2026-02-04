@@ -149,6 +149,12 @@ lazy_static! {
         vec![100.0, 1000.0, 10000.0, 50000.0, 100000.0, 500000.0]
     )
     .unwrap();
+    pub static ref FLUSH_ELAPSED: Histogram = register_histogram!(
+        "greptime_prom_store_flush_elapsed",
+        "Elapsed time of pending rows batch flush in seconds",
+        vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
+    )
+    .unwrap();
     /// Http prometheus read duration per database.
     pub static ref METRIC_HTTP_PROM_STORE_READ_ELAPSED: HistogramVec = register_histogram_vec!(
         "greptime_servers_http_prometheus_read_elapsed",
