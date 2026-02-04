@@ -30,20 +30,18 @@ use common_meta::rpc::procedure::{
     self, GcRegionsRequest as MetaGcRegionsRequest, GcResponse,
     GcTableRequest as MetaGcTableRequest,
 };
-use common_procedure::{ProcedureWithId, watcher};
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 use table::table_reference::TableReference;
 use tonic::Request;
 
 use crate::error::{TableMetadataManagerSnafu, TableNotFoundSnafu};
-use crate::gc::{BatchGcProcedure, Region2Peers};
 use crate::metasrv::Metasrv;
 use crate::procedure::region_migration::manager::{
     RegionMigrationProcedureTask, RegionMigrationTriggerReason,
 };
 use crate::service::GrpcResult;
-use crate::{check_leader, error};
+use crate::{check_leader, error, gc};
 
 #[async_trait::async_trait]
 impl procedure_service_server::ProcedureService for Metasrv {
@@ -307,18 +305,42 @@ impl procedure_service_server::ProcedureService for Metasrv {
 
 impl Metasrv {
     async fn handle_gc_regions(&self, request: MetaGcRegionsRequest) -> error::Result<GcResponse> {
-        let region_ids = request
+        let region_ids: Vec<RegionId> = request
             .region_ids
             .into_iter()
             .map(RegionId::from_u64)
-            .collect::<Vec<_>>();
-        let report = self
-            .run_gc_procedure(
-                region_ids.clone(),
-                request.full_file_listing,
-                request.timeout,
-            )
-            .await?;
+            .collect();
+
+        // Use GcTickerRef to trigger manual GC
+        let gc_ticker = self.gc_ticker().context(error::UnexpectedSnafu {
+            violated: "GC ticker not available".to_string(),
+        })?;
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        gc_ticker
+            .sender
+            .send(gc::Event::Manually {
+                sender: tx,
+                region_ids: Some(region_ids.clone()),
+                full_file_listing: Some(request.full_file_listing),
+                timeout: Some(request.timeout),
+            })
+            .await
+            .map_err(|_| {
+                error::UnexpectedSnafu {
+                    violated: "Failed to send GC event".to_string(),
+                }
+                .build()
+            })?;
+
+        let job_report = rx.await.map_err(|_| {
+            error::UnexpectedSnafu {
+                violated: "GC job channel closed unexpectedly".to_string(),
+            }
+            .build()
+        })?;
+
+        let report = gc_job_report_to_gc_report(job_report);
 
         Ok(gc_report_to_response(&report, region_ids.len() as u64))
     }
@@ -347,55 +369,50 @@ impl Metasrv {
             .await
             .context(TableMetadataManagerSnafu)?;
 
-        let region_ids = route
-            .region_routes
-            .iter()
-            .map(|r| r.region.id)
-            .collect::<Vec<_>>();
+        let region_ids: Vec<RegionId> = route.region_routes.iter().map(|r| r.region.id).collect();
 
-        let report = self
-            .run_gc_procedure(
-                region_ids.clone(),
-                request.full_file_listing,
-                request.timeout,
-            )
-            .await?;
+        // Use GcTickerRef to trigger manual GC
+        let gc_ticker = self.gc_ticker().context(error::UnexpectedSnafu {
+            violated: "GC ticker not available".to_string(),
+        })?;
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        gc_ticker
+            .sender
+            .send(gc::Event::Manually {
+                sender: tx,
+                region_ids: Some(region_ids.clone()),
+                full_file_listing: Some(request.full_file_listing),
+                timeout: Some(request.timeout),
+            })
+            .await
+            .map_err(|_| {
+                error::UnexpectedSnafu {
+                    violated: "Failed to send GC event".to_string(),
+                }
+                .build()
+            })?;
+
+        let job_report = rx.await.map_err(|_| {
+            error::UnexpectedSnafu {
+                violated: "GC job channel closed unexpectedly".to_string(),
+            }
+            .build()
+        })?;
+
+        let report = gc_job_report_to_gc_report(job_report);
 
         Ok(gc_report_to_response(&report, region_ids.len() as u64))
     }
+}
 
-    async fn run_gc_procedure(
-        &self,
-        region_ids: Vec<RegionId>,
-        full_file_listing: bool,
-        timeout: Duration,
-    ) -> error::Result<store_api::storage::GcReport> {
-        let procedure = BatchGcProcedure::new(
-            self.mailbox().clone(),
-            self.table_metadata_manager().clone(),
-            self.options().grpc.server_addr.clone(),
-            region_ids,
-            full_file_listing,
-            timeout,
-            Region2Peers::new(),
-        );
-
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
-        let mut watcher = self
-            .procedure_manager()
-            .submit(procedure_with_id)
-            .await
-            .context(error::SubmitProcedureSnafu)?;
-
-        let res = watcher::wait(&mut watcher)
-            .await
-            .context(error::WaitProcedureSnafu)?
-            .with_context(|| error::UnexpectedSnafu {
-                violated: "GC procedure completed but returned no result".to_string(),
-            })?;
-
-        BatchGcProcedure::cast_result(res)
+fn gc_job_report_to_gc_report(job_report: crate::gc::GcJobReport) -> store_api::storage::GcReport {
+    // Merge all datanode reports into a single GcReport
+    let mut gc_report = store_api::storage::GcReport::default();
+    for (_datanode_id, report) in job_report.per_datanode_reports {
+        gc_report.merge(report);
     }
+    gc_report
 }
 
 fn gc_report_to_response(
