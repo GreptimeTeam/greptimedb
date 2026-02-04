@@ -28,7 +28,6 @@ use datafusion::datasource::DefaultTableSource;
 use datafusion::functions_aggregate::average::avg_udaf;
 use datafusion::functions_aggregate::count::count_udaf;
 use datafusion::functions_aggregate::expr_fn::first_value;
-use datafusion::functions_aggregate::grouping::grouping_udaf;
 use datafusion::functions_aggregate::min_max::{max_udaf, min_udaf};
 use datafusion::functions_aggregate::stddev::stddev_pop_udaf;
 use datafusion::functions_aggregate::sum::sum_udaf;
@@ -2722,6 +2721,7 @@ impl PromPlanner {
         input_plan: &LogicalPlan,
     ) -> Result<(Vec<DfExpr>, Vec<DfExpr>)> {
         let mut non_col_args = Vec::new();
+        let is_group_agg = op.id() == token::T_GROUP;
         let aggr = match op.id() {
             token::T_SUM => sum_udaf(),
             token::T_QUANTILE => {
@@ -2734,7 +2734,9 @@ impl PromPlanner {
             token::T_COUNT_VALUES | token::T_COUNT => count_udaf(),
             token::T_MIN => min_udaf(),
             token::T_MAX => max_udaf(),
-            token::T_GROUP => grouping_udaf(),
+            // PromQL's `group()` aggregator produces 1 for each group.
+            // Use `max(1.0)` (per-group) to match semantics and output type (Float64).
+            token::T_GROUP => max_udaf(),
             token::T_STDDEV => stddev_pop_udaf(),
             token::T_STDVAR => var_pop_udaf(),
             token::T_TOPK | token::T_BOTTOMK => UnsupportedExprSnafu {
@@ -2750,10 +2752,14 @@ impl PromPlanner {
             .field_columns
             .iter()
             .map(|col| {
-                non_col_args.push(DfExpr::Column(Column::from_name(col)));
-                let expr = aggr.call(non_col_args.clone());
-                non_col_args.pop();
-                expr
+                if is_group_agg {
+                    aggr.call(vec![lit(1_f64)])
+                } else {
+                    non_col_args.push(DfExpr::Column(Column::from_name(col)));
+                    let expr = aggr.call(non_col_args.clone());
+                    non_col_args.pop();
+                    expr
+                }
             })
             .collect::<Vec<_>>();
 
@@ -4970,9 +4976,39 @@ mod test {
     }
 
     #[tokio::test]
-    #[should_panic] // output type doesn't match
     async fn aggregate_group() {
-        do_aggregate_expr_plan("grouping", "GROUPING").await;
+        // Regression test for `group()` aggregator.
+        // PromQL: sum(group by (cluster)(kubernetes_build_info{service="kubernetes",job="apiserver"}))
+        // should be plannable, and `group()` should produce constant 1 for each group.
+        let prom_expr = parser::parse(
+            "sum(group by (cluster)(kubernetes_build_info{service=\"kubernetes\",job=\"apiserver\"}))",
+        )
+        .unwrap();
+        let eval_stmt = EvalStmt {
+            expr: prom_expr,
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+
+        let table_provider = build_test_table_provider_with_fields(
+            &[(
+                DEFAULT_SCHEMA_NAME.to_string(),
+                "kubernetes_build_info".to_string(),
+            )],
+            &["cluster", "service", "job"],
+        )
+        .await;
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(plan_str.contains("max(Float64(1"));
     }
 
     #[tokio::test]
