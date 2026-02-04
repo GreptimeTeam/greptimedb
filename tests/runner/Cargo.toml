@@ -25,8 +25,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
-# wait for https://github.com/CeresDB/sqlness/pull/71
-sqlness = { git = "https://github.com/CeresDB/sqlness.git", rev = "bb91f31ff58993e07ea89845791235138283a24c" }
+sqlness = { git = "https://github.com/GreptimeTeam/sqlness", rev = "6bc85ce077a87756e68ef5a5cd5707071a9da380" }
 tar = "0.4"
 tempfile.workspace = true
 tinytemplate = "1.2"
