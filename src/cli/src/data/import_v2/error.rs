@@ -19,6 +19,8 @@ use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
 
+use crate::data::export_v2::manifest::ChunkStatus;
+
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
@@ -77,6 +79,14 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Incomplete snapshot: chunk {} has status {:?}", chunk_id, status))]
+    IncompleteSnapshot {
+        chunk_id: u32,
+        status: ChunkStatus,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -92,7 +102,9 @@ impl ErrorExt for Error {
                 error.status_code()
             }
             Error::Export { error, .. } => error.status_code(),
-            Error::InvalidColumnDefinition { .. } => StatusCode::InvalidArguments,
+            Error::InvalidColumnDefinition { .. } | Error::IncompleteSnapshot { .. } => {
+                StatusCode::InvalidArguments
+            }
         }
     }
 

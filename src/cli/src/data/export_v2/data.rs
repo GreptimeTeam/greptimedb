@@ -35,7 +35,19 @@ pub(super) struct CopyTarget {
     secrets: Vec<Option<String>>,
 }
 
+pub(crate) struct CopySource {
+    pub(crate) location: String,
+    pub(crate) connection: String,
+    secrets: Vec<Option<String>>,
+}
+
 impl CopyTarget {
+    fn mask_sql(&self, sql: &str) -> String {
+        mask_secrets(sql, &self.secrets)
+    }
+}
+
+impl CopySource {
     fn mask_sql(&self, sql: &str) -> String {
         mask_secrets(sql, &self.secrets)
     }
@@ -47,6 +59,40 @@ pub(super) fn build_copy_target(
     schema: &str,
     chunk_id: u32,
 ) -> Result<CopyTarget> {
+    let location = build_copy_location(snapshot_uri, storage, schema, chunk_id)?;
+    Ok(CopyTarget {
+        location: location.location,
+        connection: location.connection,
+        secrets: location.secrets,
+    })
+}
+
+pub(crate) fn build_copy_source(
+    snapshot_uri: &str,
+    storage: &ObjectStoreConfig,
+    schema: &str,
+    chunk_id: u32,
+) -> Result<CopySource> {
+    let location = build_copy_location(snapshot_uri, storage, schema, chunk_id)?;
+    Ok(CopySource {
+        location: location.location,
+        connection: location.connection,
+        secrets: location.secrets,
+    })
+}
+
+struct CopyLocation {
+    location: String,
+    connection: String,
+    secrets: Vec<Option<String>>,
+}
+
+fn build_copy_location(
+    snapshot_uri: &str,
+    storage: &ObjectStoreConfig,
+    schema: &str,
+    chunk_id: u32,
+) -> Result<CopyLocation> {
     let url = Url::parse(snapshot_uri).context(UrlParseSnafu)?;
     let scheme = StorageScheme::from_uri(snapshot_uri)?;
     let suffix = format!("data/{schema}/{chunk_id}/");
@@ -55,7 +101,7 @@ pub(super) fn build_copy_target(
         StorageScheme::File => {
             let root = url.path().trim_end_matches('/');
             let location = format!("{}/{}", root, suffix);
-            Ok(CopyTarget {
+            Ok(CopyLocation {
                 location,
                 connection: String::new(),
                 secrets: Vec::new(),
@@ -65,7 +111,7 @@ pub(super) fn build_copy_target(
             let (bucket, root) = extract_bucket_root(&url, snapshot_uri)?;
             let location = format!("s3://{}/{}", bucket, join_root(&root, &suffix));
             let (connection, secrets) = build_s3_connection(storage);
-            Ok(CopyTarget {
+            Ok(CopyLocation {
                 location,
                 connection,
                 secrets,
@@ -75,7 +121,7 @@ pub(super) fn build_copy_target(
             let (bucket, root) = extract_bucket_root(&url, snapshot_uri)?;
             let location = format!("oss://{}/{}", bucket, join_root(&root, &suffix));
             let (connection, secrets) = build_oss_connection(storage);
-            Ok(CopyTarget {
+            Ok(CopyLocation {
                 location,
                 connection,
                 secrets,
@@ -85,7 +131,7 @@ pub(super) fn build_copy_target(
             let (bucket, root) = extract_bucket_root(&url, snapshot_uri)?;
             let location = format!("gcs://{}/{}", bucket, join_root(&root, &suffix));
             let (connection, secrets) = build_gcs_connection(storage);
-            Ok(CopyTarget {
+            Ok(CopyLocation {
                 location,
                 connection,
                 secrets,
@@ -95,7 +141,7 @@ pub(super) fn build_copy_target(
             let (bucket, root) = extract_bucket_root(&url, snapshot_uri)?;
             let location = format!("azblob://{}/{}", bucket, join_root(&root, &suffix));
             let (connection, secrets) = build_azblob_connection(storage);
-            Ok(CopyTarget {
+            Ok(CopyLocation {
                 location,
                 connection,
                 secrets,
@@ -117,6 +163,26 @@ pub(super) async fn execute_copy_database(
         catalog, schema, target.location, with_options, target.connection
     );
     let safe_sql = target.mask_sql(&sql);
+    info!("Executing sql: {}", safe_sql);
+    database_client
+        .sql_in_public(&sql)
+        .await
+        .context(DatabaseSnafu)?;
+    Ok(())
+}
+
+pub(crate) async fn execute_copy_database_from(
+    database_client: &DatabaseClient,
+    catalog: &str,
+    schema: &str,
+    source: &CopySource,
+    format: DataFormat,
+) -> Result<()> {
+    let sql = format!(
+        r#"COPY DATABASE "{}"."{}" FROM '{}' WITH (FORMAT='{}'){};"#,
+        catalog, schema, source.location, format, source.connection
+    );
+    let safe_sql = source.mask_sql(&sql);
     info!("Executing sql: {}", safe_sql);
     database_client
         .sql_in_public(&sql)
@@ -171,10 +237,14 @@ fn build_s3_connection(storage: &ObjectStoreConfig) -> (String, Vec<Option<Strin
     let secret_access_key = expose_optional_secret(&storage.s3.s3_secret_access_key);
 
     let mut options = Vec::new();
-    if let Some(access_key_id) = &access_key_id {
+    if let Some(access_key_id) = &access_key_id
+        && !access_key_id.is_empty()
+    {
         options.push(format!("ACCESS_KEY_ID='{}'", access_key_id));
     }
-    if let Some(secret_access_key) = &secret_access_key {
+    if let Some(secret_access_key) = &secret_access_key
+        && !secret_access_key.is_empty()
+    {
         options.push(format!("SECRET_ACCESS_KEY='{}'", secret_access_key));
     }
     if let Some(region) = &storage.s3.s3_region {
@@ -198,10 +268,14 @@ fn build_oss_connection(storage: &ObjectStoreConfig) -> (String, Vec<Option<Stri
     let access_key_secret = expose_optional_secret(&storage.oss.oss_access_key_secret);
 
     let mut options = Vec::new();
-    if let Some(access_key_id) = &access_key_id {
+    if let Some(access_key_id) = &access_key_id
+        && !access_key_id.is_empty()
+    {
         options.push(format!("ACCESS_KEY_ID='{}'", access_key_id));
     }
-    if let Some(access_key_secret) = &access_key_secret {
+    if let Some(access_key_secret) = &access_key_secret
+        && !access_key_secret.is_empty()
+    {
         options.push(format!("ACCESS_KEY_SECRET='{}'", access_key_secret));
     }
 
@@ -219,10 +293,14 @@ fn build_gcs_connection(storage: &ObjectStoreConfig) -> (String, Vec<Option<Stri
     let credential = expose_optional_secret(&storage.gcs.gcs_credential);
 
     let mut options = Vec::new();
-    if let Some(credential_path) = &credential_path {
+    if let Some(credential_path) = &credential_path
+        && !credential_path.is_empty()
+    {
         options.push(format!("CREDENTIAL_PATH='{}'", credential_path));
     }
-    if let Some(credential) = &credential {
+    if let Some(credential) = &credential
+        && !credential.is_empty()
+    {
         options.push(format!("CREDENTIAL='{}'", credential));
     }
     if !storage.gcs.gcs_endpoint.is_empty() {
@@ -243,10 +321,14 @@ fn build_azblob_connection(storage: &ObjectStoreConfig) -> (String, Vec<Option<S
     let account_key = expose_optional_secret(&storage.azblob.azblob_account_key);
 
     let mut options = Vec::new();
-    if let Some(account_name) = &account_name {
+    if let Some(account_name) = &account_name
+        && !account_name.is_empty()
+    {
         options.push(format!("ACCOUNT_NAME='{}'", account_name));
     }
-    if let Some(account_key) = &account_key {
+    if let Some(account_key) = &account_key
+        && !account_key.is_empty()
+    {
         options.push(format!("ACCOUNT_KEY='{}'", account_key));
     }
     if let Some(sas_token) = &storage.azblob.azblob_sas_token {

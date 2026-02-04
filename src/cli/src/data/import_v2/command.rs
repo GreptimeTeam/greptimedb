@@ -19,15 +19,19 @@ use std::time::Duration;
 use async_trait::async_trait;
 use clap::Parser;
 use common_error::ext::BoxedError;
-use common_telemetry::info;
-use snafu::ResultExt;
+use common_telemetry::{error, info};
+use snafu::{OptionExt, ResultExt};
 
 use super::ddl_generator::DdlGenerator;
-use super::error::{ExportSnafu, ManifestVersionMismatchSnafu, Result, SchemaNotInSnapshotSnafu};
+use super::error::{
+    ExportSnafu, IncompleteSnapshotSnafu, ManifestVersionMismatchSnafu, Result,
+    SchemaNotInSnapshotSnafu,
+};
 use super::executor::DdlExecutor;
 use crate::Tool;
 use crate::common::ObjectStoreConfig;
-use crate::data::export_v2::manifest::MANIFEST_VERSION;
+use crate::data::export_v2::data::{build_copy_source, execute_copy_database_from};
+use crate::data::export_v2::manifest::{ChunkMeta, ChunkStatus, MANIFEST_VERSION, Manifest};
 use crate::data::snapshot_storage::{OpenDalStorage, SnapshotStorage, validate_uri};
 use crate::database::{DatabaseClient, parse_proxy_opts};
 
@@ -120,10 +124,13 @@ impl ImportV2Command {
         );
 
         Ok(Box::new(Import {
+            catalog: self.catalog.clone(),
             schemas,
             dry_run: self.dry_run,
             use_ddl: self.use_ddl,
             _parallelism: self.parallelism,
+            snapshot_uri: self.from.clone(),
+            storage_config: self.storage.clone(),
             storage: Box::new(storage),
             database_client,
         }))
@@ -132,10 +139,13 @@ impl ImportV2Command {
 
 /// Import tool implementation.
 pub struct Import {
+    catalog: String,
     schemas: Option<Vec<String>>,
     dry_run: bool,
     use_ddl: bool,
     _parallelism: usize,
+    snapshot_uri: String,
+    storage_config: ObjectStoreConfig,
     storage: Box<dyn SnapshotStorage>,
     database_client: DatabaseClient,
 }
@@ -180,19 +190,19 @@ impl Import {
         let schemas_to_import = match &self.schemas {
             Some(filter) => {
                 // Validate that all specified schemas exist in snapshot
+                let mut schemas = Vec::with_capacity(filter.len());
                 for schema in filter {
-                    if !manifest
+                    let matched_schema = manifest
                         .schemas
                         .iter()
-                        .any(|s| s.eq_ignore_ascii_case(schema))
-                    {
-                        return SchemaNotInSnapshotSnafu {
+                        .find(|s| s.eq_ignore_ascii_case(schema))
+                        .cloned()
+                        .context(SchemaNotInSnapshotSnafu {
                             schema: schema.clone(),
-                        }
-                        .fail();
-                    }
+                        })?;
+                    schemas.push(matched_schema);
                 }
-                filter.clone()
+                schemas
             }
             None => manifest.schemas.clone(),
         };
@@ -218,6 +228,19 @@ impl Import {
                 println!("{};", stmt);
                 println!();
             }
+
+            if !manifest.schema_only && !manifest.chunks.is_empty() {
+                println!("-- Data import plan:");
+                for chunk in &manifest.chunks {
+                    println!("-- Chunk {}: {:?}", chunk.id, chunk.status);
+                    for schema in &schemas_to_import {
+                        if chunk_has_schema_files(chunk, schema) {
+                            println!("--   {} -> COPY DATABASE FROM", schema);
+                        }
+                    }
+                }
+                println!();
+            }
             return Ok(());
         }
 
@@ -237,12 +260,66 @@ impl Import {
             );
         }
 
-        // 7. Data import would happen here for non-schema-only snapshots (M2/M3)
+        // 7. Data import for non-schema-only snapshots (M3)
         if !manifest.schema_only && !manifest.chunks.is_empty() {
+            self.import_data(&manifest, &schemas_to_import).await?;
+        }
+
+        Ok(())
+    }
+
+    async fn import_data(&self, manifest: &Manifest, schemas: &[String]) -> Result<()> {
+        validate_chunk_statuses(&manifest.chunks)?;
+
+        let total_chunks = manifest
+            .chunks
+            .iter()
+            .filter(|chunk| chunk.status == ChunkStatus::Completed)
+            .count();
+        info!(
+            "Importing data: {} chunks, {} schemas",
+            total_chunks,
+            schemas.len()
+        );
+
+        for (idx, chunk) in manifest.chunks.iter().enumerate() {
+            if chunk.status == ChunkStatus::Skipped {
+                info!(
+                    "[{}/{}] Chunk {}: skipped (no data)",
+                    idx + 1,
+                    manifest.chunks.len(),
+                    chunk.id
+                );
+                continue;
+            }
             info!(
-                "Data import not yet implemented (M3). {} chunks pending.",
-                manifest.chunks.len()
+                "[{}/{}] Chunk {} ({:?} ~ {:?})",
+                idx + 1,
+                manifest.chunks.len(),
+                chunk.id,
+                chunk.time_range.start,
+                chunk.time_range.end
             );
+            for schema in schemas {
+                if !chunk_has_schema_files(chunk, schema) {
+                    info!("  {}: no data, skipped", schema);
+                    continue;
+                }
+                info!("  {}: importing...", schema);
+                let source =
+                    build_copy_source(&self.snapshot_uri, &self.storage_config, schema, chunk.id)
+                        .context(ExportSnafu)?;
+                execute_copy_database_from(
+                    &self.database_client,
+                    &self.catalog,
+                    schema,
+                    &source,
+                    manifest.format,
+                )
+                .await
+                .context(ExportSnafu)?;
+                info!("  {}: done", schema);
+            }
         }
 
         Ok(())
@@ -283,9 +360,44 @@ fn parse_ddl_statements(content: &str) -> Vec<String> {
         .collect()
 }
 
+fn validate_chunk_statuses(chunks: &[ChunkMeta]) -> Result<()> {
+    let invalid_chunks: Vec<_> = chunks
+        .iter()
+        .filter(|chunk| !matches!(chunk.status, ChunkStatus::Completed | ChunkStatus::Skipped))
+        .collect();
+    if invalid_chunks.is_empty() {
+        return Ok(());
+    }
+
+    for chunk in &invalid_chunks {
+        error!(
+            "Chunk {} has invalid status for import: {:?}",
+            chunk.id, chunk.status
+        );
+    }
+
+    IncompleteSnapshotSnafu {
+        chunk_id: invalid_chunks[0].id,
+        status: invalid_chunks[0].status,
+    }
+    .fail()
+}
+
+fn chunk_has_schema_files(chunk: &ChunkMeta, schema: &str) -> bool {
+    let prefix_with_data = format!("data/{schema}/{}/", chunk.id);
+    let prefix_without_data = format!("{schema}/{}/", chunk.id);
+    chunk.files.iter().any(|path| {
+        let normalized = path.trim_start_matches('/');
+        normalized.starts_with(&prefix_with_data) || normalized.starts_with(&prefix_without_data)
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    use chrono::{TimeZone, Utc};
+
     use super::*;
+    use crate::data::export_v2::manifest::{ChunkMeta, ChunkStatus, TimeRange};
 
     #[test]
     fn test_parse_ddl_statements() {
@@ -302,5 +414,42 @@ CREATE VIEW v AS SELECT * FROM t;
         assert!(statements[0].starts_with("CREATE DATABASE public"));
         assert!(statements[1].starts_with("CREATE TABLE t"));
         assert!(statements[2].starts_with("CREATE VIEW v"));
+    }
+
+    #[test]
+    fn test_validate_chunk_statuses() {
+        let time_range = TimeRange::new(
+            Some(Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap()),
+            Some(Utc.with_ymd_and_hms(2025, 1, 2, 0, 0, 0).unwrap()),
+        );
+        let mut completed = ChunkMeta::new(1, time_range.clone());
+        completed.status = ChunkStatus::Completed;
+        let mut skipped = ChunkMeta::new(2, time_range);
+        skipped.status = ChunkStatus::Skipped;
+        assert!(validate_chunk_statuses(&[completed, skipped]).is_ok());
+
+        let mut failed = ChunkMeta::new(3, TimeRange::unbounded());
+        failed.status = ChunkStatus::Failed;
+        assert!(validate_chunk_statuses(&[failed]).is_err());
+    }
+
+    #[test]
+    fn test_chunk_has_schema_files() {
+        let mut chunk = ChunkMeta::new(1, TimeRange::unbounded());
+        chunk.files = vec![
+            "data/public/1/a.parquet".to_string(),
+            "data/metrics/1/b.parquet".to_string(),
+        ];
+        assert!(chunk_has_schema_files(&chunk, "public"));
+        assert!(chunk_has_schema_files(&chunk, "metrics"));
+        assert!(!chunk_has_schema_files(&chunk, "system"));
+
+        let mut chunk_without_data_prefix = ChunkMeta::new(1, TimeRange::unbounded());
+        chunk_without_data_prefix.files = vec!["public/1/a.parquet".to_string()];
+        assert!(chunk_has_schema_files(&chunk_without_data_prefix, "public"));
+
+        let mut chunk_with_leading_slash = ChunkMeta::new(1, TimeRange::unbounded());
+        chunk_with_leading_slash.files = vec!["/data/public/1/a.parquet".to_string()];
+        assert!(chunk_has_schema_files(&chunk_with_leading_slash, "public"));
     }
 }
