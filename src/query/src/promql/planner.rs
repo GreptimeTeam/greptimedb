@@ -67,6 +67,7 @@ use promql::functions::{
 };
 use promql_parser::label::{METRIC_NAME, MatchOp, Matcher, Matchers};
 use promql_parser::parser::token::TokenType;
+use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
     AggregateExpr, BinModifier, BinaryExpr as PromBinaryExpr, Call, EvalStmt, Expr as PromExpr,
     Function, FunctionArgs as PromFunctionArgs, LabelModifier, MatrixSelector, NumberLiteral,
@@ -763,12 +764,20 @@ impl PromPlanner {
                 };
                 if is_comparison_op && !should_return_bool {
                     // PromQL comparison operators without `bool` are filters:
-                    //   - keep LHS sample values
+                    //   - keep the instant-vector side sample values
                     //   - drop samples where the comparison is false
                     //
-                    // So we filter on the join result and then project the LHS columns only.
+                    // So we filter on the join result and then project only the side that should
+                    // be preserved according to PromQL semantics.
                     let filtered = self.filter_on_field_column(join_plan, bin_expr_builder)?;
-                    self.project_left_side_of_binary_join(filtered, &left_table_ref, &left_context)
+                    let (project_table_ref, project_context) =
+                        match (lhs.value_type(), rhs.value_type()) {
+                            (ValueType::Scalar, ValueType::Vector) => {
+                                (&right_table_ref, &right_context)
+                            }
+                            _ => (&left_table_ref, &left_context),
+                        };
+                    self.project_binary_join_side(filtered, project_table_ref, project_context)
                 } else {
                     self.projection_for_each_field_column(join_plan, bin_expr_builder)
                 }
@@ -776,40 +785,39 @@ impl PromPlanner {
         }
     }
 
-    fn project_left_side_of_binary_join(
+    fn project_binary_join_side(
         &mut self,
         input: LogicalPlan,
-        left_table_ref: &TableReference,
-        left_context: &PromPlannerContext,
+        table_ref: &TableReference,
+        context: &PromPlannerContext,
     ) -> Result<LogicalPlan> {
         let schema = input.schema();
 
-        let mut project_exprs = Vec::with_capacity(
-            left_context.tag_columns.len() + left_context.field_columns.len() + 2,
-        );
+        let mut project_exprs =
+            Vec::with_capacity(context.tag_columns.len() + context.field_columns.len() + 2);
 
-        // Project time index from the left side.
-        if let Some(time_index_column) = &left_context.time_index_column {
+        // Project time index from the chosen side.
+        if let Some(time_index_column) = &context.time_index_column {
             let time_index_col = schema
-                .qualified_field_with_name(Some(left_table_ref), time_index_column)
+                .qualified_field_with_name(Some(table_ref), time_index_column)
                 .context(DataFusionPlanningSnafu)?
                 .into();
             project_exprs.push(DfExpr::Column(time_index_col));
         }
 
-        // Project field columns from the left side.
-        for field_column in &left_context.field_columns {
+        // Project field columns from the chosen side.
+        for field_column in &context.field_columns {
             let field_col = schema
-                .qualified_field_with_name(Some(left_table_ref), field_column)
+                .qualified_field_with_name(Some(table_ref), field_column)
                 .context(DataFusionPlanningSnafu)?
                 .into();
             project_exprs.push(DfExpr::Column(field_col));
         }
 
-        // Project tag columns from the left side.
-        for tag_column in &left_context.tag_columns {
+        // Project tag columns from the chosen side.
+        for tag_column in &context.tag_columns {
             let tag_col = schema
-                .qualified_field_with_name(Some(left_table_ref), tag_column)
+                .qualified_field_with_name(Some(table_ref), tag_column)
                 .context(DataFusionPlanningSnafu)?
                 .into();
             project_exprs.push(DfExpr::Column(tag_col));
@@ -817,9 +825,9 @@ impl PromPlanner {
 
         // Preserve `__tsid` if present, so it can still be used internally downstream. It's
         // stripped from the final output anyway.
-        if left_context.use_tsid
+        if context.use_tsid
             && let Ok(tsid_col) =
-                schema.qualified_field_with_name(Some(left_table_ref), DATA_SCHEMA_TSID_COLUMN_NAME)
+                schema.qualified_field_with_name(Some(table_ref), DATA_SCHEMA_TSID_COLUMN_NAME)
         {
             project_exprs.push(DfExpr::Column(tsid_col.into()));
         }
@@ -832,7 +840,7 @@ impl PromPlanner {
 
         // Update context to reflect the projected schema. Don't keep a table qualifier since
         // the result is a derived expression.
-        self.ctx = left_context.clone();
+        self.ctx = context.clone();
         self.ctx.table_name = None;
         self.ctx.schema_name = None;
 

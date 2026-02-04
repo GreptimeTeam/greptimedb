@@ -46,6 +46,28 @@ tql eval (0, 0, '1s') (a > b) or b or a;
 -- SQLNESS SORT_RESULT 2 1
 tql eval (0, 0, '1s') abs(a > b);
 
+-- Regression: scalar-vector comparison (scalar on LHS) without `bool` is a filter that keeps
+-- the vector side's samples/labels (not the scalar side).
+CREATE TABLE m (
+    k STRING NULL,
+    ts TIMESTAMP NOT NULL,
+    greptime_value DOUBLE NULL,
+    TIME INDEX (ts),
+    PRIMARY KEY (k)
+) ENGINE=metric WITH (on_physical_table = 'comparison_filter_or_physical');
+
+INSERT INTO m (ts, k, greptime_value)
+VALUES
+    (1000, 'x', 3),
+    (1000, 'y', 0),
+    (2000, 'x', 4),
+    (2000, 'y', 0);
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (1, 2, '1s') time() < m;
+
+drop table m;
+
 drop table a;
 drop table b;
 drop table comparison_filter_or_physical;
