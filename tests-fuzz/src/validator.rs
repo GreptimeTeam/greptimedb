@@ -13,5 +13,6 @@
 // limitations under the License.
 
 pub mod column;
+pub mod partition;
 pub mod row;
 pub mod table;

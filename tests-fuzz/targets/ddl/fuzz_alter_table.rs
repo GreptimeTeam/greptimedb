@@ -50,6 +50,7 @@ use tests_fuzz::utils::{
     get_gt_fuzz_input_max_columns, init_greptime_connections_via_env,
 };
 use tests_fuzz::validator;
+
 struct FuzzContext {
     greptime: Pool<MySql>,
 }
