@@ -927,6 +927,15 @@ pub async fn execute_sql(instance: &Arc<Instance>, sql: &str) -> Output {
         .unwrap()
 }
 
+pub async fn try_execute_sql(
+    instance: &Arc<Instance>,
+    sql: &str,
+) -> servers::error::Result<Output> {
+    SqlQueryHandler::do_query(instance.as_ref(), sql, QueryContext::arc())
+        .await
+        .remove(0)
+}
+
 pub async fn execute_sql_and_expect(instance: &Arc<Instance>, sql: &str, expected: &str) {
     let output = execute_sql(instance, sql).await;
     let output = output.data.pretty_print().await;

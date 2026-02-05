@@ -197,76 +197,73 @@ impl GcScheduler {
     ) -> Result<GcJobReport> {
         info!("Start to handle manual gc request");
 
-        let report = if let Some(regions) = region_ids {
-            let full_listing = full_file_listing.unwrap_or(false);
-            let gc_timeout = timeout.unwrap_or(self.config.mailbox_timeout);
-            let mut dropped_regions = Vec::new();
-            let mut active_regions = Vec::new();
-            let mut dropped_routes_override = Region2Peers::new();
+        // No specific regions, use default tick behavior
+        let Some(regions) = region_ids else {
+            let report = self.trigger_gc().await?;
+            info!("Finished manual gc request");
+            return Ok(report);
+        };
 
-            if !regions.is_empty() {
-                let region_set: HashSet<RegionId> = regions.iter().copied().collect();
-                let table_reparts = self.ctx.get_table_reparts().await?;
-                let dropped_collector = DroppedRegionCollector::new(
-                    self.ctx.as_ref(),
-                    &self.config,
-                    &self.region_gc_tracker,
-                );
-                let dropped_assignment = dropped_collector
-                    .collect_and_assign_with_cooldown(&table_reparts, false)
-                    .await?;
+        // Empty regions list, return empty report
+        if regions.is_empty() {
+            info!("Finished manual gc request");
+            return Ok(GcJobReport::default());
+        }
 
-                let mut dropped_region_set = HashSet::new();
-                for (_peer, overrides) in dropped_assignment.region_routes_override {
-                    for (region_id, route) in overrides {
-                        if region_set.contains(&region_id) {
-                            dropped_region_set.insert(region_id);
-                            dropped_routes_override.insert(region_id, route);
-                        }
-                    }
-                }
+        let full_listing = full_file_listing.unwrap_or(false);
+        let gc_timeout = timeout.unwrap_or(self.config.mailbox_timeout);
 
-                for region_id in regions {
-                    if dropped_region_set.contains(&region_id) {
-                        dropped_regions.push(region_id);
-                    } else {
-                        active_regions.push(region_id);
-                    }
+        let region_set: HashSet<RegionId> = regions.iter().copied().collect();
+        let table_reparts = self.ctx.get_table_reparts().await?;
+        let dropped_collector =
+            DroppedRegionCollector::new(self.ctx.as_ref(), &self.config, &self.region_gc_tracker);
+        let dropped_assignment = dropped_collector
+            .collect_and_assign_with_cooldown(&table_reparts, false)
+            .await?;
+
+        let mut dropped_region_set = HashSet::new();
+        let mut dropped_routes_override = Region2Peers::new();
+        for overrides in dropped_assignment.region_routes_override.into_values() {
+            for (region_id, route) in overrides {
+                if region_set.contains(&region_id) {
+                    dropped_region_set.insert(region_id);
+                    dropped_routes_override.insert(region_id, route);
                 }
             }
+        }
 
-            let mut combined_report = GcReport::default();
+        let (dropped_regions, active_regions): (Vec<_>, Vec<_>) = regions
+            .into_iter()
+            .partition(|region_id| dropped_region_set.contains(region_id));
 
-            if !active_regions.is_empty() {
-                let report = self
-                    .ctx
-                    .gc_regions(
-                        &active_regions,
-                        full_listing,
-                        gc_timeout,
-                        Region2Peers::new(),
-                    )
-                    .await?;
-                combined_report.merge(report);
-            }
+        let mut combined_report = GcReport::default();
 
-            if !dropped_regions.is_empty() {
-                let report = self
-                    .ctx
-                    .gc_regions(&dropped_regions, true, gc_timeout, dropped_routes_override)
-                    .await?;
-                combined_report.merge(report);
-            }
+        if !active_regions.is_empty() {
+            let report = self
+                .ctx
+                .gc_regions(
+                    &active_regions,
+                    full_listing,
+                    gc_timeout,
+                    Region2Peers::new(),
+                )
+                .await?;
+            combined_report.merge(report);
+        }
 
-            let mut per_datanode_reports = HashMap::new();
-            per_datanode_reports.insert(0, combined_report);
-            GcJobReport {
-                per_datanode_reports,
-                failed_datanodes: HashMap::new(),
-            }
-        } else {
-            // No specific regions, use default tick behavior
-            self.trigger_gc().await?
+        if !dropped_regions.is_empty() {
+            let report = self
+                .ctx
+                .gc_regions(&dropped_regions, true, gc_timeout, dropped_routes_override)
+                .await?;
+            combined_report.merge(report);
+        }
+
+        let mut per_datanode_reports = HashMap::new();
+        per_datanode_reports.insert(0, combined_report);
+        let report = GcJobReport {
+            per_datanode_reports,
+            failed_datanodes: HashMap::new(),
         };
 
         info!("Finished manual gc request");
