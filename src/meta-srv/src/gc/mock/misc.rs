@@ -73,8 +73,18 @@ async fn test_empty_file_refs_manifest() {
         .parallel_process_datanodes(datanode_to_candidates, HashMap::new(), HashMap::new())
         .await;
 
-    assert_eq!(report.per_datanode_reports.len(), 1);
-    assert_eq!(report.failed_datanodes.len(), 0);
+    match report {
+        crate::gc::scheduler::GcJobReport::PerDatanode {
+            per_datanode_reports,
+            failed_datanodes,
+        } => {
+            assert_eq!(per_datanode_reports.len(), 1);
+            assert_eq!(failed_datanodes.len(), 0);
+        }
+        crate::gc::scheduler::GcJobReport::Combined { .. } => {
+            panic!("expected per-datanode report");
+        }
+    }
     // Should handle empty file refs gracefully
 }
 
@@ -150,6 +160,16 @@ async fn test_multiple_regions_per_table() {
         .parallel_process_datanodes(datanode_to_candidates, HashMap::new(), HashMap::new())
         .await;
 
-    assert_eq!(report.per_datanode_reports.len(), 1);
-    assert_eq!(report.failed_datanodes.len(), 0);
+    match report {
+        crate::gc::scheduler::GcJobReport::PerDatanode {
+            per_datanode_reports,
+            failed_datanodes,
+        } => {
+            assert_eq!(per_datanode_reports.len(), 1);
+            assert_eq!(failed_datanodes.len(), 0);
+        }
+        crate::gc::scheduler::GcJobReport::Combined { .. } => {
+            panic!("expected per-datanode report");
+        }
+    }
 }

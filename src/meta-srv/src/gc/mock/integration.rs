@@ -86,19 +86,19 @@ async fn test_full_gc_workflow() {
     let report = scheduler.handle_tick().await.unwrap();
 
     // Validate the returned GcJobReport - should have 1 datanode report
-    assert_eq!(
-        report.per_datanode_reports.len(),
-        1,
-        "Should process 1 datanode"
-    );
-    assert_eq!(
-        report.failed_datanodes.len(),
-        0,
-        "Should have no failed datanodes"
-    );
-
-    // Get the datanode report
-    let datanode_report = report.per_datanode_reports.values().next().unwrap();
+    let datanode_report = match &report {
+        crate::gc::scheduler::GcJobReport::PerDatanode {
+            per_datanode_reports,
+            failed_datanodes,
+        } => {
+            assert_eq!(per_datanode_reports.len(), 1, "Should process 1 datanode");
+            assert_eq!(failed_datanodes.len(), 0, "Should have no failed datanodes");
+            per_datanode_reports.values().next().unwrap()
+        }
+        crate::gc::scheduler::GcJobReport::Combined { .. } => {
+            panic!("expected per-datanode report");
+        }
+    };
 
     // Check that the region was processed successfully
     assert!(
@@ -216,19 +216,19 @@ async fn test_tracker_cleanup() {
     let report = scheduler.handle_tick().await.unwrap();
 
     // Validate the returned GcJobReport - should have 1 datanode report
-    assert_eq!(
-        report.per_datanode_reports.len(),
-        1,
-        "Should process 1 datanode"
-    );
-    assert_eq!(
-        report.failed_datanodes.len(),
-        0,
-        "Should have no failed datanodes"
-    );
-
-    // Get the datanode report
-    let datanode_report = report.per_datanode_reports.values().next().unwrap();
+    let datanode_report = match &report {
+        crate::gc::scheduler::GcJobReport::PerDatanode {
+            per_datanode_reports,
+            failed_datanodes,
+        } => {
+            assert_eq!(per_datanode_reports.len(), 1, "Should process 1 datanode");
+            assert_eq!(failed_datanodes.len(), 0, "Should have no failed datanodes");
+            per_datanode_reports.values().next().unwrap()
+        }
+        crate::gc::scheduler::GcJobReport::Combined { .. } => {
+            panic!("expected per-datanode report");
+        }
+    };
 
     // Check that the region was processed successfully
     assert!(
