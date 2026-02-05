@@ -266,12 +266,7 @@ impl DfLogicalPlanner {
     }
 
     #[tracing::instrument(skip_all)]
-    async fn plan_pql(
-        &self,
-        stmt: &EvalStmt,
-        alias: Option<String>,
-        query_ctx: QueryContextRef,
-    ) -> Result<LogicalPlan> {
+    async fn plan_pql(&self, stmt: &EvalStmt, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
         let plan_decoder = Arc::new(DefaultPlanDecoder::new(
             self.session_state.clone(),
             &query_ctx,
@@ -286,7 +281,7 @@ impl DfLogicalPlanner {
                 .sql_parser
                 .enable_ident_normalization,
         );
-        PromPlanner::stmt_to_plan_with_alias(table_provider, stmt, alias, &self.engine_state)
+        PromPlanner::stmt_to_plan(table_provider, stmt, &self.engine_state)
             .await
             .map_err(BoxedError::new)
             .context(QueryPlanSnafu)
@@ -418,9 +413,7 @@ impl LogicalPlanner for DfLogicalPlanner {
     async fn plan(&self, stmt: &QueryStatement, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
         match stmt {
             QueryStatement::Sql(stmt) => self.plan_sql(stmt, query_ctx).await,
-            QueryStatement::Promql(stmt, alias) => {
-                self.plan_pql(stmt, alias.clone(), query_ctx).await
-            }
+            QueryStatement::Promql(stmt, _alias) => self.plan_pql(stmt, query_ctx).await,
         }
     }
 
