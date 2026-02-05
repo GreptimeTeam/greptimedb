@@ -14,6 +14,7 @@
 
 pub mod error;
 
+use std::hash::Hash;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -34,7 +35,8 @@ const DEFAULT_CACHE_MAX_CAPACITY: u64 = 65536;
 const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 const DEFAULT_CACHE_TTI: Duration = Duration::from_secs(5 * 60);
 
-fn default_cache<K, V>() -> Cache<K, V> {
+fn default_cache<K: Send + Sync + Hash + Eq + 'static, V: Send + Sync + Clone + 'static>()
+-> Cache<K, V> {
     CacheBuilder::new(DEFAULT_CACHE_MAX_CAPACITY)
         .time_to_live(DEFAULT_CACHE_TTL)
         .time_to_idle(DEFAULT_CACHE_TTI)
