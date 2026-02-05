@@ -123,21 +123,29 @@ async fn send_gc_regions(
     let result =
         send_gc_regions_inner(mailbox, peer, gc_regions, server_addr, timeout, description).await;
 
-    match &result {
-        Ok(_) => METRIC_META_GC_DATANODE_CALLS_TOTAL
-            .with_label_values(&["gc_regions", "success"])
-            .inc(),
-        Err(_) => {
+    match result {
+        Ok(report) => {
+            METRIC_META_GC_DATANODE_CALLS_TOTAL
+                .with_label_values(&["gc_regions", "success"])
+                .inc();
+
+            let need_retry_count = report.need_retry_regions.len() as u64;
+            if need_retry_count > 0 {
+                METRIC_META_GC_FAILED_REGIONS_TOTAL.inc_by(need_retry_count);
+            }
+
+            Ok(report)
+        }
+        Err(e) => {
             METRIC_META_GC_DATANODE_CALLS_TOTAL
                 .with_label_values(&["gc_regions", "error"])
                 .inc();
             if failed_region_count > 0 {
                 METRIC_META_GC_FAILED_REGIONS_TOTAL.inc_by(failed_region_count);
             }
+            Err(e)
         }
     }
-
-    result
 }
 
 async fn send_gc_regions_inner(
