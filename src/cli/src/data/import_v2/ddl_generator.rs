@@ -16,6 +16,7 @@
 
 use std::collections::HashSet;
 
+use datatypes::prelude::ConcreteDataType;
 use store_api::metric_engine_consts::{
     LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
 };
@@ -192,7 +193,7 @@ impl<'a> DdlGenerator<'a> {
         if let Some(ref default) = col.default_value {
             let trimmed = default.trim();
             if trimmed.is_empty() {
-                if is_string_like_type(&col.sql_type) {
+                if is_string_like_type(&col.data_type) {
                     def.push_str(" DEFAULT ''");
                 } else {
                     return InvalidColumnDefinitionSnafu {
@@ -202,7 +203,7 @@ impl<'a> DdlGenerator<'a> {
                     .fail();
                 }
             } else {
-                let formatted = format_default_value(trimmed, &col.sql_type);
+                let formatted = format_default_value(trimmed, &col.data_type);
                 def.push_str(&format!(" DEFAULT {}", formatted));
             }
         }
@@ -261,7 +262,7 @@ fn escape_identifier(s: &str) -> String {
     s.replace('"', "\"\"")
 }
 
-fn format_default_value(default: &str, sql_type: &str) -> String {
+fn format_default_value(default: &str, data_type: &str) -> String {
     if is_null_literal(default) {
         return "NULL".to_string();
     }
@@ -272,7 +273,7 @@ fn format_default_value(default: &str, sql_type: &str) -> String {
         return default.to_string();
     }
 
-    let needs_quote = is_string_like_type(sql_type) || is_temporal_type(sql_type);
+    let needs_quote = is_string_like_type(data_type) || is_temporal_type(data_type);
     if needs_quote {
         format!("'{}'", escape_string(default))
     } else {
@@ -280,26 +281,61 @@ fn format_default_value(default: &str, sql_type: &str) -> String {
     }
 }
 
-fn is_string_like_type(sql_type: &str) -> bool {
-    let upper = sql_type.trim().to_ascii_uppercase();
-    upper.starts_with("STRING")
-        || upper.starts_with("VARCHAR")
-        || upper.starts_with("CHAR")
-        || upper.starts_with("TEXT")
-        || upper.starts_with("TINYTEXT")
-        || upper.starts_with("BINARY")
-        || upper.starts_with("VARBINARY")
-        || upper.starts_with("JSON")
+/// Checks if the data type is string-like (needs quoting for default values).
+/// Based on GreptimeDB internal type names.
+fn is_string_like_type(data_type: &str) -> bool {
+    if let Some(concrete) = parse_concrete_type(data_type) {
+        return matches!(
+            concrete,
+            ConcreteDataType::String(_) | ConcreteDataType::Binary(_) | ConcreteDataType::Json(_)
+        );
+    }
+    data_type == "String" || data_type == "Binary" || data_type.starts_with("Json")
 }
 
-fn is_temporal_type(sql_type: &str) -> bool {
-    let upper = sql_type.trim().to_ascii_uppercase();
-    upper.starts_with("TIMESTAMP")
-        || upper.starts_with("DATE")
-        || upper.starts_with("TIME")
-        || upper.starts_with("DATETIME")
-        || upper.starts_with("DURATION")
-        || upper.starts_with("INTERVAL")
+/// Checks if the data type is temporal (needs quoting for default values).
+/// Based on GreptimeDB internal type names.
+fn is_temporal_type(data_type: &str) -> bool {
+    if let Some(concrete) = parse_concrete_type(data_type) {
+        return matches!(
+            concrete,
+            ConcreteDataType::Timestamp(_)
+                | ConcreteDataType::Date(_)
+                | ConcreteDataType::Time(_)
+                | ConcreteDataType::Duration(_)
+                | ConcreteDataType::Interval(_)
+        );
+    }
+    data_type.starts_with("Timestamp")
+        || data_type == "Date"
+        || data_type.starts_with("Time")
+        || data_type.starts_with("Duration")
+        || data_type.starts_with("Interval")
+}
+
+fn parse_concrete_type(data_type: &str) -> Option<ConcreteDataType> {
+    match data_type {
+        "String" => Some(ConcreteDataType::string_datatype()),
+        "Binary" => Some(ConcreteDataType::binary_datatype()),
+        "Json" => Some(ConcreteDataType::json_datatype()),
+        "Date" => Some(ConcreteDataType::date_datatype()),
+        "TimestampSecond" => Some(ConcreteDataType::timestamp_second_datatype()),
+        "TimestampMillisecond" => Some(ConcreteDataType::timestamp_millisecond_datatype()),
+        "TimestampMicrosecond" => Some(ConcreteDataType::timestamp_microsecond_datatype()),
+        "TimestampNanosecond" => Some(ConcreteDataType::timestamp_nanosecond_datatype()),
+        "TimeSecond" => Some(ConcreteDataType::time_second_datatype()),
+        "TimeMillisecond" => Some(ConcreteDataType::time_millisecond_datatype()),
+        "TimeMicrosecond" => Some(ConcreteDataType::time_microsecond_datatype()),
+        "TimeNanosecond" => Some(ConcreteDataType::time_nanosecond_datatype()),
+        "DurationSecond" => Some(ConcreteDataType::duration_second_datatype()),
+        "DurationMillisecond" => Some(ConcreteDataType::duration_millisecond_datatype()),
+        "DurationMicrosecond" => Some(ConcreteDataType::duration_microsecond_datatype()),
+        "DurationNanosecond" => Some(ConcreteDataType::duration_nanosecond_datatype()),
+        "IntervalYearMonth" => Some(ConcreteDataType::interval_year_month_datatype()),
+        "IntervalDayTime" => Some(ConcreteDataType::interval_day_time_datatype()),
+        "IntervalMonthDayNano" => Some(ConcreteDataType::interval_month_day_nano_datatype()),
+        _ => None,
+    }
 }
 
 fn is_function_default(value: &str) -> bool {
@@ -520,6 +556,23 @@ mod tests {
     fn test_escape_string() {
         assert_eq!(escape_string("normal"), "normal");
         assert_eq!(escape_string("it's"), "it''s");
+    }
+
+    #[test]
+    fn test_type_classification_helpers() {
+        assert!(is_string_like_type("String"));
+        assert!(is_string_like_type("Binary"));
+        assert!(is_string_like_type("Json"));
+        assert!(is_string_like_type("JsonBinary"));
+
+        assert!(is_temporal_type("TimestampMillisecond"));
+        assert!(is_temporal_type("TimeMicrosecond"));
+        assert!(is_temporal_type("DurationNanosecond"));
+        assert!(is_temporal_type("IntervalMonthDayNano"));
+        assert!(is_temporal_type("Date"));
+
+        assert!(!is_string_like_type("Int64"));
+        assert!(!is_temporal_type("Float64"));
     }
 
     #[test]

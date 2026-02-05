@@ -126,6 +126,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Export config mismatch with existing snapshot: {}", reason))]
+    ExportConfigMismatch {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Schema '{}' not found in catalog '{}'", schema, catalog))]
     SchemaNotFound {
         catalog: String,
@@ -195,6 +202,7 @@ impl ErrorExt for Error {
             | Error::TimeParseInvalidFormat { .. }
             | Error::TimeParseEndBeforeStart { .. }
             | Error::ChunkTimeWindowRequiresBounds { .. } => StatusCode::InvalidArguments,
+            Error::ExportConfigMismatch { .. } => StatusCode::InvalidArguments,
 
             Error::StorageOperation { .. }
             | Error::ManifestParse { .. }

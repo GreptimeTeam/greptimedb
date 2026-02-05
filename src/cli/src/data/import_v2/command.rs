@@ -14,6 +14,8 @@
 
 //! Import V2 CLI command.
 
+use std::result::Result as StdResult;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -22,18 +24,21 @@ use common_error::ext::BoxedError;
 use common_telemetry::{error, info};
 use snafu::{OptionExt, ResultExt};
 
+use super::coordinator::{ImportContext, chunk_has_schema_files, import_data};
 use super::ddl_generator::DdlGenerator;
 use super::error::{
     ExportSnafu, IncompleteSnapshotSnafu, ManifestVersionMismatchSnafu, Result,
     SchemaNotInSnapshotSnafu,
 };
 use super::executor::DdlExecutor;
+use super::state::{ImportStateStore, default_state_path};
 use crate::Tool;
 use crate::common::ObjectStoreConfig;
-use crate::data::export_v2::data::{build_copy_source, execute_copy_database_from};
-use crate::data::export_v2::manifest::{ChunkMeta, ChunkStatus, MANIFEST_VERSION, Manifest};
+use crate::data::export_v2::manifest::{ChunkMeta, ChunkStatus, MANIFEST_VERSION};
+use crate::data::retry::RetryConfig;
 use crate::data::snapshot_storage::{OpenDalStorage, SnapshotStorage, validate_uri};
 use crate::database::{DatabaseClient, parse_proxy_opts};
+use crate::import_v2::error::StateOperationSnafu;
 
 /// Import from a snapshot.
 #[derive(Debug, Parser)]
@@ -63,9 +68,29 @@ pub struct ImportV2Command {
     #[clap(long)]
     use_ddl: bool,
 
-    /// Concurrency level (for future use).
+    /// Max concurrent chunks on client side.
     #[clap(long, default_value = "1")]
-    parallelism: usize,
+    chunk_parallelism: usize,
+
+    /// Worker parallelism used by import execution backend.
+    #[clap(long, alias = "parallelism", default_value = "1")]
+    worker_parallelism: usize,
+
+    /// Maximum retries for retryable errors.
+    #[clap(long, default_value = "3")]
+    max_retries: usize,
+
+    /// Initial retry backoff (e.g., 1s, 3s).
+    #[clap(long, value_parser = humantime::parse_duration, default_value = "1s")]
+    retry_backoff: Duration,
+
+    /// Keep local import state after a successful import.
+    #[clap(long)]
+    keep_state: bool,
+
+    /// Remove local import state for this snapshot and exit without importing.
+    #[clap(long)]
+    clean_state: bool,
 
     /// Basic authentication (user:password).
     #[clap(long)]
@@ -94,7 +119,7 @@ pub struct ImportV2Command {
 }
 
 impl ImportV2Command {
-    pub async fn build(&self) -> std::result::Result<Box<dyn Tool>, BoxedError> {
+    pub async fn build(&self) -> StdResult<Box<dyn Tool>, BoxedError> {
         // Validate URI format
         validate_uri(&self.from)
             .context(ExportSnafu)
@@ -128,7 +153,12 @@ impl ImportV2Command {
             schemas,
             dry_run: self.dry_run,
             use_ddl: self.use_ddl,
-            _parallelism: self.parallelism,
+            addr: self.addr.clone(),
+            chunk_parallelism: self.chunk_parallelism,
+            worker_parallelism: self.worker_parallelism,
+            retry: RetryConfig::new(self.max_retries, self.retry_backoff),
+            keep_state: self.keep_state,
+            clean_state: self.clean_state,
             snapshot_uri: self.from.clone(),
             storage_config: self.storage.clone(),
             storage: Box::new(storage),
@@ -143,7 +173,12 @@ pub struct Import {
     schemas: Option<Vec<String>>,
     dry_run: bool,
     use_ddl: bool,
-    _parallelism: usize,
+    addr: String,
+    chunk_parallelism: usize,
+    worker_parallelism: usize,
+    retry: RetryConfig,
+    keep_state: bool,
+    clean_state: bool,
     snapshot_uri: String,
     storage_config: ObjectStoreConfig,
     storage: Box<dyn SnapshotStorage>,
@@ -152,7 +187,7 @@ pub struct Import {
 
 #[async_trait]
 impl Tool for Import {
-    async fn do_work(&self) -> std::result::Result<(), BoxedError> {
+    async fn do_work(&self) -> StdResult<(), BoxedError> {
         self.run().await.map_err(BoxedError::new)
     }
 }
@@ -174,6 +209,29 @@ impl Import {
                 found: manifest.version,
             }
             .fail();
+        }
+        validate_chunk_statuses(&manifest.chunks)?;
+
+        if self.clean_state {
+            let state_path = default_state_path(manifest.snapshot_id)?;
+            if tokio::fs::try_exists(&state_path)
+                .await
+                .context(StateOperationSnafu {
+                    operation: "check state existence",
+                    path: state_path.display().to_string(),
+                })?
+            {
+                tokio::fs::remove_file(&state_path)
+                    .await
+                    .context(StateOperationSnafu {
+                        operation: "remove state",
+                        path: state_path.display().to_string(),
+                    })?;
+                info!("State removed: {}", state_path.display());
+            } else {
+                info!("State not found: {}", state_path.display());
+            }
+            return Ok(());
         }
 
         // 2. Read schema snapshot
@@ -260,65 +318,40 @@ impl Import {
             );
         }
 
-        // 7. Data import for non-schema-only snapshots (M3)
+        // 7. Data import for non-schema-only snapshots (M4)
         if !manifest.schema_only && !manifest.chunks.is_empty() {
-            self.import_data(&manifest, &schemas_to_import).await?;
-        }
-
-        Ok(())
-    }
-
-    async fn import_data(&self, manifest: &Manifest, schemas: &[String]) -> Result<()> {
-        validate_chunk_statuses(&manifest.chunks)?;
-
-        let total_chunks = manifest
-            .chunks
-            .iter()
-            .filter(|chunk| chunk.status == ChunkStatus::Completed)
-            .count();
-        info!(
-            "Importing data: {} chunks, {} schemas",
-            total_chunks,
-            schemas.len()
-        );
-
-        for (idx, chunk) in manifest.chunks.iter().enumerate() {
-            if chunk.status == ChunkStatus::Skipped {
+            let (state_store, resume_mode) =
+                ImportStateStore::load_or_init(manifest.snapshot_id, &self.addr, &manifest.chunks)
+                    .await?;
+            let state_store = Arc::new(state_store);
+            if resume_mode {
+                let stats = state_store.resume_stats().await;
+                info!("Found local state: {}", state_store.path().display());
                 info!(
-                    "[{}/{}] Chunk {}: skipped (no data)",
-                    idx + 1,
-                    manifest.chunks.len(),
-                    chunk.id
+                    "Resume mode: {} completed, {} pending",
+                    stats.completed, stats.pending
                 );
-                continue;
             }
-            info!(
-                "[{}/{}] Chunk {} ({:?} ~ {:?})",
-                idx + 1,
-                manifest.chunks.len(),
-                chunk.id,
-                chunk.time_range.start,
-                chunk.time_range.end
-            );
-            for schema in schemas {
-                if !chunk_has_schema_files(chunk, schema) {
-                    info!("  {}: no data, skipped", schema);
-                    continue;
+
+            let context = ImportContext {
+                catalog: self.catalog.clone(),
+                snapshot_uri: self.snapshot_uri.clone(),
+                storage_config: self.storage_config.clone(),
+                database_client: self.database_client.clone(),
+                format: manifest.format,
+                worker_parallelism: self.worker_parallelism,
+                chunk_parallelism: self.chunk_parallelism,
+                retry: self.retry.clone(),
+                state_store: state_store.clone(),
+            };
+            import_data(context, &manifest, &schemas_to_import).await?;
+            if !self.keep_state {
+                let removed = state_store.remove_file().await?;
+                if removed {
+                    info!("State removed: {}", state_store.path().display());
                 }
-                info!("  {}: importing...", schema);
-                let source =
-                    build_copy_source(&self.snapshot_uri, &self.storage_config, schema, chunk.id)
-                        .context(ExportSnafu)?;
-                execute_copy_database_from(
-                    &self.database_client,
-                    &self.catalog,
-                    schema,
-                    &source,
-                    manifest.format,
-                )
-                .await
-                .context(ExportSnafu)?;
-                info!("  {}: done", schema);
+            } else {
+                info!("State kept: {}", state_store.path().display());
             }
         }
 
@@ -381,15 +414,6 @@ fn validate_chunk_statuses(chunks: &[ChunkMeta]) -> Result<()> {
         status: invalid_chunks[0].status,
     }
     .fail()
-}
-
-fn chunk_has_schema_files(chunk: &ChunkMeta, schema: &str) -> bool {
-    let prefix_with_data = format!("data/{schema}/{}/", chunk.id);
-    let prefix_without_data = format!("{schema}/{}/", chunk.id);
-    chunk.files.iter().any(|path| {
-        let normalized = path.trim_start_matches('/');
-        normalized.starts_with(&prefix_with_data) || normalized.starts_with(&prefix_without_data)
-    })
 }
 
 #[cfg(test)]

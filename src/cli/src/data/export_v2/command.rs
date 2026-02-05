@@ -15,6 +15,7 @@
 //! Export V2 CLI commands.
 
 use std::collections::HashSet;
+use std::result::Result as StdResult;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -24,9 +25,11 @@ use common_telemetry::info;
 use serde_json::Value;
 use snafu::{OptionExt, ResultExt};
 
+use super::chunker::generate_chunks;
 use super::coordinator::export_data;
 use super::error::{
-    CannotResumeSchemaOnlySnafu, DatabaseSnafu, EmptyResultSnafu, Result, UnexpectedValueTypeSnafu,
+    DatabaseSnafu, EmptyResultSnafu, ExportConfigMismatchSnafu, ManifestVersionMismatchSnafu,
+    Result, UnexpectedValueTypeSnafu,
 };
 use super::extractor::SchemaExtractor;
 use super::manifest::{DataFormat, MANIFEST_VERSION, Manifest, TimeRange};
@@ -34,7 +37,9 @@ use super::schema::{DDL_DIR, SCHEMA_DIR, SchemaSnapshot};
 use super::storage::{OpenDalStorage, SnapshotStorage, validate_uri};
 use crate::Tool;
 use crate::common::ObjectStoreConfig;
+use crate::data::retry::RetryConfig;
 use crate::database::{DatabaseClient, parse_proxy_opts};
+use crate::export_v2::error::ChunkTimeWindowRequiresBoundsSnafu;
 
 /// Export V2 commands.
 #[derive(Debug, Subcommand)]
@@ -44,7 +49,7 @@ pub enum ExportV2Command {
 }
 
 impl ExportV2Command {
-    pub async fn build(&self) -> std::result::Result<Box<dyn Tool>, BoxedError> {
+    pub async fn build(&self) -> StdResult<Box<dyn Tool>, BoxedError> {
         match self {
             ExportV2Command::Create(cmd) => cmd.build().await,
         }
@@ -105,7 +110,19 @@ pub struct ExportCreateCommand {
 
     /// Parallelism for COPY DATABASE execution (server-side, per schema per chunk).
     #[clap(long, default_value = "1")]
-    parallelism: usize,
+    worker_parallelism: usize,
+
+    /// Max concurrent chunks on client side.
+    #[clap(long, default_value = "1")]
+    chunk_parallelism: usize,
+
+    /// Maximum retries for retryable errors.
+    #[clap(long, default_value = "3")]
+    max_retries: usize,
+
+    /// Initial retry backoff (e.g., 1s, 3s).
+    #[clap(long, value_parser = humantime::parse_duration, default_value = "1s")]
+    retry_backoff: Duration,
 
     /// Basic authentication (user:password).
     #[clap(long)]
@@ -134,7 +151,7 @@ pub struct ExportCreateCommand {
 }
 
 impl ExportCreateCommand {
-    pub async fn build(&self) -> std::result::Result<Box<dyn Tool>, BoxedError> {
+    pub async fn build(&self) -> StdResult<Box<dyn Tool>, BoxedError> {
         // Validate URI format
         validate_uri(&self.to).map_err(BoxedError::new)?;
 
@@ -142,9 +159,7 @@ impl ExportCreateCommand {
         let time_range = TimeRange::parse(self.start_time.as_deref(), self.end_time.as_deref())
             .map_err(BoxedError::new)?;
         if self.chunk_time_window.is_some() && !time_range.is_bounded() {
-            return Err(BoxedError::new(
-                super::error::ChunkTimeWindowRequiresBoundsSnafu.build(),
-            ));
+            return Err(BoxedError::new(ChunkTimeWindowRequiresBoundsSnafu.build()));
         }
 
         // Parse schemas (empty vec means all schemas)
@@ -177,7 +192,9 @@ impl ExportCreateCommand {
                 format: self.format,
                 force: self.force,
                 time_range,
-                parallelism: self.parallelism,
+                worker_parallelism: self.worker_parallelism,
+                chunk_parallelism: self.chunk_parallelism,
+                retry: RetryConfig::new(self.max_retries, self.retry_backoff),
                 chunk_time_window: self.chunk_time_window,
                 snapshot_uri: self.to.clone(),
                 storage_config: self.storage.clone(),
@@ -204,14 +221,16 @@ struct ExportConfig {
     force: bool,
     time_range: TimeRange,
     chunk_time_window: Option<Duration>,
-    parallelism: usize,
+    worker_parallelism: usize,
+    chunk_parallelism: usize,
+    retry: RetryConfig,
     snapshot_uri: String,
     storage_config: ObjectStoreConfig,
 }
 
 #[async_trait]
 impl Tool for ExportCreate {
-    async fn do_work(&self) -> std::result::Result<(), BoxedError> {
+    async fn do_work(&self) -> StdResult<(), BoxedError> {
         self.run().await.map_err(BoxedError::new)
     }
 }
@@ -231,16 +250,21 @@ impl ExportCreate {
 
                 // Check version compatibility
                 if manifest.version != MANIFEST_VERSION {
-                    info!(
-                        "Warning: Manifest version mismatch (expected {}, found {})",
-                        MANIFEST_VERSION, manifest.version
-                    );
+                    return ManifestVersionMismatchSnafu {
+                        expected: MANIFEST_VERSION,
+                        found: manifest.version,
+                    }
+                    .fail();
                 }
 
-                // Cannot resume schema-only with data export
-                if manifest.schema_only && !self.config.schema_only {
-                    return CannotResumeSchemaOnlySnafu.fail();
+                if manifest.schema_only != self.config.schema_only {
+                    return ExportConfigMismatchSnafu {
+                        reason: "schema_only flag does not match existing snapshot".to_string(),
+                    }
+                    .fail();
                 }
+
+                self.validate_resume_config(&manifest)?;
 
                 info!(
                     "Resuming existing snapshot: {} (completed: {}/{} chunks)",
@@ -249,15 +273,25 @@ impl ExportCreate {
                     manifest.chunks.len()
                 );
 
-                // For M1, we only handle schema-only exports
-                // M2 will add chunk resume logic
                 if manifest.is_complete() {
                     info!("Snapshot is already complete");
                     return Ok(());
                 }
 
-                // TODO: Resume data export in M2
-                info!("Data export resume not yet implemented (M2)");
+                // Resume data export
+                let mut manifest = manifest;
+                export_data(
+                    self.storage.as_ref(),
+                    &self.database_client,
+                    &self.config.snapshot_uri,
+                    &self.config.storage_config,
+                    &mut manifest,
+                    self.config.worker_parallelism,
+                    self.config.chunk_parallelism,
+                    self.config.retry.clone(),
+                )
+                .await?;
+
                 return Ok(());
             }
         }
@@ -314,9 +348,81 @@ impl ExportCreate {
                 &self.config.snapshot_uri,
                 &self.config.storage_config,
                 &mut manifest,
-                self.config.parallelism,
+                self.config.worker_parallelism,
+                self.config.chunk_parallelism,
+                self.config.retry.clone(),
             )
             .await?;
+        }
+
+        Ok(())
+    }
+
+    fn validate_resume_config(&self, manifest: &Manifest) -> Result<()> {
+        if manifest.catalog != self.config.catalog {
+            return ExportConfigMismatchSnafu {
+                reason: "catalog does not match existing snapshot".to_string(),
+            }
+            .fail();
+        }
+
+        if let Some(schemas) = &self.config.schemas {
+            let mut expected = schemas.clone();
+            expected.sort();
+            let mut actual = manifest.schemas.clone();
+            actual.sort();
+            if expected != actual {
+                return ExportConfigMismatchSnafu {
+                    reason: "schema list does not match existing snapshot".to_string(),
+                }
+                .fail();
+            }
+        }
+
+        if manifest.time_range != self.config.time_range {
+            return ExportConfigMismatchSnafu {
+                reason: "time range does not match existing snapshot".to_string(),
+            }
+            .fail();
+        }
+
+        if !manifest.schema_only && manifest.format != self.config.format {
+            return ExportConfigMismatchSnafu {
+                reason: "data format does not match existing snapshot".to_string(),
+            }
+            .fail();
+        }
+
+        if manifest.schema_only {
+            return Ok(());
+        }
+
+        match self.config.chunk_time_window {
+            Some(window) => {
+                let expected_chunks = generate_chunks(&manifest.time_range, window);
+                if expected_chunks.len() != manifest.chunks.len() {
+                    return ExportConfigMismatchSnafu {
+                        reason: "chunk window does not match existing snapshot".to_string(),
+                    }
+                    .fail();
+                }
+                for (expected, actual) in expected_chunks.iter().zip(&manifest.chunks) {
+                    if expected.time_range != actual.time_range {
+                        return ExportConfigMismatchSnafu {
+                            reason: "chunk time ranges do not match existing snapshot".to_string(),
+                        }
+                        .fail();
+                    }
+                }
+            }
+            None => {
+                if manifest.chunks.len() != 1 {
+                    return ExportConfigMismatchSnafu {
+                        reason: "chunk count does not match existing snapshot".to_string(),
+                    }
+                    .fail();
+                }
+            }
         }
 
         Ok(())

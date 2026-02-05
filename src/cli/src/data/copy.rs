@@ -17,27 +17,27 @@ use common_telemetry::info;
 use snafu::ResultExt;
 use url::Url;
 
-use super::error::{DatabaseSnafu, InvalidUriSnafu, Result, UrlParseSnafu};
-use super::manifest::{DataFormat, TimeRange};
-use super::storage::StorageScheme;
 use crate::common::ObjectStoreConfig;
+use crate::data::export_v2::error::{DatabaseSnafu, InvalidUriSnafu, Result, UrlParseSnafu};
+use crate::data::export_v2::manifest::{DataFormat, TimeRange};
+use crate::data::snapshot_storage::StorageScheme;
 use crate::database::DatabaseClient;
 
-pub(super) struct CopyOptions {
-    pub(super) format: DataFormat,
-    pub(super) time_range: TimeRange,
-    pub(super) parallelism: usize,
+pub struct CopyOptions {
+    pub format: DataFormat,
+    pub time_range: TimeRange,
+    pub parallelism: usize,
 }
 
-pub(super) struct CopyTarget {
-    pub(super) location: String,
-    pub(super) connection: String,
+pub struct CopyTarget {
+    pub location: String,
+    pub connection: String,
     secrets: Vec<Option<String>>,
 }
 
-pub(crate) struct CopySource {
-    pub(crate) location: String,
-    pub(crate) connection: String,
+pub struct CopySource {
+    pub location: String,
+    pub connection: String,
     secrets: Vec<Option<String>>,
 }
 
@@ -53,7 +53,7 @@ impl CopySource {
     }
 }
 
-pub(super) fn build_copy_target(
+pub fn build_copy_target(
     snapshot_uri: &str,
     storage: &ObjectStoreConfig,
     schema: &str,
@@ -67,7 +67,7 @@ pub(super) fn build_copy_target(
     })
 }
 
-pub(crate) fn build_copy_source(
+pub fn build_copy_source(
     snapshot_uri: &str,
     storage: &ObjectStoreConfig,
     schema: &str,
@@ -150,7 +150,7 @@ fn build_copy_location(
     }
 }
 
-pub(super) async fn execute_copy_database(
+pub async fn execute_copy_database_to(
     database_client: &DatabaseClient,
     catalog: &str,
     schema: &str,
@@ -171,16 +171,17 @@ pub(super) async fn execute_copy_database(
     Ok(())
 }
 
-pub(crate) async fn execute_copy_database_from(
+pub async fn execute_copy_database_from(
     database_client: &DatabaseClient,
     catalog: &str,
     schema: &str,
     source: &CopySource,
     format: DataFormat,
+    parallelism: usize,
 ) -> Result<()> {
     let sql = format!(
-        r#"COPY DATABASE "{}"."{}" FROM '{}' WITH (FORMAT='{}'){};"#,
-        catalog, schema, source.location, format, source.connection
+        r#"COPY DATABASE "{}"."{}" FROM '{}' WITH (FORMAT='{}', PARALLELISM={}){};"#,
+        catalog, schema, source.location, format, parallelism, source.connection
     );
     let safe_sql = source.mask_sql(&sql);
     info!("Executing sql: {}", safe_sql);
@@ -319,6 +320,7 @@ fn build_gcs_connection(storage: &ObjectStoreConfig) -> (String, Vec<Option<Stri
 fn build_azblob_connection(storage: &ObjectStoreConfig) -> (String, Vec<Option<String>>) {
     let account_name = expose_optional_secret(&storage.azblob.azblob_account_name);
     let account_key = expose_optional_secret(&storage.azblob.azblob_account_key);
+    let endpoint = storage.azblob.azblob_endpoint.as_str();
 
     let mut options = Vec::new();
     if let Some(account_name) = &account_name
@@ -331,8 +333,8 @@ fn build_azblob_connection(storage: &ObjectStoreConfig) -> (String, Vec<Option<S
     {
         options.push(format!("ACCOUNT_KEY='{}'", account_key));
     }
-    if let Some(sas_token) = &storage.azblob.azblob_sas_token {
-        options.push(format!("SAS_TOKEN='{}'", sas_token));
+    if !endpoint.is_empty() {
+        options.push(format!("ENDPOINT='{}'", endpoint));
     }
 
     let secrets = vec![account_name, account_key];
@@ -345,17 +347,13 @@ fn build_azblob_connection(storage: &ObjectStoreConfig) -> (String, Vec<Option<S
 }
 
 fn expose_optional_secret(secret: &Option<SecretString>) -> Option<String> {
-    secret.as_ref().map(|s| s.expose_secret().to_owned())
+    secret.as_ref().map(|s| s.expose_secret().clone())
 }
 
 fn mask_secrets(sql: &str, secrets: &[Option<String>]) -> String {
     let mut masked = sql.to_string();
-    for secret in secrets {
-        if let Some(secret) = secret
-            && !secret.is_empty()
-        {
-            masked = masked.replace(secret, "[REDACTED]");
-        }
+    for secret in secrets.iter().flatten() {
+        masked = masked.replace(secret, "***");
     }
     masked
 }

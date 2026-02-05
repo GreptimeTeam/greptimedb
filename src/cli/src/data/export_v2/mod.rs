@@ -41,14 +41,10 @@
 mod chunker;
 mod command;
 mod coordinator;
-pub(crate) mod data;
 pub mod error;
 pub mod extractor;
 pub mod manifest;
 pub mod schema;
-pub use command::ExportV2Command;
-
-#[cfg(test)]
-mod tests;
+pub use command::{ExportCreateCommand, ExportV2Command};
 
 pub use super::snapshot_storage as storage;

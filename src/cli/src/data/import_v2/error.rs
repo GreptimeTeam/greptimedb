@@ -18,6 +18,7 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
+use uuid::Uuid;
 
 use crate::data::export_v2::manifest::ChunkStatus;
 
@@ -87,6 +88,70 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("State operation '{}' failed at {}", operation, path))]
+    StateOperation {
+        operation: String,
+        path: String,
+        #[snafu(source)]
+        error: std::io::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to parse state file: {}", path))]
+    StateParse {
+        path: String,
+        #[snafu(source)]
+        error: serde_json::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to serialize state file: {}", path))]
+    StateSerialize {
+        path: String,
+        #[snafu(source)]
+        error: serde_json::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "State snapshot mismatch: expected {}, found {}. Clean the local state before resuming",
+        expected,
+        found
+    ))]
+    StateSnapshotMismatch {
+        expected: Uuid,
+        found: Uuid,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "State target mismatch: expected '{}', found '{}'. Use --clean-state to reset local state",
+        expected,
+        found
+    ))]
+    StateTargetMismatch {
+        expected: String,
+        found: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Import incomplete: {} chunk(s) failed, state saved at {}",
+        failed_chunks,
+        state_path
+    ))]
+    ImportIncomplete {
+        failed_chunks: usize,
+        state_path: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -102,9 +167,14 @@ impl ErrorExt for Error {
                 error.status_code()
             }
             Error::Export { error, .. } => error.status_code(),
-            Error::InvalidColumnDefinition { .. } | Error::IncompleteSnapshot { .. } => {
-                StatusCode::InvalidArguments
-            }
+            Error::StateOperation { .. } => StatusCode::StorageUnavailable,
+            Error::StateParse { .. }
+            | Error::StateSerialize { .. }
+            | Error::StateSnapshotMismatch { .. }
+            | Error::StateTargetMismatch { .. }
+            | Error::InvalidColumnDefinition { .. }
+            | Error::IncompleteSnapshot { .. }
+            | Error::ImportIncomplete { .. } => StatusCode::Internal,
         }
     }
 

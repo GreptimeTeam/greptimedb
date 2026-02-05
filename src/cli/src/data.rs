@@ -12,10 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub(crate) mod copy;
 mod export;
 pub mod export_v2;
 mod import;
 pub mod import_v2;
+pub(crate) mod retry;
 pub mod snapshot_storage;
 mod storage_export;
 
@@ -30,6 +32,9 @@ use crate::data::import::ImportCommand;
 use crate::data::import_v2::ImportV2Command;
 
 pub(crate) const COPY_PATH_PLACEHOLDER: &str = "<PATH/TO/FILES>";
+
+#[cfg(test)]
+mod tests;
 
 /// Command for data operations including exporting data from and importing data into GreptimeDB.
 #[derive(Subcommand)]
