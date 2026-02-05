@@ -14,22 +14,18 @@
 
 //! Structs for partition ranges.
 
-use std::sync::{Arc, Mutex};
-
 use common_time::Timestamp;
 use smallvec::{SmallVec, smallvec};
 use store_api::region_engine::PartitionRange;
 use store_api::storage::TimeSeriesDistribution;
 
 use crate::cache::CacheStrategy;
-use crate::error::Result;
 use crate::memtable::{MemtableRange, MemtableStats};
 use crate::read::scan_region::ScanInput;
 use crate::sst::file::{FileHandle, FileTimeRange, overlaps};
 use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
 use crate::sst::parquet::file_range::{FileRange, FileRangeContextRef};
 use crate::sst::parquet::format::parquet_row_group_time_range;
-use crate::sst::parquet::reader::ReaderMetrics;
 use crate::sst::parquet::row_selection::RowGroupSelection;
 
 const ALL_ROW_GROUPS: i64 = -1;
@@ -480,133 +476,6 @@ impl MemRangeBuilder {
     /// Returns the statistics of the memtable.
     pub(crate) fn stats(&self) -> &MemtableStats {
         &self.stats
-    }
-}
-
-/// Computes the number of ranges that reference each file.
-///
-/// # Arguments
-/// * `num_memtables` - Number of memtables
-/// * `num_files` - Number of files
-/// * `ranges` - All range metadata from StreamContext
-/// * `part_ranges` - Iterator of partition ranges to scan
-pub(crate) fn file_range_counts<'a>(
-    num_memtables: usize,
-    num_files: usize,
-    ranges: &[RangeMeta],
-    part_ranges: impl Iterator<Item = &'a PartitionRange>,
-) -> Vec<usize> {
-    let mut counts = vec![0usize; num_files];
-    for part_range in part_ranges {
-        let range_meta = &ranges[part_range.identifier];
-        for row_group_index in &range_meta.row_group_indices {
-            if row_group_index.index >= num_memtables {
-                let file_index = row_group_index.index - num_memtables;
-                if file_index < num_files {
-                    counts[file_index] += 1;
-                }
-            }
-        }
-    }
-    counts
-}
-
-/// Entry for a file builder with its remaining range count.
-struct FileBuilderEntry {
-    /// The builder for the file. None if not yet built or already cleared.
-    builder: Option<Arc<FileRangeBuilder>>,
-    /// Number of remaining ranges to scan for this file.
-    remaining_ranges: usize,
-}
-
-/// List to manages the builders to create file ranges.
-/// Each scan partition should have its own list. Mutex inside this list is used to allow moving
-/// the list to different streams in the same partition.
-pub(crate) struct RangeBuilderList {
-    num_memtables: usize,
-    file_entries: Mutex<Vec<FileBuilderEntry>>,
-}
-
-impl RangeBuilderList {
-    /// Creates a new [RangeBuilderList] with pre-computed file range counts.
-    ///
-    /// # Arguments
-    /// * `num_memtables` - Number of memtables
-    /// * `file_range_counts` - Pre-computed counts of ranges per file
-    pub(crate) fn new(num_memtables: usize, file_range_counts: Vec<usize>) -> Self {
-        let file_entries = file_range_counts
-            .into_iter()
-            .map(|count| FileBuilderEntry {
-                builder: None,
-                remaining_ranges: count,
-            })
-            .collect();
-
-        Self {
-            num_memtables,
-            file_entries: Mutex::new(file_entries),
-        }
-    }
-
-    /// Builds file ranges to read the row group at `index`.
-    pub(crate) async fn build_file_ranges(
-        &self,
-        input: &ScanInput,
-        index: RowGroupIndex,
-        reader_metrics: &mut ReaderMetrics,
-    ) -> Result<SmallVec<[FileRange; 2]>> {
-        let mut ranges = SmallVec::new();
-        let file_index = index.index - self.num_memtables;
-        let builder_opt = self.get_file_builder(file_index);
-        match builder_opt {
-            Some(builder) => builder.build_ranges(index.row_group_index, &mut ranges),
-            None => {
-                let file = &input.files[file_index];
-                let builder = input.prune_file(file, reader_metrics).await?;
-                builder.build_ranges(index.row_group_index, &mut ranges);
-
-                // Record memory size and count of newly built builder.
-                reader_metrics.metadata_mem_size += builder.memory_size() as isize;
-                reader_metrics.num_range_builders += 1;
-
-                self.set_file_builder(file_index, Arc::new(builder));
-            }
-        }
-
-        // Decrement remaining count and auto-clear if all ranges are scanned
-        self.decrement_and_maybe_clear(file_index, reader_metrics);
-
-        Ok(ranges)
-    }
-
-    fn get_file_builder(&self, file_index: usize) -> Option<Arc<FileRangeBuilder>> {
-        let entries = self.file_entries.lock().unwrap();
-        entries
-            .get(file_index)
-            .and_then(|entry| entry.builder.clone())
-    }
-
-    fn set_file_builder(&self, file_index: usize, builder: Arc<FileRangeBuilder>) {
-        let mut entries = self.file_entries.lock().unwrap();
-        if let Some(entry) = entries.get_mut(file_index) {
-            entry.builder = Some(builder);
-        }
-    }
-
-    /// Decrements the remaining range count for a file and clears the builder if done.
-    fn decrement_and_maybe_clear(&self, file_index: usize, reader_metrics: &mut ReaderMetrics) {
-        let mut entries = self.file_entries.lock().unwrap();
-        if let Some(entry) = entries.get_mut(file_index)
-            && entry.remaining_ranges > 0
-        {
-            entry.remaining_ranges -= 1;
-            if entry.remaining_ranges == 0
-                && let Some(builder) = entry.builder.take()
-            {
-                reader_metrics.metadata_mem_size -= builder.memory_size() as isize;
-                reader_metrics.num_range_builders -= 1;
-            }
-        }
     }
 }
 

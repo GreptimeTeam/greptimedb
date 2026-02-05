@@ -43,7 +43,7 @@ use crate::error::{
     Error, InvalidSenderSnafu, PartitionOutOfRangeSnafu, Result, ScanMultiTimesSnafu,
     ScanSeriesSnafu, TooManyFilesToReadSnafu,
 };
-use crate::read::range::{RangeBuilderList, file_range_counts};
+use crate::read::pruner::{PartitionPruner, Pruner};
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{PartitionMetrics, PartitionMetricsList, SeriesDistributorMetrics};
 use crate::read::seq_scan::{SeqScan, build_flat_sources, build_sources};
@@ -68,6 +68,8 @@ pub struct SeriesScan {
     properties: ScannerProperties,
     /// Context of streams.
     stream_ctx: Arc<StreamContext>,
+    /// Shared pruner for file range building.
+    pruner: Arc<Pruner>,
     /// Receivers of each partition.
     receivers: Mutex<ReceiverList>,
     /// Metrics for each partition.
@@ -84,9 +86,14 @@ impl SeriesScan {
         let stream_ctx = Arc::new(StreamContext::seq_scan_ctx(input));
         properties.partitions = vec![stream_ctx.partition_ranges()];
 
+        // Create the shared pruner with number of workers equal to CPU cores.
+        let num_workers = common_stat::get_total_cpu_cores().max(1);
+        let pruner = Arc::new(Pruner::new(stream_ctx.clone(), num_workers));
+
         Self {
             properties,
             stream_ctx,
+            pruner,
             receivers: Mutex::new(Vec::new()),
             metrics_list: Arc::new(PartitionMetricsList::default()),
         }
@@ -217,6 +224,7 @@ impl SeriesScan {
             stream_ctx: self.stream_ctx.clone(),
             semaphore: Some(Arc::new(Semaphore::new(self.properties.num_partitions()))),
             partitions: self.properties.partitions.clone(),
+            pruner: self.pruner.clone(),
             senders,
             metrics_set: metrics_set.clone(),
             metrics_list: metrics_list.clone(),
@@ -403,6 +411,8 @@ struct SeriesDistributor {
     semaphore: Option<Arc<Semaphore>>,
     /// Partition ranges to scan.
     partitions: Vec<Vec<PartitionRange>>,
+    /// Shared pruner for file range building.
+    pruner: Arc<Pruner>,
     /// Senders of all partitions.
     senders: SenderList,
     /// Metrics set to report.
@@ -438,6 +448,18 @@ impl SeriesDistributor {
         fields(region_id = %self.stream_ctx.input.mapper.metadata().region_id)
     )]
     async fn scan_partitions_flat(&mut self) -> Result<()> {
+        // Initialize reference counts for all partition ranges.
+        for partition_ranges in &self.partitions {
+            self.pruner.add_partition_ranges(partition_ranges);
+        }
+
+        // Create PartitionPruner covering all partitions
+        let all_partition_ranges: Vec<_> = self.partitions.iter().flatten().cloned().collect();
+        let partition_pruner = Arc::new(PartitionPruner::new(
+            self.pruner.clone(),
+            &all_partition_ranges,
+        ));
+
         let part_metrics = new_partition_metrics(
             &self.stream_ctx,
             false,
@@ -450,16 +472,6 @@ impl SeriesDistributor {
         // build part cost.
         let mut fetch_start = Instant::now();
 
-        let counts = file_range_counts(
-            self.stream_ctx.input.num_memtables(),
-            self.stream_ctx.input.num_files(),
-            &self.stream_ctx.ranges,
-            self.partitions.iter().flatten(),
-        );
-        let range_builder_list = Arc::new(RangeBuilderList::new(
-            self.stream_ctx.input.num_memtables(),
-            counts,
-        ));
         // Scans all parts.
         let mut sources = Vec::with_capacity(self.partitions.len());
         for partition in &self.partitions {
@@ -470,7 +482,7 @@ impl SeriesDistributor {
                     part_range,
                     false,
                     &part_metrics,
-                    range_builder_list.clone(),
+                    partition_pruner.clone(),
                     &mut sources,
                     self.semaphore.clone(),
                 )
@@ -542,6 +554,18 @@ impl SeriesDistributor {
         fields(region_id = %self.stream_ctx.input.mapper.metadata().region_id)
     )]
     async fn scan_partitions(&mut self) -> Result<()> {
+        // Initialize reference counts for all partition ranges.
+        for partition_ranges in &self.partitions {
+            self.pruner.add_partition_ranges(partition_ranges);
+        }
+
+        // Create PartitionPruner covering all partitions
+        let all_partition_ranges: Vec<_> = self.partitions.iter().flatten().cloned().collect();
+        let partition_pruner = Arc::new(PartitionPruner::new(
+            self.pruner.clone(),
+            &all_partition_ranges,
+        ));
+
         let part_metrics = new_partition_metrics(
             &self.stream_ctx,
             false,
@@ -554,16 +578,6 @@ impl SeriesDistributor {
         // build part cost.
         let mut fetch_start = Instant::now();
 
-        let counts = file_range_counts(
-            self.stream_ctx.input.num_memtables(),
-            self.stream_ctx.input.num_files(),
-            &self.stream_ctx.ranges,
-            self.partitions.iter().flatten(),
-        );
-        let range_builder_list = Arc::new(RangeBuilderList::new(
-            self.stream_ctx.input.num_memtables(),
-            counts,
-        ));
         // Scans all parts.
         let mut sources = Vec::with_capacity(self.partitions.len());
         for partition in &self.partitions {
@@ -574,7 +588,7 @@ impl SeriesDistributor {
                     part_range,
                     false,
                     &part_metrics,
-                    range_builder_list.clone(),
+                    partition_pruner.clone(),
                     &mut sources,
                     self.semaphore.clone(),
                 )
