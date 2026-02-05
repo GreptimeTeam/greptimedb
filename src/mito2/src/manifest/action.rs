@@ -79,7 +79,6 @@ pub struct RegionChange {
     #[serde(default)]
     pub sst_format: FormatType,
     /// Whether the region is in append mode.
-    /// This is optional to maintain backward compatibility with existing code.
     #[serde(default)]
     pub append_mode: Option<bool>,
 }
