@@ -5743,7 +5743,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=d8e09e8487c344323ee364b67f7187b1e0a6102c#d8e09e8487c344323ee364b67f7187b1e0a6102c"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=f1e0ea3a71336b92bcec253b5668d5274609ff1b#f1e0ea3a71336b92bcec253b5668d5274609ff1b"
 dependencies = [
  "prost 0.14.1",
  "prost-types 0.14.1",
@@ -8102,7 +8102,6 @@ dependencies = [
  "tokio-util",
  "toml 0.8.23",
  "tracing",
- "usearch",
  "uuid",
 ]
 
