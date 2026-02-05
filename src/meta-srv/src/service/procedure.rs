@@ -385,12 +385,7 @@ impl Metasrv {
 }
 
 fn gc_job_report_to_gc_report(job_report: crate::gc::GcJobReport) -> store_api::storage::GcReport {
-    // Merge all datanode reports into a single GcReport
-    let mut gc_report = store_api::storage::GcReport::default();
-    for (_datanode_id, report) in job_report.per_datanode_reports {
-        gc_report.merge(report);
-    }
-    gc_report
+    job_report.merge_to_report()
 }
 
 fn gc_report_to_response(report: &store_api::storage::GcReport) -> GcResponse {

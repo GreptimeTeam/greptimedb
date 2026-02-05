@@ -39,10 +39,46 @@ use crate::metrics::{
 use crate::service::mailbox::MailboxRef;
 
 /// Report for a GC job.
-#[derive(Debug, Default)]
-pub struct GcJobReport {
-    pub per_datanode_reports: HashMap<DatanodeId, GcReport>,
-    pub failed_datanodes: HashMap<DatanodeId, Vec<Error>>,
+#[derive(Debug)]
+pub enum GcJobReport {
+    PerDatanode {
+        per_datanode_reports: HashMap<DatanodeId, GcReport>,
+        failed_datanodes: HashMap<DatanodeId, Vec<Error>>,
+    },
+    Combined {
+        report: GcReport,
+    },
+}
+
+impl Default for GcJobReport {
+    fn default() -> Self {
+        Self::PerDatanode {
+            per_datanode_reports: HashMap::new(),
+            failed_datanodes: HashMap::new(),
+        }
+    }
+}
+
+impl GcJobReport {
+    pub fn combined(report: GcReport) -> Self {
+        Self::Combined { report }
+    }
+
+    pub fn merge_to_report(self) -> GcReport {
+        match self {
+            GcJobReport::Combined { report } => report,
+            GcJobReport::PerDatanode {
+                per_datanode_reports,
+                ..
+            } => {
+                let mut combined = GcReport::default();
+                for (_datanode_id, report) in per_datanode_reports {
+                    combined.merge(report);
+                }
+                combined
+            }
+        }
+    }
 }
 
 /// [`Event`] represents various types of events that can be processed by the gc ticker.
@@ -207,7 +243,7 @@ impl GcScheduler {
         // Empty regions list, return empty report
         if regions.is_empty() {
             info!("Finished manual gc request");
-            return Ok(GcJobReport::default());
+            return Ok(GcJobReport::combined(GcReport::default()));
         }
 
         let full_listing = full_file_listing.unwrap_or(false);
@@ -259,12 +295,7 @@ impl GcScheduler {
             combined_report.merge(report);
         }
 
-        let mut per_datanode_reports = HashMap::new();
-        per_datanode_reports.insert(0, combined_report);
-        let report = GcJobReport {
-            per_datanode_reports,
-            failed_datanodes: HashMap::new(),
-        };
+        let report = GcJobReport::combined(combined_report);
 
         info!("Finished manual gc request");
         Ok(report)

@@ -34,8 +34,18 @@ async fn test_parallel_process_datanodes_empty() {
         .parallel_process_datanodes(HashMap::new(), HashMap::new(), HashMap::new())
         .await;
 
-    assert_eq!(report.per_datanode_reports.len(), 0);
-    assert_eq!(report.failed_datanodes.len(), 0);
+    match report {
+        crate::gc::scheduler::GcJobReport::PerDatanode {
+            per_datanode_reports,
+            failed_datanodes,
+        } => {
+            assert_eq!(per_datanode_reports.len(), 0);
+            assert_eq!(failed_datanodes.len(), 0);
+        }
+        crate::gc::scheduler::GcJobReport::Combined { .. } => {
+            panic!("expected per-datanode report");
+        }
+    }
 }
 
 #[tokio::test]
@@ -88,8 +98,18 @@ async fn test_parallel_process_datanodes_with_candidates() {
         .parallel_process_datanodes(datanode_to_candidates, HashMap::new(), HashMap::new())
         .await;
 
-    assert_eq!(report.per_datanode_reports.len(), 1);
-    assert_eq!(report.failed_datanodes.len(), 0);
+    match report {
+        crate::gc::scheduler::GcJobReport::PerDatanode {
+            per_datanode_reports,
+            failed_datanodes,
+        } => {
+            assert_eq!(per_datanode_reports.len(), 1);
+            assert_eq!(failed_datanodes.len(), 0);
+        }
+        crate::gc::scheduler::GcJobReport::Combined { .. } => {
+            panic!("expected per-datanode report");
+        }
+    }
 }
 
 #[tokio::test]
@@ -140,16 +160,18 @@ async fn test_handle_tick() {
     let report = scheduler.handle_tick().await.unwrap();
 
     // Validate the returned GcJobReport
-    assert_eq!(
-        report.per_datanode_reports.len(),
-        1,
-        "Should process 1 datanode"
-    );
-    assert_eq!(
-        report.failed_datanodes.len(),
-        0,
-        "Should have 0 failed datanodes"
-    );
+    match report {
+        crate::gc::scheduler::GcJobReport::PerDatanode {
+            per_datanode_reports,
+            failed_datanodes,
+        } => {
+            assert_eq!(per_datanode_reports.len(), 1, "Should process 1 datanode");
+            assert_eq!(failed_datanodes.len(), 0, "Should have 0 failed datanodes");
+        }
+        crate::gc::scheduler::GcJobReport::Combined { .. } => {
+            panic!("expected per-datanode report");
+        }
+    }
 
     assert_eq!(*ctx.get_table_to_region_stats_calls.lock().unwrap(), 1);
     assert_eq!(*ctx.gc_regions_calls.lock().unwrap(), 1);
