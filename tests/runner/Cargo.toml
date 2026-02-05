@@ -27,7 +27,7 @@ semver = "1.0"
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
-sqlness = { git = "https://github.com/GreptimeTeam/sqlness", rev = "6bc85ce077a87756e68ef5a5cd5707071a9da380" }
+sqlness = { git = "https://github.com/GreptimeTeam/sqlness", rev = "662d7dd24d8c11f62d960d2b90a92aa43ec699b5" }
 tar = "0.4"
 tempfile.workspace = true
 tinytemplate = "1.2"
