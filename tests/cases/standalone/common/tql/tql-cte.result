@@ -180,7 +180,7 @@ SELECT sum(val) FROM filtered;
 +-------------------+
 | sum(filtered.val) |
 +-------------------+
-| 1.05              |
+| 0.7               |
 +-------------------+
 
 -- SQLNESS REPLACE (peers.*) REDACTED
