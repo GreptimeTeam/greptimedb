@@ -8,6 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+anyhow = "1.0"
 async-trait.workspace = true
 clap.workspace = true
 client = { workspace = true, features = ["testing"] }
@@ -22,6 +23,7 @@ local-ip-address = "0.6"
 mysql = { version = "26", default-features = false, features = ["minimal", "rustls-tls-ring"] }
 num_cpus = "1.16"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+semver = "1.0"
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"

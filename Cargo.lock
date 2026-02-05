@@ -12728,7 +12728,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "snafu 0.8.6",
  "sqlness",
  "tar",
  "tempfile",
