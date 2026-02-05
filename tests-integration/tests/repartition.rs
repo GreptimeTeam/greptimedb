@@ -64,12 +64,12 @@ macro_rules! repartition_tests {
                             // Exercise format + primary key encoding matrix for metric engine.
                             // for flat format with sparse primary key encoding
                             $crate::repartition::test_repartition_metric(store_type, true, PrimaryKeyEncoding::Sparse).await;
-                            // // for flat format with dense primary key encoding
-                            // $crate::repartition::test_repartition_metric(store_type, true, PrimaryKeyEncoding::Dense).await;
-                            // // for primary key format with sparse primary key encoding
-                            // $crate::repartition::test_repartition_metric(store_type, false, PrimaryKeyEncoding::Sparse).await;
-                            // // for primary key format with dense primary key encoding
-                            // $crate::repartition::test_repartition_metric(store_type, false, PrimaryKeyEncoding::Dense).await;
+                            // for flat format with dense primary key encoding
+                            $crate::repartition::test_repartition_metric(store_type, true, PrimaryKeyEncoding::Dense).await;
+                            // for primary key format with sparse primary key encoding
+                            $crate::repartition::test_repartition_metric(store_type, false, PrimaryKeyEncoding::Sparse).await;
+                            // for primary key format with dense primary key encoding
+                            $crate::repartition::test_repartition_metric(store_type, false, PrimaryKeyEncoding::Dense).await;
                         }
                     }
                 }
