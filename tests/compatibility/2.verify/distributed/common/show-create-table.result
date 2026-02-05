@@ -1,0 +1,4 @@
+SHOW CREATE TABLE granularity_and_false_positive_rate;
+
+Error: 4001(TableNotFound), Table not found: granularity_and_false_positive_rate
+
