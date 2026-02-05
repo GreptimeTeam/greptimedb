@@ -215,7 +215,8 @@ impl VectorIndexer {
                     creator.push_vector(&floats).map_err(build_err)?;
                 } else {
                     common_telemetry::debug!(
-                        "Unexpected non-binary value for vector index column, treating as null"
+                        "Unexpected non-binary value for vector index column, treating as null, data_type: {:?}",
+                        value.data_type()
                     );
                     creator.push_null().map_err(build_err)?;
                 }
