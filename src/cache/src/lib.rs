@@ -24,7 +24,7 @@ use common_meta::cache::{
     new_table_route_cache, new_table_schema_cache, new_view_info_cache,
 };
 use common_meta::kv_backend::KvBackendRef;
-use moka::future::CacheBuilder;
+use moka::future::{Cache, CacheBuilder};
 use partition::cache::new_partition_info_cache;
 use snafu::OptionExt;
 
@@ -34,13 +34,11 @@ const DEFAULT_CACHE_MAX_CAPACITY: u64 = 65536;
 const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 const DEFAULT_CACHE_TTI: Duration = Duration::from_secs(5 * 60);
 
-macro_rules! default_cache {
-    () => {
-        CacheBuilder::new(DEFAULT_CACHE_MAX_CAPACITY)
-            .time_to_live(DEFAULT_CACHE_TTL)
-            .time_to_idle(DEFAULT_CACHE_TTI)
-            .build()
-    };
+fn default_cache<K, V>() -> Cache<K, V> {
+    CacheBuilder::new(DEFAULT_CACHE_MAX_CAPACITY)
+        .time_to_live(DEFAULT_CACHE_TTL)
+        .time_to_idle(DEFAULT_CACHE_TTI)
+        .build()
 }
 
 pub const TABLE_INFO_CACHE_NAME: &str = "table_info_cache";
@@ -66,7 +64,7 @@ pub fn build_datanode_cache_registry(kv_backend: KvBackendRef) -> CacheRegistry 
     ));
 
     // Builds schema cache
-    let cache = default_cache!();
+    let cache = default_cache();
     let schema_cache = Arc::new(new_schema_cache(
         SCHEMA_CACHE_NAME.to_string(),
         cache,
@@ -88,7 +86,7 @@ pub fn build_datanode_cache_registry(kv_backend: KvBackendRef) -> CacheRegistry 
 /// - Schema cache
 pub fn build_fundamental_cache_registry(kv_backend: KvBackendRef) -> CacheRegistry {
     // Builds table info cache
-    let cache = default_cache!();
+    let cache = default_cache();
     let table_info_cache = Arc::new(new_table_info_cache(
         TABLE_INFO_CACHE_NAME.to_string(),
         cache,
@@ -96,7 +94,7 @@ pub fn build_fundamental_cache_registry(kv_backend: KvBackendRef) -> CacheRegist
     ));
 
     // Builds table name cache
-    let cache = default_cache!();
+    let cache = default_cache();
     let table_name_cache = Arc::new(new_table_name_cache(
         TABLE_NAME_CACHE_NAME.to_string(),
         cache,
@@ -104,7 +102,7 @@ pub fn build_fundamental_cache_registry(kv_backend: KvBackendRef) -> CacheRegist
     ));
 
     // Builds table route cache
-    let cache = default_cache!();
+    let cache = default_cache();
     let table_route_cache = Arc::new(new_table_route_cache(
         TABLE_ROUTE_CACHE_NAME.to_string(),
         cache,
@@ -112,14 +110,14 @@ pub fn build_fundamental_cache_registry(kv_backend: KvBackendRef) -> CacheRegist
     ));
 
     // Builds table flownode set cache
-    let cache = default_cache!();
+    let cache = default_cache();
     let table_flownode_set_cache = Arc::new(new_table_flownode_set_cache(
         TABLE_FLOWNODE_SET_CACHE_NAME.to_string(),
         cache,
         kv_backend.clone(),
     ));
     // Builds the view info cache
-    let cache = default_cache!();
+    let cache = default_cache();
     let view_info_cache = Arc::new(new_view_info_cache(
         VIEW_INFO_CACHE_NAME.to_string(),
         cache,
@@ -127,7 +125,7 @@ pub fn build_fundamental_cache_registry(kv_backend: KvBackendRef) -> CacheRegist
     ));
 
     // Builds schema cache
-    let cache = default_cache!();
+    let cache = default_cache();
     let schema_cache = Arc::new(new_schema_cache(
         SCHEMA_CACHE_NAME.to_string(),
         cache,
@@ -165,7 +163,7 @@ pub fn with_default_composite_cache_registry(
     })?;
 
     // Builds table cache
-    let cache = default_cache!();
+    let cache = default_cache();
     let table_cache = Arc::new(new_table_cache(
         TABLE_CACHE_NAME.to_string(),
         cache,
@@ -173,7 +171,7 @@ pub fn with_default_composite_cache_registry(
         table_name_cache,
     ));
 
-    let cache = default_cache!();
+    let cache = default_cache();
     let partition_info_cache = Arc::new(new_partition_info_cache(
         PARTITION_INFO_CACHE_NAME.to_string(),
         cache,
