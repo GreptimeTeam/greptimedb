@@ -43,6 +43,8 @@ use table::metadata::{TableId, TableInfoRef};
 use table::table::scan::RegionScanExec;
 
 use crate::error::{GetRegionMetadataSnafu, Result};
+#[cfg(feature = "vector_index")]
+use crate::vector_scan::VectorSearchScanExec;
 
 /// Resolve to the given region (specified by [RegionId]) unconditionally.
 #[derive(Clone, Debug)]
@@ -188,11 +190,28 @@ impl TableProvider for DummyTableProvider {
             .await
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
         let query_memory_permit = self.engine.register_query_memory_permit();
-        let mut scan_exec = RegionScanExec::new(scanner, request, query_memory_permit)?;
+        let mut scan_exec =
+            RegionScanExec::new(scanner, request.clone(), query_memory_permit.clone())?;
         if let Some(query_ctx) = &self.query_ctx {
             scan_exec.set_explain_verbose(query_ctx.explain_verbose());
         }
-        Ok(Arc::new(scan_exec))
+        let scan_exec = Arc::new(scan_exec);
+        #[cfg(feature = "vector_index")]
+        if request.vector_search.is_some() {
+            return Ok(Arc::new(VectorSearchScanExec::new(
+                self.engine.clone(),
+                self.region_id,
+                request,
+                scan_exec.clone(),
+                scan_exec.schema(),
+                query_memory_permit,
+                self.query_ctx
+                    .as_ref()
+                    .map(|ctx| ctx.explain_verbose())
+                    .unwrap_or(false),
+            )));
+        }
+        Ok(scan_exec)
     }
 
     fn supports_filters_pushdown(

@@ -33,6 +33,7 @@ ADMIN FLUSH_TABLE('vectors_explain');
 -- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE region_id=[^\s]+\([^)]*\) region_id=REDACTED
 EXPLAIN ANALYZE VERBOSE
 SELECT vec_id
 FROM vectors_explain
@@ -84,6 +85,7 @@ ADMIN FLUSH_TABLE('vectors_explain_left');
 -- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE region_id=[^\s]+\([^)]*\) region_id=REDACTED
 EXPLAIN ANALYZE VERBOSE
 SELECT l.vec_id
 FROM vectors_explain_left l
@@ -126,6 +128,7 @@ ADMIN FLUSH_TABLE('vectors_explain_metric');
 -- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE region_id=[^\s]+\([^)]*\) region_id=REDACTED
 EXPLAIN ANALYZE VERBOSE
 SELECT vec_id
 FROM vectors_explain_metric
@@ -146,6 +149,7 @@ LIMIT 2;
 -- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE region_id=[^\s]+\([^)]*\) region_id=REDACTED
 EXPLAIN ANALYZE VERBOSE
 SELECT vec_id
 FROM vectors_explain_metric

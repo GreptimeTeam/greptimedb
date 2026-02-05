@@ -66,6 +66,8 @@ use crate::optimizer::scan_hint::ScanHintRule;
 use crate::optimizer::string_normalization::StringNormalizationRule;
 use crate::optimizer::transcribe_atat::TranscribeAtatRule;
 use crate::optimizer::type_conversion::TypeConversionRule;
+#[cfg(feature = "vector_index")]
+use crate::optimizer::vector_topk_physical::VectorTopKPhysicalRule;
 use crate::optimizer::windowed_sort::WindowedSortPhysicalRule;
 use crate::options::QueryOptions as QueryOptionsNew;
 use crate::query_engine::DefaultSerializer;
@@ -161,6 +163,7 @@ impl QueryEngineState {
 
         let mut optimizer = Optimizer::new();
         optimizer.rules.push(Arc::new(ScanHintRule));
+        // Keep vector search hints in ScanHintRule; physical plan handles dynamic extend.
 
         // add physical optimizer
         let mut physical_optimizer = PhysicalOptimizer::new();
@@ -172,9 +175,16 @@ impl QueryEngineState {
         physical_optimizer
             .rules
             .insert(6, Arc::new(PassDistribution));
+        // Run vector top-k fusion before enforcing sorting.
+        #[cfg(feature = "vector_index")]
+        physical_optimizer
+            .rules
+            .insert(7, Arc::new(VectorTopKPhysicalRule));
+        // Keep enforce sorting placement aligned with existing rule order.
+        let enforce_idx = 8;
         // Enforce sorting AFTER custom rules that modify the plan structure
         physical_optimizer.rules.insert(
-            7,
+            enforce_idx,
             Arc::new(datafusion::physical_optimizer::enforce_sorting::EnforceSorting {}),
         );
         // Add rule for windowed sort

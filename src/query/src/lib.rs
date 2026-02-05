@@ -38,6 +38,8 @@ pub mod query_engine;
 mod range_select;
 pub mod region_query;
 pub mod sql;
+#[cfg(feature = "vector_index")]
+mod vector_scan;
 pub(crate) mod window_sort;
 
 #[cfg(test)]

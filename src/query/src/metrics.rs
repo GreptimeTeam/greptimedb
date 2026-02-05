@@ -74,6 +74,22 @@ lazy_static! {
         "total number of query memory allocations rejected"
     )
     .unwrap();
+
+    pub static ref VECTOR_SCAN_ROUNDS_TOTAL: IntCounter = register_int_counter!(
+        "greptime_query_vector_scan_rounds_total",
+        "total number of vector scan rounds"
+    )
+    .unwrap();
+    pub static ref VECTOR_SCAN_TOTAL_ROWS: IntCounter = register_int_counter!(
+        "greptime_query_vector_scan_rows_total",
+        "total rows produced by vector scan exec"
+    )
+    .unwrap();
+    pub static ref VECTOR_SCAN_MAX_K: Histogram = register_histogram!(
+        "greptime_query_vector_scan_max_k",
+        "max k observed in vector scan exec"
+    )
+    .unwrap();
 }
 
 /// A stream to call the callback once a RecordBatch stream is done.

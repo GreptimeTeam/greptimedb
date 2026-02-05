@@ -41,6 +41,7 @@ ADMIN FLUSH_TABLE('vectors_explain');
 -- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE region_id=[^\s]+\([^)]*\) region_id=REDACTED
 EXPLAIN ANALYZE VERBOSE
 SELECT vec_id
 FROM vectors_explain
@@ -54,8 +55,9 @@ LIMIT 2;
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[vec_id@0 as vec_id] metrics=REDACTED_|
-|_|_|_SortPreservingMergeExec: [vec_l2sq_distance(embedding@1, [1.0, 0.0]) ASC NULLS LAST, vec_id@0 ASC NULLS LAST], fetch=2 metrics=REDACTED_|
-|_|_|_SortExec: TopK(fetch=2), expr=[vec_l2sq_distance(embedding@1, [1.0, 0.0]) ASC NULLS LAST, vec_id@0 ASC NULLS LAST], preserve_partitioning=[true] metrics=REDACTED_|
+|_|_|_VectorTopKExec: region_id=REDACTED, fetch=2, skip=0, rounds=2 metrics=REDACTED_|
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_VectorSearchScanExec: region_id=REDACTED, base_k=2, target_rows=2 metrics=REDACTED_|
 |_|_|_CooperativeExec metrics=REDACTED_|
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["vec_id", "embedding"], "vector_index_k": 2, "files": [{"file_id":"REDACTED","time_range_start":"REDACTED","time_range_end":"REDACTED","rows":4,"size":REDACTED,"index_size":893}], "flat_format":REDACTED, "metrics_per_partition": REDACTED metrics=REDACTED |
 |_|_|_|
@@ -123,6 +125,7 @@ ADMIN FLUSH_TABLE('vectors_explain_left');
 -- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE region_id=[^\s]+\([^)]*\) region_id=REDACTED
 EXPLAIN ANALYZE VERBOSE
 SELECT l.vec_id
 FROM vectors_explain_left l
@@ -208,6 +211,7 @@ ADMIN FLUSH_TABLE('vectors_explain_metric');
 -- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE region_id=[^\s]+\([^)]*\) region_id=REDACTED
 EXPLAIN ANALYZE VERBOSE
 SELECT vec_id
 FROM vectors_explain_metric
@@ -221,8 +225,9 @@ LIMIT 2;
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[vec_id@0 as vec_id] metrics=REDACTED_|
-|_|_|_SortPreservingMergeExec: [vec_cos_distance(embedding@1, [1.0, 0.0]) ASC NULLS LAST, vec_id@0 ASC NULLS LAST], fetch=2 metrics=REDACTED_|
-|_|_|_SortExec: TopK(fetch=2), expr=[vec_cos_distance(embedding@1, [1.0, 0.0]) ASC NULLS LAST, vec_id@0 ASC NULLS LAST], preserve_partitioning=[true] metrics=REDACTED_|
+|_|_|_VectorTopKExec: region_id=REDACTED, fetch=2, skip=0, rounds=3 metrics=REDACTED_|
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_VectorSearchScanExec: region_id=REDACTED, base_k=2, target_rows=2 metrics=REDACTED_|
 |_|_|_CooperativeExec metrics=REDACTED_|
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["vec_id", "embedding"], "vector_index_k": 2, "files": [{"file_id":"REDACTED","time_range_start":"REDACTED","time_range_end":"REDACTED","rows":4,"size":REDACTED,"index_size":895}], "flat_format":REDACTED, "metrics_per_partition": REDACTED metrics=REDACTED |
 |_|_|_|
@@ -243,6 +248,7 @@ LIMIT 2;
 -- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE region_id=[^\s]+\([^)]*\) region_id=REDACTED
 EXPLAIN ANALYZE VERBOSE
 SELECT vec_id
 FROM vectors_explain_metric
@@ -256,8 +262,9 @@ LIMIT 2;
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[vec_id@0 as vec_id] metrics=REDACTED_|
-|_|_|_SortPreservingMergeExec: [vec_dot_product(embedding@1, [1.0, 0.0]) DESC, vec_id@0 ASC NULLS LAST], fetch=2 metrics=REDACTED_|
-|_|_|_SortExec: TopK(fetch=2), expr=[vec_dot_product(embedding@1, [1.0, 0.0]) DESC, vec_id@0 ASC NULLS LAST], preserve_partitioning=[true] metrics=REDACTED_|
+|_|_|_VectorTopKExec: region_id=REDACTED, fetch=2, skip=0, rounds=2 metrics=REDACTED_|
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_VectorSearchScanExec: region_id=REDACTED, base_k=2, target_rows=2 metrics=REDACTED_|
 |_|_|_CooperativeExec metrics=REDACTED_|
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["vec_id", "embedding"], "vector_index_k": 2, "files": [{"file_id":"REDACTED","time_range_start":"REDACTED","time_range_end":"REDACTED","rows":4,"size":REDACTED,"index_size":895}], "flat_format":REDACTED, "metrics_per_partition": REDACTED metrics=REDACTED |
 |_|_|_|

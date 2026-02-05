@@ -239,6 +239,18 @@ lazy_static! {
         "Number of rows returned in a scan task",
         exponential_buckets(100.0, 10.0, 7).unwrap(),
     ).unwrap();
+    /// Counter of vector index overfetch multiplier usage.
+    pub static ref VECTOR_INDEX_OVERFETCH_TOTAL: IntCounter = register_int_counter!(
+        "greptime_mito_vector_index_overfetch_total",
+        "total number of vector index scans using overfetch multiplier"
+    )
+    .unwrap();
+    /// Histogram of vector index k after overfetch.
+    pub static ref VECTOR_INDEX_K_AFTER_OVERFETCH: Histogram = register_histogram!(
+        "greptime_mito_vector_index_k_after_overfetch",
+        "vector index k value after overfetch multiplier"
+    )
+    .unwrap();
     /// Gauge for scan memory usage in bytes.
     pub static ref SCAN_MEMORY_USAGE_BYTES: IntGauge = register_int_gauge!(
         "greptime_mito_scan_memory_usage_bytes",
