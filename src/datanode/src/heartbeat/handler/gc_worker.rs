@@ -102,17 +102,10 @@ impl InstructionHandler for GcRegionsHandler {
                             reports.push(report);
                         }
 
-                        // Merge reports
-                        let mut merged_report = GcReport::default();
-                        for report in reports {
-                            merged_report
-                                .deleted_files
-                                .extend(report.deleted_files.into_iter());
-                            merged_report
-                                .deleted_indexes
-                                .extend(report.deleted_indexes.into_iter());
-                        }
-                        Ok(merged_report)
+                    // Merge reports
+                    let mut merged_report = GcReport::default();
+                    for report in reports {
+                        merged_report.merge(report);
                     }
                     .instrument(common_telemetry::tracing::info_span!("gc_worker_run")),
                 ),

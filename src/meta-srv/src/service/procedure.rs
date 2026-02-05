@@ -310,39 +310,8 @@ impl Metasrv {
             .into_iter()
             .map(RegionId::from_u64)
             .collect();
-
-        // Use GcTickerRef to trigger manual GC
-        let gc_ticker = self.gc_ticker().context(error::UnexpectedSnafu {
-            violated: "GC ticker not available".to_string(),
-        })?;
-
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        gc_ticker
-            .sender
-            .send(gc::Event::Manually {
-                sender: tx,
-                region_ids: Some(region_ids.clone()),
-                full_file_listing: Some(request.full_file_listing),
-                timeout: Some(request.timeout),
-            })
+        self.trigger_gc_for_regions(region_ids, request.full_file_listing, request.timeout)
             .await
-            .map_err(|_| {
-                error::UnexpectedSnafu {
-                    violated: "Failed to send GC event".to_string(),
-                }
-                .build()
-            })?;
-
-        let job_report = rx.await.map_err(|_| {
-            error::UnexpectedSnafu {
-                violated: "GC job channel closed unexpectedly".to_string(),
-            }
-            .build()
-        })?;
-
-        let report = gc_job_report_to_gc_report(job_report);
-
-        Ok(gc_report_to_response(&report, region_ids.len() as u64))
     }
 
     async fn handle_gc_table(&self, request: MetaGcTableRequest) -> error::Result<GcResponse> {
@@ -370,8 +339,17 @@ impl Metasrv {
             .context(TableMetadataManagerSnafu)?;
 
         let region_ids: Vec<RegionId> = route.region_routes.iter().map(|r| r.region.id).collect();
+        self.trigger_gc_for_regions(region_ids, request.full_file_listing, request.timeout)
+            .await
+    }
 
-        // Use GcTickerRef to trigger manual GC
+    /// Triggers manual GC for specified regions and returns the GC response.
+    async fn trigger_gc_for_regions(
+        &self,
+        region_ids: Vec<RegionId>,
+        full_file_listing: bool,
+        timeout: Duration,
+    ) -> error::Result<GcResponse> {
         let gc_ticker = self.gc_ticker().context(error::UnexpectedSnafu {
             violated: "GC ticker not available".to_string(),
         })?;
@@ -381,9 +359,9 @@ impl Metasrv {
             .sender
             .send(gc::Event::Manually {
                 sender: tx,
-                region_ids: Some(region_ids.clone()),
-                full_file_listing: Some(request.full_file_listing),
-                timeout: Some(request.timeout),
+                region_ids: Some(region_ids),
+                full_file_listing: Some(full_file_listing),
+                timeout: Some(timeout),
             })
             .await
             .map_err(|_| {
@@ -402,7 +380,7 @@ impl Metasrv {
 
         let report = gc_job_report_to_gc_report(job_report);
 
-        Ok(gc_report_to_response(&report, region_ids.len() as u64))
+        Ok(gc_report_to_response(&report))
     }
 }
 
@@ -415,10 +393,7 @@ fn gc_job_report_to_gc_report(job_report: crate::gc::GcJobReport) -> store_api::
     gc_report
 }
 
-fn gc_report_to_response(
-    report: &store_api::storage::GcReport,
-    processed_regions: u64,
-) -> GcResponse {
+fn gc_report_to_response(report: &store_api::storage::GcReport) -> GcResponse {
     let deleted_files = report.deleted_files.values().map(|v| v.len() as u64).sum();
     let deleted_indexes = report
         .deleted_indexes
@@ -426,7 +401,7 @@ fn gc_report_to_response(
         .map(|v| v.len() as u64)
         .sum();
     GcResponse {
-        processed_regions,
+        processed_regions: report.processed_regions.len() as u64,
         need_retry_regions: report
             .need_retry_regions
             .iter()
