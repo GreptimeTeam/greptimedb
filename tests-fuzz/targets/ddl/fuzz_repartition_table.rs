@@ -122,11 +122,12 @@ async fn execute_repartition_table(ctx: FuzzContext, input: FuzzInput) -> Result
         let expr = repartition_operation(&table_ctx, &mut rng)?;
         let translator = RepartitionExprTranslator;
         let sql = translator.translate(&expr)?;
+        info!("Repartition sql: {sql}");
         let result = sqlx::query(&sql)
             .execute(&ctx.greptime)
             .await
             .context(error::ExecuteQuerySnafu { sql: &sql })?;
-        info!("Repartition table: {sql}, result: {result:?}");
+        info!("result: {result:?}");
         table_ctx = Arc::new(Arc::unwrap_or_clone(table_ctx).repartition(expr).unwrap());
 
         // Validates partition expression
