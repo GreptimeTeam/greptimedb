@@ -21,6 +21,7 @@ use sqlness::{ConfigBuilder, Runner};
 
 use crate::cmd::SqlnessConfig;
 use crate::env::bare::{Env, ServiceProvider, StoreConfig, WalConfig};
+use crate::interceptors::ignore_result;
 use crate::{protocol_interceptor, util};
 
 #[derive(ValueEnum, Debug, Clone)]
@@ -120,6 +121,10 @@ impl BareCommand {
         interceptor_registry.register(
             protocol_interceptor::PREFIX,
             Arc::new(protocol_interceptor::ProtocolInterceptorFactory),
+        );
+        interceptor_registry.register(
+            ignore_result::PREFIX,
+            Arc::new(ignore_result::IgnoreResultInterceptorFactory),
         );
 
         if let Some(d) = &self.config.case_dir
