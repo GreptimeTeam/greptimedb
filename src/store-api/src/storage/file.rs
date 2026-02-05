@@ -114,6 +114,8 @@ pub struct GcReport {
     pub deleted_indexes: HashMap<RegionId, Vec<(FileId, IndexVersion)>>,
     /// Regions that need retry in next gc round, usually because their tmp ref files are outdated
     pub need_retry_regions: HashSet<RegionId>,
+    /// Regions successfully processed in this GC run
+    pub processed_regions: HashSet<RegionId>,
 }
 
 impl GcReport {
@@ -126,6 +128,7 @@ impl GcReport {
             deleted_files,
             deleted_indexes,
             need_retry_regions,
+            processed_regions: HashSet::new(),
         }
     }
 
@@ -139,7 +142,17 @@ impl GcReport {
             );
             *self_files = dedup.into_iter().collect();
         }
+        for (region, files) in other.deleted_indexes {
+            let self_files = self.deleted_indexes.entry(region).or_default();
+            let dedup: HashSet<(FileId, IndexVersion)> = HashSet::from_iter(
+                std::mem::take(self_files)
+                    .into_iter()
+                    .chain(files.iter().cloned()),
+            );
+            *self_files = dedup.into_iter().collect();
+        }
         self.need_retry_regions.extend(other.need_retry_regions);
+        self.processed_regions.extend(other.processed_regions);
         // Remove regions that have succeeded from need_retry_regions
         self.need_retry_regions
             .retain(|region| !self.deleted_files.contains_key(region));
