@@ -45,6 +45,16 @@ impl Interceptor for SinceInterceptor {
             sql.clear();
         }
     }
+
+    fn after_execute(&self, result: &mut String) {
+        result.clear();
+        *result = format!(
+            "{} target version {} < {}",
+            sqlness::SKIP_MARKER_PREFIX,
+            self.target_version,
+            self.since_version
+        );
+    }
 }
 
 pub struct SinceInterceptorFactory {

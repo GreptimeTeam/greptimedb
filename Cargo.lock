@@ -12690,7 +12690,7 @@ dependencies = [
 [[package]]
 name = "sqlness"
 version = "0.6.1"
-source = "git+https://github.com/GreptimeTeam/sqlness?rev=6bc85ce077a87756e68ef5a5cd5707071a9da380#6bc85ce077a87756e68ef5a5cd5707071a9da380"
+source = "git+https://github.com/GreptimeTeam/sqlness?rev=662d7dd24d8c11f62d960d2b90a92aa43ec699b5#662d7dd24d8c11f62d960d2b90a92aa43ec699b5"
 dependencies = [
  "async-trait",
  "derive_builder 0.11.2",

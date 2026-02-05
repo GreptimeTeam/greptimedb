@@ -44,6 +44,16 @@ impl Interceptor for TillInterceptor {
             sql.clear();
         }
     }
+
+    fn after_execute(&self, result: &mut String) {
+        result.clear();
+        *result = format!(
+            "{} target version {} > {}",
+            sqlness::SKIP_MARKER_PREFIX,
+            self.target_version,
+            self.till_version
+        );
+    }
 }
 
 pub struct TillInterceptorFactory {
