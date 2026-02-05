@@ -60,6 +60,7 @@ use servers::request_memory_limiter::ServerMemoryLimiter;
 use table::table_name::TableName;
 use tests_integration::test_util::{
     StorageType, setup_test_http_app, setup_test_http_app_with_frontend,
+    setup_test_http_app_with_frontend_and_slow_query_threshold,
     setup_test_http_app_with_frontend_and_user_provider, setup_test_prom_app_with_frontend,
 };
 use urlencoding::encode;
@@ -117,6 +118,7 @@ macro_rules! http_tests {
                 test_pipeline_auto_transform,
                 test_pipeline_auto_transform_with_select,
                 test_identity_pipeline,
+                test_identity_pipeline_with_null_column,
                 test_identity_pipeline_with_flatten,
                 test_identity_pipeline_with_custom_ts,
                 test_pipeline_dispatcher,
@@ -664,24 +666,29 @@ async fn test_sql_format_api() {
 }
 
 pub async fn test_http_sql_slow_query(store_type: StorageType) {
-    let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "sql_api").await;
+    let (app, mut guard) = setup_test_http_app_with_frontend_and_slow_query_threshold(
+        store_type,
+        "sql_api",
+        Duration::from_millis(100),
+    )
+    .await;
     let client = TestClient::new(app).await;
 
-    let slow_query = "SELECT count(*) FROM generate_series(1, 1000000000)";
+    let slow_query = "SELECT count(*) FROM generate_series(1, 50000000)";
     let encoded_slow_query = encode(slow_query);
 
     let query_params = format!("/v1/sql?sql={encoded_slow_query}");
     let res = client.get(&query_params).send().await;
     assert_eq!(res.status(), StatusCode::OK);
 
-    // Wait for the slow query to be recorded.
-    tokio::time::sleep(Duration::from_secs(5)).await;
-
     let table = format!("{}.{}", DEFAULT_PRIVATE_SCHEMA_NAME, SLOW_QUERY_TABLE_NAME);
-    let query = format!("SELECT {} FROM {table}", SLOW_QUERY_TABLE_QUERY_COLUMN_NAME);
+    let query = format!(
+        "SELECT {} FROM {table} WHERE {} = '{slow_query}'",
+        SLOW_QUERY_TABLE_QUERY_COLUMN_NAME, SLOW_QUERY_TABLE_QUERY_COLUMN_NAME
+    );
 
     let expected = format!(r#"[["{}"]]"#, slow_query);
-    validate_data("test_http_sql_slow_query", &client, &query, &expected).await;
+    wait_for_data(&client, &query, &expected).await;
 
     guard.remove_all().await;
 }
@@ -2437,6 +2444,199 @@ pub async fn test_identity_pipeline(store_type: StorageType) {
 
     let expected = r#"[["greptime_timestamp","TimestampNanosecond","PRI","NO","","TIMESTAMP"],["__source__","String","","YES","","FIELD"],["__time__","Int64","","YES","","FIELD"],["__topic__","String","","YES","","FIELD"],["ip","String","","YES","","FIELD"],["json_array","String","","YES","","FIELD"],["json_object.a","Int64","","YES","","FIELD"],["json_object.b","Int64","","YES","","FIELD"],["status","String","","YES","","FIELD"],["time","String","","YES","","FIELD"],["url","String","","YES","","FIELD"],["user-agent","String","","YES","","FIELD"],["dongdongdong","String","","YES","","FIELD"],["hasagei","String","","YES","","FIELD"]]"#;
     validate_data("identity_schema", &client, "desc logs", expected).await;
+
+    guard.remove_all().await;
+}
+
+/// Test for identity pipeline with null values for new columns.
+/// This test verifies that null values for columns not yet in the schema
+/// are handled correctly - they should NOT push to the row without updating schema.
+/// Regression test for: https://github.com/GreptimeTeam/greptimedb/issues/7654
+///
+/// The bug was that when a null value appeared for a column not in schema:
+/// 1. The schema was not updated (correct)
+/// 2. But row.push() was still called (BUG!)
+///
+/// This caused row.len() > schema.len(), leading to integer underflow in the
+/// padding loop: `let diff = column_count - row.values.len()` where column_count < row.values.len()
+/// causes usize underflow, making the loop try to push billions of elements → OOM.
+///
+/// To trigger this bug:
+/// - Row 1 must have ONLY null values for NEW columns (pushes to row without schema update)
+/// - Row 2 must have FEWER new non-null columns than Row 1's null columns
+///
+/// Example that triggers the bug:
+/// - Row 1: {"a": null, "b": null} → row has [ts, null, null] (3 elements), schema has [ts] (1 col)
+/// - Row 2: {"c": "value"} → row has [ts, "value"] (2 elements), schema has [ts, c] (2 cols)
+/// - Padding: column_count=2, Row1.len()=3 → diff = 2-3 = underflow!
+///
+/// This test also covers resolve_value function branches:
+/// - VrlValue::Null (null values)
+/// - VrlValue::Integer (integer values)
+/// - VrlValue::Float (floating point values)
+/// - VrlValue::Boolean (boolean values)
+/// - VrlValue::Bytes (string values)
+///
+/// Note: VrlValue::Array and VrlValue::Object branches are NOT covered because
+/// the identity pipeline flattens nested objects and stringifies arrays before
+/// resolve_value is called. Testing those branches would require a custom pipeline.
+pub async fn test_identity_pipeline_with_null_column(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_identity_pipeline_with_null_column")
+            .await;
+
+    let client = TestClient::new(app).await;
+
+    // Row 1 has 2 null values for new columns (a, b) - these push to row but don't add to schema
+    // Row 2 has 1 non-null value for new column (c) - this adds to schema
+    // Result: Row 1 has 3 elements [ts, null, null], schema has 2 columns [ts, c]
+    // The padding loop: diff = 2 - 3 = usize underflow → OOM
+    let body = r#"{"a":null,"b":null}
+{"c":"value"}"#;
+
+    let res = client
+        .post("/v1/ingest?db=public&table=null_test&pipeline_name=greptime_identity")
+        .header("Content-Type", "application/json")
+        .body(body)
+        .send()
+        .await;
+
+    // The buggy code would OOM or panic here due to the integer underflow causing
+    // billions of push operations. If we get here, the bug is fixed.
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body: serde_json::Value = res.json().await;
+    assert_eq!(body["output"][0]["affectedrows"], 2);
+
+    // Verify the schema only contains columns that had non-null values
+    // a and b should NOT be in the schema since they only had null values
+    let expected = r#"[["greptime_timestamp","TimestampNanosecond","PRI","NO","","TIMESTAMP"],["c","String","","YES","","FIELD"]]"#;
+    validate_data(
+        "test_identity_pipeline_null_column_schema",
+        &client,
+        "desc null_test",
+        expected,
+    )
+    .await;
+
+    // Verify the data is correct
+    let res = client
+        .get(
+            "/v1/sql?sql=select c from null_test order by case when c is null then 0 else 1 end, c",
+        )
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let resp: serde_json::Value = res.json().await;
+    let rows = resp["output"][0]["records"]["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+
+    // Row 1 has null for c (column didn't exist when row 1 was processed)
+    assert!(rows[0][0].is_null());
+
+    // Row 2 has "value" for c
+    assert_eq!(rows[1][0], "value");
+
+    // Test resolve_value function with various data types
+    // Covers: VrlValue::Null, Integer, Float, Boolean, Bytes (string)
+    // Note: Array and Object are flattened/stringified by identity pipeline before resolve_value
+    let body_all_types = r#"{"null_col":null,"int_col":42,"float_col":3.10,"bool_col":true,"str_col":"hello","array_col":[1,2,3],"obj_col":{"nested":"value"}}"#;
+
+    let res = client
+        .post("/v1/ingest?db=public&table=all_types_test&pipeline_name=greptime_identity")
+        .header("Content-Type", "application/json")
+        .body(body_all_types)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body: serde_json::Value = res.json().await;
+    assert_eq!(body["output"][0]["affectedrows"], 1);
+
+    // Verify the schema contains all non-null column types
+    // null_col should NOT be in schema since it only has null value
+    // Note: arrays are converted to strings, nested objects are flattened (obj_col.nested)
+    let expected = r#"[["greptime_timestamp","TimestampNanosecond","PRI","NO","","TIMESTAMP"],["array_col","String","","YES","","FIELD"],["bool_col","Boolean","","YES","","FIELD"],["float_col","Float64","","YES","","FIELD"],["int_col","Int64","","YES","","FIELD"],["obj_col.nested","String","","YES","","FIELD"],["str_col","String","","YES","","FIELD"]]"#;
+    validate_data(
+        "test_identity_pipeline_all_types_schema",
+        &client,
+        "desc all_types_test",
+        expected,
+    )
+    .await;
+
+    // Verify the data values are correct
+    let res = client
+        .get("/v1/sql?sql=select int_col, float_col, bool_col, str_col from all_types_test")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let resp: serde_json::Value = res.json().await;
+    let rows = resp["output"][0]["records"]["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0], 42); // int_col
+    assert_eq!(rows[0][1], 3.10); // float_col
+    assert_eq!(rows[0][2], true); // bool_col
+    assert_eq!(rows[0][3], "hello"); // str_col
+
+    // Test with multiple rows containing different combinations of types
+    // This ensures the schema evolution works correctly across rows
+    let body_multi_rows = r#"{"int_val":100,"str_val":"first"}
+{"int_val":200,"float_val":2.5,"bool_val":false}
+{"str_val":"third","array_val":[4,5,6],"nested_obj":{"key":"val"}}"#;
+
+    let res = client
+        .post("/v1/ingest?db=public&table=multi_types_test&pipeline_name=greptime_identity")
+        .header("Content-Type", "application/json")
+        .body(body_multi_rows)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body: serde_json::Value = res.json().await;
+    assert_eq!(body["output"][0]["affectedrows"], 3);
+
+    // Verify all columns from all rows are in the schema
+    // Note: arrays are converted to strings, nested objects are flattened (nested_obj.key)
+    // Columns appear in order they were first encountered: Row1(int_val,str_val), Row2(float_val,bool_val), Row3(array_val,nested_obj.key)
+    let expected = r#"[["greptime_timestamp","TimestampNanosecond","PRI","NO","","TIMESTAMP"],["int_val","Int64","","YES","","FIELD"],["str_val","String","","YES","","FIELD"],["bool_val","Boolean","","YES","","FIELD"],["float_val","Float64","","YES","","FIELD"],["array_val","String","","YES","","FIELD"],["nested_obj.key","String","","YES","","FIELD"]]"#;
+    validate_data(
+        "test_identity_pipeline_multi_types_schema",
+        &client,
+        "desc multi_types_test",
+        expected,
+    )
+    .await;
+
+    // Verify data with nulls for columns not present in each row
+    // ORDER BY with explicit NULLS LAST
+    let res = client
+        .get("/v1/sql?sql=select int_val, str_val, float_val, bool_val from multi_types_test order by case when int_val is null then 1 else 0 end, int_val")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let resp: serde_json::Value = res.json().await;
+    let rows = resp["output"][0]["records"]["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 3);
+
+    // Row 1: int_val=100, str_val="first", float_val=null, bool_val=null
+    assert_eq!(rows[0][0], 100);
+    assert_eq!(rows[0][1], "first");
+    assert!(rows[0][2].is_null());
+    assert!(rows[0][3].is_null());
+
+    // Row 2: int_val=200, str_val=null, float_val=2.5, bool_val=false
+    assert_eq!(rows[1][0], 200);
+    assert!(rows[1][1].is_null());
+    assert_eq!(rows[1][2], 2.5);
+    assert_eq!(rows[1][3], false);
+
+    // Row 3: int_val=null, str_val="third", float_val=null, bool_val=null (nulls sorted last)
+    assert!(rows[2][0].is_null());
+    assert_eq!(rows[2][1], "third");
+    assert!(rows[2][2].is_null());
+    assert!(rows[2][3].is_null());
 
     guard.remove_all().await;
 }
@@ -7101,6 +7301,32 @@ async fn validate_data(test_name: &str, client: &TestClient, sql: &str, expected
         expected, v,
         "validate {test_name} fail, expected: {expected}, actual: {v}"
     );
+}
+
+async fn wait_for_data(client: &TestClient, sql: &str, expected: &str) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let encoded_sql = encode(sql);
+        loop {
+            let res = client
+                .get(format!("/v1/sql?sql={encoded_sql}").as_str())
+                .send()
+                .await;
+            if res.status() != StatusCode::OK {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                continue;
+            }
+            let resp = res.text().await;
+            let v = get_rows_from_output(&resp);
+
+            if expected == v {
+                break;
+            }
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
 }
 
 async fn send_req(

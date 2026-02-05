@@ -79,6 +79,7 @@ pub struct GreptimeDbStandaloneBuilder {
     store_providers: Option<Vec<StorageType>>,
     default_store: Option<StorageType>,
     plugin: Option<Plugins>,
+    slow_query_options: SlowQueryOptions,
 }
 
 impl GreptimeDbStandaloneBuilder {
@@ -90,6 +91,12 @@ impl GreptimeDbStandaloneBuilder {
             default_store: None,
             datanode_wal_config: DatanodeWalConfig::default(),
             metasrv_wal_config: MetasrvWalConfig::default(),
+            // Enable slow query log with 1s threshold by default for integration tests.
+            slow_query_options: SlowQueryOptions {
+                enable: true,
+                threshold: Duration::from_secs(1),
+                ..Default::default()
+            },
         }
     }
 
@@ -116,6 +123,12 @@ impl GreptimeDbStandaloneBuilder {
             plugin: Some(plugin),
             ..self
         }
+    }
+
+    #[must_use]
+    pub fn with_slow_query_threshold(mut self, threshold: Duration) -> Self {
+        self.slow_query_options.threshold = threshold;
+        self
     }
 
     #[must_use]
@@ -332,13 +345,7 @@ impl GreptimeDbStandaloneBuilder {
             metadata_store: kv_backend_config,
             wal: self.metasrv_wal_config.clone().into(),
             grpc: GrpcOptions::default().with_server_addr("127.0.0.1:4001"),
-            // Enable slow query log with 1s threshold to run the slow query test.
-            slow_query: SlowQueryOptions {
-                enable: true,
-                // Set the threshold to 1s to run the slow query test.
-                threshold: Duration::from_secs(1),
-                ..Default::default()
-            },
+            slow_query: self.slow_query_options.clone(),
             ..StandaloneOptions::default()
         };
 

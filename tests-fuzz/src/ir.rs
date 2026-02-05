@@ -17,6 +17,8 @@
 pub(crate) mod alter_expr;
 pub(crate) mod create_expr;
 pub(crate) mod insert_expr;
+pub(crate) mod partition_expr;
+pub(crate) mod repartition_expr;
 pub(crate) mod select_expr;
 
 use core::fmt;
@@ -36,6 +38,7 @@ pub use insert_expr::InsertIntoExpr;
 use lazy_static::lazy_static;
 use rand::Rng;
 use rand::seq::{IndexedRandom, SliceRandom};
+pub use repartition_expr::RepartitionExpr;
 use serde::{Deserialize, Serialize};
 
 use self::insert_expr::{RowValue, RowValues};

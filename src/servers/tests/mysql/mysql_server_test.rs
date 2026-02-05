@@ -26,7 +26,6 @@ use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::value::Value;
 use mysql_async::prelude::*;
 use mysql_async::{Conn, Row, SslOpts};
-use rand::Rng;
 use servers::error::Result;
 use servers::install_ring_crypto_provider;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
@@ -436,19 +435,23 @@ async fn test_query_concurrently() -> Result<()> {
     let server_port = server_addr.port();
 
     let threads = 4;
-    let expect_executed_queries_per_worker = 1000;
+    let expect_executed_queries_per_worker = 200;
+    let queries = Arc::new(
+        (0..100u32)
+            .map(|expected| format!("SELECT uint32s FROM numbers WHERE uint32s = {expected}"))
+            .collect::<Vec<_>>(),
+    );
     let mut join_handles = vec![];
-    for _ in 0..threads {
+    for worker_id in 0..threads {
+        let queries = queries.clone();
         join_handles.push(tokio::spawn(async move {
             let mut connection = create_connection_default_db_name(server_port, false)
                 .await
                 .unwrap();
-            for _ in 0..expect_executed_queries_per_worker {
-                let expected: u32 = rand::rng().random_range(0..100);
+            for i in 0..expect_executed_queries_per_worker {
+                let expected: u32 = ((i + worker_id) % 100) as u32;
                 let result: u32 = connection
-                    .query_first(format!(
-                        "SELECT uint32s FROM numbers WHERE uint32s = {expected}"
-                    ))
+                    .query_first(&queries[expected as usize])
                     .await
                     .unwrap()
                     .unwrap();

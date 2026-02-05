@@ -35,6 +35,16 @@ use crate::dummy_catalog::DummyTableProvider;
 /// - A LIMIT (or Sort.fetch) is present to derive k.
 /// - The hint stays within a single input chain (not across join/subquery branches).
 /// - The target column is non-nullable, or an explicit IS NOT NULL filter exists.
+///
+/// Known limitations:
+/// - Dynamic overfetching is not implemented yet. When filters exist or ORDER BY includes
+///   additional tie-breaker columns (e.g., ORDER BY distance, id), the current fixed k may
+///   return incorrect results. A future improvement should dynamically adjust k based on
+///   filter selectivity and secondary sort requirements.
+/// - Hints only block at subquery boundaries when the subquery contains non-inlineable
+///   operators (Limit/Sort/Distinct/Aggregate/Window). Simple subqueries without these
+///   operators allow hints to propagate through. In distributed mode, the dist analyzer
+///   may inline subqueries before this rule runs, further reducing isolation.
 #[derive(Default)]
 pub(crate) struct VectorSearchState {
     current_distance: Option<VectorDistanceInfo>,
@@ -241,21 +251,45 @@ impl VectorSearchState {
     fn extract_distance_from_sort(
         sort: &datafusion_expr::logical_plan::Sort,
     ) -> Option<VectorDistanceInfo> {
-        if sort.expr.len() != 1 {
-            debug!(
-                "Skip vector hint: Sort has {} expressions, expected 1",
-                sort.expr.len()
-            );
+        if sort.expr.is_empty() {
+            debug!("Skip vector hint: Sort has no expressions");
             return None;
         }
         let sort_expr: &SortExpr = &sort.expr[0];
         let info = Self::extract_distance_info(&sort_expr.expr)?;
         let expected_asc = info.metric != VectorDistanceMetric::InnerProduct;
-        if sort_expr.asc == expected_asc {
+        if sort_expr.asc != expected_asc {
+            return None;
+        }
+
+        if Self::tie_breakers_allowed(&sort.expr[1..], &info) {
             Some(info)
         } else {
+            if sort.expr.len() > 1 {
+                debug!(
+                    "Skip vector hint: Sort has unsupported tie-breakers ({} expressions)",
+                    sort.expr.len()
+                );
+            }
             None
         }
+    }
+
+    fn tie_breakers_allowed(sort_exprs: &[SortExpr], distance_info: &VectorDistanceInfo) -> bool {
+        if sort_exprs.is_empty() {
+            return true;
+        }
+
+        sort_exprs.iter().all(|sort_expr| {
+            let Expr::Column(col) = &sort_expr.expr else {
+                return false;
+            };
+
+            match &distance_info.table_reference {
+                Some(table) => col.relation.as_ref() == Some(table),
+                None => col.relation.is_none(),
+            }
+        })
     }
 
     fn extract_limit_info(limit: &datafusion_expr::logical_plan::Limit) -> Option<VectorLimitInfo> {
@@ -767,8 +801,10 @@ mod tests {
         assert!(t2_provider.get_vector_search_hint().is_none());
     }
 
+    // Simple subqueries (without non-inlineable ops like Limit/Sort/Distinct/Aggregate/Window)
+    // allow hints to propagate through. See known limitations in VectorSearchState docs.
     #[test]
-    fn test_no_vector_hint_above_subquery() {
+    fn test_simple_subquery_allows_hint_propagation() {
         let provider = build_dummy_provider(10);
         let table_source = Arc::new(DefaultTableSource::new(provider.clone()));
         let scan_plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
@@ -794,6 +830,42 @@ mod tests {
         let context = OptimizerContext::default();
         let _ = ScanHintRule.rewrite(plan, &context).unwrap();
 
+        // Hint propagates through simple subquery
+        let hint = provider.get_vector_search_hint().unwrap();
+        assert_eq!(hint.k, 5);
+    }
+
+    // Subqueries with non-inlineable ops (Limit/Sort/Distinct/Aggregate/Window) block hint propagation.
+    #[test]
+    fn test_subquery_with_limit_blocks_hint() {
+        let provider = build_dummy_provider(10);
+        let table_source = Arc::new(DefaultTableSource::new(provider.clone()));
+        let scan_plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+            .unwrap()
+            .limit(0, Some(100)) // non-inlineable op inside subquery
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let subquery = LogicalPlan::Subquery(Subquery {
+            subquery: Arc::new(scan_plan),
+            outer_ref_columns: vec![],
+            spans: Default::default(),
+        });
+
+        let expr = vec_distance_expr(VEC_L2SQ_DISTANCE);
+        let plan = LogicalPlanBuilder::from(subquery)
+            .sort(vec![expr.sort(true, false)])
+            .unwrap()
+            .limit(0, Some(5))
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let context = OptimizerContext::default();
+        let _ = ScanHintRule.rewrite(plan, &context).unwrap();
+
+        // Hint does NOT propagate through subquery with non-inlineable ops
         assert!(provider.get_vector_search_hint().is_none());
     }
 

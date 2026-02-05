@@ -28,7 +28,6 @@ use datafusion::datasource::DefaultTableSource;
 use datafusion::functions_aggregate::average::avg_udaf;
 use datafusion::functions_aggregate::count::count_udaf;
 use datafusion::functions_aggregate::expr_fn::first_value;
-use datafusion::functions_aggregate::grouping::grouping_udaf;
 use datafusion::functions_aggregate::min_max::{max_udaf, min_udaf};
 use datafusion::functions_aggregate::stddev::stddev_pop_udaf;
 use datafusion::functions_aggregate::sum::sum_udaf;
@@ -67,6 +66,7 @@ use promql::functions::{
 };
 use promql_parser::label::{METRIC_NAME, MatchOp, Matcher, Matchers};
 use promql_parser::parser::token::TokenType;
+use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
     AggregateExpr, BinModifier, BinaryExpr as PromBinaryExpr, Call, EvalStmt, Expr as PromExpr,
     Function, FunctionArgs as PromFunctionArgs, LabelModifier, MatrixSelector, NumberLiteral,
@@ -762,12 +762,88 @@ impl PromPlanner {
                     Ok(binary_expr)
                 };
                 if is_comparison_op && !should_return_bool {
-                    self.filter_on_field_column(join_plan, bin_expr_builder)
+                    // PromQL comparison operators without `bool` are filters:
+                    //   - keep the instant-vector side sample values
+                    //   - drop samples where the comparison is false
+                    //
+                    // So we filter on the join result and then project only the side that should
+                    // be preserved according to PromQL semantics.
+                    let filtered = self.filter_on_field_column(join_plan, bin_expr_builder)?;
+                    let (project_table_ref, project_context) =
+                        match (lhs.value_type(), rhs.value_type()) {
+                            (ValueType::Scalar, ValueType::Vector) => {
+                                (&right_table_ref, &right_context)
+                            }
+                            _ => (&left_table_ref, &left_context),
+                        };
+                    self.project_binary_join_side(filtered, project_table_ref, project_context)
                 } else {
                     self.projection_for_each_field_column(join_plan, bin_expr_builder)
                 }
             }
         }
+    }
+
+    fn project_binary_join_side(
+        &mut self,
+        input: LogicalPlan,
+        table_ref: &TableReference,
+        context: &PromPlannerContext,
+    ) -> Result<LogicalPlan> {
+        let schema = input.schema();
+
+        let mut project_exprs =
+            Vec::with_capacity(context.tag_columns.len() + context.field_columns.len() + 2);
+
+        // Project time index from the chosen side.
+        if let Some(time_index_column) = &context.time_index_column {
+            let time_index_col = schema
+                .qualified_field_with_name(Some(table_ref), time_index_column)
+                .context(DataFusionPlanningSnafu)?
+                .into();
+            project_exprs.push(DfExpr::Column(time_index_col));
+        }
+
+        // Project field columns from the chosen side.
+        for field_column in &context.field_columns {
+            let field_col = schema
+                .qualified_field_with_name(Some(table_ref), field_column)
+                .context(DataFusionPlanningSnafu)?
+                .into();
+            project_exprs.push(DfExpr::Column(field_col));
+        }
+
+        // Project tag columns from the chosen side.
+        for tag_column in &context.tag_columns {
+            let tag_col = schema
+                .qualified_field_with_name(Some(table_ref), tag_column)
+                .context(DataFusionPlanningSnafu)?
+                .into();
+            project_exprs.push(DfExpr::Column(tag_col));
+        }
+
+        // Preserve `__tsid` if present, so it can still be used internally downstream. It's
+        // stripped from the final output anyway.
+        if context.use_tsid
+            && let Ok(tsid_col) =
+                schema.qualified_field_with_name(Some(table_ref), DATA_SCHEMA_TSID_COLUMN_NAME)
+        {
+            project_exprs.push(DfExpr::Column(tsid_col.into()));
+        }
+
+        let plan = LogicalPlanBuilder::from(input)
+            .project(project_exprs)
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)?;
+
+        // Update context to reflect the projected schema. Don't keep a table qualifier since
+        // the result is a derived expression.
+        self.ctx = context.clone();
+        self.ctx.table_name = None;
+        self.ctx.schema_name = None;
+
+        Ok(plan)
     }
 
     fn prom_number_lit_to_plan(&mut self, number_literal: &NumberLiteral) -> Result<LogicalPlan> {
@@ -2695,8 +2771,15 @@ impl PromPlanner {
             exprs.push(expr);
         }
 
-        conjunction(exprs).context(ValueNotFoundSnafu {
-            table: self.table_ref()?.to_quoted_string(),
+        // This error context should be computed lazily: the planner may set `ctx.table_name` to
+        // `None` for derived expressions (e.g. after projecting the LHS of a vector-vector
+        // comparison filter). Eagerly calling `table_ref()?` here can turn a valid plan into
+        // a `TableNameNotFound` error even when `conjunction(exprs)` succeeds.
+        conjunction(exprs).with_context(|| ValueNotFoundSnafu {
+            table: self
+                .table_ref()
+                .map(|t| t.to_quoted_string())
+                .unwrap_or_else(|_| "unknown".to_string()),
         })
     }
 
@@ -2722,6 +2805,15 @@ impl PromPlanner {
         input_plan: &LogicalPlan,
     ) -> Result<(Vec<DfExpr>, Vec<DfExpr>)> {
         let mut non_col_args = Vec::new();
+        let is_group_agg = op.id() == token::T_GROUP;
+        if is_group_agg {
+            ensure!(
+                self.ctx.field_columns.len() == 1,
+                MultiFieldsNotSupportedSnafu {
+                    operator: "group()"
+                }
+            );
+        }
         let aggr = match op.id() {
             token::T_SUM => sum_udaf(),
             token::T_QUANTILE => {
@@ -2734,7 +2826,9 @@ impl PromPlanner {
             token::T_COUNT_VALUES | token::T_COUNT => count_udaf(),
             token::T_MIN => min_udaf(),
             token::T_MAX => max_udaf(),
-            token::T_GROUP => grouping_udaf(),
+            // PromQL's `group()` aggregator produces 1 for each group.
+            // Use `max(1.0)` (per-group) to match semantics and output type (Float64).
+            token::T_GROUP => max_udaf(),
             token::T_STDDEV => stddev_pop_udaf(),
             token::T_STDVAR => var_pop_udaf(),
             token::T_TOPK | token::T_BOTTOMK => UnsupportedExprSnafu {
@@ -2750,10 +2844,14 @@ impl PromPlanner {
             .field_columns
             .iter()
             .map(|col| {
-                non_col_args.push(DfExpr::Column(Column::from_name(col)));
-                let expr = aggr.call(non_col_args.clone());
-                non_col_args.pop();
-                expr
+                if is_group_agg {
+                    aggr.call(vec![lit(1_f64)])
+                } else {
+                    non_col_args.push(DfExpr::Column(Column::from_name(col)));
+                    let expr = aggr.call(non_col_args.clone());
+                    non_col_args.pop();
+                    expr
+                }
             })
             .collect::<Vec<_>>();
 
@@ -4970,9 +5068,39 @@ mod test {
     }
 
     #[tokio::test]
-    #[should_panic] // output type doesn't match
     async fn aggregate_group() {
-        do_aggregate_expr_plan("grouping", "GROUPING").await;
+        // Regression test for `group()` aggregator.
+        // PromQL: sum(group by (cluster)(kubernetes_build_info{service="kubernetes",job="apiserver"}))
+        // should be plannable, and `group()` should produce constant 1 for each group.
+        let prom_expr = parser::parse(
+            "sum(group by (cluster)(kubernetes_build_info{service=\"kubernetes\",job=\"apiserver\"}))",
+        )
+        .unwrap();
+        let eval_stmt = EvalStmt {
+            expr: prom_expr,
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+
+        let table_provider = build_test_table_provider_with_fields(
+            &[(
+                DEFAULT_SCHEMA_NAME.to_string(),
+                "kubernetes_build_info".to_string(),
+            )],
+            &["cluster", "service", "job"],
+        )
+        .await;
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(plan_str.contains("max(Float64(1"));
     }
 
     #[tokio::test]

@@ -1,0 +1,270 @@
+-- Vector index explain analyze coverage
+-- ============================================
+-- Part 1: Single table KNN explain
+-- ============================================
+CREATE TABLE vectors_explain (
+    vec_id INT,
+    ts TIMESTAMP TIME INDEX,
+    embedding VECTOR(2) NOT NULL VECTOR INDEX WITH (metric = 'l2sq'),
+    PRIMARY KEY (vec_id)
+);
+
+Affected Rows: 0
+
+INSERT INTO vectors_explain VALUES
+    (1, '2024-01-01 00:00:00', '[1.0, 0.0]'),
+    (2, '2024-01-01 00:00:01', '[0.9, 0.0]'),
+    (3, '2024-01-01 00:00:02', '[0.0, 1.0]'),
+    (4, '2024-01-01 00:00:03', '[0.0, 0.9]');
+
+Affected Rows: 4
+
+ADMIN FLUSH_TABLE('vectors_explain');
+
++--------------------------------------+
+| ADMIN FLUSH_TABLE('vectors_explain') |
++--------------------------------------+
+| 0                                    |
++--------------------------------------+
+
+-- SQLNESS REPLACE ("metrics_per_partition":\s*.*metrics=) "metrics_per_partition": REDACTED metrics=
+-- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
+-- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE Hash\(\[vec_id@0\],.* Hash([vec_id@0],REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE "(file_id|time_range_start|time_range_end)":"[^"]+" "$1":"REDACTED"
+-- SQLNESS REPLACE ("[a-z_]+":"[0-9\.]+(ns|us|µs|ms|s)") "DURATION": REDACTED
+-- SQLNESS REPLACE "(size|flat_format)":\s*(\d+|true|false) "$1":REDACTED
+-- SQLNESS REPLACE ,\s*filter=.*?metrics=  metrics=
+-- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN ANALYZE VERBOSE
+SELECT vec_id
+FROM vectors_explain
+ORDER BY vec_l2sq_distance(embedding, '[1.0, 0.0]'), vec_id
+LIMIT 2;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec metrics=REDACTED_|
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[vec_id@0 as vec_id] metrics=REDACTED_|
+|_|_|_SortPreservingMergeExec: [vec_l2sq_distance(embedding@1, [1.0, 0.0]) ASC NULLS LAST, vec_id@0 ASC NULLS LAST], fetch=2 metrics=REDACTED_|
+|_|_|_SortExec: TopK(fetch=2), expr=[vec_l2sq_distance(embedding@1, [1.0, 0.0]) ASC NULLS LAST, vec_id@0 ASC NULLS LAST], preserve_partitioning=[true] metrics=REDACTED_|
+|_|_|_CooperativeExec metrics=REDACTED_|
+|_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["vec_id", "embedding"], "vector_index_k": 2, "files": [{"file_id":"REDACTED","time_range_start":"REDACTED","time_range_end":"REDACTED","rows":4,"size":REDACTED,"index_size":893}], "flat_format":REDACTED, "metrics_per_partition": REDACTED metrics=REDACTED |
+|_|_|_|
+|_|_| Total rows: REDACTED_|
++-+-+-+
+
+DROP TABLE vectors_explain;
+
+Affected Rows: 0
+
+-- ============================================
+-- Part 2: Join with vector order/limit
+-- ============================================
+CREATE TABLE vectors_explain_left (
+    vec_id INT,
+    ts TIMESTAMP TIME INDEX,
+    embedding VECTOR(2) NOT NULL VECTOR INDEX WITH (metric = 'l2sq'),
+    PRIMARY KEY (vec_id)
+);
+
+Affected Rows: 0
+
+CREATE TABLE vectors_explain_right (
+    vec_id INT,
+    note STRING,
+    ts TIMESTAMP TIME INDEX,
+    PRIMARY KEY (vec_id)
+);
+
+Affected Rows: 0
+
+INSERT INTO vectors_explain_left VALUES
+    (1, '2024-01-01 00:00:00', '[1.0, 0.0]'),
+    (2, '2024-01-01 00:00:01', '[0.9, 0.0]'),
+    (3, '2024-01-01 00:00:02', '[0.0, 1.0]'),
+    (4, '2024-01-01 00:00:03', '[0.0, 0.9]');
+
+Affected Rows: 4
+
+INSERT INTO vectors_explain_right VALUES
+    (3, 'keep', '2024-01-01 00:00:02'),
+    (4, 'keep', '2024-01-01 00:00:03');
+
+Affected Rows: 2
+
+ADMIN FLUSH_TABLE('vectors_explain_left');
+
++-------------------------------------------+
+| ADMIN FLUSH_TABLE('vectors_explain_left') |
++-------------------------------------------+
+| 0                                         |
++-------------------------------------------+
+
+-- SQLNESS REPLACE ("metrics_per_partition":\s*.*metrics=) "metrics_per_partition": REDACTED metrics=
+-- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
+-- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE Hash\(\[vec_id@0\],.* Hash([vec_id@0],REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE "(file_id|time_range_start|time_range_end)":"[^"]+" "$1":"REDACTED"
+-- SQLNESS REPLACE ("[a-z_]+":"[0-9\.]+(ns|us|µs|ms|s)") "DURATION": REDACTED
+-- SQLNESS REPLACE "(size|flat_format)":\s*(\d+|true|false) "$1":REDACTED
+-- SQLNESS REPLACE ,\s*filter=.*?metrics=  metrics=
+-- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN ANALYZE VERBOSE
+SELECT l.vec_id
+FROM vectors_explain_left l
+JOIN vectors_explain_right r ON l.vec_id = r.vec_id
+ORDER BY vec_l2sq_distance(l.embedding, '[1.0, 0.0]'), l.vec_id
+LIMIT 1;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_ProjectionExec: expr=[vec_id@0 as vec_id] metrics=REDACTED_|
+|_|_|_SortPreservingMergeExec: [vec_l2sq_distance(embedding@1, [1.0, 0.0]) ASC NULLS LAST, vec_id@0 ASC NULLS LAST], fetch=1 metrics=REDACTED_|
+|_|_|_SortExec: TopK(fetch=1), expr=[vec_l2sq_distance(embedding@1, [1.0, 0.0]) ASC NULLS LAST, vec_id@0 ASC NULLS LAST], preserve_partitioning=[true] metrics=REDACTED_|
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 metrics=REDACTED_|
+|_|_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(vec_id@0, vec_id@0)], projection=[vec_id@0, embedding@1] metrics=REDACTED_|
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 metrics=REDACTED_|
+|_|_|_RepartitionExec: partitioning=Hash([vec_id@0],REDACTED
+|_|_|_ProjectionExec: expr=[vec_id@0 as vec_id, embedding@2 as embedding] metrics=REDACTED_|
+|_|_|_CooperativeExec metrics=REDACTED_|
+|_|_|_MergeScanExec: REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 metrics=REDACTED_|
+|_|_|_RepartitionExec: partitioning=Hash([vec_id@0],REDACTED
+|_|_|_ProjectionExec: expr=[vec_id@0 as vec_id] metrics=REDACTED_|
+|_|_|_CooperativeExec metrics=REDACTED_|
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_CooperativeExec metrics=REDACTED_|
+|_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["vec_id", "ts", "embedding"], "files": [{"file_id":"REDACTED","time_range_start":"REDACTED","time_range_end":"REDACTED","rows":4,"size":REDACTED,"index_size":893}], "flat_format":REDACTED, "metrics_per_partition": REDACTED metrics=REDACTED |
+|_|_|_|
+| 1_| 0_|_CooperativeExec metrics=REDACTED_|
+|_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["vec_id", "note", "ts"], "flat_format":REDACTED, "metrics_per_partition": REDACTED metrics=REDACTED_|
+|_|_|_|
+|_|_| Total rows: REDACTED_|
++-+-+-+
+
+DROP TABLE vectors_explain_left;
+
+Affected Rows: 0
+
+DROP TABLE vectors_explain_right;
+
+Affected Rows: 0
+
+-- ============================================
+-- Part 3: Cosine and dot explain coverage
+-- ============================================
+CREATE TABLE vectors_explain_metric (
+    vec_id INT,
+    ts TIMESTAMP TIME INDEX,
+    embedding VECTOR(2) NOT NULL VECTOR INDEX WITH (metric = 'cosine'),
+    PRIMARY KEY (vec_id)
+);
+
+Affected Rows: 0
+
+INSERT INTO vectors_explain_metric VALUES
+    (1, '2024-01-01 00:00:00', '[1.0, 0.0]'),
+    (2, '2024-01-01 00:00:01', '[0.0, 1.0]'),
+    (3, '2024-01-01 00:00:02', '[-1.0, 0.0]'),
+    (4, '2024-01-01 00:00:03', '[0.0, -1.0]');
+
+Affected Rows: 4
+
+ADMIN FLUSH_TABLE('vectors_explain_metric');
+
++---------------------------------------------+
+| ADMIN FLUSH_TABLE('vectors_explain_metric') |
++---------------------------------------------+
+| 0                                           |
++---------------------------------------------+
+
+-- SQLNESS REPLACE ("metrics_per_partition":\s*.*metrics=) "metrics_per_partition": REDACTED metrics=
+-- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
+-- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE Hash\(\[vec_id@0\],.* Hash([vec_id@0],REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE "(file_id|time_range_start|time_range_end)":"[^"]+" "$1":"REDACTED"
+-- SQLNESS REPLACE ("[a-z_]+":"[0-9\.]+(ns|us|µs|ms|s)") "DURATION": REDACTED
+-- SQLNESS REPLACE "(size|flat_format)":\s*(\d+|true|false) "$1":REDACTED
+-- SQLNESS REPLACE ,\s*filter=.*?metrics=  metrics=
+-- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN ANALYZE VERBOSE
+SELECT vec_id
+FROM vectors_explain_metric
+ORDER BY vec_cos_distance(embedding, '[1.0, 0.0]'), vec_id
+LIMIT 2;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec metrics=REDACTED_|
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[vec_id@0 as vec_id] metrics=REDACTED_|
+|_|_|_SortPreservingMergeExec: [vec_cos_distance(embedding@1, [1.0, 0.0]) ASC NULLS LAST, vec_id@0 ASC NULLS LAST], fetch=2 metrics=REDACTED_|
+|_|_|_SortExec: TopK(fetch=2), expr=[vec_cos_distance(embedding@1, [1.0, 0.0]) ASC NULLS LAST, vec_id@0 ASC NULLS LAST], preserve_partitioning=[true] metrics=REDACTED_|
+|_|_|_CooperativeExec metrics=REDACTED_|
+|_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["vec_id", "embedding"], "vector_index_k": 2, "files": [{"file_id":"REDACTED","time_range_start":"REDACTED","time_range_end":"REDACTED","rows":4,"size":REDACTED,"index_size":895}], "flat_format":REDACTED, "metrics_per_partition": REDACTED metrics=REDACTED |
+|_|_|_|
+|_|_| Total rows: REDACTED_|
++-+-+-+
+
+-- SQLNESS REPLACE ("metrics_per_partition":\s*.*metrics=) "metrics_per_partition": REDACTED metrics=
+-- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
+-- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE Hash\(\[vec_id@0\],.* Hash([vec_id@0],REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE "(file_id|time_range_start|time_range_end)":"[^"]+" "$1":"REDACTED"
+-- SQLNESS REPLACE ("[a-z_]+":"[0-9\.]+(ns|us|µs|ms|s)") "DURATION": REDACTED
+-- SQLNESS REPLACE "(size|flat_format)":\s*(\d+|true|false) "$1":REDACTED
+-- SQLNESS REPLACE ,\s*filter=.*?metrics=  metrics=
+-- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN ANALYZE VERBOSE
+SELECT vec_id
+FROM vectors_explain_metric
+ORDER BY vec_dot_product(embedding, '[1.0, 0.0]') DESC, vec_id
+LIMIT 2;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec metrics=REDACTED_|
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[vec_id@0 as vec_id] metrics=REDACTED_|
+|_|_|_SortPreservingMergeExec: [vec_dot_product(embedding@1, [1.0, 0.0]) DESC, vec_id@0 ASC NULLS LAST], fetch=2 metrics=REDACTED_|
+|_|_|_SortExec: TopK(fetch=2), expr=[vec_dot_product(embedding@1, [1.0, 0.0]) DESC, vec_id@0 ASC NULLS LAST], preserve_partitioning=[true] metrics=REDACTED_|
+|_|_|_CooperativeExec metrics=REDACTED_|
+|_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["vec_id", "embedding"], "vector_index_k": 2, "files": [{"file_id":"REDACTED","time_range_start":"REDACTED","time_range_end":"REDACTED","rows":4,"size":REDACTED,"index_size":895}], "flat_format":REDACTED, "metrics_per_partition": REDACTED metrics=REDACTED |
+|_|_|_|
+|_|_| Total rows: REDACTED_|
++-+-+-+
+
+DROP TABLE vectors_explain_metric;
+
+Affected Rows: 0
+

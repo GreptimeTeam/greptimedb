@@ -120,8 +120,6 @@ fn partition_rules_for_uuid(partition_num: u32, ident: &str) -> Result<Vec<Expr>
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use sqlparser::ast::{Expr, ValueWithSpan};
     use sqlparser::dialect::GenericDialect;
     use sqlparser::parser::Parser;
@@ -180,20 +178,16 @@ mod tests {
     }
 
     fn check_distribution(test_partition: u32, test_uuid_num: usize) -> bool {
-        // Generate test_uuid_num random uuids.
-        let uuids = (0..test_uuid_num)
-            .map(|_| Uuid::new_v4().to_string().replace("-", "").to_lowercase())
-            .collect::<Vec<String>>();
-
         // Generate the partition rules.
         let rules = partition_rules_for_uuid(test_partition, "test_trace_id").unwrap();
+        let upper_bounds = upper_bounds_from_rules(&rules);
 
         // Collect the number of partitions for each uuid.
-        let mut stats = HashMap::new();
-        for uuid in uuids {
-            let partition = allocate_partition_for_uuid(uuid.clone(), &rules);
-            // Count the number of uuids in each partition.
-            *stats.entry(partition).or_insert(0) += 1;
+        let mut counts = vec![0usize; test_partition as usize];
+        for _ in 0..test_uuid_num {
+            let uuid = Uuid::new_v4().simple().to_string();
+            let partition = allocate_partition_for_uuid(uuid.as_str(), &upper_bounds);
+            counts[partition] += 1;
         }
 
         // Check if the partition distribution is uniform.
@@ -203,7 +197,7 @@ mod tests {
         let tolerance = 100.0 / test_partition as f64 * 0.30;
 
         // For each partition, its ratio should be as close as possible to the expected ratio.
-        for (_, count) in stats {
+        for count in counts {
             let ratio = (count as f64 / test_uuid_num as f64) * 100.0;
             if (ratio - expected_ratio).abs() >= tolerance {
                 return false;
@@ -213,58 +207,94 @@ mod tests {
         true
     }
 
-    fn allocate_partition_for_uuid(uuid: String, rules: &[Expr]) -> usize {
-        for (i, rule) in rules.iter().enumerate() {
-            if let Expr::BinaryOp { left, op: _, right } = rule {
-                if i == 0 {
-                    // Hit the leftmost rule.
-                    if let Expr::Value(ValueWithSpan {
-                        value: Value::SingleQuotedString(leftmost),
-                        ..
-                    }) = *right.clone()
-                        && uuid < leftmost
-                    {
-                        return i;
-                    }
-                } else if i == rules.len() - 1 {
-                    // Hit the rightmost rule.
-                    if let Expr::Value(ValueWithSpan {
-                        value: Value::SingleQuotedString(rightmost),
-                        ..
-                    }) = *right.clone()
-                        && uuid >= rightmost
-                    {
-                        return i;
-                    }
-                } else {
-                    // Hit the middle rules.
-                    if let Expr::BinaryOp {
-                        left: _,
-                        op: _,
-                        right: inner_right,
-                    } = *left.clone()
-                        && let Expr::Value(ValueWithSpan {
-                            value: Value::SingleQuotedString(lower),
-                            ..
-                        }) = *inner_right.clone()
-                        && let Expr::BinaryOp {
-                            left: _,
-                            op: _,
-                            right: inner_right,
-                        } = *right.clone()
-                        && let Expr::Value(ValueWithSpan {
-                            value: Value::SingleQuotedString(upper),
-                            ..
-                        }) = *inner_right.clone()
-                        && uuid >= lower
-                        && uuid < upper
-                    {
-                        return i;
-                    }
+    fn upper_bounds_from_rules<'a>(rules: &'a [Expr]) -> Vec<&'a str> {
+        let mut upper_bounds = Vec::with_capacity(rules.len().saturating_sub(1));
+        let mut prev_upper: Option<&'a str> = None;
+
+        for (idx, rule) in rules.iter().enumerate() {
+            let (lower, upper) = extract_rule_bounds(rule);
+            match idx {
+                0 => {
+                    assert!(lower.is_none());
+                    assert!(upper.is_some());
                 }
+                idx if idx == rules.len() - 1 => {
+                    assert_eq!(lower, prev_upper);
+                    assert!(upper.is_none());
+                }
+                _ => {
+                    assert_eq!(lower, prev_upper);
+                    assert!(upper.is_some());
+                }
+            }
+
+            if idx < rules.len() - 1 {
+                upper_bounds.push(upper.unwrap());
+            }
+
+            prev_upper = upper;
+        }
+
+        upper_bounds
+    }
+
+    fn extract_rule_bounds(rule: &Expr) -> (Option<&str>, Option<&str>) {
+        fn extract_single_quoted_string(expr: &Expr) -> Option<&str> {
+            match expr {
+                Expr::Value(ValueWithSpan {
+                    value: Value::SingleQuotedString(value),
+                    ..
+                }) => Some(value.as_str()),
+                _ => None,
             }
         }
 
-        panic!("No partition found for uuid: {}, rules: {:?}", uuid, rules);
+        match rule {
+            Expr::BinaryOp {
+                op: BinaryOperator::Lt,
+                right,
+                ..
+            } => (None, extract_single_quoted_string(right)),
+            Expr::BinaryOp {
+                op: BinaryOperator::GtEq,
+                right,
+                ..
+            } => (extract_single_quoted_string(right), None),
+            Expr::BinaryOp {
+                op: BinaryOperator::And,
+                left,
+                right,
+            } => {
+                let lower = match left.as_ref() {
+                    Expr::BinaryOp {
+                        op: BinaryOperator::GtEq,
+                        right,
+                        ..
+                    } => extract_single_quoted_string(right),
+                    _ => None,
+                };
+                let upper = match right.as_ref() {
+                    Expr::BinaryOp {
+                        op: BinaryOperator::Lt,
+                        right,
+                        ..
+                    } => extract_single_quoted_string(right),
+                    _ => None,
+                };
+                (lower, upper)
+            }
+            _ => (None, None),
+        }
+    }
+
+    fn allocate_partition_for_uuid(uuid: &str, upper_bounds: &[&str]) -> usize {
+        upper_bounds.partition_point(|upper| uuid >= *upper)
+    }
+
+    #[test]
+    fn test_extract_rule_bounds() {
+        let rules = partition_rules_for_uuid(16, "trace_id").unwrap();
+        let upper_bounds = upper_bounds_from_rules(&rules);
+        assert_eq!(upper_bounds.len(), 15);
     }
 }

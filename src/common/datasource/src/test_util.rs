@@ -68,7 +68,7 @@ pub fn test_basic_schema() -> SchemaRef {
     Arc::new(schema)
 }
 
-pub fn csv_basic_schema() -> SchemaRef {
+pub fn basic_schema_with_time_format() -> SchemaRef {
     let schema = Schema::new(vec![
         Field::new("num", DataType::Int64, false),
         Field::new("str", DataType::Utf8, false),
@@ -97,7 +97,7 @@ pub(crate) fn scan_config(
 pub async fn setup_stream_to_json_test(origin_path: &str, threshold: impl Fn(usize) -> usize) {
     let store = test_store("/");
 
-    let schema = test_basic_schema();
+    let schema = basic_schema_with_time_format();
 
     let json_opener = JsonOpener::new(
         test_util::TEST_BATCH_SIZE,
@@ -148,7 +148,7 @@ pub async fn setup_stream_to_csv_test(
 ) {
     let store = test_store("/");
 
-    let schema = csv_basic_schema();
+    let schema = basic_schema_with_time_format();
 
     let csv_source = CsvSource::new(schema).with_batch_size(TEST_BATCH_SIZE);
     let config = scan_config(None, origin_path, csv_source.clone());

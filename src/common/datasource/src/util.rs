@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 pub fn find_dir_and_filename(path: &str) -> (String, Option<String>) {
     if path.is_empty() {
         ("/".to_string(), None)
@@ -27,9 +29,30 @@ pub fn find_dir_and_filename(path: &str) -> (String, Option<String>) {
     }
 }
 
+/// Normalize the schema inferred from the data.
+/// If the data type is null, set the data type to Utf8.
+pub fn normalize_infer_schema(schema: arrow_schema::Schema) -> arrow_schema::Schema {
+    let fields = schema
+        .fields
+        .iter()
+        .map(|f| {
+            if f.data_type().is_null() {
+                // Set the data type to Utf8 for null fields
+                Arc::new((**f).clone().with_data_type(arrow_schema::DataType::Utf8))
+            } else {
+                f.clone()
+            }
+        })
+        .collect::<Vec<_>>();
+
+    arrow_schema::Schema {
+        fields: arrow_schema::Fields::from(fields),
+        metadata: schema.metadata,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-
     use url::Url;
 
     use super::*;

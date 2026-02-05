@@ -94,6 +94,13 @@ bench = false
 doc = false
 
 [[bin]]
+name = "fuzz_repartition_table"
+path = "targets/ddl/fuzz_repartition_table.rs"
+test = false
+bench = false
+doc = false
+
+[[bin]]
 name = "fuzz_alter_table"
 path = "targets/ddl/fuzz_alter_table.rs"
 test = false

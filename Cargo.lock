@@ -5745,7 +5745,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=2d3d2e3328b2c1d793348030ee8f2ae9a208e818#2d3d2e3328b2c1d793348030ee8f2ae9a208e818"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=829d1f4f1e149403be1fefb9662df2b0c2935f4b#829d1f4f1e149403be1fefb9662df2b0c2935f4b"
 dependencies = [
  "prost 0.14.1",
  "prost-types 0.14.1",
@@ -8106,7 +8106,6 @@ dependencies = [
  "tokio-util",
  "toml 0.8.23",
  "tracing",
- "usearch",
  "uuid",
 ]
 
@@ -12716,7 +12715,7 @@ dependencies = [
 [[package]]
 name = "sqlness"
 version = "0.6.1"
-source = "git+https://github.com/CeresDB/sqlness.git?rev=bb91f31ff58993e07ea89845791235138283a24c#bb91f31ff58993e07ea89845791235138283a24c"
+source = "git+https://github.com/GreptimeTeam/sqlness?rev=6bc85ce077a87756e68ef5a5cd5707071a9da380#6bc85ce077a87756e68ef5a5cd5707071a9da380"
 dependencies = [
  "async-trait",
  "derive_builder 0.11.2",
