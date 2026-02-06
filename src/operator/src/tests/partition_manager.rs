@@ -216,7 +216,7 @@ async fn test_partition_rule_version_cache() {
             .map(|expr| expr.as_json_str().unwrap())
             .map(|expr_json| partition_rule_version(Some(expr_json.as_str())))
             .unwrap_or_default();
-        assert_eq!(expected, partition.partition_rule_version);
+        assert_eq!(Some(expected), partition.partition_rule_version);
         version_by_region.insert(
             partition.id.region_number(),
             partition.partition_rule_version,
@@ -224,7 +224,7 @@ async fn test_partition_rule_version_cache() {
     }
 
     assert_eq!(3, version_by_region.len());
-    assert_ne!(0, *version_by_region.get(&1).unwrap());
-    assert_ne!(0, *version_by_region.get(&2).unwrap());
-    assert_ne!(0, *version_by_region.get(&3).unwrap());
+    assert_ne!(None, *version_by_region.get(&1).unwrap());
+    assert_ne!(None, *version_by_region.get(&2).unwrap());
+    assert_ne!(None, *version_by_region.get(&3).unwrap());
 }

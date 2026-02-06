@@ -176,21 +176,21 @@ impl MetricEngineInner {
         let mut merged_rows = Vec::with_capacity(total_rows);
         let mut total_affected_rows: AffectedRows = 0;
         let mut output_schema: Option<Vec<ColumnSchema>> = None;
-        let mut merged_version = 0u64;
+        let mut merged_version: Option<u64> = None;
 
         // Modify and collect rows from each request
         for (logical_region_id, mut request) in requests {
-            if request.partition_rule_version != 0 {
-                if merged_version == 0 {
-                    merged_version = request.partition_rule_version;
-                } else {
+            if let Some(request_version) = request.partition_rule_version {
+                if let Some(merged_version) = merged_version {
                     ensure!(
-                        merged_version == request.partition_rule_version,
+                        merged_version == request_version,
                         InvalidRequestSnafu {
                             region_id: physical_region_id,
                             reason: "inconsistent partition rule version in batch"
                         }
                     );
+                } else {
+                    merged_version = Some(request_version);
                 }
             }
             self.modify_rows(
@@ -296,27 +296,27 @@ impl MetricEngineInner {
     fn align_requests_to_schema(
         requests: Vec<(RegionId, RegionPutRequest)>,
         merged_schema: &[ColumnSchema],
-    ) -> Result<(Vec<Row>, Vec<TableId>, u64)> {
+    ) -> Result<(Vec<Row>, Vec<TableId>, Option<u64>)> {
         // Pre-calculate total capacity
         let total_rows: usize = requests.iter().map(|(_, req)| req.rows.rows.len()).sum();
         let mut merged_rows = Vec::with_capacity(total_rows);
         let mut table_ids = Vec::with_capacity(total_rows);
-        let mut merged_version = 0u64;
+        let mut merged_version: Option<u64> = None;
 
         let null_value = Value { value_data: None };
 
         for (logical_region_id, request) in requests {
-            if request.partition_rule_version != 0 {
-                if merged_version == 0 {
-                    merged_version = request.partition_rule_version;
-                } else {
+            if let Some(request_version) = request.partition_rule_version {
+                if let Some(merged_version) = merged_version {
                     ensure!(
-                        merged_version == request.partition_rule_version,
+                        merged_version == request_version,
                         InvalidRequestSnafu {
                             region_id: logical_region_id,
                             reason: "inconsistent partition rule version in batch"
                         }
                     );
+                } else {
+                    merged_version = Some(request_version);
                 }
             }
             let table_id = logical_region_id.table_id();
@@ -707,7 +707,7 @@ mod tests {
                             rows: rows_1,
                         },
                         hint: None,
-                        partition_rule_version: 0,
+                        partition_rule_version: None,
                     },
                 ),
                 (
@@ -718,7 +718,7 @@ mod tests {
                             rows: rows_2,
                         },
                         hint: None,
-                        partition_rule_version: 0,
+                        partition_rule_version: None,
                     },
                 ),
             ]
@@ -781,7 +781,7 @@ mod tests {
         let request = RegionRequest::Put(RegionPutRequest {
             rows: Rows { schema, rows },
             hint: None,
-            partition_rule_version: 0,
+            partition_rule_version: None,
         });
 
         // write data
@@ -856,7 +856,7 @@ mod tests {
         let request = RegionRequest::Put(RegionPutRequest {
             rows: Rows { schema, rows },
             hint: None,
-            partition_rule_version: 0,
+            partition_rule_version: None,
         });
 
         // write data
@@ -879,7 +879,7 @@ mod tests {
         let request = RegionRequest::Put(RegionPutRequest {
             rows: Rows { schema, rows },
             hint: None,
-            partition_rule_version: 0,
+            partition_rule_version: None,
         });
 
         engine
@@ -900,7 +900,7 @@ mod tests {
         let request = RegionRequest::Put(RegionPutRequest {
             rows: Rows { schema, rows },
             hint: None,
-            partition_rule_version: 0,
+            partition_rule_version: None,
         });
 
         engine
@@ -963,7 +963,7 @@ mod tests {
                         rows: rows1,
                     },
                     hint: None,
-                    partition_rule_version: 0,
+                    partition_rule_version: None,
                 },
             ),
             (
@@ -974,7 +974,7 @@ mod tests {
                         rows: rows2,
                     },
                     hint: None,
-                    partition_rule_version: 0,
+                    partition_rule_version: None,
                 },
             ),
             (
@@ -985,7 +985,7 @@ mod tests {
                         rows: rows3,
                     },
                     hint: None,
-                    partition_rule_version: 0,
+                    partition_rule_version: None,
                 },
             ),
         ];
@@ -1036,7 +1036,7 @@ mod tests {
                         rows: test_util::build_rows(1, 3),
                     },
                     hint: None,
-                    partition_rule_version: 0,
+                    partition_rule_version: None,
                 },
             ),
             (
@@ -1047,7 +1047,7 @@ mod tests {
                         rows: test_util::build_rows(1, 2),
                     },
                     hint: None,
-                    partition_rule_version: 0,
+                    partition_rule_version: None,
                 },
             ),
             (
@@ -1058,7 +1058,7 @@ mod tests {
                         rows: test_util::build_rows(1, 5),
                     },
                     hint: None,
-                    partition_rule_version: 0,
+                    partition_rule_version: None,
                 },
             ),
         ];
@@ -1098,7 +1098,7 @@ mod tests {
                     rows: test_util::build_rows(1, 5),
                 },
                 hint: None,
-                partition_rule_version: 0,
+                partition_rule_version: None,
             },
         )];
 
@@ -1179,7 +1179,7 @@ mod tests {
                 RegionRequest::Put(RegionPutRequest {
                     rows,
                     hint: None,
-                    partition_rule_version: 1,
+                    partition_rule_version: Some(1),
                 }),
             )
             .await
@@ -1219,7 +1219,7 @@ mod tests {
                 RegionRequest::Put(RegionPutRequest {
                     rows: rows.clone(),
                     hint: None,
-                    partition_rule_version: expected_version.wrapping_add(1),
+                    partition_rule_version: Some(expected_version.wrapping_add(1)),
                 }),
             )
             .await
@@ -1233,7 +1233,7 @@ mod tests {
                 RegionRequest::Put(RegionPutRequest {
                     rows: rows.clone(),
                     hint: None,
-                    partition_rule_version: 0,
+                    partition_rule_version: None,
                 }),
             )
             .await
@@ -1247,7 +1247,7 @@ mod tests {
                 RegionRequest::Put(RegionPutRequest {
                     rows,
                     hint: None,
-                    partition_rule_version: expected_version,
+                    partition_rule_version: Some(expected_version),
                 }),
             )
             .await

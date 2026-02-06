@@ -1183,7 +1183,7 @@ pub async fn put_rows(engine: &MitoEngine, region_id: RegionId, rows: Rows) {
             RegionRequest::Put(RegionPutRequest {
                 rows,
                 hint: None,
-                partition_rule_version: 0,
+                partition_rule_version: None,
             }),
         )
         .await
@@ -1226,7 +1226,7 @@ pub async fn delete_rows(engine: &MitoEngine, region_id: RegionId, rows: Rows) {
             RegionRequest::Delete(RegionDeleteRequest {
                 rows,
                 hint: None,
-                partition_rule_version: 0,
+                partition_rule_version: None,
             }),
         )
         .await

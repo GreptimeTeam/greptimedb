@@ -54,7 +54,7 @@ pub struct PartitionInfo {
 pub struct PartitionInfoWithVersion {
     pub id: RegionId,
     pub partition_expr: Option<PartitionExpr>,
-    pub partition_rule_version: u64,
+    pub partition_rule_version: Option<u64>,
 }
 
 impl PartitionRuleManager {
@@ -147,7 +147,7 @@ impl PartitionRuleManager {
                     .context(error::TableRouteNotFoundSnafu {
                         table_id: physical_table_id,
                     })?;
-                let info= cached.into_physical().context(error::UnexpectedSnafu{
+                let info = cached.into_physical().context(error::UnexpectedSnafu{
                         err_msg: format!(
                             "Expected the physical partition info, but got logical partable route, table: {physical_table_id}"
                         )
@@ -179,7 +179,7 @@ impl PartitionRuleManager {
     pub async fn find_table_partition_rule(
         &self,
         table_info: &TableInfo,
-    ) -> Result<(PartitionRuleRef, HashMap<RegionNumber, u64>)> {
+    ) -> Result<(PartitionRuleRef, HashMap<RegionNumber, Option<u64>>)> {
         let partition_columns = table_info
             .meta
             .partition_column_names()
@@ -193,7 +193,7 @@ impl PartitionRuleManager {
             .partitions
             .iter()
             .map(|r| (r.id.region_number(), r.partition_rule_version))
-            .collect::<HashMap<RegionNumber, u64>>();
+            .collect::<HashMap<RegionNumber, Option<u64>>>();
         let regions = partition_info
             .partitions
             .iter()
@@ -233,7 +233,7 @@ impl PartitionRuleManager {
         &self,
         table_info: &TableInfo,
         rows: Rows,
-    ) -> Result<HashMap<RegionNumber, (Rows, u64)>> {
+    ) -> Result<HashMap<RegionNumber, (Rows, Option<u64>)>> {
         let (partition_rule, partition_versions) =
             self.find_table_partition_rule(table_info).await?;
 

@@ -79,7 +79,7 @@ pub struct WriteRequest {
     /// Region metadata on the time of this request is created.
     pub(crate) region_metadata: Option<RegionMetadataRef>,
     /// Partition rule version for the region.
-    pub partition_rule_version: u64,
+    pub partition_rule_version: Option<u64>,
 }
 
 impl WriteRequest {
@@ -136,7 +136,7 @@ impl WriteRequest {
             has_null,
             hint: None,
             region_metadata,
-            partition_rule_version: 0,
+            partition_rule_version: None,
         })
     }
 
@@ -146,7 +146,7 @@ impl WriteRequest {
         self
     }
 
-    pub fn with_partition_rule_version(mut self, partition_rule_version: u64) -> Self {
+    pub fn with_partition_rule_version(mut self, partition_rule_version: Option<u64>) -> Self {
         self.partition_rule_version = partition_rule_version;
         self
     }
@@ -553,7 +553,7 @@ pub(crate) struct SenderBulkRequest {
     pub(crate) region_id: RegionId,
     pub(crate) request: BulkPart,
     pub(crate) region_metadata: RegionMetadataRef,
-    pub(crate) partition_rule_version: u64,
+    pub(crate) partition_rule_version: Option<u64>,
 }
 
 /// Request sent to a worker with timestamp

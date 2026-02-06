@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::Rows;
 use api::v1::region::{DeleteRequest, InsertRequest};
+use api::v1::{PartitionRuleVersion, Rows};
 use partition::manager::PartitionRuleManager;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
@@ -46,7 +46,7 @@ impl<'a> Partitioner<'a> {
                 |(region_number, (rows, partition_rule_version))| InsertRequest {
                     region_id: RegionId::new(table_id, region_number).into(),
                     rows: Some(rows),
-                    partition_rule_version,
+                    version: partition_rule_version.map(|value| PartitionRuleVersion { value }),
                 },
             )
             .collect();
@@ -70,7 +70,7 @@ impl<'a> Partitioner<'a> {
                 |(region_number, (rows, partition_rule_version))| DeleteRequest {
                     region_id: RegionId::new(table_id, region_number).into(),
                     rows: Some(rows),
-                    partition_rule_version,
+                    version: partition_rule_version.map(|value| PartitionRuleVersion { value }),
                 },
             )
             .collect();

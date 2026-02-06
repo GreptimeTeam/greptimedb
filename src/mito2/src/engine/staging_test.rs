@@ -249,7 +249,7 @@ fn default_partition_expr() -> String {
 #[tokio::test]
 async fn test_staging_write_partition_rule_version() {
     test_staging_write_partition_rule_version_with_format(false).await;
-    // test_staging_write_partition_rule_version_with_format(true).await;
+    test_staging_write_partition_rule_version_with_format(true).await;
 }
 
 async fn test_staging_write_partition_rule_version_with_format(flat_format: bool) {
@@ -302,7 +302,7 @@ async fn test_staging_write_partition_rule_version_with_format(flat_format: bool
             RegionRequest::Put(RegionPutRequest {
                 rows: bad_rows,
                 hint: None,
-                partition_rule_version: origin_version,
+                partition_rule_version: Some(origin_version),
             }),
         )
         .await
@@ -323,7 +323,7 @@ async fn test_staging_write_partition_rule_version_with_format(flat_format: bool
             RegionRequest::Put(RegionPutRequest {
                 rows: compat_rows,
                 hint: None,
-                partition_rule_version: 0,
+                partition_rule_version: None,
             }),
         )
         .await
@@ -340,7 +340,7 @@ async fn test_staging_write_partition_rule_version_with_format(flat_format: bool
             RegionRequest::Put(RegionPutRequest {
                 rows: ok_rows,
                 hint: None,
-                partition_rule_version: expected_version,
+                partition_rule_version: Some(expected_version),
             }),
         )
         .await
@@ -389,7 +389,7 @@ async fn test_staging_write_partition_rule_version_with_format(flat_format: bool
             RegionRequest::Put(RegionPutRequest {
                 rows: exit_rows,
                 hint: None,
-                partition_rule_version: origin_version,
+                partition_rule_version: Some(origin_version),
             }),
         )
         .await
@@ -406,7 +406,7 @@ async fn test_staging_write_partition_rule_version_with_format(flat_format: bool
             RegionRequest::Put(RegionPutRequest {
                 rows: compat_rows,
                 hint: None,
-                partition_rule_version: 0,
+                partition_rule_version: None,
             }),
         )
         .await
@@ -432,7 +432,7 @@ async fn test_staging_write_partition_rule_version_with_format(flat_format: bool
             RegionRequest::Put(RegionPutRequest {
                 rows: commit_rows,
                 hint: None,
-                partition_rule_version: expected_version,
+                partition_rule_version: Some(expected_version),
             }),
         )
         .await

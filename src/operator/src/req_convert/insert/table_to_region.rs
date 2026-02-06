@@ -72,7 +72,7 @@ mod tests {
     use api::v1::helper::tag_column_schema;
     use api::v1::region::InsertRequest as RegionInsertRequest;
     use api::v1::value::ValueData;
-    use api::v1::{ColumnDataType, Row, Value};
+    use api::v1::{ColumnDataType, PartitionRuleVersion, Row, Value};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use datatypes::vectors::{Int32Vector, VectorRef};
     use store_api::storage::RegionId;
@@ -157,7 +157,7 @@ mod tests {
     fn build_region_request(
         rows: Vec<Option<i32>>,
         region_id: u64,
-        version: u64,
+        version: Option<u64>,
     ) -> RegionInsertRequest {
         RegionInsertRequest {
             region_id,
@@ -172,7 +172,7 @@ mod tests {
                     })
                     .collect(),
             }),
-            partition_rule_version: version,
+            version: version.map(|value| PartitionRuleVersion { value }),
         }
     }
 }

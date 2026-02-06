@@ -498,11 +498,12 @@ fn check_op_type(append_mode: bool, request: &WriteRequest) -> Result<()> {
 fn check_partition_rule_version(
     region_id: RegionId,
     expected_version: u64,
-    request_version: u64,
+    request_version: Option<u64>,
 ) -> Result<()> {
-    if request_version == 0 {
-        return Ok(());
-    }
+    let request_version = match request_version {
+        None => return Ok(()),
+        Some(value) => value,
+    };
     if request_version != expected_version {
         return PartitionRuleVersionMismatchSnafu {
             region_id,
