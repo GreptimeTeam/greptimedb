@@ -3734,8 +3734,13 @@ dependencies = [
  "half",
  "hashbrown 0.14.5",
  "indexmap 2.12.0",
+ "libc",
  "log",
  "object_store",
+ "parquet",
+ "paste",
+ "recursive",
+ "sqlparser",
  "tokio",
  "web-time",
 ]
