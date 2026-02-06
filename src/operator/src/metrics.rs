@@ -37,6 +37,11 @@ lazy_static! {
         &["db"]
     )
     .unwrap();
+    pub static ref DIST_INGEST_ROWS_FILTERED_TTL_COUNTER: IntCounter = register_int_counter!(
+        "greptime_table_operator_ingest_rows_filtered_ttl",
+        "table operator ingest rows filtered by TTL",
+    )
+    .unwrap();
     pub static ref DIST_MIRROR_ROW_COUNT: IntCounter = register_int_counter!(
         "greptime_table_operator_mirror_rows",
         "table operator mirror rows"

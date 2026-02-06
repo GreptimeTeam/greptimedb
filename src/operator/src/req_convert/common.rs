@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub(crate) mod partitioner;
+pub mod ttl_filter;
 
 use std::collections::HashMap;
 

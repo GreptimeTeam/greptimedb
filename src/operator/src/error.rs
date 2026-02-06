@@ -299,6 +299,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to check TTL expiration"))]
+    CheckTtl {
+        source: common_time::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to find leader for region"))]
     FindRegionLeader {
         source: partition::error::Error,
@@ -1017,6 +1024,7 @@ impl ErrorExt for Error {
             | Error::SplitInsert { source, .. }
             | Error::SplitDelete { source, .. }
             | Error::FindRegionLeader { source, .. } => source.status_code(),
+            Error::CheckTtl { source, .. } => source.status_code(),
             Error::UnrecognizedTableOption { .. } => StatusCode::InvalidArguments,
             Error::ReadObject { .. }
             | Error::ReadParquetMetadata { .. }

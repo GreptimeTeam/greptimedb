@@ -75,6 +75,7 @@ use crate::region_req_factory::RegionRequestFactory;
 use crate::req_convert::common::preprocess_row_insert_requests;
 use crate::req_convert::insert::{
     ColumnToRow, RowToRegion, StatementToRegion, TableToRegion, fill_reqs_with_impure_default,
+    filter_normal_requests_by_ttl,
 };
 use crate::statement::StatementExecutor;
 
@@ -405,9 +406,13 @@ impl Inserter {
         .await?;
         flow_mirror_task.detach(self.node_manager.clone())?;
 
+        // Filter expired rows from normal_requests AFTER flownode mirroring
+        // but BEFORE datanode writes. Instant requests are already excluded from datanodes.
+        let filtered_requests = filter_normal_requests_by_ttl(normal_requests, table_infos)?;
+
         // Write requests to datanode and wait for response
         let write_tasks = self
-            .group_requests_by_peer(normal_requests)
+            .group_requests_by_peer(filtered_requests)
             .await?
             .into_iter()
             .map(|(peer, inserts)| {
