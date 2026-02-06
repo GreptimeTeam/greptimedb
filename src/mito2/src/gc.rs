@@ -45,7 +45,10 @@ use crate::error::{
     TooManyGcJobsSnafu, UnexpectedSnafu,
 };
 use crate::manifest::action::{RegionManifest, RemovedFile};
-use crate::metrics::{GC_DELETE_FILE_CNT, GC_ORPHANED_INDEX_FILES, GC_SKIPPED_UNPARSABLE_FILES};
+use crate::metrics::{
+    GC_DELETE_FILE_CNT, GC_DURATION_SECONDS, GC_ERRORS_TOTAL, GC_FILES_DELETED_TOTAL,
+    GC_ORPHANED_INDEX_FILES, GC_RUNS_TOTAL, GC_SKIPPED_UNPARSABLE_FILES,
+};
 use crate::region::{MitoRegionRef, RegionRoleState};
 use crate::sst::file::{RegionFileId, RegionIndexId, delete_files, delete_index};
 use crate::sst::location::{self};
@@ -267,6 +270,9 @@ impl LocalGcWorker {
     /// TODO(discord9): consider instead running in parallel mode
     pub async fn run(self) -> Result<GcReport> {
         info!("LocalGcWorker started");
+        let _timer = GC_DURATION_SECONDS
+            .with_label_values(&["total"])
+            .start_timer();
         let now = std::time::Instant::now();
 
         let mut deleted_files = HashMap::new();
@@ -336,6 +342,12 @@ impl LocalGcWorker {
         region: Option<MitoRegionRef>,
         tmp_ref_files: &HashSet<FileRef>,
     ) -> Result<Vec<RemovedFile>> {
+        let mode = if self.full_file_listing {
+            "full_listing"
+        } else {
+            "fast"
+        };
+        GC_RUNS_TOTAL.with_label_values(&[mode]).inc();
         debug!(
             "Doing gc for region {}, {}",
             region_id,
@@ -370,6 +382,9 @@ impl LocalGcWorker {
                     region.region_id(),
                     manifest.manifest_version
                 );
+                GC_ERRORS_TOTAL
+                    .with_label_values(&["manifest_mismatch"])
+                    .inc();
                 return Ok(vec![]);
             }
             Some(manifest)
@@ -460,6 +475,9 @@ impl LocalGcWorker {
             region_id
         );
 
+        let _delete_timer = GC_DURATION_SECONDS
+            .with_label_values(&["delete_files"])
+            .start_timer();
         self.delete_files(region_id, &deletable_files).await?;
 
         debug!(
@@ -467,6 +485,9 @@ impl LocalGcWorker {
             unused_file_cnt, region_id
         );
         if let Some(region) = &region {
+            let _update_timer = GC_DURATION_SECONDS
+                .with_label_values(&["update_manifest"])
+                .start_timer();
             self.update_manifest_removed_files(region, deletable_files.clone())
                 .await?;
         }
@@ -497,12 +518,26 @@ impl LocalGcWorker {
         )
         .await?;
 
-        for index_id in index_ids {
-            delete_index(index_id, &self.access_layer, &self.cache_manager).await?;
+        if !file_pairs.is_empty() {
+            let deleted_count = file_pairs.len() as u64;
+            GC_FILES_DELETED_TOTAL
+                .with_label_values(&["parquet"])
+                .inc_by(deleted_count);
+            GC_DELETE_FILE_CNT.inc_by(deleted_count);
         }
 
-        // FIXME(discord9): if files are already deleted before calling delete_files, the metric will be inaccurate, no clean way to fix it now
-        GC_DELETE_FILE_CNT.add(removed_files.len() as i64);
+        for index_id in index_ids {
+            match delete_index(index_id, &self.access_layer, &self.cache_manager).await {
+                Ok(()) => {
+                    GC_FILES_DELETED_TOTAL.with_label_values(&["index"]).inc();
+                    GC_DELETE_FILE_CNT.inc();
+                }
+                Err(err) => {
+                    GC_ERRORS_TOTAL.with_label_values(&["delete_failed"]).inc();
+                    return Err(err);
+                }
+            }
+        }
 
         Ok(())
     }
@@ -588,16 +623,29 @@ impl LocalGcWorker {
         region_id: RegionId,
         file_cnt_hint: usize,
     ) -> Result<Vec<Entry>> {
+        let _timer = GC_DURATION_SECONDS
+            .with_label_values(&["list_files"])
+            .start_timer();
         let start = tokio::time::Instant::now();
         let concurrency = (file_cnt_hint / Self::CONCURRENCY_LIST_PER_FILES)
             .max(1)
             .min(self.opt.max_concurrent_lister_per_gc_job);
 
-        let listers = self.partition_region_files(region_id, concurrency).await?;
+        let listers = self
+            .partition_region_files(region_id, concurrency)
+            .await
+            .inspect_err(|_| {
+                GC_ERRORS_TOTAL.with_label_values(&["list_failed"]).inc();
+            })?;
         let lister_cnt = listers.len();
 
         // Step 2: Concurrently list all files in the region directory
-        let all_entries = self.list_region_files_concurrent(listers).await?;
+        let all_entries = self
+            .list_region_files_concurrent(listers)
+            .await
+            .inspect_err(|_| {
+                GC_ERRORS_TOTAL.with_label_values(&["list_failed"]).inc();
+            })?;
         let cnt = all_entries.len();
         info!(
             "gc: full listing mode cost {} secs using {lister_cnt} lister for {cnt} files in region {}.",

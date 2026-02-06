@@ -32,6 +32,7 @@ use crate::gc::candidate::GcCandidate;
 use crate::gc::dropped::DroppedRegionCollector;
 use crate::gc::scheduler::{GcJobReport, GcScheduler};
 use crate::gc::tracker::RegionGcInfo;
+use crate::metrics::METRIC_META_GC_CANDIDATE_REGIONS;
 
 impl GcScheduler {
     pub(crate) async fn trigger_gc(&self) -> Result<GcJobReport> {
@@ -51,6 +52,13 @@ impl GcScheduler {
         let dropped_collector =
             DroppedRegionCollector::new(self.ctx.as_ref(), &self.config, &self.region_gc_tracker);
         let dropped_assignment = dropped_collector.collect_and_assign(&table_reparts).await?;
+        let candidate_count: usize = per_table_candidates.values().map(|c| c.len()).sum();
+        let dropped_count: usize = dropped_assignment
+            .regions_by_peer
+            .values()
+            .map(|regions| regions.len())
+            .sum();
+        METRIC_META_GC_CANDIDATE_REGIONS.set((candidate_count + dropped_count) as i64);
 
         if per_table_candidates.is_empty() && dropped_assignment.regions_by_peer.is_empty() {
             info!("No GC candidates found, skipping GC cycle");

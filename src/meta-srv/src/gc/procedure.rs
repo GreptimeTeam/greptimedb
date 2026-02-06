@@ -40,10 +40,32 @@ use crate::error::{self, KvBackendSnafu, Result, SerializeToJsonSnafu, TableMeta
 use crate::gc::util::table_route_to_region;
 use crate::gc::{Peer2Regions, Region2Peers};
 use crate::handler::HeartbeatMailbox;
+use crate::metrics::{METRIC_META_GC_DATANODE_CALLS_TOTAL, METRIC_META_GC_FAILED_REGIONS_TOTAL};
 use crate::service::mailbox::{Channel, MailboxRef};
 
 /// Helper function to send GetFileRefs instruction and wait for reply.
 async fn send_get_file_refs(
+    mailbox: &MailboxRef,
+    server_addr: &str,
+    peer: &Peer,
+    instruction: GetFileRefs,
+    timeout: Duration,
+) -> Result<GetFileRefsReply> {
+    let result = send_get_file_refs_inner(mailbox, server_addr, peer, instruction, timeout).await;
+
+    match &result {
+        Ok(_) => METRIC_META_GC_DATANODE_CALLS_TOTAL
+            .with_label_values(&["get_file_refs", "success"])
+            .inc(),
+        Err(_) => METRIC_META_GC_DATANODE_CALLS_TOTAL
+            .with_label_values(&["get_file_refs", "error"])
+            .inc(),
+    }
+
+    result
+}
+
+async fn send_get_file_refs_inner(
     mailbox: &MailboxRef,
     server_addr: &str,
     peer: &Peer,
@@ -90,6 +112,43 @@ async fn send_get_file_refs(
 
 /// Helper function to send GcRegions instruction and wait for reply.
 async fn send_gc_regions(
+    mailbox: &MailboxRef,
+    peer: &Peer,
+    gc_regions: GcRegions,
+    server_addr: &str,
+    timeout: Duration,
+    description: &str,
+) -> Result<GcReport> {
+    let failed_region_count = gc_regions.regions.len() as u64;
+    let result =
+        send_gc_regions_inner(mailbox, peer, gc_regions, server_addr, timeout, description).await;
+
+    match result {
+        Ok(report) => {
+            METRIC_META_GC_DATANODE_CALLS_TOTAL
+                .with_label_values(&["gc_regions", "success"])
+                .inc();
+
+            let need_retry_count = report.need_retry_regions.len() as u64;
+            if need_retry_count > 0 {
+                METRIC_META_GC_FAILED_REGIONS_TOTAL.inc_by(need_retry_count);
+            }
+
+            Ok(report)
+        }
+        Err(e) => {
+            METRIC_META_GC_DATANODE_CALLS_TOTAL
+                .with_label_values(&["gc_regions", "error"])
+                .inc();
+            if failed_region_count > 0 {
+                METRIC_META_GC_FAILED_REGIONS_TOTAL.inc_by(failed_region_count);
+            }
+            Err(e)
+        }
+    }
+}
+
+async fn send_gc_regions_inner(
     mailbox: &MailboxRef,
     peer: &Peer,
     gc_regions: GcRegions,

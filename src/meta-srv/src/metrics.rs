@@ -90,4 +90,41 @@ lazy_static! {
     /// The topic estimated replay size.
     pub static ref METRIC_META_TOPIC_ESTIMATED_REPLAY_SIZE: IntGaugeVec =
         register_int_gauge_vec!("meta_topic_estimated_replay_size", "meta topic estimated replay size", &["topic_name"]).unwrap();
+
+    /// Total GC scheduler cycles.
+    pub static ref METRIC_META_GC_SCHEDULER_CYCLES_TOTAL: IntCounter = register_int_counter!(
+        "greptime_metasrv_gc_scheduler_cycles_total",
+        "Total GC scheduler cycles",
+    )
+    .unwrap();
+
+    /// Time for a full GC scheduler cycle.
+    pub static ref METRIC_META_GC_SCHEDULER_DURATION_SECONDS: Histogram = register_histogram!(
+        "greptime_metasrv_gc_scheduler_duration_seconds",
+        "Time for a full GC scheduler cycle",
+        exponential_buckets(1.0, 10.0, 6).unwrap(),
+    )
+    .unwrap();
+
+    /// Number of GC candidate regions.
+    pub static ref METRIC_META_GC_CANDIDATE_REGIONS: IntGauge = register_int_gauge!(
+        "greptime_metasrv_gc_candidate_regions",
+        "Number of GC candidate regions",
+    )
+    .unwrap();
+
+    /// Calls to datanodes for GC.
+    pub static ref METRIC_META_GC_DATANODE_CALLS_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "greptime_metasrv_gc_datanode_calls_total",
+        "Calls to datanodes for GC",
+        &["operation", "status"],
+    )
+    .unwrap();
+
+    /// Total regions that failed GC.
+    pub static ref METRIC_META_GC_FAILED_REGIONS_TOTAL: IntCounter = register_int_counter!(
+        "greptime_metasrv_gc_failed_regions_total",
+        "Total regions that failed GC",
+    )
+    .unwrap();
 }
