@@ -333,7 +333,7 @@ async fn test_admin_gc_missing_cases(store_type: &StorageType) {
     match invalid_region_result {
         Ok(output) => {
             let processed_regions = extract_u64_output(output.data).await;
-            assert_eq!(processed_regions, 1);
+            assert_eq!(processed_regions, 0);
             let sst_after_invalid_region = list_sst_files(&test_context).await;
             assert_eq!(
                 sst_before_invalid_region.len(),
