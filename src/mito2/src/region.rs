@@ -155,19 +155,22 @@ pub struct MitoRegion {
     pub(crate) topic_latest_entry_id: AtomicU64,
     /// The total bytes written to the region.
     pub(crate) written_bytes: Arc<AtomicU64>,
-    /// The partition expression of the region in staging mode.
+    /// Partition info of the region in staging mode.
     ///
     /// During the staging mode, the region metadata in [`VersionControlRef`] is not updated,
-    /// so we need to store the partition expression separately.
-    /// TODO(weny):
-    /// 1. Reload the staging partition expr during region open.
-    /// 2. Rejects requests with mismatching partition expr.
-    pub(crate) staging_partition_expr: Mutex<Option<String>>,
+    /// so we need to store the partition info separately.
+    pub(crate) staging_partition_info: Mutex<Option<StagingPartitionInfo>>,
     /// manifest stats
     stats: ManifestStats,
 }
 
 pub type MitoRegionRef = Arc<MitoRegion>;
+
+#[derive(Debug, Clone)]
+pub(crate) struct StagingPartitionInfo {
+    pub(crate) partition_expr: String,
+    pub(crate) partition_rule_version: u64,
+}
 
 impl MitoRegion {
     /// Stop background managers for this region.
@@ -363,7 +366,7 @@ impl MitoRegion {
     /// You should call this method in the worker loop.
     /// Transitions from Staging to Writable state.
     pub fn exit_staging(&self) -> Result<()> {
-        *self.staging_partition_expr.lock().unwrap() = None;
+        *self.staging_partition_info.lock().unwrap() = None;
         self.compare_exchange_state(
             RegionLeaderState::Staging,
             RegionRoleState::Leader(RegionLeaderState::Writable),
@@ -760,17 +763,31 @@ impl MitoRegion {
     pub fn maybe_staging_partition_expr_str(&self) -> Option<String> {
         let is_staging = self.is_staging();
         if is_staging {
-            let staging_partition_expr = self.staging_partition_expr.lock().unwrap();
-            if staging_partition_expr.is_none() {
+            let staging_partition_info = self.staging_partition_info.lock().unwrap();
+            if staging_partition_info.is_none() {
                 warn!(
                     "Staging partition expr is none for region {} in staging state",
                     self.region_id
                 );
             }
-            staging_partition_expr.clone()
+            staging_partition_info
+                .as_ref()
+                .map(|info| info.partition_expr.clone())
         } else {
             let version = self.version();
             version.metadata.partition_expr.clone()
+        }
+    }
+
+    pub fn expected_partition_rule_version(&self) -> u64 {
+        if self.is_staging() {
+            let staging_partition_info = self.staging_partition_info.lock().unwrap();
+            staging_partition_info
+                .as_ref()
+                .map(|info| info.partition_rule_version)
+                .unwrap_or_default()
+        } else {
+            self.version().metadata.partition_rule_version
         }
     }
 }
@@ -1526,7 +1543,7 @@ mod tests {
             topic_latest_entry_id: Default::default(),
             written_bytes: Arc::new(AtomicU64::new(0)),
             stats: ManifestStats::default(),
-            staging_partition_expr: Mutex::new(None),
+            staging_partition_info: Mutex::new(None),
         };
 
         // Test initial state

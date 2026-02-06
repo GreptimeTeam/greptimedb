@@ -92,6 +92,7 @@ mod tests {
                 let request = RegionRequest::Put(RegionPutRequest {
                     rows: Rows { schema, rows },
                     hint: None,
+                    partition_rule_version: None,
                 });
                 engine
                     .handle_request(*logi_region_id, request)

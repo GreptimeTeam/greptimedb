@@ -629,7 +629,11 @@ async fn test_absent_and_invalid_columns_with_format(flat_format: bool) {
     let err = engine
         .handle_request(
             region_id,
-            RegionRequest::Put(RegionPutRequest { rows, hint: None }),
+            RegionRequest::Put(RegionPutRequest {
+                rows,
+                hint: None,
+                partition_rule_version: None,
+            }),
         )
         .await
         .unwrap_err();

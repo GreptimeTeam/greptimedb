@@ -180,6 +180,7 @@ async fn test_engine_open_readonly_with_format(flat_format: bool) {
             RegionRequest::Put(RegionPutRequest {
                 rows: rows.clone(),
                 hint: None,
+                partition_rule_version: None,
             }),
         )
         .await

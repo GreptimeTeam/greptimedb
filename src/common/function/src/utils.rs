@@ -12,10 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::hash::BuildHasher;
-
-use ahash::RandomState;
-use serde::{Deserialize, Serialize};
+pub use common_base::hash::{FixedRandomState, partition_rule_version};
 
 /// Escapes special characters in the provided pattern string for `LIKE`.
 ///
@@ -36,70 +33,6 @@ pub fn escape_like_pattern(pattern: &str) -> String {
             _ => vec![c],
         })
         .collect::<String>()
-}
-
-/// A random state with fixed seeds.
-///
-/// This is used to ensure that the hash values are consistent across
-/// different processes, and easy to serialize and deserialize.
-#[derive(Debug)]
-pub struct FixedRandomState {
-    state: RandomState,
-}
-
-impl FixedRandomState {
-    // some random seeds
-    const RANDOM_SEED_0: u64 = 0x517cc1b727220a95;
-    const RANDOM_SEED_1: u64 = 0x428a2f98d728ae22;
-    const RANDOM_SEED_2: u64 = 0x7137449123ef65cd;
-    const RANDOM_SEED_3: u64 = 0xb5c0fbcfec4d3b2f;
-
-    pub fn new() -> Self {
-        Self {
-            state: ahash::RandomState::with_seeds(
-                Self::RANDOM_SEED_0,
-                Self::RANDOM_SEED_1,
-                Self::RANDOM_SEED_2,
-                Self::RANDOM_SEED_3,
-            ),
-        }
-    }
-}
-
-impl Default for FixedRandomState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl BuildHasher for FixedRandomState {
-    type Hasher = ahash::AHasher;
-
-    fn build_hasher(&self) -> Self::Hasher {
-        self.state.build_hasher()
-    }
-
-    fn hash_one<T: std::hash::Hash>(&self, x: T) -> u64 {
-        self.state.hash_one(x)
-    }
-}
-
-impl Serialize for FixedRandomState {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_unit()
-    }
-}
-
-impl<'de> Deserialize<'de> for FixedRandomState {
-    fn deserialize<D>(_deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        Ok(Self::new())
-    }
 }
 
 #[cfg(test)]

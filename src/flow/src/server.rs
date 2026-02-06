@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use api::v1::flow::DirtyWindowRequests;
 use api::v1::{RowDeleteRequests, RowInsertRequests};
-use cache::{TABLE_FLOWNODE_SET_CACHE_NAME, TABLE_ROUTE_CACHE_NAME};
+use cache::{PARTITION_INFO_CACHE_NAME, TABLE_FLOWNODE_SET_CACHE_NAME, TABLE_ROUTE_CACHE_NAME};
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
@@ -38,6 +38,7 @@ use itertools::Itertools;
 use operator::delete::Deleter;
 use operator::insert::Inserter;
 use operator::statement::StatementExecutor;
+use partition::cache::PartitionInfoCacheRef;
 use partition::manager::PartitionRuleManager;
 use query::{QueryEngine, QueryEngineFactory};
 use servers::add_service;
@@ -122,6 +123,7 @@ impl flow_server::Flow for FlowService {
                     api::v1::region::InsertRequest {
                         region_id: insert.region_id,
                         rows: insert.rows,
+                        partition_rule_version: insert.partition_rule_version,
                     }
                 })
                 .collect_vec(),
@@ -537,10 +539,15 @@ impl FrontendInvoker {
             layered_cache_registry.get().context(CacheRequiredSnafu {
                 name: TABLE_ROUTE_CACHE_NAME,
             })?;
+        let partition_info_cache: PartitionInfoCacheRef =
+            layered_cache_registry.get().context(CacheRequiredSnafu {
+                name: PARTITION_INFO_CACHE_NAME,
+            })?;
 
         let partition_manager = Arc::new(PartitionRuleManager::new(
             kv_backend.clone(),
             table_route_cache.clone(),
+            partition_info_cache.clone(),
         ));
 
         let table_flownode_cache: TableFlownodeSetCacheRef =
@@ -570,7 +577,7 @@ impl FrontendInvoker {
             kv_backend.clone(),
             layered_cache_registry.clone(),
             inserter.clone(),
-            table_route_cache,
+            partition_manager,
             None,
         ));
 

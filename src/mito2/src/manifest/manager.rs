@@ -838,7 +838,7 @@ mod test {
         let expr_json =
             r#"{"Expr":{"lhs":{"Column":"a"},"op":"GtEq","rhs":{"Value":{"UInt32":10}}}}"#;
         let mut metadata = basic_region_metadata();
-        metadata.partition_expr = Some(expr_json.to_string());
+        metadata.set_partition_expr(Some(expr_json.to_string()));
         let metadata = Arc::new(metadata);
         let mut manager = env
             .create_manifest_manager(CompressionType::Uncompressed, 10, Some(metadata.clone()))

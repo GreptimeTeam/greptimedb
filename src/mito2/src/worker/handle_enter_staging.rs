@@ -15,6 +15,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use common_base::hash::partition_rule_version;
 use common_telemetry::{error, info, warn};
 use store_api::logstore::LogStore;
 use store_api::region_request::EnterStagingRequest;
@@ -23,7 +24,7 @@ use store_api::storage::RegionId;
 use crate::error::{RegionNotFoundSnafu, Result, StagingPartitionExprMismatchSnafu};
 use crate::flush::FlushReason;
 use crate::manifest::action::{RegionChange, RegionMetaAction, RegionMetaActionList};
-use crate::region::{MitoRegionRef, RegionLeaderState};
+use crate::region::{MitoRegionRef, RegionLeaderState, StagingPartitionInfo};
 use crate::request::{
     BackgroundNotify, DdlRequest, EnterStagingResult, OptionOutputTx, SenderDdlRequest,
     WorkerRequest, WorkerRequestWithTime,
@@ -43,11 +44,17 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         // If the region is already in staging mode, verify the partition expr matches.
         if region.is_staging() {
-            let staging_partition_expr = region.staging_partition_expr.lock().unwrap().clone();
+            let staging_partition_info = region.staging_partition_info.lock().unwrap().clone();
             // If the partition expr mismatch, return error.
-            if staging_partition_expr.as_ref() != Some(&partition_expr) {
+            if staging_partition_info
+                .as_ref()
+                .map(|info| &info.partition_expr)
+                != Some(&partition_expr)
+            {
                 sender.send(Err(StagingPartitionExprMismatchSnafu {
-                    manifest_expr: staging_partition_expr,
+                    manifest_expr: staging_partition_info
+                        .as_ref()
+                        .map(|info| info.partition_expr.clone()),
                     request_expr: partition_expr,
                 }
                 .build()));
@@ -119,7 +126,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         // Second step: write new staging manifest.
         let mut new_meta = (*region.metadata()).clone();
-        new_meta.partition_expr = Some(partition_expr.clone());
+        new_meta.set_partition_expr(Some(partition_expr.clone()));
         let sst_format = region.version().options.sst_format.unwrap_or_default();
         let change = RegionChange {
             metadata: Arc::new(new_meta),
@@ -224,7 +231,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 "Updating region {} staging partition expr to {}",
                 region.region_id, enter_staging_result.partition_expr
             );
-            Self::update_region_staging_partition_expr(
+            Self::update_region_staging_partition_info(
                 &region,
                 enter_staging_result.partition_expr,
             );
@@ -240,9 +247,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             .await;
     }
 
-    fn update_region_staging_partition_expr(region: &MitoRegionRef, partition_expr: String) {
-        let mut staging_partition_expr = region.staging_partition_expr.lock().unwrap();
-        debug_assert!(staging_partition_expr.is_none());
-        *staging_partition_expr = Some(partition_expr);
+    fn update_region_staging_partition_info(region: &MitoRegionRef, partition_expr: String) {
+        let mut staging_partition_info = region.staging_partition_info.lock().unwrap();
+        debug_assert!(staging_partition_info.is_none());
+        let partition_rule_version = partition_rule_version(Some(&partition_expr));
+        *staging_partition_info = Some(StagingPartitionInfo {
+            partition_expr,
+            partition_rule_version,
+        });
     }
 }

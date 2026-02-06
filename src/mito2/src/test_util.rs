@@ -1180,7 +1180,11 @@ pub async fn put_rows(engine: &MitoEngine, region_id: RegionId, rows: Rows) {
     let result = engine
         .handle_request(
             region_id,
-            RegionRequest::Put(RegionPutRequest { rows, hint: None }),
+            RegionRequest::Put(RegionPutRequest {
+                rows,
+                hint: None,
+                partition_rule_version: None,
+            }),
         )
         .await
         .unwrap();
@@ -1219,7 +1223,11 @@ pub async fn delete_rows(engine: &MitoEngine, region_id: RegionId, rows: Rows) {
     let result = engine
         .handle_request(
             region_id,
-            RegionRequest::Delete(RegionDeleteRequest { rows, hint: None }),
+            RegionRequest::Delete(RegionDeleteRequest {
+                rows,
+                hint: None,
+                partition_rule_version: None,
+            }),
         )
         .await
         .unwrap();

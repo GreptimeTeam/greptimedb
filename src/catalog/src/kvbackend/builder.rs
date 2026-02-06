@@ -106,6 +106,9 @@ impl KvBackendCatalogManagerBuilder {
                 cache_registry
                     .get()
                     .expect("Failed to get table_route_cache"),
+                cache_registry
+                    .get()
+                    .expect("Failed to get partition_info_cache"),
             )),
             table_metadata_manager: Arc::new(TableMetadataManager::new(backend.clone())),
             system_catalog: SystemCatalog {

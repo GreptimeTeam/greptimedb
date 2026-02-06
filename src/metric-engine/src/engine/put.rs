@@ -28,8 +28,8 @@ use store_api::storage::{RegionId, TableId};
 
 use crate::engine::MetricEngineInner;
 use crate::error::{
-    ColumnNotFoundSnafu, ForbiddenPhysicalAlterSnafu, LogicalRegionNotFoundSnafu,
-    PhysicalRegionNotFoundSnafu, Result, UnsupportedRegionRequestSnafu,
+    ColumnNotFoundSnafu, ForbiddenPhysicalAlterSnafu, InvalidRequestSnafu,
+    LogicalRegionNotFoundSnafu, PhysicalRegionNotFoundSnafu, Result, UnsupportedRegionRequestSnafu,
 };
 use crate::metrics::{FORBIDDEN_OPERATION_COUNT, MITO_OPERATION_ELAPSED};
 use crate::row_modifier::{RowsIter, TableIdInput};
@@ -176,9 +176,23 @@ impl MetricEngineInner {
         let mut merged_rows = Vec::with_capacity(total_rows);
         let mut total_affected_rows: AffectedRows = 0;
         let mut output_schema: Option<Vec<ColumnSchema>> = None;
+        let mut merged_version: Option<u64> = None;
 
         // Modify and collect rows from each request
         for (logical_region_id, mut request) in requests {
+            if let Some(request_version) = request.partition_rule_version {
+                if let Some(merged_version) = merged_version {
+                    ensure!(
+                        merged_version == request_version,
+                        InvalidRequestSnafu {
+                            region_id: physical_region_id,
+                            reason: "inconsistent partition rule version in batch"
+                        }
+                    );
+                } else {
+                    merged_version = Some(request_version);
+                }
+            }
             self.modify_rows(
                 physical_region_id,
                 logical_region_id.table_id(),
@@ -208,6 +222,7 @@ impl MetricEngineInner {
             hint: Some(WriteHint {
                 primary_key_encoding: PrimaryKeyEncodingProto::Sparse.into(),
             }),
+            partition_rule_version: merged_version,
         };
 
         Ok((merged_request, total_affected_rows))
@@ -227,7 +242,8 @@ impl MetricEngineInner {
         let merged_schema = Self::build_union_schema(&requests);
 
         // Align all rows to the merged schema and collect table_ids
-        let (merged_rows, table_ids) = Self::align_requests_to_schema(requests, &merged_schema);
+        let (merged_rows, table_ids, merged_version) =
+            Self::align_requests_to_schema(requests, &merged_schema)?;
 
         // Batch-modify all rows (add __table_id and __tsid columns)
         let final_rows = {
@@ -258,6 +274,7 @@ impl MetricEngineInner {
         let merged_request = RegionPutRequest {
             rows: final_rows,
             hint: None,
+            partition_rule_version: merged_version,
         };
 
         Ok((merged_request, table_ids.len() as AffectedRows))
@@ -279,15 +296,29 @@ impl MetricEngineInner {
     fn align_requests_to_schema(
         requests: Vec<(RegionId, RegionPutRequest)>,
         merged_schema: &[ColumnSchema],
-    ) -> (Vec<Row>, Vec<TableId>) {
+    ) -> Result<(Vec<Row>, Vec<TableId>, Option<u64>)> {
         // Pre-calculate total capacity
         let total_rows: usize = requests.iter().map(|(_, req)| req.rows.rows.len()).sum();
         let mut merged_rows = Vec::with_capacity(total_rows);
         let mut table_ids = Vec::with_capacity(total_rows);
+        let mut merged_version: Option<u64> = None;
 
         let null_value = Value { value_data: None };
 
         for (logical_region_id, request) in requests {
+            if let Some(request_version) = request.partition_rule_version {
+                if let Some(merged_version) = merged_version {
+                    ensure!(
+                        merged_version == request_version,
+                        InvalidRequestSnafu {
+                            region_id: logical_region_id,
+                            reason: "inconsistent partition rule version in batch"
+                        }
+                    );
+                } else {
+                    merged_version = Some(request_version);
+                }
+            }
             let table_id = logical_region_id.table_id();
 
             // Build column name to index mapping once per request
@@ -327,7 +358,7 @@ impl MetricEngineInner {
             }
         }
 
-        (merged_rows, table_ids)
+        Ok((merged_rows, table_ids, merged_version))
     }
 
     /// Find the physical region id for a logical region.
@@ -526,14 +557,19 @@ impl MetricEngineInner {
 mod tests {
     use std::collections::HashSet;
 
+    use common_error::ext::ErrorExt;
+    use common_error::status_code::StatusCode;
+    use common_function::utils::partition_rule_version;
     use common_recordbatch::RecordBatches;
+    use datatypes::value::Value as PartitionValue;
+    use partition::expr::col;
     use store_api::metric_engine_consts::{
         DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
         MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING,
     };
     use store_api::path_utils::table_dir;
     use store_api::region_engine::RegionEngine;
-    use store_api::region_request::RegionRequest;
+    use store_api::region_request::{EnterStagingRequest, RegionRequest};
     use store_api::storage::ScanRequest;
     use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 
@@ -590,6 +626,13 @@ mod tests {
                 "dense encoding should keep tag columns"
             );
         }
+    }
+
+    fn job_partition_expr_json() -> String {
+        let expr = col("job")
+            .gt_eq(PartitionValue::String("job-0".into()))
+            .and(col("job").lt(PartitionValue::String("job-9".into())));
+        expr.as_json_str().unwrap()
     }
 
     async fn create_logical_region_with_tags(
@@ -664,6 +707,7 @@ mod tests {
                             rows: rows_1,
                         },
                         hint: None,
+                        partition_rule_version: None,
                     },
                 ),
                 (
@@ -674,6 +718,7 @@ mod tests {
                             rows: rows_2,
                         },
                         hint: None,
+                        partition_rule_version: None,
                     },
                 ),
             ]
@@ -736,6 +781,7 @@ mod tests {
         let request = RegionRequest::Put(RegionPutRequest {
             rows: Rows { schema, rows },
             hint: None,
+            partition_rule_version: None,
         });
 
         // write data
@@ -810,6 +856,7 @@ mod tests {
         let request = RegionRequest::Put(RegionPutRequest {
             rows: Rows { schema, rows },
             hint: None,
+            partition_rule_version: None,
         });
 
         // write data
@@ -832,6 +879,7 @@ mod tests {
         let request = RegionRequest::Put(RegionPutRequest {
             rows: Rows { schema, rows },
             hint: None,
+            partition_rule_version: None,
         });
 
         engine
@@ -852,6 +900,7 @@ mod tests {
         let request = RegionRequest::Put(RegionPutRequest {
             rows: Rows { schema, rows },
             hint: None,
+            partition_rule_version: None,
         });
 
         engine
@@ -914,6 +963,7 @@ mod tests {
                         rows: rows1,
                     },
                     hint: None,
+                    partition_rule_version: None,
                 },
             ),
             (
@@ -924,6 +974,7 @@ mod tests {
                         rows: rows2,
                     },
                     hint: None,
+                    partition_rule_version: None,
                 },
             ),
             (
@@ -934,6 +985,7 @@ mod tests {
                         rows: rows3,
                     },
                     hint: None,
+                    partition_rule_version: None,
                 },
             ),
         ];
@@ -984,6 +1036,7 @@ mod tests {
                         rows: test_util::build_rows(1, 3),
                     },
                     hint: None,
+                    partition_rule_version: None,
                 },
             ),
             (
@@ -994,6 +1047,7 @@ mod tests {
                         rows: test_util::build_rows(1, 2),
                     },
                     hint: None,
+                    partition_rule_version: None,
                 },
             ),
             (
@@ -1004,6 +1058,7 @@ mod tests {
                         rows: test_util::build_rows(1, 5),
                     },
                     hint: None,
+                    partition_rule_version: None,
                 },
             ),
         ];
@@ -1043,6 +1098,7 @@ mod tests {
                     rows: test_util::build_rows(1, 5),
                 },
                 hint: None,
+                partition_rule_version: None,
             },
         )];
 
@@ -1103,5 +1159,99 @@ mod tests {
             false,
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn test_metric_put_rejects_bad_partition_rule_version() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+
+        let logical_region_id = env.default_logical_region_id();
+        let rows = Rows {
+            schema: test_util::row_schema_with_tags(&["job"]),
+            rows: test_util::build_rows(1, 3),
+        };
+
+        let err = env
+            .metric()
+            .handle_request(
+                logical_region_id,
+                RegionRequest::Put(RegionPutRequest {
+                    rows,
+                    hint: None,
+                    partition_rule_version: Some(1),
+                }),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.status_code(), StatusCode::InvalidArguments);
+    }
+
+    #[tokio::test]
+    async fn test_metric_put_respects_staging_partition_rule_version() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+
+        let logical_region_id = env.default_logical_region_id();
+        let physical_region_id = env.default_physical_region_id();
+        let partition_expr = job_partition_expr_json();
+        env.metric()
+            .handle_request(
+                physical_region_id,
+                RegionRequest::EnterStaging(EnterStagingRequest {
+                    partition_expr: partition_expr.clone(),
+                }),
+            )
+            .await
+            .unwrap();
+
+        let expected_version = partition_rule_version(Some(&partition_expr));
+        let rows = Rows {
+            schema: test_util::row_schema_with_tags(&["job"]),
+            rows: test_util::build_rows(1, 3),
+        };
+
+        let err = env
+            .metric()
+            .handle_request(
+                logical_region_id,
+                RegionRequest::Put(RegionPutRequest {
+                    rows: rows.clone(),
+                    hint: None,
+                    partition_rule_version: Some(expected_version.wrapping_add(1)),
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::InvalidArguments);
+
+        let response = env
+            .metric()
+            .handle_request(
+                logical_region_id,
+                RegionRequest::Put(RegionPutRequest {
+                    rows: rows.clone(),
+                    hint: None,
+                    partition_rule_version: None,
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.affected_rows, 3);
+
+        let response = env
+            .metric()
+            .handle_request(
+                logical_region_id,
+                RegionRequest::Put(RegionPutRequest {
+                    rows,
+                    hint: None,
+                    partition_rule_version: Some(expected_version),
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.affected_rows, 3);
     }
 }

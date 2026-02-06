@@ -22,6 +22,7 @@ use std::time::Duration;
 use api::v1::Rows;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_function::utils::partition_rule_version;
 use common_recordbatch::RecordBatches;
 use datatypes::value::Value;
 use object_store::Buffer;
@@ -30,10 +31,10 @@ use object_store::layers::mock::{
     Result as MockResult, Write, Writer,
 };
 use partition::expr::{PartitionExpr, col};
-use store_api::region_engine::{RegionEngine, SettableRegionRoleState};
+use store_api::region_engine::{RegionEngine, RemapManifestsRequest, SettableRegionRoleState};
 use store_api::region_request::{
-    EnterStagingRequest, RegionAlterRequest, RegionFlushRequest, RegionRequest,
-    RegionTruncateRequest,
+    ApplyStagingManifestRequest, EnterStagingRequest, RegionAlterRequest, RegionFlushRequest,
+    RegionPutRequest, RegionRequest, RegionTruncateRequest,
 };
 use store_api::storage::{RegionId, ScanRequest};
 
@@ -246,6 +247,200 @@ fn default_partition_expr() -> String {
 }
 
 #[tokio::test]
+async fn test_staging_write_partition_rule_version() {
+    test_staging_write_partition_rule_version_with_format(false).await;
+    test_staging_write_partition_rule_version_with_format(true).await;
+}
+
+async fn test_staging_write_partition_rule_version_with_format(flat_format: bool) {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
+
+    let region_id = RegionId::new(1024, 0);
+    let origin_partition_expr = range_expr("a", 0, 50).as_json_str().unwrap();
+    let request = CreateRequestBuilder::new()
+        .partition_expr_json(Some(origin_partition_expr.clone()))
+        .build();
+    let column_schemas = rows_schema(&request);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let partition_expr = default_partition_expr();
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_expr: partition_expr.clone(),
+            }),
+        )
+        .await
+        .unwrap();
+
+    let expected_version = partition_rule_version(Some(&partition_expr));
+    let origin_version = partition_rule_version(Some(&origin_partition_expr));
+    common_telemetry::info!(
+        "expected_version: {}, origin_version: {}",
+        expected_version,
+        origin_version
+    );
+    let bad_rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows(0, 3),
+    };
+    let err = engine
+        .handle_request(
+            region_id,
+            RegionRequest::Put(RegionPutRequest {
+                rows: bad_rows,
+                hint: None,
+                partition_rule_version: Some(origin_version),
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.status_code(), StatusCode::InvalidArguments);
+    assert_matches!(
+        err.into_inner().as_any().downcast_ref::<Error>().unwrap(),
+        Error::PartitionRuleVersionMismatch { .. }
+    );
+
+    let compat_rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows(3, 6),
+    };
+    let result = engine
+        .handle_request(
+            region_id,
+            RegionRequest::Put(RegionPutRequest {
+                rows: compat_rows,
+                hint: None,
+                partition_rule_version: None,
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.affected_rows, 3);
+
+    let ok_rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows(6, 9),
+    };
+    let result = engine
+        .handle_request(
+            region_id,
+            RegionRequest::Put(RegionPutRequest {
+                rows: ok_rows,
+                hint: None,
+                partition_rule_version: Some(expected_version),
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.affected_rows, 3);
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Flush(RegionFlushRequest {
+                row_group_size: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+    let result = engine
+        .remap_manifests(RemapManifestsRequest {
+            region_id,
+            input_regions: vec![region_id],
+            region_mapping: [(region_id, vec![region_id])].into_iter().collect(),
+            new_partition_exprs: [(region_id, default_partition_expr())]
+                .into_iter()
+                .collect(),
+        })
+        .await
+        .unwrap();
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::ApplyStagingManifest(ApplyStagingManifestRequest {
+                partition_expr: default_partition_expr(),
+                central_region_id: region_id,
+                manifest_path: result.manifest_paths[&region_id].clone(),
+            }),
+        )
+        .await
+        .unwrap();
+
+    let exit_rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows(9, 12),
+    };
+    let err = engine
+        .handle_request(
+            region_id,
+            RegionRequest::Put(RegionPutRequest {
+                rows: exit_rows,
+                hint: None,
+                partition_rule_version: Some(origin_version),
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.status_code(), StatusCode::InvalidArguments);
+
+    let compat_rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows(12, 15),
+    };
+    let result = engine
+        .handle_request(
+            region_id,
+            RegionRequest::Put(RegionPutRequest {
+                rows: compat_rows,
+                hint: None,
+                partition_rule_version: None,
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.affected_rows, 3);
+
+    let committed_version = engine
+        .get_region(region_id)
+        .unwrap()
+        .version()
+        .metadata
+        .partition_rule_version;
+    assert_ne!(0, committed_version);
+    assert_eq!(committed_version, expected_version,);
+
+    let commit_rows = Rows {
+        schema: column_schemas,
+        rows: build_rows(15, 18),
+    };
+    let result = engine
+        .handle_request(
+            region_id,
+            RegionRequest::Put(RegionPutRequest {
+                rows: commit_rows,
+                hint: None,
+                partition_rule_version: Some(expected_version),
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.affected_rows, 3);
+}
+
+#[tokio::test]
 async fn test_staging_manifest_directory() {
     test_staging_manifest_directory_with_format(false).await;
     test_staging_manifest_directory_with_format(true).await;
@@ -297,8 +492,11 @@ async fn test_staging_manifest_directory_with_format(flat_format: bool) {
         .await
         .unwrap();
     let region = engine.get_region(region_id).unwrap();
-    let staging_partition_expr = region.staging_partition_expr.lock().unwrap().clone();
-    assert_eq!(staging_partition_expr.unwrap(), partition_expr);
+    let staging_partition_info = region.staging_partition_info.lock().unwrap().clone();
+    assert_eq!(
+        staging_partition_info.unwrap().partition_expr,
+        partition_expr
+    );
     {
         let manager = region.manifest_ctx.manifest_manager.read().await;
         assert_eq!(

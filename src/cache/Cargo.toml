@@ -10,4 +10,5 @@ common-error.workspace = true
 common-macro.workspace = true
 common-meta.workspace = true
 moka.workspace = true
+partition.workspace = true
 snafu.workspace = true

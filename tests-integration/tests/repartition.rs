@@ -255,6 +255,8 @@ pub async fn test_repartition_mito(store_type: StorageType, flat_format: bool) {
         );
     "#;
     let _result = run_sql(instance, sql, query_ctx.clone()).await.unwrap();
+    // Wait for cache invalidation
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     let result = run_sql(
         instance,
@@ -371,6 +373,8 @@ pub async fn test_repartition_mito(store_type: StorageType, flat_format: bool) {
         );
     "#;
     run_sql(instance, sql, query_ctx.clone()).await.unwrap();
+    // Wait for cache invalidation
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     let result = run_sql(
         instance,
@@ -613,6 +617,8 @@ pub async fn test_repartition_metric(
         );
     "#;
     run_sql(instance, sql, query_ctx.clone()).await.unwrap();
+    // Wait for cache invalidation
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     let result = run_sql(
         instance,
@@ -741,6 +747,8 @@ pub async fn test_repartition_metric(
         );
     "#;
     run_sql(instance, sql, query_ctx.clone()).await.unwrap();
+    // Wait for cache invalidation
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     let result = run_sql(
         instance,

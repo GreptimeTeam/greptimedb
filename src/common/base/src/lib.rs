@@ -15,6 +15,7 @@
 pub mod bit_vec;
 pub mod bytes;
 pub mod cancellation;
+pub mod hash;
 pub mod memory_limit;
 pub mod plugins;
 pub mod range_read;

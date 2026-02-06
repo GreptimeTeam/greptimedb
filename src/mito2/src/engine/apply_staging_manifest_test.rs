@@ -318,7 +318,7 @@ async fn test_apply_staging_manifest_success_with_format(flat_format: bool) {
     let staging_manifest = region.manifest_ctx.staging_manifest().await;
     assert!(staging_manifest.is_none());
     // The staging partition expr should be cleared.
-    assert!(region.staging_partition_expr.lock().unwrap().is_none());
+    assert!(region.staging_partition_info.lock().unwrap().is_none());
     // The staging manifest directory should be empty.
     let data_home = env.data_home();
     let region_dir = format!("{}/data/test/1_0000000001", data_home.display());

@@ -289,6 +289,10 @@ impl MetadataValue for TableRouteValue {
 }
 
 impl PhysicalTableRouteValue {
+    /// Returns the version of the table route.
+    pub fn version(&self) -> u64 {
+        self.version
+    }
     pub fn new(region_routes: Vec<RegionRoute>) -> Self {
         let max_region_number = region_routes
             .iter()

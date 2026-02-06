@@ -15,6 +15,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+use common_base::hash::partition_rule_version;
 use common_meta::cache::{TableRouteCacheRef, new_table_route_cache};
 use common_meta::key::TableMetadataManager;
 use common_meta::key::table_route::TableRouteValue;
@@ -24,6 +25,7 @@ use common_meta::rpc::router::{LegacyPartition, Region, RegionRoute};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder};
 use moka::future::CacheBuilder;
+use partition::cache::{PartitionInfoCacheRef, new_partition_info_cache};
 use partition::expr::{Operand, PartitionExpr, RestrictedOp};
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
 use store_api::storage::RegionNumber;
@@ -82,6 +84,15 @@ fn test_new_table_route_cache(kv_backend: KvBackendRef) -> TableRouteCacheRef {
     ))
 }
 
+fn test_new_partition_info_cache(table_route_cache: TableRouteCacheRef) -> PartitionInfoCacheRef {
+    let cache = CacheBuilder::new(128).build();
+    Arc::new(new_partition_info_cache(
+        "partition_info_cache".to_string(),
+        cache,
+        table_route_cache,
+    ))
+}
+
 /// Create a partition rule manager with two tables, one is partitioned by single column, and
 /// the other one is two. The tables are under default catalog and schema.
 ///
@@ -103,7 +114,12 @@ pub(crate) async fn create_partition_rule_manager(
 ) -> PartitionRuleManagerRef {
     let table_metadata_manager = TableMetadataManager::new(kv_backend.clone());
     let table_route_cache = test_new_table_route_cache(kv_backend.clone());
-    let partition_manager = Arc::new(PartitionRuleManager::new(kv_backend, table_route_cache));
+    let partition_info_cache = test_new_partition_info_cache(table_route_cache.clone());
+    let partition_manager = Arc::new(PartitionRuleManager::new(
+        kv_backend,
+        table_route_cache,
+        partition_info_cache,
+    ));
     let regions = vec![1u32, 2, 3];
     let region_wal_options = new_test_region_wal_options(regions.clone());
     table_metadata_manager
@@ -179,4 +195,36 @@ pub(crate) async fn create_partition_rule_manager(
         .await
         .unwrap();
     partition_manager
+}
+
+#[tokio::test]
+async fn test_partition_rule_version_cache() {
+    let kv_backend = Arc::new(common_meta::kv_backend::memory::MemoryKvBackend::new());
+    let partition_manager = create_partition_rule_manager(kv_backend).await;
+    let partitions = partition_manager
+        .find_physical_partition_info(1)
+        .await
+        .unwrap()
+        .partitions
+        .clone();
+
+    let mut version_by_region = HashMap::new();
+    for partition in partitions {
+        let expected = partition
+            .partition_expr
+            .as_ref()
+            .map(|expr| expr.as_json_str().unwrap())
+            .map(|expr_json| partition_rule_version(Some(expr_json.as_str())))
+            .unwrap_or_default();
+        assert_eq!(Some(expected), partition.partition_rule_version);
+        version_by_region.insert(
+            partition.id.region_number(),
+            partition.partition_rule_version,
+        );
+    }
+
+    assert_eq!(3, version_by_region.len());
+    assert_ne!(None, *version_by_region.get(&1).unwrap());
+    assert_ne!(None, *version_by_region.get(&2).unwrap());
+    assert_ne!(None, *version_by_region.get(&3).unwrap());
 }

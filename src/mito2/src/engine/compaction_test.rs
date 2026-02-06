@@ -100,7 +100,11 @@ pub(crate) async fn delete_and_flush(
     let result = engine
         .handle_request(
             region_id,
-            RegionRequest::Delete(RegionDeleteRequest { rows, hint: None }),
+            RegionRequest::Delete(RegionDeleteRequest {
+                rows,
+                hint: None,
+                partition_rule_version: None,
+            }),
         )
         .await
         .unwrap();

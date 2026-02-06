@@ -21,22 +21,16 @@ use common_meta::key::table_route::{PhysicalTableRouteValue, TableRouteManager};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{self, RegionRoute};
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{OptionExt, ResultExt};
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::{TableId, TableInfo};
 
+use crate::cache::{CachedPartitionInfo, PartitionInfoCacheRef, PhysicalPartitionInfo};
 use crate::error::{FindLeaderSnafu, Result};
 use crate::expr::PartitionExpr;
 use crate::multi_dim::MultiDimPartitionRule;
 use crate::splitter::RowSplitter;
 use crate::{PartitionRuleRef, error};
-
-#[async_trait::async_trait]
-pub trait TableRouteCacheInvalidator: Send + Sync {
-    async fn invalidate_table_route(&self, table: TableId);
-}
-
-pub type TableRouteCacheInvalidatorRef = Arc<dyn TableRouteCacheInvalidator>;
 
 pub type PartitionRuleManagerRef = Arc<PartitionRuleManager>;
 
@@ -47,19 +41,32 @@ pub type PartitionRuleManagerRef = Arc<PartitionRuleManager>;
 pub struct PartitionRuleManager {
     table_route_manager: TableRouteManager,
     table_route_cache: TableRouteCacheRef,
+    partition_info_cache: PartitionInfoCacheRef,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PartitionInfo {
     pub id: RegionId,
     pub partition_expr: Option<PartitionExpr>,
 }
 
+#[derive(Debug, Clone)]
+pub struct PartitionInfoWithVersion {
+    pub id: RegionId,
+    pub partition_expr: Option<PartitionExpr>,
+    pub partition_rule_version: Option<u64>,
+}
+
 impl PartitionRuleManager {
-    pub fn new(kv_backend: KvBackendRef, table_route_cache: TableRouteCacheRef) -> Self {
+    pub fn new(
+        kv_backend: KvBackendRef,
+        table_route_cache: TableRouteCacheRef,
+        partition_info_cache: PartitionInfoCacheRef,
+    ) -> Self {
         Self {
             table_route_manager: TableRouteManager::new(kv_backend),
             table_route_cache,
+            partition_info_cache,
         }
     }
 
@@ -118,17 +125,37 @@ impl PartitionRuleManager {
         Ok(table_region_routes)
     }
 
-    pub async fn find_table_partitions(&self, table_id: TableId) -> Result<Vec<PartitionInfo>> {
-        let region_routes = &self
-            .find_physical_table_route(table_id)
-            .await?
-            .region_routes;
-        ensure!(
-            !region_routes.is_empty(),
-            error::FindTableRoutesSnafu { table_id }
-        );
+    /// Returns the physical partition info with version.
+    pub async fn find_physical_partition_info(
+        &self,
+        table_id: TableId,
+    ) -> Result<Arc<PhysicalPartitionInfo>> {
+        let cached = self
+            .partition_info_cache
+            .get(table_id)
+            .await
+            .context(error::GetPartitionInfoSnafu)?
+            .context(error::TableRouteNotFoundSnafu { table_id })?;
+        match cached {
+            CachedPartitionInfo::Physical(info) => Ok(info),
+            CachedPartitionInfo::Logical(physical_table_id) => {
+                let cached = self
+                    .partition_info_cache
+                    .get(physical_table_id)
+                    .await
+                    .context(error::GetPartitionInfoSnafu)?
+                    .context(error::TableRouteNotFoundSnafu {
+                        table_id: physical_table_id,
+                    })?;
+                let info = cached.into_physical().context(error::UnexpectedSnafu{
+                        err_msg: format!(
+                            "Expected the physical partition info, but got logical partable route, table: {physical_table_id}"
+                        )
+                    })?;
 
-        create_partitions_from_region_routes(table_id, region_routes)
+                Ok(info)
+            }
+        }
     }
 
     pub async fn batch_find_table_partitions(
@@ -152,26 +179,39 @@ impl PartitionRuleManager {
     pub async fn find_table_partition_rule(
         &self,
         table_info: &TableInfo,
-    ) -> Result<PartitionRuleRef> {
-        let partitions = self.find_table_partitions(table_info.table_id()).await?;
-        let regions = partitions
-            .iter()
-            .map(|x| x.id.region_number())
-            .collect::<Vec<RegionNumber>>();
-
-        let exprs = partitions
-            .iter()
-            .filter_map(|x| x.partition_expr.as_ref())
-            .cloned()
-            .collect::<Vec<_>>();
-
+    ) -> Result<(PartitionRuleRef, HashMap<RegionNumber, Option<u64>>)> {
         let partition_columns = table_info
             .meta
             .partition_column_names()
             .cloned()
             .collect::<Vec<_>>();
-        let rule = MultiDimPartitionRule::try_new(partition_columns, regions, exprs, false)?;
-        Ok(Arc::new(rule) as _)
+
+        let partition_info = self
+            .find_physical_partition_info(table_info.table_id())
+            .await?;
+        let partition_versions = partition_info
+            .partitions
+            .iter()
+            .map(|r| (r.id.region_number(), r.partition_rule_version))
+            .collect::<HashMap<RegionNumber, Option<u64>>>();
+        let regions = partition_info
+            .partitions
+            .iter()
+            .map(|x| x.id.region_number())
+            .collect::<Vec<RegionNumber>>();
+        let exprs = partition_info
+            .partitions
+            .iter()
+            .filter_map(|x| x.partition_expr.as_ref())
+            .cloned()
+            .collect::<Vec<_>>();
+        let partition_rule = Arc::new(MultiDimPartitionRule::try_new(
+            partition_columns,
+            regions,
+            exprs,
+            false,
+        )?) as _;
+        Ok((partition_rule, partition_versions))
     }
 
     /// Find the leader of the region.
@@ -193,9 +233,28 @@ impl PartitionRuleManager {
         &self,
         table_info: &TableInfo,
         rows: Rows,
-    ) -> Result<HashMap<RegionNumber, Rows>> {
-        let partition_rule = self.find_table_partition_rule(table_info).await?;
-        RowSplitter::new(partition_rule).split(rows)
+    ) -> Result<HashMap<RegionNumber, (Rows, Option<u64>)>> {
+        let (partition_rule, partition_versions) =
+            self.find_table_partition_rule(table_info).await?;
+
+        let result = RowSplitter::new(partition_rule)
+            .split(rows)?
+            .into_iter()
+            .map(|(region_number, rows)| {
+                (
+                    region_number,
+                    (
+                        rows,
+                        partition_versions
+                            .get(&region_number)
+                            .copied()
+                            .unwrap_or_default(),
+                    ),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+
+        Ok(result)
     }
 }
 

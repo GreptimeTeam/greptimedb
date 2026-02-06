@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::Rows;
 use api::v1::region::{DeleteRequest, InsertRequest};
+use api::v1::{PartitionRuleVersion, Rows};
 use partition::manager::PartitionRuleManager;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
@@ -42,10 +42,14 @@ impl<'a> Partitioner<'a> {
             .await
             .context(SplitInsertSnafu)?
             .into_iter()
-            .map(|(region_number, rows)| InsertRequest {
-                region_id: RegionId::new(table_id, region_number).into(),
-                rows: Some(rows),
-            })
+            .map(
+                |(region_number, (rows, partition_rule_version))| InsertRequest {
+                    region_id: RegionId::new(table_id, region_number).into(),
+                    rows: Some(rows),
+                    partition_rule_version: partition_rule_version
+                        .map(|value| PartitionRuleVersion { value }),
+                },
+            )
             .collect();
         Ok(requests)
     }
@@ -56,16 +60,21 @@ impl<'a> Partitioner<'a> {
         rows: Rows,
     ) -> Result<Vec<DeleteRequest>> {
         let table_id = table_info.table_id();
+
         let requests = self
             .partition_manager
             .split_rows(table_info, rows)
             .await
             .context(SplitDeleteSnafu)?
             .into_iter()
-            .map(|(region_number, rows)| DeleteRequest {
-                region_id: RegionId::new(table_id, region_number).into(),
-                rows: Some(rows),
-            })
+            .map(
+                |(region_number, (rows, partition_rule_version))| DeleteRequest {
+                    region_id: RegionId::new(table_id, region_number).into(),
+                    rows: Some(rows),
+                    partition_rule_version: partition_rule_version
+                        .map(|value| PartitionRuleVersion { value }),
+                },
+            )
             .collect();
         Ok(requests)
     }

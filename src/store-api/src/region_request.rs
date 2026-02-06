@@ -204,7 +204,11 @@ fn make_region_puts(inserts: InsertRequests) -> Result<Vec<(RegionId, RegionRequ
             r.rows.map(|rows| {
                 (
                     region_id,
-                    RegionRequest::Put(RegionPutRequest { rows, hint: None }),
+                    RegionRequest::Put(RegionPutRequest {
+                        rows,
+                        hint: None,
+                        partition_rule_version: r.partition_rule_version.map(|v| v.value),
+                    }),
                 )
             })
         })
@@ -221,7 +225,11 @@ fn make_region_deletes(deletes: DeleteRequests) -> Result<Vec<(RegionId, RegionR
             r.rows.map(|rows| {
                 (
                     region_id,
-                    RegionRequest::Delete(RegionDeleteRequest { rows, hint: None }),
+                    RegionRequest::Delete(RegionDeleteRequest {
+                        rows,
+                        hint: None,
+                        partition_rule_version: r.partition_rule_version.map(|v| v.value),
+                    }),
                 )
             })
         })
@@ -396,6 +404,7 @@ fn make_region_truncate(truncate: TruncateRequest) -> Result<Vec<(RegionId, Regi
 /// Convert [BulkInsertRequest] to [RegionRequest] and group by [RegionId].
 fn make_region_bulk_inserts(request: BulkInsertRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
     let region_id = request.region_id.into();
+    let partition_rule_version = request.partition_rule_version.map(|v| v.value);
     let Some(Body::ArrowIpc(request)) = request.body else {
         return Ok(vec![]);
     };
@@ -415,6 +424,7 @@ fn make_region_bulk_inserts(request: BulkInsertRequest) -> Result<Vec<(RegionId,
             region_id,
             payload,
             raw_data: request,
+            partition_rule_version,
         }),
     )])
 }
@@ -445,6 +455,8 @@ pub struct RegionPutRequest {
     pub rows: Rows,
     /// Write hint.
     pub hint: Option<WriteHint>,
+    /// Partition rule version for the region.
+    pub partition_rule_version: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -461,6 +473,8 @@ pub struct RegionDeleteRequest {
     pub rows: Rows,
     /// Write hint.
     pub hint: Option<WriteHint>,
+    /// Partition rule version for the region.
+    pub partition_rule_version: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -1444,6 +1458,7 @@ pub struct RegionBulkInsertsRequest {
     pub region_id: RegionId,
     pub payload: DfRecordBatch,
     pub raw_data: ArrowIpc,
+    pub partition_rule_version: Option<u64>,
 }
 
 impl RegionBulkInsertsRequest {

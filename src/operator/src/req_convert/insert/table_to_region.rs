@@ -72,7 +72,7 @@ mod tests {
     use api::v1::helper::tag_column_schema;
     use api::v1::region::InsertRequest as RegionInsertRequest;
     use api::v1::value::ValueData;
-    use api::v1::{ColumnDataType, Row, Value};
+    use api::v1::{ColumnDataType, PartitionRuleVersion, Row, Value};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use datatypes::vectors::{Int32Vector, VectorRef};
     use store_api::storage::RegionId;
@@ -106,6 +106,14 @@ mod tests {
             Some(11),
             Some(101),
         ])));
+        let versions = partition_manager
+            .find_physical_partition_info(1)
+            .await
+            .unwrap()
+            .partitions
+            .iter()
+            .map(|p| (p.id.as_u64(), p.partition_rule_version))
+            .collect::<HashMap<_, _>>();
 
         let region_requests = converter.convert(table_request).await.unwrap();
         let mut region_id_to_region_requests = region_requests
@@ -119,21 +127,21 @@ mod tests {
         let region_request = region_id_to_region_requests.remove(&region_id).unwrap();
         assert_eq!(
             region_request,
-            build_region_request(vec![Some(101)], region_id)
+            build_region_request(vec![Some(101)], region_id, versions[&region_id])
         );
 
         let region_id = RegionId::new(1, 2).as_u64();
         let region_request = region_id_to_region_requests.remove(&region_id).unwrap();
         assert_eq!(
             region_request,
-            build_region_request(vec![Some(11)], region_id)
+            build_region_request(vec![Some(11)], region_id, versions[&region_id])
         );
 
         let region_id = RegionId::new(1, 3).as_u64();
         let region_request = region_id_to_region_requests.remove(&region_id).unwrap();
         assert_eq!(
             region_request,
-            build_region_request(vec![Some(1), None], region_id)
+            build_region_request(vec![Some(1), None], region_id, versions[&region_id])
         );
     }
 
@@ -146,7 +154,11 @@ mod tests {
         }
     }
 
-    fn build_region_request(rows: Vec<Option<i32>>, region_id: u64) -> RegionInsertRequest {
+    fn build_region_request(
+        rows: Vec<Option<i32>>,
+        region_id: u64,
+        version: Option<u64>,
+    ) -> RegionInsertRequest {
         RegionInsertRequest {
             region_id,
             rows: Some(Rows {
@@ -160,6 +172,7 @@ mod tests {
                     })
                     .collect(),
             }),
+            partition_rule_version: version.map(|value| PartitionRuleVersion { value }),
         }
     }
 }

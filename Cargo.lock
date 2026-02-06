@@ -1624,6 +1624,7 @@ dependencies = [
  "common-macro",
  "common-meta",
  "moka",
+ "partition",
  "snafu 0.8.6",
 ]
 
@@ -2262,6 +2263,7 @@ checksum = "55b672471b4e9f9e95499ea597ff64941a309b2cdbffcc46f2cc5e2d971fd335"
 name = "common-base"
 version = "1.0.0-rc.1"
 dependencies = [
+ "ahash 0.8.12",
  "anymap2",
  "async-trait",
  "bitvec",
@@ -5743,7 +5745,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=f1e0ea3a71336b92bcec253b5668d5274609ff1b#f1e0ea3a71336b92bcec253b5668d5274609ff1b"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=b9452e34113ec8d2a3d3e932cce386936041819b#b9452e34113ec8d2a3d3e932cce386936041819b"
 dependencies = [
  "prost 0.14.1",
  "prost-types 0.14.1",
@@ -7913,6 +7915,7 @@ dependencies = [
  "chrono",
  "common-base",
  "common-error",
+ "common-function",
  "common-macro",
  "common-meta",
  "common-query",
@@ -7935,6 +7938,7 @@ dependencies = [
  "moka",
  "mur3",
  "object-store",
+ "partition",
  "prometheus 0.13.4",
  "serde",
  "serde_json",
@@ -9445,6 +9449,7 @@ version = "1.0.0-rc.1"
 dependencies = [
  "api",
  "async-trait",
+ "common-base",
  "common-error",
  "common-macro",
  "common-meta",
@@ -9455,6 +9460,7 @@ dependencies = [
  "datafusion-physical-expr",
  "datatypes",
  "itertools 0.14.0",
+ "moka",
  "rand 0.8.5",
  "serde",
  "serde_json",
