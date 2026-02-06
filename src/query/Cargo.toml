@@ -8,7 +8,7 @@ license.workspace = true
 workspace = true
 
 [features]
-enterprise = []
+enterprise = ["sql/enterprise"]
 vector_index = []
 
 [dependencies]
