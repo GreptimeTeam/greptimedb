@@ -2098,7 +2098,7 @@ pub fn create_table_info(
         .context(UnrecognizedTableOptionSnafu)?;
 
     let meta = TableMeta {
-        schema: raw_schema,
+        schema,
         primary_key_indices,
         value_indices: vec![],
         engine: create_table.engine.clone(),

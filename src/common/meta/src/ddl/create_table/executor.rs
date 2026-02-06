@@ -181,13 +181,13 @@ impl CreateTableExecutor {
         region_wal_options: HashMap<RegionNumber, String>,
     ) -> Result<()> {
         if !column_metadatas.is_empty() {
-            update_table_info_column_ids(&mut raw_table_info, column_metadatas);
+            update_table_info_column_ids(&mut table_info, column_metadatas);
         }
         let detecting_regions =
             convert_region_routes_to_detecting_regions(&table_route.region_routes);
         let table_route = TableRouteValue::Physical(table_route);
         table_metadata_manager
-            .create_table_metadata(raw_table_info, table_route, region_wal_options)
+            .create_table_metadata(table_info, table_route, region_wal_options)
             .await?;
         region_failure_detector_controller
             .register_failure_detectors(detecting_regions)

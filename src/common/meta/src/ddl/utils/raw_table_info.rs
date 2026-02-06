@@ -29,19 +29,19 @@ pub(crate) fn build_new_physical_table_info(
 ) -> TableInfo {
     debug!(
         "building new physical table info for table: {}, table_id: {}",
-        raw_table_info.name, raw_table_info.ident.table_id
+        table_info.name, table_info.ident.table_id
     );
-    let existing_columns = raw_table_info
+    let existing_columns = table_info
         .meta
         .schema
         .column_schemas()
         .iter()
         .map(|col| col.name.clone())
         .collect::<HashSet<_>>();
-    let primary_key_indices = &mut raw_table_info.meta.primary_key_indices;
-    let value_indices = &mut raw_table_info.meta.value_indices;
+    let primary_key_indices = &mut table_info.meta.primary_key_indices;
+    let value_indices = &mut table_info.meta.value_indices;
     value_indices.clear();
-    let column_ids = &mut raw_table_info.meta.column_ids;
+    let column_ids = &mut table_info.meta.column_ids;
     column_ids.clear();
 
     let mut columns = Vec::with_capacity(physical_columns.len());
@@ -63,11 +63,11 @@ pub(crate) fn build_new_physical_table_info(
         column_ids.push(col.column_id);
     }
 
-    raw_table_info.meta.schema = Arc::new(Schema::new_with_version(
+    table_info.meta.schema = Arc::new(Schema::new_with_version(
         columns,
-        raw_table_info.meta.schema.version(),
+        table_info.meta.schema.version(),
     ));
-    raw_table_info
+    table_info
 }
 
 /// Updates the column IDs in the table info based on the provided column metadata.
@@ -79,7 +79,7 @@ pub(crate) fn update_table_info_column_ids(
     table_info: &mut TableInfo,
     column_metadatas: &[ColumnMetadata],
 ) {
-    let mut table_column_names = raw_table_info
+    let mut table_column_names = table_info
         .meta
         .schema
         .column_schemas()
@@ -97,7 +97,7 @@ pub(crate) fn update_table_info_column_ids(
     if table_column_names != column_names {
         warn!(
             "Column metadata doesn't match the table schema for table {}, table_id: {}, column in table: {:?}, column in metadata: {:?}",
-            raw_table_info.name, raw_table_info.ident.table_id, table_column_names, column_names,
+            table_info.name, table_info.ident.table_id, table_column_names, column_names,
         );
         return;
     }
@@ -107,7 +107,7 @@ pub(crate) fn update_table_info_column_ids(
         .map(|c| (c.column_schema.name.clone(), c.column_id))
         .collect::<HashMap<_, _>>();
 
-    let schema = raw_table_info.meta.schema.column_schemas();
+    let schema = table_info.meta.schema.column_schemas();
     let mut column_ids = Vec::with_capacity(schema.len());
     for column_schema in schema {
         if let Some(id) = name_to_id.get(&column_schema.name) {
@@ -115,5 +115,5 @@ pub(crate) fn update_table_info_column_ids(
         }
     }
 
-    raw_table_info.meta.column_ids = column_ids;
+    table_info.meta.column_ids = column_ids;
 }
