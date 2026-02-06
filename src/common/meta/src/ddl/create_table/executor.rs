@@ -175,7 +175,7 @@ impl CreateTableExecutor {
         &self,
         table_metadata_manager: &TableMetadataManagerRef,
         region_failure_detector_controller: &RegionFailureDetectorControllerRef,
-        mut raw_table_info: TableInfo,
+        mut table_info: TableInfo,
         column_metadatas: &[ColumnMetadata],
         table_route: PhysicalTableRouteValue,
         region_wal_options: HashMap<RegionNumber, String>,

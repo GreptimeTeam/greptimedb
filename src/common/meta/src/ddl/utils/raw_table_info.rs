@@ -24,7 +24,7 @@ use table::metadata::TableInfo;
 
 /// Generate the new physical table info.
 pub(crate) fn build_new_physical_table_info(
-    mut raw_table_info: TableInfo,
+    mut table_info: TableInfo,
     physical_columns: &[ColumnMetadata],
 ) -> TableInfo {
     debug!(
@@ -76,7 +76,7 @@ pub(crate) fn build_new_physical_table_info(
 /// before updating the column ids. If the column metadata doesn't match the table schema,
 /// the table info remains unchanged.
 pub(crate) fn update_table_info_column_ids(
-    raw_table_info: &mut TableInfo,
+    table_info: &mut TableInfo,
     column_metadatas: &[ColumnMetadata],
 ) {
     let mut table_column_names = raw_table_info

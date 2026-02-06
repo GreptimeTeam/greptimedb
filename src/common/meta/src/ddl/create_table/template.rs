@@ -35,7 +35,7 @@ use crate::wal_provider::prepare_wal_options;
 /// Logical table templates keep the original column order and primary key indices from
 /// `TableInfo` (including internal columns when present), because these are used to
 /// reconstruct the logical schema on the engine side.
-pub fn build_template_from_raw_table_info(raw_table_info: &TableInfo) -> Result<CreateRequest> {
+pub fn build_template_from_raw_table_info(table_info: &TableInfo) -> Result<CreateRequest> {
     let primary_key_indices = &raw_table_info.meta.primary_key_indices;
     let column_defs = raw_table_info
         .meta
@@ -82,7 +82,7 @@ pub fn build_template_from_raw_table_info(raw_table_info: &TableInfo) -> Result<
 /// Physical table templates mark primary
 /// keys by tag semantic type to match the physical storage layout.
 pub fn build_template_from_raw_table_info_for_physical_table(
-    raw_table_info: &TableInfo,
+    table_info: &TableInfo,
 ) -> Result<CreateRequest> {
     let name_to_ids = raw_table_info
         .name_to_ids()

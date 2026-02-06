@@ -2071,7 +2071,7 @@ pub fn create_table_info(
     }
 
     let next_column_id = column_schemas.len() as u32;
-    let raw_schema = Arc::new(Schema::new(column_schemas));
+    let schema = Arc::new(Schema::new(column_schemas));
 
     let primary_key_indices = create_table
         .primary_keys

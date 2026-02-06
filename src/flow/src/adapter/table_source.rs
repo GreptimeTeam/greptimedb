@@ -125,7 +125,7 @@ impl ManagedTableSource {
                 reason: format!("Table id = {:?}, couldn't found table info", table_id),
             })?;
         let raw_schema = &info.table_info.meta.schema;
-        let Some(ts_index) = raw_schema.timestamp_index() else {
+        let Some(ts_index) = schema.timestamp_index() else {
             UnexpectedSnafu {
                 reason: format!("Table id = {:?}, couldn't found timestamp index", table_id),
             }
