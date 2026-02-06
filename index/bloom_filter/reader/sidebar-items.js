@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["BLOOM_META_LEN_SIZE","DEFAULT_PREFETCH_SIZE"],"fn":["bytes_to_u64_vec"],"struct":["BloomFilterMetaReader","BloomFilterReadMetrics","BloomFilterReaderImpl"],"trait":["BloomFilterReader"]};

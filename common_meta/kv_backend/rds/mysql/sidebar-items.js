@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["EMPTY","MYSQL_STORE_NAME"],"enum":["RangeTemplateType"],"fn":["is_prefix_range","key_value_from_row","mysql_generate_in_placeholders","range_template"],"struct":["MySqlExecutorFactory","MySqlTemplateFactory","MySqlTemplateSet","MySqlTxnClient","RangeTemplate"],"type":["MySqlClient","MySqlStore"]};

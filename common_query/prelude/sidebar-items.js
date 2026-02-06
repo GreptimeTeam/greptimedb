@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["GREPTIME_COUNT","GREPTIME_PHYSICAL_TABLE","GREPTIME_TIMESTAMP","GREPTIME_VALUE"],"enum":["ScalarValue"],"fn":["greptime_timestamp","greptime_value","set_default_prefix"],"static":["GREPTIME_TIMESTAMP_CELL","GREPTIME_VALUE_CELL"]};

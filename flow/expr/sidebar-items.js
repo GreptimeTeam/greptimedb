@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["TUMBLE_END","TUMBLE_START"],"mod":["df_func","error","func","id","linear","relation","scalar","signature","utils"],"struct":["Batch","VectorDiff","VectorDiffIter"]};

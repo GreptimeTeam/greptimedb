@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["Arranged","Collection","CollectionBundle","ErrCollector"],"trait":["GenericBundle"],"type":["Toff"]};

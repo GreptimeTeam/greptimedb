@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["can_cast_type","cast","cast_with_opt","invalid_type_cast"],"struct":["CastOption"]};

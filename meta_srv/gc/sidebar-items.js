@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Event"],"mod":["candidate","ctx","dropped","handler","options","procedure","scheduler","tracker","util"],"struct":["BatchGcProcedure","GcScheduler","GcSchedulerOptions"],"type":["GcTickerRef","Peer2Regions","Region2Peers"]};

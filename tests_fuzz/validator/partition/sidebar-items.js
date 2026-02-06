@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["PARTITIONS_INFO_SCHEMA_SQL"],"fn":["assert_partitions","fetch_partitions_info_schema"],"struct":["PartitionInfo"]};

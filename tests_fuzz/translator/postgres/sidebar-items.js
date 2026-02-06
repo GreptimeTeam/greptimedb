@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["sql_data_type_to_postgres_data_type"],"mod":["alter_expr","create_expr"]};

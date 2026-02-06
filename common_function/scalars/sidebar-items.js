@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["date","expression","geo","hll_count","ip","json","matches","matches_term","math","primary_key","string","timestamp","uddsketch_calc","udf","vector"]};

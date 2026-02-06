@@ -1,0 +1,32 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Converts a `BulkPart` that is unordered and without encoded primary keys into a `BulkPart` with the same format as produced by BulkPartConverter."><title>convert_bulk_part in mito2::memtable::bulk::part - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-e56847b5.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="mito2" data-themes="" data-resource-suffix="" data-rustdoc-version="1.92.0-nightly (fa3155a64 2025-09-30)" data-channel="nightly" data-search-js="search-e256b49e.js" data-stringdex-js="stringdex-828709d0.js" data-settings-js="settings-c38705f0.js" ><script src="../../../../static.files/storage-e2aeef58.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../../../static.files/main-ce535bd0.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-263c88ec.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc fn"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">convert_bulk_part</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../../mito2/index.html">mito2</a><span class="version">1.0.0-rc.1</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">convert_<wbr>bulk_<wbr>part</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#arguments" title="Arguments">Arguments</a></li><li><a href="#returns" title="Returns">Returns</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="index.html">In mito2::<wbr>memtable::<wbr>bulk::<wbr>part</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../../index.html">mito2</a>::<wbr><a href="../../index.html">memtable</a>::<wbr><a href="../index.html">bulk</a>::<wbr><a href="index.html">part</a></div><h1>Function <span class="fn">convert_<wbr>bulk_<wbr>part</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../../src/mito2/memtable/bulk/part.rs.html#794-957">Source</a> </span></div><pre class="rust item-decl"><code>pub fn convert_bulk_part(
+    part: <a class="struct" href="struct.BulkPart.html" title="struct mito2::memtable::bulk::part::BulkPart">BulkPart</a>,
+    region_metadata: &amp;RegionMetadataRef,
+    primary_key_codec: <a class="struct" href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;dyn PrimaryKeyCodec&gt;,
+    schema: SchemaRef,
+    store_primary_key_columns: <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.bool.html">bool</a>,
+) -&gt; <a class="type" href="../../../error/type.Result.html" title="type mito2::error::Result">Result</a>&lt;<a class="enum" href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="struct" href="struct.BulkPart.html" title="struct mito2::memtable::bulk::part::BulkPart">BulkPart</a>&gt;&gt;</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Converts a <code>BulkPart</code> that is unordered and without encoded primary keys into a <code>BulkPart</code>
+with the same format as produced by <a href="struct.BulkPartConverter.html" title="struct mito2::memtable::bulk::part::BulkPartConverter">BulkPartConverter</a>.</p>
+<p>This function takes a <code>BulkPart</code> where:</p>
+<ul>
+<li>For dense encoding: Primary key columns may be stored as individual columns</li>
+<li>For sparse encoding: The <code>__primary_key</code> column should already be present with encoded keys</li>
+<li>The batch may not be sorted</li>
+</ul>
+<p>And produces a <code>BulkPart</code> where:</p>
+<ul>
+<li>Primary key columns are optionally stored (depending on <code>store_primary_key_columns</code> and encoding)</li>
+<li>An encoded <code>__primary_key</code> dictionary column is present</li>
+<li>The batch is sorted by (primary_key, timestamp, sequence desc)</li>
+</ul>
+<h2 id="arguments"><a class="doc-anchor" href="#arguments">§</a>Arguments</h2>
+<ul>
+<li><code>part</code> - The input <code>BulkPart</code> to convert</li>
+<li><code>region_metadata</code> - Region metadata containing schema information</li>
+<li><code>primary_key_codec</code> - Codec for encoding primary keys</li>
+<li><code>schema</code> - Target schema for the output batch</li>
+<li><code>store_primary_key_columns</code> - If true and encoding is not sparse, stores individual primary key columns</li>
+</ul>
+<h2 id="returns"><a class="doc-anchor" href="#returns">§</a>Returns</h2>
+<p>Returns <code>None</code> if the input part has no rows, otherwise returns a new <code>BulkPart</code> with
+encoded primary keys and sorted data.</p>
+</div></details></section></div></main></body></html>
