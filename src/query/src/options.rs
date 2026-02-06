@@ -27,6 +27,10 @@ pub struct QueryOptions {
     /// Supports absolute size (e.g., "2GB") or percentage (e.g., "50%").
     /// When this limit is reached, queries will fail with ResourceExhausted error.
     pub memory_pool_size: MemoryLimit,
+    /// Maximum rounds for adaptive vector top-k.
+    pub vector_topk_max_rounds: usize,
+    /// Maximum k for adaptive vector top-k. None means no limit.
+    pub vector_topk_max_k: Option<usize>,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -36,6 +40,8 @@ impl Default for QueryOptions {
             parallelism: 0,
             allow_query_fallback: false,
             memory_pool_size: MemoryLimit::default(),
+            vector_topk_max_rounds: 8,
+            vector_topk_max_k: None,
         }
     }
 }

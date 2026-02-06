@@ -395,6 +395,25 @@ impl MergeScanExec {
                     // record metrics from sub sgates
                     let mut sub_stage_metrics = sub_stage_metrics_moved.lock().unwrap();
                     sub_stage_metrics.insert(region_id, metrics);
+
+                    let mut requested_k = 0usize;
+                    let mut returned_k = 0usize;
+                    for plan_metrics in sub_stage_metrics.values() {
+                        for plan_metric in &plan_metrics.plan_metrics {
+                            for (name, value) in &plan_metric.metrics {
+                                match name.as_str() {
+                                    "vector_index_requested_k" => {
+                                        requested_k = requested_k.saturating_add(*value)
+                                    }
+                                    "vector_index_returned_k" => {
+                                        returned_k = returned_k.saturating_add(*value)
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    metric.record_vector_index_k(requested_k, returned_k);
                 }
 
                 MERGE_SCAN_POLL_ELAPSED.observe(poll_duration.as_secs_f64());
@@ -675,6 +694,10 @@ struct MergeScanMetric {
 
     /// Gauge for greptime plan execution cost metrics for output
     greptime_exec_cost: Gauge,
+    /// Gauge for vector index requested k
+    vector_index_requested_k: Gauge,
+    /// Gauge for vector index returned k
+    vector_index_returned_k: Gauge,
 }
 
 impl MergeScanMetric {
@@ -685,6 +708,9 @@ impl MergeScanMetric {
             finish_time: MetricBuilder::new(metric).subset_time("finish_time", 1),
             output_rows: MetricBuilder::new(metric).output_rows(1),
             greptime_exec_cost: MetricBuilder::new(metric).gauge(GREPTIME_EXEC_READ_COST, 1),
+            vector_index_requested_k: MetricBuilder::new(metric)
+                .gauge("vector_index_requested_k", 1),
+            vector_index_returned_k: MetricBuilder::new(metric).gauge("vector_index_returned_k", 1),
         }
     }
 
@@ -706,5 +732,14 @@ impl MergeScanMetric {
 
     pub fn record_greptime_exec_cost(&self, metrics: usize) {
         self.greptime_exec_cost.add(metrics);
+    }
+
+    pub fn record_vector_index_k(&self, requested: usize, returned: usize) {
+        if requested > 0 {
+            self.vector_index_requested_k.add(requested);
+        }
+        if returned > 0 {
+            self.vector_index_returned_k.add(returned);
+        }
     }
 }

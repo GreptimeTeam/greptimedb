@@ -1009,7 +1009,7 @@ impl ParquetReaderBuilder {
 
         let file_size_hint = self.file_handle.meta_ref().index_file_size();
         let apply_res = applier
-            .apply_with_k(self.file_handle.index_id(), Some(file_size_hint), k)
+            .apply_with_k(self.file_handle.index_id(), Some(file_size_hint), k, None)
             .await;
         let row_ids = match apply_res {
             Ok(res) => res.row_offsets,
@@ -1018,6 +1018,8 @@ impl ParquetReaderBuilder {
                 return;
             }
         };
+        metrics.vector_index_requested_k += k;
+        metrics.vector_index_returned_k += row_ids.len();
 
         let selection = match vector_selection_from_offsets(row_ids, row_group_size, num_row_groups)
         {
@@ -1280,6 +1282,10 @@ pub(crate) struct ReaderFilterMetrics {
     pub(crate) rows_vector_filtered: usize,
     /// Number of rows selected by vector index.
     pub(crate) rows_vector_selected: usize,
+    /// Total requested k for vector index pruning.
+    pub(crate) vector_index_requested_k: usize,
+    /// Total returned k for vector index pruning.
+    pub(crate) vector_index_returned_k: usize,
     /// Number of rows filtered by precise filter.
     pub(crate) rows_precise_filtered: usize,
 
@@ -1327,6 +1333,8 @@ impl ReaderFilterMetrics {
         self.rows_bloom_filtered += other.rows_bloom_filtered;
         self.rows_vector_filtered += other.rows_vector_filtered;
         self.rows_vector_selected += other.rows_vector_selected;
+        self.vector_index_requested_k += other.vector_index_requested_k;
+        self.vector_index_returned_k += other.vector_index_returned_k;
         self.rows_precise_filtered += other.rows_precise_filtered;
 
         self.fulltext_index_cache_hit += other.fulltext_index_cache_hit;

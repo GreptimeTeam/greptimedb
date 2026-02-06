@@ -1602,6 +1602,7 @@ ttl = "2months 29days 2h 52m 48s"
 [query]
 parallelism = 0
 allow_query_fallback = false
+vector_topk_max_rounds = 8
 
 [memory]
 enable_heap_profiling = true

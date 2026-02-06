@@ -57,6 +57,7 @@ use crate::dist_plan::{
 };
 use crate::metrics::{QUERY_MEMORY_POOL_REJECTED_TOTAL, QUERY_MEMORY_POOL_USAGE_BYTES};
 use crate::optimizer::ExtensionAnalyzerRule;
+use crate::optimizer::adaptive_vector_topk::AdaptiveVectorTopKRule;
 use crate::optimizer::constant_term::MatchesConstantTermOptimizer;
 use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
 use crate::optimizer::parallelize_scan::ParallelizeScan;
@@ -72,6 +73,8 @@ use crate::query_engine::DefaultSerializer;
 use crate::query_engine::options::QueryOptions;
 use crate::range_select::planner::RangeSelectPlanner;
 use crate::region_query::RegionQueryHandlerRef;
+use crate::vector_search::options::AdaptiveVectorTopKOptions;
+use crate::vector_search::planner::AdaptiveVectorTopKPlanner;
 
 /// Query engine global state
 #[derive(Clone)]
@@ -131,6 +134,14 @@ impl QueryEngineState {
                     allow_query_fallback: true,
                 });
         }
+        session_config
+            .options_mut()
+            .extensions
+            .insert(AdaptiveVectorTopKOptions {
+                max_rounds: options.vector_topk_max_rounds,
+                max_k: options.vector_topk_max_k,
+                ..Default::default()
+            });
 
         // todo(hl): This serves as a workaround for https://github.com/GreptimeTeam/greptimedb/issues/5659
         // and we can add that check back once we upgrade datafusion.
@@ -161,6 +172,7 @@ impl QueryEngineState {
 
         let mut optimizer = Optimizer::new();
         optimizer.rules.push(Arc::new(ScanHintRule));
+        optimizer.rules.push(Arc::new(AdaptiveVectorTopKRule));
 
         // add physical optimizer
         let mut physical_optimizer = PhysicalOptimizer::new();
@@ -457,8 +469,11 @@ impl DfQueryPlanner {
         partition_rule_manager: Option<PartitionRuleManagerRef>,
         region_query_handler: Option<RegionQueryHandlerRef>,
     ) -> Self {
-        let mut planners: Vec<Arc<dyn ExtensionPlanner + Send + Sync>> =
-            vec![Arc::new(PromExtensionPlanner), Arc::new(RangeSelectPlanner)];
+        let mut planners: Vec<Arc<dyn ExtensionPlanner + Send + Sync>> = vec![
+            Arc::new(PromExtensionPlanner),
+            Arc::new(RangeSelectPlanner),
+            Arc::new(AdaptiveVectorTopKPlanner),
+        ];
         if let (Some(region_query_handler), Some(partition_rule_manager)) =
             (region_query_handler, partition_rule_manager)
         {

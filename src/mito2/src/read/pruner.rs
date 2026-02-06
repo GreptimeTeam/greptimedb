@@ -257,6 +257,10 @@ impl Pruner {
         {
             let entry = self.inner.file_entries[file_index].lock().unwrap();
             if let Some(builder) = &entry.builder {
+                reader_metrics.filter_metrics.vector_index_requested_k +=
+                    builder.vector_index_requested_k();
+                reader_metrics.filter_metrics.vector_index_returned_k +=
+                    builder.vector_index_returned_k();
                 reader_metrics.filter_metrics.pruner_cache_hit += 1;
                 return Ok(builder.clone());
             }
@@ -275,25 +279,43 @@ impl Pruner {
             partition_metrics: Some(partition_metrics.clone()),
         };
 
-        let result = if self.worker_senders[worker_idx].send(request).await.is_err() {
+        let (result, from_worker) = if self.worker_senders[worker_idx].send(request).await.is_err()
+        {
             common_telemetry::warn!("Worker channel closed, falling back to direct pruning");
             // Worker channel closed, falls back to direct pruning
-            self.prune_file_directly(file_index, reader_metrics).await
+            (
+                self.prune_file_directly(file_index, reader_metrics).await,
+                false,
+            )
         } else {
             // Waits for response
             match response_rx.await {
-                Ok(result) => result,
+                Ok(result) => (result, true),
                 Err(_) => {
                     common_telemetry::warn!(
                         "Response channel closed, falling back to direct pruning"
                     );
                     // Channel closed, falls back to direct pruning
-                    self.prune_file_directly(file_index, reader_metrics).await
+                    (
+                        self.prune_file_directly(file_index, reader_metrics).await,
+                        false,
+                    )
                 }
             }
         };
         reader_metrics.filter_metrics.pruner_prune_cost += prune_start.elapsed();
-        result
+        match result {
+            Ok(builder) => {
+                if from_worker {
+                    reader_metrics.filter_metrics.vector_index_requested_k +=
+                        builder.vector_index_requested_k();
+                    reader_metrics.filter_metrics.vector_index_returned_k +=
+                        builder.vector_index_returned_k();
+                }
+                Ok(builder)
+            }
+            Err(err) => Err(err),
+        }
     }
 
     /// Gets or creates the FileRangeBuilder for a file.

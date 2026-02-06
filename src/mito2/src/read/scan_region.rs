@@ -77,8 +77,6 @@ use crate::sst::parquet::reader::ReaderMetrics;
 
 /// Parallel scan channel size for flat format.
 const FLAT_SCAN_CHANNEL_SIZE: usize = 2;
-#[cfg(feature = "vector_index")]
-const VECTOR_INDEX_OVERFETCH_MULTIPLIER: usize = 2;
 
 /// A scanner scans a region and returns a [SendableRecordBatchStream].
 pub(crate) enum Scanner {
@@ -519,13 +517,7 @@ impl ScanRegion {
         #[cfg(feature = "vector_index")]
         let vector_index_applier = self.build_vector_index_applier();
         #[cfg(feature = "vector_index")]
-        let vector_index_k = self.request.vector_search.as_ref().map(|search| {
-            if self.request.filters.is_empty() {
-                search.k
-            } else {
-                search.k.saturating_mul(VECTOR_INDEX_OVERFETCH_MULTIPLIER)
-            }
-        });
+        let vector_index_k = self.request.vector_search.as_ref().map(|search| search.k);
 
         if flat_format {
             // The batch is already large enough so we use a small channel size here.
@@ -1205,7 +1197,12 @@ impl ScanInput {
             };
             file_range_ctx.set_compat_batch(compat);
         }
-        Ok(FileRangeBuilder::new(Arc::new(file_range_ctx), selection))
+        Ok(FileRangeBuilder::new(
+            Arc::new(file_range_ctx),
+            selection,
+            reader_metrics.filter_metrics.vector_index_requested_k,
+            reader_metrics.filter_metrics.vector_index_returned_k,
+        ))
     }
 
     /// Scans the input source in another task and sends batches to the sender.

@@ -393,14 +393,25 @@ pub struct FileRangeBuilder {
     context: Option<FileRangeContextRef>,
     /// Row group selection for the file to read.
     selection: RowGroupSelection,
+    /// Total requested k for vector index pruning.
+    vector_index_requested_k: usize,
+    /// Total returned k for vector index pruning.
+    vector_index_returned_k: usize,
 }
 
 impl FileRangeBuilder {
     /// Builds a file range builder from context and row groups.
-    pub(crate) fn new(context: FileRangeContextRef, selection: RowGroupSelection) -> Self {
+    pub(crate) fn new(
+        context: FileRangeContextRef,
+        selection: RowGroupSelection,
+        vector_index_requested_k: usize,
+        vector_index_returned_k: usize,
+    ) -> Self {
         Self {
             context: Some(context),
             selection,
+            vector_index_requested_k,
+            vector_index_returned_k,
         }
     }
 
@@ -446,6 +457,14 @@ impl FileRangeBuilder {
             .unwrap_or(0);
         let selection_size = self.selection.mem_usage();
         context_size + selection_size
+    }
+
+    pub(crate) fn vector_index_requested_k(&self) -> usize {
+        self.vector_index_requested_k
+    }
+
+    pub(crate) fn vector_index_returned_k(&self) -> usize {
+        self.vector_index_returned_k
     }
 }
 
