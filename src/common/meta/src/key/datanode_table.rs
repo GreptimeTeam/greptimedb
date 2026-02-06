@@ -267,6 +267,7 @@ impl DatanodeTableManager {
         table_id: TableId,
         region_distribution: RegionDistribution,
         new_region_options: HashMap<String, String>,
+        new_region_wal_options: Option<HashMap<RegionNumber, String>>,
     ) -> Result<Txn> {
         assert!(!region_distribution.is_empty());
         // safety: region_distribution must not be empty
@@ -284,12 +285,27 @@ impl DatanodeTableManager {
             .and_then(|r| DatanodeTableValue::try_from_raw_value(&r.value))?
             .region_info;
 
-        // If the region options are the same, we don't need to update it.
-        if region_info.region_options == new_region_options {
+        // If the region options are the same and WAL options are not being updated, we don't need to update it.
+        let need_update_options = region_info.region_options != new_region_options;
+        let need_update_wal_options = if let Some(ref new_wal_options) = new_region_wal_options {
+            region_info.region_wal_options != *new_wal_options
+        } else {
+            false
+        };
+
+        if !need_update_options && !need_update_wal_options {
             return Ok(Txn::new());
         }
-        // substitute region options only.
-        region_info.region_options = new_region_options;
+
+        // substitute region options.
+        if need_update_options {
+            region_info.region_options = new_region_options;
+        }
+
+        // substitute region WAL options if provided.
+        if let Some(new_wal_options) = new_region_wal_options {
+            region_info.region_wal_options = new_wal_options;
+        }
 
         let mut txns = Vec::with_capacity(region_distribution.len());
 

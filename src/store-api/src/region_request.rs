@@ -52,7 +52,8 @@ use crate::metadata::{
 use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use crate::metrics;
 use crate::mito_engine_options::{
-    SST_FORMAT_KEY, TTL_KEY, TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM,
+    SKIP_WAL_KEY, SST_FORMAT_KEY, TTL_KEY, TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW,
+    TWCS_TRIGGER_FILE_NUM,
 };
 use crate::path_utils::table_dir;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
@@ -1316,6 +1317,14 @@ pub enum SetRegionOption {
     Twsc(String, String),
     // Modifying the SST format.
     Format(String),
+    /// Modifying skip_wal option.
+    /// - `skip_wal`: whether to skip WAL writes.
+    /// - `wal_options`: the WAL options to restore when enabling WAL (skip_wal=false).
+    ///   This should be the serialized WalOptions from DatanodeTableValue.
+    SkipWal {
+        skip_wal: bool,
+        wal_options: Option<String>,
+    },
 }
 
 impl TryFrom<&PbOption> for SetRegionOption {
@@ -1334,6 +1343,16 @@ impl TryFrom<&PbOption> for SetRegionOption {
                 Ok(Self::Twsc(key.clone(), value.clone()))
             }
             SST_FORMAT_KEY => Ok(Self::Format(value.clone())),
+            SKIP_WAL_KEY => {
+                let skip_wal = value
+                    .parse::<bool>()
+                    .map_err(|_| InvalidSetRegionOptionRequestSnafu { key, value }.build())?;
+                // wal_options will be filled by the caller (metasrv) when needed
+                Ok(Self::SkipWal {
+                    skip_wal,
+                    wal_options: None,
+                })
+            }
             _ => InvalidSetRegionOptionRequestSnafu { key, value }.fail(),
         }
     }
@@ -1352,6 +1371,10 @@ impl From<&UnsetRegionOption> for SetRegionOption {
                 SetRegionOption::Twsc(unset_option.to_string(), String::new())
             }
             UnsetRegionOption::Ttl => SetRegionOption::Ttl(Default::default()),
+            UnsetRegionOption::SkipWal => SetRegionOption::SkipWal {
+                skip_wal: false,
+                wal_options: None,
+            },
         }
     }
 }
@@ -1365,6 +1388,7 @@ impl TryFrom<&str> for UnsetRegionOption {
             TWCS_TRIGGER_FILE_NUM => Ok(Self::TwcsTriggerFileNum),
             TWCS_MAX_OUTPUT_FILE_SIZE => Ok(Self::TwcsMaxOutputFileSize),
             TWCS_TIME_WINDOW => Ok(Self::TwcsTimeWindow),
+            SKIP_WAL_KEY => Ok(Self::SkipWal),
             _ => InvalidUnsetRegionOptionRequestSnafu { key }.fail(),
         }
     }
@@ -1376,6 +1400,7 @@ pub enum UnsetRegionOption {
     TwcsMaxOutputFileSize,
     TwcsTimeWindow,
     Ttl,
+    SkipWal,
 }
 
 impl UnsetRegionOption {
@@ -1385,6 +1410,7 @@ impl UnsetRegionOption {
             Self::TwcsTriggerFileNum => TWCS_TRIGGER_FILE_NUM,
             Self::TwcsMaxOutputFileSize => TWCS_MAX_OUTPUT_FILE_SIZE,
             Self::TwcsTimeWindow => TWCS_TIME_WINDOW,
+            Self::SkipWal => SKIP_WAL_KEY,
         }
     }
 }

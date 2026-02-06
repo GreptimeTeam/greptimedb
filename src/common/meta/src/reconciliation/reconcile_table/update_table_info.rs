@@ -96,6 +96,7 @@ impl State for UpdateTableInfo {
                 current_table_info_value,
                 Some(region_distribution),
                 new_table_info,
+                None,
             )
             .await?;
 
