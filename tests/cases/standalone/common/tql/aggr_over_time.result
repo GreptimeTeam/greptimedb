@@ -1,4 +1,4 @@
--- Port from functions.test L607 - L630, commit 001ee2620e094970e5657ce39275b2fccdbd1359
+-- Port from Prometheus `promql/promqltest/testdata/functions.test`.
 -- Include stddev/stdvar over time
 -- load 10s
 --   metric 0 8 8 2 3
@@ -27,9 +27,9 @@ select * from metric;
 | 1970-01-01T00:00:40 | 3.0 |
 +---------------------+-----+
 
--- eval instant at 1m stdvar_over_time(metric[1m])
+-- eval instant at 1m stdvar_over_time(metric[2m])
 --   {} 10.56
-tql eval (60, 61, '10s') stdvar_over_time(metric[1m]);
+tql eval (60, 60, '1s') stdvar_over_time(metric[2m]);
 
 +---------------------+-------------------------------------+
 | ts                  | prom_stdvar_over_time(ts_range,val) |
@@ -37,9 +37,9 @@ tql eval (60, 61, '10s') stdvar_over_time(metric[1m]);
 | 1970-01-01T00:01:00 | 10.559999999999999                  |
 +---------------------+-------------------------------------+
 
--- eval instant at 1m stddev_over_time(metric[1m])
+-- eval instant at 1m stddev_over_time(metric[2m])
 --   {} 3.249615
-tql eval (60, 60, '1s') stddev_over_time(metric[1m]);
+tql eval (60, 60, '1s') stddev_over_time(metric[2m]);
 
 +---------------------+-------------------------------------+
 | ts                  | prom_stddev_over_time(ts_range,val) |
@@ -47,9 +47,9 @@ tql eval (60, 60, '1s') stddev_over_time(metric[1m]);
 | 1970-01-01T00:01:00 | 3.249615361854384                   |
 +---------------------+-------------------------------------+
 
--- eval instant at 1m stddev_over_time((metric[1m]))
+-- eval instant at 1m stddev_over_time((metric[2m]))
 --   {} 3.249615
-tql eval (60, 60, '1s') stddev_over_time((metric[1m]));
+tql eval (60, 60, '1s') stddev_over_time((metric[2m]));
 
 +---------------------+-------------------------------------+
 | ts                  | prom_stddev_over_time(ts_range,val) |
@@ -68,31 +68,30 @@ create table metric (ts timestamp(3) time index, val double);
 Affected Rows: 0
 
 insert into metric values
-    (0,0),
+    (0,1.5990505637277868),
     (10000,1.5990505637277868),
-    (20000,1.5990505637277868),
-    (30000,1.5990505637277868);
+    (20000,1.5990505637277868);
 
-Affected Rows: 4
+Affected Rows: 3
 
--- eval instant at 1m stdvar_over_time(metric[1m])
+-- eval instant at 55s stdvar_over_time(metric[1m])
 --   {} 0
-tql eval (60, 60, '1s') stdvar_over_time(metric[1m]);
+tql eval (55, 55, '1s') stdvar_over_time(metric[1m]);
 
 +---------------------+-------------------------------------+
 | ts                  | prom_stdvar_over_time(ts_range,val) |
 +---------------------+-------------------------------------+
-| 1970-01-01T00:01:00 | 0.47943050725465364                 |
+| 1970-01-01T00:00:55 | 0.0                                 |
 +---------------------+-------------------------------------+
 
--- eval instant at 1m stddev_over_time(metric[1m])
+-- eval instant at 55s stddev_over_time(metric[1m])
 --   {} 0
-tql eval (60, 60, '1s') stddev_over_time(metric[1m]);
+tql eval (55, 55, '1s') stddev_over_time(metric[1m]);
 
 +---------------------+-------------------------------------+
 | ts                  | prom_stddev_over_time(ts_range,val) |
 +---------------------+-------------------------------------+
-| 1970-01-01T00:01:00 | 0.6924092050620454                  |
+| 1970-01-01T00:00:55 | 0.0                                 |
 +---------------------+-------------------------------------+
 
 drop table metric;

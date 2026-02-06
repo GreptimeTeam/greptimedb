@@ -82,7 +82,7 @@ TQL ANALYZE (0, 10, '5s') sum(rate(promql_column_pruning[5s]));
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
-|_|_| Total rows: 2_|
+|_|_| Total rows: 0_|
 +-+-+-+
 
 DROP TABLE promql_column_pruning;

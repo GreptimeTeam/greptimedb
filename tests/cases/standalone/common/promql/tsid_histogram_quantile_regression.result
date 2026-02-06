@@ -90,8 +90,8 @@ TQL EVAL (0, 10, '5s') avg_over_time(tsid_no_aggr_metric[5s]);
 | ts                  | prom_avg_over_time(ts_range,val) | instance | job       |
 +---------------------+----------------------------------+----------+-----------+
 | 1970-01-01T00:00:00 | 1.0                              | job1     | instance1 |
-| 1970-01-01T00:00:05 | 2.0                              | job1     | instance1 |
-| 1970-01-01T00:00:10 | 4.0                              | job1     | instance1 |
+| 1970-01-01T00:00:05 | 3.0                              | job1     | instance1 |
+| 1970-01-01T00:00:10 | 5.0                              | job1     | instance1 |
 +---------------------+----------------------------------+----------+-----------+
 
 -- Histogram quantile must fold buckets across `le` even when `__tsid` exists.
