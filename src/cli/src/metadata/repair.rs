@@ -14,12 +14,13 @@
 
 mod alter_table;
 mod create_table;
+mod partition_column;
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use client::api::v1::CreateTableExpr;
 use client::client_manager::NodeClients;
 use client::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -34,6 +35,7 @@ use common_meta::peer::Peer;
 use common_meta::rpc::router::{RegionRoute, find_leaders};
 use common_telemetry::{error, info, warn};
 use futures::TryStreamExt;
+use partition_column::RepairPartitionColumnCommand;
 use snafu::{ResultExt, ensure};
 use store_api::storage::TableId;
 
@@ -43,6 +45,21 @@ use crate::error::{
     InvalidArgumentsSnafu, Result, SendRequestToDatanodeSnafu, TableMetadataSnafu, UnexpectedSnafu,
 };
 use crate::metadata::utils::{FullTableMetadata, IteratorInput, TableMetadataIterator};
+
+#[derive(Subcommand)]
+pub enum RepairCommand {
+    LogicalTables(RepairLogicalTablesCommand),
+    PartitionColumn(RepairPartitionColumnCommand),
+}
+
+impl RepairCommand {
+    pub(super) async fn build(&self) -> std::result::Result<Box<dyn Tool>, BoxedError> {
+        match self {
+            Self::LogicalTables(x) => x.build().await,
+            Self::PartitionColumn(x) => x.build().await.map(|x| Box::new(x) as _),
+        }
+    }
+}
 
 /// Repair metadata of logical tables.
 #[derive(Debug, Default, Parser)]

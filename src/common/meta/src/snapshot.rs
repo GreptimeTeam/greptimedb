@@ -35,7 +35,7 @@ use crate::kv_backend::KvBackendRef;
 use crate::range_stream::{DEFAULT_PAGE_SIZE, PaginationStream};
 use crate::rpc::KeyValue;
 use crate::rpc::store::{BatchPutRequest, RangeRequest};
-use crate::snapshot::file::{Document, KeyValue as FileKeyValue};
+use crate::snapshot::file::Document;
 
 /// The format of the backup file.
 #[derive(Debug, PartialEq, Eq, Display, Clone, Copy)]
@@ -164,7 +164,7 @@ pub struct MetadataSnapshotManager {
 const MAX_REQUEST_SIZE: usize = 1024 * 1024;
 
 /// Returns true if the key is an internal key.
-fn is_internal_key(kv: &FileKeyValue) -> bool {
+fn is_internal_key(kv: &KeyValue) -> bool {
     kv.key.starts_with(ELECTION_KEY.as_bytes()) || kv.key.starts_with(CANDIDATES_ROOT.as_bytes())
 }
 
@@ -197,7 +197,7 @@ impl MetadataSnapshotManager {
         let mut total_request_size = 0;
         let mut count = 0;
         let now = Instant::now();
-        for FileKeyValue { key, value } in metadata_content.into_iter() {
+        for KeyValue { key, value } in metadata_content.into_iter() {
             count += 1;
             let key_size = key.len();
             let value_size = value.len();
@@ -277,7 +277,7 @@ impl MetadataSnapshotManager {
         let now = Instant::now();
         let req = RangeRequest::new().with_range(vec![0], vec![0]);
         let stream = PaginationStream::new(self.kv_backend.clone(), req, DEFAULT_PAGE_SIZE, |kv| {
-            Ok(FileKeyValue {
+            Ok(KeyValue {
                 key: kv.key,
                 value: kv.value,
             })
