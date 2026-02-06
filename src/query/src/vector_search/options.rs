@@ -60,9 +60,7 @@ impl ExtensionOptions for AdaptiveVectorTopKOptions {
                     self.max_k = None;
                 } else {
                     self.max_k = Some(value.parse().map_err(|_| {
-                        datafusion_common::DataFusionError::Plan(format!(
-                            "Invalid max_k: {value}"
-                        ))
+                        datafusion_common::DataFusionError::Plan(format!("Invalid max_k: {value}"))
                     })?);
                 }
             }

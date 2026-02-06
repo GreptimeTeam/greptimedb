@@ -20,11 +20,11 @@ pub mod pass_distribution;
 pub mod remove_duplicate;
 pub mod scan_hint;
 pub mod string_normalization;
+#[cfg(test)]
+pub(crate) mod test_util;
 pub mod transcribe_atat;
 pub mod type_conversion;
 pub mod windowed_sort;
-#[cfg(test)]
-pub(crate) mod test_util;
 
 use datafusion_common::Result;
 use datafusion_common::config::ConfigOptions;

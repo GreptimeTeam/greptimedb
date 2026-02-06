@@ -270,11 +270,10 @@ async fn run_direct_topk(
         }
     }
 
-    let (batch, _, _, _, _) =
-        match sort_and_limit(batches, schema, exprs, fetch, skip)? {
-            SortLimitOutcome::Empty | SortLimitOutcome::Skipped => return Ok(None),
-            SortLimitOutcome::Some(result) => result,
-        };
+    let (batch, _, _, _, _) = match sort_and_limit(batches, schema, exprs, fetch, skip)? {
+        SortLimitOutcome::Empty | SortLimitOutcome::Skipped => return Ok(None),
+        SortLimitOutcome::Some(result) => result,
+    };
     Ok(Some(batch))
 }
 
@@ -322,11 +321,10 @@ async fn run_adaptive_topk(
         }
         vector_index_last_k.set(k);
         vector_index_desired_rows.set(desired);
-        let logical_plan =
-            datafusion_expr::LogicalPlanBuilder::from(logical_input.clone())
-                .sort(logical_exprs.to_vec())?
-                .limit(0, Some(k))?
-                .build()?;
+        let logical_plan = datafusion_expr::LogicalPlanBuilder::from(logical_input.clone())
+            .sort(logical_exprs.to_vec())?
+            .limit(0, Some(k))?
+            .build()?;
 
         let plan = crate::optimizer::adaptive_vector_topk::with_adaptive_topk_disabled(
             session_state.create_physical_plan(&logical_plan),
@@ -399,9 +397,7 @@ async fn run_adaptive_topk(
             return Ok(Some(batch));
         }
 
-        if total_rows < desired
-            && matches!(last_total_rows, Some(prev) if prev == total_rows)
-        {
+        if total_rows < desired && matches!(last_total_rows, Some(prev) if prev == total_rows) {
             return Ok(Some(batch));
         }
 
