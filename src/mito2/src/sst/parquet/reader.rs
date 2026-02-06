@@ -471,7 +471,7 @@ impl ParquetReaderBuilder {
         let dyn_filters = if let Some(predicate) = &self.predicate {
             predicate.dyn_filters().clone()
         } else {
-            Arc::new(vec![])
+            vec![]
         };
 
         let codec = build_primary_key_codec(read_format.metadata());
