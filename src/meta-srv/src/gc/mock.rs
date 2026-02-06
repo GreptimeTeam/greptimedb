@@ -50,13 +50,16 @@ pub const TEST_REGION_SIZE_200MB: u64 = 200_000_000;
 /// Helper function to create an empty GcReport for the given region IDs
 pub fn new_empty_report_with(region_ids: impl IntoIterator<Item = RegionId>) -> GcReport {
     let mut deleted_files = HashMap::new();
+    let mut processed_regions = HashSet::new();
     for region_id in region_ids {
         deleted_files.insert(region_id, vec![]);
+        processed_regions.insert(region_id);
     }
     GcReport {
         deleted_files,
         deleted_indexes: HashMap::new(),
         need_retry_regions: HashSet::new(),
+        processed_regions,
     }
 }
 
