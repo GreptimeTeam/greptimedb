@@ -300,7 +300,7 @@ pub async fn new_wal_prune_metadata(
         let region_ids = (0..n_region)
             .map(|i| RegionId::new(table_id, i))
             .collect::<Vec<_>>();
-        let table_info = new_test_table_info(table_id).into();
+        let table_info = new_test_table_info(table_id);
         let region_routes = region_ids
             .iter()
             .map(|region_id| RegionRoute {

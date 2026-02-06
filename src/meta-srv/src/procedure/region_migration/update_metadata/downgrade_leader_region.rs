@@ -142,7 +142,7 @@ mod tests {
         let mut ctx = env.context_factory().new_context(persistent_context);
         let table_id = ctx.persistent_ctx.region_ids[0].table_id();
 
-        let table_info = new_test_table_info(1024).into();
+        let table_info = new_test_table_info(1024);
         let region_routes = vec![RegionRoute {
             region: Region::new_test(RegionId::new(1024, 1)),
             leader_peer: Some(Peer::empty(1024)),
@@ -185,7 +185,7 @@ mod tests {
         let mut ctx = env.context_factory().new_context(persistent_context);
         let table_id = ctx.persistent_ctx.region_ids[0].table_id();
 
-        let table_info = new_test_table_info(1024).into();
+        let table_info = new_test_table_info(1024);
         let region_routes = vec![RegionRoute {
             region: Region::new_test(RegionId::new(1024, 1)),
             leader_peer: Some(from_peer.clone()),

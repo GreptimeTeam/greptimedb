@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use store_api::metadata::ColumnMetadata;
 use store_api::storage::TableId;
-use table::metadata::RawTableMeta;
+use table::metadata::TableMeta;
 use table::table_name::TableName;
 use tonic::async_trait;
 
@@ -78,11 +78,11 @@ impl ReconcileTableContext {
         self.persistent_ctx.table_id
     }
 
-    /// Builds a [`RawTableMeta`] from the provided [`ColumnMetadata`]s.
+    /// Builds a [`TableMeta`] from the provided [`ColumnMetadata`]s.
     pub(crate) fn build_table_meta(
         &self,
         column_metadatas: &[ColumnMetadata],
-    ) -> Result<RawTableMeta> {
+    ) -> Result<TableMeta> {
         // Safety: The table info value is set in `ReconciliationStart` state.
         let table_info_value = self.persistent_ctx.table_info_value.as_ref().unwrap();
         let table_id = self.table_id();
@@ -145,7 +145,7 @@ impl PersistentContext {
 
 #[derive(Default)]
 pub(crate) struct VolatileContext {
-    pub(crate) table_meta: Option<RawTableMeta>,
+    pub(crate) table_meta: Option<TableMeta>,
     pub(crate) metrics: ReconcileTableMetrics,
 }
 

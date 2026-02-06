@@ -28,7 +28,7 @@ use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{RegionNumber, TableId};
-use table::metadata::RawTableInfo;
+use table::metadata::TableInfo;
 use table::table_reference::TableReference;
 use tokio::time::Instant;
 
@@ -258,7 +258,7 @@ impl AllocateRegion {
 
     async fn allocate_regions(
         node_manager: &NodeManagerRef,
-        raw_table_info: &RawTableInfo,
+        raw_table_info: &TableInfo,
         region_routes: &[RegionRoute],
         wal_options: &HashMap<RegionNumber, String>,
     ) -> Result<()> {

@@ -21,14 +21,12 @@ use common_meta::rpc::router::{RegionRoute, find_leader_regions};
 use operator::expr_helper::column_schemas_to_defs;
 use snafu::ResultExt;
 use store_api::storage::{RegionId, TableId};
-use table::metadata::RawTableInfo;
+use table::metadata::TableInfo;
 
 use crate::error::{CovertColumnSchemasToDefsSnafu, Result};
 
 /// Generates alter table expression for all columns.
-pub fn generate_alter_table_expr_for_all_columns(
-    table_info: &RawTableInfo,
-) -> Result<AlterTableExpr> {
+pub fn generate_alter_table_expr_for_all_columns(table_info: &TableInfo) -> Result<AlterTableExpr> {
     let schema = &table_info.meta.schema;
 
     let mut alter_table_expr = AlterTableExpr {
@@ -42,10 +40,10 @@ pub fn generate_alter_table_expr_for_all_columns(
         .meta
         .primary_key_indices
         .iter()
-        .map(|i| schema.column_schemas[*i].name.clone())
+        .map(|i| schema.column_schemas()[*i].name.clone())
         .collect::<Vec<_>>();
 
-    let add_columns = column_schemas_to_defs(schema.column_schemas.clone(), &primary_keys)
+    let add_columns = column_schemas_to_defs(schema.column_schemas().to_vec(), &primary_keys)
         .context(CovertColumnSchemasToDefsSnafu)?;
 
     alter_table_expr.kind = Some(Kind::AddColumns(AddColumns {

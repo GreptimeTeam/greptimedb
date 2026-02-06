@@ -32,7 +32,7 @@ use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::ALTER_PHYSICAL_EXTENSION_KEY;
 use store_api::storage::RegionNumber;
 use strum::AsRefStr;
-use table::metadata::{RawTableInfo, TableId};
+use table::metadata::{TableId, TableInfo};
 
 use crate::ddl::DdlContext;
 use crate::ddl::utils::{
@@ -279,7 +279,7 @@ impl CreateTablesData {
 
     /// Returns the remaining tasks.
     /// The length of tasks must be greater than 0.
-    fn remaining_tasks(&self) -> Vec<(RawTableInfo, TableRouteValue)> {
+    fn remaining_tasks(&self) -> Vec<(TableInfo, TableRouteValue)> {
         self.tasks
             .iter()
             .zip(self.table_ids_already_exists.iter())

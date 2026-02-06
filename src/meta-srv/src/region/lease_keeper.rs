@@ -265,7 +265,7 @@ mod tests {
     use common_meta::rpc::router::{LeaderState, Region, RegionRouteBuilder};
     use store_api::region_engine::RegionRole;
     use store_api::storage::RegionId;
-    use table::metadata::RawTableInfo;
+    use table::metadata::TableInfo;
 
     use super::{RegionLeaseKeeper, renew_region_lease_via_region_route};
     use crate::region::lease_keeper::{RegionLeaseInfo, RenewRegionLeasesResponse};
@@ -343,7 +343,7 @@ mod tests {
     #[tokio::test]
     async fn test_collect_metadata() {
         let table_id = 1024;
-        let table_info: RawTableInfo = new_test_table_info(table_id).into();
+        let table_info: TableInfo = new_test_table_info(table_id);
 
         let region_id = RegionId::new(table_id, 1);
         let leader_peer_id = 1024;
@@ -394,7 +394,7 @@ mod tests {
     #[tokio::test]
     async fn test_renew_region_leases_basic() {
         let table_id = 1024;
-        let table_info: RawTableInfo = new_test_table_info(table_id).into();
+        let table_info: TableInfo = new_test_table_info(table_id);
 
         let region_id = RegionId::new(table_id, 1);
         let leader_peer_id = 1024;
@@ -501,7 +501,7 @@ mod tests {
     #[tokio::test]
     async fn test_renew_unexpected_logic_table() {
         let table_id = 1024;
-        let table_info: RawTableInfo = new_test_table_info(table_id).into();
+        let table_info: TableInfo = new_test_table_info(table_id);
 
         let region_id = RegionId::new(table_id, 1);
         let keeper = new_test_keeper();
@@ -537,7 +537,7 @@ mod tests {
     #[tokio::test]
     async fn test_renew_region_leases_with_downgrade_leader() {
         let table_id = 1024;
-        let table_info: RawTableInfo = new_test_table_info(table_id).into();
+        let table_info: TableInfo = new_test_table_info(table_id);
 
         let region_id = RegionId::new(table_id, 1);
         let leader_peer_id = 1024;

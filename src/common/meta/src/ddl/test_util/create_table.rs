@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use api::v1::column_def::try_as_column_schema;
 use api::v1::meta::Partition;
@@ -21,10 +22,10 @@ use chrono::DateTime;
 use common_catalog::consts::{
     DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE, MITO2_ENGINE,
 };
-use datatypes::schema::RawSchema;
+use datatypes::schema::Schema;
 use derive_builder::Builder;
 use store_api::storage::TableId;
-use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
+use table::metadata::{TableIdent, TableInfo, TableMeta, TableType};
 use table::requests::TableOptions;
 
 use crate::ddl::test_util::columns::TestColumnDefBuilder;
@@ -87,9 +88,9 @@ impl From<TestCreateTableExpr> for CreateTableExpr {
     }
 }
 
-/// Builds [RawTableInfo] from [CreateTableExpr].
-pub fn build_raw_table_info_from_expr(expr: &CreateTableExpr) -> RawTableInfo {
-    RawTableInfo {
+/// Builds [TableInfo] from [CreateTableExpr].
+pub fn build_raw_table_info_from_expr(expr: &CreateTableExpr) -> TableInfo {
+    TableInfo {
         ident: TableIdent {
             table_id: expr
                 .table_id
@@ -102,19 +103,13 @@ pub fn build_raw_table_info_from_expr(expr: &CreateTableExpr) -> RawTableInfo {
         desc: Some(expr.desc.clone()),
         catalog_name: expr.catalog_name.clone(),
         schema_name: expr.schema_name.clone(),
-        meta: RawTableMeta {
-            schema: RawSchema {
-                column_schemas: expr
-                    .column_defs
+        meta: TableMeta {
+            schema: Arc::new(Schema::new(
+                expr.column_defs
                     .iter()
                     .map(|column| try_as_column_schema(column).unwrap())
                     .collect(),
-                timestamp_index: expr
-                    .column_defs
-                    .iter()
-                    .position(|column| column.semantic_type() == SemanticType::Timestamp),
-                version: 0,
-            },
+            )),
             primary_key_indices: expr
                 .primary_keys
                 .iter()

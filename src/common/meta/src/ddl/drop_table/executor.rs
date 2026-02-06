@@ -328,7 +328,7 @@ mod tests {
 
     use api::v1::{ColumnDataType, SemanticType};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-    use table::metadata::RawTableInfo;
+    use table::metadata::TableInfo;
     use table::table_name::TableName;
 
     use super::*;
@@ -339,7 +339,7 @@ mod tests {
     use crate::key::table_route::TableRouteValue;
     use crate::test_util::{MockDatanodeManager, new_ddl_context};
 
-    fn test_create_raw_table_info(name: &str) -> RawTableInfo {
+    fn test_create_raw_table_info(name: &str) -> TableInfo {
         let create_table = TestCreateTableExprBuilder::default()
             .column_defs([
                 TestColumnDefBuilder::default()

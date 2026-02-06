@@ -14,7 +14,6 @@
 
 mod column_schema;
 pub mod constraint;
-mod raw;
 
 use std::collections::HashMap;
 use std::fmt;
@@ -22,6 +21,7 @@ use std::sync::Arc;
 
 use arrow::datatypes::{Field, Schema as ArrowSchema};
 use datafusion_common::DFSchemaRef;
+use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{ResultExt, ensure};
 
 use crate::error::{self, DuplicateColumnSnafu, Error, ProjectArrowSchemaSnafu, Result};
@@ -40,7 +40,6 @@ pub use crate::schema::column_schema::{
     VectorIndexOptions,
 };
 pub use crate::schema::constraint::ColumnDefaultConstraint;
-pub use crate::schema::raw::RawSchema;
 
 /// Key used to store version number of the schema in metadata.
 pub const VERSION_KEY: &str = "greptime:version";
@@ -48,20 +47,43 @@ pub const VERSION_KEY: &str = "greptime:version";
 pub const TYPE_KEY: &str = "greptime:type";
 
 /// A common schema, should be immutable.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 pub struct Schema {
     column_schemas: Vec<ColumnSchema>,
+    #[serde(skip_serializing)]
     name_to_index: HashMap<String, usize>,
+    #[serde(skip_serializing)]
     arrow_schema: Arc<ArrowSchema>,
     /// Index of the timestamp key column.
     ///
     /// Timestamp key column is the column holds the timestamp and forms part of
     /// the primary key. None means there is no timestamp key column.
+    #[serde(skip_serializing)]
     timestamp_index: Option<usize>,
     /// Version of the schema.
     ///
     /// Initial value is zero. The version should bump after altering schema.
     version: u32,
+}
+
+impl<'de> Deserialize<'de> for Schema {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        use serde::de::Error;
+
+        #[derive(Deserialize)]
+        struct RawSchema {
+            column_schemas: Vec<ColumnSchema>,
+            version: u32,
+        }
+        let raw = RawSchema::deserialize(deserializer)?;
+
+        SchemaBuilder::try_from(raw.column_schemas)
+            .and_then(|x| x.version(raw.version).build())
+            .map_err(D::Error::custom)
+    }
 }
 
 impl fmt::Debug for Schema {
@@ -85,8 +107,13 @@ impl Schema {
     /// Panics when ColumnSchema's `default_constraint` can't be serialized into json.
     pub fn new(column_schemas: Vec<ColumnSchema>) -> Schema {
         // Builder won't fail in this case
+        Self::new_with_version(column_schemas, Self::INITIAL_VERSION)
+    }
+
+    pub fn new_with_version(column_schemas: Vec<ColumnSchema>, version: u32) -> Schema {
         SchemaBuilder::try_from(column_schemas)
             .unwrap()
+            .version(version)
             .build()
             .unwrap()
     }

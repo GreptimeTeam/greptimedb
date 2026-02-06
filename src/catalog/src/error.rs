@@ -218,13 +218,6 @@ pub enum Error {
         source: common_query::error::Error,
     },
 
-    #[snafu(display("Invalid table info in catalog"))]
-    InvalidTableInfoInCatalog {
-        #[snafu(implicit)]
-        location: Location,
-        source: datatypes::error::Error,
-    },
-
     #[snafu(display("Illegal access to catalog: {} and schema: {}", catalog, schema))]
     QueryAccessDenied { catalog: String, schema: String },
 
@@ -368,7 +361,6 @@ impl ErrorExt for Error {
             Error::CreateTable { source, .. } => source.status_code(),
 
             Error::DecodePlan { source, .. } => source.status_code(),
-            Error::InvalidTableInfoInCatalog { source, .. } => source.status_code(),
 
             Error::Internal { source, .. } => source.status_code(),
 
