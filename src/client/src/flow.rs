@@ -86,7 +86,7 @@ impl FlowRequester {
                 .map(|insert| api::v1::flow::InsertRequest {
                     region_id: insert.region_id,
                     rows: insert.rows,
-                    version: insert.version,
+                    partition_rule_version: insert.partition_rule_version,
                 })
                 .collect(),
         };

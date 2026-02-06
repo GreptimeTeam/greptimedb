@@ -207,7 +207,7 @@ fn make_region_puts(inserts: InsertRequests) -> Result<Vec<(RegionId, RegionRequ
                     RegionRequest::Put(RegionPutRequest {
                         rows,
                         hint: None,
-                        partition_rule_version: r.version.map(|v| v.value),
+                        partition_rule_version: r.partition_rule_version.map(|v| v.value),
                     }),
                 )
             })
@@ -228,7 +228,7 @@ fn make_region_deletes(deletes: DeleteRequests) -> Result<Vec<(RegionId, RegionR
                     RegionRequest::Delete(RegionDeleteRequest {
                         rows,
                         hint: None,
-                        partition_rule_version: r.version.map(|v| v.value),
+                        partition_rule_version: r.partition_rule_version.map(|v| v.value),
                     }),
                 )
             })
@@ -404,7 +404,7 @@ fn make_region_truncate(truncate: TruncateRequest) -> Result<Vec<(RegionId, Regi
 /// Convert [BulkInsertRequest] to [RegionRequest] and group by [RegionId].
 fn make_region_bulk_inserts(request: BulkInsertRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
     let region_id = request.region_id.into();
-    let partition_rule_version = request.version.map(|v| v.value);
+    let partition_rule_version = request.partition_rule_version.map(|v| v.value);
     let Some(Body::ArrowIpc(request)) = request.body else {
         return Ok(vec![]);
     };

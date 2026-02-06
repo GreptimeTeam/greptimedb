@@ -104,7 +104,8 @@ impl Inserter {
                 }),
                 body: Some(region_request::Body::BulkInsert(BulkInsertRequest {
                     region_id: region_id.as_u64(),
-                    version: partition_rule_version.map(|value| PartitionRuleVersion { value }),
+                    partition_rule_version: partition_rule_version
+                        .map(|value| PartitionRuleVersion { value }),
                     body: Some(bulk_insert_request::Body::ArrowIpc(ArrowIpc {
                         schema: schema_bytes.clone(),
                         data_header: raw_flight_data.data_header,
@@ -217,7 +218,7 @@ impl Inserter {
                             }),
                             body: Some(region_request::Body::BulkInsert(BulkInsertRequest {
                                 region_id: region_id.as_u64(),
-                                version: partition_rule_version
+                                partition_rule_version: partition_rule_version
                                     .map(|value| PartitionRuleVersion { value }),
                                 body: Some(bulk_insert_request::Body::ArrowIpc(ArrowIpc {
                                     schema: schema_bytes,

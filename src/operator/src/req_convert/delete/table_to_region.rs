@@ -155,7 +155,7 @@ mod tests {
                     })
                     .collect(),
             }),
-            version: version.map(|value| PartitionRuleVersion { value }),
+            partition_rule_version: version.map(|value| PartitionRuleVersion { value }),
         }
     }
 }

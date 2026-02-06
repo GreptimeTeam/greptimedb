@@ -46,7 +46,8 @@ impl<'a> Partitioner<'a> {
                 |(region_number, (rows, partition_rule_version))| InsertRequest {
                     region_id: RegionId::new(table_id, region_number).into(),
                     rows: Some(rows),
-                    version: partition_rule_version.map(|value| PartitionRuleVersion { value }),
+                    partition_rule_version: partition_rule_version
+                        .map(|value| PartitionRuleVersion { value }),
                 },
             )
             .collect();
@@ -70,7 +71,8 @@ impl<'a> Partitioner<'a> {
                 |(region_number, (rows, partition_rule_version))| DeleteRequest {
                     region_id: RegionId::new(table_id, region_number).into(),
                     rows: Some(rows),
-                    version: partition_rule_version.map(|value| PartitionRuleVersion { value }),
+                    partition_rule_version: partition_rule_version
+                        .map(|value| PartitionRuleVersion { value }),
                 },
             )
             .collect();
