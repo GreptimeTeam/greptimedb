@@ -296,10 +296,7 @@ impl Pruner {
             }
         };
         reader_metrics.filter_metrics.pruner_prune_cost += prune_start.elapsed();
-        match result {
-            Ok(builder) => Ok(builder),
-            Err(err) => Err(err),
-        }
+        result
     }
 
     /// Gets or creates the FileRangeBuilder for a file.
