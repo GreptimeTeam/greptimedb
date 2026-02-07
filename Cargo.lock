@@ -2449,6 +2449,7 @@ dependencies = [
  "datafusion-common",
  "datafusion-expr",
  "datafusion-functions-aggregate-common",
+ "datafusion-functions-window-common",
  "datafusion-pg-catalog",
  "datafusion-physical-expr",
  "datatypes",

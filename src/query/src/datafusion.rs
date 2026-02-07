@@ -38,7 +38,7 @@ use datafusion::physical_plan::analyze::AnalyzeExec;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion_common::ResolvedTableReference;
 use datafusion_expr::{
-    AggregateUDF, DmlStatement, LogicalPlan as DfLogicalPlan, LogicalPlan, WriteOp,
+    AggregateUDF, DmlStatement, LogicalPlan as DfLogicalPlan, LogicalPlan, WindowUDF, WriteOp,
 };
 use datatypes::prelude::VectorRef;
 use datatypes::schema::Schema;
@@ -498,6 +498,10 @@ impl QueryEngine for DatafusionQueryEngine {
 
     fn register_table_function(&self, func: Arc<TableFunction>) {
         self.state.register_table_function(func);
+    }
+
+    fn register_window_function(&self, func: WindowUDF) {
+        self.state.register_window_function(func);
     }
 
     fn read_table(&self, table: TableRef) -> Result<DataFrame> {
