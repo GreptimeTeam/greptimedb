@@ -29,7 +29,7 @@ use datafusion_expr::{PartitionEvaluator, Signature, TypeSignature, Volatility, 
 use datafusion_functions_window_common::field::WindowUDFFieldArgs;
 use datafusion_functions_window_common::partition::PartitionEvaluatorArgs;
 
-use super::utils::{MIN_SAMPLES, collect_window_values, median_f64, nearly_equal};
+use super::utils::{MIN_SAMPLES, collect_window_values, median_f64};
 
 /// MAD consistency constant for normal distribution: `1 / Φ⁻¹(3/4) ≈ 1.4826`
 const MAD_CONSISTENCY_CONSTANT: f64 = 1.4826;
@@ -134,15 +134,6 @@ impl PartitionEvaluator for AnomalyScoreMadEvaluator {
             None => return Ok(ScalarValue::Float64(None)),
         };
 
-        // Handle degenerate case: MAD = 0 (more than 50% of values identical)
-        if nearly_equal(mad, 0.0) {
-            return if nearly_equal(current_value, median) {
-                Ok(ScalarValue::Float64(Some(0.0)))
-            } else {
-                Ok(ScalarValue::Float64(None))
-            };
-        }
-
         let score = (current_value - median).abs() / (mad * MAD_CONSISTENCY_CONSTANT);
         Ok(ScalarValue::Float64(Some(score)))
     }
@@ -186,17 +177,25 @@ mod tests {
     #[test]
     fn test_constant_sequence() {
         let values: Vec<Option<f64>> = vec![Some(5.0); 10];
-        // All values are the same → MAD=0, current == median → score=0.0
+        // All values are the same -> 0/0 => NaN
         let result = eval_mad(&values, 0..10);
-        assert_eq!(result, ScalarValue::Float64(Some(0.0)));
+        match result {
+            ScalarValue::Float64(Some(score)) => assert!(score.is_nan()),
+            other => panic!("expected Some(NaN), got {other:?}"),
+        }
     }
 
     #[test]
     fn test_mad_zero_non_median() {
-        // More than 50% identical, current is different → NULL
+        // More than 50% identical and current differs from median -> non-zero / 0 => +inf
         let values: Vec<Option<f64>> = vec![Some(1.0), Some(1.0), Some(1.0), Some(1.0), Some(5.0)];
         let result = eval_mad(&values, 0..5);
-        assert_eq!(result, ScalarValue::Float64(None));
+        match result {
+            ScalarValue::Float64(Some(score)) => {
+                assert!(score.is_infinite() && score.is_sign_positive())
+            }
+            other => panic!("expected Some(+inf), got {other:?}"),
+        }
     }
 
     #[test]

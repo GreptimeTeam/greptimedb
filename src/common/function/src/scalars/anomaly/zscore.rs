@@ -28,7 +28,7 @@ use datafusion_expr::{PartitionEvaluator, Signature, TypeSignature, Volatility, 
 use datafusion_functions_window_common::field::WindowUDFFieldArgs;
 use datafusion_functions_window_common::partition::PartitionEvaluatorArgs;
 
-use super::utils::{MIN_SAMPLES, collect_window_values, nearly_equal};
+use super::utils::{MIN_SAMPLES, collect_window_values};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AnomalyScoreZscore {
@@ -123,15 +123,6 @@ impl PartitionEvaluator for AnomalyScoreZscoreEvaluator {
             / n;
         let stddev = variance.sqrt();
 
-        // Handle degenerate case: stddev = 0 (all values identical)
-        if nearly_equal(stddev, 0.0) {
-            return if nearly_equal(current_value, mean) {
-                Ok(ScalarValue::Float64(Some(0.0)))
-            } else {
-                Ok(ScalarValue::Float64(None))
-            };
-        }
-
         let score = (current_value - mean).abs() / stddev;
         Ok(ScalarValue::Float64(Some(score)))
     }
@@ -181,7 +172,10 @@ mod tests {
     fn test_constant_sequence() {
         let values: Vec<Option<f64>> = vec![Some(5.0); 10];
         let result = eval_zscore(&values, 0..10);
-        assert_eq!(result, ScalarValue::Float64(Some(0.0)));
+        match result {
+            ScalarValue::Float64(Some(score)) => assert!(score.is_nan()),
+            other => panic!("expected Some(NaN), got {other:?}"),
+        }
     }
 
     #[test]
@@ -261,8 +255,7 @@ mod tests {
         // Data: [0, 0, 0, 0, 10]
         // Full window for all rows (ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
         // mean=2.0, stddev=4.0 for all rows
-        let values: Vec<Option<f64>> =
-            vec![Some(0.0), Some(0.0), Some(0.0), Some(0.0), Some(10.0)];
+        let values: Vec<Option<f64>> = vec![Some(0.0), Some(0.0), Some(0.0), Some(0.0), Some(10.0)];
         let array = Arc::new(Float64Array::from(values)) as ArrayRef;
         let full_range = 0..5;
         let vals = std::slice::from_ref(&array);
@@ -293,8 +286,7 @@ mod tests {
     fn test_centered_window_frame() {
         // Data: [0, 0, 10, 0, 0]
         // Centered window of size 3: ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING
-        let values: Vec<Option<f64>> =
-            vec![Some(0.0), Some(0.0), Some(10.0), Some(0.0), Some(0.0)];
+        let values: Vec<Option<f64>> = vec![Some(0.0), Some(0.0), Some(10.0), Some(0.0), Some(0.0)];
         let array = Arc::new(Float64Array::from(values)) as ArrayRef;
 
         // Score row 2 (value=10.0) with window [1..4) = {0.0, 10.0, 0.0}

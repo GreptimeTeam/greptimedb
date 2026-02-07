@@ -84,14 +84,6 @@ pub fn percentile_sorted(sorted: &[f64], p: f64) -> Option<f64> {
     }
 }
 
-/// Float-safe approximate equality check.
-///
-/// Uses a tolerance of `f64::EPSILON * 8.0` to handle floating-point
-/// precision issues that arise from common arithmetic operations.
-pub fn nearly_equal(a: f64, b: f64) -> bool {
-    (a - b).abs() < f64::EPSILON * 8.0
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,14 +139,5 @@ mod tests {
         ]);
         let values = collect_window_values(&array, &(0..7));
         assert_eq!(values, vec![1.0, 2.0, 3.0]);
-    }
-
-    #[test]
-    fn test_nearly_equal() {
-        assert!(nearly_equal(1.0, 1.0));
-        assert!(nearly_equal(0.0, 0.0));
-        assert!(!nearly_equal(1.0, 2.0));
-        // Values that differ by more than EPSILON * 8 are not equal
-        assert!(!nearly_equal(1.0, 1.0 + f64::EPSILON * 16.0));
     }
 }
