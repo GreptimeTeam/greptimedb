@@ -33,7 +33,7 @@ use datafusion_expr::{PartitionEvaluator, Signature, TypeSignature, Volatility, 
 use datafusion_functions_window_common::field::WindowUDFFieldArgs;
 use datafusion_functions_window_common::partition::PartitionEvaluatorArgs;
 
-use super::utils::{MIN_SAMPLES, collect_window_values, nearly_equal, percentile_sorted};
+use super::utils::{MIN_SAMPLES, collect_window_values, percentile_sorted};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AnomalyScoreIqr {
@@ -153,15 +153,6 @@ impl PartitionEvaluator for AnomalyScoreIqrEvaluator {
         };
         let iqr = q3 - q1;
 
-        // Handle degenerate case: IQR = 0
-        if nearly_equal(iqr, 0.0) {
-            return if current_value >= q1 && current_value <= q3 {
-                Ok(ScalarValue::Float64(Some(0.0)))
-            } else {
-                Ok(ScalarValue::Float64(None))
-            };
-        }
-
         let lower_fence = q1 - k * iqr;
         let upper_fence = q3 + k * iqr;
 
@@ -222,9 +213,23 @@ mod tests {
     #[test]
     fn test_constant_sequence() {
         let values: Vec<Option<f64>> = vec![Some(5.0); 10];
-        // IQR=0, current is in [Q1,Q3] → 0.0
+        // IQR=0 and current is on the fence -> 0.0
         let result = eval_iqr(&values, 1.5, 0..10);
         assert_eq!(result, ScalarValue::Float64(Some(0.0)));
+    }
+
+    #[test]
+    fn test_zero_iqr_outlier_is_infinite() {
+        // Q1=Q3=1.0 -> IQR=0.0, current value is outside fence.
+        let values: Vec<Option<f64>> =
+            vec![Some(1.0), Some(1.0), Some(1.0), Some(1.0), Some(100.0)];
+        let result = eval_iqr(&values, 1.5, 0..5);
+        match result {
+            ScalarValue::Float64(Some(score)) => {
+                assert!(score.is_infinite() && score.is_sign_positive())
+            }
+            other => panic!("expected Some(+inf), got {other:?}"),
+        }
     }
 
     #[test]
