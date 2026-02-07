@@ -392,28 +392,15 @@ impl MergeScanExec {
                     );
                     metric.record_greptime_exec_cost(value as usize);
 
-                    // record metrics from sub sgates
+                    // Record metrics from this finished region only.
+                    // Re-adding cumulative totals across all finished regions will over-count.
+                    let (requested_k, returned_k) =
+                        collect_vector_index_k_from_region_metrics(&metrics);
+                    metric.record_vector_index_k(requested_k, returned_k);
+
+                    // Keep per-region metrics for explain/debug output.
                     let mut sub_stage_metrics = sub_stage_metrics_moved.lock().unwrap();
                     sub_stage_metrics.insert(region_id, metrics);
-
-                    let mut requested_k = 0usize;
-                    let mut returned_k = 0usize;
-                    for plan_metrics in sub_stage_metrics.values() {
-                        for plan_metric in &plan_metrics.plan_metrics {
-                            for (name, value) in &plan_metric.metrics {
-                                match name.as_str() {
-                                    "vector_index_requested_k" => {
-                                        requested_k = requested_k.saturating_add(*value)
-                                    }
-                                    "vector_index_returned_k" => {
-                                        returned_k = returned_k.saturating_add(*value)
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                    }
-                    metric.record_vector_index_k(requested_k, returned_k);
                 }
 
                 MERGE_SCAN_POLL_ELAPSED.observe(poll_duration.as_secs_f64());
@@ -681,6 +668,21 @@ impl DisplayAs for MergeScanExec {
     }
 }
 
+fn collect_vector_index_k_from_region_metrics(metrics: &RecordBatchMetrics) -> (usize, usize) {
+    let mut requested = 0usize;
+    let mut returned = 0usize;
+    for plan_metric in &metrics.plan_metrics {
+        for (name, value) in &plan_metric.metrics {
+            match name.as_str() {
+                "vector_index_requested_k" => requested = requested.saturating_add(*value),
+                "vector_index_returned_k" => returned = returned.saturating_add(*value),
+                _ => {}
+            }
+        }
+    }
+    (requested, returned)
+}
+
 #[derive(Debug, Clone)]
 struct MergeScanMetric {
     /// Nanosecond elapsed till the scan operator is ready to emit data
@@ -734,6 +736,8 @@ impl MergeScanMetric {
         self.greptime_exec_cost.add(metrics);
     }
 
+    /// Adds per-region vector index k increments.
+    /// Callers should pass region-local contributions, not cumulative totals.
     pub fn record_vector_index_k(&self, requested: usize, returned: usize) {
         if requested > 0 {
             self.vector_index_requested_k.add(requested);
@@ -741,5 +745,90 @@ impl MergeScanMetric {
         if returned > 0 {
             self.vector_index_returned_k.add(returned);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use common_recordbatch::adapter::{PlanMetrics, RecordBatchMetrics};
+
+    use super::*;
+
+    fn metric_value(metrics: &ExecutionPlanMetricsSet, name: &str) -> usize {
+        let aggregated = metrics
+            .clone_inner()
+            .aggregate_by_name()
+            .sorted_for_display()
+            .timestamps_removed();
+        aggregated
+            .iter()
+            .find_map(|metric| (metric.value().name() == name).then_some(metric.value().as_usize()))
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn test_collect_vector_index_k_from_region_metrics() {
+        let metrics = RecordBatchMetrics {
+            plan_metrics: vec![
+                PlanMetrics {
+                    plan: "a".to_string(),
+                    level: 0,
+                    metrics: vec![
+                        ("vector_index_requested_k".to_string(), 3),
+                        ("vector_index_returned_k".to_string(), 2),
+                    ],
+                },
+                PlanMetrics {
+                    plan: "b".to_string(),
+                    level: 1,
+                    metrics: vec![
+                        ("vector_index_requested_k".to_string(), 7),
+                        ("vector_index_returned_k".to_string(), 5),
+                    ],
+                },
+            ],
+            ..Default::default()
+        };
+
+        let (requested, returned) = collect_vector_index_k_from_region_metrics(&metrics);
+        assert_eq!(requested, 10);
+        assert_eq!(returned, 7);
+    }
+
+    #[test]
+    fn test_record_vector_index_k_adds_per_region_increments_once() {
+        let metrics_set = ExecutionPlanMetricsSet::new();
+        let metric = MergeScanMetric::new(&metrics_set);
+
+        let region_1 = RecordBatchMetrics {
+            plan_metrics: vec![PlanMetrics {
+                plan: "r1".to_string(),
+                level: 0,
+                metrics: vec![
+                    ("vector_index_requested_k".to_string(), 10),
+                    ("vector_index_returned_k".to_string(), 6),
+                ],
+            }],
+            ..Default::default()
+        };
+        let (requested_1, returned_1) = collect_vector_index_k_from_region_metrics(&region_1);
+        metric.record_vector_index_k(requested_1, returned_1);
+
+        let region_2 = RecordBatchMetrics {
+            plan_metrics: vec![PlanMetrics {
+                plan: "r2".to_string(),
+                level: 0,
+                metrics: vec![
+                    ("vector_index_requested_k".to_string(), 20),
+                    ("vector_index_returned_k".to_string(), 15),
+                ],
+            }],
+            ..Default::default()
+        };
+        let (requested_2, returned_2) = collect_vector_index_k_from_region_metrics(&region_2);
+        metric.record_vector_index_k(requested_2, returned_2);
+
+        assert_eq!(metric_value(&metrics_set, "vector_index_requested_k"), 30);
+        assert_eq!(metric_value(&metrics_set, "vector_index_returned_k"), 21);
     }
 }

@@ -29,6 +29,9 @@ use crate::vector_search::plan::AdaptiveVectorTopKLogicalPlan;
 pub struct AdaptiveVectorTopKRule;
 
 task_local! {
+    // Prevent recursive rewrite when adaptive execution rebuilds a logical plan per round.
+    // The rebuilt plan still contains Sort + Limit shape; without this guard, the optimizer
+    // would keep wrapping it with AdaptiveVectorTopK again.
     static SKIP_REWRITE: bool;
 }
 
@@ -51,6 +54,8 @@ impl OptimizerRule for AdaptiveVectorTopKRule {
     ) -> Result<Transformed<LogicalPlan>> {
         let skip_rewrite = SKIP_REWRITE.try_with(|flag| *flag).unwrap_or(false);
         if skip_rewrite {
+            // This branch is entered only from adaptive runtime re-planning.
+            // User-submitted queries should still be rewritten normally.
             return Ok(Transformed::no(plan));
         }
         plan.transform_down(&mut |plan| Self::rewrite_limit_sort(plan))

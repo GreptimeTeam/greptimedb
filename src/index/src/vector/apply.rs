@@ -323,10 +323,14 @@ impl IndexApplier for HnswVectorIndexApplier {
                 predicate: &'a dyn VectorSearchPredicate,
             }
 
+            // The engine-level predicate receives HNSW internal keys.
+            // Adapt it to row offsets so upper layers can write predicates
+            // against table row positions consistently.
             impl VectorSearchPredicate for RowOffsetPredicateAdapter<'_> {
                 fn allows(&self, key: u64) -> bool {
                     match self.applier.hnsw_key_to_row_offset(self.total_rows, key) {
                         Ok(row_offset) => self.predicate.allows(row_offset as u64),
+                        // Fail closed: on key mapping failure we must not leak unmatched rows.
                         Err(_) => false,
                     }
                 }

@@ -336,6 +336,7 @@ async fn run_adaptive_topk(
         // in distributed scans. Keep the loop simple and bounded by max_rows/max_rounds.
         let mut batches = Vec::new();
         let mut collected_rows = 0usize;
+        let mut hit_max_rows = false;
         for input_partition in 0..input_partition_count {
             let mut input = plan.execute(input_partition, context.clone())?;
             while let Some(batch) = input.next().await {
@@ -345,6 +346,7 @@ async fn run_adaptive_topk(
                     batches.push(batch);
                     collected_rows = collected_rows.saturating_add(rows);
                     if collected_rows >= max_rows {
+                        hit_max_rows = true;
                         break;
                     }
                 }
@@ -392,11 +394,16 @@ async fn run_adaptive_topk(
             _ => false,
         };
 
-        let candidates_exhausted = requested_k > 0 && returned_k > 0 && returned_k < requested_k;
-        if total_rows >= desired && (tie_stable || candidates_exhausted) {
+        // `returned_k < requested_k` is a coarse aggregated metric and can be affected by
+        // partial collection. Treat exhaustion as reliable only when this round did not hit
+        // the row cap and the physical plan itself produced fewer than `k` rows.
+        if should_finish_round(total_rows, desired, tie_stable, hit_max_rows, k) {
             return Ok(Some(batch));
         }
 
+        // Stagnation stop: if the collected candidate count no longer increases after growing k,
+        // another round is unlikely to produce new rows from storage/index pruning.
+        // Returning here preserves current best-effort semantics and avoids useless retries.
         if total_rows < desired && matches!(last_total_rows, Some(prev) if prev == total_rows) {
             return Ok(Some(batch));
         }
@@ -473,6 +480,8 @@ fn sort_and_limit(
         None
     };
 
+    // Hash rows in the distance-tie group at kth boundary. Two consecutive rounds are treated as
+    // tie-stable only when both kth distance and this hash stay unchanged.
     let tie_hash = if let (Some(indices), Some(kth_distance)) = (&indices, kth_distance) {
         Some(hash_tie_group(&sort_columns, indices, kth_distance)?)
     } else {
@@ -530,6 +539,20 @@ fn collect_vector_index_k_metrics(plan: &dyn ExecutionPlan) -> (usize, usize) {
     (requested, returned)
 }
 
+fn candidates_exhausted(hit_max_rows: bool, total_rows: usize, k: usize) -> bool {
+    !hit_max_rows && total_rows < k
+}
+
+fn should_finish_round(
+    total_rows: usize,
+    desired: usize,
+    tie_stable: bool,
+    hit_max_rows: bool,
+    k: usize,
+) -> bool {
+    total_rows >= desired && (tie_stable || candidates_exhausted(hit_max_rows, total_rows, k))
+}
+
 fn extract_kth_distance(
     sort_columns: &[SortColumn],
     indices: &UInt32Array,
@@ -567,7 +590,8 @@ fn hash_tie_group(
     })?;
 
     // When only distance is sorted, the tie hash is stable but adds little value.
-    // It is mainly used to detect changes in tie groups with additional tie-breaker columns.
+    // It becomes useful when secondary sort columns exist: if candidate expansion changes row
+    // composition inside the equal-distance group, this hash changes even when kth distance does not.
     let mut tie_indices = Vec::new();
     for i in 0..indices.len() {
         let row_index = indices.value(i) as usize;
@@ -889,5 +913,18 @@ mod tests {
         ));
         let batches = collect(exec, ctx.task_ctx()).await.unwrap();
         assert!(batches.is_empty());
+    }
+
+    #[test]
+    fn test_should_not_finish_round_when_row_cap_hit_and_tie_unstable() {
+        // A capped round is not enough evidence of global exhaustion.
+        assert!(!super::should_finish_round(
+            100_000, 100_000, false, true, 200_000
+        ));
+    }
+
+    #[test]
+    fn test_should_finish_round_when_not_capped_and_candidates_exhausted() {
+        assert!(super::should_finish_round(128, 64, false, false, 256));
     }
 }

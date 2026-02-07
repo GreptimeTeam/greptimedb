@@ -18,6 +18,8 @@ use datafusion::config::{ConfigExtension, ExtensionOptions};
 pub struct AdaptiveVectorTopKOptions {
     pub max_rounds: usize,
     pub max_k: Option<usize>,
+    // Per-round candidate collection cap during adaptive execution.
+    // This bounds one retry round's memory/CPU cost; it is not final result size.
     pub max_rows: usize,
 }
 

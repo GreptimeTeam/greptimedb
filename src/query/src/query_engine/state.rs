@@ -172,6 +172,8 @@ impl QueryEngineState {
 
         let mut optimizer = Optimizer::new();
         optimizer.rules.push(Arc::new(ScanHintRule));
+        // Order matters: ScanHintRule attaches vector_search hints to scans first,
+        // then AdaptiveVectorTopKRule rewrites top-level Sort+Limit shape.
         optimizer.rules.push(Arc::new(AdaptiveVectorTopKRule));
 
         // add physical optimizer

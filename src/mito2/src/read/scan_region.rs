@@ -1197,12 +1197,7 @@ impl ScanInput {
             };
             file_range_ctx.set_compat_batch(compat);
         }
-        Ok(FileRangeBuilder::new(
-            Arc::new(file_range_ctx),
-            selection,
-            reader_metrics.filter_metrics.vector_index_requested_k,
-            reader_metrics.filter_metrics.vector_index_returned_k,
-        ))
+        Ok(FileRangeBuilder::new(Arc::new(file_range_ctx), selection))
     }
 
     /// Scans the input source in another task and sends batches to the sender.
