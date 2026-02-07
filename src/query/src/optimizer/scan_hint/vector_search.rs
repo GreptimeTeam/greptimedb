@@ -14,9 +14,11 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use arrow_schema::SortOptions;
 use common_function::scalars::vector::distance::{
     VEC_COS_DISTANCE, VEC_DOT_PRODUCT, VEC_L2SQ_DISTANCE,
 };
+use common_recordbatch::OrderOption;
 use common_telemetry::debug;
 use datafusion_common::ScalarValue;
 use datafusion_expr::logical_plan::FetchType;
@@ -62,6 +64,7 @@ struct VectorDistanceInfo {
     column_name: String,
     query_vector: Vec<f32>,
     metric: VectorDistanceMetric,
+    tie_breakers: Vec<OrderOption>,
 }
 
 #[derive(Clone)]
@@ -213,6 +216,9 @@ impl VectorSearchState {
             query_vector: info.query_vector.clone(),
             k,
             metric: info.metric,
+            limit: Some(hint.limit.fetch),
+            offset: Some(hint.limit.skip),
+            tie_breakers: (!info.tie_breakers.is_empty()).then(|| info.tie_breakers.clone()),
         })
     }
 
@@ -245,6 +251,7 @@ impl VectorSearchState {
             column_name,
             query_vector,
             metric,
+            tie_breakers: Vec::new(),
         })
     }
 
@@ -263,7 +270,11 @@ impl VectorSearchState {
         }
 
         if Self::tie_breakers_allowed(&sort.expr[1..], &info) {
-            Some(info)
+            let tie_breakers = Self::build_tie_breakers(&sort.expr[1..]);
+            Some(VectorDistanceInfo {
+                tie_breakers,
+                ..info
+            })
         } else {
             if sort.expr.len() > 1 {
                 debug!(
@@ -290,6 +301,24 @@ impl VectorSearchState {
                 None => col.relation.is_none(),
             }
         })
+    }
+
+    fn build_tie_breakers(sort_exprs: &[SortExpr]) -> Vec<OrderOption> {
+        sort_exprs
+            .iter()
+            .filter_map(|sort_expr| {
+                let Expr::Column(col) = &sort_expr.expr else {
+                    return None;
+                };
+                Some(OrderOption {
+                    name: col.name.clone(),
+                    options: SortOptions {
+                        descending: !sort_expr.asc,
+                        nulls_first: sort_expr.nulls_first,
+                    },
+                })
+            })
+            .collect()
     }
 
     fn extract_limit_info(limit: &datafusion_expr::logical_plan::Limit) -> Option<VectorLimitInfo> {
@@ -572,6 +601,32 @@ mod tests {
         assert_eq!(hint.k, 5);
         assert_eq!(hint.metric, VectorDistanceMetric::L2sq);
         assert_eq!(hint.query_vector, vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn test_vector_hint_with_tie_breaker_and_offset() {
+        let dummy_provider = build_dummy_provider(10);
+        let table_source = Arc::new(DefaultTableSource::new(dummy_provider.clone()));
+        let expr = vec_distance_expr(VEC_L2SQ_DISTANCE);
+        let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+            .unwrap()
+            .sort(vec![expr.sort(true, false), col("k0").sort(true, false)])
+            .unwrap()
+            .limit(3, Some(7))
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let context = OptimizerContext::default();
+        let _ = ScanHintRule.rewrite(plan, &context).unwrap();
+
+        let hint = dummy_provider.get_vector_search_hint().unwrap();
+        assert_eq!(hint.limit, Some(7));
+        assert_eq!(hint.offset, Some(3));
+        let tie_breakers = hint.tie_breakers.unwrap();
+        assert_eq!(tie_breakers.len(), 1);
+        assert_eq!(tie_breakers[0].name, "k0");
+        assert!(!tie_breakers[0].options.descending);
     }
 
     #[test]

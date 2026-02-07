@@ -131,6 +131,8 @@ impl Default for FlownodeOptions {
                 parallelism: 1,
                 allow_query_fallback: false,
                 memory_pool_size: MemoryLimit::default(),
+                vector_topk_max_rounds: 8,
+                vector_topk_max_k: None,
             },
             user_provider: None,
             memory: MemoryOptions::default(),

@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use async_stream::try_stream;
 use common_telemetry::tracing;
-use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricBuilder, Time};
+use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, Gauge, MetricBuilder, Time};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::timestamp::timestamp_array_to_primitive;
 use futures::Stream;
@@ -168,6 +168,10 @@ pub(crate) struct ScanMetricsSet {
     rows_vector_filtered: usize,
     /// Number of rows selected by vector index.
     rows_vector_selected: usize,
+    /// Total requested k for vector index pruning.
+    vector_index_requested_k: usize,
+    /// Total returned k for vector index pruning.
+    vector_index_returned_k: usize,
     /// Number of rows filtered by precise filter.
     rows_precise_filtered: usize,
     /// Number of index result cache hits for fulltext index.
@@ -301,6 +305,8 @@ impl fmt::Debug for ScanMetricsSet {
             rows_bloom_filtered,
             rows_vector_filtered,
             rows_vector_selected,
+            vector_index_requested_k,
+            vector_index_returned_k,
             rows_precise_filtered,
             fulltext_index_cache_hit,
             fulltext_index_cache_miss,
@@ -399,6 +405,15 @@ impl fmt::Debug for ScanMetricsSet {
         }
         if *rows_vector_selected > 0 {
             write!(f, ", \"rows_vector_selected\":{rows_vector_selected}")?;
+        }
+        if *vector_index_requested_k > 0 {
+            write!(
+                f,
+                ", \"vector_index_requested_k\":{vector_index_requested_k}"
+            )?;
+        }
+        if *vector_index_returned_k > 0 {
+            write!(f, ", \"vector_index_returned_k\":{vector_index_returned_k}")?;
         }
         if *rows_precise_filtered > 0 {
             write!(f, ", \"rows_precise_filtered\":{rows_precise_filtered}")?;
@@ -632,6 +647,8 @@ impl ScanMetricsSet {
                     rows_bloom_filtered,
                     rows_vector_filtered,
                     rows_vector_selected,
+                    vector_index_requested_k,
+                    vector_index_returned_k,
                     rows_precise_filtered,
                     fulltext_index_cache_hit,
                     fulltext_index_cache_miss,
@@ -672,6 +689,8 @@ impl ScanMetricsSet {
         self.rows_bloom_filtered += *rows_bloom_filtered;
         self.rows_vector_filtered += *rows_vector_filtered;
         self.rows_vector_selected += *rows_vector_selected;
+        self.vector_index_requested_k += *vector_index_requested_k;
+        self.vector_index_returned_k += *vector_index_returned_k;
         self.rows_precise_filtered += *rows_precise_filtered;
 
         self.fulltext_index_cache_hit += *fulltext_index_cache_hit;
@@ -856,6 +875,10 @@ struct PartitionMetricsInner {
     convert_cost: Time,
     /// Aggregated compute time reported to DataFusion.
     elapsed_compute: Time,
+    /// Total requested k for vector index pruning.
+    vector_index_requested_k: Gauge,
+    /// Total returned k for vector index pruning.
+    vector_index_returned_k: Gauge,
 }
 
 impl PartitionMetricsInner {
@@ -980,6 +1003,10 @@ impl PartitionMetrics {
             yield_cost: MetricBuilder::new(metrics_set).subset_time("yield_cost", partition),
             convert_cost,
             elapsed_compute: MetricBuilder::new(metrics_set).elapsed_compute(partition),
+            vector_index_requested_k: MetricBuilder::new(metrics_set)
+                .gauge("vector_index_requested_k", partition),
+            vector_index_returned_k: MetricBuilder::new(metrics_set)
+                .gauge("vector_index_returned_k", partition),
         };
         Self(Arc::new(inner))
     }
@@ -1046,6 +1073,12 @@ impl PartitionMetrics {
         per_file_metrics: Option<&HashMap<RegionFileId, FileScanMetrics>>,
     ) {
         self.0.build_parts_cost.add_duration(metrics.build_cost);
+        self.0
+            .vector_index_requested_k
+            .add(metrics.filter_metrics.vector_index_requested_k);
+        self.0
+            .vector_index_returned_k
+            .add(metrics.filter_metrics.vector_index_returned_k);
 
         let mut metrics_set = self.0.metrics.lock().unwrap();
         metrics_set.merge_reader_metrics(metrics);

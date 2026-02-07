@@ -34,6 +34,15 @@ pub struct VectorSearchRequest {
     pub k: usize,
     /// Distance metric to use (matches the index metric).
     pub metric: VectorDistanceMetric,
+    /// Optional limit for the final result size (limit + offset).
+    /// Currently used by query planning for adaptive top-k; not pushed down to storage yet.
+    pub limit: Option<usize>,
+    /// Optional offset for the final result.
+    /// Currently used by query planning for adaptive top-k; not pushed down to storage yet.
+    pub offset: Option<usize>,
+    /// Optional tie-breaker order applied after distance.
+    /// Currently used by query planning for adaptive top-k; not pushed down to storage yet.
+    pub tie_breakers: Option<Vec<OrderOption>>,
 }
 
 /// Search results from vector index.
@@ -43,6 +52,12 @@ pub struct VectorSearchMatches {
     pub keys: Vec<u64>,
     /// Distances from the query vector.
     pub distances: Vec<f32>,
+}
+
+/// Predicate for filtering vector search candidates by row offset.
+pub trait VectorSearchPredicate: Send + Sync {
+    /// Returns true if the row offset should be included.
+    fn allows(&self, key: u64) -> bool;
 }
 
 /// Trait for vector index engines (HNSW implementations).
@@ -55,6 +70,17 @@ pub trait VectorIndexEngine: Send + Sync {
 
     /// Searches for k nearest neighbors.
     fn search(&self, query: &[f32], k: usize) -> Result<VectorSearchMatches, BoxedError>;
+
+    /// Searches for k nearest neighbors with an optional predicate.
+    fn search_with_predicate(
+        &self,
+        query: &[f32],
+        k: usize,
+        predicate: Option<&dyn VectorSearchPredicate>,
+    ) -> Result<VectorSearchMatches, BoxedError> {
+        let _ = predicate;
+        self.search(query, k)
+    }
 
     /// Returns the serialized length.
     fn serialized_length(&self) -> usize;
@@ -199,11 +225,14 @@ impl Display for ScanRequest {
         if let Some(vector_search) = &self.vector_search {
             write!(
                 f,
-                "{}vector_search: column_id={}, k={}, metric={}",
+                "{}vector_search: column_id={}, k={}, metric={}, limit={:?}, offset={:?}, tie_breakers={:?}",
                 delimiter.as_str(),
                 vector_search.column_id,
                 vector_search.k,
-                vector_search.metric
+                vector_search.metric,
+                vector_search.limit,
+                vector_search.offset,
+                vector_search.tie_breakers
             )?;
         }
         write!(f, " }}")
