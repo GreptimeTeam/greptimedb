@@ -39,6 +39,7 @@ use crate::engine::MitoEngine;
 use crate::engine::listener::{AlterFlushListener, NotifyRegionChangeResultListener};
 use crate::error;
 use crate::sst::FormatType;
+use crate::test_util::batch_util::sort_batches_and_print;
 use crate::test_util::{
     CreateRequestBuilder, TestEnv, build_rows, build_rows_for_key, flush_region, put_rows,
     rows_schema,
@@ -1228,4 +1229,284 @@ async fn test_alter_region_sst_format_without_flush() {
     let stream = engine.scan_to_stream(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     assert_eq!(expected_all_data, batches.pretty_print().unwrap());
+}
+
+#[tokio::test]
+async fn test_alter_region_append_mode_with_flush() {
+    common_telemetry::init_default_ut_logging();
+
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    // Create a region with append_mode=false (default)
+    let request = CreateRequestBuilder::new().build();
+
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let column_schemas = rows_schema(&request);
+    let table_dir = request.table_dir.clone();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let check_append_mode = |engine: &MitoEngine, expected: bool| {
+        let append_mode = engine
+            .get_region(region_id)
+            .unwrap()
+            .version()
+            .options
+            .append_mode;
+        assert_eq!(append_mode, expected);
+    };
+    check_append_mode(&engine, false);
+
+    // Inserts some data before alter (memtable not empty, alter will trigger flush)
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows(0, 3),
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    // Alters append_mode from false to true (this triggers internal flush)
+    let alter_request = RegionAlterRequest {
+        kind: AlterKind::SetRegionOptions {
+            options: vec![SetRegionOption::AppendMode(true)],
+        },
+    };
+    engine
+        .handle_request(region_id, RegionRequest::Alter(alter_request))
+        .await
+        .unwrap();
+
+    check_append_mode(&engine, true);
+
+    // Inserts duplicate data after alter (same as rows 0, 1, 2)
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows(0, 3),
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    // Flushes again
+    flush_region(&engine, region_id, None).await;
+
+    // After append_mode=true, duplicates should be preserved
+    let expected_all_data = "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| 0     | 0.0     | 1970-01-01T00:00:00 |
+| 0     | 0.0     | 1970-01-01T00:00:00 |
+| 1     | 1.0     | 1970-01-01T00:00:01 |
+| 1     | 1.0     | 1970-01-01T00:00:01 |
+| 2     | 2.0     | 1970-01-01T00:00:02 |
+| 2     | 2.0     | 1970-01-01T00:00:02 |
++-------+---------+---------------------+";
+    let request = ScanRequest::default();
+    let stream = engine.scan_to_stream(region_id, request).await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(
+        expected_all_data,
+        sort_batches_and_print(&batches, &["tag_0", "ts"])
+    );
+
+    // Reopens region to verify append_mode persists
+    let engine = env.reopen_engine(engine, MitoConfig::default()).await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Open(RegionOpenRequest {
+                engine: String::new(),
+                table_dir,
+                path_type: PathType::Bare,
+                options: HashMap::default(),
+                skip_wal_replay: false,
+                checkpoint: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+    check_append_mode(&engine, true);
+
+    let request = ScanRequest::default();
+    let stream = engine.scan_to_stream(region_id, request).await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(
+        expected_all_data,
+        sort_batches_and_print(&batches, &["tag_0", "ts"])
+    );
+}
+
+#[tokio::test]
+async fn test_alter_region_append_mode_without_flush() {
+    common_telemetry::init_default_ut_logging();
+
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    // Create a region with append_mode=false (default)
+    let request = CreateRequestBuilder::new().build();
+
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let column_schemas = rows_schema(&request);
+    let table_dir = request.table_dir.clone();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let check_append_mode = |engine: &MitoEngine, expected: bool| {
+        let append_mode = engine
+            .get_region(region_id)
+            .unwrap()
+            .version()
+            .options
+            .append_mode;
+        assert_eq!(append_mode, expected);
+    };
+    check_append_mode(&engine, false);
+
+    // Alters append_mode from false to true immediately (no data, no flush needed)
+    let alter_request = RegionAlterRequest {
+        kind: AlterKind::SetRegionOptions {
+            options: vec![SetRegionOption::AppendMode(true)],
+        },
+    };
+    engine
+        .handle_request(region_id, RegionRequest::Alter(alter_request))
+        .await
+        .unwrap();
+
+    check_append_mode(&engine, true);
+
+    // Inserts duplicate data
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows(0, 3),
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    // Insert same data again
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows(0, 3),
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    // Flushes
+    flush_region(&engine, region_id, None).await;
+
+    // Duplicates should be preserved
+    let expected_all_data = "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| 0     | 0.0     | 1970-01-01T00:00:00 |
+| 0     | 0.0     | 1970-01-01T00:00:00 |
+| 1     | 1.0     | 1970-01-01T00:00:01 |
+| 1     | 1.0     | 1970-01-01T00:00:01 |
+| 2     | 2.0     | 1970-01-01T00:00:02 |
+| 2     | 2.0     | 1970-01-01T00:00:02 |
++-------+---------+---------------------+";
+    let request = ScanRequest::default();
+    let stream = engine.scan_to_stream(region_id, request).await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(
+        expected_all_data,
+        sort_batches_and_print(&batches, &["tag_0", "ts"])
+    );
+
+    // Reopens region to verify append_mode persists
+    let engine = env.reopen_engine(engine, MitoConfig::default()).await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Open(RegionOpenRequest {
+                engine: String::new(),
+                table_dir,
+                path_type: PathType::Bare,
+                options: HashMap::default(),
+                skip_wal_replay: false,
+                checkpoint: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+    check_append_mode(&engine, true);
+
+    let request = ScanRequest::default();
+    let stream = engine.scan_to_stream(region_id, request).await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(
+        expected_all_data,
+        sort_batches_and_print(&batches, &["tag_0", "ts"])
+    );
+}
+
+#[tokio::test]
+async fn test_alter_region_append_mode_invalid() {
+    common_telemetry::init_default_ut_logging();
+
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    // Create a region with append_mode=true
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .build();
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let check_append_mode = |engine: &MitoEngine, expected: bool| {
+        let append_mode = engine
+            .get_region(region_id)
+            .unwrap()
+            .version()
+            .options
+            .append_mode;
+        assert_eq!(append_mode, expected);
+    };
+    check_append_mode(&engine, true);
+
+    // Try to alter append_mode from true to false (should fail)
+    let alter_request = RegionAlterRequest {
+        kind: AlterKind::SetRegionOptions {
+            options: vec![SetRegionOption::AppendMode(false)],
+        },
+    };
+    engine
+        .handle_request(region_id, RegionRequest::Alter(alter_request))
+        .await
+        .unwrap_err();
+
+    // append_mode should still be true
+    check_append_mode(&engine, true);
 }

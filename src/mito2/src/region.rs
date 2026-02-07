@@ -492,6 +492,7 @@ impl MitoRegion {
                 let action = RegionMetaAction::Change(RegionChange {
                     metadata: current_meta.clone(),
                     sst_format: current_version.options.sst_format.unwrap_or_default(),
+                    append_mode: None,
                 });
                 let result = manager
                     .update(RegionMetaActionList::with_action(action), false)

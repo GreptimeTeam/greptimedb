@@ -131,6 +131,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let change = RegionChange {
             metadata: Arc::new(new_meta),
             sst_format,
+            append_mode: None,
         };
         let action_list = RegionMetaActionList::with_action(RegionMetaAction::Change(change));
         region

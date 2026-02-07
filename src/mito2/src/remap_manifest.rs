@@ -115,6 +115,7 @@ impl RemapManifest {
                 truncated_entry_id: None,
                 compaction_time_window: None,
                 sst_format,
+                append_mode: None,
             };
 
             new_manifests.insert(*region_id, manifest);
@@ -464,6 +465,7 @@ mod tests {
             compaction_time_window: None,
             committed_sequence: None,
             sst_format: FormatType::PrimaryKey,
+            append_mode: None,
         }
     }
 

@@ -619,6 +619,17 @@ pub(crate) fn sanitize_region_options(manifest: &RegionManifest, options: &mut R
         );
         options.sst_format = Some(manifest.sst_format);
     }
+    if let Some(manifest_append_mode) = manifest.append_mode
+        && options.append_mode != manifest_append_mode
+    {
+        common_telemetry::warn!(
+            "Overriding append_mode from {} to {} for region {}",
+            options.append_mode,
+            manifest_append_mode,
+            manifest.metadata.region_id,
+        );
+        options.append_mode = manifest_append_mode;
+    }
 }
 
 /// Returns an object store corresponding to `name`. If `name` is `None`, this method returns the default object store.
