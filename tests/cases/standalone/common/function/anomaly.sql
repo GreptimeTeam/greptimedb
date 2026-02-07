@@ -27,7 +27,8 @@ INSERT INTO anomaly_test VALUES
     ('host-b', 10.0, '2025-01-01 00:04:00');
 
 -- 1. Basic expanding window with PARTITION BY (three functions)
--- Expect: first 2 rows per partition → NULL (< 3 samples), outlier row high score, host-b all 0.0
+-- Expect: first 2 rows per partition -> NULL (< 3 samples), outlier row high score.
+-- For host-b (constant series), zscore/mad become NaN and iqr stays 0.0.
 SELECT
     host,
     ts,
@@ -144,7 +145,8 @@ ORDER BY host, ts;
 
 -- 6. Subquery filtering anomalous rows (WHERE score > threshold)
 -- MAD score for outlier is ~67, use threshold 3.0 to filter
--- Should only return the outlier row (host-a, val=200.0)
+-- Current behavior: rows with MAD = NaN are also returned by `mad > 3.0`.
+-- So this query returns host-a outlier and host-b NaN rows.
 SELECT * FROM (
     SELECT
         host,
