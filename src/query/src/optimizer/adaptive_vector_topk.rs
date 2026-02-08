@@ -12,20 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_function::scalars::vector::distance::{
-    VEC_COS_DISTANCE, VEC_DOT_PRODUCT, VEC_L2SQ_DISTANCE,
-};
 use datafusion_common::Result;
 use datafusion_common::tree_node::{Transformed, TreeNode};
-use datafusion_expr::logical_plan::{FetchType, Limit, SkipType, Sort};
-use datafusion_expr::{Expr, LogicalPlan};
+use datafusion_expr::LogicalPlan;
 use datafusion_optimizer::{OptimizerConfig, OptimizerRule};
-use store_api::storage::VectorDistanceMetric;
 use tokio::task_local;
 
 use crate::vector_search::plan::AdaptiveVectorTopKLogicalPlan;
+use crate::vector_search::sort::{extract_limit_info, is_vector_sort};
 
 #[derive(Debug)]
+/// Rewrites vector distance `Sort + Limit` queries into `AdaptiveVectorTopKLogicalPlan`.
+///
+/// This enables adaptive top-k execution: start with `k = fetch + skip`, then retry with
+/// larger k when needed to stabilize tie groups and return correct global top-k results.
+/// Non-vector sorts or plans without concrete limit info are left unchanged.
 pub struct AdaptiveVectorTopKRule;
 
 task_local! {
@@ -70,13 +71,12 @@ impl AdaptiveVectorTopKRule {
         let LogicalPlan::Sort(sort) = limit.input.as_ref() else {
             return Ok(Transformed::no(plan));
         };
-        if !Self::is_vector_sort(sort) {
+        if !is_vector_sort(sort) {
             return Ok(Transformed::no(plan));
         }
 
-        let (fetch, skip) = match Self::extract_limit_info(limit) {
-            Some(info) => info,
-            None => return Ok(Transformed::no(plan)),
+        let Some((fetch, skip)) = extract_limit_info(limit) else {
+            return Ok(Transformed::no(plan));
         };
 
         let new_plan = AdaptiveVectorTopKLogicalPlan::new(
@@ -87,41 +87,6 @@ impl AdaptiveVectorTopKRule {
         )
         .into_logical_plan();
         Ok(Transformed::yes(new_plan))
-    }
-
-    fn is_vector_sort(sort: &Sort) -> bool {
-        let Some(sort_expr) = sort.expr.first() else {
-            return false;
-        };
-        let Some(metric) = Self::distance_metric(&sort_expr.expr) else {
-            return false;
-        };
-        let expected_asc = metric != VectorDistanceMetric::InnerProduct;
-        sort_expr.asc == expected_asc
-    }
-
-    fn distance_metric(expr: &Expr) -> Option<VectorDistanceMetric> {
-        let Expr::ScalarFunction(func) = expr else {
-            return None;
-        };
-        match func.name().to_lowercase().as_str() {
-            VEC_L2SQ_DISTANCE => Some(VectorDistanceMetric::L2sq),
-            VEC_COS_DISTANCE => Some(VectorDistanceMetric::Cosine),
-            VEC_DOT_PRODUCT => Some(VectorDistanceMetric::InnerProduct),
-            _ => None,
-        }
-    }
-
-    fn extract_limit_info(limit: &Limit) -> Option<(usize, usize)> {
-        let fetch = match limit.get_fetch_type().ok()? {
-            FetchType::Literal(fetch) => fetch?,
-            FetchType::UnsupportedExpr => return None,
-        };
-        let skip = match limit.get_skip_type().ok()? {
-            SkipType::Literal(skip) => skip,
-            SkipType::UnsupportedExpr => return None,
-        };
-        Some((fetch, skip))
     }
 }
 

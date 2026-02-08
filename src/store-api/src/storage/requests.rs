@@ -35,13 +35,13 @@ pub struct VectorSearchRequest {
     /// Distance metric to use (matches the index metric).
     pub metric: VectorDistanceMetric,
     /// Optional limit for the final result size (limit + offset).
-    /// Currently used by query planning for adaptive top-k; not pushed down to storage yet.
+    /// Used by query-layer adaptive top-k logic; currently not consumed by storage vector scan.
     pub limit: Option<usize>,
     /// Optional offset for the final result.
-    /// Currently used by query planning for adaptive top-k; not pushed down to storage yet.
+    /// Used by query-layer adaptive top-k logic; currently not consumed by storage vector scan.
     pub offset: Option<usize>,
     /// Optional tie-breaker order applied after distance.
-    /// Currently used by query planning for adaptive top-k; not pushed down to storage yet.
+    /// Used by query-layer adaptive top-k logic; currently not consumed by storage vector scan.
     pub tie_breakers: Option<Vec<OrderOption>>,
 }
 
@@ -77,10 +77,7 @@ pub trait VectorIndexEngine: Send + Sync {
         query: &[f32],
         k: usize,
         predicate: Option<&dyn VectorSearchPredicate>,
-    ) -> Result<VectorSearchMatches, BoxedError> {
-        let _ = predicate;
-        self.search(query, k)
-    }
+    ) -> Result<VectorSearchMatches, BoxedError>;
 
     /// Returns the serialized length.
     fn serialized_length(&self) -> usize;

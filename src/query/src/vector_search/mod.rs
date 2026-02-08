@@ -16,3 +16,4 @@ pub mod exec;
 pub mod options;
 pub mod plan;
 pub mod planner;
+pub(crate) mod sort;

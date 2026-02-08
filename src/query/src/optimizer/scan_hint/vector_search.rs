@@ -15,13 +15,9 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use arrow_schema::SortOptions;
-use common_function::scalars::vector::distance::{
-    VEC_COS_DISTANCE, VEC_DOT_PRODUCT, VEC_L2SQ_DISTANCE,
-};
 use common_recordbatch::OrderOption;
 use common_telemetry::debug;
 use datafusion_common::ScalarValue;
-use datafusion_expr::logical_plan::FetchType;
 use datafusion_expr::utils::split_conjunction;
 use datafusion_expr::{Expr, SortExpr};
 use datafusion_sql::TableReference;
@@ -29,6 +25,7 @@ use datatypes::types::parse_string_to_vector_type_value;
 use store_api::storage::{VectorDistanceMetric, VectorSearchRequest};
 
 use crate::dummy_catalog::DummyTableProvider;
+use crate::vector_search::sort::{distance_metric, extract_limit_info};
 
 /// Tracks vector search hints while traversing the logical plan.
 ///
@@ -120,7 +117,8 @@ impl VectorSearchState {
 
     pub(crate) fn on_limit_enter(&mut self, limit: &datafusion_expr::logical_plan::Limit) {
         self.limit_stack.push(self.current_limit.take());
-        self.current_limit = Self::extract_limit_info(limit);
+        self.current_limit =
+            extract_limit_info(limit).map(|(fetch, skip)| VectorLimitInfo { fetch, skip });
     }
 
     pub(crate) fn on_limit_exit(&mut self) {
@@ -223,16 +221,10 @@ impl VectorSearchState {
     }
 
     fn extract_distance_info(expr: &Expr) -> Option<VectorDistanceInfo> {
+        let metric = distance_metric(expr)?;
+
         let Expr::ScalarFunction(func) = expr else {
             return None;
-        };
-
-        let func_name = func.name().to_lowercase();
-        let metric = match func_name.as_str() {
-            VEC_L2SQ_DISTANCE => VectorDistanceMetric::L2sq,
-            VEC_COS_DISTANCE => VectorDistanceMetric::Cosine,
-            VEC_DOT_PRODUCT => VectorDistanceMetric::InnerProduct,
-            _ => return None,
         };
 
         if func.args.len() != 2 {
@@ -319,18 +311,6 @@ impl VectorSearchState {
                 })
             })
             .collect()
-    }
-
-    fn extract_limit_info(limit: &datafusion_expr::logical_plan::Limit) -> Option<VectorLimitInfo> {
-        let fetch = match limit.get_fetch_type().ok()? {
-            FetchType::Literal(fetch) => fetch?,
-            FetchType::UnsupportedExpr => return None,
-        };
-        let skip = match limit.get_skip_type().ok()? {
-            datafusion_expr::logical_plan::SkipType::Literal(skip) => skip,
-            datafusion_expr::logical_plan::SkipType::UnsupportedExpr => return None,
-        };
-        Some(VectorLimitInfo { fetch, skip })
     }
 
     fn extract_limit_from_sort(

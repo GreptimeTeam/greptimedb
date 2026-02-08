@@ -48,10 +48,7 @@ pub trait IndexApplier: Send + Sync {
         query: &[f32],
         k: usize,
         predicate: Option<&dyn VectorSearchPredicate>,
-    ) -> Result<VectorSearchOutput> {
-        let _ = predicate;
-        self.search(query, k)
-    }
+    ) -> Result<VectorSearchOutput>;
 
     /// Returns the memory usage.
     fn memory_usage(&self) -> usize;

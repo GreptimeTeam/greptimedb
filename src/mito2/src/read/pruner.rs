@@ -257,9 +257,6 @@ impl Pruner {
         {
             let entry = self.inner.file_entries[file_index].lock().unwrap();
             if let Some(builder) = &entry.builder {
-                // Vector index k counters are file-level totals. They are accounted once when
-                // pruning finishes (worker merge or direct prune path), so cache hits must not
-                // add them again for every row-group lookup.
                 reader_metrics.filter_metrics.pruner_cache_hit += 1;
                 return Ok(builder.clone());
             }

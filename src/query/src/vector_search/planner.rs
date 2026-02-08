@@ -28,6 +28,10 @@ use datafusion_physical_expr::create_physical_sort_expr;
 use crate::vector_search::exec::AdaptiveVectorTopKExec;
 use crate::vector_search::plan::AdaptiveVectorTopKLogicalPlan;
 
+/// Builds physical exec for `AdaptiveVectorTopKLogicalPlan`.
+///
+/// It converts logical sort expressions into physical sort expressions and
+/// preserves the logical input for adaptive re-planning in execution rounds.
 pub struct AdaptiveVectorTopKPlanner;
 
 #[async_trait]
@@ -40,6 +44,7 @@ impl ExtensionPlanner for AdaptiveVectorTopKPlanner {
         physical_inputs: &[Arc<dyn ExecutionPlan>],
         session_state: &SessionState,
     ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+        // Ignore unrelated extension nodes and let other extension planners handle them.
         let Some(topk) = node
             .as_any()
             .downcast_ref::<AdaptiveVectorTopKLogicalPlan>()
@@ -47,14 +52,17 @@ impl ExtensionPlanner for AdaptiveVectorTopKPlanner {
             return Ok(None);
         };
 
-        let logical_input = logical_inputs
-            .first()
-            .ok_or_else(|| DataFusionError::Internal("Missing logical input".to_string()))?;
-
-        let plan = physical_inputs
-            .first()
-            .cloned()
-            .ok_or_else(|| DataFusionError::Internal("Missing physical input".to_string()))?;
+        // AdaptiveVectorTopKLogicalPlan is unary. Enforce exactly one input here so
+        // future planner wiring bugs fail fast instead of silently dropping inputs.
+        if logical_inputs.len() != 1 || physical_inputs.len() != 1 {
+            return Err(DataFusionError::Internal(format!(
+                "AdaptiveVectorTopKPlanner expects exactly one input, logical_inputs={}, physical_inputs={}",
+                logical_inputs.len(),
+                physical_inputs.len()
+            )));
+        }
+        let logical_input = logical_inputs[0];
+        let plan = physical_inputs[0].clone();
         let exprs = topk
             .expr
             .iter()

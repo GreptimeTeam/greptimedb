@@ -22,6 +22,7 @@ use arrow::compute::{SortColumn, concat_batches, lexsort_to_indices, take};
 use arrow::record_batch::RecordBatch;
 use arrow_schema::SchemaRef;
 use common_recordbatch::DfSendableRecordBatchStream;
+use common_telemetry::debug;
 use datafusion::execution::TaskContext;
 use datafusion::execution::context::SessionState;
 use datafusion::physical_plan::metrics::{
@@ -35,6 +36,11 @@ use datafusion_physical_expr::Partitioning;
 use futures_util::StreamExt;
 
 #[derive(Debug)]
+/// Physical exec for adaptive vector top-k queries.
+///
+/// It merges all child partitions, applies global sort/offset/limit, and optionally
+/// rebuilds `Sort + Limit(k)` plans across rounds to increase k until the result
+/// stabilizes or reaches configured stop conditions.
 pub struct AdaptiveVectorTopKExec {
     inner: Arc<dyn ExecutionPlan>,
     exprs: Vec<datafusion_physical_expr::PhysicalSortExpr>,
@@ -46,6 +52,11 @@ pub struct AdaptiveVectorTopKExec {
     rebuild_plan: bool,
     properties: PlanProperties,
     metrics: ExecutionPlanMetricsSet,
+    vector_metrics: AdaptiveVectorTopKMetric,
+}
+
+#[derive(Debug, Clone)]
+struct AdaptiveVectorTopKMetric {
     /// Vector index requested k for the last executed round.
     vector_index_requested_k: Gauge,
     /// Vector index returned k for the last executed round.
@@ -60,6 +71,51 @@ pub struct AdaptiveVectorTopKExec {
     vector_index_result_len: Gauge,
     /// Kth distance in micros (distance * 1_000_000) for the last execution.
     vector_index_kth_distance_micros: Gauge,
+}
+
+impl AdaptiveVectorTopKMetric {
+    fn new(metrics: &ExecutionPlanMetricsSet) -> Self {
+        Self {
+            vector_index_requested_k: MetricBuilder::new(metrics)
+                .gauge("vector_index_requested_k", 1),
+            vector_index_returned_k: MetricBuilder::new(metrics)
+                .gauge("vector_index_returned_k", 1),
+            vector_index_retry_rounds: MetricBuilder::new(metrics)
+                .gauge("vector_index_retry_rounds", 1),
+            vector_index_last_k: MetricBuilder::new(metrics).gauge("vector_index_last_k", 1),
+            vector_index_desired_rows: MetricBuilder::new(metrics)
+                .gauge("vector_index_desired_rows", 1),
+            vector_index_result_len: MetricBuilder::new(metrics)
+                .gauge("vector_index_result_len", 1),
+            vector_index_kth_distance_micros: MetricBuilder::new(metrics)
+                .gauge("vector_index_kth_distance_micros", 1),
+        }
+    }
+
+    fn on_round_start(&self, round: usize, k: usize, desired: usize) {
+        self.vector_index_retry_rounds.set(round.saturating_sub(1));
+        self.vector_index_last_k.set(k);
+        self.vector_index_desired_rows.set(desired);
+    }
+
+    fn set_requested_returned_k(&self, requested: usize, returned: usize) {
+        self.vector_index_requested_k.set(requested);
+        self.vector_index_returned_k.set(returned);
+    }
+
+    fn set_result_len(&self, result_len: usize) {
+        self.vector_index_result_len.set(result_len);
+    }
+
+    fn set_kth_distance_micros(&self, kth_distance: Option<f64>) {
+        let kth_micros = kth_distance
+            .filter(|v| v.is_finite())
+            .map(|v| (v * 1_000_000.0).round())
+            .filter(|v| *v > 0.0)
+            .map(|v| v as usize)
+            .unwrap_or(0);
+        self.vector_index_kth_distance_micros.set(kth_micros);
+    }
 }
 
 impl AdaptiveVectorTopKExec {
@@ -81,19 +137,7 @@ impl AdaptiveVectorTopKExec {
             inner.properties().boundedness,
         );
         let metrics = ExecutionPlanMetricsSet::new();
-        let vector_index_requested_k =
-            MetricBuilder::new(&metrics).gauge("vector_index_requested_k", 1);
-        let vector_index_returned_k =
-            MetricBuilder::new(&metrics).gauge("vector_index_returned_k", 1);
-        let vector_index_retry_rounds =
-            MetricBuilder::new(&metrics).gauge("vector_index_retry_rounds", 1);
-        let vector_index_last_k = MetricBuilder::new(&metrics).gauge("vector_index_last_k", 1);
-        let vector_index_desired_rows =
-            MetricBuilder::new(&metrics).gauge("vector_index_desired_rows", 1);
-        let vector_index_result_len =
-            MetricBuilder::new(&metrics).gauge("vector_index_result_len", 1);
-        let vector_index_kth_distance_micros =
-            MetricBuilder::new(&metrics).gauge("vector_index_kth_distance_micros", 1);
+        let vector_metrics = AdaptiveVectorTopKMetric::new(&metrics);
         Self {
             inner,
             exprs,
@@ -105,13 +149,7 @@ impl AdaptiveVectorTopKExec {
             rebuild_plan,
             properties,
             metrics,
-            vector_index_requested_k,
-            vector_index_returned_k,
-            vector_index_retry_rounds,
-            vector_index_last_k,
-            vector_index_desired_rows,
-            vector_index_result_len,
-            vector_index_kth_distance_micros,
+            vector_metrics,
         }
     }
 }
@@ -184,16 +222,15 @@ impl ExecutionPlan for AdaptiveVectorTopKExec {
         let rebuild_plan = self.rebuild_plan;
         let inner = self.inner.clone();
         let context = context.clone();
-        let vector_index_requested_k = self.vector_index_requested_k.clone();
-        let vector_index_returned_k = self.vector_index_returned_k.clone();
-        let vector_index_retry_rounds = self.vector_index_retry_rounds.clone();
-        let vector_index_last_k = self.vector_index_last_k.clone();
-        let vector_index_desired_rows = self.vector_index_desired_rows.clone();
-        let vector_index_result_len = self.vector_index_result_len.clone();
-        let vector_index_kth_distance_micros = self.vector_index_kth_distance_micros.clone();
+        let vector_metrics = self.vector_metrics.clone();
 
         let stream = async_stream::try_stream! {
+            // This exec declares UnknownPartitioning(1), so only partition 0 should be scheduled.
             if partition != 0 {
+                debug!(
+                    "AdaptiveVectorTopKExec skips non-zero output partition: {}",
+                    partition
+                );
                 return;
             }
             let maybe_batch = if rebuild_plan {
@@ -207,13 +244,7 @@ impl ExecutionPlan for AdaptiveVectorTopKExec {
                     fetch,
                     skip,
                     options.as_ref().map(|v| v.as_ref()),
-                    &vector_index_requested_k,
-                    &vector_index_returned_k,
-                    &vector_index_retry_rounds,
-                    &vector_index_last_k,
-                    &vector_index_desired_rows,
-                    &vector_index_result_len,
-                    &vector_index_kth_distance_micros,
+                    &vector_metrics,
                 )
                 .await?
             } else {
@@ -241,13 +272,25 @@ impl ExecutionPlan for AdaptiveVectorTopKExec {
     }
 }
 
-/// (batch, kth_distance, tie_hash, total_rows, result_len)
-type SortLimitResult = (RecordBatch, Option<f64>, Option<u64>, usize, usize);
+struct SortLimitResult {
+    batch: RecordBatch,
+    kth_distance: Option<f64>,
+    tie_hash: Option<u64>,
+    total_rows: usize,
+    result_len: usize,
+}
 
 enum SortLimitOutcome {
     Empty,
     Skipped,
     Some(SortLimitResult),
+}
+
+struct AdaptiveRoundResult {
+    batches: Vec<RecordBatch>,
+    requested_k: usize,
+    returned_k: usize,
+    hit_max_rows: bool,
 }
 
 async fn run_direct_topk(
@@ -270,11 +313,17 @@ async fn run_direct_topk(
         }
     }
 
-    let (batch, _, _, _, _) = match sort_and_limit(batches, schema, exprs, fetch, skip)? {
-        SortLimitOutcome::Empty | SortLimitOutcome::Skipped => return Ok(None),
+    let result = match sort_and_limit(batches, schema, exprs, fetch, skip)? {
+        SortLimitOutcome::Empty | SortLimitOutcome::Skipped => {
+            debug!(
+                "AdaptiveVectorTopK direct path returns None: no rows after global sort/limit, fetch={:?}, skip={}",
+                fetch, skip
+            );
+            return Ok(None);
+        }
         SortLimitOutcome::Some(result) => result,
     };
-    Ok(Some(batch))
+    Ok(Some(result.batch))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -288,19 +337,18 @@ async fn run_adaptive_topk(
     fetch: Option<usize>,
     skip: usize,
     options: Option<&crate::vector_search::options::AdaptiveVectorTopKOptions>,
-    vector_index_requested_k: &Gauge,
-    vector_index_returned_k: &Gauge,
-    vector_index_retry_rounds: &Gauge,
-    vector_index_last_k: &Gauge,
-    vector_index_desired_rows: &Gauge,
-    vector_index_result_len: &Gauge,
-    vector_index_kth_distance_micros: &Gauge,
+    vector_metrics: &AdaptiveVectorTopKMetric,
 ) -> datafusion_common::Result<Option<RecordBatch>> {
     let Some(desired) = fetch.map(|f| f.saturating_add(skip)) else {
+        debug!(
+            "AdaptiveVectorTopK returns None: fetch is None, skip={}",
+            skip
+        );
         return Ok(None);
     };
     let mut k = desired;
     if k == 0 {
+        debug!("AdaptiveVectorTopK returns None: desired rows is zero");
         return Ok(None);
     }
     let mut last_tie_hash = None;
@@ -313,116 +361,215 @@ async fn run_adaptive_topk(
 
     loop {
         round += 1;
-        vector_index_retry_rounds.set(round.saturating_sub(1));
-        if let Some(max_k) = max_k
-            && k > max_k
-        {
-            k = max_k;
-        }
-        vector_index_last_k.set(k);
-        vector_index_desired_rows.set(desired);
-        let logical_plan = datafusion_expr::LogicalPlanBuilder::from(logical_input.clone())
-            .sort(logical_exprs.to_vec())?
-            .limit(0, Some(k))?
-            .build()?;
-
-        let plan = crate::optimizer::adaptive_vector_topk::with_adaptive_topk_disabled(
-            session_state.create_physical_plan(&logical_plan),
+        k = clamp_k(k, max_k);
+        vector_metrics.on_round_start(round, k, desired);
+        let round_result = execute_adaptive_round(
+            session_state,
+            logical_input,
+            logical_exprs,
+            context,
+            k,
+            max_rows,
         )
         .await?;
 
-        let input_partition_count = plan.output_partitioning().partition_count();
-        // Each adaptive round re-executes all partitions; this can trigger repeated RPCs
-        // in distributed scans. Keep the loop simple and bounded by max_rows/max_rounds.
-        let mut batches = Vec::new();
-        let mut collected_rows = 0usize;
-        let mut hit_max_rows = false;
-        for input_partition in 0..input_partition_count {
-            let mut input = plan.execute(input_partition, context.clone())?;
-            while let Some(batch) = input.next().await {
-                let batch = batch?;
-                let rows = batch.num_rows();
-                if rows > 0 {
-                    batches.push(batch);
-                    collected_rows = collected_rows.saturating_add(rows);
-                    if collected_rows >= max_rows {
-                        hit_max_rows = true;
-                        break;
-                    }
+        vector_metrics.set_requested_returned_k(round_result.requested_k, round_result.returned_k);
+        let result = match sort_and_limit(round_result.batches, schema, exprs, fetch, skip)? {
+            SortLimitOutcome::Empty | SortLimitOutcome::Skipped => {
+                if should_retry_empty_round(
+                    round,
+                    max_rounds,
+                    k,
+                    max_k,
+                    round_result.requested_k,
+                    round_result.returned_k,
+                ) {
+                    debug!(
+                        "AdaptiveVectorTopK retries after empty/skip round: round={}, k={}, requested_k={}, returned_k={}",
+                        round, k, round_result.requested_k, round_result.returned_k
+                    );
+                    k = k.saturating_mul(2);
+                    continue;
                 }
+                debug!(
+                    "AdaptiveVectorTopK returns None after empty/skip round: round={}, k={}, requested_k={}, returned_k={}, max_rounds={}, max_k={:?}",
+                    round, k, round_result.requested_k, round_result.returned_k, max_rounds, max_k
+                );
+                return Ok(None);
             }
-            if collected_rows >= max_rows {
-                break;
-            }
-        }
-
-        let (requested_k, returned_k) = collect_vector_index_k_metrics(plan.as_ref());
-        vector_index_requested_k.set(requested_k);
-        vector_index_returned_k.set(returned_k);
-        let (batch, kth_distance, tie_hash, total_rows, result_len) =
-            match sort_and_limit(batches, schema, exprs, fetch, skip)? {
-                SortLimitOutcome::Empty | SortLimitOutcome::Skipped => {
-                    if round >= max_rounds {
-                        return Ok(None);
-                    }
-                    if let Some(max_k) = max_k
-                        && k >= max_k
-                    {
-                        return Ok(None);
-                    }
-                    if requested_k > 0 && returned_k == requested_k {
-                        k = k.saturating_mul(2);
-                        continue;
-                    }
-                    return Ok(None);
-                }
-                SortLimitOutcome::Some(result) => result,
-            };
-        vector_index_result_len.set(result_len);
-        let kth_micros = kth_distance
-            .filter(|v| v.is_finite())
-            .map(|v| (v * 1_000_000.0).round())
-            .filter(|v| *v > 0.0)
-            .map(|v| v as usize)
-            .unwrap_or(0);
-        vector_index_kth_distance_micros.set(kth_micros);
-
-        let tie_stable = match (last_tie_hash, tie_hash, last_kth, kth_distance) {
-            (Some(prev_hash), Some(curr_hash), Some(prev_kth), Some(curr_kth)) => {
-                prev_hash == curr_hash && prev_kth == curr_kth
-            }
-            _ => false,
+            SortLimitOutcome::Some(result) => result,
         };
+        vector_metrics.set_result_len(result.result_len);
+        vector_metrics.set_kth_distance_micros(result.kth_distance);
+
+        let tie_stable = is_tie_stable(
+            last_tie_hash,
+            result.tie_hash,
+            last_kth,
+            result.kth_distance,
+        );
 
         // `returned_k < requested_k` is a coarse aggregated metric and can be affected by
         // partial collection. Treat exhaustion as reliable only when this round did not hit
         // the row cap and the physical plan itself produced fewer than `k` rows.
-        if should_finish_round(total_rows, desired, tie_stable, hit_max_rows, k) {
-            return Ok(Some(batch));
+        if should_finish_round(
+            result.total_rows,
+            desired,
+            tie_stable,
+            round_result.hit_max_rows,
+            k,
+        ) {
+            debug!(
+                "AdaptiveVectorTopK returns batch: finish condition met, round={}, k={}, desired={}, total_rows={}, tie_stable={}, hit_max_rows={}",
+                round, k, desired, result.total_rows, tie_stable, round_result.hit_max_rows
+            );
+            return Ok(Some(result.batch));
         }
 
         // Stagnation stop: if the collected candidate count no longer increases after growing k,
         // another round is unlikely to produce new rows from storage/index pruning.
         // Returning here preserves current best-effort semantics and avoids useless retries.
-        if total_rows < desired && matches!(last_total_rows, Some(prev) if prev == total_rows) {
-            return Ok(Some(batch));
-        }
-
-        if round >= max_rounds {
-            return Ok(Some(batch));
-        }
-
-        if let Some(max_k) = max_k
-            && k >= max_k
+        if result.total_rows < desired
+            && matches!(last_total_rows, Some(prev) if prev == result.total_rows)
         {
-            return Ok(Some(batch));
+            debug!(
+                "AdaptiveVectorTopK returns batch: stagnation detected, round={}, k={}, desired={}, total_rows={}",
+                round, k, desired, result.total_rows
+            );
+            return Ok(Some(result.batch));
         }
 
-        last_tie_hash = tie_hash;
-        last_kth = kth_distance;
-        last_total_rows = Some(total_rows);
+        if reached_adaptive_limits(round, max_rounds, k, max_k) {
+            debug!(
+                "AdaptiveVectorTopK returns batch: adaptive limit reached, round={}, k={}, max_rounds={}, max_k={:?}, total_rows={}",
+                round, k, max_rounds, max_k, result.total_rows
+            );
+            return Ok(Some(result.batch));
+        }
+
+        last_tie_hash = result.tie_hash;
+        last_kth = result.kth_distance;
+        last_total_rows = Some(result.total_rows);
         k = k.saturating_mul(2);
     }
+}
+
+async fn execute_adaptive_round(
+    session_state: &Arc<SessionState>,
+    logical_input: &datafusion_expr::LogicalPlan,
+    logical_exprs: &[datafusion_expr::SortExpr],
+    context: &Arc<TaskContext>,
+    k: usize,
+    max_rows: usize,
+) -> datafusion_common::Result<AdaptiveRoundResult> {
+    let logical_plan = datafusion_expr::LogicalPlanBuilder::from(logical_input.clone())
+        .sort(logical_exprs.to_vec())?
+        .limit(0, Some(k))?
+        .build()?;
+
+    let plan = crate::optimizer::adaptive_vector_topk::with_adaptive_topk_disabled(
+        session_state.create_physical_plan(&logical_plan),
+    )
+    .await?;
+
+    let (batches, hit_max_rows) = collect_round_batches(plan.as_ref(), context, max_rows).await?;
+    let (requested_k, returned_k) = collect_vector_index_k_metrics(plan.as_ref());
+    Ok(AdaptiveRoundResult {
+        batches,
+        requested_k,
+        returned_k,
+        hit_max_rows,
+    })
+}
+
+async fn collect_round_batches(
+    plan: &dyn ExecutionPlan,
+    context: &Arc<TaskContext>,
+    max_rows: usize,
+) -> datafusion_common::Result<(Vec<RecordBatch>, bool)> {
+    let input_partition_count = plan.output_partitioning().partition_count();
+    // Each adaptive round re-executes all partitions; this can trigger repeated RPCs
+    // in distributed scans. Keep the loop simple and bounded by max_rows/max_rounds.
+    let mut batches = Vec::new();
+    let mut collected_rows = 0usize;
+    let mut hit_max_rows = false;
+    for input_partition in 0..input_partition_count {
+        let mut input = plan.execute(input_partition, context.clone())?;
+        while let Some(batch) = input.next().await {
+            let batch = batch?;
+            let rows = batch.num_rows();
+            if rows > 0 {
+                batches.push(batch);
+                collected_rows = collected_rows.saturating_add(rows);
+                if collected_rows >= max_rows {
+                    hit_max_rows = true;
+                    debug!(
+                        "AdaptiveVectorTopK round collection hit max_rows, partition={}, collected_rows={}, max_rows={}",
+                        input_partition, collected_rows, max_rows
+                    );
+                    break;
+                }
+            }
+        }
+        if collected_rows >= max_rows {
+            break;
+        }
+    }
+    Ok((batches, hit_max_rows))
+}
+
+fn clamp_k(k: usize, max_k: Option<usize>) -> usize {
+    if let Some(max_k) = max_k
+        && k > max_k
+    {
+        return max_k;
+    }
+    k
+}
+
+fn should_retry_empty_round(
+    round: usize,
+    max_rounds: usize,
+    k: usize,
+    max_k: Option<usize>,
+    requested_k: usize,
+    returned_k: usize,
+) -> bool {
+    if reached_adaptive_limits(round, max_rounds, k, max_k) {
+        return false;
+    }
+    requested_k > 0 && returned_k == requested_k
+}
+
+fn is_tie_stable(
+    last_tie_hash: Option<u64>,
+    tie_hash: Option<u64>,
+    last_kth: Option<f64>,
+    kth_distance: Option<f64>,
+) -> bool {
+    match (last_tie_hash, tie_hash, last_kth, kth_distance) {
+        (Some(prev_hash), Some(curr_hash), Some(prev_kth), Some(curr_kth)) => {
+            prev_hash == curr_hash && prev_kth == curr_kth
+        }
+        _ => false,
+    }
+}
+
+fn reached_adaptive_limits(
+    round: usize,
+    max_rounds: usize,
+    k: usize,
+    max_k: Option<usize>,
+) -> bool {
+    if round >= max_rounds {
+        return true;
+    }
+    if let Some(max_k) = max_k
+        && k >= max_k
+    {
+        return true;
+    }
+    false
 }
 
 fn sort_and_limit(
@@ -494,13 +641,13 @@ fn sort_and_limit(
         .map(|col| take(col.as_ref(), &selected_indices, None))
         .collect::<Result<Vec<_>, _>>()?;
 
-    Ok(SortLimitOutcome::Some((
-        RecordBatch::try_new(schema.clone(), columns)?,
+    Ok(SortLimitOutcome::Some(SortLimitResult {
+        batch: RecordBatch::try_new(schema.clone(), columns)?,
         kth_distance,
         tie_hash,
         total_rows,
-        length,
-    )))
+        result_len: length,
+    }))
 }
 
 fn collect_vector_index_k_metrics(plan: &dyn ExecutionPlan) -> (usize, usize) {
