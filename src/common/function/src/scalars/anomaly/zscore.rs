@@ -190,11 +190,10 @@ mod tests {
     }
 
     #[test]
-    fn test_stddev_zero_non_mean() {
-        // All same but current is different → NULL
+    fn test_outlier_in_window_gives_finite_score() {
+        // 5.0 is included in the window, so stddev is non-zero → finite positive score
         let values: Vec<Option<f64>> = vec![Some(1.0), Some(1.0), Some(1.0), Some(1.0), Some(5.0)];
         let result = eval_zscore(&values, 0..5);
-        // stddev will be non-zero because 5.0 is in the window
         match result {
             ScalarValue::Float64(Some(score)) => assert!(score > 0.0),
             other => panic!("expected Some(score>0), got {other:?}"),
