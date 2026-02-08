@@ -32,7 +32,9 @@ use datafusion_expr::{PartitionEvaluator, Signature, Volatility, WindowUDFImpl};
 use datafusion_functions_window_common::field::WindowUDFFieldArgs;
 use datafusion_functions_window_common::partition::PartitionEvaluatorArgs;
 
-use super::utils::{MIN_SAMPLES, anomaly_ratio, cast_to_f64, collect_window_values};
+use crate::scalars::anomaly::utils::{
+    MIN_SAMPLES, anomaly_ratio, cast_to_f64, collect_window_values,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AnomalyScoreZscore {

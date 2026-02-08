@@ -337,6 +337,35 @@ ORDER BY ts;
 | 2025-01-01T00:04:00 | 15.0 |              |           |           |
 +---------------------+------+--------------+-----------+-----------+
 
+-- 9. Zero-spread with deviation: +inf branch
+-- host-b had 5 constant 10.0 values; inserting one deviating value triggers +inf
+-- for MAD and IQR (whose spread metrics are robust to a single outlier),
+-- while zscore sees non-zero stddev and returns a finite value.
+INSERT INTO anomaly_test VALUES ('host-b', 11.0, '2025-01-01 00:05:00');
+
+Affected Rows: 1
+
+SELECT
+    ts,
+    val,
+    ROUND(anomaly_score_zscore(val) OVER (ORDER BY ts), 2) AS zscore,
+    ROUND(anomaly_score_mad(val) OVER (ORDER BY ts), 2) AS mad,
+    ROUND(anomaly_score_iqr(val, 1.5) OVER (ORDER BY ts), 2) AS iqr
+FROM anomaly_test
+WHERE host = 'host-b'
+ORDER BY ts;
+
++---------------------+------+--------+-----+-----+
+| ts                  | val  | zscore | mad | iqr |
++---------------------+------+--------+-----+-----+
+| 2025-01-01T00:00:00 | 10.0 |        |     |     |
+| 2025-01-01T00:01:00 | 10.0 |        |     |     |
+| 2025-01-01T00:02:00 | 10.0 | 0.0    | 0.0 | 0.0 |
+| 2025-01-01T00:03:00 | 10.0 | 0.0    | 0.0 | 0.0 |
+| 2025-01-01T00:04:00 | 10.0 | 0.0    | 0.0 | 0.0 |
+| 2025-01-01T00:05:00 | 11.0 | 2.24   | inf | inf |
++---------------------+------+--------+-----+-----+
+
 -- Cleanup
 DROP TABLE anomaly_test;
 

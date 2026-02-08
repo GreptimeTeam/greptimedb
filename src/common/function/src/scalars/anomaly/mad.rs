@@ -33,7 +33,9 @@ use datafusion_expr::{PartitionEvaluator, Signature, Volatility, WindowUDFImpl};
 use datafusion_functions_window_common::field::WindowUDFFieldArgs;
 use datafusion_functions_window_common::partition::PartitionEvaluatorArgs;
 
-use super::utils::{MIN_SAMPLES, anomaly_ratio, cast_to_f64, collect_window_values, median_f64};
+use crate::scalars::anomaly::utils::{
+    MIN_SAMPLES, anomaly_ratio, cast_to_f64, collect_window_values, median_f64,
+};
 
 /// MAD consistency constant for normal distribution: `1 / Φ⁻¹(3/4) ≈ 1.4826`
 const MAD_CONSISTENCY_CONSTANT: f64 = 1.4826;
