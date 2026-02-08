@@ -90,7 +90,7 @@ pub trait QueryEngine: Send + Sync {
     fn register_table_function(&self, func: Arc<TableFunction>);
 
     /// Register a window function (UDWF).
-    fn register_window_function(&self, _func: WindowUDF) {}
+    fn register_window_function(&self, func: WindowUDF);
 
     /// Create a DataFrame from a table.
     fn read_table(&self, table: TableRef) -> Result<DataFrame>;
