@@ -16,6 +16,9 @@
 //!
 //! Algorithm: `score = |x - median(window)| / (MAD * 1.4826)`
 //! where `MAD = median(|xi - median(window)|)`
+//!
+//! When MAD = 0 (majority-constant window), returns 0.0 if value equals
+//! median, or +inf otherwise.
 
 use std::any::Any;
 use std::fmt::Debug;
@@ -24,12 +27,13 @@ use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, Float64Array};
 use arrow::datatypes::{DataType, Field, FieldRef};
-use datafusion_common::{Result, ScalarValue};
-use datafusion_expr::{PartitionEvaluator, Signature, TypeSignature, Volatility, WindowUDFImpl};
+use datafusion_common::{DataFusionError, Result, ScalarValue};
+use datafusion_expr::type_coercion::aggregates::NUMERICS;
+use datafusion_expr::{PartitionEvaluator, Signature, Volatility, WindowUDFImpl};
 use datafusion_functions_window_common::field::WindowUDFFieldArgs;
 use datafusion_functions_window_common::partition::PartitionEvaluatorArgs;
 
-use super::utils::{MIN_SAMPLES, collect_window_values, median_f64};
+use super::utils::{MIN_SAMPLES, anomaly_ratio, cast_to_f64, collect_window_values, median_f64};
 
 /// MAD consistency constant for normal distribution: `1 / Φ⁻¹(3/4) ≈ 1.4826`
 const MAD_CONSISTENCY_CONSTANT: f64 = 1.4826;
@@ -42,10 +46,7 @@ pub struct AnomalyScoreMad {
 impl AnomalyScoreMad {
     pub fn new() -> Self {
         Self {
-            signature: Signature::one_of(
-                vec![TypeSignature::Exact(vec![DataType::Float64])],
-                Volatility::Immutable,
-            ),
+            signature: Signature::uniform(1, NUMERICS.to_vec(), Volatility::Immutable),
         }
     }
 }
@@ -97,10 +98,16 @@ impl PartitionEvaluator for AnomalyScoreMadEvaluator {
     }
 
     fn evaluate(&mut self, values: &[ArrayRef], range: &Range<usize>) -> Result<ScalarValue> {
-        let array = values[0]
+        let values_f64 = cast_to_f64(&values[0])?;
+        let array = values_f64
             .as_any()
             .downcast_ref::<Float64Array>()
-            .expect("anomaly_score_mad expects Float64 input");
+            .ok_or_else(|| {
+                DataFusionError::Internal(format!(
+                    "Expected Float64Array, got: {:?}",
+                    values_f64.data_type()
+                ))
+            })?;
 
         // Use the tracked current row index — correct for any window frame
         // (trailing, leading, centered, unbounded).
@@ -134,7 +141,9 @@ impl PartitionEvaluator for AnomalyScoreMadEvaluator {
             None => return Ok(ScalarValue::Float64(None)),
         };
 
-        let score = (current_value - median).abs() / (mad * MAD_CONSISTENCY_CONSTANT);
+        let distance = (current_value - median).abs();
+        let scale = mad * MAD_CONSISTENCY_CONSTANT;
+        let score = anomaly_ratio(distance, scale);
         Ok(ScalarValue::Float64(Some(score)))
     }
 }
@@ -177,11 +186,11 @@ mod tests {
     #[test]
     fn test_constant_sequence() {
         let values: Vec<Option<f64>> = vec![Some(5.0); 10];
-        // All values are the same -> 0/0 => NaN
+        // All values are the same -> zero spread and zero distance => 0.0
         let result = eval_mad(&values, 0..10);
         match result {
-            ScalarValue::Float64(Some(score)) => assert!(score.is_nan()),
-            other => panic!("expected Some(NaN), got {other:?}"),
+            ScalarValue::Float64(Some(score)) => assert_eq!(score, 0.0),
+            other => panic!("expected Some(0.0), got {other:?}"),
         }
     }
 

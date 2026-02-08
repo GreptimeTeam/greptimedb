@@ -24,6 +24,13 @@
 //! These functions return a floating-point anomaly score rather than a boolean,
 //! allowing users to set their own threshold via `WHERE score > N`.
 //!
+//! ## Return Values
+//!
+//! - `NULL` — fewer than 3 valid (finite, non-null) data points in the window
+//! - `0.0` — value equals the center (mean/median) under zero spread
+//! - `+inf` — value deviates from a constant window (zero spread, non-zero distance)
+//! - finite positive — normal anomaly score
+//!
 //! ## Window Frame Semantics
 //!
 //! The functions score the **current row** in the partition, regardless of

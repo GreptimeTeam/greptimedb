@@ -16,10 +16,22 @@
 
 use std::ops::Range;
 
-use arrow::array::{Array, Float64Array};
+use arrow::array::{Array, ArrayRef, Float64Array};
+use arrow::compute;
+use arrow::datatypes::DataType;
+use datafusion_common::DataFusionError;
 
 /// Minimum number of valid data points required for meaningful statistical analysis.
 pub const MIN_SAMPLES: usize = 3;
+
+/// Cast an ArrayRef to Float64. Returns the array as-is if already Float64.
+pub fn cast_to_f64(array: &ArrayRef) -> datafusion_common::Result<ArrayRef> {
+    if array.data_type() == &DataType::Float64 {
+        return Ok(array.clone());
+    }
+    compute::cast(array, &DataType::Float64)
+        .map_err(|e| DataFusionError::Internal(format!("Failed to cast to Float64: {e}")))
+}
 
 /// Collect valid f64 values from a Float64Array within the given range,
 /// skipping NULL, NaN, and ±Inf values.
@@ -84,6 +96,20 @@ pub fn percentile_sorted(sorted: &[f64], p: f64) -> Option<f64> {
     }
 }
 
+/// Compute a non-negative anomaly score ratio with stable zero-denominator semantics.
+///
+/// When `scale == 0.0`:
+/// - returns `0.0` if `distance == 0.0` (on-center value),
+/// - returns `+inf` if `distance > 0.0` (off-center value under zero spread).
+#[inline]
+pub fn anomaly_ratio(distance: f64, scale: f64) -> f64 {
+    if scale == 0.0 {
+        if distance == 0.0 { 0.0 } else { f64::INFINITY }
+    } else {
+        distance / scale
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,5 +165,11 @@ mod tests {
         ]);
         let values = collect_window_values(&array, &(0..7));
         assert_eq!(values, vec![1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn test_anomaly_ratio_zero_scale() {
+        assert_eq!(anomaly_ratio(0.0, 0.0), 0.0);
+        assert!(anomaly_ratio(1.0, 0.0).is_infinite());
     }
 }

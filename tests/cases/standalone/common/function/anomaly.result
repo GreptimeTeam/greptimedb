@@ -33,7 +33,7 @@ Affected Rows: 5
 
 -- 1. Basic expanding window with PARTITION BY (three functions)
 -- Expect: first 2 rows per partition -> NULL (< 3 samples), outlier row high score.
--- For host-b (constant series), zscore/mad become NaN and iqr stays 0.0.
+-- For host-b (constant series), zscore/mad/iqr are all 0.0.
 SELECT
     host,
     ts,
@@ -56,9 +56,9 @@ ORDER BY host, ts;
 | host-a | 2025-01-01T00:06:00 | 50.0  | 0.41   | 0.0   | 0.0  |
 | host-b | 2025-01-01T00:00:00 | 10.0  |        |       |      |
 | host-b | 2025-01-01T00:01:00 | 10.0  |        |       |      |
-| host-b | 2025-01-01T00:02:00 | 10.0  | NaN    | NaN   | 0.0  |
-| host-b | 2025-01-01T00:03:00 | 10.0  | NaN    | NaN   | 0.0  |
-| host-b | 2025-01-01T00:04:00 | 10.0  | NaN    | NaN   | 0.0  |
+| host-b | 2025-01-01T00:02:00 | 10.0  | 0.0    | 0.0   | 0.0  |
+| host-b | 2025-01-01T00:03:00 | 10.0  | 0.0    | 0.0   | 0.0  |
+| host-b | 2025-01-01T00:04:00 | 10.0  | 0.0    | 0.0   | 0.0  |
 +--------+---------------------+-------+--------+-------+------+
 
 -- 2. Time range window (RANGE INTERVAL '5 minutes' PRECEDING)
@@ -93,9 +93,9 @@ ORDER BY host, ts;
 | host-a | 2025-01-01T00:06:00 | 50.0  | 0.45         | 0.34      | 0.0       |
 | host-b | 2025-01-01T00:00:00 | 10.0  |              |           |           |
 | host-b | 2025-01-01T00:01:00 | 10.0  |              |           |           |
-| host-b | 2025-01-01T00:02:00 | 10.0  | NaN          | NaN       | 0.0       |
-| host-b | 2025-01-01T00:03:00 | 10.0  | NaN          | NaN       | 0.0       |
-| host-b | 2025-01-01T00:04:00 | 10.0  | NaN          | NaN       | 0.0       |
+| host-b | 2025-01-01T00:02:00 | 10.0  | 0.0          | 0.0       | 0.0       |
+| host-b | 2025-01-01T00:03:00 | 10.0  | 0.0          | 0.0       | 0.0       |
+| host-b | 2025-01-01T00:04:00 | 10.0  | 0.0          | 0.0       | 0.0       |
 +--------+---------------------+-------+--------------+-----------+-----------+
 
 -- 3. Fixed sliding window (ROWS 4 PRECEDING)
@@ -254,15 +254,14 @@ ORDER BY host, ts;
 | host-a | 2025-01-01T00:06:00 | 50.0  | 0.41   | 0.0   | 0.0  |
 | host-b | 2025-01-01T00:00:00 | 10.0  |        |       |      |
 | host-b | 2025-01-01T00:01:00 | 10.0  |        |       |      |
-| host-b | 2025-01-01T00:02:00 | 10.0  | NaN    | NaN   | 0.0  |
-| host-b | 2025-01-01T00:03:00 | 10.0  | NaN    | NaN   | 0.0  |
-| host-b | 2025-01-01T00:04:00 | 10.0  | NaN    | NaN   | 0.0  |
+| host-b | 2025-01-01T00:02:00 | 10.0  | 0.0    | 0.0   | 0.0  |
+| host-b | 2025-01-01T00:03:00 | 10.0  | 0.0    | 0.0   | 0.0  |
+| host-b | 2025-01-01T00:04:00 | 10.0  | 0.0    | 0.0   | 0.0  |
 +--------+---------------------+-------+--------+-------+------+
 
 -- 6. Subquery filtering anomalous rows (WHERE score > threshold)
 -- MAD score for outlier is ~67, use threshold 3.0 to filter
--- Current behavior: rows with MAD = NaN are also returned by `mad > 3.0`.
--- So this query returns host-a outlier and host-b NaN rows.
+-- MAD score for host-b constant rows is 0.0, so this query returns only host-a outlier.
 SELECT * FROM (
     SELECT
         host,
@@ -277,9 +276,6 @@ ORDER BY host, ts;
 | host   | ts                  | val   | mad   |
 +--------+---------------------+-------+-------+
 | host-a | 2025-01-01T00:05:00 | 200.0 | 67.22 |
-| host-b | 2025-01-01T00:02:00 | 10.0  | NaN   |
-| host-b | 2025-01-01T00:03:00 | 10.0  | NaN   |
-| host-b | 2025-01-01T00:04:00 | 10.0  | NaN   |
 +--------+---------------------+-------+-------+
 
 -- 7. NULL handling

@@ -20,6 +20,9 @@
 //! - Lower fence = Q1 - k * IQR, Upper fence = Q3 + k * IQR
 //! - If value is outside fences, score = |distance to nearest fence| / IQR
 //! - Otherwise, score = 0.0
+//!
+//! When IQR = 0 (constant quartiles), returns 0.0 if value is on the fence,
+//! or +inf if value is outside.
 
 use std::any::Any;
 use std::fmt::Debug;
@@ -28,12 +31,13 @@ use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, Float64Array};
 use arrow::datatypes::{DataType, Field, FieldRef};
-use datafusion_common::{Result, ScalarValue};
-use datafusion_expr::{PartitionEvaluator, Signature, TypeSignature, Volatility, WindowUDFImpl};
+use datafusion_common::{DataFusionError, Result, ScalarValue};
+use datafusion_expr::type_coercion::aggregates::NUMERICS;
+use datafusion_expr::{PartitionEvaluator, Signature, Volatility, WindowUDFImpl};
 use datafusion_functions_window_common::field::WindowUDFFieldArgs;
 use datafusion_functions_window_common::partition::PartitionEvaluatorArgs;
 
-use super::utils::{MIN_SAMPLES, collect_window_values, percentile_sorted};
+use super::utils::{MIN_SAMPLES, cast_to_f64, collect_window_values, percentile_sorted};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AnomalyScoreIqr {
@@ -43,13 +47,7 @@ pub struct AnomalyScoreIqr {
 impl AnomalyScoreIqr {
     pub fn new() -> Self {
         Self {
-            signature: Signature::one_of(
-                vec![TypeSignature::Exact(vec![
-                    DataType::Float64,
-                    DataType::Float64,
-                ])],
-                Volatility::Immutable,
-            ),
+            signature: Signature::uniform(2, NUMERICS.to_vec(), Volatility::Immutable),
         }
     }
 }
@@ -99,16 +97,28 @@ impl PartitionEvaluator for AnomalyScoreIqrEvaluator {
     }
 
     fn evaluate(&mut self, values: &[ArrayRef], range: &Range<usize>) -> Result<ScalarValue> {
-        let array = values[0]
+        let values_f64 = cast_to_f64(&values[0])?;
+        let array = values_f64
             .as_any()
             .downcast_ref::<Float64Array>()
-            .expect("anomaly_score_iqr expects Float64 as first input");
+            .ok_or_else(|| {
+                DataFusionError::Internal(format!(
+                    "Expected Float64Array, got: {:?}",
+                    values_f64.data_type()
+                ))
+            })?;
 
         // Extract k from the second argument (constant across the window)
-        let k_array = values[1]
+        let k_f64 = cast_to_f64(&values[1])?;
+        let k_array = k_f64
             .as_any()
             .downcast_ref::<Float64Array>()
-            .expect("anomaly_score_iqr expects Float64 as second input (k)");
+            .ok_or_else(|| {
+                DataFusionError::Internal(format!(
+                    "Expected Float64Array for k, got: {:?}",
+                    k_f64.data_type()
+                ))
+            })?;
 
         // Use the tracked current row index — correct for any window frame.
         let current_idx = self.current_row;

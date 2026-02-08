@@ -15,6 +15,9 @@
 //! `anomaly_score_zscore` window function — Z-Score-based anomaly scoring.
 //!
 //! Algorithm: `score = |x - mean(window)| / stddev(window)`
+//!
+//! When stddev = 0 (constant window), returns 0.0 if value equals mean,
+//! or +inf otherwise.
 
 use std::any::Any;
 use std::fmt::Debug;
@@ -23,12 +26,13 @@ use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, Float64Array};
 use arrow::datatypes::{DataType, Field, FieldRef};
-use datafusion_common::{Result, ScalarValue};
-use datafusion_expr::{PartitionEvaluator, Signature, TypeSignature, Volatility, WindowUDFImpl};
+use datafusion_common::{DataFusionError, Result, ScalarValue};
+use datafusion_expr::type_coercion::aggregates::NUMERICS;
+use datafusion_expr::{PartitionEvaluator, Signature, Volatility, WindowUDFImpl};
 use datafusion_functions_window_common::field::WindowUDFFieldArgs;
 use datafusion_functions_window_common::partition::PartitionEvaluatorArgs;
 
-use super::utils::{MIN_SAMPLES, collect_window_values};
+use super::utils::{MIN_SAMPLES, anomaly_ratio, cast_to_f64, collect_window_values};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AnomalyScoreZscore {
@@ -38,10 +42,7 @@ pub struct AnomalyScoreZscore {
 impl AnomalyScoreZscore {
     pub fn new() -> Self {
         Self {
-            signature: Signature::one_of(
-                vec![TypeSignature::Exact(vec![DataType::Float64])],
-                Volatility::Immutable,
-            ),
+            signature: Signature::uniform(1, NUMERICS.to_vec(), Volatility::Immutable),
         }
     }
 }
@@ -91,10 +92,16 @@ impl PartitionEvaluator for AnomalyScoreZscoreEvaluator {
     }
 
     fn evaluate(&mut self, values: &[ArrayRef], range: &Range<usize>) -> Result<ScalarValue> {
-        let array = values[0]
+        let values_f64 = cast_to_f64(&values[0])?;
+        let array = values_f64
             .as_any()
             .downcast_ref::<Float64Array>()
-            .expect("anomaly_score_zscore expects Float64 input");
+            .ok_or_else(|| {
+                DataFusionError::Internal(format!(
+                    "Expected Float64Array, got: {:?}",
+                    values_f64.data_type()
+                ))
+            })?;
 
         // Use the tracked current row index — correct for any window frame.
         let current_idx = self.current_row;
@@ -123,7 +130,8 @@ impl PartitionEvaluator for AnomalyScoreZscoreEvaluator {
             / n;
         let stddev = variance.sqrt();
 
-        let score = (current_value - mean).abs() / stddev;
+        let distance = (current_value - mean).abs();
+        let score = anomaly_ratio(distance, stddev);
         Ok(ScalarValue::Float64(Some(score)))
     }
 }
@@ -173,8 +181,8 @@ mod tests {
         let values: Vec<Option<f64>> = vec![Some(5.0); 10];
         let result = eval_zscore(&values, 0..10);
         match result {
-            ScalarValue::Float64(Some(score)) => assert!(score.is_nan()),
-            other => panic!("expected Some(NaN), got {other:?}"),
+            ScalarValue::Float64(Some(score)) => assert_eq!(score, 0.0),
+            other => panic!("expected Some(0.0), got {other:?}"),
         }
     }
 
