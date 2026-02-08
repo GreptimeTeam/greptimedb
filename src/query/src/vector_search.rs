@@ -12,8 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(feature = "vector_index")]
 pub mod exec;
+#[cfg(feature = "vector_index")]
+pub(crate) mod metrics;
+#[cfg(feature = "vector_index")]
 pub mod options;
+#[cfg(feature = "vector_index")]
 pub mod plan;
+#[cfg(feature = "vector_index")]
 pub mod planner;
-pub(crate) mod sort;
+#[cfg(all(test, feature = "vector_index"))]
+pub(crate) mod test_utils;
+#[cfg(feature = "vector_index")]
+pub(crate) mod utils;

@@ -394,9 +394,14 @@ impl MergeScanExec {
 
                     // Record metrics from this finished region only.
                     // Re-adding cumulative totals across all finished regions will over-count.
-                    let (requested_k, returned_k) =
-                        collect_vector_index_k_from_region_metrics(&metrics);
-                    metric.record_vector_index_k(requested_k, returned_k);
+                    #[cfg(feature = "vector_index")]
+                    {
+                        let (requested_k, returned_k) =
+                            crate::vector_search::metrics::collect_vector_index_k_from_region_metrics(
+                                &metrics,
+                            );
+                        metric.record_vector_index_k(requested_k, returned_k);
+                    }
 
                     // Keep per-region metrics for explain/debug output.
                     let mut sub_stage_metrics = sub_stage_metrics_moved.lock().unwrap();
@@ -668,21 +673,6 @@ impl DisplayAs for MergeScanExec {
     }
 }
 
-fn collect_vector_index_k_from_region_metrics(metrics: &RecordBatchMetrics) -> (usize, usize) {
-    let mut requested = 0usize;
-    let mut returned = 0usize;
-    for plan_metric in &metrics.plan_metrics {
-        for (name, value) in &plan_metric.metrics {
-            match name.as_str() {
-                "vector_index_requested_k" => requested = requested.saturating_add(*value),
-                "vector_index_returned_k" => returned = returned.saturating_add(*value),
-                _ => {}
-            }
-        }
-    }
-    (requested, returned)
-}
-
 #[derive(Debug, Clone)]
 struct MergeScanMetric {
     /// Nanosecond elapsed till the scan operator is ready to emit data
@@ -697,8 +687,10 @@ struct MergeScanMetric {
     /// Gauge for greptime plan execution cost metrics for output
     greptime_exec_cost: Gauge,
     /// Gauge for vector index requested k
+    #[cfg(feature = "vector_index")]
     vector_index_requested_k: Gauge,
     /// Gauge for vector index returned k
+    #[cfg(feature = "vector_index")]
     vector_index_returned_k: Gauge,
 }
 
@@ -710,9 +702,12 @@ impl MergeScanMetric {
             finish_time: MetricBuilder::new(metric).subset_time("finish_time", 1),
             output_rows: MetricBuilder::new(metric).output_rows(1),
             greptime_exec_cost: MetricBuilder::new(metric).gauge(GREPTIME_EXEC_READ_COST, 1),
+            #[cfg(feature = "vector_index")]
             vector_index_requested_k: MetricBuilder::new(metric)
-                .gauge("vector_index_requested_k", 1),
-            vector_index_returned_k: MetricBuilder::new(metric).gauge("vector_index_returned_k", 1),
+                .gauge(crate::vector_search::metrics::VECTOR_INDEX_REQUESTED_K, 1),
+            #[cfg(feature = "vector_index")]
+            vector_index_returned_k: MetricBuilder::new(metric)
+                .gauge(crate::vector_search::metrics::VECTOR_INDEX_RETURNED_K, 1),
         }
     }
 
@@ -738,6 +733,7 @@ impl MergeScanMetric {
 
     /// Adds per-region vector index k increments.
     /// Callers should pass region-local contributions, not cumulative totals.
+    #[cfg(feature = "vector_index")]
     pub fn record_vector_index_k(&self, requested: usize, returned: usize) {
         if requested > 0 {
             self.vector_index_requested_k.add(requested);
@@ -748,11 +744,12 @@ impl MergeScanMetric {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "vector_index"))]
 mod tests {
     use common_recordbatch::adapter::{PlanMetrics, RecordBatchMetrics};
 
     use super::*;
+    use crate::vector_search::metrics::collect_vector_index_k_from_region_metrics;
 
     fn metric_value(metrics: &ExecutionPlanMetricsSet, name: &str) -> usize {
         let aggregated = metrics

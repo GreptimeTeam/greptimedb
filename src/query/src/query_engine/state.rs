@@ -57,6 +57,7 @@ use crate::dist_plan::{
 };
 use crate::metrics::{QUERY_MEMORY_POOL_REJECTED_TOTAL, QUERY_MEMORY_POOL_USAGE_BYTES};
 use crate::optimizer::ExtensionAnalyzerRule;
+#[cfg(feature = "vector_index")]
 use crate::optimizer::adaptive_vector_topk::AdaptiveVectorTopKRule;
 use crate::optimizer::constant_term::MatchesConstantTermOptimizer;
 use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
@@ -73,7 +74,9 @@ use crate::query_engine::DefaultSerializer;
 use crate::query_engine::options::QueryOptions;
 use crate::range_select::planner::RangeSelectPlanner;
 use crate::region_query::RegionQueryHandlerRef;
+#[cfg(feature = "vector_index")]
 use crate::vector_search::options::AdaptiveVectorTopKOptions;
+#[cfg(feature = "vector_index")]
 use crate::vector_search::planner::AdaptiveVectorTopKPlanner;
 
 /// Query engine global state
@@ -134,6 +137,7 @@ impl QueryEngineState {
                     allow_query_fallback: true,
                 });
         }
+        #[cfg(feature = "vector_index")]
         session_config
             .options_mut()
             .extensions
@@ -174,6 +178,7 @@ impl QueryEngineState {
         optimizer.rules.push(Arc::new(ScanHintRule));
         // Order matters: ScanHintRule attaches vector_search hints to scans first,
         // then AdaptiveVectorTopKRule rewrites top-level Sort+Limit shape.
+        #[cfg(feature = "vector_index")]
         optimizer.rules.push(Arc::new(AdaptiveVectorTopKRule));
 
         // add physical optimizer
@@ -471,11 +476,10 @@ impl DfQueryPlanner {
         partition_rule_manager: Option<PartitionRuleManagerRef>,
         region_query_handler: Option<RegionQueryHandlerRef>,
     ) -> Self {
-        let mut planners: Vec<Arc<dyn ExtensionPlanner + Send + Sync>> = vec![
-            Arc::new(PromExtensionPlanner),
-            Arc::new(RangeSelectPlanner),
-            Arc::new(AdaptiveVectorTopKPlanner),
-        ];
+        let mut planners: Vec<Arc<dyn ExtensionPlanner + Send + Sync>> =
+            vec![Arc::new(PromExtensionPlanner), Arc::new(RangeSelectPlanner)];
+        #[cfg(feature = "vector_index")]
+        planners.push(Arc::new(AdaptiveVectorTopKPlanner));
         if let (Some(region_query_handler), Some(partition_rule_manager)) =
             (region_query_handler, partition_rule_manager)
         {

@@ -166,10 +166,8 @@ impl Stream for EmptyStream {
 mod vector_search_tests {
     use std::sync::Arc;
 
-    use common_function::function::Function;
-    use common_function::scalars::udf::create_udf;
-    use datafusion_expr::expr::ScalarFunction;
-    use datafusion_expr::{Expr, LogicalPlanBuilder, Signature, Volatility, col, lit};
+    use common_function::scalars::vector::distance::VEC_L2SQ_DISTANCE;
+    use datafusion_expr::LogicalPlanBuilder;
     use datatypes::schema::{ColumnSchema, SchemaBuilder};
     use store_api::storage::ConcreteDataType;
     use table::metadata::{FilterPushDownType, TableInfoBuilder, TableMeta, TableType};
@@ -178,52 +176,7 @@ mod vector_search_tests {
 
     use super::*;
     use crate::dist_plan::MergeScanLogicalPlan;
-
-    struct TestVectorFunction {
-        name: &'static str,
-        signature: Signature,
-    }
-
-    impl TestVectorFunction {
-        fn new(name: &'static str) -> Self {
-            Self {
-                name,
-                signature: Signature::any(2, Volatility::Immutable),
-            }
-        }
-    }
-
-    impl std::fmt::Display for TestVectorFunction {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "{}", self.name)
-        }
-    }
-
-    impl Function for TestVectorFunction {
-        fn name(&self) -> &str {
-            self.name
-        }
-
-        fn return_type(
-            &self,
-            _input_types: &[datatypes::arrow::datatypes::DataType],
-        ) -> datafusion_common::Result<datatypes::arrow::datatypes::DataType> {
-            Ok(datatypes::arrow::datatypes::DataType::Float32)
-        }
-
-        fn signature(&self) -> &Signature {
-            &self.signature
-        }
-
-        fn invoke_with_args(
-            &self,
-            _args: datafusion_expr::ScalarFunctionArgs,
-        ) -> datafusion_common::Result<datafusion_expr::ColumnarValue> {
-            Err(datafusion_common::DataFusionError::Execution(
-                "test udf should not be invoked".to_string(),
-            ))
-        }
-    }
+    use crate::vector_search::test_utils::vec_distance_expr;
 
     fn build_vector_table(table_id: TableId) -> TableRef {
         let schema = {
@@ -277,17 +230,6 @@ mod vector_search_tests {
         ))
     }
 
-    fn vector_distance_expr() -> Expr {
-        let udf = create_udf(Arc::new(TestVectorFunction::new("vec_l2sq_distance")));
-        Expr::ScalarFunction(ScalarFunction::new_udf(
-            Arc::new(udf),
-            vec![
-                col("v"),
-                lit(ScalarValue::Utf8(Some("[1.0, 2.0]".to_string()))),
-            ],
-        ))
-    }
-
     #[test]
     fn vector_search_rewrite_keeps_sort_in_child_plan() {
         init_default_ut_logging();
@@ -298,7 +240,7 @@ mod vector_search_tests {
 
         let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
             .unwrap()
-            .sort(vec![vector_distance_expr().sort(true, false)])
+            .sort(vec![vec_distance_expr(VEC_L2SQ_DISTANCE).sort(true, false)])
             .unwrap()
             .limit(0, Some(5))
             .unwrap()
@@ -326,7 +268,7 @@ mod vector_search_tests {
             .unwrap()
             .filter(col("k0").eq(lit("hello")))
             .unwrap()
-            .sort(vec![vector_distance_expr().sort(true, false)])
+            .sort(vec![vec_distance_expr(VEC_L2SQ_DISTANCE).sort(true, false)])
             .unwrap()
             .limit(0, Some(5))
             .unwrap()

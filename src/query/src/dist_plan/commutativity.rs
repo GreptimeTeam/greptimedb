@@ -31,7 +31,7 @@ use crate::dist_plan::MergeScanLogicalPlan;
 use crate::dist_plan::analyzer::AliasMapping;
 use crate::dist_plan::merge_sort::{MergeSortLogicalPlan, merge_sort_transformer};
 #[cfg(feature = "vector_index")]
-use crate::vector_search::sort::is_vector_sort;
+use crate::vector_search::utils::is_vector_sort;
 
 #[cfg(feature = "vector_index")]
 fn vector_sort_transformer(plan: &LogicalPlan) -> DfResult<TransformerAction> {

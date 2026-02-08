@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(feature = "vector_index")]
 pub mod adaptive_vector_topk;
 pub mod constant_term;
 pub mod count_wildcard;

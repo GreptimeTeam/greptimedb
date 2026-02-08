@@ -77,9 +77,9 @@ impl AdaptiveVectorTopKMetric {
     fn new(metrics: &ExecutionPlanMetricsSet) -> Self {
         Self {
             vector_index_requested_k: MetricBuilder::new(metrics)
-                .gauge("vector_index_requested_k", 1),
+                .gauge(crate::vector_search::metrics::VECTOR_INDEX_REQUESTED_K, 1),
             vector_index_returned_k: MetricBuilder::new(metrics)
-                .gauge("vector_index_returned_k", 1),
+                .gauge(crate::vector_search::metrics::VECTOR_INDEX_RETURNED_K, 1),
             vector_index_retry_rounds: MetricBuilder::new(metrics)
                 .gauge("vector_index_retry_rounds", 1),
             vector_index_last_k: MetricBuilder::new(metrics).gauge("vector_index_last_k", 1),
@@ -473,7 +473,8 @@ async fn execute_adaptive_round(
     .await?;
 
     let (batches, hit_max_rows) = collect_round_batches(plan.as_ref(), context, max_rows).await?;
-    let (requested_k, returned_k) = collect_vector_index_k_metrics(plan.as_ref());
+    let (requested_k, returned_k) =
+        crate::vector_search::metrics::collect_vector_index_k_from_plan(plan.as_ref());
     Ok(AdaptiveRoundResult {
         batches,
         requested_k,
@@ -648,42 +649,6 @@ fn sort_and_limit(
         total_rows,
         result_len: length,
     }))
-}
-
-fn collect_vector_index_k_metrics(plan: &dyn ExecutionPlan) -> (usize, usize) {
-    fn collect_from_metrics(metrics: Option<MetricsSet>) -> (usize, usize) {
-        let Some(metrics) = metrics else {
-            return (0, 0);
-        };
-        let aggregated = metrics
-            .aggregate_by_name()
-            .sorted_for_display()
-            .timestamps_removed();
-        let mut requested = 0usize;
-        let mut returned = 0usize;
-        for metric in aggregated.iter() {
-            let name = metric.value().name();
-            let value = metric.value().as_usize();
-            match name {
-                "vector_index_requested_k" => requested = requested.saturating_add(value),
-                "vector_index_returned_k" => returned = returned.saturating_add(value),
-                _ => {}
-            }
-        }
-        (requested, returned)
-    }
-
-    let mut requested = 0usize;
-    let mut returned = 0usize;
-    let (local_requested, local_returned) = collect_from_metrics(plan.metrics());
-    requested = requested.saturating_add(local_requested);
-    returned = returned.saturating_add(local_returned);
-    for child in plan.children() {
-        let (child_requested, child_returned) = collect_vector_index_k_metrics(child.as_ref());
-        requested = requested.saturating_add(child_requested);
-        returned = returned.saturating_add(child_returned);
-    }
-    (requested, returned)
 }
 
 fn candidates_exhausted(hit_max_rows: bool, total_rows: usize, k: usize) -> bool {

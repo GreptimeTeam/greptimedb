@@ -19,7 +19,7 @@ use datafusion_optimizer::{OptimizerConfig, OptimizerRule};
 use tokio::task_local;
 
 use crate::vector_search::plan::AdaptiveVectorTopKLogicalPlan;
-use crate::vector_search::sort::{extract_limit_info, is_vector_sort};
+use crate::vector_search::utils::{extract_limit_info, is_vector_sort};
 
 #[derive(Debug)]
 /// Rewrites vector distance `Sort + Limit` queries into `AdaptiveVectorTopKLogicalPlan`.
@@ -90,18 +90,14 @@ impl AdaptiveVectorTopKRule {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "vector_index"))]
 mod tests {
     use std::sync::Arc;
 
     use api::v1::SemanticType;
-    use common_function::function::Function;
-    use common_function::scalars::udf::create_udf;
     use common_function::scalars::vector::distance::VEC_L2SQ_DISTANCE;
     use datafusion::datasource::DefaultTableSource;
-    use datafusion_common::{DataFusionError, Result, ScalarValue};
-    use datafusion_expr::expr::ScalarFunction;
-    use datafusion_expr::{Expr, LogicalPlanBuilder, Signature, Volatility, col, lit};
+    use datafusion_expr::LogicalPlanBuilder;
     use datafusion_optimizer::{OptimizerContext, OptimizerRule};
     use datatypes::schema::ColumnSchema;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
@@ -111,63 +107,7 @@ mod tests {
     use crate::optimizer::adaptive_vector_topk::AdaptiveVectorTopKRule;
     use crate::optimizer::scan_hint::ScanHintRule;
     use crate::optimizer::test_util::MetaRegionEngine;
-
-    struct TestVectorFunction {
-        name: &'static str,
-        signature: Signature,
-    }
-
-    impl TestVectorFunction {
-        fn new(name: &'static str) -> Self {
-            Self {
-                name,
-                signature: Signature::any(2, Volatility::Immutable),
-            }
-        }
-    }
-
-    impl std::fmt::Display for TestVectorFunction {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "{}", self.name)
-        }
-    }
-
-    impl Function for TestVectorFunction {
-        fn name(&self) -> &str {
-            self.name
-        }
-
-        fn return_type(
-            &self,
-            _input_types: &[datatypes::arrow::datatypes::DataType],
-        ) -> Result<datatypes::arrow::datatypes::DataType> {
-            Ok(datatypes::arrow::datatypes::DataType::Float32)
-        }
-
-        fn signature(&self) -> &Signature {
-            &self.signature
-        }
-
-        fn invoke_with_args(
-            &self,
-            _args: datafusion_expr::ScalarFunctionArgs,
-        ) -> Result<datafusion_expr::ColumnarValue> {
-            Err(DataFusionError::Execution(
-                "test udf should not be invoked".to_string(),
-            ))
-        }
-    }
-
-    fn vec_distance_expr(function_name: &'static str) -> Expr {
-        let udf = create_udf(Arc::new(TestVectorFunction::new(function_name)));
-        Expr::ScalarFunction(ScalarFunction::new_udf(
-            Arc::new(udf),
-            vec![
-                col("v"),
-                lit(ScalarValue::Utf8(Some("[1.0, 2.0]".to_string()))),
-            ],
-        ))
-    }
+    use crate::vector_search::test_utils::vec_distance_expr;
 
     fn build_dummy_provider(column_id: u32) -> Arc<DummyTableProvider> {
         let mut builder = RegionMetadataBuilder::new(0.into());

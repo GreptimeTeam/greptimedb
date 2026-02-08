@@ -25,7 +25,7 @@ use datatypes::types::parse_string_to_vector_type_value;
 use store_api::storage::{VectorDistanceMetric, VectorSearchRequest};
 
 use crate::dummy_catalog::DummyTableProvider;
-use crate::vector_search::sort::{distance_metric, extract_limit_info};
+use crate::vector_search::utils::{distance_metric, extract_limit_info};
 
 /// Tracks vector search hints while traversing the logical plan.
 ///
@@ -410,17 +410,11 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::SemanticType;
-    use common_function::function::Function;
-    use common_function::scalars::udf::create_udf;
     use common_function::scalars::vector::distance::{VEC_DOT_PRODUCT, VEC_L2SQ_DISTANCE};
     use datafusion::datasource::DefaultTableSource;
-    use datafusion::logical_expr::ColumnarValue;
-    use datafusion_common::{Column, DataFusionError, Result, ScalarValue};
-    use datafusion_expr::expr::ScalarFunction;
+    use datafusion_common::Column;
     use datafusion_expr::logical_plan::JoinType;
-    use datafusion_expr::{
-        Expr, LogicalPlan, LogicalPlanBuilder, Signature, Subquery, Volatility, col, lit,
-    };
+    use datafusion_expr::{LogicalPlan, LogicalPlanBuilder, Subquery, col};
     use datafusion_optimizer::{OptimizerContext, OptimizerRule};
     use datatypes::schema::ColumnSchema;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
@@ -430,63 +424,7 @@ mod tests {
     use crate::dummy_catalog::DummyTableProvider;
     use crate::optimizer::scan_hint::ScanHintRule;
     use crate::optimizer::test_util::MetaRegionEngine;
-
-    struct TestVectorFunction {
-        name: &'static str,
-        signature: Signature,
-    }
-
-    impl TestVectorFunction {
-        fn new(name: &'static str) -> Self {
-            Self {
-                name,
-                signature: Signature::any(2, Volatility::Immutable),
-            }
-        }
-    }
-
-    impl std::fmt::Display for TestVectorFunction {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "{}", self.name)
-        }
-    }
-
-    impl Function for TestVectorFunction {
-        fn name(&self) -> &str {
-            self.name
-        }
-
-        fn return_type(
-            &self,
-            _input_types: &[datatypes::arrow::datatypes::DataType],
-        ) -> Result<datatypes::arrow::datatypes::DataType> {
-            Ok(datatypes::arrow::datatypes::DataType::Float32)
-        }
-
-        fn signature(&self) -> &Signature {
-            &self.signature
-        }
-
-        fn invoke_with_args(
-            &self,
-            _args: datafusion_expr::ScalarFunctionArgs,
-        ) -> Result<ColumnarValue> {
-            Err(DataFusionError::Execution(
-                "test udf should not be invoked".to_string(),
-            ))
-        }
-    }
-
-    fn vec_distance_expr(function_name: &'static str) -> Expr {
-        let udf = create_udf(Arc::new(TestVectorFunction::new(function_name)));
-        Expr::ScalarFunction(ScalarFunction::new_udf(
-            Arc::new(udf),
-            vec![
-                col("v"),
-                lit(ScalarValue::Utf8(Some("[1.0, 2.0]".to_string()))),
-            ],
-        ))
-    }
+    use crate::vector_search::test_utils::{vec_distance_expr, vec_distance_expr_qualified};
 
     fn build_dummy_provider(column_id: u32) -> Arc<DummyTableProvider> {
         build_dummy_provider_with_nullable(column_id, false)
@@ -776,24 +714,6 @@ mod tests {
 
         assert!(t1_provider.get_vector_search_hint().is_none());
         assert!(t2_provider.get_vector_search_hint().is_none());
-    }
-
-    fn vec_distance_expr_qualified(
-        function_name: &'static str,
-        table_name: &str,
-        column_name: &str,
-    ) -> Expr {
-        use datafusion_common::Column;
-
-        let udf = create_udf(Arc::new(TestVectorFunction::new(function_name)));
-        let qualified_col = Expr::Column(Column::new(Some(table_name.to_string()), column_name));
-        Expr::ScalarFunction(ScalarFunction::new_udf(
-            Arc::new(udf),
-            vec![
-                qualified_col,
-                lit(ScalarValue::Utf8(Some("[1.0, 2.0]".to_string()))),
-            ],
-        ))
     }
 
     #[test]

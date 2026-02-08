@@ -15,24 +15,34 @@
 use common_function::scalars::vector::distance::{
     VEC_COS_DISTANCE, VEC_DOT_PRODUCT, VEC_L2SQ_DISTANCE,
 };
-use datafusion_expr::Expr;
 use datafusion_expr::logical_plan::{FetchType, Limit, SkipType, Sort};
+use datafusion_expr::{Expr, SortExpr};
 use store_api::storage::VectorDistanceMetric;
 
-pub(crate) fn extract_vector_sort_metric(sort: &Sort) -> Option<VectorDistanceMetric> {
-    let sort_expr = sort.expr.first()?;
-    distance_metric(&sort_expr.expr)
+#[derive(Clone, Copy)]
+pub(crate) struct VectorSortInfo<'a> {
+    pub metric: VectorDistanceMetric,
+    pub primary_sort_expr: &'a SortExpr,
+}
+
+impl<'a> VectorSortInfo<'a> {
+    pub(crate) fn has_expected_order(&self) -> bool {
+        let expected_asc = self.metric != VectorDistanceMetric::InnerProduct;
+        self.primary_sort_expr.asc == expected_asc
+    }
+}
+
+pub(crate) fn parse_vector_sort(sort: &Sort) -> Option<VectorSortInfo<'_>> {
+    let primary_sort_expr = sort.expr.first()?;
+    let metric = distance_metric(&primary_sort_expr.expr)?;
+    Some(VectorSortInfo {
+        metric,
+        primary_sort_expr,
+    })
 }
 
 pub(crate) fn is_vector_sort(sort: &Sort) -> bool {
-    let Some(metric) = extract_vector_sort_metric(sort) else {
-        return false;
-    };
-    let Some(sort_expr) = sort.expr.first() else {
-        return false;
-    };
-    let expected_asc = metric != VectorDistanceMetric::InnerProduct;
-    sort_expr.asc == expected_asc
+    parse_vector_sort(sort).is_some_and(|info| info.has_expected_order())
 }
 
 pub(crate) fn distance_metric(expr: &Expr) -> Option<VectorDistanceMetric> {
