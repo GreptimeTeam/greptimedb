@@ -354,7 +354,7 @@ impl QueryEngineState {
             .insert(name.to_string(), func.clone());
 
         if x.is_some() {
-            warn!("Already registered table function '{name}");
+            warn!("Already registered table function '{name}'");
         }
     }
 
