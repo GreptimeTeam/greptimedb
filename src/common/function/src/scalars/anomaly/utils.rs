@@ -21,9 +21,6 @@ use arrow::compute;
 use arrow::datatypes::DataType;
 use datafusion_common::DataFusionError;
 
-/// Minimum number of valid data points required for meaningful statistical analysis.
-pub const MIN_SAMPLES: usize = 3;
-
 /// Cast an ArrayRef to Float64. Returns the array as-is if already Float64.
 pub fn cast_to_f64(array: &ArrayRef) -> datafusion_common::Result<ArrayRef> {
     if array.data_type() == &DataType::Float64 {

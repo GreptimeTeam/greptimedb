@@ -32,9 +32,10 @@ use datafusion_expr::{PartitionEvaluator, Signature, Volatility, WindowUDFImpl};
 use datafusion_functions_window_common::field::WindowUDFFieldArgs;
 use datafusion_functions_window_common::partition::PartitionEvaluatorArgs;
 
-use crate::scalars::anomaly::utils::{
-    MIN_SAMPLES, anomaly_ratio, cast_to_f64, collect_window_values,
-};
+use crate::scalars::anomaly::utils::{anomaly_ratio, cast_to_f64, collect_window_values};
+
+/// Minimum valid samples for zscore (stddev requires n >= 2).
+const MIN_SAMPLES: usize = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AnomalyScoreZscore {
@@ -208,9 +209,24 @@ mod tests {
     }
 
     #[test]
-    fn test_insufficient_samples() {
+    fn test_two_samples_returns_score() {
+        // zscore min_samples=2, so two points should produce a score
+        // [1.0, 2.0]: mean=1.5, stddev=0.5, zscore(2.0) = |2.0-1.5|/0.5 = 1.0
         let values: Vec<Option<f64>> = vec![Some(1.0), Some(2.0)];
         let result = eval_zscore(&values, 0..2);
+        match result {
+            ScalarValue::Float64(Some(score)) => {
+                assert!((score - 1.0).abs() < 1e-10, "score={score}")
+            }
+            other => panic!("expected Some(1.0), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_insufficient_samples() {
+        // Single point is insufficient even for zscore
+        let values: Vec<Option<f64>> = vec![Some(1.0)];
+        let result = eval_zscore(&values, 0..1);
         assert_eq!(result, ScalarValue::Float64(None));
     }
 

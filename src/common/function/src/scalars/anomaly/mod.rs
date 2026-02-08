@@ -24,11 +24,21 @@
 //! These functions return a floating-point anomaly score rather than a boolean,
 //! allowing users to set their own threshold via `WHERE score > N`.
 //!
+//! ## Minimum Samples
+//!
+//! Each function has its own minimum based on statistical validity:
+//!
+//! | Function | min_samples | Rationale |
+//! |---|---|---|
+//! | `anomaly_score_zscore` | 2 | stddev requires n >= 2 (aligned with `STDDEV_SAMP`) |
+//! | `anomaly_score_mad` | 3 | n <= 2 makes MAD almost always 0, yielding spurious +inf |
+//! | `anomaly_score_iqr` | 3 | linear-interpolated Q1 != Q3 is possible at n >= 3 |
+//!
 //! ## Return Values
 //!
 //! | Condition | zscore | mad | iqr | Result |
 //! |---|---|---|---|---|
-//! | < 3 valid points in window | any | any | any | `NULL` |
+//! | insufficient valid points | n < 2 | n < 3 | n < 3 | `NULL` |
 //! | stddev / MAD / IQR = 0, value = center | distance = 0 | distance = 0 | on fence | `0.0` |
 //! | stddev / MAD / IQR = 0, value ≠ center | distance > 0 | distance > 0 | outside fence | `+inf` |
 //! | normal case | stddev > 0 | MAD > 0 | IQR > 0 | finite positive |

@@ -34,8 +34,11 @@ use datafusion_functions_window_common::field::WindowUDFFieldArgs;
 use datafusion_functions_window_common::partition::PartitionEvaluatorArgs;
 
 use crate::scalars::anomaly::utils::{
-    MIN_SAMPLES, anomaly_ratio, cast_to_f64, collect_window_values, median_f64,
+    anomaly_ratio, cast_to_f64, collect_window_values, median_f64,
 };
+
+/// Minimum valid samples for MAD (n <= 2 makes MAD almost always 0, yielding spurious +inf).
+const MIN_SAMPLES: usize = 3;
 
 /// MAD consistency constant for normal distribution: `1 / Φ⁻¹(3/4) ≈ 1.4826`
 const MAD_CONSISTENCY_CONSTANT: f64 = 1.4826;

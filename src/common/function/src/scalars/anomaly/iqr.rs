@@ -37,9 +37,10 @@ use datafusion_expr::{PartitionEvaluator, Signature, Volatility, WindowUDFImpl};
 use datafusion_functions_window_common::field::WindowUDFFieldArgs;
 use datafusion_functions_window_common::partition::PartitionEvaluatorArgs;
 
-use crate::scalars::anomaly::utils::{
-    MIN_SAMPLES, cast_to_f64, collect_window_values, percentile_sorted,
-};
+use crate::scalars::anomaly::utils::{cast_to_f64, collect_window_values, percentile_sorted};
+
+/// Minimum valid samples for IQR (linear-interpolated Q1 != Q3 is possible at n >= 3).
+const MIN_SAMPLES: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AnomalyScoreIqr {
@@ -253,6 +254,7 @@ mod tests {
 
     #[test]
     fn test_insufficient_samples() {
+        // IQR requires min_samples=3; 2 points should return NULL
         let values: Vec<Option<f64>> = vec![Some(1.0), Some(2.0)];
         let result = eval_iqr(&values, 1.5, 0..2);
         assert_eq!(result, ScalarValue::Float64(None));

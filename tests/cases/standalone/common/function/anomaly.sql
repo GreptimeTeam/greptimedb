@@ -27,7 +27,7 @@ INSERT INTO anomaly_test VALUES
     ('host-b', 10.0, '2025-01-01 00:04:00');
 
 -- 1. Basic expanding window with PARTITION BY (three functions)
--- Expect: first 2 rows per partition -> NULL (< 3 samples), outlier row high score.
+-- Row 1 (n=1): all NULL. Row 2 (n=2): zscore returns a score, MAD/IQR still NULL.
 -- For host-b (constant series), zscore/mad/iqr are all 0.0.
 SELECT
     host,
@@ -181,7 +181,8 @@ SELECT
 FROM anomaly_null_test
 ORDER BY ts;
 
--- 8. Insufficient samples: ROWS 1 PRECEDING gives at most 2 valid points → all NULL
+-- 8. Narrow window: ROWS 1 PRECEDING gives at most 2 valid points
+-- zscore (min_samples=2) returns a score; MAD and IQR (min_samples=3) return NULL
 SELECT
     ts,
     val,
