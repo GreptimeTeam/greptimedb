@@ -26,10 +26,12 @@
 //!
 //! ## Return Values
 //!
-//! - `NULL` — fewer than 3 valid (finite, non-null) data points in the window
-//! - `0.0` — value equals the center (mean/median) under zero spread
-//! - `+inf` — value deviates from a constant window (zero spread, non-zero distance)
-//! - finite positive — normal anomaly score
+//! | Condition | zscore | mad | iqr | Result |
+//! |---|---|---|---|---|
+//! | < 3 valid points in window | any | any | any | `NULL` |
+//! | stddev / MAD / IQR = 0, value = center | distance = 0 | distance = 0 | on fence | `0.0` |
+//! | stddev / MAD / IQR = 0, value ≠ center | distance > 0 | distance > 0 | outside fence | `+inf` |
+//! | normal case | stddev > 0 | MAD > 0 | IQR > 0 | finite positive |
 //!
 //! ## Window Frame Semantics
 //!
