@@ -390,6 +390,9 @@ impl Display for JsonType {
 
 /// Converts a json type value to string
 pub fn jsonb_to_string(val: &[u8]) -> Result<String> {
+    if val.is_empty() {
+        return Ok("".to_string());
+    }
     match jsonb::from_slice(val) {
         Ok(jsonb_value) => {
             let serialized = jsonb_value.to_string();

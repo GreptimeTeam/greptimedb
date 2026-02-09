@@ -2391,6 +2391,7 @@ dependencies = [
  "humantime",
  "humantime-serde",
  "itertools 0.14.0",
+ "jsonb",
  "serde",
  "serde_json",
  "snafu 0.8.6",

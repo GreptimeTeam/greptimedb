@@ -63,7 +63,7 @@ impl Event for ProcedureEvent {
         self.timestamp
     }
 
-    fn json_payload(&self) -> Result<String> {
+    fn json_payload(&self) -> Result<serde_json::Value> {
         self.internal_event.json_payload()
     }
 
