@@ -52,8 +52,8 @@ use common_version::{short_version, verbose_version};
 use datanode::config::DatanodeOptions;
 use datanode::datanode::{Datanode, DatanodeBuilder};
 use flow::{
-    FlownodeBuilder, FlownodeInstance, FlownodeOptions, FrontendClient, FrontendInvoker,
-    GrpcQueryHandlerWithBoxedError,
+    FlownodeBuilder, FlownodeInstance, FlownodeOptions, FlownodeServiceBuilder, FrontendClient,
+    FrontendInvoker, GrpcQueryHandlerWithBoxedError,
 };
 use frontend::frontend::Frontend;
 use frontend::instance::builder::FrontendBuilder;
@@ -445,18 +445,23 @@ impl StartCommand {
         let flownode_grpc_addr = flownode_options.grpc.bind_addr.clone();
 
         let flow_builder = FlownodeBuilder::new(
-            flownode_options,
+            flownode_options.clone(),
             plugins.clone(),
             table_metadata_manager.clone(),
             catalog_manager.clone(),
             flow_metadata_manager.clone(),
             frontend_client.clone(),
         );
-        let flownode = flow_builder
+        let mut flownode = flow_builder
             .build()
             .await
             .map_err(BoxedError::new)
             .context(error::OtherSnafu)?;
+        let services = FlownodeServiceBuilder::new(&flownode_options)
+            .with_default_grpc_server(flownode.flownode_server())
+            .build()
+            .context(StartFlownodeSnafu)?;
+        flownode.setup_services(services);
 
         // set the ref to query for the local flow state
         {
