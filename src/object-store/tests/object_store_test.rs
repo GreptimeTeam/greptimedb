@@ -103,6 +103,19 @@ async fn test_object_list(store: &ObjectStore) -> Result<()> {
     Ok(())
 }
 
+fn assert_opendal_metrics() {
+    let metric_families = prometheus::gather();
+    let mut buffer = Vec::new();
+    let encoder = TextEncoder::new();
+    encoder.encode(&metric_families, &mut buffer).unwrap();
+    let text = String::from_utf8(buffer).unwrap();
+    assert!(
+        text.contains("opendal"),
+        "Missing opendal metrics: {}",
+        text
+    );
+}
+
 #[tokio::test]
 async fn test_fs_backend() -> Result<()> {
     let data_dir = create_temp_dir("test_fs_backend");
@@ -117,12 +130,7 @@ async fn test_fs_backend() -> Result<()> {
     test_object_crud(&store).await?;
     test_object_list(&store).await?;
 
-    let metric_families = prometheus::gather();
-    let mut buffer = Vec::new();
-    let encoder = TextEncoder::new();
-    encoder.encode(&metric_families, &mut buffer).unwrap();
-    let text = String::from_utf8(buffer).unwrap();
-    assert_eq!("", text);
+    assert_opendal_metrics();
 
     Ok(())
 }
@@ -145,10 +153,12 @@ async fn test_s3_backend() -> Result<()> {
             .bucket(&bucket);
 
         let store = ObjectStore::new(builder).unwrap().finish();
+        let store = object_store::util::with_instrument_layers(store, false);
 
         let guard = TempFolder::new(&store, "/");
         test_object_crud(&store).await?;
         test_object_list(&store).await?;
+        assert_opendal_metrics();
         guard.remove_all().await?;
     }
 
@@ -172,10 +182,12 @@ async fn test_oss_backend() -> Result<()> {
             .bucket(&bucket);
 
         let store = ObjectStore::new(builder).unwrap().finish();
+        let store = object_store::util::with_instrument_layers(store, false);
 
         let guard = TempFolder::new(&store, "/");
         test_object_crud(&store).await?;
         test_object_list(&store).await?;
+        assert_opendal_metrics();
         guard.remove_all().await?;
     }
 
@@ -199,10 +211,12 @@ async fn test_azblob_backend() -> Result<()> {
             .container(&container);
 
         let store = ObjectStore::new(builder).unwrap().finish();
+        let store = object_store::util::with_instrument_layers(store, false);
 
         let guard = TempFolder::new(&store, "/");
         test_object_crud(&store).await?;
         test_object_list(&store).await?;
+        assert_opendal_metrics();
         guard.remove_all().await?;
     }
     Ok(())
@@ -225,10 +239,12 @@ async fn test_gcs_backend() -> Result<()> {
             .endpoint(&env::var("GT_GCS_ENDPOINT").unwrap());
 
         let store = ObjectStore::new(builder).unwrap().finish();
+        let store = object_store::util::with_instrument_layers(store, false);
 
         let guard = TempFolder::new(&store, "/");
         test_object_crud(&store).await?;
         test_object_list(&store).await?;
+        assert_opendal_metrics();
         guard.remove_all().await?;
     }
     Ok(())
