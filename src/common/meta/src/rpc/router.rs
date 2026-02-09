@@ -405,17 +405,53 @@ impl RegionRoutes {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Region {
     pub id: RegionId,
     pub name: String,
     pub attrs: BTreeMap<String, String>,
-
-    /// **Deprecated:** Use `partition_expr` instead.
-    pub partition: Option<LegacyPartition>,
-    /// The partition expression of the region.
-    #[serde(default)]
+    /// The normalized partition expression of the region.
     pub partition_expr: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RegionDe {
+    id: RegionId,
+    name: String,
+    #[serde(default)]
+    attrs: BTreeMap<String, String>,
+    #[serde(default)]
+    partition: Option<LegacyPartition>,
+    #[serde(default)]
+    partition_expr: String,
+}
+
+impl<'de> Deserialize<'de> for Region {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let de = RegionDe::deserialize(deserializer)?;
+        let partition_expr = if de.partition_expr.is_empty() {
+            if let Some(LegacyPartition { value_list, .. }) = &de.partition {
+                value_list
+                    .first()
+                    .map(|expr| String::from_utf8_lossy(expr).to_string())
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            }
+        } else {
+            de.partition_expr
+        };
+
+        Ok(Self {
+            id: de.id,
+            name: de.name,
+            attrs: de.attrs,
+            partition_expr,
+        })
+    }
 }
 
 impl Region {
@@ -429,17 +465,7 @@ impl Region {
 
     /// Gets the partition expression of the region in compatible mode.
     pub fn partition_expr(&self) -> String {
-        if !self.partition_expr.is_empty() {
-            self.partition_expr.clone()
-        } else if let Some(LegacyPartition { value_list, .. }) = &self.partition {
-            if !value_list.is_empty() {
-                String::from_utf8_lossy(&value_list[0]).to_string()
-            } else {
-                "".to_string()
-            }
-        } else {
-            "".to_string()
-        }
+        self.partition_expr.clone()
     }
 }
 
@@ -465,7 +491,6 @@ impl From<PbRegion> for Region {
         Self {
             id: r.id.into(),
             name: r.name,
-            partition: None,
             partition_expr,
             attrs: r.attrs.into_iter().collect::<BTreeMap<_, _>>(),
         }
@@ -548,7 +573,6 @@ mod tests {
                 id: 2.into(),
                 name: "r2".to_string(),
                 attrs: BTreeMap::new(),
-                partition: None,
                 partition_expr: "".to_string(),
             },
             leader_peer: Some(Peer::new(1, "a1")),
@@ -572,7 +596,6 @@ mod tests {
                 id: 2.into(),
                 name: "r2".to_string(),
                 attrs: BTreeMap::new(),
-                partition: None,
                 partition_expr: "".to_string(),
             },
             leader_peer: Some(Peer::new(1, "a1")),
@@ -596,7 +619,6 @@ mod tests {
                 id: 2.into(),
                 name: "r2".to_string(),
                 attrs: BTreeMap::new(),
-                partition: None,
                 partition_expr: "".to_string(),
             },
             leader_peer: Some(Peer::new(1, "a1")),
@@ -614,7 +636,6 @@ mod tests {
                 id: 2.into(),
                 name: "r2".to_string(),
                 attrs: BTreeMap::new(),
-                partition: None,
                 partition_expr: "".to_string(),
             },
             leader_peer: Some(Peer::new(1, "a1")),
@@ -632,7 +653,6 @@ mod tests {
                 id: 2.into(),
                 name: "r2".to_string(),
                 attrs: BTreeMap::new(),
-                partition: None,
                 partition_expr: "".to_string(),
             },
             leader_peer: Some(Peer::new(1, "a1")),
@@ -650,7 +670,6 @@ mod tests {
                 id: 2.into(),
                 name: "r2".to_string(),
                 attrs: BTreeMap::new(),
-                partition: None,
                 partition_expr: "".to_string(),
             },
             leader_peer: Some(Peer::new(1, "a1")),
@@ -679,7 +698,6 @@ mod tests {
                 id: 2.into(),
                 name: "r2".to_string(),
                 attrs: BTreeMap::new(),
-                partition: None,
                 partition_expr: "".to_string(),
             },
             leader_peer: Some(Peer::new(1, "a1")),
@@ -719,7 +737,6 @@ mod tests {
                     id: RegionId::new(1, 1),
                     name: "r1".to_string(),
                     attrs: BTreeMap::new(),
-                    partition: None,
                     partition_expr: "".to_string(),
                 },
                 leader_peer: Some(Peer::new(1, "a1")),
@@ -733,7 +750,6 @@ mod tests {
                     id: RegionId::new(1, 2),
                     name: "r2".to_string(),
                     attrs: BTreeMap::new(),
-                    partition: None,
                     partition_expr: "".to_string(),
                 },
                 leader_peer: Some(Peer::new(2, "a2")),
@@ -777,7 +793,6 @@ mod tests {
 
         let r2: Region = r.into();
         assert_eq!(r2.partition_expr(), "");
-        assert!(r2.partition.is_none());
 
         let r3: PbRegion = r2.into();
         assert_eq!(r3.partition.as_ref().unwrap().expression, "");
@@ -796,7 +811,6 @@ mod tests {
 
         let r2: Region = r.into();
         assert_eq!(r2.partition_expr(), "{}");
-        assert!(r2.partition.is_none());
 
         let r3: PbRegion = r2.into();
         assert_eq!(r3.partition.as_ref().unwrap().expression, "{}");
@@ -815,7 +829,6 @@ mod tests {
 
         let r2: Region = r.into();
         assert_eq!(r2.partition_expr(), "a>b");
-        assert!(r2.partition.is_none());
 
         let r3: PbRegion = r2.into();
         assert_eq!(r3.partition.as_ref().unwrap().expression, "a>b");

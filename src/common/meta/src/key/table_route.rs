@@ -941,7 +941,6 @@ mod tests {
                     region: Region {
                         id: RegionId::new(0, 1),
                         name: "r1".to_string(),
-                        partition: None,
                         attrs: Default::default(),
                         partition_expr: Default::default(),
                     },
@@ -958,7 +957,6 @@ mod tests {
                     region: Region {
                         id: RegionId::new(0, 1),
                         name: "r1".to_string(),
-                        partition: None,
                         attrs: Default::default(),
                         partition_expr: Default::default(),
                     },

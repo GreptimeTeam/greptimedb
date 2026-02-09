@@ -21,7 +21,7 @@ use common_meta::key::TableMetadataManager;
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
-use common_meta::rpc::router::{LegacyPartition, Region, RegionRoute};
+use common_meta::rpc::router::{Region, RegionRoute};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder};
 use moka::future::CacheBuilder;
@@ -130,7 +130,6 @@ pub(crate) async fn create_partition_rule_manager(
                     region: Region {
                         id: 3.into(),
                         name: "r1".to_string(),
-                        partition: None,
                         attrs: BTreeMap::new(),
                         partition_expr: PartitionExpr::new(
                             Operand::Column("a".to_string()),
@@ -150,7 +149,6 @@ pub(crate) async fn create_partition_rule_manager(
                     region: Region {
                         id: 2.into(),
                         name: "r2".to_string(),
-                        partition: None,
                         attrs: BTreeMap::new(),
                         partition_expr: PartitionExpr::new(
                             Operand::Expr(PartitionExpr::new(
@@ -172,25 +170,19 @@ pub(crate) async fn create_partition_rule_manager(
                     follower_peers: vec![],
                     leader_state: None,
                     leader_down_since: None,
-                    write_route_policy:None,
+                    write_route_policy: None,
                 },
                 RegionRoute {
-                    region: Region {
-                        id: 1.into(),
-                        name: "r3".to_string(),
-                        // Keep the old partition definition to test compatibility.
-                        partition: Some(LegacyPartition {
-                            column_list: vec![b"a".to_vec()],
-                            value_list: vec![b"{\"Expr\":{\"lhs\":{\"Column\":\"a\"},\"op\":\"GtEq\",\"rhs\":{\"Value\":{\"Int32\":50}}}}".to_vec()],
-                        }),
-                        attrs: BTreeMap::new(),
-                        partition_expr: Default::default(),
-                    },
+                    // Keep legacy `partition` payload to test compatibility.
+                    region: serde_json::from_str(
+                        r#"{"id":1,"name":"r3","partition":{"column_list":["a"],"value_list":["{\"Expr\":{\"lhs\":{\"Column\":\"a\"},\"op\":\"GtEq\",\"rhs\":{\"Value\":{\"Int32\":50}}}}"]},"attrs":{},"partition_expr":""}"#,
+                    )
+                    .unwrap(),
                     leader_peer: Some(Peer::new(1, "")),
                     follower_peers: vec![],
                     leader_state: None,
                     leader_down_since: None,
-                    write_route_policy:None,
+                    write_route_policy: None,
                 },
             ]),
             region_wal_options.clone(),

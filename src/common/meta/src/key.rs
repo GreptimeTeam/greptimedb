@@ -1539,7 +1539,6 @@ mod tests {
             region: Region {
                 id: region_id.into(),
                 name: "r1".to_string(),
-                partition: None,
                 attrs: BTreeMap::new(),
                 partition_expr: Default::default(),
             },
@@ -2046,7 +2045,6 @@ mod tests {
                 region: Region {
                     id: 1.into(),
                     name: "r1".to_string(),
-                    partition: None,
                     attrs: BTreeMap::new(),
                     partition_expr: Default::default(),
                 },
@@ -2060,7 +2058,6 @@ mod tests {
                 region: Region {
                     id: 2.into(),
                     name: "r2".to_string(),
-                    partition: None,
                     attrs: BTreeMap::new(),
                     partition_expr: Default::default(),
                 },
