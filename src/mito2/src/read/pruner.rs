@@ -57,7 +57,7 @@ impl PartitionPruner {
         for part_range in partition_ranges {
             let range_meta = &pruner.inner.stream_ctx.ranges[part_range.identifier];
             for row_group_index in &range_meta.row_group_indices {
-                if row_group_index.index >= num_memtables {
+                if pruner.inner.stream_ctx.is_file_range_index(*row_group_index) {
                     let file_index = row_group_index.index - num_memtables;
                     if dedup_set.contains(&file_index) {
                         continue;
@@ -207,7 +207,7 @@ impl Pruner {
         for part_range in partition_ranges {
             let range_meta = &self.inner.stream_ctx.ranges[part_range.identifier];
             for row_group_index in &range_meta.row_group_indices {
-                if row_group_index.index >= num_memtables {
+                if self.inner.stream_ctx.is_file_range_index(*row_group_index) {
                     let file_index = row_group_index.index - num_memtables;
                     if file_index < self.inner.file_entries.len() {
                         let mut entry = self.inner.file_entries[file_index].lock().unwrap();
