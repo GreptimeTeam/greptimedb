@@ -472,7 +472,7 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 event.json_payload().unwrap(),
-                "{\"procedure_id\": \"1234567890\"}"
+                json!({"procedure_id": "1234567890"}),
             );
             assert_eq!(event.event_type(), "test_event");
             Ok(())
