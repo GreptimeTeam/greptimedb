@@ -45,6 +45,7 @@ impl UpdateMetadata {
                 },
             )?;
             region_route.clear_leader_staging();
+            region_route.clear_reject_all_writes();
         }
 
         for source in sources {
@@ -55,6 +56,7 @@ impl UpdateMetadata {
                 },
             )?;
             region_route.clear_leader_staging();
+            region_route.clear_reject_all_writes();
         }
 
         Ok(region_routes)
@@ -102,5 +104,67 @@ impl UpdateMetadata {
         ctx.update_table_repart_mapping().await?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use common_meta::peer::Peer;
+    use common_meta::rpc::router::{LeaderState, Region, RegionRoute};
+    use store_api::storage::RegionId;
+    use uuid::Uuid;
+
+    use crate::procedure::repartition::group::update_metadata::UpdateMetadata;
+    use crate::procedure::repartition::plan::RegionDescriptor;
+    use crate::procedure::repartition::test_util::range_expr;
+
+    #[test]
+    fn test_exit_staging_region_routes_clear_reject_all_writes() {
+        let group_id = Uuid::new_v4();
+        let table_id = 1024;
+        let source_region = RegionDescriptor {
+            region_id: RegionId::new(table_id, 1),
+            partition_expr: range_expr("x", 0, 100),
+        };
+        let target_region = RegionDescriptor {
+            region_id: RegionId::new(table_id, 2),
+            partition_expr: range_expr("x", 0, 50),
+        };
+        let mut source_route = RegionRoute {
+            region: Region {
+                id: source_region.region_id,
+                partition_expr: range_expr("x", 0, 100).as_json_str().unwrap(),
+                ..Default::default()
+            },
+            leader_peer: Some(Peer::empty(1)),
+            leader_state: Some(LeaderState::Staging),
+            ..Default::default()
+        };
+        source_route.set_reject_all_writes();
+
+        let mut target_route = RegionRoute {
+            region: Region {
+                id: target_region.region_id,
+                partition_expr: range_expr("x", 0, 50).as_json_str().unwrap(),
+                ..Default::default()
+            },
+            leader_peer: Some(Peer::empty(1)),
+            leader_state: Some(LeaderState::Staging),
+            ..Default::default()
+        };
+        target_route.set_reject_all_writes();
+
+        let new_region_routes = UpdateMetadata::exit_staging_region_routes(
+            group_id,
+            &[source_region],
+            &[target_region],
+            &[source_route, target_route],
+        )
+        .unwrap();
+
+        assert!(!new_region_routes[0].is_leader_staging());
+        assert!(!new_region_routes[0].is_reject_all_writes());
+        assert!(!new_region_routes[1].is_leader_staging());
+        assert!(!new_region_routes[1].is_reject_all_writes());
     }
 }

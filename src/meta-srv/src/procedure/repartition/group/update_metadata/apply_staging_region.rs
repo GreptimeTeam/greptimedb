@@ -34,6 +34,7 @@ impl UpdateMetadata {
         group_id: GroupId,
         sources: &[RegionDescriptor],
         targets: &[RegionDescriptor],
+        pending_deallocate_region_ids: &[store_api::storage::RegionId],
         current_region_routes: &[RegionRoute],
     ) -> Result<Vec<RegionRoute>> {
         let mut region_routes = current_region_routes.to_vec();
@@ -54,6 +55,7 @@ impl UpdateMetadata {
                 .as_json_str()
                 .context(error::SerializePartitionExprSnafu)?;
             region_route.set_leader_staging();
+            region_route.clear_reject_all_writes();
         }
 
         for source in sources {
@@ -64,6 +66,11 @@ impl UpdateMetadata {
                 },
             )?;
             region_route.set_leader_staging();
+            if pending_deallocate_region_ids.contains(&source.region_id) {
+                region_route.set_reject_all_writes();
+            } else {
+                region_route.clear_reject_all_writes();
+            }
         }
 
         Ok(region_routes)
@@ -86,6 +93,7 @@ impl UpdateMetadata {
             group_id,
             &ctx.persistent_ctx.sources,
             &ctx.persistent_ctx.targets,
+            &ctx.persistent_ctx.pending_deallocate_region_ids,
             region_routes,
         )?;
 
@@ -169,6 +177,7 @@ mod tests {
             group_id,
             &[source_region],
             &[target_region],
+            &[],
             &region_routes,
         )
         .unwrap();
@@ -183,5 +192,54 @@ mod tests {
         );
         assert!(new_region_routes[1].is_leader_staging());
         assert!(!new_region_routes[2].is_leader_staging());
+    }
+
+    #[test]
+    fn test_generate_region_routes_mark_pending_deallocate_reject_all_writes() {
+        let group_id = Uuid::new_v4();
+        let table_id = 1024;
+        let pending_deallocate_region_id = RegionId::new(table_id, 1);
+        let region_routes = vec![
+            RegionRoute {
+                region: Region {
+                    id: pending_deallocate_region_id,
+                    partition_expr: range_expr("x", 0, 100).as_json_str().unwrap(),
+                    ..Default::default()
+                },
+                leader_peer: Some(Peer::empty(1)),
+                ..Default::default()
+            },
+            RegionRoute {
+                region: Region {
+                    id: RegionId::new(table_id, 2),
+                    partition_expr: String::new(),
+                    ..Default::default()
+                },
+                leader_peer: Some(Peer::empty(1)),
+                ..Default::default()
+            },
+        ];
+        let source_region = RegionDescriptor {
+            region_id: pending_deallocate_region_id,
+            partition_expr: range_expr("x", 0, 100),
+        };
+        let target_region = RegionDescriptor {
+            region_id: RegionId::new(table_id, 2),
+            partition_expr: range_expr("x", 0, 10),
+        };
+
+        let new_region_routes = UpdateMetadata::apply_staging_region_routes(
+            group_id,
+            &[source_region],
+            &[target_region],
+            &[pending_deallocate_region_id],
+            &region_routes,
+        )
+        .unwrap();
+
+        assert!(new_region_routes[0].is_leader_staging());
+        assert!(new_region_routes[0].is_reject_all_writes());
+        assert!(new_region_routes[1].is_leader_staging());
+        assert!(!new_region_routes[1].is_reject_all_writes());
     }
 }
