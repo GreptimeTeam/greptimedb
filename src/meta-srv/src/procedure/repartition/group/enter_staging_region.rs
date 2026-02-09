@@ -27,6 +27,7 @@ use common_telemetry::info;
 use futures::future::{join_all, try_join_all};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
+use store_api::storage::RegionId;
 
 use crate::error::{self, Error, Result};
 use crate::handler::HeartbeatMailbox;
@@ -34,7 +35,7 @@ use crate::procedure::repartition::group::remap_manifest::RemapManifest;
 use crate::procedure::repartition::group::utils::{
     HandleMultipleResult, group_region_routes_by_peer, handle_multiple_results,
 };
-use crate::procedure::repartition::group::{Context, GroupPrepareResult, State};
+use crate::procedure::repartition::group::{Context, GroupId, GroupPrepareResult, State};
 use crate::procedure::repartition::plan::RegionDescriptor;
 use crate::procedure::utils::{self, ErrorStrategy};
 use crate::service::mailbox::{Channel, MailboxRef};
@@ -72,8 +73,10 @@ impl State for EnterStagingRegion {
 
 impl EnterStagingRegion {
     fn build_enter_staging_instructions(
+        group_id: GroupId,
         prepare_result: &GroupPrepareResult,
         targets: &[RegionDescriptor],
+        pending_deallocate_region_ids: &[RegionId],
     ) -> Result<HashMap<Peer, Vec<common_meta::instruction::EnterStagingRegion>>> {
         let target_partition_expr_by_region = targets
             .iter()
@@ -104,6 +107,25 @@ impl EnterStagingRegion {
                 .collect();
             instructions.insert(peer.clone(), enter_staging_regions);
         }
+        // For pending deallocate regions, set the partition rule to RejectAllWrites.
+        for region_id in pending_deallocate_region_ids {
+            let peer = prepare_result
+                .source_routes
+                .iter()
+                .find(|route| route.region.id == *region_id)
+                .map(|route| route.leader_peer.as_ref().unwrap())
+                .context(error::RepartitionSourceRegionMissingSnafu {
+                    group_id,
+                    region_id: *region_id,
+                })?;
+            instructions.insert(
+                peer.clone(),
+                vec![common_meta::instruction::EnterStagingRegion {
+                    region_id: *region_id,
+                    partition_rule: StagingPartitionRule::RejectAllWrites,
+                }],
+            );
+        }
 
         Ok(instructions)
     }
@@ -114,7 +136,12 @@ impl EnterStagingRegion {
         // Safety: the group prepare result is set in the RepartitionStart state.
         let prepare_result = ctx.persistent_ctx.group_prepare_result.as_ref().unwrap();
         let targets = &ctx.persistent_ctx.targets;
-        let instructions = Self::build_enter_staging_instructions(prepare_result, targets)?;
+        let instructions = Self::build_enter_staging_instructions(
+            group_id,
+            prepare_result,
+            targets,
+            &ctx.persistent_ctx.pending_deallocate_region_ids,
+        )?;
         let target_region_count = targets.len();
         let peer_count = instructions.len();
         let operation_timeout =
@@ -410,6 +437,7 @@ mod tests {
     use common_meta::peer::Peer;
     use common_meta::rpc::router::{Region, RegionRoute};
     use store_api::storage::RegionId;
+    use uuid::Uuid;
 
     use crate::error::{self, Error};
     use crate::procedure::repartition::group::GroupPrepareResult;
@@ -457,9 +485,13 @@ mod tests {
             central_region_datanode: Peer::empty(1),
         };
         let targets = test_targets();
-        let instructions =
-            EnterStagingRegion::build_enter_staging_instructions(&prepare_result, &targets)
-                .unwrap();
+        let instructions = EnterStagingRegion::build_enter_staging_instructions(
+            Uuid::new_v4(),
+            &prepare_result,
+            &targets,
+            &[],
+        )
+        .unwrap();
 
         assert_eq!(instructions.len(), 2);
         let instruction_1 = instructions.get(&Peer::empty(1)).unwrap().clone();
