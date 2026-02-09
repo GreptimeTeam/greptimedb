@@ -22,7 +22,7 @@ use common_error::ext::BoxedError;
 
 use crate::Tool;
 use crate::metadata::control::{DelCommand, GetCommand};
-use crate::metadata::repair::RepairLogicalTablesCommand;
+use crate::metadata::repair::RepairCommand;
 use crate::metadata::snapshot::SnapshotCommand;
 
 /// Command for managing metadata operations,
@@ -36,14 +36,15 @@ pub enum MetadataCommand {
     Get(GetCommand),
     #[clap(subcommand)]
     Del(DelCommand),
-    RepairLogicalTables(RepairLogicalTablesCommand),
+    #[clap(subcommand)]
+    Repair(RepairCommand),
 }
 
 impl MetadataCommand {
     pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
         match self {
             MetadataCommand::Snapshot(cmd) => cmd.build().await,
-            MetadataCommand::RepairLogicalTables(cmd) => cmd.build().await,
+            MetadataCommand::Repair(cmd) => cmd.build().await,
             MetadataCommand::Get(cmd) => cmd.build().await,
             MetadataCommand::Del(cmd) => cmd.build().await,
         }

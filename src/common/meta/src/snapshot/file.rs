@@ -20,6 +20,7 @@ use snafu::ResultExt;
 use crate::error::{
     DeserializeFlexbuffersSnafu, ReadFlexbuffersSnafu, Result, SerializeFlexbuffersSnafu,
 };
+use crate::rpc::KeyValue;
 use crate::snapshot::FileFormat;
 
 /// The layout of the backup file.
@@ -116,13 +117,6 @@ impl MetadataContent {
     pub fn values(self) -> Vec<KeyValue> {
         self.values
     }
-}
-
-/// The key-value pair of the backup file.
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
-pub(crate) struct KeyValue {
-    pub key: Vec<u8>,
-    pub value: Vec<u8>,
 }
 
 #[cfg(test)]
