@@ -50,7 +50,7 @@ impl UpdateMetadata {
             )?;
             region_route.region.partition_expr = source.region.partition_expr.clone();
             region_route.clear_leader_staging();
-            region_route.clear_reject_all_writes();
+            region_route.clear_ignore_all_writes();
         }
 
         for target in target_routes {
@@ -61,7 +61,7 @@ impl UpdateMetadata {
                 },
             )?;
             region_route.clear_leader_staging();
-            region_route.clear_reject_all_writes();
+            region_route.clear_ignore_all_writes();
         }
 
         Ok(region_routes)
@@ -138,7 +138,7 @@ mod tests {
                     leader_state: Some(LeaderState::Staging),
                     ..Default::default()
                 };
-                route.set_reject_all_writes();
+                route.set_ignore_all_writes();
                 route
             },
             RegionRoute {
@@ -188,13 +188,13 @@ mod tests {
         )
         .unwrap();
         assert!(!new_region_routes[0].is_leader_staging());
-        assert!(!new_region_routes[0].is_reject_all_writes());
+        assert!(!new_region_routes[0].is_ignore_all_writes());
         assert_eq!(
             new_region_routes[0].region.partition_expr,
             range_expr("x", 0, 20).as_json_str().unwrap(),
         );
         assert!(!new_region_routes[1].is_leader_staging());
-        assert!(!new_region_routes[1].is_reject_all_writes());
+        assert!(!new_region_routes[1].is_ignore_all_writes());
         assert!(new_region_routes[2].is_leader_downgrading());
     }
 }

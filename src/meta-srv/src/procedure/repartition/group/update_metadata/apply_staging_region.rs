@@ -55,7 +55,7 @@ impl UpdateMetadata {
                 .as_json_str()
                 .context(error::SerializePartitionExprSnafu)?;
             region_route.set_leader_staging();
-            region_route.clear_reject_all_writes();
+            region_route.clear_ignore_all_writes();
         }
 
         for source in sources {
@@ -67,9 +67,9 @@ impl UpdateMetadata {
             )?;
             region_route.set_leader_staging();
             if pending_deallocate_region_ids.contains(&source.region_id) {
-                region_route.set_reject_all_writes();
+                region_route.set_ignore_all_writes();
             } else {
-                region_route.clear_reject_all_writes();
+                region_route.clear_ignore_all_writes();
             }
         }
 
@@ -238,8 +238,8 @@ mod tests {
         .unwrap();
 
         assert!(new_region_routes[0].is_leader_staging());
-        assert!(new_region_routes[0].is_reject_all_writes());
+        assert!(new_region_routes[0].is_ignore_all_writes());
         assert!(new_region_routes[1].is_leader_staging());
-        assert!(!new_region_routes[1].is_reject_all_writes());
+        assert!(!new_region_routes[1].is_ignore_all_writes());
     }
 }

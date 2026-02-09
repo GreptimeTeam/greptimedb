@@ -295,25 +295,25 @@ pub enum LeaderState {
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 pub enum WriteRoutePolicy {
     Normal,
-    RejectAllWrites,
+    IgnoreAllWrites,
 }
 
 impl RegionRoute {
-    /// Returns true if the region should reject all writes.
-    pub fn is_reject_all_writes(&self) -> bool {
+    /// Returns true if the region should ignore all writes.
+    pub fn is_ignore_all_writes(&self) -> bool {
         matches!(
             self.write_route_policy,
-            Some(WriteRoutePolicy::RejectAllWrites)
+            Some(WriteRoutePolicy::IgnoreAllWrites)
         )
     }
 
-    /// Marks this region as reject-all for writes.
-    pub fn set_reject_all_writes(&mut self) {
-        self.write_route_policy = Some(WriteRoutePolicy::RejectAllWrites);
+    /// Marks this region as ignore-all for writes.
+    pub fn set_ignore_all_writes(&mut self) {
+        self.write_route_policy = Some(WriteRoutePolicy::IgnoreAllWrites);
     }
 
-    /// Clears reject-all write policy and falls back to normal routing behavior.
-    pub fn clear_reject_all_writes(&mut self) {
+    /// Clears ignore-all write policy and falls back to normal routing behavior.
+    pub fn clear_ignore_all_writes(&mut self) {
         self.write_route_policy = None;
     }
 
@@ -685,10 +685,10 @@ mod tests {
 
     #[test]
     fn test_region_route_write_route_policy_decode_compatibility() {
-        let input = r#"{"region":{"id":2,"name":"r2","partition":null,"attrs":{}},"leader_peer":{"id":1,"addr":"a1"},"follower_peers":[{"id":2,"addr":"a2"}],"write_route_policy":"RejectAllWrites"}"#;
+        let input = r#"{"region":{"id":2,"name":"r2","partition":null,"attrs":{}},"leader_peer":{"id":1,"addr":"a1"},"follower_peers":[{"id":2,"addr":"a2"}],"write_route_policy":"IgnoreAllWrites"}"#;
         let decoded: RegionRoute = serde_json::from_str(input).unwrap();
 
-        assert!(decoded.is_reject_all_writes());
+        assert!(decoded.is_ignore_all_writes());
     }
 
     #[test]
@@ -722,11 +722,11 @@ mod tests {
             write_route_policy: None,
         };
 
-        assert!(!region_route.is_reject_all_writes());
-        region_route.set_reject_all_writes();
-        assert!(region_route.is_reject_all_writes());
-        region_route.clear_reject_all_writes();
-        assert!(!region_route.is_reject_all_writes());
+        assert!(!region_route.is_ignore_all_writes());
+        region_route.set_ignore_all_writes();
+        assert!(region_route.is_ignore_all_writes());
+        region_route.clear_ignore_all_writes();
+        assert!(!region_route.is_ignore_all_writes());
     }
 
     #[test]

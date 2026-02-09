@@ -138,7 +138,7 @@ mod tests {
             leader_state: Some(LeaderState::Staging),
             ..Default::default()
         };
-        source_route.set_reject_all_writes();
+        source_route.set_ignore_all_writes();
 
         let mut target_route = RegionRoute {
             region: Region {
@@ -150,7 +150,7 @@ mod tests {
             leader_state: Some(LeaderState::Staging),
             ..Default::default()
         };
-        target_route.set_reject_all_writes();
+        target_route.set_ignore_all_writes();
 
         let new_region_routes = UpdateMetadata::exit_staging_region_routes(
             group_id,
@@ -161,8 +161,8 @@ mod tests {
         .unwrap();
 
         assert!(!new_region_routes[0].is_leader_staging());
-        assert!(new_region_routes[0].is_reject_all_writes());
+        assert!(new_region_routes[0].is_ignore_all_writes());
         assert!(!new_region_routes[1].is_leader_staging());
-        assert!(new_region_routes[1].is_reject_all_writes());
+        assert!(new_region_routes[1].is_ignore_all_writes());
     }
 }

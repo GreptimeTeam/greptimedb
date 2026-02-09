@@ -57,7 +57,7 @@ pub fn create_partitions_with_version_from_region_routes(
 ) -> common_meta::error::Result<Vec<PartitionInfoWithVersion>> {
     let mut partitions = Vec::with_capacity(region_routes.len());
     for r in region_routes {
-        if r.is_reject_all_writes() {
+        if r.is_ignore_all_writes() {
             continue;
         }
 
@@ -156,7 +156,7 @@ mod tests {
                 follower_peers: vec![],
                 leader_state: None,
                 leader_down_since: None,
-                write_route_policy: Some(WriteRoutePolicy::RejectAllWrites),
+                write_route_policy: Some(WriteRoutePolicy::IgnoreAllWrites),
             },
             RegionRoute {
                 region: Region {
