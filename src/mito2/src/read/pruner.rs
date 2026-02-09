@@ -57,7 +57,11 @@ impl PartitionPruner {
         for part_range in partition_ranges {
             let range_meta = &pruner.inner.stream_ctx.ranges[part_range.identifier];
             for row_group_index in &range_meta.row_group_indices {
-                if pruner.inner.stream_ctx.is_file_range_index(*row_group_index) {
+                if pruner
+                    .inner
+                    .stream_ctx
+                    .is_file_range_index(*row_group_index)
+                {
                     let file_index = row_group_index.index - num_memtables;
                     if dedup_set.contains(&file_index) {
                         continue;
