@@ -87,7 +87,7 @@ pub trait Event: Send + Sync + Debug {
         Timestamp::current_time(TimeUnit::Nanosecond)
     }
 
-    /// Returns the JSON bytes of the event as the payload. It will use JSON type to store the payload.
+    /// Returns the event payload as a structured JSON value. It will be encoded as JSONB when stored.
     fn json_payload(&self) -> Result<serde_json::Value> {
         Ok(serde_json::Value::Null)
     }
