@@ -467,7 +467,7 @@ impl Stream for InstantManipulateStream {
 impl InstantManipulateStream {
     // Refer to Prometheus `vectorSelectorSingle` / lookback semantics.
     //
-    // Prometheus `v3.9.1` (commit `9ec59ba`) uses a start-exclusive lookback window:
+    // Prometheus `v3.9.1` uses a start-exclusive lookback window:
     //   (eval_ts - lookback_delta, eval_ts]
     // i.e. a sample at exactly `eval_ts - lookback_delta` is considered too old.
     pub fn manipulate(&self, input: RecordBatch) -> DataFusionResult<RecordBatch> {
