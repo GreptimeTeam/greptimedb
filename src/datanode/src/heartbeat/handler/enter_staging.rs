@@ -52,22 +52,6 @@ impl EnterStagingRegionsHandler {
             partition_rule,
         }: EnterStagingRegion,
     ) -> EnterStagingRegionReply {
-        let partition_expr = match partition_rule {
-            StagingPartitionRule::PartitionExpr(partition_expr) => partition_expr,
-            StagingPartitionRule::RejectAllWrites => {
-                return EnterStagingRegionReply {
-                    region_id,
-                    ready: false,
-                    exists: true,
-                    error: Some("RejectAllWrites is not supported in enter staging yet".into()),
-                };
-            }
-        };
-        common_telemetry::info!(
-            "Datanode received enter staging region: {}, partition_expr: {}",
-            region_id,
-            partition_expr
-        );
         let Some(writable) = ctx.region_server.is_region_leader(region_id) else {
             warn!("Region: {} is not found", region_id);
             return EnterStagingRegionReply {
@@ -86,6 +70,23 @@ impl EnterStagingRegionsHandler {
                 error: Some("Region is not writable".into()),
             };
         }
+
+        let partition_expr = match partition_rule {
+            StagingPartitionRule::PartitionExpr(partition_expr) => partition_expr,
+            StagingPartitionRule::RejectAllWrites => {
+                return EnterStagingRegionReply {
+                    region_id,
+                    ready: false,
+                    exists: true,
+                    error: Some("RejectAllWrites is not supported in enter staging yet".into()),
+                };
+            }
+        };
+        common_telemetry::info!(
+            "Datanode received enter staging region: {}, partition_expr: {}",
+            region_id,
+            partition_expr
+        );
 
         match ctx
             .region_server
@@ -260,5 +261,36 @@ mod tests {
         assert!(reply.exists);
         assert!(reply.error.is_some());
         assert!(!reply.ready);
+    }
+
+    #[tokio::test]
+    async fn test_enter_staging_reject_all_writes_not_supported() {
+        let mut region_server = mock_region_server();
+        let region_id = RegionId::new(1024, 1);
+        let mut engine_env = TestEnv::new().await;
+        let engine = engine_env.create_engine(MitoConfig::default()).await;
+        region_server.register_engine(Arc::new(engine.clone()));
+        prepare_region(&region_server).await;
+
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let handler_context = HandlerContext::new_for_test(region_server, kv_backend);
+        let replies = EnterStagingRegionsHandler
+            .handle(
+                &handler_context,
+                vec![EnterStagingRegion {
+                    region_id,
+                    partition_rule: StagingPartitionRule::RejectAllWrites,
+                }],
+            )
+            .await
+            .unwrap();
+        let replies = replies.expect_enter_staging_regions_reply();
+        let reply = &replies[0];
+        assert!(reply.exists);
+        assert!(!reply.ready);
+        assert_eq!(
+            reply.error.as_deref(),
+            Some("RejectAllWrites is not supported in enter staging yet")
+        );
     }
 }
