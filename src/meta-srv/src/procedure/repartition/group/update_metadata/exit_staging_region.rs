@@ -45,7 +45,6 @@ impl UpdateMetadata {
                 },
             )?;
             region_route.clear_leader_staging();
-            region_route.clear_reject_all_writes();
         }
 
         for source in sources {
@@ -56,7 +55,6 @@ impl UpdateMetadata {
                 },
             )?;
             region_route.clear_leader_staging();
-            region_route.clear_reject_all_writes();
         }
 
         Ok(region_routes)
@@ -119,7 +117,7 @@ mod tests {
     use crate::procedure::repartition::test_util::range_expr;
 
     #[test]
-    fn test_exit_staging_region_routes_clear_reject_all_writes() {
+    fn test_exit_staging_region_routes_keep_reject_all_writes() {
         let group_id = Uuid::new_v4();
         let table_id = 1024;
         let source_region = RegionDescriptor {
@@ -163,8 +161,8 @@ mod tests {
         .unwrap();
 
         assert!(!new_region_routes[0].is_leader_staging());
-        assert!(!new_region_routes[0].is_reject_all_writes());
+        assert!(new_region_routes[0].is_reject_all_writes());
         assert!(!new_region_routes[1].is_leader_staging());
-        assert!(!new_region_routes[1].is_reject_all_writes());
+        assert!(new_region_routes[1].is_reject_all_writes());
     }
 }

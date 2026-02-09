@@ -118,13 +118,13 @@ impl EnterStagingRegion {
                     group_id,
                     region_id: *region_id,
                 })?;
-            instructions.insert(
-                peer.clone(),
-                vec![common_meta::instruction::EnterStagingRegion {
+            instructions
+                .entry(peer.clone())
+                .or_insert_with(Vec::new)
+                .push(common_meta::instruction::EnterStagingRegion {
                     region_id: *region_id,
                     partition_rule: StagingPartitionRule::RejectAllWrites,
-                }],
-            );
+                });
         }
 
         Ok(instructions)

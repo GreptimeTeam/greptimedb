@@ -393,7 +393,12 @@ impl<S> RegionWorkerLoop<S> {
                     continue;
                 };
                 match region.state() {
-                    RegionRoleState::Leader(RegionLeaderState::Writable) => {
+                    RegionRoleState::Leader(RegionLeaderState::Writable)
+                    | RegionRoleState::Leader(RegionLeaderState::Staging) => {
+                        if region.reject_all_writes_in_staging() {
+                            bulk_req.sender.send(RejectWriteSnafu { region_id }.fail());
+                            continue;
+                        }
                         let region_ctx = RegionWriteCtx::new(
                             region.region_id,
                             &region.version_control,
