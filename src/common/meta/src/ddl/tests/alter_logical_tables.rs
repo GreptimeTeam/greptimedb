@@ -600,6 +600,7 @@ async fn test_on_submit_alter_region_request() {
         follower_peers: vec![Peer::empty(5)],
         leader_state: None,
         leader_down_since: None,
+        write_route_policy: None,
     }];
     create_physical_table_task.set_table_id(phy_id);
     create_physical_table_metadata(

@@ -196,6 +196,7 @@ impl TableRoute {
                 follower_peers,
                 leader_state: None,
                 leader_down_since: None,
+                write_route_policy: None,
             });
         }
 
@@ -258,6 +259,10 @@ pub struct RegionRoute {
     #[serde(default)]
     #[builder(default = "self.default_leader_down_since()")]
     pub leader_down_since: Option<i64>,
+    /// Special write routing behavior for this region.
+    #[builder(setter(into, strip_option), default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write_route_policy: Option<WriteRoutePolicy>,
 }
 
 impl RegionRouteBuilder {
@@ -287,7 +292,31 @@ pub enum LeaderState {
     Staging,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+pub enum WriteRoutePolicy {
+    Normal,
+    RejectAllWrites,
+}
+
 impl RegionRoute {
+    /// Returns true if the region should reject all writes.
+    pub fn is_reject_all_writes(&self) -> bool {
+        matches!(
+            self.write_route_policy,
+            Some(WriteRoutePolicy::RejectAllWrites)
+        )
+    }
+
+    /// Marks this region as reject-all for writes.
+    pub fn set_reject_all_writes(&mut self) {
+        self.write_route_policy = Some(WriteRoutePolicy::RejectAllWrites);
+    }
+
+    /// Clears reject-all write policy and falls back to normal routing behavior.
+    pub fn clear_reject_all_writes(&mut self) {
+        self.write_route_policy = None;
+    }
+
     /// Returns true if the Leader [`Region`] is downgraded.
     ///
     /// The following cases in which the [`Region`] will be downgraded.
@@ -526,6 +555,7 @@ mod tests {
             follower_peers: vec![Peer::new(2, "a2"), Peer::new(3, "a3")],
             leader_state: None,
             leader_down_since: None,
+            write_route_policy: None,
         };
 
         assert!(!region_route.is_leader_downgrading());
@@ -549,6 +579,7 @@ mod tests {
             follower_peers: vec![Peer::new(2, "a2"), Peer::new(3, "a3")],
             leader_state: None,
             leader_down_since: None,
+            write_route_policy: None,
         };
 
         let input = r#"{"region":{"id":2,"name":"r2","partition":null,"attrs":{}},"leader_peer":{"id":1,"addr":"a1"},"follower_peers":[{"id":2,"addr":"a2"},{"id":3,"addr":"a3"}]}"#;
@@ -572,6 +603,7 @@ mod tests {
             follower_peers: vec![Peer::new(2, "a2"), Peer::new(3, "a3")],
             leader_state: Some(LeaderState::Downgrading),
             leader_down_since: None,
+            write_route_policy: None,
         };
         let input = r#"{"region":{"id":2,"name":"r2","partition":null,"attrs":{}},"leader_peer":{"id":1,"addr":"a1"},"follower_peers":[{"id":2,"addr":"a2"},{"id":3,"addr":"a3"}],"leader_state":"Downgraded","leader_down_since":null}"#;
         let decoded: RegionRoute = serde_json::from_str(input).unwrap();
@@ -589,6 +621,7 @@ mod tests {
             follower_peers: vec![Peer::new(2, "a2"), Peer::new(3, "a3")],
             leader_state: Some(LeaderState::Downgrading),
             leader_down_since: None,
+            write_route_policy: None,
         };
         let input = r#"{"region":{"id":2,"name":"r2","partition":null,"attrs":{}},"leader_peer":{"id":1,"addr":"a1"},"follower_peers":[{"id":2,"addr":"a2"},{"id":3,"addr":"a3"}],"leader_status":"Downgraded","leader_down_since":null}"#;
         let decoded: RegionRoute = serde_json::from_str(input).unwrap();
@@ -606,6 +639,7 @@ mod tests {
             follower_peers: vec![Peer::new(2, "a2"), Peer::new(3, "a3")],
             leader_state: Some(LeaderState::Downgrading),
             leader_down_since: None,
+            write_route_policy: None,
         };
         let input = r#"{"region":{"id":2,"name":"r2","partition":null,"attrs":{}},"leader_peer":{"id":1,"addr":"a1"},"follower_peers":[{"id":2,"addr":"a2"},{"id":3,"addr":"a3"}],"leader_state":"Downgrading","leader_down_since":null}"#;
         let decoded: RegionRoute = serde_json::from_str(input).unwrap();
@@ -623,10 +657,58 @@ mod tests {
             follower_peers: vec![Peer::new(2, "a2"), Peer::new(3, "a3")],
             leader_state: Some(LeaderState::Downgrading),
             leader_down_since: None,
+            write_route_policy: None,
         };
         let input = r#"{"region":{"id":2,"name":"r2","partition":null,"attrs":{}},"leader_peer":{"id":1,"addr":"a1"},"follower_peers":[{"id":2,"addr":"a2"},{"id":3,"addr":"a3"}],"leader_status":"Downgrading","leader_down_since":null}"#;
         let decoded: RegionRoute = serde_json::from_str(input).unwrap();
         assert_eq!(decoded, region_route);
+    }
+
+    #[test]
+    fn test_region_route_write_route_policy_decode_compatibility() {
+        let input = r#"{"region":{"id":2,"name":"r2","partition":null,"attrs":{}},"leader_peer":{"id":1,"addr":"a1"},"follower_peers":[{"id":2,"addr":"a2"}],"write_route_policy":"RejectAllWrites"}"#;
+        let decoded: RegionRoute = serde_json::from_str(input).unwrap();
+
+        assert!(decoded.is_reject_all_writes());
+    }
+
+    #[test]
+    fn test_region_route_write_route_policy_default_not_serialized() {
+        let region_route = RegionRoute {
+            region: Region {
+                id: 2.into(),
+                name: "r2".to_string(),
+                attrs: BTreeMap::new(),
+                partition: None,
+                partition_expr: "".to_string(),
+            },
+            leader_peer: Some(Peer::new(1, "a1")),
+            follower_peers: vec![Peer::new(2, "a2"), Peer::new(3, "a3")],
+            leader_state: None,
+            leader_down_since: None,
+            write_route_policy: None,
+        };
+
+        let encoded = serde_json::to_string(&region_route).unwrap();
+        assert!(!encoded.contains("write_route_policy"));
+    }
+
+    #[test]
+    fn test_region_route_write_route_policy_helpers() {
+        let mut region_route = RegionRoute {
+            region: Region::new_test(2.into()),
+            leader_peer: Some(Peer::new(1, "a1")),
+            follower_peers: vec![],
+            leader_state: None,
+            leader_down_since: None,
+            write_route_policy: None,
+        };
+
+        assert!(!region_route.is_reject_all_writes());
+        region_route.set_reject_all_writes();
+        assert!(region_route.is_reject_all_writes());
+        region_route.clear_reject_all_writes();
+        assert!(!region_route.is_reject_all_writes());
     }
 
     #[test]
@@ -644,6 +726,7 @@ mod tests {
                 follower_peers: vec![Peer::new(2, "a2"), Peer::new(3, "a3")],
                 leader_state: None,
                 leader_down_since: None,
+                write_route_policy: None,
             },
             RegionRoute {
                 region: Region {
@@ -657,6 +740,7 @@ mod tests {
                 follower_peers: vec![Peer::new(1, "a1"), Peer::new(3, "a3")],
                 leader_state: None,
                 leader_down_since: None,
+                write_route_policy: None,
             },
         ];
 

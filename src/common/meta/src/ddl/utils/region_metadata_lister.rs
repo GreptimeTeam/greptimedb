@@ -171,6 +171,7 @@ mod tests {
                 follower_peers: vec![Peer::empty(5)],
                 leader_state: None,
                 leader_down_since: None,
+                write_route_policy: None,
             },
             RegionRoute {
                 region: Region::new_test(RegionId::new(1024, 2)),
@@ -178,6 +179,7 @@ mod tests {
                 follower_peers: vec![Peer::empty(4)],
                 leader_state: None,
                 leader_down_since: None,
+                write_route_policy: None,
             },
             RegionRoute {
                 region: Region::new_test(RegionId::new(1024, 3)),
@@ -185,6 +187,7 @@ mod tests {
                 follower_peers: vec![Peer::empty(4)],
                 leader_state: None,
                 leader_down_since: None,
+                write_route_policy: None,
             },
         ];
         let region_metadatas = lister.list(1024, &region_routes).await.unwrap();
@@ -223,6 +226,7 @@ mod tests {
                 follower_peers: vec![],
                 leader_state: None,
                 leader_down_since: None,
+                write_route_policy: None,
             },
             RegionRoute {
                 region: Region::new_test(RegionId::new(1024, 1)),
@@ -230,6 +234,7 @@ mod tests {
                 follower_peers: vec![],
                 leader_state: None,
                 leader_down_since: None,
+                write_route_policy: None,
             },
         ];
         let region_metadatas = lister.list(1024, &region_routes).await.unwrap();

@@ -337,6 +337,7 @@ mod tests {
             follower_peers: vec![Peer::empty(2), Peer::empty(3)],
             leader_state: Some(LeaderState::Downgrading),
             leader_down_since: Some(current_time_millis()),
+            write_route_policy: None,
         }];
 
         env.create_physical_table_metadata(table_info, region_routes)
@@ -376,6 +377,7 @@ mod tests {
             follower_peers: vec![Peer::empty(2), Peer::empty(3)],
             leader_state: None,
             leader_down_since: None,
+            write_route_policy: None,
         }];
 
         env.create_physical_table_metadata(table_info, region_routes)
@@ -403,6 +405,7 @@ mod tests {
             follower_peers: vec![Peer::empty(2), Peer::empty(3)],
             leader_state: None,
             leader_down_since: None,
+            write_route_policy: None,
         }];
 
         env.create_physical_table_metadata(table_info, region_routes)
@@ -431,6 +434,7 @@ mod tests {
             follower_peers: vec![Peer::empty(2), Peer::empty(3)],
             leader_state: Some(LeaderState::Downgrading),
             leader_down_since: None,
+            write_route_policy: None,
         }];
 
         env.create_physical_table_metadata(table_info, region_routes)

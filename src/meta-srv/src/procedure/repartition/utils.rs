@@ -145,6 +145,7 @@ mod tests {
             follower_peers: vec![],
             leader_state: None,
             leader_down_since: None,
+            write_route_policy: None,
         }
     }
 

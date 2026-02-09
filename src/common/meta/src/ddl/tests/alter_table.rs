@@ -68,6 +68,7 @@ fn prepare_table_route(table_id: u32) -> TableRouteValue {
             follower_peers: vec![Peer::empty(5)],
             leader_state: None,
             leader_down_since: None,
+            write_route_policy: None,
         },
         RegionRoute {
             region: Region::new_test(RegionId::new(table_id, 2)),
@@ -75,6 +76,7 @@ fn prepare_table_route(table_id: u32) -> TableRouteValue {
             follower_peers: vec![Peer::empty(4)],
             leader_state: None,
             leader_down_since: None,
+            write_route_policy: None,
         },
         RegionRoute {
             region: Region::new_test(RegionId::new(table_id, 3)),
@@ -82,6 +84,7 @@ fn prepare_table_route(table_id: u32) -> TableRouteValue {
             follower_peers: vec![],
             leader_state: None,
             leader_down_since: None,
+            write_route_policy: None,
         },
     ])
 }
@@ -425,6 +428,7 @@ async fn test_on_update_metadata_add_columns() {
         follower_peers: vec![],
         leader_state: None,
         leader_down_since: None,
+        write_route_policy: None,
     }];
     // Puts a value to table name key.
     ddl_context
@@ -528,6 +532,7 @@ async fn test_on_update_table_options() {
         follower_peers: vec![],
         leader_state: None,
         leader_down_since: None,
+        write_route_policy: None,
     }];
     // Puts a value to table name key.
     ddl_context
