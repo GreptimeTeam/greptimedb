@@ -88,8 +88,8 @@ pub trait Event: Send + Sync + Debug {
     }
 
     /// Returns the JSON bytes of the event as the payload. It will use JSON type to store the payload.
-    fn json_payload(&self) -> Result<String> {
-        Ok("".to_string())
+    fn json_payload(&self) -> Result<serde_json::Value> {
+        Ok(serde_json::Value::Null)
     }
 
     /// Add the extra schema to the event with the default schema.
@@ -164,7 +164,7 @@ pub fn build_row_inserts_request(events: &[&Box<dyn Event>]) -> Result<RowInsert
             let mut values = Vec::with_capacity(3 + extra_row.values.len());
             values.extend([
                 ValueData::StringValue(event.event_type().to_string()).into(),
-                ValueData::BinaryValue(event.json_payload()?.into_bytes()).into(),
+                ValueData::BinaryValue(jsonb::Value::from(&event.json_payload()?).to_vec()).into(),
                 ValueData::TimestampNanosecondValue(event.timestamp().value()).into(),
             ]);
             values.extend(extra_row.values);
@@ -438,6 +438,8 @@ impl EventProcessor {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
 
     #[derive(Debug)]
@@ -448,8 +450,8 @@ mod tests {
             "test_event"
         }
 
-        fn json_payload(&self) -> Result<String> {
-            Ok("{\"procedure_id\": \"1234567890\"}".to_string())
+        fn json_payload(&self) -> Result<serde_json::Value> {
+            Ok(json!({"procedure_id": "1234567890"}))
         }
 
         fn as_any(&self) -> &dyn Any {

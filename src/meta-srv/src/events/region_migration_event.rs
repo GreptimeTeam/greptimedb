@@ -153,8 +153,8 @@ impl Event for RegionMigrationEvent {
         Ok(extra_rows)
     }
 
-    fn json_payload(&self) -> Result<String> {
-        serde_json::to_string(&Payload {
+    fn json_payload(&self) -> Result<serde_json::Value> {
+        serde_json::to_value(Payload {
             timeout: self.timeout,
         })
         .context(SerializeEventSnafu)
