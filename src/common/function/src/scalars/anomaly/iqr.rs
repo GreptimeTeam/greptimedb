@@ -100,6 +100,7 @@ impl PartitionEvaluator for AnomalyScoreIqrEvaluator {
     }
 
     fn evaluate(&mut self, values: &[ArrayRef], range: &Range<usize>) -> Result<ScalarValue> {
+        // TODO(dennis): memoize the converted arrays to avoid re-casting inside each row evaluation
         let values_f64 = cast_to_f64(&values[0])?;
         let array = values_f64
             .as_any()
