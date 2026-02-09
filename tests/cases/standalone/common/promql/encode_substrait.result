@@ -27,7 +27,7 @@ tql explain (0, 100, '1s')
 |               |         PromSeriesNormalize: offset=[0], time index=[ts], filter NaN: [true]                                                                                                        |
 |               |           PromSeriesDivide: tags=["tag_a", "tag_b"]                                                                                                                                 |
 |               |             Sort: count_total.tag_a ASC NULLS FIRST, count_total.tag_b ASC NULLS FIRST, count_total.ts ASC NULLS FIRST                                                              |
-|               |               Filter: count_total.tag_a = Utf8("ffa") AND count_total.ts >= TimestampMillisecond(-43500000, None) AND count_total.ts <= TimestampMillisecond(300000, None)          |
+|               |               Filter: count_total.tag_a = Utf8("ffa") AND count_total.ts >= TimestampMillisecond(-43199999, None) AND count_total.ts <= TimestampMillisecond(0, None)               |
 |               |                 TableScan: count_total                                                                                                                                              |
 |               | ]]                                                                                                                                                                                  |
 | physical_plan | CooperativeExec                                                                                                                                                                     |

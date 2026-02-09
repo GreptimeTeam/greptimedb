@@ -17,22 +17,22 @@ create table trignan (ts timestamp(3) time index, val double);
 
 insert into trignan values (0, 'NaN'::double);
 
--- eval instant at 5m trigy atan2 trigx
+-- eval instant at 1m trigy atan2 trigx
 --     trigy{} 0.4636476090008061
-tql eval (300, 300, '1s') trigy atan2 trigx;
+tql eval (60, 60, '1s') trigy atan2 trigx;
 
--- eval instant at 5m trigy atan2 trigNaN
+-- eval instant at 1m trigy atan2 trigNaN
 --     trigy{} NaN
 -- This query doesn't have result because `trignan` is NaN and will be filtered out.
-tql eval (300, 300, '1s') trigy atan2 trignan;
+tql eval (60, 60, '1s') trigy atan2 trignan;
 
--- eval instant at 5m 10 atan2 20
+-- eval instant at 1m 10 atan2 20
 --     0.4636476090008061
-tql eval (300, 300, '1s') 10 atan2 20;
+tql eval (60, 60, '1s') 10 atan2 20;
 
--- eval instant at 5m 10 atan2 NaN
+-- eval instant at 1m 10 atan2 NaN
 --     NaN
-tql eval (300, 300, '1s') 10 atan2 NaN;
+tql eval (60, 60, '1s') 10 atan2 NaN;
 
 drop table trigx;
 
