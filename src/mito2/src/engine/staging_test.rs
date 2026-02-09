@@ -253,6 +253,52 @@ fn default_partition_expr() -> String {
 }
 
 #[tokio::test]
+async fn test_staging_reject_all_writes_rejects_put() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(2048, 0);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = rows_schema(&request);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_rule: StagingPartitionRule::RejectAllWrites,
+            }),
+        )
+        .await
+        .unwrap();
+
+    let rows = Rows {
+        schema: column_schemas,
+        rows: build_rows(0, 2),
+    };
+    let err = engine
+        .handle_request(
+            region_id,
+            RegionRequest::Put(RegionPutRequest {
+                rows,
+                hint: None,
+                partition_expr_version: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.status_code(), StatusCode::StorageUnavailable);
+    assert_matches!(
+        err.into_inner().as_any().downcast_ref::<Error>().unwrap(),
+        Error::RejectWrite { .. }
+    );
+}
+
+#[tokio::test]
 async fn test_staging_write_partition_expr_version() {
     test_staging_write_partition_expr_version_with_format(false).await;
     test_staging_write_partition_expr_version_with_format(true).await;

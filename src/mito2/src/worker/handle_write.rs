@@ -253,6 +253,13 @@ impl<S> RegionWorkerLoop<S> {
                 match region.state() {
                     RegionRoleState::Leader(RegionLeaderState::Writable)
                     | RegionRoleState::Leader(RegionLeaderState::Staging) => {
+                        if region.reject_all_writes_in_staging() {
+                            sender_req
+                                .sender
+                                .send(RejectWriteSnafu { region_id }.fail());
+                            continue;
+                        }
+
                         let region_ctx = RegionWriteCtx::new(
                             region.region_id,
                             &region.version_control,
@@ -305,6 +312,12 @@ impl<S> RegionWorkerLoop<S> {
             else {
                 continue;
             };
+            if region.reject_all_writes_in_staging() {
+                sender_req
+                    .sender
+                    .send(RejectWriteSnafu { region_id }.fail());
+                continue;
+            }
             let expected_version = region.expected_partition_expr_version();
             if let Err(e) = check_partition_expr_version(
                 region_id,
@@ -420,6 +433,10 @@ impl<S> RegionWorkerLoop<S> {
             let Some(region) = self.regions.get_region_or(region_id, &mut bulk_req.sender) else {
                 continue;
             };
+            if region.reject_all_writes_in_staging() {
+                bulk_req.sender.send(RejectWriteSnafu { region_id }.fail());
+                continue;
+            }
             let expected_version = region.expected_partition_expr_version();
             if let Err(e) = check_partition_expr_version(
                 region_id,

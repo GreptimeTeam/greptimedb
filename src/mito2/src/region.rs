@@ -840,6 +840,17 @@ impl MitoRegion {
             self.version().metadata.partition_expr_version
         }
     }
+
+    pub(crate) fn reject_all_writes_in_staging(&self) -> bool {
+        if !self.is_staging() {
+            return false;
+        }
+        let staging_partition_info = self.staging_partition_info.lock().unwrap();
+        staging_partition_info
+            .as_ref()
+            .map(|info| matches!(info.partition_rule, StagingPartitionRule::RejectAllWrites))
+            .unwrap_or(false)
+    }
 }
 
 /// Context to update the region manifest.
