@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::time::Duration;
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use store_api::region_engine::SyncRegionFromRequest;
 use store_api::storage::{FileRefsManifest, GcReport, RegionId, RegionNumber};
 use strum::Display;
@@ -518,16 +518,93 @@ impl Display for GcRegionsReply {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EnterStagingRegion {
     pub region_id: RegionId,
-    pub partition_expr: String,
+    #[serde(
+        alias = "partition_expr",
+        deserialize_with = "deserialize_enter_staging_partition_rule",
+        serialize_with = "serialize_enter_staging_partition_rule"
+    )]
+    pub partition_rule: StagingPartitionRule,
 }
 
 impl Display for EnterStagingRegion {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "EnterStagingRegion(region_id={}, partition_expr={})",
-            self.region_id, self.partition_expr
+            "EnterStagingRegion(region_id={}, partition_rule={})",
+            self.region_id, self.partition_rule
         )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StagingPartitionRule {
+    PartitionExpr(String),
+    RejectAllWrites,
+}
+
+impl StagingPartitionRule {
+    pub fn as_partition_expr(&self) -> Option<&str> {
+        match self {
+            Self::PartitionExpr(expr) => Some(expr),
+            Self::RejectAllWrites => None,
+        }
+    }
+}
+
+impl Display for StagingPartitionRule {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PartitionExpr(expr) => write!(f, "PartitionExpr({})", expr),
+            Self::RejectAllWrites => write!(f, "RejectAllWrites"),
+        }
+    }
+}
+
+fn serialize_enter_staging_partition_rule<S>(
+    rule: &StagingPartitionRule,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match rule {
+        StagingPartitionRule::PartitionExpr(expr) => serializer.serialize_str(expr),
+        StagingPartitionRule::RejectAllWrites => {
+            #[derive(Serialize)]
+            struct RejectAllWritesSer<'a> {
+                r#type: &'a str,
+            }
+
+            RejectAllWritesSer {
+                r#type: "reject_all_writes",
+            }
+            .serialize(serializer)
+        }
+    }
+}
+
+fn deserialize_enter_staging_partition_rule<'de, D>(
+    deserializer: D,
+) -> std::result::Result<StagingPartitionRule, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Compat {
+        Legacy(String),
+        TypeTagged { r#type: String },
+    }
+
+    match Compat::deserialize(deserializer)? {
+        Compat::Legacy(expr) => Ok(StagingPartitionRule::PartitionExpr(expr)),
+        Compat::TypeTagged { r#type } if r#type == "reject_all_writes" => {
+            Ok(StagingPartitionRule::RejectAllWrites)
+        }
+        Compat::TypeTagged { r#type } => Err(serde::de::Error::custom(format!(
+            "Unknown enter staging partition rule type: {}",
+            r#type
+        ))),
     }
 }
 
@@ -1206,6 +1283,28 @@ mod tests {
                 error: None,
             }));
         assert_eq!(upgrade_region_instruction_reply, upgrade_region_reply);
+    }
+
+    #[test]
+    fn test_enter_staging_partition_rule_compatibility() {
+        let legacy = r#"{"region_id":4398046511105,"partition_expr":"{\"Expr\":{\"lhs\":{\"Column\":\"x\"},\"op\":\"GtEq\",\"rhs\":{\"Value\":{\"Int32\":0}}}}"}"#;
+        let enter: EnterStagingRegion = serde_json::from_str(legacy).unwrap();
+        assert_eq!(enter.region_id, RegionId::new(1024, 1));
+        assert_eq!(
+            enter.partition_rule,
+            StagingPartitionRule::PartitionExpr(
+                "{\"Expr\":{\"lhs\":{\"Column\":\"x\"},\"op\":\"GtEq\",\"rhs\":{\"Value\":{\"Int32\":0}}}}"
+                    .to_string()
+            )
+        );
+
+        let serialized = serde_json::to_string(&enter).unwrap();
+        assert!(serialized.contains("\"partition_rule\":\""));
+        assert!(!serialized.contains("partition_expr"));
+
+        let reject = r#"{"region_id":4398046511105,"partition_expr":{"type":"reject_all_writes"}}"#;
+        let enter: EnterStagingRegion = serde_json::from_str(reject).unwrap();
+        assert_eq!(enter.partition_rule, StagingPartitionRule::RejectAllWrites);
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]

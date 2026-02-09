@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use api::v1::meta::MailboxMessage;
 use common_meta::instruction::{
     EnterStagingRegionReply, EnterStagingRegionsReply, Instruction, InstructionReply,
+    StagingPartitionRule,
 };
 use common_meta::peer::Peer;
 use common_procedure::{Context as ProcedureContext, Status};
@@ -96,7 +97,9 @@ impl EnterStagingRegion {
                 .map(|region_id| common_meta::instruction::EnterStagingRegion {
                     region_id,
                     // Safety: the target_routes is constructed from the targets, so the region_id is always present in the map.
-                    partition_expr: target_partition_expr_by_region[&region_id].clone(),
+                    partition_rule: StagingPartitionRule::PartitionExpr(
+                        target_partition_expr_by_region[&region_id].clone(),
+                    ),
                 })
                 .collect();
             instructions.insert(peer.clone(), enter_staging_regions);
@@ -403,6 +406,7 @@ mod tests {
     use std::assert_matches::assert_matches;
     use std::time::Duration;
 
+    use common_meta::instruction::StagingPartitionRule;
     use common_meta::peer::Peer;
     use common_meta::rpc::router::{Region, RegionRoute};
     use store_api::storage::RegionId;
@@ -463,7 +467,9 @@ mod tests {
             instruction_1,
             vec![common_meta::instruction::EnterStagingRegion {
                 region_id: RegionId::new(table_id, 1),
-                partition_expr: range_expr("x", 0, 10).as_json_str().unwrap(),
+                partition_rule: StagingPartitionRule::PartitionExpr(
+                    range_expr("x", 0, 10).as_json_str().unwrap(),
+                ),
             }]
         );
         let instruction_2 = instructions.get(&Peer::empty(2)).unwrap().clone();
@@ -471,7 +477,9 @@ mod tests {
             instruction_2,
             vec![common_meta::instruction::EnterStagingRegion {
                 region_id: RegionId::new(table_id, 2),
-                partition_expr: range_expr("x", 10, 20).as_json_str().unwrap(),
+                partition_rule: StagingPartitionRule::PartitionExpr(
+                    range_expr("x", 10, 20).as_json_str().unwrap(),
+                ),
             }]
         );
     }
@@ -483,7 +491,9 @@ mod tests {
         let peer = Peer::empty(1);
         let enter_staging_regions = vec![common_meta::instruction::EnterStagingRegion {
             region_id: RegionId::new(1024, 1),
-            partition_expr: range_expr("x", 0, 10).as_json_str().unwrap(),
+            partition_rule: StagingPartitionRule::PartitionExpr(
+                range_expr("x", 0, 10).as_json_str().unwrap(),
+            ),
         }];
         let timeout = Duration::from_secs(10);
 
@@ -512,7 +522,9 @@ mod tests {
         let peer = Peer::empty(1);
         let enter_staging_regions = vec![common_meta::instruction::EnterStagingRegion {
             region_id: RegionId::new(1024, 1),
-            partition_expr: range_expr("x", 0, 10).as_json_str().unwrap(),
+            partition_rule: StagingPartitionRule::PartitionExpr(
+                range_expr("x", 0, 10).as_json_str().unwrap(),
+            ),
         }];
         let timeout = Duration::from_secs(10);
 
@@ -543,7 +555,9 @@ mod tests {
         let peer = Peer::empty(1);
         let enter_staging_regions = vec![common_meta::instruction::EnterStagingRegion {
             region_id: RegionId::new(1024, 1),
-            partition_expr: range_expr("x", 0, 10).as_json_str().unwrap(),
+            partition_rule: StagingPartitionRule::PartitionExpr(
+                range_expr("x", 0, 10).as_json_str().unwrap(),
+            ),
         }];
         let timeout = Duration::from_secs(10);
 
@@ -579,7 +593,9 @@ mod tests {
         let peer = Peer::empty(1);
         let enter_staging_regions = vec![common_meta::instruction::EnterStagingRegion {
             region_id: RegionId::new(1024, 1),
-            partition_expr: range_expr("x", 0, 10).as_json_str().unwrap(),
+            partition_rule: StagingPartitionRule::PartitionExpr(
+                range_expr("x", 0, 10).as_json_str().unwrap(),
+            ),
         }];
         let timeout = Duration::from_secs(10);
 

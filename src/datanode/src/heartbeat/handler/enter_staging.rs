@@ -14,6 +14,7 @@
 
 use common_meta::instruction::{
     EnterStagingRegion, EnterStagingRegionReply, EnterStagingRegionsReply, InstructionReply,
+    StagingPartitionRule,
 };
 use common_telemetry::{error, warn};
 use futures::future::join_all;
@@ -48,9 +49,20 @@ impl EnterStagingRegionsHandler {
         ctx: &HandlerContext,
         EnterStagingRegion {
             region_id,
-            partition_expr,
+            partition_rule,
         }: EnterStagingRegion,
     ) -> EnterStagingRegionReply {
+        let partition_expr = match partition_rule {
+            StagingPartitionRule::PartitionExpr(partition_expr) => partition_expr,
+            StagingPartitionRule::RejectAllWrites => {
+                return EnterStagingRegionReply {
+                    region_id,
+                    ready: false,
+                    exists: true,
+                    error: Some("RejectAllWrites is not supported in enter staging yet".into()),
+                };
+            }
+        };
         common_telemetry::info!(
             "Datanode received enter staging region: {}, partition_expr: {}",
             region_id,
@@ -106,7 +118,7 @@ impl EnterStagingRegionsHandler {
 mod tests {
     use std::sync::Arc;
 
-    use common_meta::instruction::EnterStagingRegion;
+    use common_meta::instruction::{EnterStagingRegion, StagingPartitionRule};
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use mito2::config::MitoConfig;
     use mito2::engine::MITO_ENGINE_NAME;
@@ -136,7 +148,7 @@ mod tests {
                 &handler_context,
                 vec![EnterStagingRegion {
                     region_id,
-                    partition_expr: "".to_string(),
+                    partition_rule: StagingPartitionRule::PartitionExpr("".to_string()),
                 }],
             )
             .await
@@ -165,7 +177,7 @@ mod tests {
                 &handler_context,
                 vec![EnterStagingRegion {
                     region_id,
-                    partition_expr: "".to_string(),
+                    partition_rule: StagingPartitionRule::PartitionExpr("".to_string()),
                 }],
             )
             .await
@@ -204,7 +216,7 @@ mod tests {
                 &handler_context,
                 vec![EnterStagingRegion {
                     region_id,
-                    partition_expr: PARTITION_EXPR.to_string(),
+                    partition_rule: StagingPartitionRule::PartitionExpr(PARTITION_EXPR.to_string()),
                 }],
             )
             .await
@@ -221,7 +233,7 @@ mod tests {
                 &handler_context,
                 vec![EnterStagingRegion {
                     region_id,
-                    partition_expr: PARTITION_EXPR.to_string(),
+                    partition_rule: StagingPartitionRule::PartitionExpr(PARTITION_EXPR.to_string()),
                 }],
             )
             .await
@@ -238,7 +250,7 @@ mod tests {
                 &handler_context,
                 vec![EnterStagingRegion {
                     region_id,
-                    partition_expr: "".to_string(),
+                    partition_rule: StagingPartitionRule::PartitionExpr("".to_string()),
                 }],
             )
             .await
