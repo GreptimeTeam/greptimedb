@@ -79,14 +79,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // If the partition expr mismatch, return error.
         if staging_partition_info
             .as_ref()
-            .map(|info| &info.partition_expr)
+            .and_then(|info| info.partition_expr().map(ToString::to_string))
+            .as_ref()
             != Some(&request.partition_expr)
         {
             sender.send(
                 StagingPartitionExprMismatchSnafu {
                     manifest_expr: staging_partition_info
                         .as_ref()
-                        .map(|info| info.partition_expr.clone()),
+                        .and_then(|info| info.partition_expr().map(ToString::to_string)),
                     request_expr: request.partition_expr,
                 }
                 .fail(),

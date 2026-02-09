@@ -1140,7 +1140,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 DdlRequest::EnterStaging(req) => {
                     self.handle_enter_staging_request(
                         ddl.region_id,
-                        req.partition_expr,
+                        req.partition_rule,
                         ddl.sender,
                     )
                     .await;

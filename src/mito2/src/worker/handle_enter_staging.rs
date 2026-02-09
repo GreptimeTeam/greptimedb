@@ -14,10 +14,9 @@
 
 use std::time::Instant;
 
-use common_base::hash::partition_expr_version;
 use common_telemetry::{error, info, warn};
 use store_api::logstore::LogStore;
-use store_api::region_request::EnterStagingRequest;
+use store_api::region_request::{EnterStagingRequest, StagingPartitionRule};
 use store_api::storage::RegionId;
 
 use crate::error::{RegionNotFoundSnafu, Result, StagingPartitionExprMismatchSnafu};
@@ -34,27 +33,27 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) async fn handle_enter_staging_request(
         &mut self,
         region_id: RegionId,
-        partition_expr: String,
+        partition_rule: StagingPartitionRule,
         mut sender: OptionOutputTx,
     ) {
         let Some(region) = self.regions.writable_region_or(region_id, &mut sender) else {
             return;
         };
 
-        // If the region is already in staging mode, verify the partition expr matches.
+        // If the region is already in staging mode, verify the partition rule matches.
         if region.is_staging() {
             let staging_partition_info = region.staging_partition_info.lock().unwrap().clone();
-            // If the partition expr mismatch, return error.
+            // If the partition rule mismatch, return error.
             if staging_partition_info
                 .as_ref()
-                .map(|info| &info.partition_expr)
-                != Some(&partition_expr)
+                .map(|info| &info.partition_rule)
+                != Some(&partition_rule)
             {
                 sender.send(Err(StagingPartitionExprMismatchSnafu {
                     manifest_expr: staging_partition_info
                         .as_ref()
-                        .map(|info| info.partition_expr.clone()),
-                    request_expr: partition_expr,
+                        .and_then(|info| info.partition_expr().map(ToString::to_string)),
+                    request_expr: format!("{:?}", partition_rule),
                 }
                 .build()));
                 return;
@@ -91,16 +90,21 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 .add_ddl_request_to_pending(SenderDdlRequest {
                     region_id,
                     sender,
-                    request: DdlRequest::EnterStaging(EnterStagingRequest { partition_expr }),
+                    request: DdlRequest::EnterStaging(EnterStagingRequest {
+                        partition_rule: partition_rule.clone(),
+                    }),
                 });
 
             return;
         }
 
-        self.handle_enter_staging(region, partition_expr, sender);
+        self.handle_enter_staging(region, partition_rule, sender);
     }
 
-    async fn enter_staging(region: &MitoRegionRef, partition_expr: String) -> Result<()> {
+    async fn enter_staging(
+        region: &MitoRegionRef,
+        partition_rule: &StagingPartitionRule,
+    ) -> Result<()> {
         let now = Instant::now();
         // First step: clear all staging manifest files.
         {
@@ -123,6 +127,14 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             );
         }
 
+        let partition_expr = match partition_rule {
+            StagingPartitionRule::PartitionExpr(partition_expr) => partition_expr.clone(),
+            StagingPartitionRule::RejectAllWrites => {
+                // Rejects all writes just a memory flag, no need to write new staging manifest.
+                return Ok(());
+            }
+        };
+
         // Second step: write new staging manifest.
         let change = RegionPartitionExprChange {
             partition_expr: Some(partition_expr.clone()),
@@ -140,7 +152,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     fn handle_enter_staging(
         &self,
         region: MitoRegionRef,
-        partition_expr: String,
+        partition_rule: StagingPartitionRule,
         sender: OptionOutputTx,
     ) {
         if let Err(e) = region.set_entering_staging() {
@@ -152,7 +164,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let request_sender = self.sender.clone();
         common_runtime::spawn_global(async move {
             let now = Instant::now();
-            let result = Self::enter_staging(&region, partition_expr.clone()).await;
+            let result = Self::enter_staging(&region, &partition_rule).await;
             match result {
                 Ok(_) => {
                     info!(
@@ -184,7 +196,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     region_id: region.region_id,
                     sender,
                     result,
-                    partition_expr,
+                    partition_rule,
                 }),
             };
             listener
@@ -224,12 +236,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         if enter_staging_result.result.is_ok() {
             info!(
-                "Updating region {} staging partition expr to {}",
-                region.region_id, enter_staging_result.partition_expr
+                "Updating region {} staging partition rule to {:?}",
+                region.region_id, enter_staging_result.partition_rule
             );
             Self::update_region_staging_partition_info(
                 &region,
-                enter_staging_result.partition_expr,
+                enter_staging_result.partition_rule,
             );
             region.switch_state_to_staging(RegionLeaderState::EnteringStaging);
         } else {
@@ -243,13 +255,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             .await;
     }
 
-    fn update_region_staging_partition_info(region: &MitoRegionRef, partition_expr: String) {
+    fn update_region_staging_partition_info(
+        region: &MitoRegionRef,
+        partition_rule: StagingPartitionRule,
+    ) {
         let mut staging_partition_info = region.staging_partition_info.lock().unwrap();
         debug_assert!(staging_partition_info.is_none());
-        let partition_expr_version = partition_expr_version(Some(&partition_expr));
-        *staging_partition_info = Some(StagingPartitionInfo {
-            partition_expr,
-            partition_expr_version,
-        });
+        *staging_partition_info = Some(StagingPartitionInfo::from_partition_rule(partition_rule));
     }
 }

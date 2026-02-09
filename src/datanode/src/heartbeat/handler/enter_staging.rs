@@ -14,11 +14,13 @@
 
 use common_meta::instruction::{
     EnterStagingRegion, EnterStagingRegionReply, EnterStagingRegionsReply, InstructionReply,
-    StagingPartitionRule,
+    StagingPartitionRule as InstructionStagingPartitionRule,
 };
 use common_telemetry::{error, warn};
 use futures::future::join_all;
-use store_api::region_request::{EnterStagingRequest, RegionRequest};
+use store_api::region_request::{
+    EnterStagingRequest, RegionRequest, StagingPartitionRule as RequestStagingPartitionRule,
+};
 
 use crate::heartbeat::handler::{HandlerContext, InstructionHandler};
 
@@ -71,28 +73,22 @@ impl EnterStagingRegionsHandler {
             };
         }
 
-        let partition_expr = match partition_rule {
-            StagingPartitionRule::PartitionExpr(partition_expr) => partition_expr,
-            StagingPartitionRule::RejectAllWrites => {
-                return EnterStagingRegionReply {
-                    region_id,
-                    ready: false,
-                    exists: true,
-                    error: Some("RejectAllWrites is not supported in enter staging yet".into()),
-                };
+        common_telemetry::info!("Datanode received enter staging region: {}", region_id);
+
+        let partition_rule = match partition_rule {
+            InstructionStagingPartitionRule::PartitionExpr(expr) => {
+                RequestStagingPartitionRule::PartitionExpr(expr)
+            }
+            InstructionStagingPartitionRule::RejectAllWrites => {
+                RequestStagingPartitionRule::RejectAllWrites
             }
         };
-        common_telemetry::info!(
-            "Datanode received enter staging region: {}, partition_expr: {}",
-            region_id,
-            partition_expr
-        );
 
         match ctx
             .region_server
             .handle_request(
                 region_id,
-                RegionRequest::EnterStaging(EnterStagingRequest { partition_expr }),
+                RegionRequest::EnterStaging(EnterStagingRequest { partition_rule }),
             )
             .await
         {
@@ -119,7 +115,9 @@ impl EnterStagingRegionsHandler {
 mod tests {
     use std::sync::Arc;
 
-    use common_meta::instruction::{EnterStagingRegion, StagingPartitionRule};
+    use common_meta::instruction::{
+        EnterStagingRegion, StagingPartitionRule as InstructionStagingPartitionRule,
+    };
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use mito2::config::MitoConfig;
     use mito2::engine::MITO_ENGINE_NAME;
@@ -149,7 +147,7 @@ mod tests {
                 &handler_context,
                 vec![EnterStagingRegion {
                     region_id,
-                    partition_rule: StagingPartitionRule::PartitionExpr("".to_string()),
+                    partition_rule: InstructionStagingPartitionRule::PartitionExpr("".to_string()),
                 }],
             )
             .await
@@ -178,7 +176,7 @@ mod tests {
                 &handler_context,
                 vec![EnterStagingRegion {
                     region_id,
-                    partition_rule: StagingPartitionRule::PartitionExpr("".to_string()),
+                    partition_rule: InstructionStagingPartitionRule::PartitionExpr("".to_string()),
                 }],
             )
             .await
@@ -217,7 +215,9 @@ mod tests {
                 &handler_context,
                 vec![EnterStagingRegion {
                     region_id,
-                    partition_rule: StagingPartitionRule::PartitionExpr(PARTITION_EXPR.to_string()),
+                    partition_rule: InstructionStagingPartitionRule::PartitionExpr(
+                        PARTITION_EXPR.to_string(),
+                    ),
                 }],
             )
             .await
@@ -234,7 +234,9 @@ mod tests {
                 &handler_context,
                 vec![EnterStagingRegion {
                     region_id,
-                    partition_rule: StagingPartitionRule::PartitionExpr(PARTITION_EXPR.to_string()),
+                    partition_rule: InstructionStagingPartitionRule::PartitionExpr(
+                        PARTITION_EXPR.to_string(),
+                    ),
                 }],
             )
             .await
@@ -251,7 +253,7 @@ mod tests {
                 &handler_context,
                 vec![EnterStagingRegion {
                     region_id,
-                    partition_rule: StagingPartitionRule::PartitionExpr("".to_string()),
+                    partition_rule: InstructionStagingPartitionRule::PartitionExpr("".to_string()),
                 }],
             )
             .await
@@ -264,7 +266,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_enter_staging_reject_all_writes_not_supported() {
+    async fn test_enter_staging_reject_all_writes() {
         let mut region_server = mock_region_server();
         let region_id = RegionId::new(1024, 1);
         let mut engine_env = TestEnv::new().await;
@@ -279,7 +281,7 @@ mod tests {
                 &handler_context,
                 vec![EnterStagingRegion {
                     region_id,
-                    partition_rule: StagingPartitionRule::RejectAllWrites,
+                    partition_rule: InstructionStagingPartitionRule::RejectAllWrites,
                 }],
             )
             .await
@@ -287,10 +289,7 @@ mod tests {
         let replies = replies.expect_enter_staging_regions_reply();
         let reply = &replies[0];
         assert!(reply.exists);
-        assert!(!reply.ready);
-        assert_eq!(
-            reply.error.as_deref(),
-            Some("RejectAllWrites is not supported in enter staging yet")
-        );
+        assert!(reply.ready);
+        assert!(reply.error.is_none());
     }
 }

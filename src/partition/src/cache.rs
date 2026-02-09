@@ -134,7 +134,7 @@ pub fn new_partition_info_cache(
 
 #[cfg(test)]
 mod tests {
-    use common_base::hash::partition_rule_version;
+    use common_base::hash::partition_expr_version;
     use common_meta::rpc::router::{Region, RegionRoute, WriteRoutePolicy};
     use store_api::storage::RegionId;
 
@@ -173,8 +173,8 @@ mod tests {
         assert_eq!(1, partitions.len());
         assert_eq!(RegionId::new(table_id, 2), partitions[0].id);
         assert_eq!(
-            Some(partition_rule_version(Some(expr_json))),
-            partitions[0].partition_rule_version
+            Some(partition_expr_version(Some(expr_json))),
+            partitions[0].partition_expr_version
         );
     }
 }

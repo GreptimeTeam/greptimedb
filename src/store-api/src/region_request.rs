@@ -1472,10 +1472,33 @@ impl RegionBulkInsertsRequest {
 /// This request transitions a region into the staging mode.
 /// It first flushes the memtable for the old region rule if it is not empty,
 /// then enters the staging mode with the new region rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StagingPartitionRule {
+    PartitionExpr(String),
+    RejectAllWrites,
+}
+
+impl StagingPartitionRule {
+    pub fn partition_expr(&self) -> Option<&str> {
+        match self {
+            Self::PartitionExpr(expr) => Some(expr),
+            Self::RejectAllWrites => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct EnterStagingRequest {
-    /// The partition expression of the staging region.
-    pub partition_expr: String,
+    /// The staging partition rule of the region.
+    pub partition_rule: StagingPartitionRule,
+}
+
+impl EnterStagingRequest {
+    pub fn with_partition_expr(partition_expr: String) -> Self {
+        Self {
+            partition_rule: StagingPartitionRule::PartitionExpr(partition_expr),
+        }
+    }
 }
 
 /// This request is used as part of the region repartition.

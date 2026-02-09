@@ -19,7 +19,9 @@ use common_recordbatch::RecordBatches;
 use datatypes::value::Value;
 use partition::expr::col;
 use store_api::region_engine::RegionEngine;
-use store_api::region_request::{EnterStagingRequest, RegionFlushRequest, RegionRequest};
+use store_api::region_request::{
+    EnterStagingRequest, RegionFlushRequest, RegionRequest, StagingPartitionRule,
+};
 use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
@@ -101,7 +103,7 @@ async fn test_partition_filter_basic_with_format(flat_format: bool) {
         .handle_request(
             region_id,
             RegionRequest::EnterStaging(EnterStagingRequest {
-                partition_expr: new_partition_expr.clone(),
+                partition_rule: StagingPartitionRule::PartitionExpr(new_partition_expr.clone()),
             }),
         )
         .await

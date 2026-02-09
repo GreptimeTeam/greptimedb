@@ -40,7 +40,7 @@ use store_api::region_request::{
     AffectedRows, ApplyStagingManifestRequest, EnterStagingRequest, RegionAlterRequest,
     RegionBuildIndexRequest, RegionBulkInsertsRequest, RegionCatchupRequest, RegionCloseRequest,
     RegionCompactRequest, RegionCreateRequest, RegionDropRequest, RegionFlushRequest,
-    RegionOpenRequest, RegionRequest, RegionTruncateRequest,
+    RegionOpenRequest, RegionRequest, RegionTruncateRequest, StagingPartitionRule,
 };
 use store_api::storage::{FileId, RegionId};
 use tokio::sync::oneshot::{self, Receiver, Sender};
@@ -1057,8 +1057,8 @@ pub(crate) struct RegionChangeResult {
 pub(crate) struct EnterStagingResult {
     /// Region id.
     pub(crate) region_id: RegionId,
-    /// The new partition expression to apply.
-    pub(crate) partition_expr: String,
+    /// The new staging partition rule to apply.
+    pub(crate) partition_rule: StagingPartitionRule,
     /// Result sender.
     pub(crate) sender: OptionOutputTx,
     /// Result from the manifest manager.

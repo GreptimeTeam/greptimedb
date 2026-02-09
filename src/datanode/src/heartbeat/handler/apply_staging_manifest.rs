@@ -125,7 +125,7 @@ mod tests {
     use partition::expr::{PartitionExpr, col};
     use store_api::path_utils::table_dir;
     use store_api::region_engine::RegionRole;
-    use store_api::region_request::EnterStagingRequest;
+    use store_api::region_request::{EnterStagingRequest, StagingPartitionRule};
     use store_api::storage::RegionId;
 
     use super::*;
@@ -216,7 +216,9 @@ mod tests {
                 .handle_request(
                     region_id,
                     RegionRequest::EnterStaging(EnterStagingRequest {
-                        partition_expr: partition_expr.as_json_str().unwrap(),
+                        partition_rule: StagingPartitionRule::PartitionExpr(
+                            partition_expr.as_json_str().unwrap(),
+                        ),
                     }),
                 )
                 .await
