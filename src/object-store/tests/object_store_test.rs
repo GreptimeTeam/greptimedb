@@ -22,6 +22,7 @@ use object_store::services::{Fs, S3};
 use object_store::test_util::TempFolder;
 use opendal::EntryMode;
 use opendal::services::{Azblob, Gcs, Oss};
+use prometheus::{Encoder, TextEncoder};
 
 async fn test_object_crud(store: &ObjectStore) -> Result<()> {
     // Create object handler.
@@ -111,9 +112,17 @@ async fn test_fs_backend() -> Result<()> {
         .atomic_write_dir(&tmp_dir.path().to_string_lossy());
 
     let store = ObjectStore::new(builder).unwrap().finish();
+    let store = object_store::util::with_instrument_layers(store, false);
 
     test_object_crud(&store).await?;
     test_object_list(&store).await?;
+
+    let metric_families = prometheus::gather();
+    let mut buffer = Vec::new();
+    let encoder = TextEncoder::new();
+    encoder.encode(&metric_families, &mut buffer).unwrap();
+    let text = String::from_utf8(buffer).unwrap();
+    assert_eq!("", text);
 
     Ok(())
 }
