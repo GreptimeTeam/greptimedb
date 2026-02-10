@@ -569,7 +569,9 @@ mod tests {
     };
     use store_api::path_utils::table_dir;
     use store_api::region_engine::RegionEngine;
-    use store_api::region_request::{EnterStagingRequest, RegionRequest, StagingPartitionRule};
+    use store_api::region_request::{
+        EnterStagingRequest, RegionRequest, StagingPartitionDirective,
+    };
     use store_api::storage::ScanRequest;
     use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 
@@ -1200,7 +1202,9 @@ mod tests {
             .handle_request(
                 physical_region_id,
                 RegionRequest::EnterStaging(EnterStagingRequest {
-                    partition_rule: StagingPartitionRule::PartitionExpr(partition_expr.clone()),
+                    partition_directive: StagingPartitionDirective::PartitionExpr(
+                        partition_expr.clone(),
+                    ),
                 }),
             )
             .await

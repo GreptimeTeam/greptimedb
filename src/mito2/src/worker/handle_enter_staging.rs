@@ -16,7 +16,7 @@ use std::time::Instant;
 
 use common_telemetry::{error, info, warn};
 use store_api::logstore::LogStore;
-use store_api::region_request::{EnterStagingRequest, StagingPartitionRule};
+use store_api::region_request::{EnterStagingRequest, StagingPartitionDirective};
 use store_api::storage::RegionId;
 
 use crate::error::{RegionNotFoundSnafu, Result, StagingPartitionExprMismatchSnafu};
@@ -33,27 +33,27 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) async fn handle_enter_staging_request(
         &mut self,
         region_id: RegionId,
-        partition_rule: StagingPartitionRule,
+        partition_directive: StagingPartitionDirective,
         mut sender: OptionOutputTx,
     ) {
         let Some(region) = self.regions.writable_region_or(region_id, &mut sender) else {
             return;
         };
 
-        // If the region is already in staging mode, verify the partition rule matches.
+        // If the region is already in staging mode, verify the partition directive matches.
         if region.is_staging() {
             let staging_partition_info = region.staging_partition_info.lock().unwrap().clone();
-            // If the partition rule mismatch, return error.
+            // If the partition directive mismatches, return error.
             if staging_partition_info
                 .as_ref()
-                .map(|info| &info.partition_rule)
-                != Some(&partition_rule)
+                .map(|info| &info.partition_directive)
+                != Some(&partition_directive)
             {
                 sender.send(Err(StagingPartitionExprMismatchSnafu {
                     manifest_expr: staging_partition_info
                         .as_ref()
                         .and_then(|info| info.partition_expr().map(ToString::to_string)),
-                    request_expr: format!("{:?}", partition_rule),
+                    request_expr: format!("{:?}", partition_directive),
                 }
                 .build()));
                 return;
@@ -91,19 +91,19 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     region_id,
                     sender,
                     request: DdlRequest::EnterStaging(EnterStagingRequest {
-                        partition_rule: partition_rule.clone(),
+                        partition_directive: partition_directive.clone(),
                     }),
                 });
 
             return;
         }
 
-        self.handle_enter_staging(region, partition_rule, sender);
+        self.handle_enter_staging(region, partition_directive, sender);
     }
 
     async fn enter_staging(
         region: &MitoRegionRef,
-        partition_rule: &StagingPartitionRule,
+        partition_directive: &StagingPartitionDirective,
     ) -> Result<()> {
         let now = Instant::now();
         // First step: clear all staging manifest files.
@@ -127,10 +127,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             );
         }
 
-        let partition_expr = match partition_rule {
-            StagingPartitionRule::PartitionExpr(partition_expr) => partition_expr.clone(),
-            StagingPartitionRule::RejectAllWrites => {
-                // Rejects all writes just a memory flag, no need to write new staging manifest.
+        let partition_expr = match partition_directive {
+            StagingPartitionDirective::PartitionExpr(partition_expr) => partition_expr.clone(),
+            StagingPartitionDirective::RejectAllWrites => {
+                    // Rejects all writes just a memory flag, no need to write new staging manifest.
                 return Ok(());
             }
         };
@@ -152,7 +152,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     fn handle_enter_staging(
         &self,
         region: MitoRegionRef,
-        partition_rule: StagingPartitionRule,
+        partition_directive: StagingPartitionDirective,
         sender: OptionOutputTx,
     ) {
         if let Err(e) = region.set_entering_staging() {
@@ -164,7 +164,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let request_sender = self.sender.clone();
         common_runtime::spawn_global(async move {
             let now = Instant::now();
-            let result = Self::enter_staging(&region, &partition_rule).await;
+            let result = Self::enter_staging(&region, &partition_directive).await;
             match result {
                 Ok(_) => {
                     info!(
@@ -196,7 +196,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     region_id: region.region_id,
                     sender,
                     result,
-                    partition_rule,
+                    partition_directive,
                 }),
             };
             listener
@@ -236,12 +236,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         if enter_staging_result.result.is_ok() {
             info!(
-                "Updating region {} staging partition rule to {:?}",
-                region.region_id, enter_staging_result.partition_rule
+                "Updating region {} staging partition directive to {:?}",
+                region.region_id, enter_staging_result.partition_directive
             );
             Self::update_region_staging_partition_info(
                 &region,
-                enter_staging_result.partition_rule,
+                enter_staging_result.partition_directive,
             );
             region.switch_state_to_staging(RegionLeaderState::EnteringStaging);
         } else {
@@ -257,10 +257,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
     fn update_region_staging_partition_info(
         region: &MitoRegionRef,
-        partition_rule: StagingPartitionRule,
+        partition_directive: StagingPartitionDirective,
     ) {
         let mut staging_partition_info = region.staging_partition_info.lock().unwrap();
         debug_assert!(staging_partition_info.is_none());
-        *staging_partition_info = Some(StagingPartitionInfo::from_partition_rule(partition_rule));
+        *staging_partition_info = Some(StagingPartitionInfo::from_partition_directive(
+            partition_directive,
+        ));
     }
 }

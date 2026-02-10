@@ -20,7 +20,7 @@ use datatypes::value::Value;
 use partition::expr::col;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{
-    EnterStagingRequest, RegionFlushRequest, RegionRequest, StagingPartitionRule,
+    EnterStagingRequest, RegionFlushRequest, RegionRequest, StagingPartitionDirective,
 };
 use store_api::storage::{RegionId, ScanRequest};
 
@@ -103,7 +103,9 @@ async fn test_partition_filter_basic_with_format(flat_format: bool) {
         .handle_request(
             region_id,
             RegionRequest::EnterStaging(EnterStagingRequest {
-                partition_rule: StagingPartitionRule::PartitionExpr(new_partition_expr.clone()),
+                partition_directive: StagingPartitionDirective::PartitionExpr(
+                    new_partition_expr.clone(),
+                ),
             }),
         )
         .await

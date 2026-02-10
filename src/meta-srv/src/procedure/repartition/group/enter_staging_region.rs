@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use api::v1::meta::MailboxMessage;
 use common_meta::instruction::{
     EnterStagingRegionReply, EnterStagingRegionsReply, Instruction, InstructionReply,
-    StagingPartitionRule,
+    StagingPartitionDirective,
 };
 use common_meta::peer::Peer;
 use common_procedure::{Context as ProcedureContext, Status};
@@ -100,7 +100,7 @@ impl EnterStagingRegion {
                 .map(|region_id| common_meta::instruction::EnterStagingRegion {
                     region_id,
                     // Safety: the target_routes is constructed from the targets, so the region_id is always present in the map.
-                    partition_rule: StagingPartitionRule::PartitionExpr(
+                    partition_directive: StagingPartitionDirective::PartitionExpr(
                         target_partition_expr_by_region[&region_id].clone(),
                     ),
                 })
@@ -123,7 +123,7 @@ impl EnterStagingRegion {
                 .or_insert_with(Vec::new)
                 .push(common_meta::instruction::EnterStagingRegion {
                     region_id: *region_id,
-                    partition_rule: StagingPartitionRule::RejectAllWrites,
+                    partition_directive: StagingPartitionDirective::RejectAllWrites,
                 });
         }
 
@@ -433,7 +433,7 @@ mod tests {
     use std::assert_matches::assert_matches;
     use std::time::Duration;
 
-    use common_meta::instruction::StagingPartitionRule;
+    use common_meta::instruction::StagingPartitionDirective;
     use common_meta::peer::Peer;
     use common_meta::rpc::router::{Region, RegionRoute};
     use store_api::storage::RegionId;
@@ -499,7 +499,7 @@ mod tests {
             instruction_1,
             vec![common_meta::instruction::EnterStagingRegion {
                 region_id: RegionId::new(table_id, 1),
-                partition_rule: StagingPartitionRule::PartitionExpr(
+                partition_directive: StagingPartitionDirective::PartitionExpr(
                     range_expr("x", 0, 10).as_json_str().unwrap(),
                 ),
             }]
@@ -509,7 +509,7 @@ mod tests {
             instruction_2,
             vec![common_meta::instruction::EnterStagingRegion {
                 region_id: RegionId::new(table_id, 2),
-                partition_rule: StagingPartitionRule::PartitionExpr(
+                partition_directive: StagingPartitionDirective::PartitionExpr(
                     range_expr("x", 10, 20).as_json_str().unwrap(),
                 ),
             }]
@@ -523,7 +523,7 @@ mod tests {
         let peer = Peer::empty(1);
         let enter_staging_regions = vec![common_meta::instruction::EnterStagingRegion {
             region_id: RegionId::new(1024, 1),
-            partition_rule: StagingPartitionRule::PartitionExpr(
+            partition_directive: StagingPartitionDirective::PartitionExpr(
                 range_expr("x", 0, 10).as_json_str().unwrap(),
             ),
         }];
@@ -554,7 +554,7 @@ mod tests {
         let peer = Peer::empty(1);
         let enter_staging_regions = vec![common_meta::instruction::EnterStagingRegion {
             region_id: RegionId::new(1024, 1),
-            partition_rule: StagingPartitionRule::PartitionExpr(
+            partition_directive: StagingPartitionDirective::PartitionExpr(
                 range_expr("x", 0, 10).as_json_str().unwrap(),
             ),
         }];
@@ -587,7 +587,7 @@ mod tests {
         let peer = Peer::empty(1);
         let enter_staging_regions = vec![common_meta::instruction::EnterStagingRegion {
             region_id: RegionId::new(1024, 1),
-            partition_rule: StagingPartitionRule::PartitionExpr(
+            partition_directive: StagingPartitionDirective::PartitionExpr(
                 range_expr("x", 0, 10).as_json_str().unwrap(),
             ),
         }];
@@ -625,7 +625,7 @@ mod tests {
         let peer = Peer::empty(1);
         let enter_staging_regions = vec![common_meta::instruction::EnterStagingRegion {
             region_id: RegionId::new(1024, 1),
-            partition_rule: StagingPartitionRule::PartitionExpr(
+            partition_directive: StagingPartitionDirective::PartitionExpr(
                 range_expr("x", 0, 10).as_json_str().unwrap(),
             ),
         }];

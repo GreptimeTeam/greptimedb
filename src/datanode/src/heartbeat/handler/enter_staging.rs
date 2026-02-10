@@ -14,12 +14,13 @@
 
 use common_meta::instruction::{
     EnterStagingRegion, EnterStagingRegionReply, EnterStagingRegionsReply, InstructionReply,
-    StagingPartitionRule as InstructionStagingPartitionRule,
+    StagingPartitionDirective as InstructionStagingPartitionDirective,
 };
 use common_telemetry::{error, warn};
 use futures::future::join_all;
 use store_api::region_request::{
-    EnterStagingRequest, RegionRequest, StagingPartitionRule as RequestStagingPartitionRule,
+    EnterStagingRequest, RegionRequest,
+    StagingPartitionDirective as RequestStagingPartitionDirective,
 };
 
 use crate::heartbeat::handler::{HandlerContext, InstructionHandler};
@@ -51,7 +52,7 @@ impl EnterStagingRegionsHandler {
         ctx: &HandlerContext,
         EnterStagingRegion {
             region_id,
-            partition_rule,
+            partition_directive,
         }: EnterStagingRegion,
     ) -> EnterStagingRegionReply {
         let Some(writable) = ctx.region_server.is_region_leader(region_id) else {
@@ -75,12 +76,12 @@ impl EnterStagingRegionsHandler {
 
         common_telemetry::info!("Datanode received enter staging region: {}", region_id);
 
-        let partition_rule = match partition_rule {
-            InstructionStagingPartitionRule::PartitionExpr(expr) => {
-                RequestStagingPartitionRule::PartitionExpr(expr)
+        let partition_directive = match partition_directive {
+            InstructionStagingPartitionDirective::PartitionExpr(expr) => {
+                RequestStagingPartitionDirective::PartitionExpr(expr)
             }
-            InstructionStagingPartitionRule::RejectAllWrites => {
-                RequestStagingPartitionRule::RejectAllWrites
+            InstructionStagingPartitionDirective::RejectAllWrites => {
+                RequestStagingPartitionDirective::RejectAllWrites
             }
         };
 
@@ -88,7 +89,9 @@ impl EnterStagingRegionsHandler {
             .region_server
             .handle_request(
                 region_id,
-                RegionRequest::EnterStaging(EnterStagingRequest { partition_rule }),
+                RegionRequest::EnterStaging(EnterStagingRequest {
+                    partition_directive,
+                }),
             )
             .await
         {
@@ -116,7 +119,7 @@ mod tests {
     use std::sync::Arc;
 
     use common_meta::instruction::{
-        EnterStagingRegion, StagingPartitionRule as InstructionStagingPartitionRule,
+        EnterStagingRegion, StagingPartitionDirective as InstructionStagingPartitionDirective,
     };
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use mito2::config::MitoConfig;
@@ -147,7 +150,9 @@ mod tests {
                 &handler_context,
                 vec![EnterStagingRegion {
                     region_id,
-                    partition_rule: InstructionStagingPartitionRule::PartitionExpr("".to_string()),
+                    partition_directive: InstructionStagingPartitionDirective::PartitionExpr(
+                        "".to_string(),
+                    ),
                 }],
             )
             .await
@@ -176,7 +181,9 @@ mod tests {
                 &handler_context,
                 vec![EnterStagingRegion {
                     region_id,
-                    partition_rule: InstructionStagingPartitionRule::PartitionExpr("".to_string()),
+                    partition_directive: InstructionStagingPartitionDirective::PartitionExpr(
+                        "".to_string(),
+                    ),
                 }],
             )
             .await
@@ -215,7 +222,7 @@ mod tests {
                 &handler_context,
                 vec![EnterStagingRegion {
                     region_id,
-                    partition_rule: InstructionStagingPartitionRule::PartitionExpr(
+                    partition_directive: InstructionStagingPartitionDirective::PartitionExpr(
                         PARTITION_EXPR.to_string(),
                     ),
                 }],
@@ -234,7 +241,7 @@ mod tests {
                 &handler_context,
                 vec![EnterStagingRegion {
                     region_id,
-                    partition_rule: InstructionStagingPartitionRule::PartitionExpr(
+                    partition_directive: InstructionStagingPartitionDirective::PartitionExpr(
                         PARTITION_EXPR.to_string(),
                     ),
                 }],
@@ -253,7 +260,9 @@ mod tests {
                 &handler_context,
                 vec![EnterStagingRegion {
                     region_id,
-                    partition_rule: InstructionStagingPartitionRule::PartitionExpr("".to_string()),
+                    partition_directive: InstructionStagingPartitionDirective::PartitionExpr(
+                        "".to_string(),
+                    ),
                 }],
             )
             .await
@@ -281,7 +290,7 @@ mod tests {
                 &handler_context,
                 vec![EnterStagingRegion {
                     region_id,
-                    partition_rule: InstructionStagingPartitionRule::RejectAllWrites,
+                    partition_directive: InstructionStagingPartitionDirective::RejectAllWrites,
                 }],
             )
             .await

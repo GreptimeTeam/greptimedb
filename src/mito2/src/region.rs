@@ -37,7 +37,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
     RegionManifestInfo, RegionRole, RegionStatistic, SettableRegionRoleState,
 };
-use store_api::region_request::{PathType, StagingPartitionRule};
+use store_api::region_request::{PathType, StagingPartitionDirective};
 use store_api::sst_entry::ManifestSstEntry;
 use store_api::storage::{FileId, RegionId, SequenceNumber};
 use tokio::sync::RwLockWriteGuard;
@@ -169,28 +169,30 @@ pub type MitoRegionRef = Arc<MitoRegion>;
 
 #[derive(Debug, Clone)]
 pub(crate) struct StagingPartitionInfo {
-    pub(crate) partition_rule: StagingPartitionRule,
+    pub(crate) partition_directive: StagingPartitionDirective,
     pub(crate) partition_rule_version: u64,
 }
 
 impl StagingPartitionInfo {
     pub(crate) fn partition_expr(&self) -> Option<&str> {
-        self.partition_rule.partition_expr()
+        self.partition_directive.partition_expr()
     }
 
-    pub(crate) fn from_partition_rule(partition_rule: StagingPartitionRule) -> Self {
-        let partition_rule_version = match &partition_rule {
-            StagingPartitionRule::PartitionExpr(expr) => partition_expr_version(Some(expr)),
-            StagingPartitionRule::RejectAllWrites => reject_all_writes_partition_rule_version(),
+    pub(crate) fn from_partition_directive(partition_directive: StagingPartitionDirective) -> Self {
+        let partition_rule_version = match &partition_directive {
+            StagingPartitionDirective::PartitionExpr(expr) => partition_expr_version(Some(expr)),
+            StagingPartitionDirective::RejectAllWrites => {
+                reject_all_writes_partition_expr_version()
+            }
         };
         Self {
-            partition_rule,
+            partition_directive,
             partition_rule_version,
         }
     }
 }
 
-pub(crate) fn reject_all_writes_partition_rule_version() -> u64 {
+pub(crate) fn reject_all_writes_partition_expr_version() -> u64 {
     partition_expr_version(Some("__greptime_reject_all_writes__"))
 }
 
@@ -848,7 +850,12 @@ impl MitoRegion {
         let staging_partition_info = self.staging_partition_info.lock().unwrap();
         staging_partition_info
             .as_ref()
-            .map(|info| matches!(info.partition_rule, StagingPartitionRule::RejectAllWrites))
+            .map(|info| {
+                matches!(
+                    info.partition_directive,
+                    StagingPartitionDirective::RejectAllWrites
+                )
+            })
             .unwrap_or(false)
     }
 }

@@ -105,7 +105,9 @@ mod tests {
     use partition::expr::{PartitionExpr, col};
     use store_api::path_utils::table_dir;
     use store_api::region_engine::RegionRole;
-    use store_api::region_request::{EnterStagingRequest, RegionRequest, StagingPartitionRule};
+    use store_api::region_request::{
+        EnterStagingRequest, RegionRequest, StagingPartitionDirective,
+    };
     use store_api::storage::RegionId;
 
     use crate::heartbeat::handler::remap_manifest::RemapManifestHandler;
@@ -192,7 +194,7 @@ mod tests {
                 .handle_request(
                     region_id,
                     RegionRequest::EnterStaging(EnterStagingRequest {
-                        partition_rule: StagingPartitionRule::PartitionExpr(
+                        partition_directive: StagingPartitionDirective::PartitionExpr(
                             partition_expr.as_json_str().unwrap(),
                         ),
                     }),
