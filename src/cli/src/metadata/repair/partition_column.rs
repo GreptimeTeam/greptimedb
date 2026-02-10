@@ -75,7 +75,7 @@ impl RepairPartitionColumnTool {
             let table_meta = &table_info_value.table_info.meta;
             let mut partition_columns = Vec::with_capacity(table_meta.partition_key_indices.len());
             for i in &table_meta.partition_key_indices {
-                if let Some(x) = table_meta.schema.column_schemas.get(*i) {
+                if let Some(x) = table_meta.schema.column_schemas().get(*i) {
                     partition_columns.push(&x.name);
                 } else {
                     warn!(
@@ -144,7 +144,7 @@ impl RepairPartitionColumnTool {
         partition_expr_columns: Vec<&String>,
         table_info_value: &TableInfoValue,
     ) -> Result<(), BoxedError> {
-        let column_schemas = &table_info_value.table_info.meta.schema.column_schemas;
+        let column_schemas = table_info_value.table_info.meta.schema.column_schemas();
         let mut partition_column_indices = Vec::with_capacity(partition_expr_columns.len());
         for column_name in &partition_expr_columns {
             if let Some((i, _)) = column_schemas
