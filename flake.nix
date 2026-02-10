@@ -43,6 +43,7 @@
             ])
             cargo-nextest
             cargo-llvm-cov
+            cargo-udeps
             taplo
             curl
             gnuplot ## for cargo bench
