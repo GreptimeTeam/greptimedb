@@ -673,7 +673,10 @@ async fn test_apply_staging_manifest_preserves_unflushed_memtable_with_format(fl
         .await
         .unwrap();
 
-    let scanner = engine.scanner(region_id, ScanRequest::default()).await.unwrap();
+    let scanner = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
     assert!(
         scanner.num_memtables() > 0,
         "unflushed memtable should be preserved after apply staging manifest"
