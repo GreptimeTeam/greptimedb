@@ -1124,6 +1124,42 @@ TQL EVAL (now() - '15s'::interval, now(), '5s') count_values("status_code", http
             r#"TQL EVAL (now() - '15s'::interval, now(), '5s') count_values("status_code", http_requests)"#,
             expr.sql
         );
+
+        let sql = r#"
+CREATE FLOW calc_reqs SINK TO cnt_reqs AS
+TQL EVAL (now() - '15s'::interval, now(), '5s') count_values("status_code", http_requests{__schema__="greptime_private"});"#;
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+        let Statement::CreateFlow(create_flow) = stmt else {
+            unreachable!()
+        };
+        let expr = to_create_flow_task_expr(create_flow, &QueryContext::arc()).unwrap();
+        assert_eq!(1, expr.source_table_names.len());
+        assert_eq!(
+            "greptime.greptime_private.http_requests",
+            to_dot_sep(expr.source_table_names[0].clone())
+        );
+
+        let sql = r#"
+CREATE FLOW calc_reqs SINK TO cnt_reqs AS
+TQL EVAL (now() - '15s'::interval, now(), '5s') count_values("status_code", http_requests{__database__="greptime_private"});"#;
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+        let Statement::CreateFlow(create_flow) = stmt else {
+            unreachable!()
+        };
+        let expr = to_create_flow_task_expr(create_flow, &QueryContext::arc()).unwrap();
+        assert_eq!(1, expr.source_table_names.len());
+        assert_eq!(
+            "greptime.greptime_private.http_requests",
+            to_dot_sep(expr.source_table_names[0].clone())
+        );
     }
 
     #[test]

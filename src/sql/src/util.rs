@@ -36,6 +36,9 @@ use crate::error::{InvalidExprAsOptionValueSnafu, InvalidSqlSnafu, Result};
 use crate::statements::create::SqlOrTql;
 use crate::statements::tql::Tql;
 
+const SCHEMA_MATCHER: &str = "__schema__";
+const DATABASE_MATCHER: &str = "__database__";
+
 /// Format an [ObjectName] without any quote of its idents.
 pub fn format_raw_object_name(name: &ObjectName) -> String {
     struct Inner<'a> {
@@ -244,20 +247,31 @@ fn extract_metric_name_from_vector_selector(
     selector: &PromVectorSelector,
     names: &mut HashSet<ObjectName>,
 ) {
-    if let Some(name) = &selector.name {
-        names.insert(ObjectName(vec![ObjectNamePart::Identifier(Ident::new(
-            name,
-        ))]));
+    let metric_name = selector.name.clone().or_else(|| {
+        let mut metric_name_matchers = selector.matchers.find_matchers(METRIC_NAME);
+        if metric_name_matchers.len() == 1 && metric_name_matchers[0].op == MatchOp::Equal {
+            metric_name_matchers.pop().map(|matcher| matcher.value)
+        } else {
+            None
+        }
+    });
+    let Some(metric_name) = metric_name else {
         return;
-    }
+    };
 
-    let mut metric_name_matchers = selector.matchers.find_matchers(METRIC_NAME);
-    if metric_name_matchers.len() == 1
-        && metric_name_matchers[0].op == MatchOp::Equal
-        && let Some(metric_name) = metric_name_matchers.pop()
-    {
+    let schema_matcher = selector.matchers.matchers.iter().rev().find(|matcher| {
+        matcher.op == MatchOp::Equal
+            && (matcher.name == SCHEMA_MATCHER || matcher.name == DATABASE_MATCHER)
+    });
+
+    if let Some(schema) = schema_matcher {
+        names.insert(ObjectName(vec![
+            ObjectNamePart::Identifier(Ident::new(&schema.value)),
+            ObjectNamePart::Identifier(Ident::new(metric_name)),
+        ]));
+    } else {
         names.insert(ObjectName(vec![ObjectNamePart::Identifier(Ident::new(
-            metric_name.value,
+            metric_name,
         ))]));
     }
 }
@@ -378,5 +392,24 @@ TQL EVAL (now() - '15s'::interval, now(), '5s') count_values("status_code", http
             .collect_vec();
         tables.sort();
         assert_eq!(vec!["http_requests".to_string()], tables);
+    }
+
+    #[test]
+    fn test_extract_tables_from_tql_query_with_schema_matcher() {
+        let sql = r#"
+CREATE FLOW calc_reqs SINK TO cnt_reqs AS
+TQL EVAL (now() - '15s'::interval, now(), '5s') count_values("status_code", http_requests{__schema__="greptime_private"});"#;
+        let mut stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        let Statement::CreateFlow(create_flow) = stmts.pop().unwrap() else {
+            unreachable!()
+        };
+
+        let mut tables = extract_tables_from_query(&create_flow.query)
+            .map(|table| format_raw_object_name(&table))
+            .collect_vec();
+        tables.sort();
+        assert_eq!(vec!["greptime_private.http_requests".to_string()], tables);
     }
 }
