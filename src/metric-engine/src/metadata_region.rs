@@ -483,7 +483,7 @@ impl MetadataRegion {
         RegionPutRequest {
             rows,
             hint: None,
-            partition_rule_version: None,
+            partition_expr_version: None,
         }
     }
 
@@ -516,7 +516,7 @@ impl MetadataRegion {
         RegionDeleteRequest {
             rows,
             hint: None,
-            partition_rule_version: None,
+            partition_expr_version: None,
         }
     }
 

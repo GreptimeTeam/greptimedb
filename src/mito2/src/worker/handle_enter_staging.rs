@@ -14,7 +14,7 @@
 
 use std::time::Instant;
 
-use common_base::hash::partition_rule_version;
+use common_base::hash::partition_expr_version;
 use common_telemetry::{error, info, warn};
 use store_api::logstore::LogStore;
 use store_api::region_request::EnterStagingRequest;
@@ -246,10 +246,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     fn update_region_staging_partition_info(region: &MitoRegionRef, partition_expr: String) {
         let mut staging_partition_info = region.staging_partition_info.lock().unwrap();
         debug_assert!(staging_partition_info.is_none());
-        let partition_rule_version = partition_rule_version(Some(&partition_expr));
+        let partition_expr_version = partition_expr_version(Some(&partition_expr));
         *staging_partition_info = Some(StagingPartitionInfo {
             partition_expr,
-            partition_rule_version,
+            partition_expr_version,
         });
     }
 }

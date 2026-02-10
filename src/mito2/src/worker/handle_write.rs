@@ -305,11 +305,11 @@ impl<S> RegionWorkerLoop<S> {
             else {
                 continue;
             };
-            let expected_version = region.expected_partition_rule_version();
-            if let Err(e) = check_partition_rule_version(
+            let expected_version = region.expected_partition_expr_version();
+            if let Err(e) = check_partition_expr_version(
                 region_id,
                 expected_version,
-                sender_req.request.partition_rule_version,
+                sender_req.request.partition_expr_version,
             ) {
                 sender_req.sender.send(Err(e));
                 continue;
@@ -420,11 +420,11 @@ impl<S> RegionWorkerLoop<S> {
             let Some(region) = self.regions.get_region_or(region_id, &mut bulk_req.sender) else {
                 continue;
             };
-            let expected_version = region.expected_partition_rule_version();
-            if let Err(e) = check_partition_rule_version(
+            let expected_version = region.expected_partition_expr_version();
+            if let Err(e) = check_partition_expr_version(
                 region_id,
                 expected_version,
-                bulk_req.partition_rule_version,
+                bulk_req.partition_expr_version,
             ) {
                 bulk_req.sender.send(Err(e));
                 continue;
@@ -495,7 +495,7 @@ fn check_op_type(append_mode: bool, request: &WriteRequest) -> Result<()> {
     Ok(())
 }
 
-fn check_partition_rule_version(
+fn check_partition_expr_version(
     region_id: RegionId,
     expected_version: u64,
     request_version: Option<u64>,

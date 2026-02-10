@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub use common_base::hash::{FixedRandomState, partition_rule_version};
+pub use common_base::hash::{FixedRandomState, partition_expr_version};
 
 /// Escapes special characters in the provided pattern string for `LIKE`.
 ///

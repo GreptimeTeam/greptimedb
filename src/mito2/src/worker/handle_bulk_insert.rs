@@ -91,7 +91,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             request: part,
             region_id: request.region_id,
             region_metadata,
-            partition_rule_version: request.partition_rule_version,
+            partition_expr_version: request.partition_expr_version,
         });
     }
 }

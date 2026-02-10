@@ -19,7 +19,7 @@ use api::v1::flow::{DirtyWindowRequest, DirtyWindowRequests};
 use api::v1::region::{
     BulkInsertRequest, RegionRequest, RegionRequestHeader, bulk_insert_request, region_request,
 };
-use api::v1::{ArrowIpc, PartitionRuleVersion};
+use api::v1::{ArrowIpc, PartitionExprVersion};
 use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
 use bytes::Bytes;
@@ -87,7 +87,7 @@ impl Inserter {
             // SAFETY: region masks length checked
             let (region_number, _) = region_masks.into_iter().next().unwrap();
             let region_id = RegionId::new(table_id, region_number);
-            let partition_rule_version = partition_versions
+            let partition_expr_version = partition_versions
                 .get(&region_number)
                 .copied()
                 .unwrap_or_default();
@@ -104,8 +104,8 @@ impl Inserter {
                 }),
                 body: Some(region_request::Body::BulkInsert(BulkInsertRequest {
                     region_id: region_id.as_u64(),
-                    partition_rule_version: partition_rule_version
-                        .map(|value| PartitionRuleVersion { value }),
+                    partition_expr_version: partition_expr_version
+                        .map(|value| PartitionExprVersion { value }),
                     body: Some(bulk_insert_request::Body::ArrowIpc(ArrowIpc {
                         schema: schema_bytes.clone(),
                         data_header: raw_flight_data.data_header,
@@ -156,7 +156,7 @@ impl Inserter {
                 if mask.select_none() {
                     continue;
                 }
-                let partition_rule_version = partition_versions
+                let partition_expr_version = partition_versions
                     .get(&region_id.region_number())
                     .copied()
                     .unwrap_or_default();
@@ -218,8 +218,8 @@ impl Inserter {
                             }),
                             body: Some(region_request::Body::BulkInsert(BulkInsertRequest {
                                 region_id: region_id.as_u64(),
-                                partition_rule_version: partition_rule_version
-                                    .map(|value| PartitionRuleVersion { value }),
+                                partition_expr_version: partition_expr_version
+                                    .map(|value| PartitionExprVersion { value }),
                                 body: Some(bulk_insert_request::Body::ArrowIpc(ArrowIpc {
                                     schema: schema_bytes,
                                     data_header: header,

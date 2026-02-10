@@ -54,7 +54,7 @@ pub struct PartitionInfo {
 pub struct PartitionInfoWithVersion {
     pub id: RegionId,
     pub partition_expr: Option<PartitionExpr>,
-    pub partition_rule_version: Option<u64>,
+    pub partition_expr_version: Option<u64>,
 }
 
 impl PartitionRuleManager {
@@ -192,7 +192,7 @@ impl PartitionRuleManager {
         let partition_versions = partition_info
             .partitions
             .iter()
-            .map(|r| (r.id.region_number(), r.partition_rule_version))
+            .map(|r| (r.id.region_number(), r.partition_expr_version))
             .collect::<HashMap<RegionNumber, Option<u64>>>();
         let regions = partition_info
             .partitions

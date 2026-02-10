@@ -78,8 +78,8 @@ pub struct WriteRequest {
     pub hint: Option<WriteHint>,
     /// Region metadata on the time of this request is created.
     pub(crate) region_metadata: Option<RegionMetadataRef>,
-    /// Partition rule version for the region.
-    pub partition_rule_version: Option<u64>,
+    /// Partition expression version for the region.
+    pub partition_expr_version: Option<u64>,
 }
 
 impl WriteRequest {
@@ -136,7 +136,7 @@ impl WriteRequest {
             has_null,
             hint: None,
             region_metadata,
-            partition_rule_version: None,
+            partition_expr_version: None,
         })
     }
 
@@ -146,8 +146,8 @@ impl WriteRequest {
         self
     }
 
-    pub fn with_partition_rule_version(mut self, partition_rule_version: Option<u64>) -> Self {
-        self.partition_rule_version = partition_rule_version;
+    pub fn with_partition_expr_version(mut self, partition_expr_version: Option<u64>) -> Self {
+        self.partition_expr_version = partition_expr_version;
         self
     }
 
@@ -553,7 +553,7 @@ pub(crate) struct SenderBulkRequest {
     pub(crate) region_id: RegionId,
     pub(crate) request: BulkPart,
     pub(crate) region_metadata: RegionMetadataRef,
-    pub(crate) partition_rule_version: Option<u64>,
+    pub(crate) partition_expr_version: Option<u64>,
 }
 
 /// Request sent to a worker with timestamp
@@ -667,7 +667,7 @@ impl WorkerRequest {
                 let mut write_request =
                     WriteRequest::new(region_id, OpType::Put, v.rows, region_metadata.clone())?
                         .with_hint(v.hint)
-                        .with_partition_rule_version(v.partition_rule_version);
+                        .with_partition_expr_version(v.partition_expr_version);
                 if write_request.primary_key_encoding() == PrimaryKeyEncoding::Dense
                     && let Some(region_metadata) = &region_metadata
                 {
@@ -682,7 +682,7 @@ impl WorkerRequest {
                 let mut write_request =
                     WriteRequest::new(region_id, OpType::Delete, v.rows, region_metadata.clone())?
                         .with_hint(v.hint)
-                        .with_partition_rule_version(v.partition_rule_version);
+                        .with_partition_expr_version(v.partition_expr_version);
                 if write_request.primary_key_encoding() == PrimaryKeyEncoding::Dense
                     && let Some(region_metadata) = &region_metadata
                 {

@@ -169,7 +169,7 @@ pub type MitoRegionRef = Arc<MitoRegion>;
 #[derive(Debug, Clone)]
 pub(crate) struct StagingPartitionInfo {
     pub(crate) partition_expr: String,
-    pub(crate) partition_rule_version: u64,
+    pub(crate) partition_expr_version: u64,
 }
 
 impl MitoRegion {
@@ -807,15 +807,15 @@ impl MitoRegion {
         }
     }
 
-    pub fn expected_partition_rule_version(&self) -> u64 {
+    pub fn expected_partition_expr_version(&self) -> u64 {
         if self.is_staging() {
             let staging_partition_info = self.staging_partition_info.lock().unwrap();
             staging_partition_info
                 .as_ref()
-                .map(|info| info.partition_rule_version)
+                .map(|info| info.partition_expr_version)
                 .unwrap_or_default()
         } else {
-            self.version().metadata.partition_rule_version
+            self.version().metadata.partition_expr_version
         }
     }
 }

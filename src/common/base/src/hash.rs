@@ -81,7 +81,7 @@ impl<'de> Deserialize<'de> for FixedRandomState {
     }
 }
 
-pub fn partition_rule_version(expr_json: Option<&str>) -> u64 {
+pub fn partition_expr_version(expr_json: Option<&str>) -> u64 {
     let expr = expr_json.unwrap_or_default();
     if expr.is_empty() {
         return 0;

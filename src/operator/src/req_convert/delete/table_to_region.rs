@@ -56,7 +56,7 @@ mod tests {
     use api::v1::helper::tag_column_schema;
     use api::v1::region::DeleteRequest as RegionDeleteRequest;
     use api::v1::value::ValueData;
-    use api::v1::{ColumnDataType, PartitionRuleVersion, Row, Value};
+    use api::v1::{ColumnDataType, PartitionExprVersion, Row, Value};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use datatypes::vectors::{Int32Vector, VectorRef};
     use store_api::storage::RegionId;
@@ -96,7 +96,7 @@ mod tests {
             .unwrap()
             .partitions
             .iter()
-            .map(|p| (p.id.as_u64(), p.partition_rule_version))
+            .map(|p| (p.id.as_u64(), p.partition_expr_version))
             .collect::<HashMap<_, _>>();
 
         let region_requests = converter.convert(table_request).await.unwrap();
@@ -155,7 +155,7 @@ mod tests {
                     })
                     .collect(),
             }),
-            partition_rule_version: version.map(|value| PartitionRuleVersion { value }),
+            partition_expr_version: version.map(|value| PartitionExprVersion { value }),
         }
     }
 }
