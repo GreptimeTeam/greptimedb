@@ -89,6 +89,10 @@ pub struct RegionOptions {
     pub merge_mode: Option<MergeMode>,
     /// SST format type.
     pub sst_format: Option<FormatType>,
+    /// Original WAL options saved when skip_wal is enabled.
+    /// Used to restore WAL options when skip_wal is disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_wal_options: Option<WalOptions>,
 }
 
 impl RegionOptions {
@@ -170,6 +174,7 @@ impl TryFrom<&HashMap<String, String>> for RegionOptions {
             memtable,
             merge_mode: options.merge_mode,
             sst_format: options.sst_format,
+            original_wal_options: None,
         };
         opts.validate()?;
 
@@ -677,6 +682,7 @@ mod tests {
             })),
             merge_mode: Some(MergeMode::LastNonNull),
             sst_format: None,
+            original_wal_options: None,
         };
         assert_eq!(expect, options);
     }
@@ -712,6 +718,7 @@ mod tests {
             })),
             merge_mode: Some(MergeMode::LastNonNull),
             sst_format: None,
+            original_wal_options: None,
         };
         let region_options_json_str = serde_json::to_string(&options).unwrap();
         let got: RegionOptions = serde_json::from_str(&region_options_json_str).unwrap();
@@ -777,6 +784,7 @@ mod tests {
             })),
             merge_mode: Some(MergeMode::LastNonNull),
             sst_format: None,
+            original_wal_options: None,
         };
         assert_eq!(options, got);
     }

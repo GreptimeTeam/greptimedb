@@ -137,6 +137,7 @@ impl<'a> AlterLogicalTablesExecutor<'a> {
                 current_table_info_value,
                 Some(region_distribution),
                 new_raw_table_info,
+                None,
             )
             .await?;
 

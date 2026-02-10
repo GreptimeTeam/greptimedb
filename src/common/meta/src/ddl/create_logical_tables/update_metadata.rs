@@ -63,7 +63,7 @@ impl CreateLogicalTablesProcedure {
         // Update physical table's metadata and we don't need to touch per-region settings.
         self.context
             .table_metadata_manager
-            .update_table_info(&physical_table_info, None, new_table_info)
+            .update_table_info(&physical_table_info, None, new_table_info, None)
             .await?;
 
         // Invalid physical table cache

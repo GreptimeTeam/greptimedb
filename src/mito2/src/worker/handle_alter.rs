@@ -20,6 +20,7 @@ use std::sync::Arc;
 use common_base::readable_size::ReadableSize;
 use common_telemetry::info;
 use common_telemetry::tracing::warn;
+use common_wal::options::WalOptions;
 use humantime_serde::re::humantime;
 use snafu::{ResultExt, ensure};
 use store_api::logstore::LogStore;
@@ -229,6 +230,54 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         );
                     }
                 }
+                SetRegionOption::SkipWal {
+                    skip_wal,
+                    wal_options,
+                } => {
+                    info!(
+                        "Update region skip_wal: {}, previous: {:?}, new: {}, original: {:?}",
+                        region.region_id,
+                        current_options.wal_options,
+                        skip_wal,
+                        current_options.original_wal_options
+                    );
+                    if skip_wal {
+                        // Save original wal_options before disabling WAL
+                        if !matches!(current_options.wal_options, WalOptions::Noop) {
+                            current_options.original_wal_options =
+                                Some(current_options.wal_options.clone());
+                        }
+                        current_options.wal_options = WalOptions::Noop;
+                    } else {
+                        // Restore WAL options: priority order
+                        // 1. Provided wal_options from request
+                        // 2. Saved original_wal_options
+                        // 3. Fallback to RaftEngine
+                        if let Some(opts) = wal_options {
+                            match serde_json::from_str(&opts) {
+                                Ok(restored) => current_options.wal_options = restored,
+                                Err(e) => {
+                                    warn!(
+                                        "Failed to parse wal_options '{}': {}, trying original",
+                                        opts, e
+                                    );
+                                    current_options.wal_options = current_options
+                                        .original_wal_options
+                                        .take()
+                                        .unwrap_or(WalOptions::RaftEngine);
+                                }
+                            }
+                        } else if let Some(original) = current_options.original_wal_options.take() {
+                            current_options.wal_options = original;
+                        } else {
+                            warn!(
+                                "No wal_options to restore for region {}, using RaftEngine",
+                                region.region_id
+                            );
+                            current_options.wal_options = WalOptions::RaftEngine;
+                        }
+                    }
+                }
             }
         }
         region.version_control.alter_options(current_options);
@@ -263,6 +312,24 @@ fn new_region_options_on_empty_memtable(
                 assert_eq!(FormatType::Flat, new_format);
 
                 current_options.sst_format = Some(new_format);
+            }
+            SetRegionOption::SkipWal {
+                skip_wal,
+                wal_options,
+            } => {
+                if *skip_wal {
+                    if !matches!(current_options.wal_options, WalOptions::Noop) {
+                        current_options.original_wal_options =
+                            Some(current_options.wal_options.clone());
+                    }
+                    current_options.wal_options = WalOptions::Noop;
+                } else if let Some(opts) = wal_options {
+                    if let Ok(restored) = serde_json::from_str(opts) {
+                        current_options.wal_options = restored;
+                    }
+                } else if let Some(original) = current_options.original_wal_options.take() {
+                    current_options.wal_options = original;
+                }
             }
         }
     }

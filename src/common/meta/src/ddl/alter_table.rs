@@ -283,6 +283,8 @@ impl AlterTableProcedure {
         };
 
         // Safety: region distribution is set in `submit_alter_region_requests`.
+        // Note: We don't reallocate WAL options when skip_wal changes.
+        // The region_wal_options in DatanodeTableValue are preserved.
         self.executor
             .on_alter_metadata(
                 &self.context.table_metadata_manager,
@@ -290,6 +292,7 @@ impl AlterTableProcedure {
                 self.data.region_distribution.as_ref(),
                 new_info.into(),
                 &self.data.column_metadatas,
+                None, // Don't update region_wal_options
             )
             .await?;
 
