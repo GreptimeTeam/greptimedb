@@ -37,12 +37,20 @@ use crate::wal::EntryId;
 pub enum RegionMetaAction {
     /// Change region's metadata for request like ALTER
     Change(RegionChange),
+    /// Change only region partition expression metadata.
+    PartitionExprChange(RegionPartitionExprChange),
     /// Edit region's state for changing options or file list.
     Edit(RegionEdit),
     /// Remove the region.
     Remove(RegionRemove),
     /// Truncate the region.
     Truncate(RegionTruncate),
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct RegionPartitionExprChange {
+    /// Partition expression serialized as JSON.
+    pub partition_expr: Option<String>,
 }
 
 impl RegionMetaAction {
@@ -599,6 +607,12 @@ mod tests {
 
         let region_remove = r#"{"region_id":42}"#;
         let _ = serde_json::from_str::<RegionRemove>(region_remove).unwrap();
+
+        let region_partition_expr_change = r#"{
+            "partition_expr": "{\"expr\":\"x < 100\"}"
+        }"#;
+        let _ = serde_json::from_str::<RegionPartitionExprChange>(region_partition_expr_change)
+            .unwrap();
     }
 
     #[test]
