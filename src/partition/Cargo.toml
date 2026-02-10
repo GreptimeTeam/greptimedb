@@ -23,7 +23,6 @@ itertools.workspace = true
 moka = { workspace = true, features = ["future"] }
 serde.workspace = true
 serde_json.workspace = true
-session.workspace = true
 snafu.workspace = true
 sql.workspace = true
 sqlparser.workspace = true
