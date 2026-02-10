@@ -155,7 +155,8 @@ pub(crate) async fn create_external_expr(
     let file_column_schemas = infer_file_table_schema(&object_store, &files, &table_options)
         .await
         .context(InferFileTableSchemaSnafu)?
-        .column_schemas;
+        .column_schemas()
+        .to_vec();
 
     let (time_index, primary_keys, table_column_schemas) = if !create.columns.is_empty() {
         // expanded form

@@ -343,7 +343,7 @@ mod tests {
         // Create view metadata
         table_metadata_manager
             .create_view_metadata(
-                view_info.clone().into(),
+                view_info.clone(),
                 logical_plan,
                 HashSet::new(),
                 vec!["a".to_string(), "b".to_string()],

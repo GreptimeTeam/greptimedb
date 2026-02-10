@@ -14,7 +14,7 @@
 
 use common_grpc_expr::alter_expr_to_request;
 use snafu::ResultExt;
-use table::metadata::{RawTableInfo, TableInfo};
+use table::metadata::TableInfo;
 
 use crate::ddl::alter_logical_tables::AlterLogicalTablesProcedure;
 use crate::ddl::alter_logical_tables::executor::AlterLogicalTablesExecutor;
@@ -56,7 +56,7 @@ impl AlterLogicalTablesProcedure {
 
     pub(crate) fn build_update_metadata(
         &self,
-    ) -> Result<Vec<(DeserializedValueWithBytes<TableInfoValue>, RawTableInfo)>> {
+    ) -> Result<Vec<(DeserializedValueWithBytes<TableInfoValue>, TableInfo)>> {
         let mut table_info_values_to_update = Vec::with_capacity(self.data.tasks.len());
         for (task, table) in self
             .data
@@ -74,10 +74,9 @@ impl AlterLogicalTablesProcedure {
         &self,
         task: &AlterTableTask,
         table: &DeserializedValueWithBytes<TableInfoValue>,
-    ) -> Result<(DeserializedValueWithBytes<TableInfoValue>, RawTableInfo)> {
+    ) -> Result<(DeserializedValueWithBytes<TableInfoValue>, TableInfo)> {
         // Builds new_meta
-        let table_info = TableInfo::try_from(table.table_info.clone())
-            .context(error::ConvertRawTableInfoSnafu)?;
+        let table_info = table.table_info.clone();
         let table_ref = task.table_ref();
         let request = alter_expr_to_request(
             table.table_info.ident.table_id,
@@ -98,9 +97,8 @@ impl AlterLogicalTablesProcedure {
         new_table.meta = new_meta;
         new_table.ident.version = version;
 
-        let mut raw_table_info = RawTableInfo::from(new_table);
-        raw_table_info.sort_columns();
+        new_table.sort_columns();
 
-        Ok((table.clone(), raw_table_info))
+        Ok((table.clone(), new_table))
     }
 }

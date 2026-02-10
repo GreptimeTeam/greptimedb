@@ -381,7 +381,7 @@ mod tests {
 
     async fn prepare_table_metadata(ctx: &Context, wal_options: HashMap<u32, String>) {
         let region_id = ctx.persistent_ctx.region_ids[0];
-        let table_info = new_test_table_info(region_id.table_id()).into();
+        let table_info = new_test_table_info(region_id.table_id());
         let region_routes = vec![RegionRoute {
             region: Region::new_test(region_id),
             leader_peer: Some(ctx.persistent_ctx.from_peer.clone()),

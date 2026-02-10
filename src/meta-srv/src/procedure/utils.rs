@@ -308,8 +308,8 @@ pub mod test_data {
     use common_meta::sequence::SequenceBuilder;
     use common_meta::wal_provider::WalProvider;
     use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::{ColumnSchema, RawSchema};
-    use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
+    use datatypes::schema::{ColumnSchema, Schema};
+    use table::metadata::{TableIdent, TableInfo, TableMeta, TableType};
     use table::requests::TableOptions;
 
     use crate::cache_invalidator::MetasrvCacheInvalidator;
@@ -330,8 +330,8 @@ pub mod test_data {
         ]
     }
 
-    pub fn new_table_info() -> RawTableInfo {
-        RawTableInfo {
+    pub fn new_table_info() -> TableInfo {
+        TableInfo {
             ident: TableIdent {
                 table_id: 42,
                 version: 1,
@@ -340,33 +340,29 @@ pub mod test_data {
             desc: Some("blabla".to_string()),
             catalog_name: "my_catalog".to_string(),
             schema_name: "my_schema".to_string(),
-            meta: RawTableMeta {
-                schema: RawSchema {
-                    column_schemas: vec![
-                        ColumnSchema::new(
-                            "ts".to_string(),
-                            ConcreteDataType::timestamp_millisecond_datatype(),
-                            false,
-                        ),
-                        ColumnSchema::new(
-                            "my_tag1".to_string(),
-                            ConcreteDataType::string_datatype(),
-                            true,
-                        ),
-                        ColumnSchema::new(
-                            "my_tag2".to_string(),
-                            ConcreteDataType::string_datatype(),
-                            true,
-                        ),
-                        ColumnSchema::new(
-                            "my_field_column".to_string(),
-                            ConcreteDataType::int32_datatype(),
-                            true,
-                        ),
-                    ],
-                    timestamp_index: Some(0),
-                    version: 0,
-                },
+            meta: TableMeta {
+                schema: Arc::new(Schema::new(vec![
+                    ColumnSchema::new(
+                        "ts".to_string(),
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        false,
+                    ),
+                    ColumnSchema::new(
+                        "my_tag1".to_string(),
+                        ConcreteDataType::string_datatype(),
+                        true,
+                    ),
+                    ColumnSchema::new(
+                        "my_tag2".to_string(),
+                        ConcreteDataType::string_datatype(),
+                        true,
+                    ),
+                    ColumnSchema::new(
+                        "my_field_column".to_string(),
+                        ConcreteDataType::int32_datatype(),
+                        true,
+                    ),
+                ])),
                 primary_key_indices: vec![1, 2],
                 value_indices: vec![2],
                 engine: MITO2_ENGINE.to_string(),

@@ -124,14 +124,14 @@ impl ManagedTableSource {
             .context(UnexpectedSnafu {
                 reason: format!("Table id = {:?}, couldn't found table info", table_id),
             })?;
-        let raw_schema = &info.table_info.meta.schema;
-        let Some(ts_index) = raw_schema.timestamp_index else {
+        let schema = &info.table_info.meta.schema;
+        let Some(ts_index) = schema.timestamp_index() else {
             UnexpectedSnafu {
                 reason: format!("Table id = {:?}, couldn't found timestamp index", table_id),
             }
             .fail()?
         };
-        let col_schema = raw_schema.column_schemas[ts_index].clone();
+        let col_schema = schema.column_schemas()[ts_index].clone();
         Ok((ts_index, col_schema))
     }
 

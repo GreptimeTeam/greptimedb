@@ -26,7 +26,7 @@ use futures::future;
 use snafu::{ResultExt, ensure};
 use store_api::metadata::ColumnMetadata;
 use store_api::storage::{RegionId, TableId};
-use table::metadata::{RawTableInfo, TableInfo};
+use table::metadata::TableInfo;
 use table::requests::AlterKind;
 use table::table_name::TableName;
 
@@ -107,7 +107,7 @@ impl AlterTableExecutor {
     /// Building the new table info here allows us to catch any issues with the
     /// alteration before committing metadata changes.
     pub(crate) fn validate_alter_table_expr(
-        table_info: &RawTableInfo,
+        table_info: &TableInfo,
         alter_table_expr: AlterTableExpr,
     ) -> Result<TableInfo> {
         build_new_table_info(table_info, alter_table_expr)
@@ -119,7 +119,7 @@ impl AlterTableExecutor {
         table_metadata_manager: &TableMetadataManagerRef,
         current_table_info_value: &DeserializedValueWithBytes<TableInfoValue>,
         region_distribution: Option<&RegionDistribution>,
-        mut raw_table_info: RawTableInfo,
+        mut raw_table_info: TableInfo,
         column_metadatas: &[ColumnMetadata],
     ) -> Result<()> {
         let table_ref = self.table.table_ref();
@@ -261,11 +261,10 @@ pub(crate) fn make_alter_region_request(
 /// `next_column_id` by the number of columns being added, which may result in gaps
 /// in the column id sequence.
 fn build_new_table_info(
-    table_info: &RawTableInfo,
+    table_info: &TableInfo,
     alter_table_expr: AlterTableExpr,
 ) -> Result<TableInfo> {
-    let table_info =
-        TableInfo::try_from(table_info.clone()).context(error::ConvertRawTableInfoSnafu)?;
+    let table_info = table_info.clone();
     let schema_name = &table_info.schema_name;
     let catalog_name = &table_info.catalog_name;
     let table_name = &table_info.name;

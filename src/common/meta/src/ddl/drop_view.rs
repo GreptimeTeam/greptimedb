@@ -21,7 +21,7 @@ use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
 use strum::AsRefStr;
-use table::metadata::{RawTableInfo, TableId, TableType};
+use table::metadata::{TableId, TableInfo, TableType};
 use table::table_reference::TableReference;
 
 use crate::cache_invalidator::Context;
@@ -118,7 +118,7 @@ impl DropViewProcedure {
         Ok(())
     }
 
-    fn ensure_is_view(&self, table_info: &RawTableInfo) -> Result<()> {
+    fn ensure_is_view(&self, table_info: &TableInfo) -> Result<()> {
         ensure!(
             table_info.table_type == TableType::View,
             error::InvalidViewInfoSnafu {

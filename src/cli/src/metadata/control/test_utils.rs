@@ -19,7 +19,7 @@ use common_meta::peer::Peer;
 use common_meta::rpc::router::{Region, RegionRoute};
 use common_meta::rpc::store::PutRequest;
 use store_api::storage::{RegionId, TableId};
-use table::metadata::RawTableInfo;
+use table::metadata::TableInfo;
 
 /// Puts a key-value pair into the kv backend.
 pub async fn put_key(kv_backend: &KvBackendRef, key: &str, value: &str) {
@@ -35,7 +35,7 @@ pub async fn put_key(kv_backend: &KvBackendRef, key: &str, value: &str) {
 pub async fn prepare_physical_table_metadata(
     table_name: &str,
     table_id: TableId,
-) -> (RawTableInfo, PhysicalTableRouteValue) {
+) -> (TableInfo, PhysicalTableRouteValue) {
     let mut create_physical_table_task = test_create_physical_table_task(table_name);
     let table_route = PhysicalTableRouteValue::new(vec![RegionRoute {
         region: Region {

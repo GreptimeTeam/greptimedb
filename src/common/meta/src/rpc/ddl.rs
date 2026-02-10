@@ -48,7 +48,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::{DefaultOnNull, serde_as};
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
-use table::metadata::{RawTableInfo, TableId};
+use table::metadata::{TableId, TableInfo};
 use table::requests::validate_database_option;
 use table::table_name::TableName;
 use table::table_reference::TableReference;
@@ -103,13 +103,13 @@ impl DdlTask {
     pub fn new_create_table(
         expr: CreateTableExpr,
         partitions: Vec<Partition>,
-        table_info: RawTableInfo,
+        table_info: TableInfo,
     ) -> Self {
         DdlTask::CreateTable(CreateTableTask::new(expr, partitions, table_info))
     }
 
     /// Creates a [`DdlTask`] to create several logical tables.
-    pub fn new_create_logical_tables(table_data: Vec<(CreateTableExpr, RawTableInfo)>) -> Self {
+    pub fn new_create_logical_tables(table_data: Vec<(CreateTableExpr, TableInfo)>) -> Self {
         DdlTask::CreateLogicalTables(
             table_data
                 .into_iter()
@@ -197,7 +197,7 @@ impl DdlTask {
     }
 
     /// Creates a [`DdlTask`] to create a view.
-    pub fn new_create_view(create_view: CreateViewExpr, view_info: RawTableInfo) -> Self {
+    pub fn new_create_view(create_view: CreateViewExpr, view_info: TableInfo) -> Self {
         DdlTask::CreateView(CreateViewTask {
             create_view,
             view_info,
@@ -415,7 +415,7 @@ impl From<SubmitDdlTaskResponse> for PbDdlTaskResponse {
 #[derive(Debug, PartialEq, Clone)]
 pub struct CreateViewTask {
     pub create_view: CreateViewExpr,
-    pub view_info: RawTableInfo,
+    pub view_info: TableInfo,
 }
 
 impl CreateViewTask {
@@ -648,7 +648,7 @@ impl From<DropTableTask> for PbDropTableTask {
 pub struct CreateTableTask {
     pub create_table: CreateTableExpr,
     pub partitions: Vec<Partition>,
-    pub table_info: RawTableInfo,
+    pub table_info: TableInfo,
 }
 
 impl TryFrom<PbCreateTableTask> for CreateTableTask {
@@ -683,7 +683,7 @@ impl CreateTableTask {
     pub fn new(
         expr: CreateTableExpr,
         partitions: Vec<Partition>,
-        table_info: RawTableInfo,
+        table_info: TableInfo,
     ) -> CreateTableTask {
         CreateTableTask {
             create_table: expr,
@@ -717,7 +717,7 @@ impl CreateTableTask {
         self.table_info.ident.table_id = table_id;
     }
 
-    /// Sort the columns in [CreateTableExpr] and [RawTableInfo].
+    /// Sort the columns in [CreateTableExpr] and [TableInfo].
     ///
     /// This function won't do any check or verification. Caller should
     /// ensure this task is valid.
@@ -1597,10 +1597,10 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::{AlterTableExpr, ColumnDef, CreateTableExpr, SemanticType};
-    use datatypes::schema::{ColumnSchema, RawSchema, SchemaBuilder};
+    use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder};
     use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
     use store_api::storage::ConcreteDataType;
-    use table::metadata::{RawTableInfo, RawTableMeta, TableType};
+    use table::metadata::{TableInfo, TableMeta, TableType};
     use table::test_util::table_info::test_table_info;
 
     use super::{AlterTableTask, CreateTableTask, *};
@@ -1609,11 +1609,7 @@ mod tests {
     fn test_basic_ser_de_create_table_task() {
         let schema = SchemaBuilder::default().build().unwrap();
         let table_info = test_table_info(1025, "foo", "bar", "baz", Arc::new(schema));
-        let task = CreateTableTask::new(
-            CreateTableExpr::default(),
-            Vec::new(),
-            RawTableInfo::from(table_info),
-        );
+        let task = CreateTableTask::new(CreateTableExpr::default(), Vec::new(), table_info);
 
         let output = serde_json::to_vec(&task).unwrap();
 
@@ -1636,32 +1632,28 @@ mod tests {
     #[test]
     fn test_sort_columns() {
         // construct RawSchema
-        let raw_schema = RawSchema {
-            column_schemas: vec![
-                ColumnSchema::new(
-                    "column3".to_string(),
-                    ConcreteDataType::string_datatype(),
-                    true,
-                ),
-                ColumnSchema::new(
-                    "column1".to_string(),
-                    ConcreteDataType::timestamp_millisecond_datatype(),
-                    false,
-                )
-                .with_time_index(true),
-                ColumnSchema::new(
-                    "column2".to_string(),
-                    ConcreteDataType::float64_datatype(),
-                    true,
-                ),
-            ],
-            timestamp_index: Some(1),
-            version: 0,
-        };
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "column3".to_string(),
+                ConcreteDataType::string_datatype(),
+                true,
+            ),
+            ColumnSchema::new(
+                "column1".to_string(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new(
+                "column2".to_string(),
+                ConcreteDataType::float64_datatype(),
+                true,
+            ),
+        ]));
 
         // construct RawTableMeta
-        let raw_table_meta = RawTableMeta {
-            schema: raw_schema,
+        let meta = TableMeta {
+            schema,
             primary_key_indices: vec![0],
             value_indices: vec![2],
             engine: METRIC_ENGINE_NAME.to_string(),
@@ -1673,10 +1665,10 @@ mod tests {
             column_ids: Default::default(),
         };
 
-        // construct RawTableInfo
-        let raw_table_info = RawTableInfo {
+        // construct TableInfo
+        let raw_table_info = TableInfo {
             ident: Default::default(),
-            meta: raw_table_meta,
+            meta,
             name: Default::default(),
             desc: Default::default(),
             catalog_name: Default::default(),
@@ -1729,7 +1721,7 @@ mod tests {
 
         // Assert that the table_info is updated correctly
         assert_eq!(
-            create_table_task.table_info.meta.schema.timestamp_index,
+            create_table_task.table_info.meta.schema.timestamp_index(),
             Some(0)
         );
         assert_eq!(

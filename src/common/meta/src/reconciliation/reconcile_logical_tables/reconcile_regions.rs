@@ -22,7 +22,7 @@ use common_telemetry::tracing_context::TracingContext;
 use futures::future;
 use serde::{Deserialize, Serialize};
 use store_api::storage::{RegionId, RegionNumber, TableId};
-use table::metadata::RawTableInfo;
+use table::metadata::TableInfo;
 
 use crate::ddl::utils::{add_peer_context_if_needed, region_storage_path};
 use crate::ddl::{CreateRequestBuilder, build_template_from_raw_table_info};
@@ -147,10 +147,10 @@ impl ReconcileRegions {
 ///
 /// Note: This function is primarily intended for creating logical tables or allocating placeholder regions.
 fn create_region_request_from_raw_table_info(
-    raw_table_info: &RawTableInfo,
+    table_info: &TableInfo,
     physical_table_id: TableId,
 ) -> Result<CreateRequestBuilder> {
-    let template = build_template_from_raw_table_info(raw_table_info)?;
+    let template = build_template_from_raw_table_info(table_info)?;
     Ok(CreateRequestBuilder::new(template, Some(physical_table_id)))
 }
 

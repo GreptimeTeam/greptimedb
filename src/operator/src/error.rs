@@ -306,13 +306,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to create table info"))]
-    CreateTableInfo {
-        #[snafu(implicit)]
-        location: Location,
-        source: datatypes::error::Error,
-    },
-
     #[snafu(display("Failed to build CreateExpr on insertion"))]
     BuildCreateExprOnInsertion {
         #[snafu(implicit)]
@@ -973,7 +966,6 @@ impl ErrorExt for Error {
             }
             Error::Table { source, .. } | Error::Insert { source, .. } => source.status_code(),
             Error::ConvertColumnDefaultConstraint { source, .. }
-            | Error::CreateTableInfo { source, .. }
             | Error::IntoVectors { source, .. } => source.status_code(),
             Error::RequestInserts { source, .. } | Error::FindViewInfo { source, .. } => {
                 source.status_code()

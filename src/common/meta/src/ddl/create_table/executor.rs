@@ -23,7 +23,7 @@ use snafu::ensure;
 use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::TABLE_COLUMN_METADATA_EXTENSION_KEY;
 use store_api::storage::{RegionId, RegionNumber};
-use table::metadata::{RawTableInfo, TableId};
+use table::metadata::{TableId, TableInfo};
 use table::table_name::TableName;
 
 use crate::ddl::utils::raw_table_info::update_table_info_column_ids;
@@ -175,19 +175,19 @@ impl CreateTableExecutor {
         &self,
         table_metadata_manager: &TableMetadataManagerRef,
         region_failure_detector_controller: &RegionFailureDetectorControllerRef,
-        mut raw_table_info: RawTableInfo,
+        mut table_info: TableInfo,
         column_metadatas: &[ColumnMetadata],
         table_route: PhysicalTableRouteValue,
         region_wal_options: HashMap<RegionNumber, String>,
     ) -> Result<()> {
         if !column_metadatas.is_empty() {
-            update_table_info_column_ids(&mut raw_table_info, column_metadatas);
+            update_table_info_column_ids(&mut table_info, column_metadatas);
         }
         let detecting_regions =
             convert_region_routes_to_detecting_regions(&table_route.region_routes);
         let table_route = TableRouteValue::Physical(table_route);
         table_metadata_manager
-            .create_table_metadata(raw_table_info, table_route, region_wal_options)
+            .create_table_metadata(table_info, table_route, region_wal_options)
             .await?;
         region_failure_detector_controller
             .register_failure_detectors(detecting_regions)

@@ -124,7 +124,7 @@ pub(crate) async fn create_partition_rule_manager(
     let region_wal_options = new_test_region_wal_options(regions.clone());
     table_metadata_manager
         .create_table_metadata(
-            new_test_table_info(1, "table_1", regions.clone().into_iter()).into(),
+            new_test_table_info(1, "table_1", regions.clone().into_iter()),
             TableRouteValue::physical(vec![
                 RegionRoute {
                     region: Region {
