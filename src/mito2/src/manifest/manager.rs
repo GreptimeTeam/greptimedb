@@ -300,6 +300,9 @@ impl RegionManifestManager {
                     RegionMetaAction::Change(action) => {
                         manifest_builder.apply_change(manifest_version, action);
                     }
+                    RegionMetaAction::PartitionExprChange(action) => {
+                        manifest_builder.apply_partition_expr_change(manifest_version, action);
+                    }
                     RegionMetaAction::Edit(action) => {
                         manifest_builder.apply_edit(manifest_version, action);
                     }
@@ -442,6 +445,9 @@ impl RegionManifestManager {
                     RegionMetaAction::Change(action) => {
                         manifest_builder.apply_change(manifest_version, action);
                     }
+                    RegionMetaAction::PartitionExprChange(action) => {
+                        manifest_builder.apply_partition_expr_change(manifest_version, action);
+                    }
                     RegionMetaAction::Edit(action) => {
                         manifest_builder.apply_edit(manifest_version, action);
                     }
@@ -547,6 +553,9 @@ impl RegionManifestManager {
             match action {
                 RegionMetaAction::Change(action) => {
                     manifest_builder.apply_change(version, action);
+                }
+                RegionMetaAction::PartitionExprChange(action) => {
+                    manifest_builder.apply_partition_expr_change(version, action);
                 }
                 RegionMetaAction::Edit(action) => {
                     manifest_builder.apply_edit(version, action);

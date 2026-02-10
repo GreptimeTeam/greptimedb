@@ -31,7 +31,9 @@ use object_store::layers::mock::{
     Result as MockResult, Write, Writer,
 };
 use partition::expr::{PartitionExpr, col};
-use store_api::region_engine::{RegionEngine, RemapManifestsRequest, SettableRegionRoleState};
+use store_api::region_engine::{
+    RegionEngine, RemapManifestsRequest, SetRegionRoleStateResponse, SettableRegionRoleState,
+};
 use store_api::region_request::{
     ApplyStagingManifestRequest, EnterStagingRequest, RegionAlterRequest, RegionFlushRequest,
     RegionPutRequest, RegionRequest, RegionTruncateRequest,
@@ -41,8 +43,12 @@ use store_api::storage::{RegionId, ScanRequest};
 use crate::config::MitoConfig;
 use crate::engine::listener::NotifyEnterStagingResultListener;
 use crate::error::Error;
+use crate::manifest::action::{
+    RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList, RegionPartitionExprChange,
+};
 use crate::region::{RegionLeaderState, RegionRoleState, parse_partition_expr};
 use crate::request::WorkerRequest;
+use crate::sst::FormatType;
 use crate::test_util::{CreateRequestBuilder, TestEnv, build_rows, put_rows, rows_schema};
 
 fn range_expr(col_name: &str, start: i64, end: i64) -> PartitionExpr {
@@ -808,6 +814,147 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
     let sst_entries = engine.all_ssts_from_manifest().await;
     assert_eq!(sst_entries.len(), 3);
     assert!(sst_entries.iter().all(|e| e.visible));
+}
+
+#[tokio::test]
+async fn test_enter_staging_writes_partition_expr_change_action() {
+    test_enter_staging_writes_partition_expr_change_action_with_format(false).await;
+    test_enter_staging_writes_partition_expr_change_action_with_format(true).await;
+}
+
+async fn test_enter_staging_writes_partition_expr_change_action_with_format(flat_format: bool) {
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
+
+    let region_id = RegionId::new(2000, 1);
+    let request = CreateRequestBuilder::new().build();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let partition_expr = default_partition_expr();
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_expr: partition_expr.clone(),
+            }),
+        )
+        .await
+        .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    let manager = region.manifest_ctx.manifest_manager.read().await;
+    let staging_manifests = manager.store().fetch_staging_manifests().await.unwrap();
+    assert!(!staging_manifests.is_empty());
+
+    let mut found_partition_expr_change = false;
+    let mut found_change = false;
+    for (_, raw_action_list) in staging_manifests {
+        let action_list = RegionMetaActionList::decode(&raw_action_list).unwrap();
+        for action in action_list.actions {
+            match action {
+                RegionMetaAction::PartitionExprChange(change) => {
+                    found_partition_expr_change = true;
+                    assert_eq!(change.partition_expr, Some(partition_expr.clone()));
+                }
+                RegionMetaAction::Change(_) => {
+                    found_change = true;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    assert!(found_partition_expr_change);
+    assert!(!found_change);
+}
+
+#[tokio::test]
+async fn test_staging_exit_conflict_partition_expr_change_and_change() {
+    test_staging_exit_conflict_partition_expr_change_and_change_with_format(false).await;
+    test_staging_exit_conflict_partition_expr_change_and_change_with_format(true).await;
+}
+
+async fn test_staging_exit_conflict_partition_expr_change_and_change_with_format(
+    flat_format: bool,
+) {
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
+
+    let region_id = RegionId::new(2000, 2);
+    let request = CreateRequestBuilder::new().build();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let partition_expr = default_partition_expr();
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_expr: partition_expr.clone(),
+            }),
+        )
+        .await
+        .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    let mut changed_metadata = region.version().metadata.as_ref().clone();
+    changed_metadata.set_partition_expr(Some(partition_expr.clone()));
+
+    let mut manager = region.manifest_ctx.manifest_manager.write().await;
+    manager
+        .update(
+            RegionMetaActionList::new(vec![
+                RegionMetaAction::PartitionExprChange(RegionPartitionExprChange {
+                    partition_expr: Some(partition_expr),
+                }),
+                RegionMetaAction::Change(RegionChange {
+                    metadata: Arc::new(changed_metadata),
+                    sst_format: FormatType::PrimaryKey,
+                }),
+                RegionMetaAction::Edit(RegionEdit {
+                    files_to_add: Vec::new(),
+                    files_to_remove: Vec::new(),
+                    timestamp_ms: None,
+                    compaction_time_window: None,
+                    flushed_entry_id: None,
+                    flushed_sequence: None,
+                    committed_sequence: None,
+                }),
+            ]),
+            true,
+        )
+        .await
+        .unwrap();
+    drop(manager);
+
+    let response = engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Leader)
+        .await
+        .unwrap();
+    match response {
+        SetRegionRoleStateResponse::InvalidTransition(err) => {
+            assert_matches!(
+                err.as_any().downcast_ref::<Error>().unwrap(),
+                Error::Unexpected { .. }
+            );
+        }
+        _ => panic!("Expected InvalidTransition response, got: {response:?}"),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

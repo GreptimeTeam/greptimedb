@@ -14,8 +14,10 @@
 
 use std::assert_matches::assert_matches;
 use std::fs;
+use std::sync::Arc;
 
 use api::v1::Rows;
+use common_function::utils::partition_rule_version;
 use common_recordbatch::RecordBatches;
 use datatypes::value::Value;
 use partition::expr::{PartitionExpr, col};
@@ -23,14 +25,18 @@ use store_api::region_engine::{
     RegionEngine, RegionRole, RemapManifestsRequest, SettableRegionRoleState,
 };
 use store_api::region_request::{
-    ApplyStagingManifestRequest, EnterStagingRequest, RegionFlushRequest, RegionRequest,
+    ApplyStagingManifestRequest, EnterStagingRequest, RegionFlushRequest, RegionPutRequest,
+    RegionRequest,
 };
 use store_api::storage::{FileId, RegionId};
 
 use super::ScanRequest;
 use crate::config::MitoConfig;
 use crate::error::Error;
-use crate::manifest::action::RegionManifest;
+use crate::manifest::action::{
+    RegionChange, RegionEdit, RegionManifest, RegionMetaAction, RegionMetaActionList,
+};
+use crate::sst::FormatType;
 use crate::sst::file::FileMeta;
 use crate::test_util::{CreateRequestBuilder, TestEnv, build_rows, put_rows, rows_schema};
 
@@ -38,6 +44,12 @@ fn range_expr(col_name: &str, start: i64, end: i64) -> PartitionExpr {
     col(col_name)
         .gt_eq(Value::Int64(start))
         .and(col(col_name).lt(Value::Int64(end)))
+}
+
+fn float_range_expr(col_name: &str, start: f64, end: f64) -> PartitionExpr {
+    col(col_name)
+        .gt_eq(Value::Float64(start.into()))
+        .and(col(col_name).lt(Value::Float64(end.into())))
 }
 
 #[tokio::test]
@@ -452,6 +464,228 @@ async fn test_apply_staging_manifest_invalid_files_to_add_with_format(flat_forma
         err.into_inner().as_any().downcast_ref::<Error>().unwrap(),
         Error::SerdeJson { .. }
     );
+}
+
+#[tokio::test]
+async fn test_apply_staging_manifest_change_edit_different_columns_fails() {
+    test_apply_staging_manifest_change_edit_different_columns_fails_with_format(false).await;
+    test_apply_staging_manifest_change_edit_different_columns_fails_with_format(true).await;
+}
+
+async fn test_apply_staging_manifest_change_edit_different_columns_fails_with_format(
+    flat_format: bool,
+) {
+    let mut env = TestEnv::with_prefix("apply-change-edit-different-columns").await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(2, 2);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let rows_data = Rows {
+        schema: column_schemas,
+        rows: build_rows(0, 3),
+    };
+    put_rows(&engine, region_id, rows_data).await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Flush(RegionFlushRequest {
+                row_group_size: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+    let partition_expr = range_expr("tag_0", 0, 50).as_json_str().unwrap();
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_expr: partition_expr.clone(),
+            }),
+        )
+        .await
+        .unwrap();
+
+    let remap_result = engine
+        .remap_manifests(RemapManifestsRequest {
+            region_id,
+            input_regions: vec![region_id],
+            region_mapping: [(region_id, vec![region_id])].into_iter().collect(),
+            new_partition_exprs: [(region_id, partition_expr.clone())].into_iter().collect(),
+        })
+        .await
+        .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    let mut manager = region.manifest_ctx.manifest_manager.write().await;
+    let manifest_storage = manager.store();
+    let blob_store = manifest_storage.staging_storage().blob_storage();
+    let remap_manifest_path = remap_result.manifest_paths[&region_id].clone();
+    let remap_manifest_bytes = blob_store.get(&remap_manifest_path).await.unwrap();
+    manager.clear_staging_manifest_and_dir().await.unwrap();
+
+    let mut changed_metadata = region.version().metadata.as_ref().clone();
+    changed_metadata.column_metadatas.rotate_left(1);
+
+    manager
+        .update(
+            RegionMetaActionList::new(vec![
+                RegionMetaAction::Change(RegionChange {
+                    metadata: Arc::new(changed_metadata),
+                    sst_format: FormatType::PrimaryKey,
+                }),
+                RegionMetaAction::Edit(RegionEdit {
+                    files_to_add: Vec::new(),
+                    files_to_remove: Vec::new(),
+                    timestamp_ms: None,
+                    compaction_time_window: None,
+                    flushed_entry_id: None,
+                    flushed_sequence: None,
+                    committed_sequence: None,
+                }),
+            ]),
+            true,
+        )
+        .await
+        .unwrap();
+    blob_store
+        .put(&remap_manifest_path, remap_manifest_bytes)
+        .await
+        .unwrap();
+    drop(manager);
+
+    let err = engine
+        .handle_request(
+            region_id,
+            RegionRequest::ApplyStagingManifest(ApplyStagingManifestRequest {
+                partition_expr,
+                central_region_id: region_id,
+                manifest_path: remap_manifest_path,
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert_matches!(
+        err.into_inner().as_any().downcast_ref::<Error>().unwrap(),
+        Error::Unexpected { .. }
+    );
+}
+
+#[tokio::test]
+async fn test_apply_staging_manifest_preserves_unflushed_memtable() {
+    test_apply_staging_manifest_preserves_unflushed_memtable_with_format(false).await;
+    test_apply_staging_manifest_preserves_unflushed_memtable_with_format(true).await;
+}
+
+async fn test_apply_staging_manifest_preserves_unflushed_memtable_with_format(flat_format: bool) {
+    let mut env = TestEnv::with_prefix("apply-preserve-memtable").await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
+
+    let region_id = RegionId::new(3, 1);
+    let origin_partition_expr = float_range_expr("field_0", 0., 50.).as_json_str().unwrap();
+    let request = CreateRequestBuilder::new()
+        .partition_expr_json(Some(origin_partition_expr))
+        .build();
+    let column_schemas = rows_schema(&request);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let base_rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows(0, 3),
+    };
+    put_rows(&engine, region_id, base_rows).await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Flush(RegionFlushRequest {
+                row_group_size: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+    let partition_expr = float_range_expr("field_0", 0., 100.).as_json_str().unwrap();
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_expr: partition_expr.clone(),
+            }),
+        )
+        .await
+        .unwrap();
+
+    let expected_version = partition_rule_version(Some(&partition_expr));
+    let unflushed_rows = Rows {
+        schema: column_schemas,
+        rows: build_rows(3, 6),
+    };
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Put(RegionPutRequest {
+                rows: unflushed_rows,
+                hint: None,
+                partition_rule_version: Some(expected_version),
+            }),
+        )
+        .await
+        .unwrap();
+
+    let remap_result = engine
+        .remap_manifests(RemapManifestsRequest {
+            region_id,
+            input_regions: vec![region_id],
+            region_mapping: [(region_id, vec![region_id])].into_iter().collect(),
+            new_partition_exprs: [(region_id, partition_expr.clone())].into_iter().collect(),
+        })
+        .await
+        .unwrap();
+
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::ApplyStagingManifest(ApplyStagingManifestRequest {
+                partition_expr,
+                central_region_id: region_id,
+                manifest_path: remap_result.manifest_paths[&region_id].clone(),
+            }),
+        )
+        .await
+        .unwrap();
+
+    let scanner = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    assert!(
+        scanner.num_memtables() > 0,
+        "unflushed memtable should be preserved after apply staging manifest"
+    );
+    let batches = RecordBatches::try_collect(scanner.scan().await.unwrap())
+        .await
+        .unwrap();
+    let total_rows: usize = batches.iter().map(|rb| rb.num_rows()).sum();
+    assert_eq!(total_rows, 6, "rows from memtable should remain readable");
 }
 
 #[tokio::test]
