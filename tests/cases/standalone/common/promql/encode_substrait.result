@@ -20,14 +20,14 @@ tql explain (0, 100, '1s')
 | plan_type     | plan                                                                                                                                                                                |
 +---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                                     |
-|               | PromRangeManipulate: req range=[0..0], interval=[300000], eval range=[43200000], time index=[ts], values=["prom_increase(ts_range,val,ts,Int64(3600000))"]                          |
+|               | PromRangeManipulate: req range=[0..100000], interval=[1000], eval range=[43200000], time index=[ts], values=["prom_increase(ts_range,val,ts,Int64(3600000))"]                       |
 |               |   Filter: prom_increase(ts_range,val,ts,Int64(3600000)) IS NOT NULL                                                                                                                 |
 |               |     Projection: count_total.ts, prom_increase(ts_range, val, count_total.ts, Int64(3600000)) AS prom_increase(ts_range,val,ts,Int64(3600000)), count_total.tag_a, count_total.tag_b |
-|               |       PromRangeManipulate: req range=[-39600000..0], interval=[3600000], eval range=[3600000], time index=[ts], values=["val"]                                                      |
+|               |       PromRangeManipulate: req range=[-39600000..100000], interval=[3600000], eval range=[3600000], time index=[ts], values=["val"]                                                 |
 |               |         PromSeriesNormalize: offset=[0], time index=[ts], filter NaN: [true]                                                                                                        |
 |               |           PromSeriesDivide: tags=["tag_a", "tag_b"]                                                                                                                                 |
 |               |             Sort: count_total.tag_a ASC NULLS FIRST, count_total.tag_b ASC NULLS FIRST, count_total.ts ASC NULLS FIRST                                                              |
-|               |               Filter: count_total.tag_a = Utf8("ffa") AND count_total.ts >= TimestampMillisecond(-43199999, None) AND count_total.ts <= TimestampMillisecond(0, None)               |
+|               |               Filter: count_total.tag_a = Utf8("ffa") AND count_total.ts >= TimestampMillisecond(-43199999, None) AND count_total.ts <= TimestampMillisecond(100000, None)          |
 |               |                 TableScan: count_total                                                                                                                                              |
 |               | ]]                                                                                                                                                                                  |
 | physical_plan | CooperativeExec                                                                                                                                                                     |
