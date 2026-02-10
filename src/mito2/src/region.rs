@@ -742,6 +742,9 @@ impl MitoRegion {
         let (merged_partition_expr_change, merged_change, merged_edit) =
             merged_actions.clone().split_region_change_and_edit();
         if let Some(change) = &merged_change {
+            // In staging exit we only allow metadata-only updates. A `Change`
+            // action is accepted only when column definitions are unchanged;
+            // otherwise it is treated as a schema change and rejected.
             let current_column_metadatas = &self.version().metadata.column_metadatas;
             ensure!(
                 change.metadata.column_metadatas == *current_column_metadatas,

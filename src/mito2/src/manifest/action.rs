@@ -217,6 +217,11 @@ impl RegionManifestBuilder {
         self.sst_format = change.sst_format;
     }
 
+    /// Applies a partition-expression-only metadata change.
+    ///
+    /// This path updates only `partition_expr` (and its derived
+    /// `partition_rule_version`) on current metadata and does not touch
+    /// `sst_format`.
     pub fn apply_partition_expr_change(
         &mut self,
         manifest_version: ManifestVersion,
