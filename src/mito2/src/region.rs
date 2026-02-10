@@ -739,24 +739,9 @@ impl MitoRegion {
             }
         );
 
-        // Submit merged actions using the manifest manager's update method
-        // Pass the `false` so it saves to normal directory, not staging
-        let new_version = manager.update(merged_actions.clone(), false).await?;
-
-        info!(
-            "Successfully submitted merged staged manifests for region {}, new version: {}",
-            self.region_id, new_version
-        );
-
-        // Apply the merged changes to in-memory version control
         let (merged_partition_expr_change, merged_change, merged_edit) =
-            merged_actions.split_region_change_and_edit();
-        if let Some(change) = merged_partition_expr_change {
-            let mut new_metadata = self.version().metadata.as_ref().clone();
-            new_metadata.set_partition_expr(change.partition_expr);
-            self.version_control.alter_metadata(new_metadata.into());
-        }
-        if let Some(change) = merged_change {
+            merged_actions.clone().split_region_change_and_edit();
+        if let Some(change) = &merged_change {
             let current_column_metadatas = &self.version().metadata.column_metadatas;
             ensure!(
                 change.metadata.column_metadatas == *current_column_metadatas,
@@ -764,6 +749,23 @@ impl MitoRegion {
                     reason: "change action alters column metadata in staging exit"
                 }
             );
+        }
+
+        // Submit merged actions using the manifest manager's update method
+        // Pass the `false` so it saves to normal directory, not staging
+        let new_version = manager.update(merged_actions, false).await?;
+        info!(
+            "Successfully submitted merged staged manifests for region {}, new version: {}",
+            self.region_id, new_version
+        );
+
+        // Apply the merged changes to in-memory version control
+        if let Some(change) = merged_partition_expr_change {
+            let mut new_metadata = self.version().metadata.as_ref().clone();
+            new_metadata.set_partition_expr(change.partition_expr);
+            self.version_control.alter_metadata(new_metadata.into());
+        }
+        if let Some(change) = merged_change {
             self.version_control.alter_metadata(change.metadata);
         }
         self.version_control
