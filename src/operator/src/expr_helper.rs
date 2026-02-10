@@ -1115,7 +1115,11 @@ TQL EVAL (now() - '15s'::interval, now(), '5s') count_values("status_code", http
             "greptime.public.cnt_reqs",
             expr.sink_table_name.map(to_dot_sep).unwrap()
         );
-        assert!(expr.source_table_names.is_empty());
+        assert_eq!(1, expr.source_table_names.len());
+        assert_eq!(
+            "greptime.public.http_requests",
+            to_dot_sep(expr.source_table_names[0].clone())
+        );
         assert_eq!(
             r#"TQL EVAL (now() - '15s'::interval, now(), '5s') count_values("status_code", http_requests)"#,
             expr.sql

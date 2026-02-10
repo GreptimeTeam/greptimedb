@@ -16,17 +16,25 @@ use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
 
 use itertools::Itertools;
+use promql_parser::label::{METRIC_NAME, MatchOp};
+use promql_parser::parser::{
+    AggregateExpr as PromAggregateExpr, BinaryExpr as PromBinaryExpr, Call as PromCall,
+    Expr as PromExpr, MatrixSelector as PromMatrixSelector, ParenExpr as PromParenExpr,
+    SubqueryExpr as PromSubqueryExpr, UnaryExpr as PromUnaryExpr,
+    VectorSelector as PromVectorSelector,
+};
 use serde::Serialize;
 use snafu::ensure;
 use sqlparser::ast::{
-    Array, Expr, Ident, ObjectName, SetExpr, SqlOption, StructField, TableFactor, Value,
-    ValueWithSpan,
+    Array, Expr, Ident, ObjectName, ObjectNamePart, SetExpr, SqlOption, StructField, TableFactor,
+    Value, ValueWithSpan,
 };
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::ast::ObjectNamePartExt;
 use crate::error::{InvalidExprAsOptionValueSnafu, InvalidSqlSnafu, Result};
 use crate::statements::create::SqlOrTql;
+use crate::statements::tql::Tql;
 
 /// Format an [ObjectName] without any quote of its idents.
 pub fn format_raw_object_name(name: &ObjectName) -> String {
@@ -181,13 +189,77 @@ pub fn extract_tables_from_query(query: &SqlOrTql) -> impl Iterator<Item = Objec
 
     match query {
         SqlOrTql::Sql(query, _) => extract_tables_from_set_expr(&query.body, &mut names),
-        SqlOrTql::Tql(_tql, _) => {
-            // since tql have sliding time window, so we don't need to extract tables from it
-            // (because we are going to eval it fully anyway)
-        }
+        SqlOrTql::Tql(tql, _) => extract_tables_from_tql(tql, &mut names),
     }
 
     names.into_iter()
+}
+
+fn extract_tables_from_tql(tql: &Tql, names: &mut HashSet<ObjectName>) {
+    let promql = match tql {
+        Tql::Eval(eval) => &eval.query,
+        Tql::Explain(explain) => &explain.query,
+        Tql::Analyze(analyze) => &analyze.query,
+    };
+
+    if let Ok(expr) = promql_parser::parser::parse(promql) {
+        extract_tables_from_prom_expr(&expr, names);
+    }
+}
+
+fn extract_tables_from_prom_expr(expr: &PromExpr, names: &mut HashSet<ObjectName>) {
+    match expr {
+        PromExpr::Aggregate(PromAggregateExpr { expr, .. }) => {
+            extract_tables_from_prom_expr(expr, names);
+        }
+        PromExpr::Unary(PromUnaryExpr { expr, .. }) => {
+            extract_tables_from_prom_expr(expr, names);
+        }
+        PromExpr::Binary(PromBinaryExpr { lhs, rhs, .. }) => {
+            extract_tables_from_prom_expr(lhs, names);
+            extract_tables_from_prom_expr(rhs, names);
+        }
+        PromExpr::Paren(PromParenExpr { expr }) => {
+            extract_tables_from_prom_expr(expr, names);
+        }
+        PromExpr::Subquery(PromSubqueryExpr { expr, .. }) => {
+            extract_tables_from_prom_expr(expr, names);
+        }
+        PromExpr::VectorSelector(selector) => {
+            extract_metric_name_from_vector_selector(selector, names);
+        }
+        PromExpr::MatrixSelector(PromMatrixSelector { vs, .. }) => {
+            extract_metric_name_from_vector_selector(vs, names);
+        }
+        PromExpr::Call(PromCall { args, .. }) => {
+            for arg in &args.args {
+                extract_tables_from_prom_expr(arg, names);
+            }
+        }
+        PromExpr::NumberLiteral(_) | PromExpr::StringLiteral(_) | PromExpr::Extension(_) => {}
+    }
+}
+
+fn extract_metric_name_from_vector_selector(
+    selector: &PromVectorSelector,
+    names: &mut HashSet<ObjectName>,
+) {
+    if let Some(name) = &selector.name {
+        names.insert(ObjectName(vec![ObjectNamePart::Identifier(Ident::new(
+            name,
+        ))]));
+        return;
+    }
+
+    let mut metric_name_matchers = selector.matchers.find_matchers(METRIC_NAME);
+    if metric_name_matchers.len() == 1
+        && metric_name_matchers[0].op == MatchOp::Equal
+        && let Some(metric_name) = metric_name_matchers.pop()
+    {
+        names.insert(ObjectName(vec![ObjectNamePart::Identifier(Ident::new(
+            metric_name.value,
+        ))]));
+    }
 }
 
 /// translate the start location to the index in the sql string
@@ -245,7 +317,8 @@ mod tests {
 
     use super::*;
     use crate::dialect::GreptimeDbDialect;
-    use crate::parser::ParserContext;
+    use crate::parser::{ParseOptions, ParserContext};
+    use crate::statements::statement::Statement;
 
     #[test]
     fn test_location_to_index() {
@@ -286,5 +359,24 @@ WHERE a =
                 assert_eq!(token.to_string(), subslice);
             }
         }
+    }
+
+    #[test]
+    fn test_extract_tables_from_tql_query() {
+        let sql = r#"
+CREATE FLOW calc_reqs SINK TO cnt_reqs AS
+TQL EVAL (now() - '15s'::interval, now(), '5s') count_values("status_code", http_requests);"#;
+        let mut stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        let Statement::CreateFlow(create_flow) = stmts.pop().unwrap() else {
+            unreachable!()
+        };
+
+        let mut tables = extract_tables_from_query(&create_flow.query)
+            .map(|table| format_raw_object_name(&table))
+            .collect_vec();
+        tables.sort();
+        assert_eq!(vec!["http_requests".to_string()], tables);
     }
 }
