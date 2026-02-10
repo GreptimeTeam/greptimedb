@@ -1387,7 +1387,11 @@ mod tests {
     use store_api::storage::RegionId;
 
     use crate::access_layer::AccessLayer;
+    use crate::error::Error;
     use crate::manifest::action::RegionMetaActionList;
+    use crate::manifest::action::{
+        RegionChange, RegionEdit, RegionMetaAction, RegionPartitionExprChange,
+    };
     use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
     use crate::region::{
         ManifestContext, ManifestStats, MitoRegion, RegionLeaderState, RegionRoleState,
@@ -1402,6 +1406,194 @@ mod tests {
     #[test]
     fn test_region_state_lock_free() {
         assert!(AtomicCell::<RegionRoleState>::is_lock_free());
+    }
+
+    async fn build_test_region(env: &SchedulerEnv) -> MitoRegion {
+        let builder = VersionControlBuilder::new();
+        let version_control = Arc::new(builder.build());
+        let metadata = version_control.current().version.metadata.clone();
+
+        let manager = RegionManifestManager::new(
+            metadata.clone(),
+            0,
+            RegionManifestOptions {
+                manifest_dir: "".to_string(),
+                object_store: env.access_layer.object_store().clone(),
+                compress_type: CompressionType::Uncompressed,
+                checkpoint_distance: 10,
+                remove_file_options: Default::default(),
+                manifest_cache: None,
+            },
+            FormatType::PrimaryKey,
+            &Default::default(),
+        )
+        .await
+        .unwrap();
+
+        let manifest_ctx = Arc::new(ManifestContext::new(
+            manager,
+            RegionRoleState::Leader(RegionLeaderState::Writable),
+        ));
+
+        MitoRegion {
+            region_id: metadata.region_id,
+            version_control,
+            access_layer: env.access_layer.clone(),
+            manifest_ctx,
+            file_purger: crate::test_util::new_noop_file_purger(),
+            provider: Provider::noop_provider(),
+            last_flush_millis: Default::default(),
+            last_compaction_millis: Default::default(),
+            time_provider: Arc::new(StdTimeProvider),
+            topic_latest_entry_id: Default::default(),
+            written_bytes: Arc::new(AtomicU64::new(0)),
+            stats: ManifestStats::default(),
+            staging_partition_info: Mutex::new(None),
+        }
+    }
+
+    fn empty_edit() -> RegionEdit {
+        RegionEdit {
+            files_to_add: Vec::new(),
+            files_to_remove: Vec::new(),
+            timestamp_ms: None,
+            compaction_time_window: None,
+            flushed_entry_id: None,
+            flushed_sequence: None,
+            committed_sequence: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_exit_staging_partition_expr_change_and_edit_success() {
+        let env = SchedulerEnv::new().await;
+        let region = build_test_region(&env).await;
+
+        let mut manager = region.manifest_ctx.manifest_manager.write().await;
+        region.set_staging(&mut manager).await.unwrap();
+        manager
+            .update(
+                RegionMetaActionList::new(vec![
+                    RegionMetaAction::PartitionExprChange(RegionPartitionExprChange {
+                        partition_expr: Some("expr_a".to_string()),
+                    }),
+                    RegionMetaAction::Edit(empty_edit()),
+                ]),
+                true,
+            )
+            .await
+            .unwrap();
+
+        region.exit_staging_on_success(&mut manager).await.unwrap();
+        drop(manager);
+
+        assert_eq!(
+            region.version().metadata.partition_expr.as_deref(),
+            Some("expr_a")
+        );
+        assert_eq!(
+            region.state(),
+            RegionRoleState::Leader(RegionLeaderState::Writable)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_exit_staging_change_with_same_columns_success() {
+        let env = SchedulerEnv::new().await;
+        let region = build_test_region(&env).await;
+
+        let mut manager = region.manifest_ctx.manifest_manager.write().await;
+        region.set_staging(&mut manager).await.unwrap();
+
+        let mut changed_metadata = region.version().metadata.as_ref().clone();
+        changed_metadata.set_partition_expr(Some("expr_b".to_string()));
+
+        manager
+            .update(
+                RegionMetaActionList::new(vec![
+                    RegionMetaAction::Change(RegionChange {
+                        metadata: Arc::new(changed_metadata),
+                        sst_format: FormatType::PrimaryKey,
+                    }),
+                    RegionMetaAction::Edit(empty_edit()),
+                ]),
+                true,
+            )
+            .await
+            .unwrap();
+
+        region.exit_staging_on_success(&mut manager).await.unwrap();
+        drop(manager);
+
+        assert_eq!(
+            region.version().metadata.partition_expr.as_deref(),
+            Some("expr_b")
+        );
+        assert_eq!(
+            region.state(),
+            RegionRoleState::Leader(RegionLeaderState::Writable)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_exit_staging_change_with_different_columns_fails() {
+        let env = SchedulerEnv::new().await;
+        let region = build_test_region(&env).await;
+
+        let mut manager = region.manifest_ctx.manifest_manager.write().await;
+        region.set_staging(&mut manager).await.unwrap();
+
+        let mut changed_metadata = region.version().metadata.as_ref().clone();
+        changed_metadata.column_metadatas.rotate_left(1);
+
+        manager
+            .update(
+                RegionMetaActionList::new(vec![
+                    RegionMetaAction::Change(RegionChange {
+                        metadata: Arc::new(changed_metadata),
+                        sst_format: FormatType::PrimaryKey,
+                    }),
+                    RegionMetaAction::Edit(empty_edit()),
+                ]),
+                true,
+            )
+            .await
+            .unwrap();
+
+        let result = region.exit_staging_on_success(&mut manager).await;
+        assert!(matches!(result, Err(Error::Unexpected { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_exit_staging_partition_expr_change_and_change_conflict_fails() {
+        let env = SchedulerEnv::new().await;
+        let region = build_test_region(&env).await;
+
+        let mut manager = region.manifest_ctx.manifest_manager.write().await;
+        region.set_staging(&mut manager).await.unwrap();
+
+        let mut changed_metadata = region.version().metadata.as_ref().clone();
+        changed_metadata.set_partition_expr(Some("expr_c".to_string()));
+
+        manager
+            .update(
+                RegionMetaActionList::new(vec![
+                    RegionMetaAction::PartitionExprChange(RegionPartitionExprChange {
+                        partition_expr: Some("expr_c".to_string()),
+                    }),
+                    RegionMetaAction::Change(RegionChange {
+                        metadata: Arc::new(changed_metadata),
+                        sst_format: FormatType::PrimaryKey,
+                    }),
+                    RegionMetaAction::Edit(empty_edit()),
+                ]),
+                true,
+            )
+            .await
+            .unwrap();
+
+        let result = region.exit_staging_on_success(&mut manager).await;
+        assert!(matches!(result, Err(Error::Unexpected { .. })));
     }
 
     #[tokio::test]
