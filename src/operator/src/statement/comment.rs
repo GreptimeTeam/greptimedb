@@ -25,6 +25,7 @@ use sql::statements::comment::{Comment, CommentObject};
 
 use crate::error::{ExecuteDdlSnafu, ExternalSnafu, InvalidSqlSnafu, Result};
 use crate::statement::StatementExecutor;
+use crate::utils::to_meta_query_context;
 
 impl StatementExecutor {
     /// Adds a comment to a database object (table, column, or flow).
@@ -41,7 +42,7 @@ impl StatementExecutor {
         let comment_on_task = self.create_comment_on_task_from_stmt(stmt, &query_ctx)?;
 
         let request =
-            SubmitDdlTaskRequest::new(query_ctx, DdlTask::new_comment_on(comment_on_task));
+            SubmitDdlTaskRequest::new(to_meta_query_context(query_ctx), DdlTask::new_comment_on(comment_on_task));
 
         self.procedure_executor
             .submit_ddl_task(&ExecutorContext::default(), request)
@@ -58,7 +59,7 @@ impl StatementExecutor {
         let comment_on_task = self.create_comment_on_task_from_expr(expr)?;
 
         let request =
-            SubmitDdlTaskRequest::new(query_ctx, DdlTask::new_comment_on(comment_on_task));
+            SubmitDdlTaskRequest::new(to_meta_query_context(query_ctx), DdlTask::new_comment_on(comment_on_task));
 
         self.procedure_executor
             .submit_ddl_task(&ExecutorContext::default(), request)

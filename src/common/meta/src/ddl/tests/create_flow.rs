@@ -18,7 +18,6 @@ use std::sync::Arc;
 
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_procedure_test::execute_procedure_until_done;
-use session::context::QueryContext as SessionQueryContext;
 use table::table_name::TableName;
 
 use crate::ddl::DdlContext;
@@ -30,6 +29,16 @@ use crate::key::FlowId;
 use crate::key::table_route::TableRouteValue;
 use crate::rpc::ddl::{CreateFlowTask, FlowQueryContext, QueryContext};
 use crate::test_util::{MockFlownodeManager, new_ddl_context};
+
+fn test_query_context() -> QueryContext {
+    QueryContext {
+        current_catalog: DEFAULT_CATALOG_NAME.to_string(),
+        current_schema: DEFAULT_SCHEMA_NAME.to_string(),
+        timezone: "UTC".to_string(),
+        extensions: HashMap::new(),
+        channel: 0,
+    }
+}
 
 pub(crate) fn test_create_flow_task(
     name: &str,
@@ -64,7 +73,7 @@ async fn test_create_flow_source_table_not_found() {
     let task = test_create_flow_task("my_flow", source_table_names, sink_table_name, false);
     let node_manager = Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler));
     let ddl_context = new_ddl_context(node_manager);
-    let query_ctx = SessionQueryContext::arc().into();
+    let query_ctx = test_query_context();
     let mut procedure = CreateFlowProcedure::new(task, query_ctx, ddl_context);
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err, error::Error::TableNotFound { .. });
@@ -82,7 +91,7 @@ pub(crate) async fn create_test_flow(
         sink_table_name.clone(),
         false,
     );
-    let query_ctx = SessionQueryContext::arc().into();
+    let query_ctx = test_query_context();
     let mut procedure = CreateFlowProcedure::new(task.clone(), query_ctx, ddl_context.clone());
     let output = execute_procedure_until_done(&mut procedure).await.unwrap();
     let flow_id = output.downcast_ref::<FlowId>().unwrap();
@@ -129,7 +138,7 @@ async fn test_create_flow() {
         sink_table_name.clone(),
         true,
     );
-    let query_ctx = SessionQueryContext::arc().into();
+    let query_ctx = test_query_context();
     let mut procedure = CreateFlowProcedure::new(task.clone(), query_ctx, ddl_context.clone());
     let output = execute_procedure_until_done(&mut procedure).await.unwrap();
     let flow_id = output.downcast_ref::<FlowId>().unwrap();
@@ -137,7 +146,7 @@ async fn test_create_flow() {
 
     // Creates again
     let task = test_create_flow_task("my_flow", source_table_names, sink_table_name, false);
-    let query_ctx = SessionQueryContext::arc().into();
+    let query_ctx = test_query_context();
     let mut procedure = CreateFlowProcedure::new(task.clone(), query_ctx, ddl_context);
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err, error::Error::FlowAlreadyExists { .. });
@@ -169,7 +178,7 @@ async fn test_create_flow_same_source_and_sink_table() {
 
     // Try to create a flow with same source and sink table - should fail
     let task = test_create_flow_task("my_flow", source_table_names, sink_table_name, false);
-    let query_ctx = SessionQueryContext::arc().into();
+    let query_ctx = test_query_context();
     let mut procedure = CreateFlowProcedure::new(task, query_ctx, ddl_context);
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err, error::Error::Unsupported { .. });
@@ -219,7 +228,7 @@ fn test_create_flow_data_serialization_backward_compatibility() {
         "source_table_ids": [],
         "query_context": {
             "current_catalog": "old_catalog",
-            "current_schema": "old_schema", 
+            "current_schema": "old_schema",
             "timezone": "UTC",
             "extensions": {},
             "channel": 0

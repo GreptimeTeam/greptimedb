@@ -2653,7 +2653,6 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_with",
- "session",
  "snafu 0.8.6",
  "sqlx",
  "store-api",

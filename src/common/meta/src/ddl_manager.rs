@@ -626,8 +626,7 @@ impl DdlManager {
                     handle_alter_database_task(self, alter_database_task).await
                 }
                 CreateFlow(create_flow_task) => {
-                    handle_create_flow_task(self, create_flow_task, request.query_context.into())
-                        .await
+                    handle_create_flow_task(self, create_flow_task, request.query_context).await
                 }
                 DropFlow(drop_flow_task) => handle_drop_flow_task(self, drop_flow_task).await,
                 CreateView(create_view_task) => {
