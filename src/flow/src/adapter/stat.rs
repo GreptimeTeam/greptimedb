@@ -17,11 +17,13 @@ use std::collections::BTreeMap;
 use common_meta::key::flow::flow_state::FlowStat;
 
 use crate::StreamingEngine;
+use crate::engine::FlowStatProvider;
 
-impl StreamingEngine {
-    pub async fn gen_state_report(&self) -> FlowStat {
+impl FlowStatProvider for StreamingEngine {
+    async fn flow_stat(&self) -> FlowStat {
         let mut full_report = BTreeMap::new();
         let mut last_exec_time_map = BTreeMap::new();
+
         for worker in self.worker_handles.iter() {
             match worker.get_state_size().await {
                 Ok(state_size) => {

@@ -167,6 +167,8 @@ struct FlownodeServerInner {
     server_shutdown_tx: Mutex<broadcast::Sender<()>>,
     /// streaming task handler
     streaming_task_handler: Mutex<Option<JoinHandle<()>>>,
+    /// state report task handler
+    state_report_task_handler: Mutex<Option<JoinHandle<()>>>,
     flow_service: FlowService,
 }
 
@@ -180,6 +182,7 @@ impl FlownodeServer {
                 worker_shutdown_tx: Mutex::new(tx),
                 server_shutdown_tx: Mutex::new(server_tx),
                 streaming_task_handler: Mutex::new(None),
+                state_report_task_handler: Mutex::new(None),
             }),
         }
     }
@@ -189,6 +192,13 @@ impl FlownodeServer {
     /// Should be called only after heartbeat is establish, hence can get cluster info
     async fn start_workers(&self) -> Result<(), Error> {
         let manager_ref = self.inner.flow_service.dual_engine.clone();
+        let state_report_handler = manager_ref.clone().start_state_report_handler().await;
+        let mut state_report_task_handler = self.inner.state_report_task_handler.lock().await;
+        if let Some(task) = state_report_task_handler.take() {
+            task.abort();
+        }
+        *state_report_task_handler = state_report_handler;
+        drop(state_report_task_handler);
         let handle = manager_ref
             .streaming_engine()
             .run_background(Some(self.inner.worker_shutdown_tx.lock().await.subscribe()));
@@ -212,6 +222,9 @@ impl FlownodeServer {
         let tx = self.inner.worker_shutdown_tx.lock().await;
         if tx.send(()).is_err() {
             info!("Receiver dropped, the flow node server has already shutdown");
+        }
+        if let Some(task) = self.inner.state_report_task_handler.lock().await.take() {
+            task.abort();
         }
         self.inner
             .flow_service
@@ -364,15 +377,18 @@ impl FlownodeBuilder {
             self.catalog_manager.clone(),
             self.opts.flow.batching_mode.clone(),
         ));
-        let dual = FlowDualEngine::new(
+        let dual = Arc::new(FlowDualEngine::new(
             manager.clone(),
             batching,
             self.flow_metadata_manager.clone(),
             self.catalog_manager.clone(),
             self.plugins.clone(),
-        );
+        ));
+        if let Some(handler) = self.state_report_handler.take() {
+            dual.set_state_report_handler(handler).await;
+        }
 
-        let server = FlownodeServer::new(FlowService::new(Arc::new(dual)));
+        let server = FlownodeServer::new(FlowService::new(dual));
 
         let heartbeat_task = self.heartbeat_task;
 
@@ -417,9 +433,6 @@ impl FlownodeBuilder {
                 .build()
             })?;
             man.add_worker_handle(worker_handle);
-        }
-        if let Some(handler) = self.state_report_handler.take() {
-            man = man.with_state_report_handler(handler).await;
         }
         info!("Flow Node Manager started");
         Ok(man)
