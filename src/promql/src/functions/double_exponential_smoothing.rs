@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Implementation of [`holt_winters`](https://prometheus.io/docs/prometheus/latest/querying/functions/#holt_winters) in PromQL. Refer to the [original
+//! Implementation of [`double_exponential_smoothing`](https://prometheus.io/docs/prometheus/latest/querying/functions/#double_exponential_smoothing) in PromQL. Refer to the [original
 //! implementation](https://github.com/prometheus/prometheus/blob/8dba9163f1e923ec213f0f4d5c185d9648e387f0/promql/functions.go#L299).
 
 use std::sync::Arc;
@@ -94,15 +94,16 @@ impl<'a> Iterator for FactorIterator<'a> {
 ///
 /// This method is applied for time-series data that exhibits both trend and seasonality.
 ///
-/// In order to keep the parity with the Prometheus functions we had to follow the same naming ("HoltWinters"), however
-/// the "Holt's linear"("double exponential smoothing") suits better and reflects implementation.
-/// There's the [discussion](https://github.com/prometheus/prometheus/issues/2458) in the Prometheus Github that dates back
-/// to 2017 highlighting the naming/implementation mismatch.
-pub struct HoltWinters;
+/// Prometheus used to expose this algorithm as `holt_winters`, even though it
+/// implements Holt's linear method ("double exponential smoothing") rather than
+/// Holt-Winters triple exponential smoothing. Prometheus 3.x renamed it to
+/// `double_exponential_smoothing`.
+/// See [discussion](https://github.com/prometheus/prometheus/issues/2458).
+pub struct DoubleExponentialSmoothing;
 
-impl HoltWinters {
+impl DoubleExponentialSmoothing {
     pub const fn name() -> &'static str {
-        "prom_holt_winters"
+        "prom_double_exponential_smoothing"
     }
 
     // time index column and value column
@@ -127,14 +128,18 @@ impl HoltWinters {
             Self::input_type(),
             Self::return_type(),
             Volatility::Volatile,
-            Arc::new(Self::holt_winters) as _,
+            Arc::new(Self::double_exponential_smoothing) as _,
         )
     }
 
-    fn holt_winters(input: &[ColumnarValue]) -> Result<ColumnarValue, DataFusionError> {
+    fn double_exponential_smoothing(
+        input: &[ColumnarValue],
+    ) -> Result<ColumnarValue, DataFusionError> {
         error::ensure(
             input.len() == 4,
-            DataFusionError::Plan("prom_holt_winters function should have 4 inputs".to_string()),
+            DataFusionError::Plan(
+                "prom_double_exponential_smoothing function should have 4 inputs".to_string(),
+            ),
         )?;
 
         let ts_array = extract_array(&input[0])?;
@@ -200,7 +205,7 @@ impl HoltWinters {
                 )),
             )?;
 
-            result_array.push(holt_winter_impl(values, sf, tf));
+            result_array.push(double_exponential_smoothing_impl(values, sf, tf));
         }
 
         let result = ColumnarValue::Array(Arc::new(Float64Array::from_iter(result_array)));
@@ -218,7 +223,7 @@ fn calc_trend_value(i: usize, tf: f64, s0: f64, s1: f64, b: f64) -> f64 {
 }
 
 /// Refer to <https://github.com/prometheus/prometheus/blob/main/promql/functions.go#L299>
-fn holt_winter_impl(values: &[f64], sf: f64, tf: f64) -> Option<f64> {
+fn double_exponential_smoothing_impl(values: &[f64], sf: f64, tf: f64) -> Option<f64> {
     if sf.is_nan() || tf.is_nan() || values.is_empty() {
         return Some(f64::NAN);
     }
@@ -261,64 +266,95 @@ mod tests {
     use crate::functions::test_util::simple_range_udf_runner;
 
     #[test]
-    fn test_holt_winter_impl_empty() {
+    fn test_double_exponential_smoothing_impl_empty() {
         let sf = 0.5;
         let tf = 0.5;
         let values = &[];
-        assert!(holt_winter_impl(values, sf, tf).unwrap().is_nan());
+        assert!(
+            double_exponential_smoothing_impl(values, sf, tf)
+                .unwrap()
+                .is_nan()
+        );
 
         let values = &[1.0, 2.0];
-        assert!(holt_winter_impl(values, sf, tf).unwrap().is_nan());
+        assert!(
+            double_exponential_smoothing_impl(values, sf, tf)
+                .unwrap()
+                .is_nan()
+        );
     }
 
     #[test]
-    fn test_holt_winter_impl_nan() {
+    fn test_double_exponential_smoothing_impl_nan() {
         let values = &[1.0, 2.0, 3.0];
         let sf = f64::NAN;
         let tf = 0.5;
-        assert!(holt_winter_impl(values, sf, tf).unwrap().is_nan());
+        assert!(
+            double_exponential_smoothing_impl(values, sf, tf)
+                .unwrap()
+                .is_nan()
+        );
 
         let values = &[1.0, 2.0, 3.0];
         let sf = 0.5;
         let tf = f64::NAN;
-        assert!(holt_winter_impl(values, sf, tf).unwrap().is_nan());
+        assert!(
+            double_exponential_smoothing_impl(values, sf, tf)
+                .unwrap()
+                .is_nan()
+        );
     }
 
     #[test]
-    fn test_holt_winter_impl_validation_rules() {
+    fn test_double_exponential_smoothing_impl_validation_rules() {
         let values = &[1.0, 2.0, 3.0];
         let sf = -0.5;
         let tf = 0.5;
-        assert_eq!(holt_winter_impl(values, sf, tf).unwrap(), f64::NEG_INFINITY);
+        assert_eq!(
+            double_exponential_smoothing_impl(values, sf, tf).unwrap(),
+            f64::NEG_INFINITY
+        );
 
         let values = &[1.0, 2.0, 3.0];
         let sf = 0.5;
         let tf = -0.5;
-        assert_eq!(holt_winter_impl(values, sf, tf).unwrap(), f64::NEG_INFINITY);
+        assert_eq!(
+            double_exponential_smoothing_impl(values, sf, tf).unwrap(),
+            f64::NEG_INFINITY
+        );
 
         let values = &[1.0, 2.0, 3.0];
         let sf = 1.5;
         let tf = 0.5;
-        assert_eq!(holt_winter_impl(values, sf, tf).unwrap(), f64::INFINITY);
+        assert_eq!(
+            double_exponential_smoothing_impl(values, sf, tf).unwrap(),
+            f64::INFINITY
+        );
 
         let values = &[1.0, 2.0, 3.0];
         let sf = 0.5;
         let tf = 1.5;
-        assert_eq!(holt_winter_impl(values, sf, tf).unwrap(), f64::INFINITY);
+        assert_eq!(
+            double_exponential_smoothing_impl(values, sf, tf).unwrap(),
+            f64::INFINITY
+        );
     }
 
     #[test]
-    fn test_holt_winter_impl() {
+    fn test_double_exponential_smoothing_impl() {
         let sf = 0.5;
         let tf = 0.1;
         let values = &[1.0, 2.0, 3.0, 4.0, 5.0];
-        assert_eq!(holt_winter_impl(values, sf, tf), Some(5.0));
+        assert_eq!(double_exponential_smoothing_impl(values, sf, tf), Some(5.0));
         let values = &[50.0, 52.0, 95.0, 59.0, 52.0, 45.0, 38.0, 10.0, 47.0, 40.0];
-        assert_eq!(holt_winter_impl(values, sf, tf), Some(38.18119566835938));
+        assert_eq!(
+            double_exponential_smoothing_impl(values, sf, tf),
+            Some(38.18119566835938)
+        );
     }
 
     #[test]
-    fn test_prom_holt_winter_monotonic() {
+    fn test_prom_double_exponential_smoothing_monotonic() {
         let ranges = [(0, 5)];
         let ts_array = Arc::new(TimestampMillisecondArray::from_iter(
             [1000i64, 3000, 5000, 7000, 9000, 11000, 13000, 15000, 17000]
@@ -329,7 +365,7 @@ mod tests {
         let ts_range_array = RangeArray::from_ranges(ts_array, ranges).unwrap();
         let value_range_array = RangeArray::from_ranges(values_array, ranges).unwrap();
         simple_range_udf_runner(
-            HoltWinters::scalar_udf(),
+            DoubleExponentialSmoothing::scalar_udf(),
             ts_range_array,
             value_range_array,
             vec![
@@ -341,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn test_prom_holt_winter_non_monotonic() {
+    fn test_prom_double_exponential_smoothing_non_monotonic() {
         let ranges = [(0, 10)];
         let ts_array = Arc::new(TimestampMillisecondArray::from_iter(
             [
@@ -356,7 +392,7 @@ mod tests {
         let ts_range_array = RangeArray::from_ranges(ts_array, ranges).unwrap();
         let value_range_array = RangeArray::from_ranges(values_array, ranges).unwrap();
         simple_range_udf_runner(
-            HoltWinters::scalar_udf(),
+            DoubleExponentialSmoothing::scalar_udf(),
             ts_range_array,
             value_range_array,
             vec![
@@ -388,7 +424,7 @@ mod tests {
             let (ts_range_array, value_range_array) =
                 create_ts_and_value_range_arrays(query, ranges.clone());
             simple_range_udf_runner(
-                HoltWinters::scalar_udf(),
+                DoubleExponentialSmoothing::scalar_udf(),
                 ts_range_array,
                 value_range_array,
                 vec![
