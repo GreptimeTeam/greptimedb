@@ -102,7 +102,7 @@ TQL ANALYZE VERBOSE (0, 10, '5s') test;
 | 1_| 0_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["k"] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeriesScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "distribution":"PerSeries", "projection": ["i", "j", "k"], "filters": ["j >= TimestampMillisecond(-300000, None)", "j <= TimestampMillisecond(310000, None)"], "REDACTED
+|_|_|_SeriesScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "distribution":"PerSeries", "projection": ["i", "j", "k"], "filters": ["j >= TimestampMillisecond(-299999, None)", "j <= TimestampMillisecond(10000, None)"], "REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
 +-+-+-+

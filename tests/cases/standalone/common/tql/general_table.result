@@ -44,7 +44,7 @@ TQL analyze (0, 10, '1s')  sum by(job) (irate(cpu_usage{job="fire"}[5s])) / 1e9;
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_ProjectionExec: expr=[value@1 as value, job@0 as job, CAST(ts@2 AS Timestamp(Millisecond, None)) as ts] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_FilterExec: job@0 = fire AND ts@2 >= -305000000000 AND ts@2 <= 310000000000 REDACTED
+|_|_|_FilterExec: job@0 = fire AND ts@2 >= -4999000000 AND ts@2 <= 10000000000 REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
