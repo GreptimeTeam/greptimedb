@@ -211,6 +211,19 @@ impl RegionManifestBuilder {
         self.sst_format = change.sst_format;
     }
 
+    pub fn apply_partition_expr_change(
+        &mut self,
+        manifest_version: ManifestVersion,
+        change: RegionPartitionExprChange,
+    ) {
+        if let Some(metadata) = &self.metadata {
+            let mut metadata = metadata.as_ref().clone();
+            metadata.set_partition_expr(change.partition_expr);
+            self.metadata = Some(metadata.into());
+            self.manifest_version = manifest_version;
+        }
+    }
+
     pub fn apply_edit(&mut self, manifest_version: ManifestVersion, edit: RegionEdit) {
         self.manifest_version = manifest_version;
 
