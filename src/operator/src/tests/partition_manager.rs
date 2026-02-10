@@ -122,6 +122,14 @@ pub(crate) async fn create_partition_rule_manager(
     ));
     let regions = vec![1u32, 2, 3];
     let region_wal_options = new_test_region_wal_options(regions.clone());
+    let expr_str = serde_json::json!({
+        "Expr": {
+            "lhs": {"Column": "a"},
+            "op": "GtEq",
+            "rhs": {"Value": {"Int32": 50}}
+        }
+    })
+    .to_string();
     table_metadata_manager
         .create_table_metadata(
             new_test_table_info(1, "table_1", regions.clone().into_iter()),
@@ -174,9 +182,16 @@ pub(crate) async fn create_partition_rule_manager(
                 },
                 RegionRoute {
                     // Keep legacy `partition` payload to test compatibility.
-                    region: serde_json::from_str(
-                        r#"{"id":1,"name":"r3","partition":{"column_list":["a"],"value_list":["{\"Expr\":{\"lhs\":{\"Column\":\"a\"},\"op\":\"GtEq\",\"rhs\":{\"Value\":{\"Int32\":50}}}}"]},"attrs":{},"partition_expr":""}"#,
-                    )
+                    region: serde_json::from_value(serde_json::json!({
+                        "id": 1,
+                        "name": "r3",
+                        "partition": {
+                            "column_list": ["a"],
+                            "value_list": [expr_str]
+                        },
+                        "attrs": {},
+                        "partition_expr": ""
+                    }))
                     .unwrap(),
                     leader_peer: Some(Peer::new(1, "")),
                     follower_peers: vec![],
