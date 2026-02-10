@@ -75,11 +75,13 @@ impl BulkIterContext {
 
         let read_format = ReadFormat::new(
             region_metadata.clone(),
+            Some(&region_metadata),
             projection,
             true,
             None,
             "memtable",
             skip_auto_convert,
+            false,
         )?;
 
         let dyn_filters = predicate
@@ -95,8 +97,6 @@ impl BulkIterContext {
                 prune_schema: region_metadata.schema.clone(),
                 expected_metadata: Some(region_metadata),
                 codec,
-                // we don't need to compat batch since all batch in memtable have the same schema.
-                compat_batch: None,
                 compaction_projection_mapper: None,
                 pre_filter_mode,
                 partition_filter: None,

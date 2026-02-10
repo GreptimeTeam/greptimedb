@@ -304,6 +304,7 @@ impl PrimaryKeyProjectionMapper {
     }
 
     /// Returns ids of fields in [Batch]es the mapper expects to convert.
+    #[cfg(test)]
     pub(crate) fn batch_fields(&self) -> &[(ColumnId, ConcreteDataType)] {
         &self.batch_fields
     }

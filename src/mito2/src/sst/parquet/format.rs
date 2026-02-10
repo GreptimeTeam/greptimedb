@@ -54,6 +54,7 @@ use crate::error::{
     ConvertVectorSnafu, DecodeSnafu, InvalidBatchSnafu, InvalidRecordBatchSnafu,
     NewRecordBatchSnafu, Result,
 };
+use crate::read::compat::{PrimaryKeyCompatBatch, has_same_columns_and_pk_encoding};
 use crate::read::{Batch, BatchBuilder, BatchColumn};
 use crate::sst::file::{FileMeta, FileTimeRange};
 use crate::sst::parquet::flat_format::FlatReadFormat;
@@ -156,44 +157,58 @@ impl ReadFormat {
     pub fn new_primary_key(
         metadata: RegionMetadataRef,
         column_ids: impl Iterator<Item = ColumnId>,
-    ) -> Self {
-        ReadFormat::PrimaryKey(PrimaryKeyReadFormat::new(metadata, column_ids))
+        expected_metadata: Option<&RegionMetadataRef>,
+    ) -> Result<Self> {
+        Ok(ReadFormat::PrimaryKey(PrimaryKeyReadFormat::new(
+            metadata,
+            column_ids,
+            expected_metadata,
+        )?))
     }
 
     /// Creates a helper to read the flat format.
     pub fn new_flat(
         metadata: RegionMetadataRef,
         column_ids: impl Iterator<Item = ColumnId>,
+        expected_metadata: Option<&RegionMetadataRef>,
         num_columns: Option<usize>,
         file_path: &str,
         skip_auto_convert: bool,
+        compaction: bool,
     ) -> Result<Self> {
         Ok(ReadFormat::Flat(FlatReadFormat::new(
             metadata,
             column_ids,
+            expected_metadata,
             num_columns,
             file_path,
             skip_auto_convert,
+            compaction,
         )?))
     }
 
     /// Creates a new read format.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         region_metadata: RegionMetadataRef,
+        expected_metadata: Option<&RegionMetadataRef>,
         projection: Option<&[ColumnId]>,
         flat_format: bool,
         num_columns: Option<usize>,
         file_path: &str,
         skip_auto_convert: bool,
+        compaction: bool,
     ) -> Result<ReadFormat> {
         if flat_format {
             if let Some(column_ids) = projection {
                 ReadFormat::new_flat(
                     region_metadata,
                     column_ids.iter().copied(),
+                    expected_metadata,
                     num_columns,
                     file_path,
                     skip_auto_convert,
+                    compaction,
                 )
             } else {
                 // No projection, lists all column ids to read.
@@ -203,25 +218,29 @@ impl ReadFormat {
                         .column_metadatas
                         .iter()
                         .map(|col| col.column_id),
+                    expected_metadata,
                     num_columns,
                     file_path,
                     skip_auto_convert,
+                    compaction,
                 )
             }
         } else if let Some(column_ids) = projection {
-            Ok(ReadFormat::new_primary_key(
+            ReadFormat::new_primary_key(
                 region_metadata,
                 column_ids.iter().copied(),
-            ))
+                expected_metadata,
+            )
         } else {
             // No projection, lists all column ids to read.
-            Ok(ReadFormat::new_primary_key(
+            ReadFormat::new_primary_key(
                 region_metadata.clone(),
                 region_metadata
                     .column_metadatas
                     .iter()
                     .map(|col| col.column_id),
-            ))
+                expected_metadata,
+            )
         }
     }
 
@@ -410,6 +429,8 @@ impl ReadFormat {
 pub struct PrimaryKeyReadFormat {
     /// The metadata stored in the SST.
     metadata: RegionMetadataRef,
+    /// Optional expected metadata of the region.
+    expected_metadata: Option<RegionMetadataRef>,
     /// SST file schema.
     arrow_schema: SchemaRef,
     /// Field column id to its index in `schema` (SST schema).
@@ -424,14 +445,20 @@ pub struct PrimaryKeyReadFormat {
     override_sequence: Option<SequenceNumber>,
     /// Codec used to decode primary key values if eager decoding is enabled.
     primary_key_codec: Option<Arc<dyn PrimaryKeyCodec>>,
+    /// Optional helper to compat batches.
+    compat: Option<PrimaryKeyCompatBatch>,
 }
 
 impl PrimaryKeyReadFormat {
     /// Creates a helper with existing `metadata` and `column_ids` to read.
+    ///
+    /// If `expected_metadata` is provided and differs from `metadata`, a compat layer
+    /// will be applied to adapt batches to the expected schema.
     pub fn new(
         metadata: RegionMetadataRef,
         column_ids: impl Iterator<Item = ColumnId>,
-    ) -> PrimaryKeyReadFormat {
+        expected_metadata: Option<&RegionMetadataRef>,
+    ) -> Result<PrimaryKeyReadFormat> {
         let field_id_to_index: HashMap<_, _> = metadata
             .field_columns()
             .enumerate()
@@ -439,21 +466,31 @@ impl PrimaryKeyReadFormat {
             .collect();
         let arrow_schema = to_sst_arrow_schema(&metadata);
 
+        let column_ids: Vec<_> = column_ids.collect();
         let format_projection = FormatProjection::compute_format_projection(
             &field_id_to_index,
             arrow_schema.fields.len(),
-            column_ids,
+            column_ids.iter().copied(),
         );
 
-        PrimaryKeyReadFormat {
+        let compat = match expected_metadata {
+            Some(expected) if !has_same_columns_and_pk_encoding(expected, &metadata) => Some(
+                PrimaryKeyCompatBatch::new(expected, &metadata, &column_ids)?,
+            ),
+            _ => None,
+        };
+
+        Ok(PrimaryKeyReadFormat {
             metadata,
+            expected_metadata: expected_metadata.cloned(),
             arrow_schema,
             field_id_to_index,
             projection_indices: format_projection.projection_indices,
             field_id_to_projected_index: format_projection.column_id_to_projected_index,
             override_sequence: None,
             primary_key_codec: None,
-        }
+            compat,
+        })
     }
 
     /// Sets the sequence number to override.
@@ -464,7 +501,8 @@ impl PrimaryKeyReadFormat {
     /// Enables or disables eager decoding of primary key values into batches.
     pub(crate) fn set_decode_primary_key_values(&mut self, decode: bool) {
         self.primary_key_codec = if decode {
-            Some(build_primary_key_codec(&self.metadata))
+            let decode_metadata = self.expected_metadata.as_ref().unwrap_or(&self.metadata);
+            Some(build_primary_key_codec(decode_metadata))
         } else {
             None
         };
@@ -590,6 +628,9 @@ impl PrimaryKeyReadFormat {
             }
 
             let mut batch = builder.build()?;
+            if let Some(compat) = &self.compat {
+                batch = compat.compat_batch(batch)?;
+            }
             if let Some(codec) = &self.primary_key_codec {
                 let pk_values: CompositeValues =
                     codec.decode(batch.primary_key()).context(DecodeSnafu)?;
@@ -899,7 +940,9 @@ impl PrimaryKeyReadFormat {
         Self::new(
             Arc::clone(&metadata),
             metadata.column_metadatas.iter().map(|c| c.column_id),
+            None,
         )
+        .unwrap()
     }
 }
 
@@ -1211,16 +1254,20 @@ mod tests {
     fn test_projection_indices() {
         let metadata = build_test_region_metadata();
         // Only read tag1
-        let read_format = ReadFormat::new_primary_key(metadata.clone(), [3].iter().copied());
+        let read_format =
+            ReadFormat::new_primary_key(metadata.clone(), [3].iter().copied(), None).unwrap();
         assert_eq!(&[2, 3, 4, 5], read_format.projection_indices());
         // Only read field1
-        let read_format = ReadFormat::new_primary_key(metadata.clone(), [4].iter().copied());
+        let read_format =
+            ReadFormat::new_primary_key(metadata.clone(), [4].iter().copied(), None).unwrap();
         assert_eq!(&[0, 2, 3, 4, 5], read_format.projection_indices());
         // Only read ts
-        let read_format = ReadFormat::new_primary_key(metadata.clone(), [5].iter().copied());
+        let read_format =
+            ReadFormat::new_primary_key(metadata.clone(), [5].iter().copied(), None).unwrap();
         assert_eq!(&[2, 3, 4, 5], read_format.projection_indices());
         // Read field0, tag0, ts
-        let read_format = ReadFormat::new_primary_key(metadata, [2, 1, 5].iter().copied());
+        let read_format =
+            ReadFormat::new_primary_key(metadata, [2, 1, 5].iter().copied(), None).unwrap();
         assert_eq!(&[1, 2, 3, 4, 5], read_format.projection_indices());
     }
 
@@ -1267,7 +1314,8 @@ mod tests {
             .iter()
             .map(|col| col.column_id)
             .collect();
-        let read_format = PrimaryKeyReadFormat::new(metadata, column_ids.iter().copied());
+        let read_format =
+            PrimaryKeyReadFormat::new(metadata, column_ids.iter().copied(), None).unwrap();
         assert_eq!(arrow_schema, *read_format.arrow_schema());
 
         let record_batch = RecordBatch::new_empty(arrow_schema);
@@ -1286,7 +1334,8 @@ mod tests {
             .iter()
             .map(|col| col.column_id)
             .collect();
-        let read_format = PrimaryKeyReadFormat::new(metadata, column_ids.iter().copied());
+        let read_format =
+            PrimaryKeyReadFormat::new(metadata, column_ids.iter().copied(), None).unwrap();
 
         let columns: Vec<ArrayRef> = vec![
             Arc::new(Int64Array::from(vec![1, 1, 10, 10])), // field1
@@ -1317,8 +1366,17 @@ mod tests {
             .iter()
             .map(|col| col.column_id)
             .collect();
-        let read_format =
-            ReadFormat::new(metadata, Some(&column_ids), false, None, "test", false).unwrap();
+        let read_format = ReadFormat::new(
+            metadata,
+            None,
+            Some(&column_ids),
+            false,
+            None,
+            "test",
+            false,
+            false,
+        )
+        .unwrap();
 
         let columns: Vec<ArrayRef> = vec![
             Arc::new(Int64Array::from(vec![1, 1, 10, 10])), // field1
@@ -1446,26 +1504,55 @@ mod tests {
         // The projection includes all "fixed position" columns: ts(4), __primary_key(5), __sequence(6), __op_type(7)
 
         // Only read tag1 (column_id=3, index=1) + fixed columns
-        let read_format =
-            ReadFormat::new_flat(metadata.clone(), [3].iter().copied(), None, "test", false)
-                .unwrap();
+        let read_format = ReadFormat::new_flat(
+            metadata.clone(),
+            [3].iter().copied(),
+            None,
+            None,
+            "test",
+            false,
+            false,
+        )
+        .unwrap();
         assert_eq!(&[1, 4, 5, 6, 7], read_format.projection_indices());
 
         // Only read field1 (column_id=4, index=2) + fixed columns
-        let read_format =
-            ReadFormat::new_flat(metadata.clone(), [4].iter().copied(), None, "test", false)
-                .unwrap();
+        let read_format = ReadFormat::new_flat(
+            metadata.clone(),
+            [4].iter().copied(),
+            None,
+            None,
+            "test",
+            false,
+            false,
+        )
+        .unwrap();
         assert_eq!(&[2, 4, 5, 6, 7], read_format.projection_indices());
 
         // Only read ts (column_id=5, index=4) + fixed columns (ts is already included in fixed)
-        let read_format =
-            ReadFormat::new_flat(metadata.clone(), [5].iter().copied(), None, "test", false)
-                .unwrap();
+        let read_format = ReadFormat::new_flat(
+            metadata.clone(),
+            [5].iter().copied(),
+            None,
+            None,
+            "test",
+            false,
+            false,
+        )
+        .unwrap();
         assert_eq!(&[4, 5, 6, 7], read_format.projection_indices());
 
         // Read field0(column_id=2, index=3), tag0(column_id=1, index=0), ts(column_id=5, index=4) + fixed columns
-        let read_format =
-            ReadFormat::new_flat(metadata, [2, 1, 5].iter().copied(), None, "test", false).unwrap();
+        let read_format = ReadFormat::new_flat(
+            metadata,
+            [2, 1, 5].iter().copied(),
+            None,
+            None,
+            "test",
+            false,
+            false,
+        )
+        .unwrap();
         assert_eq!(&[0, 3, 4, 5, 6, 7], read_format.projection_indices());
     }
 
@@ -1475,8 +1562,10 @@ mod tests {
         let mut format = FlatReadFormat::new(
             metadata,
             std::iter::once(1), // Just read tag0
+            None,
             Some(8),
             "test",
+            false,
             false,
         )
         .unwrap();
@@ -1692,8 +1781,10 @@ mod tests {
         let format = FlatReadFormat::new(
             metadata.clone(),
             column_ids.into_iter(),
+            None,
             Some(6),
             "test",
+            false,
             false,
         )
         .unwrap();
@@ -1775,7 +1866,9 @@ mod tests {
             metadata.clone(),
             column_ids.clone().into_iter(),
             None,
+            None,
             "test",
+            false,
             false,
         )
         .unwrap();
@@ -1860,9 +1953,16 @@ mod tests {
         // Compare the actual result with the expected record batch
         assert_eq!(expected_record_batch, result);
 
-        let format =
-            FlatReadFormat::new(metadata.clone(), column_ids.into_iter(), None, "test", true)
-                .unwrap();
+        let format = FlatReadFormat::new(
+            metadata.clone(),
+            column_ids.into_iter(),
+            None,
+            None,
+            "test",
+            true,
+            false,
+        )
+        .unwrap();
         // Test conversion with sparse encoding and skip convert.
         let result = format.convert_batch(record_batch.clone(), None).unwrap();
         assert_eq!(record_batch, result);

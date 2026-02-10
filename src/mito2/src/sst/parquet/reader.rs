@@ -373,11 +373,13 @@ impl ParquetReaderBuilder {
         let mut read_format = if let Some(column_ids) = &self.projection {
             ReadFormat::new(
                 region_meta.clone(),
+                self.expected_metadata.as_ref(),
                 Some(column_ids),
                 self.flat_format,
                 Some(parquet_meta.file_metadata().schema_descr().num_columns()),
                 &file_path,
                 skip_auto_convert,
+                self.compaction,
             )?
         } else {
             // Lists all column ids to read, we always use the expected metadata if possible.
@@ -389,11 +391,13 @@ impl ParquetReaderBuilder {
                 .collect();
             ReadFormat::new(
                 region_meta.clone(),
+                self.expected_metadata.as_ref(),
                 Some(&column_ids),
                 self.flat_format,
                 Some(parquet_meta.file_metadata().schema_descr().num_columns()),
                 &file_path,
                 skip_auto_convert,
+                self.compaction,
             )?
         };
         if self.decode_primary_key_values {
@@ -487,7 +491,6 @@ impl ParquetReaderBuilder {
                 expected_metadata: self.expected_metadata.clone(),
                 prune_schema,
                 codec,
-                compat_batch: None,
                 compaction_projection_mapper,
                 pre_filter_mode: self.pre_filter_mode,
                 partition_filter,

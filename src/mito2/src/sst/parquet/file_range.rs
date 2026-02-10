@@ -43,7 +43,6 @@ use crate::error::{
     UnexpectedSnafu,
 };
 use crate::read::Batch;
-use crate::read::compat::CompatBatch;
 use crate::read::flat_projection::CompactionProjectionMapper;
 use crate::read::last_row::RowGroupLastRowCachedReader;
 use crate::read::prune::{FlatPruneReader, PruneReader};
@@ -265,14 +264,14 @@ impl FileRange {
         Ok(Some(flat_prune_reader))
     }
 
-    /// Returns the helper to compat batches.
-    pub(crate) fn compat_batch(&self) -> Option<&CompatBatch> {
-        self.context.compat_batch()
-    }
-
     /// Returns the helper to project batches.
     pub(crate) fn compaction_projection_mapper(&self) -> Option<&CompactionProjectionMapper> {
         self.context.compaction_projection_mapper()
+    }
+
+    /// Returns the format helper.
+    pub(crate) fn read_format(&self) -> &ReadFormat {
+        self.context.read_format()
     }
 
     /// Returns the file handle of the file range.
@@ -325,19 +324,9 @@ impl FileRangeContext {
         &self.reader_builder
     }
 
-    /// Returns the helper to compat batches.
-    pub(crate) fn compat_batch(&self) -> Option<&CompatBatch> {
-        self.base.compat_batch.as_ref()
-    }
-
     /// Returns the helper to project batches.
     pub(crate) fn compaction_projection_mapper(&self) -> Option<&CompactionProjectionMapper> {
         self.base.compaction_projection_mapper.as_ref()
-    }
-
-    /// Sets the `CompatBatch` to the context.
-    pub(crate) fn set_compat_batch(&mut self, compat: Option<CompatBatch>) {
-        self.base.compat_batch = compat;
     }
 
     /// TRY THE BEST to perform pushed down predicate precisely on the input batch.
@@ -415,8 +404,6 @@ pub(crate) struct RangeBase {
     pub(crate) prune_schema: Arc<Schema>,
     /// Decoder for primary keys
     pub(crate) codec: Arc<dyn PrimaryKeyCodec>,
-    /// Optional helper to compat batches.
-    pub(crate) compat_batch: Option<CompatBatch>,
     /// Optional helper to project batches.
     pub(crate) compaction_projection_mapper: Option<CompactionProjectionMapper>,
     /// Mode to pre-filter columns.

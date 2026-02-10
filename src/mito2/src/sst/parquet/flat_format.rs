@@ -51,6 +51,7 @@ use crate::error::{
     ComputeArrowSnafu, DecodeSnafu, InvalidParquetSnafu, InvalidRecordBatchSnafu,
     NewRecordBatchSnafu, Result,
 };
+use crate::read::compat::{FlatCompatBatch, has_same_columns_and_pk_encoding};
 use crate::sst::parquet::format::{
     FormatProjection, INTERNAL_COLUMN_NUM, PrimaryKeyArray, PrimaryKeyReadFormat, ReadFormat,
     StatValues,
@@ -136,6 +137,8 @@ pub(crate) fn op_type_column_index(num_columns: usize) -> usize {
 pub struct FlatReadFormat {
     /// Sequence number to override the sequence read from the SST.
     override_sequence: Option<SequenceNumber>,
+    /// Optional helper to compat record batches.
+    compat: Option<FlatCompatBatch>,
     /// Parquet format adapter.
     parquet_adapter: ParquetAdapter,
 }
@@ -147,10 +150,14 @@ impl FlatReadFormat {
     pub fn new(
         metadata: RegionMetadataRef,
         column_ids: impl Iterator<Item = ColumnId>,
+        expected_metadata: Option<&RegionMetadataRef>,
         num_columns: Option<usize>,
         file_path: &str,
         skip_auto_convert: bool,
+        compaction: bool,
     ) -> Result<FlatReadFormat> {
+        let column_ids: Vec<_> = column_ids.collect();
+        let actual_metadata = metadata.clone();
         let is_legacy = match num_columns {
             Some(num) => Self::is_legacy_format(&metadata, num, file_path)?,
             None => metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse,
@@ -162,20 +169,40 @@ impl FlatReadFormat {
                 // Only skip auto convert when the primary key encoding is sparse.
                 ParquetAdapter::PrimaryKeyToFlat(ParquetPrimaryKeyToFlat::new(
                     metadata,
-                    column_ids,
+                    column_ids.iter().copied(),
                     skip_auto_convert,
-                ))
+                )?)
             } else {
                 ParquetAdapter::PrimaryKeyToFlat(ParquetPrimaryKeyToFlat::new(
-                    metadata, column_ids, false,
-                ))
+                    metadata,
+                    column_ids.iter().copied(),
+                    false,
+                )?)
             }
         } else {
-            ParquetAdapter::Flat(ParquetFlat::new(metadata, column_ids))
+            ParquetAdapter::Flat(ParquetFlat::new(metadata, column_ids.iter().copied()))
+        };
+
+        let format_projection = match &parquet_adapter {
+            ParquetAdapter::Flat(p) => &p.format_projection,
+            ParquetAdapter::PrimaryKeyToFlat(p) => &p.format_projection,
+        };
+        let compat = match expected_metadata {
+            Some(expected) if !has_same_columns_and_pk_encoding(expected, &actual_metadata) => {
+                FlatCompatBatch::try_new(
+                    expected,
+                    &actual_metadata,
+                    format_projection,
+                    &column_ids,
+                    compaction,
+                )?
+            }
+            _ => None,
         };
 
         Ok(FlatReadFormat {
             override_sequence: None,
+            compat,
             parquet_adapter,
         })
     }
@@ -308,6 +335,15 @@ impl FlatReadFormat {
         RecordBatch::try_new(batch.schema(), columns).context(NewRecordBatchSnafu)
     }
 
+    /// Adapts a record batch to expected schema if compat is enabled.
+    pub(crate) fn compat_record_batch(&self, batch: RecordBatch) -> Result<RecordBatch> {
+        if let Some(compat) = &self.compat {
+            compat.compat(batch)
+        } else {
+            Ok(batch)
+        }
+    }
+
     /// Checks whether the batch from the parquet file needs to be converted to match the flat format.
     ///
     /// * `metadata` is the region metadata (always assumes flat format).
@@ -383,7 +419,7 @@ impl ParquetPrimaryKeyToFlat {
         metadata: RegionMetadataRef,
         column_ids: impl Iterator<Item = ColumnId>,
         skip_auto_convert: bool,
-    ) -> ParquetPrimaryKeyToFlat {
+    ) -> Result<ParquetPrimaryKeyToFlat> {
         assert!(if skip_auto_convert {
             metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse
         } else {
@@ -398,7 +434,7 @@ impl ParquetPrimaryKeyToFlat {
             flat_sst_arrow_schema_column_num(&metadata, &FlatSchemaOptions::default());
 
         let codec = build_primary_key_codec(&metadata);
-        let format = PrimaryKeyReadFormat::new(metadata.clone(), column_ids.iter().copied());
+        let format = PrimaryKeyReadFormat::new(metadata.clone(), column_ids.iter().copied(), None)?;
         let (convert_format, format_projection) = if skip_auto_convert {
             (
                 None,
@@ -420,11 +456,11 @@ impl ParquetPrimaryKeyToFlat {
             )
         };
 
-        Self {
+        Ok(Self {
             format,
             convert_format,
             format_projection,
-        }
+        })
     }
 
     fn convert_batch(&self, record_batch: RecordBatch) -> Result<RecordBatch> {
@@ -759,7 +795,9 @@ impl FlatReadFormat {
             Arc::clone(&metadata),
             metadata.column_metadatas.iter().map(|c| c.column_id),
             None,
+            None,
             "test",
+            false,
             false,
         )
         .unwrap()

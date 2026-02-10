@@ -208,6 +208,7 @@ impl FlatProjectionMapper {
     }
 
     /// Returns ids of columns of the batch that the mapper expects to convert.
+    #[cfg(test)]
     pub(crate) fn batch_schema(&self) -> &[(ColumnId, ConcreteDataType)] {
         &self.batch_schema
     }
