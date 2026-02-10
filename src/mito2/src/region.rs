@@ -174,10 +174,12 @@ pub(crate) struct StagingPartitionInfo {
 }
 
 impl StagingPartitionInfo {
+    /// Returns the partition expression carried by the staging directive, if any.
     pub(crate) fn partition_expr(&self) -> Option<&str> {
         self.partition_directive.partition_expr()
     }
 
+    /// Builds staging partition info from a directive and derives its version marker.
     pub(crate) fn from_partition_directive(partition_directive: StagingPartitionDirective) -> Self {
         let partition_rule_version = match &partition_directive {
             StagingPartitionDirective::PartitionExpr(expr) => partition_expr_version(Some(expr)),
@@ -843,6 +845,7 @@ impl MitoRegion {
         }
     }
 
+    /// Returns whether writes should be rejected for this region in staging mode.
     pub(crate) fn reject_all_writes_in_staging(&self) -> bool {
         if !self.is_staging() {
             return false;

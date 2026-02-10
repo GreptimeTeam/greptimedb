@@ -292,9 +292,16 @@ pub enum LeaderState {
     Staging,
 }
 
+/// The write route policy for the region.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 pub enum WriteRoutePolicy {
+    // The default policy.
     Normal,
+    /// Ignores all writes for this region.
+    ///
+    /// This policy is typically used during region merge operations, such as repartitioning.
+    /// For example, when merging Region A and Region B into just Region B,
+    /// writes to Region A are ignored, while Region B accepts all writes originating from both regions.
     IgnoreAllWrites,
 }
 
@@ -314,7 +321,9 @@ impl RegionRoute {
 
     /// Clears ignore-all write policy and falls back to normal routing behavior.
     pub fn clear_ignore_all_writes(&mut self) {
-        self.write_route_policy = None;
+        if self.write_route_policy == Some(WriteRoutePolicy::IgnoreAllWrites) {
+            self.write_route_policy = None;
+        }
     }
 
     /// Returns true if the Leader [`Region`] is downgraded.
@@ -432,6 +441,8 @@ impl<'de> Deserialize<'de> for Region {
         D: Deserializer<'de>,
     {
         let de = RegionDe::deserialize(deserializer)?;
+        // Compatibility path for legacy serialized routes: prefer the normalized
+        // `partition_expr` field and only fall back to legacy `partition.value_list`.
         let partition_expr = if de.partition_expr.is_empty() {
             if let Some(LegacyPartition { value_list, .. }) = &de.partition {
                 value_list

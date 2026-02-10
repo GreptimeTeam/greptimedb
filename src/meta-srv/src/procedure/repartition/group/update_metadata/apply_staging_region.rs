@@ -67,9 +67,8 @@ impl UpdateMetadata {
             )?;
             region_route.set_leader_staging();
             if pending_deallocate_region_ids.contains(&source.region_id) {
+                // When a region is pending deallocation, it should ignore all writes.
                 region_route.set_ignore_all_writes();
-            } else {
-                region_route.clear_ignore_all_writes();
             }
         }
 

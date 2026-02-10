@@ -61,7 +61,6 @@ impl UpdateMetadata {
                 },
             )?;
             region_route.clear_leader_staging();
-            region_route.clear_ignore_all_writes();
         }
 
         Ok(region_routes)

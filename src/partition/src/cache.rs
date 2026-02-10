@@ -57,6 +57,8 @@ pub fn create_partitions_with_version_from_region_routes(
 ) -> common_meta::error::Result<Vec<PartitionInfoWithVersion>> {
     let mut partitions = Vec::with_capacity(region_routes.len());
     for r in region_routes {
+        // Ignore regions marked as reject-all-writes; they should not participate
+        // in writable partition-cache construction.
         if r.is_ignore_all_writes() {
             continue;
         }
