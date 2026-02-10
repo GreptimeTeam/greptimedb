@@ -1388,9 +1388,8 @@ mod tests {
 
     use crate::access_layer::AccessLayer;
     use crate::error::Error;
-    use crate::manifest::action::RegionMetaActionList;
     use crate::manifest::action::{
-        RegionChange, RegionEdit, RegionMetaAction, RegionPartitionExprChange,
+        RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList, RegionPartitionExprChange,
     };
     use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
     use crate::region::{

@@ -464,7 +464,9 @@ async fn test_apply_staging_manifest_change_edit_same_columns_success() {
     test_apply_staging_manifest_change_edit_same_columns_success_with_format(true).await;
 }
 
-async fn test_apply_staging_manifest_change_edit_same_columns_success_with_format(flat_format: bool) {
+async fn test_apply_staging_manifest_change_edit_same_columns_success_with_format(
+    flat_format: bool,
+) {
     let mut env = TestEnv::with_prefix("apply-change-edit-same-columns").await;
     let engine = env
         .create_engine(MitoConfig {

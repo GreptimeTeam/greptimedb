@@ -882,7 +882,9 @@ async fn test_staging_exit_conflict_partition_expr_change_and_change() {
     test_staging_exit_conflict_partition_expr_change_and_change_with_format(true).await;
 }
 
-async fn test_staging_exit_conflict_partition_expr_change_and_change_with_format(flat_format: bool) {
+async fn test_staging_exit_conflict_partition_expr_change_and_change_with_format(
+    flat_format: bool,
+) {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
