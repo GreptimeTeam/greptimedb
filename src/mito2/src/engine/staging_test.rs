@@ -901,7 +901,9 @@ async fn test_enter_staging_writes_partition_expr_change_action_with_format(flat
         .handle_request(
             region_id,
             RegionRequest::EnterStaging(EnterStagingRequest {
-                partition_directive: StagingPartitionDirective::PartitionExpr(partition_expr.clone()),
+                partition_directive: StagingPartitionDirective::PartitionExpr(
+                    partition_expr.clone(),
+                ),
             }),
         )
         .await
@@ -963,7 +965,9 @@ async fn test_staging_exit_conflict_partition_expr_change_and_change_with_format
         .handle_request(
             region_id,
             RegionRequest::EnterStaging(EnterStagingRequest {
-                partition_directive: StagingPartitionDirective::PartitionExpr(partition_expr.clone()),
+                partition_directive: StagingPartitionDirective::PartitionExpr(
+                    partition_expr.clone(),
+                ),
             }),
         )
         .await

@@ -130,7 +130,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let partition_expr = match partition_directive {
             StagingPartitionDirective::PartitionExpr(partition_expr) => partition_expr.clone(),
             StagingPartitionDirective::RejectAllWrites => {
-                    // Rejects all writes just a memory flag, no need to write new staging manifest.
+                // Rejects all writes just a memory flag, no need to write new staging manifest.
                 return Ok(());
             }
         };
