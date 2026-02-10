@@ -592,7 +592,10 @@ impl StatementExecutor {
         })
         .context(error::InvalidExprSnafu)?;
 
-        let request = SubmitDdlTaskRequest::new(to_meta_query_context(query_context), DdlTask::new_create_trigger(task));
+        let request = SubmitDdlTaskRequest::new(
+            to_meta_query_context(query_context),
+            DdlTask::new_create_trigger(task),
+        );
 
         self.procedure_executor
             .submit_ddl_task(&ExecutorContext::default(), request)
@@ -642,7 +645,10 @@ impl StatementExecutor {
             create_flow: Some(expr),
         })
         .context(error::InvalidExprSnafu)?;
-        let request = SubmitDdlTaskRequest::new(to_meta_query_context(query_context), DdlTask::new_create_flow(task));
+        let request = SubmitDdlTaskRequest::new(
+            to_meta_query_context(query_context),
+            DdlTask::new_create_flow(task),
+        );
 
         self.procedure_executor
             .submit_ddl_task(&ExecutorContext::default(), request)
@@ -937,8 +943,10 @@ impl StatementExecutor {
             table_type: TableType::View,
         };
 
-        let request =
-            SubmitDdlTaskRequest::new(to_meta_query_context(ctx), DdlTask::new_create_view(expr, view_info.clone()));
+        let request = SubmitDdlTaskRequest::new(
+            to_meta_query_context(ctx),
+            DdlTask::new_create_view(expr, view_info.clone()),
+        );
 
         let resp = self
             .procedure_executor
@@ -1021,7 +1029,10 @@ impl StatementExecutor {
         expr: DropFlowTask,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
-        let request = SubmitDdlTaskRequest::new(to_meta_query_context(query_context), DdlTask::new_drop_flow(expr));
+        let request = SubmitDdlTaskRequest::new(
+            to_meta_query_context(query_context),
+            DdlTask::new_drop_flow(expr),
+        );
 
         self.procedure_executor
             .submit_ddl_task(&ExecutorContext::default(), request)
@@ -1053,7 +1064,10 @@ impl StatementExecutor {
         expr: DropTriggerTask,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
-        let request = SubmitDdlTaskRequest::new(to_meta_query_context(query_context), DdlTask::new_drop_trigger(expr));
+        let request = SubmitDdlTaskRequest::new(
+            to_meta_query_context(query_context),
+            DdlTask::new_drop_trigger(expr),
+        );
 
         self.procedure_executor
             .submit_ddl_task(&ExecutorContext::default(), request)
@@ -1118,7 +1132,10 @@ impl StatementExecutor {
         expr: DropViewTask,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
-        let request = SubmitDdlTaskRequest::new(to_meta_query_context(query_context), DdlTask::new_drop_view(expr));
+        let request = SubmitDdlTaskRequest::new(
+            to_meta_query_context(query_context),
+            DdlTask::new_drop_view(expr),
+        );
 
         self.procedure_executor
             .submit_ddl_task(&ExecutorContext::default(), request)
@@ -1615,7 +1632,10 @@ impl StatementExecutor {
 
         let (req, invalidate_keys) = if physical_table_id == table_id {
             // This is physical table
-            let req = SubmitDdlTaskRequest::new(to_meta_query_context(query_context), DdlTask::new_alter_table(expr));
+            let req = SubmitDdlTaskRequest::new(
+                to_meta_query_context(query_context),
+                DdlTask::new_alter_table(expr),
+            );
 
             let invalidate_keys = vec![
                 CacheIdent::TableId(table_id),
@@ -1836,8 +1856,10 @@ impl StatementExecutor {
         alter_expr: AlterDatabaseExpr,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
-        let request =
-            SubmitDdlTaskRequest::new(to_meta_query_context(query_context), DdlTask::new_alter_database(alter_expr));
+        let request = SubmitDdlTaskRequest::new(
+            to_meta_query_context(query_context),
+            DdlTask::new_alter_database(alter_expr),
+        );
 
         self.procedure_executor
             .submit_ddl_task(&ExecutorContext::default(), request)
