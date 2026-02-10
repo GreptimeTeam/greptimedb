@@ -718,7 +718,7 @@ impl MitoRegion {
         let expect_partition_expr_change = merged_actions
             .actions
             .iter()
-            .any(|a| matches!(a, RegionMetaAction::PartitionExprChange(_)));
+            .any(|a| a.is_partition_expr_change());
         let expect_edit = merged_actions.actions.iter().any(|a| a.is_edit());
         ensure!(
             !(expect_change && expect_partition_expr_change),
@@ -727,9 +727,9 @@ impl MitoRegion {
             }
         );
         ensure!(
-            expect_change,
+            expect_change || expect_partition_expr_change,
             UnexpectedSnafu {
-                reason: "expect a change action in merged actions"
+                reason: "expect a change or partition expr change action in merged actions"
             }
         );
         ensure!(
@@ -749,11 +749,23 @@ impl MitoRegion {
         );
 
         // Apply the merged changes to in-memory version control
-        let (_merged_partition_expr_change, merged_change, merged_edit) =
+        let (merged_partition_expr_change, merged_change, merged_edit) =
             merged_actions.split_region_change_and_edit();
-        // Safety: we have already ensured that there is a change action in the merged actions.
-        let new_metadata = merged_change.as_ref().unwrap().metadata.clone();
-        self.version_control.alter_schema(new_metadata);
+        if let Some(change) = merged_partition_expr_change {
+            let mut new_metadata = self.version().metadata.as_ref().clone();
+            new_metadata.set_partition_expr(change.partition_expr);
+            self.version_control.alter_metadata(new_metadata.into());
+        }
+        if let Some(change) = merged_change {
+            let current_column_metadatas = &self.version().metadata.column_metadatas;
+            ensure!(
+                change.metadata.column_metadatas == *current_column_metadatas,
+                UnexpectedSnafu {
+                    reason: "change action alters column metadata in staging exit"
+                }
+            );
+            self.version_control.alter_metadata(change.metadata);
+        }
         self.version_control
             .apply_edit(Some(merged_edit), &[], self.file_purger.clone());
 

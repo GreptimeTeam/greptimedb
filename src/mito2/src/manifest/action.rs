@@ -63,6 +63,11 @@ impl RegionMetaAction {
     pub fn is_edit(&self) -> bool {
         matches!(self, RegionMetaAction::Edit(_))
     }
+
+    /// Returns true if the action is a partition expr change action.
+    pub fn is_partition_expr_change(&self) -> bool {
+        matches!(self, RegionMetaAction::PartitionExprChange(_))
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
