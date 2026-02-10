@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
 use std::time::Instant;
 
 use common_base::hash::partition_rule_version;
@@ -23,7 +22,7 @@ use store_api::storage::RegionId;
 
 use crate::error::{RegionNotFoundSnafu, Result, StagingPartitionExprMismatchSnafu};
 use crate::flush::FlushReason;
-use crate::manifest::action::{RegionChange, RegionMetaAction, RegionMetaActionList};
+use crate::manifest::action::{RegionMetaAction, RegionMetaActionList, RegionPartitionExprChange};
 use crate::region::{MitoRegionRef, RegionLeaderState, StagingPartitionInfo};
 use crate::request::{
     BackgroundNotify, DdlRequest, EnterStagingResult, OptionOutputTx, SenderDdlRequest,
@@ -125,14 +124,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
 
         // Second step: write new staging manifest.
-        let mut new_meta = (*region.metadata()).clone();
-        new_meta.set_partition_expr(Some(partition_expr.clone()));
-        let sst_format = region.version().options.sst_format.unwrap_or_default();
-        let change = RegionChange {
-            metadata: Arc::new(new_meta),
-            sst_format,
+        let change = RegionPartitionExprChange {
+            partition_expr: Some(partition_expr.clone()),
         };
-        let action_list = RegionMetaActionList::with_action(RegionMetaAction::Change(change));
+        let action_list =
+            RegionMetaActionList::with_action(RegionMetaAction::PartitionExprChange(change));
         region
             .manifest_ctx
             .update_manifest(RegionLeaderState::EnteringStaging, action_list, true)
