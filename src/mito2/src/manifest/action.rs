@@ -506,8 +506,14 @@ impl RegionMetaActionList {
         Self { actions }
     }
 
-    /// Split the actions into a region change and an edit.
-    pub fn split_region_change_and_edit(self) -> (Option<RegionChange>, RegionEdit) {
+    /// Split the actions into a partition expr change, a region change and an edit.
+    pub fn split_region_change_and_edit(
+        self,
+    ) -> (
+        Option<RegionPartitionExprChange>,
+        Option<RegionChange>,
+        RegionEdit,
+    ) {
         let mut edit = RegionEdit {
             files_to_add: Vec::new(),
             files_to_remove: Vec::new(),
@@ -517,9 +523,13 @@ impl RegionMetaActionList {
             flushed_sequence: None,
             committed_sequence: None,
         };
+        let mut partition_expr_change = None;
         let mut region_change = None;
         for action in self.actions {
             match action {
+                RegionMetaAction::PartitionExprChange(change) => {
+                    partition_expr_change = Some(change);
+                }
                 RegionMetaAction::Change(change) => {
                     region_change = Some(change);
                 }
@@ -549,7 +559,7 @@ impl RegionMetaActionList {
             }
         }
 
-        (region_change, edit)
+        (partition_expr_change, region_change, edit)
     }
 }
 

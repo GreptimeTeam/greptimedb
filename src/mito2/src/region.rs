@@ -715,7 +715,17 @@ impl MitoRegion {
             }
         };
         let expect_change = merged_actions.actions.iter().any(|a| a.is_change());
+        let expect_partition_expr_change = merged_actions
+            .actions
+            .iter()
+            .any(|a| matches!(a, RegionMetaAction::PartitionExprChange(_)));
         let expect_edit = merged_actions.actions.iter().any(|a| a.is_edit());
+        ensure!(
+            !(expect_change && expect_partition_expr_change),
+            UnexpectedSnafu {
+                reason: "unexpected both change and partition expr change actions in merged actions"
+            }
+        );
         ensure!(
             expect_change,
             UnexpectedSnafu {
@@ -739,7 +749,8 @@ impl MitoRegion {
         );
 
         // Apply the merged changes to in-memory version control
-        let (merged_change, merged_edit) = merged_actions.split_region_change_and_edit();
+        let (_merged_partition_expr_change, merged_change, merged_edit) =
+            merged_actions.split_region_change_and_edit();
         // Safety: we have already ensured that there is a change action in the merged actions.
         let new_metadata = merged_change.as_ref().unwrap().metadata.clone();
         self.version_control.alter_schema(new_metadata);
