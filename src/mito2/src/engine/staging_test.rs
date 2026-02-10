@@ -364,7 +364,7 @@ async fn test_staging_write_partition_expr_version_with_format(flat_format: bool
     assert_eq!(err.status_code(), StatusCode::InvalidArguments);
     assert_matches!(
         err.into_inner().as_any().downcast_ref::<Error>().unwrap(),
-        Error::PartitionRuleVersionMismatch { .. }
+        Error::PartitionExprVersionMismatch { .. }
     );
 
     let compat_rows = Rows {

@@ -562,12 +562,12 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Partition rule version mismatch for region {}: request {}, expected {}",
+        "Partition expr version mismatch for region {}: request {}, expected {}",
         region_id,
         request_version,
         expected_version
     ))]
-    PartitionRuleVersionMismatch {
+    PartitionExprVersionMismatch {
         region_id: RegionId,
         request_version: u64,
         expected_version: u64,
@@ -1272,7 +1272,7 @@ impl ErrorExt for Error {
             | InvalidScanIndex { .. }
             | InvalidMeta { .. }
             | InvalidRequest { .. }
-            | PartitionRuleVersionMismatch { .. }
+            | PartitionExprVersionMismatch { .. }
             | FillDefault { .. }
             | ConvertColumnDataType { .. }
             | ColumnNotFound { .. }

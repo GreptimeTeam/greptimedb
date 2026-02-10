@@ -26,7 +26,7 @@ use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
 use crate::error::{
-    InvalidRequestSnafu, PartitionRuleVersionMismatchSnafu, RegionStateSnafu, RejectWriteSnafu,
+    InvalidRequestSnafu, PartitionExprVersionMismatchSnafu, RegionStateSnafu, RejectWriteSnafu,
     Result,
 };
 use crate::metrics;
@@ -527,7 +527,7 @@ fn check_partition_expr_version(
         Some(value) => value,
     };
     if request_version != expected_version {
-        return PartitionRuleVersionMismatchSnafu {
+        return PartitionExprVersionMismatchSnafu {
             region_id,
             request_version,
             expected_version,

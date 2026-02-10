@@ -186,7 +186,7 @@ impl MetricEngineInner {
                         merged_version == request_version,
                         InvalidRequestSnafu {
                             region_id: physical_region_id,
-                            reason: "inconsistent partition rule version in batch"
+                            reason: "inconsistent partition expr version in batch"
                         }
                     );
                 } else {
@@ -312,7 +312,7 @@ impl MetricEngineInner {
                         merged_version == request_version,
                         InvalidRequestSnafu {
                             region_id: logical_region_id,
-                            reason: "inconsistent partition rule version in batch"
+                            reason: "inconsistent partition expr version in batch"
                         }
                     );
                 } else {
