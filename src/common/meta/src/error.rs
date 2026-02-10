@@ -874,13 +874,6 @@ pub enum Error {
         source: common_procedure::error::Error,
     },
 
-    #[snafu(display("Failed to parse timezone"))]
-    InvalidTimeZone {
-        #[snafu(implicit)]
-        location: Location,
-        #[snafu(source)]
-        error: common_time::error::Error,
-    },
     #[snafu(display("Invalid file path: {}", file_path))]
     InvalidFilePath {
         #[snafu(implicit)]
@@ -1148,7 +1141,6 @@ impl ErrorExt for Error {
             | InvalidSetDatabaseOption { .. }
             | InvalidUnsetDatabaseOption { .. }
             | InvalidTopicNamePrefix { .. }
-            | InvalidTimeZone { .. }
             | InvalidFileExtension { .. }
             | InvalidFileName { .. }
             | InvalidFlowRequestBody { .. }

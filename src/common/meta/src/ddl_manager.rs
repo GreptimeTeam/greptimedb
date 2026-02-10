@@ -636,17 +636,12 @@ impl DdlManager {
                 CommentOn(comment_on_task) => handle_comment_on_task(self, comment_on_task).await,
                 #[cfg(feature = "enterprise")]
                 CreateTrigger(create_trigger_task) => {
-                    handle_create_trigger_task(
-                        self,
-                        create_trigger_task,
-                        request.query_context.into(),
-                    )
-                    .await
+                    handle_create_trigger_task(self, create_trigger_task, request.query_context)
+                        .await
                 }
                 #[cfg(feature = "enterprise")]
                 DropTrigger(drop_trigger_task) => {
-                    handle_drop_trigger_task(self, drop_trigger_task, request.query_context.into())
-                        .await
+                    handle_drop_trigger_task(self, drop_trigger_task, request.query_context).await
                 }
             }
         }
