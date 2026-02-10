@@ -17,7 +17,7 @@ use std::fs;
 use std::sync::Arc;
 
 use api::v1::Rows;
-use common_function::utils::partition_rule_version;
+use common_function::utils::partition_expr_version;
 use common_recordbatch::RecordBatches;
 use datatypes::value::Value;
 use partition::expr::{PartitionExpr, col};
@@ -634,7 +634,7 @@ async fn test_apply_staging_manifest_preserves_unflushed_memtable_with_format(fl
         .await
         .unwrap();
 
-    let expected_version = partition_rule_version(Some(&partition_expr));
+    let expected_version = partition_expr_version(Some(&partition_expr));
     let unflushed_rows = Rows {
         schema: column_schemas,
         rows: build_rows(3, 6),
@@ -645,7 +645,7 @@ async fn test_apply_staging_manifest_preserves_unflushed_memtable_with_format(fl
             RegionRequest::Put(RegionPutRequest {
                 rows: unflushed_rows,
                 hint: None,
-                partition_rule_version: Some(expected_version),
+                partition_expr_version: Some(expected_version),
             }),
         )
         .await
