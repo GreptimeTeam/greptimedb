@@ -30,17 +30,17 @@ use tests_integration::test_util::{StorageType, get_test_store_config};
 use tokio::time::{Duration, sleep};
 
 #[macro_export]
-macro_rules! repartition_rule_version_tests {
+macro_rules! repartition_expr_version_tests {
     ($($service:ident),*) => {
         $(
             paste::item! {
-                mod [<integration_repartition_rule_version_ $service:lower _test>] {
+                mod [<integration_repartition_expr_version_ $service:lower _test>] {
                     #[tokio::test(flavor = "multi_thread")]
-                    async fn [< test_repartition_rule_version >]() {
+                    async fn [< test_repartition_expr_version >]() {
                         let store_type = tests_integration::test_util::StorageType::$service;
                         if store_type.test_on() {
                             common_telemetry::init_default_ut_logging();
-                            $crate::repartition_rule_version::test_repartition_rule_version(store_type).await
+                            $crate::repartition_expr_version::test_repartition_expr_version(store_type).await
                         }
                     }
                 }
@@ -49,12 +49,12 @@ macro_rules! repartition_rule_version_tests {
     };
 }
 
-pub async fn test_repartition_rule_version(store_type: StorageType) {
-    let cluster_name = "test_repartition_rule_version";
+pub async fn test_repartition_expr_version(store_type: StorageType) {
+    let cluster_name = "test_repartition_expr_version";
     let (store_config, _guard) = get_test_store_config(&store_type);
     let mut builder = GreptimeDbClusterBuilder::new(cluster_name).await;
     if matches!(store_type, StorageType::File) {
-        let home_dir = create_temp_dir("test_repartition_rule_version_data_home");
+        let home_dir = create_temp_dir("test_repartition_expr_version_data_home");
         builder = builder.with_shared_home_dir(Arc::new(home_dir));
     }
 
@@ -79,7 +79,7 @@ pub async fn test_repartition_rule_version(store_type: StorageType) {
     let query_ctx = QueryContext::arc();
 
     let sql = r#"
-        CREATE TABLE repartition_rule_version_table(
+        CREATE TABLE repartition_expr_version_table(
           `id` INT,
           `ts` TIMESTAMP TIME INDEX,
           `val` DOUBLE,
@@ -98,7 +98,7 @@ pub async fn test_repartition_rule_version(store_type: StorageType) {
         let id = next_id;
         next_id += 1;
         let sql = format!(
-            "INSERT INTO repartition_rule_version_table VALUES ({id}, '2022-01-01 00:00:00', 0.5)"
+            "INSERT INTO repartition_expr_version_table VALUES ({id}, '2022-01-01 00:00:00', 0.5)"
         );
         run_sql(&instance, &sql, query_ctx.clone()).await.unwrap();
         success_count += 1;
@@ -110,7 +110,7 @@ pub async fn test_repartition_rule_version(store_type: StorageType) {
         run_sql(
             &moved_instance,
             r#"
-                ALTER TABLE repartition_rule_version_table SPLIT PARTITION (
+                ALTER TABLE repartition_expr_version_table SPLIT PARTITION (
                   `id` < 10
                 ) INTO (
                   `id` < 5,
@@ -126,7 +126,7 @@ pub async fn test_repartition_rule_version(store_type: StorageType) {
         let id = next_id;
         next_id += 1;
         let sql = format!(
-            "INSERT INTO repartition_rule_version_table VALUES ({id}, '2022-01-01 00:00:00', 1.0)"
+            "INSERT INTO repartition_expr_version_table VALUES ({id}, '2022-01-01 00:00:00', 1.0)"
         );
         match run_sql(&instance, &sql, query_ctx.clone()).await {
             Ok(_) => success_count += 1,
@@ -142,14 +142,14 @@ pub async fn test_repartition_rule_version(store_type: StorageType) {
 
     let id = next_id;
     let sql = format!(
-        "INSERT INTO repartition_rule_version_table VALUES ({id}, '2022-01-01 00:00:00', 2.0)"
+        "INSERT INTO repartition_expr_version_table VALUES ({id}, '2022-01-01 00:00:00', 2.0)"
     );
     run_sql(&instance, &sql, query_ctx.clone()).await.unwrap();
     success_count += 1;
 
     let result = run_sql(
         &instance,
-        "SELECT count(*) FROM repartition_rule_version_table",
+        "SELECT count(*) FROM repartition_expr_version_table",
         query_ctx.clone(),
     )
     .await
@@ -160,7 +160,7 @@ pub async fn test_repartition_rule_version(store_type: StorageType) {
 
     run_sql(
         &instance,
-        "DROP TABLE repartition_rule_version_table",
+        "DROP TABLE repartition_expr_version_table",
         query_ctx,
     )
     .await

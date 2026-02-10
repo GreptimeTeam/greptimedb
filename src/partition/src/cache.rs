@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use common_base::hash::partition_rule_version;
+use common_base::hash::partition_expr_version;
 use common_error::ext::BoxedError;
 use common_meta::cache::{CacheContainer, Initializer, TableRoute, TableRouteCacheRef};
 use common_meta::instruction::CacheIdent;
@@ -58,10 +58,10 @@ pub fn create_partitions_with_version_from_region_routes(
     let mut partitions = Vec::with_capacity(region_routes.len());
     for r in region_routes {
         let expr_json = r.region.partition_expr();
-        let partition_rule_version = if expr_json.is_empty() {
+        let partition_expr_version = if expr_json.is_empty() {
             None
         } else {
-            Some(partition_rule_version(Some(expr_json.as_str())))
+            Some(partition_expr_version(Some(expr_json.as_str())))
         };
         let partition_expr = PartitionExpr::from_json_str(expr_json.as_str())
             .map_err(BoxedError::new)
@@ -70,7 +70,7 @@ pub fn create_partitions_with_version_from_region_routes(
         partitions.push(PartitionInfoWithVersion {
             id,
             partition_expr,
-            partition_rule_version,
+            partition_expr_version,
         });
     }
 

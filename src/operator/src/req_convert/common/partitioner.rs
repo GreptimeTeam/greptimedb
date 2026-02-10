@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use api::v1::region::{DeleteRequest, InsertRequest};
-use api::v1::{PartitionRuleVersion, Rows};
+use api::v1::{PartitionExprVersion, Rows};
 use partition::manager::PartitionRuleManager;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
@@ -43,11 +43,11 @@ impl<'a> Partitioner<'a> {
             .context(SplitInsertSnafu)?
             .into_iter()
             .map(
-                |(region_number, (rows, partition_rule_version))| InsertRequest {
+                |(region_number, (rows, partition_expr_version))| InsertRequest {
                     region_id: RegionId::new(table_id, region_number).into(),
                     rows: Some(rows),
-                    partition_rule_version: partition_rule_version
-                        .map(|value| PartitionRuleVersion { value }),
+                    partition_expr_version: partition_expr_version
+                        .map(|value| PartitionExprVersion { value }),
                 },
             )
             .collect();
@@ -68,11 +68,11 @@ impl<'a> Partitioner<'a> {
             .context(SplitDeleteSnafu)?
             .into_iter()
             .map(
-                |(region_number, (rows, partition_rule_version))| DeleteRequest {
+                |(region_number, (rows, partition_expr_version))| DeleteRequest {
                     region_id: RegionId::new(table_id, region_number).into(),
                     rows: Some(rows),
-                    partition_rule_version: partition_rule_version
-                        .map(|value| PartitionRuleVersion { value }),
+                    partition_expr_version: partition_expr_version
+                        .map(|value| PartitionExprVersion { value }),
                 },
             )
             .collect();

@@ -15,7 +15,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use common_base::hash::partition_rule_version;
+use common_base::hash::partition_expr_version;
 use common_meta::cache::{TableRouteCacheRef, new_table_route_cache};
 use common_meta::key::TableMetadataManager;
 use common_meta::key::table_route::TableRouteValue;
@@ -198,7 +198,7 @@ pub(crate) async fn create_partition_rule_manager(
 }
 
 #[tokio::test]
-async fn test_partition_rule_version_cache() {
+async fn test_partition_expr_version_cache() {
     let kv_backend = Arc::new(common_meta::kv_backend::memory::MemoryKvBackend::new());
     let partition_manager = create_partition_rule_manager(kv_backend).await;
     let partitions = partition_manager
@@ -214,12 +214,12 @@ async fn test_partition_rule_version_cache() {
             .partition_expr
             .as_ref()
             .map(|expr| expr.as_json_str().unwrap())
-            .map(|expr_json| partition_rule_version(Some(expr_json.as_str())))
+            .map(|expr_json| partition_expr_version(Some(expr_json.as_str())))
             .unwrap_or_default();
-        assert_eq!(Some(expected), partition.partition_rule_version);
+        assert_eq!(Some(expected), partition.partition_expr_version);
         version_by_region.insert(
             partition.id.region_number(),
-            partition.partition_rule_version,
+            partition.partition_expr_version,
         );
     }
 

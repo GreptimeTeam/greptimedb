@@ -22,7 +22,7 @@ use std::time::Duration;
 use api::v1::Rows;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use common_function::utils::partition_rule_version;
+use common_function::utils::partition_expr_version;
 use common_recordbatch::RecordBatches;
 use datatypes::value::Value;
 use object_store::Buffer;
@@ -253,12 +253,12 @@ fn default_partition_expr() -> String {
 }
 
 #[tokio::test]
-async fn test_staging_write_partition_rule_version() {
-    test_staging_write_partition_rule_version_with_format(false).await;
-    test_staging_write_partition_rule_version_with_format(true).await;
+async fn test_staging_write_partition_expr_version() {
+    test_staging_write_partition_expr_version_with_format(false).await;
+    test_staging_write_partition_expr_version_with_format(true).await;
 }
 
-async fn test_staging_write_partition_rule_version_with_format(flat_format: bool) {
+async fn test_staging_write_partition_expr_version_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::new().await;
     let engine = env
@@ -291,8 +291,8 @@ async fn test_staging_write_partition_rule_version_with_format(flat_format: bool
         .await
         .unwrap();
 
-    let expected_version = partition_rule_version(Some(&partition_expr));
-    let origin_version = partition_rule_version(Some(&origin_partition_expr));
+    let expected_version = partition_expr_version(Some(&partition_expr));
+    let origin_version = partition_expr_version(Some(&origin_partition_expr));
     common_telemetry::info!(
         "expected_version: {}, origin_version: {}",
         expected_version,
@@ -308,7 +308,7 @@ async fn test_staging_write_partition_rule_version_with_format(flat_format: bool
             RegionRequest::Put(RegionPutRequest {
                 rows: bad_rows,
                 hint: None,
-                partition_rule_version: Some(origin_version),
+                partition_expr_version: Some(origin_version),
             }),
         )
         .await
@@ -329,7 +329,7 @@ async fn test_staging_write_partition_rule_version_with_format(flat_format: bool
             RegionRequest::Put(RegionPutRequest {
                 rows: compat_rows,
                 hint: None,
-                partition_rule_version: None,
+                partition_expr_version: None,
             }),
         )
         .await
@@ -346,7 +346,7 @@ async fn test_staging_write_partition_rule_version_with_format(flat_format: bool
             RegionRequest::Put(RegionPutRequest {
                 rows: ok_rows,
                 hint: None,
-                partition_rule_version: Some(expected_version),
+                partition_expr_version: Some(expected_version),
             }),
         )
         .await
@@ -395,7 +395,7 @@ async fn test_staging_write_partition_rule_version_with_format(flat_format: bool
             RegionRequest::Put(RegionPutRequest {
                 rows: exit_rows,
                 hint: None,
-                partition_rule_version: Some(origin_version),
+                partition_expr_version: Some(origin_version),
             }),
         )
         .await
@@ -412,7 +412,7 @@ async fn test_staging_write_partition_rule_version_with_format(flat_format: bool
             RegionRequest::Put(RegionPutRequest {
                 rows: compat_rows,
                 hint: None,
-                partition_rule_version: None,
+                partition_expr_version: None,
             }),
         )
         .await
@@ -424,7 +424,7 @@ async fn test_staging_write_partition_rule_version_with_format(flat_format: bool
         .unwrap()
         .version()
         .metadata
-        .partition_rule_version;
+        .partition_expr_version;
     assert_ne!(0, committed_version);
     assert_eq!(committed_version, expected_version,);
 
@@ -438,7 +438,7 @@ async fn test_staging_write_partition_rule_version_with_format(flat_format: bool
             RegionRequest::Put(RegionPutRequest {
                 rows: commit_rows,
                 hint: None,
-                partition_rule_version: Some(expected_version),
+                partition_expr_version: Some(expected_version),
             }),
         )
         .await

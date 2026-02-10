@@ -103,7 +103,7 @@ pub(crate) async fn delete_and_flush(
             RegionRequest::Delete(RegionDeleteRequest {
                 rows,
                 hint: None,
-                partition_rule_version: None,
+                partition_expr_version: None,
             }),
         )
         .await
