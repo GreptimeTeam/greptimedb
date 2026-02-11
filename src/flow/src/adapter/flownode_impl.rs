@@ -33,6 +33,7 @@ use common_telemetry::{error, info, trace, warn};
 use datatypes::value::Value;
 use futures::TryStreamExt;
 use itertools::Itertools;
+use operator::utils::try_to_session_query_context;
 use session::context::QueryContextBuilder;
 use snafu::{IntoError, OptionExt, ResultExt, ensure};
 use store_api::storage::{RegionId, TableId};
@@ -325,7 +326,7 @@ impl FlowDualEngine {
                             .query_context()
                             .clone()
                             .map(|ctx| {
-                                ctx.try_into()
+                                try_to_session_query_context(ctx)
                                     .map_err(BoxedError::new)
                                     .context(ExternalSnafu)
                             })

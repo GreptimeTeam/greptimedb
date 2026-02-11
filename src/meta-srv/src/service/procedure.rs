@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::reconcile_request::Target;
@@ -97,7 +96,7 @@ impl procedure_service_server::ProcedureService for Metasrv {
                     tracing_context: Some(header.tracing_context),
                 },
                 SubmitDdlTaskRequest {
-                    query_context: Arc::new(query_context),
+                    query_context,
                     wait,
                     timeout: Duration::from_secs(timeout_secs.into()),
                     task,

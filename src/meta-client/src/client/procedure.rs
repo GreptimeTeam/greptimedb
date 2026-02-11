@@ -340,10 +340,11 @@ mod tests {
     };
     use async_trait::async_trait;
     use common_error::status_code::StatusCode;
-    use common_meta::rpc::ddl::{CommentObjectType, CommentOnTask, DdlTask, SubmitDdlTaskRequest};
+    use common_meta::rpc::ddl::{
+        CommentObjectType, CommentOnTask, DdlTask, QueryContext, SubmitDdlTaskRequest,
+    };
     use common_telemetry::common_error::ext::ErrorExt;
     use common_telemetry::info;
-    use session::context::QueryContext;
     use tokio::net::TcpListener;
     use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
     use tonic::codec::CompressionEncoding;
@@ -468,7 +469,7 @@ mod tests {
         client.start(&[addr_str.as_str()]).await.unwrap();
 
         let mut request = SubmitDdlTaskRequest::new(
-            QueryContext::arc(),
+            QueryContext::default(),
             DdlTask::new_comment_on(CommentOnTask {
                 catalog_name: "greptime".to_string(),
                 schema_name: "public".to_string(),

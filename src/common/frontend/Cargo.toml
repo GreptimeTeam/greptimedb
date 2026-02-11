@@ -17,7 +17,6 @@ greptime-proto.workspace = true
 humantime.workspace = true
 meta-client.workspace = true
 serde.workspace = true
-session.workspace = true
 snafu.workspace = true
 tonic.workspace = true
 

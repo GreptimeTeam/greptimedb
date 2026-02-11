@@ -849,6 +849,15 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid timezone: {}", timezone))]
+    InvalidTimezone {
+        timezone: String,
+        #[snafu(source)]
+        source: common_time::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid process id: {}", id))]
     InvalidProcessId { id: String },
 
@@ -1031,7 +1040,9 @@ impl ErrorExt for Error {
             Error::ColumnOptions { source, .. } => source.status_code(),
             Error::DecodeFlightData { source, .. } => source.status_code(),
             Error::ComputeArrow { .. } => StatusCode::Internal,
-            Error::InvalidTimeIndexType { .. } => StatusCode::InvalidArguments,
+            Error::InvalidTimeIndexType { .. } | Error::InvalidTimezone { .. } => {
+                StatusCode::InvalidArguments
+            }
             Error::InvalidProcessId { .. } => StatusCode::InvalidArguments,
             Error::ProcessManagerMissing { .. } => StatusCode::Unexpected,
             Error::PathNotFound { .. } => StatusCode::InvalidArguments,
