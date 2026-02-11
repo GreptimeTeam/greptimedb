@@ -12,20 +12,20 @@ Affected Rows: 3
 -- SQLNESS REPLACE (peers.*) REDACTED
 TQL EXPLAIN (0, 10, '5s') test;
 
-+---------------+---------------------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                                    |
-+---------------+---------------------------------------------------------------------------------------------------------+
-| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                         |
-|               | PromInstantManipulate: range=[0..0], lookback=[300000], interval=[300000], time index=[j]               |
-|               |   PromSeriesDivide: tags=["k"]                                                                          |
-|               |     Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST                                                |
-|               |       Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(0, None) |
-|               |         TableScan: test                                                                                 |
-|               | ]]                                                                                                      |
-| physical_plan | CooperativeExec                                                                                         |
++---------------+-------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                        |
++---------------+-------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                             |
+|               | PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]                 |
+|               |   PromSeriesDivide: tags=["k"]                                                                              |
+|               |     Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST                                                    |
+|               |       Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(10000, None) |
+|               |         TableScan: test                                                                                     |
+|               | ]]                                                                                                          |
+| physical_plan | CooperativeExec                                                                                             |
 |               |   MergeScanExec: REDACTED
-|               |                                                                                                         |
-+---------------+---------------------------------------------------------------------------------------------------------+
+|               |                                                                                                             |
++---------------+-------------------------------------------------------------------------------------------------------------+
 
 -- 'lookback' parameter is not fully supported, the test has to be updated
 -- explain at 0s, 5s and 10s. No point at 0s.
@@ -33,40 +33,40 @@ TQL EXPLAIN (0, 10, '5s') test;
 -- SQLNESS REPLACE (peers.*) REDACTED
 TQL EXPLAIN (0, 10, '1s', '2s') test;
 
-+---------------+-------------------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                                  |
-+---------------+-------------------------------------------------------------------------------------------------------+
-| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                       |
-|               | PromInstantManipulate: range=[0..0], lookback=[2000], interval=[300000], time index=[j]               |
-|               |   PromSeriesDivide: tags=["k"]                                                                        |
-|               |     Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST                                              |
-|               |       Filter: test.j >= TimestampMillisecond(-1999, None) AND test.j <= TimestampMillisecond(0, None) |
-|               |         TableScan: test                                                                               |
-|               | ]]                                                                                                    |
-| physical_plan | CooperativeExec                                                                                       |
++---------------+-----------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                      |
++---------------+-----------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                           |
+|               | PromInstantManipulate: range=[0..10000], lookback=[2000], interval=[1000], time index=[j]                 |
+|               |   PromSeriesDivide: tags=["k"]                                                                            |
+|               |     Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST                                                  |
+|               |       Filter: test.j >= TimestampMillisecond(-1999, None) AND test.j <= TimestampMillisecond(10000, None) |
+|               |         TableScan: test                                                                                   |
+|               | ]]                                                                                                        |
+| physical_plan | CooperativeExec                                                                                           |
 |               |   MergeScanExec: REDACTED
-|               |                                                                                                       |
-+---------------+-------------------------------------------------------------------------------------------------------+
+|               |                                                                                                           |
++---------------+-----------------------------------------------------------------------------------------------------------+
 
 -- explain at 0s, 5s and 10s. No point at 0s.
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 TQL EXPLAIN ('1970-01-01T00:00:00'::timestamp, '1970-01-01T00:00:00'::timestamp + '10 seconds'::interval, '5s') test;
 
-+---------------+---------------------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                                    |
-+---------------+---------------------------------------------------------------------------------------------------------+
-| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                         |
-|               | PromInstantManipulate: range=[0..0], lookback=[300000], interval=[300000], time index=[j]               |
-|               |   PromSeriesDivide: tags=["k"]                                                                          |
-|               |     Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST                                                |
-|               |       Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(0, None) |
-|               |         TableScan: test                                                                                 |
-|               | ]]                                                                                                      |
-| physical_plan | CooperativeExec                                                                                         |
++---------------+-------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                        |
++---------------+-------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                             |
+|               | PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]                 |
+|               |   PromSeriesDivide: tags=["k"]                                                                              |
+|               |     Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST                                                    |
+|               |       Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(10000, None) |
+|               |         TableScan: test                                                                                     |
+|               | ]]                                                                                                          |
+| physical_plan | CooperativeExec                                                                                             |
 |               |   MergeScanExec: REDACTED
-|               |                                                                                                         |
-+---------------+---------------------------------------------------------------------------------------------------------+
+|               |                                                                                                             |
++---------------+-------------------------------------------------------------------------------------------------------------+
 
 -- explain verbose at 0s, 5s and 10s. No point at 0s.
 -- SQLNESS REPLACE (-+) -
@@ -79,10 +79,10 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 +-+-+
 | plan_type_| plan_|
 +-+-+
-| initial_logical_plan_| PromInstantManipulate: range=[0..0], lookback=[300000], interval=[300000], time index=[j]_|
+| initial_logical_plan_| PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
 |_|_PromSeriesDivide: tags=["k"]_|
 |_|_Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST_|
-|_|_Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(0, None)_|
+|_|_Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(10000, None)_|
 |_|_TableScan: test_|
 | logical_plan after count_wildcard_to_time_index_rule_| SAME TEXT AS ABOVE_|
 | logical_plan after StringNormalizationRule_| SAME TEXT AS ABOVE_|
@@ -91,10 +91,10 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 | logical_plan after type_coercion_| SAME TEXT AS ABOVE_|
 | logical_plan after DistPlannerAnalyzer_| Projection: test.i, test.j, test.k_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| PromInstantManipulate: range=[0..0], lookback=[300000], interval=[300000], time index=[j]_|
+|_| PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
 |_|_PromSeriesDivide: tags=["k"]_|
 |_|_Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST_|
-|_|_Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(0, None)_|
+|_|_Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(10000, None)_|
 |_|_TableScan: test_|
 |_| ]]_|
 | logical_plan after FixStateUdafOrderingAnalyzer_| SAME TEXT AS ABOVE_|
@@ -121,10 +121,10 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 | logical_plan after eliminate_group_by_constant_| SAME TEXT AS ABOVE_|
 | logical_plan after common_sub_expression_eliminate_| SAME TEXT AS ABOVE_|
 | logical_plan after optimize_projections_| MergeScan [is_placeholder=false, remote_input=[_|
-|_| PromInstantManipulate: range=[0..0], lookback=[300000], interval=[300000], time index=[j]_|
+|_| PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
 |_|_PromSeriesDivide: tags=["k"]_|
 |_|_Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST_|
-|_|_Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(0, None)_|
+|_|_Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(10000, None)_|
 |_|_TableScan: test_|
 |_| ]]_|
 | logical_plan after ScanHintRule_| SAME TEXT AS ABOVE_|
@@ -152,10 +152,10 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 | logical_plan after optimize_projections_| SAME TEXT AS ABOVE_|
 | logical_plan after ScanHintRule_| SAME TEXT AS ABOVE_|
 | logical_plan_| MergeScan [is_placeholder=false, remote_input=[_|
-|_| PromInstantManipulate: range=[0..0], lookback=[300000], interval=[300000], time index=[j]_|
+|_| PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
 |_|_PromSeriesDivide: tags=["k"]_|
 |_|_Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST_|
-|_|_Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(0, None)_|
+|_|_Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(10000, None)_|
 |_|_TableScan: test_|
 |_| ]]_|
 | initial_physical_plan_| MergeScanExec: REDACTED
@@ -217,22 +217,24 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test AS series;
 +-+-+
 | plan_type_| plan_|
 +-+-+
-| initial_logical_plan_| PromInstantManipulate: range=[0..0], lookback=[300000], interval=[300000], time index=[j]_|
+| initial_logical_plan_| Projection: test.i AS series, test.k, test.j_|
+|_|_PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
 |_|_PromSeriesDivide: tags=["k"]_|
 |_|_Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST_|
-|_|_Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(0, None)_|
+|_|_Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(10000, None)_|
 |_|_TableScan: test_|
 | logical_plan after count_wildcard_to_time_index_rule_| SAME TEXT AS ABOVE_|
 | logical_plan after StringNormalizationRule_| SAME TEXT AS ABOVE_|
 | logical_plan after TranscribeAtatRule_| SAME TEXT AS ABOVE_|
 | logical_plan after resolve_grouping_function_| SAME TEXT AS ABOVE_|
 | logical_plan after type_coercion_| SAME TEXT AS ABOVE_|
-| logical_plan after DistPlannerAnalyzer_| Projection: test.i, test.j, test.k_|
+| logical_plan after DistPlannerAnalyzer_| Projection: series, test.k, test.j_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| PromInstantManipulate: range=[0..0], lookback=[300000], interval=[300000], time index=[j]_|
+|_| Projection: test.i AS series, test.k, test.j_|
+|_|_PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
 |_|_PromSeriesDivide: tags=["k"]_|
 |_|_Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST_|
-|_|_Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(0, None)_|
+|_|_Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(10000, None)_|
 |_|_TableScan: test_|
 |_| ]]_|
 | logical_plan after FixStateUdafOrderingAnalyzer_| SAME TEXT AS ABOVE_|
@@ -259,10 +261,11 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test AS series;
 | logical_plan after eliminate_group_by_constant_| SAME TEXT AS ABOVE_|
 | logical_plan after common_sub_expression_eliminate_| SAME TEXT AS ABOVE_|
 | logical_plan after optimize_projections_| MergeScan [is_placeholder=false, remote_input=[_|
-|_| PromInstantManipulate: range=[0..0], lookback=[300000], interval=[300000], time index=[j]_|
+|_| Projection: test.i AS series, test.k, test.j_|
+|_|_PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
 |_|_PromSeriesDivide: tags=["k"]_|
 |_|_Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST_|
-|_|_Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(0, None)_|
+|_|_Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(10000, None)_|
 |_|_TableScan: test_|
 |_| ]]_|
 | logical_plan after ScanHintRule_| SAME TEXT AS ABOVE_|
@@ -290,10 +293,11 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test AS series;
 | logical_plan after optimize_projections_| SAME TEXT AS ABOVE_|
 | logical_plan after ScanHintRule_| SAME TEXT AS ABOVE_|
 | logical_plan_| MergeScan [is_placeholder=false, remote_input=[_|
-|_| PromInstantManipulate: range=[0..0], lookback=[300000], interval=[300000], time index=[j]_|
+|_| Projection: test.i AS series, test.k, test.j_|
+|_|_PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
 |_|_PromSeriesDivide: tags=["k"]_|
 |_|_Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST_|
-|_|_Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(0, None)_|
+|_|_Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(10000, None)_|
 |_|_TableScan: test_|
 |_| ]]_|
 | initial_physical_plan_| MergeScanExec: REDACTED
@@ -339,7 +343,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test AS series;
 | physical_plan_with_stats_| CooperativeExec, statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
 |_|_MergeScanExec: REDACTED
 |_|_|
-| physical_plan_with_schema_| CooperativeExec, schema=[i:Float64;N, j:Timestamp(Millisecond, None), k:Utf8;N]_|
+| physical_plan_with_schema_| CooperativeExec, schema=[series:Float64;N, k:Utf8;N, j:Timestamp(Millisecond, None)]_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+

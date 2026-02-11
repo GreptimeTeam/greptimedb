@@ -53,10 +53,13 @@ impl StatementExecutor {
 
                 let promql = PromQuery {
                     query: explain.query,
+                    start: explain.start,
+                    end: explain.end,
+                    step: explain.step,
                     lookback: explain
                         .lookback
                         .unwrap_or_else(|| DEFAULT_LOOKBACK_STRING.to_string()),
-                    ..PromQuery::default()
+                    alias: explain.alias,
                 };
                 let explain_node_name = if explain.is_verbose {
                     EXPLAIN_VERBOSE_NODE_NAME
@@ -68,7 +71,7 @@ impl StatementExecutor {
                 QueryLanguageParser::parse_promql(&promql, query_ctx)
                     .context(ParseQuerySnafu)?
                     .post_process(params)
-                    .unwrap()
+                    .context(ParseQuerySnafu)?
             }
             Tql::Analyze(analyze) => {
                 if let Some(format) = &analyze.format {
@@ -95,7 +98,7 @@ impl StatementExecutor {
                 QueryLanguageParser::parse_promql(&promql, query_ctx)
                     .context(ParseQuerySnafu)?
                     .post_process(params)
-                    .unwrap()
+                    .context(ParseQuerySnafu)?
             }
         };
         self.query_engine

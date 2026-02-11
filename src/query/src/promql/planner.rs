@@ -81,6 +81,10 @@ use store_api::metric_engine_consts::{
 };
 use table::table::adapter::DfTableProviderAdapter;
 
+use crate::parser::{
+    ALIAS_NODE_NAME, ANALYZE_NODE_NAME, ANALYZE_VERBOSE_NODE_NAME, AliasExpr, EXPLAIN_NODE_NAME,
+    EXPLAIN_VERBOSE_NODE_NAME,
+};
 use crate::promql::error::{
     CatalogSnafu, ColumnNotFoundSnafu, CombineTableColumnMismatchSnafu, DataFusionPlanningSnafu,
     ExpectRangeSelectorSnafu, FunctionInvalidArgumentSnafu, InvalidDestinationLabelNameSnafu,
@@ -200,10 +204,9 @@ pub struct PromPlanner {
 }
 
 impl PromPlanner {
-    pub async fn stmt_to_plan_with_alias(
+    pub async fn stmt_to_plan(
         table_provider: DfTableSourceProvider,
         stmt: &EvalStmt,
-        alias: Option<String>,
         query_engine_state: &QueryEngineState,
     ) -> Result<LogicalPlan> {
         let mut planner = Self {
@@ -215,24 +218,8 @@ impl PromPlanner {
             .prom_expr_to_plan(&stmt.expr, query_engine_state)
             .await?;
 
-        // Apply alias if provided
-        let plan = if let Some(alias_name) = alias {
-            planner.apply_alias_projection(plan, alias_name)?
-        } else {
-            plan
-        };
-
         // Never leak internal series identifier to output.
         planner.strip_tsid_column(plan)
-    }
-
-    #[cfg(test)]
-    async fn stmt_to_plan(
-        table_provider: DfTableSourceProvider,
-        stmt: &EvalStmt,
-        query_engine_state: &QueryEngineState,
-    ) -> Result<LogicalPlan> {
-        Self::stmt_to_plan_with_alias(table_provider, stmt, None, query_engine_state).await
     }
 
     pub async fn prom_expr_to_plan(
@@ -1126,26 +1113,37 @@ impl PromPlanner {
         // information about metrics during run.
         // if `verbose` is true, prints out additional details when VERBOSE keyword is specified
         match expr.name() {
-            "ANALYZE" => LogicalPlanBuilder::from(plan)
+            ANALYZE_NODE_NAME => LogicalPlanBuilder::from(plan)
                 .explain(false, true)
                 .unwrap()
                 .build()
                 .context(DataFusionPlanningSnafu),
-            "ANALYZE VERBOSE" => LogicalPlanBuilder::from(plan)
+            ANALYZE_VERBOSE_NODE_NAME => LogicalPlanBuilder::from(plan)
                 .explain(true, true)
                 .unwrap()
                 .build()
                 .context(DataFusionPlanningSnafu),
-            "EXPLAIN" => LogicalPlanBuilder::from(plan)
+            EXPLAIN_NODE_NAME => LogicalPlanBuilder::from(plan)
                 .explain(false, false)
                 .unwrap()
                 .build()
                 .context(DataFusionPlanningSnafu),
-            "EXPLAIN VERBOSE" => LogicalPlanBuilder::from(plan)
+            EXPLAIN_VERBOSE_NODE_NAME => LogicalPlanBuilder::from(plan)
                 .explain(true, false)
                 .unwrap()
                 .build()
                 .context(DataFusionPlanningSnafu),
+            ALIAS_NODE_NAME => {
+                let alias = expr
+                    .as_any()
+                    .downcast_ref::<AliasExpr>()
+                    .context(UnexpectedPlanExprSnafu {
+                        desc: "Expected AliasExpr",
+                    })?
+                    .alias
+                    .clone();
+                self.apply_alias(plan, alias)
+            }
             _ => LogicalPlanBuilder::empty(true)
                 .build()
                 .context(DataFusionPlanningSnafu),
@@ -3949,11 +3947,7 @@ impl PromPlanner {
     }
 
     /// Apply an alias to the query result by adding a projection with the alias name
-    fn apply_alias_projection(
-        &mut self,
-        plan: LogicalPlan,
-        alias_name: String,
-    ) -> Result<LogicalPlan> {
+    fn apply_alias(&mut self, plan: LogicalPlan, alias_name: String) -> Result<LogicalPlan> {
         let fields_expr = self.create_field_column_exprs()?;
 
         // TODO(dennis): how to support multi-value aliasing?
@@ -4034,6 +4028,7 @@ mod test {
 
     use super::*;
     use crate::options::QueryOptions;
+    use crate::parser::QueryLanguageParser;
 
     fn build_query_engine_state() -> QueryEngineState {
         QueryEngineState::new(
@@ -6190,6 +6185,7 @@ Filter: up.field_0 IS NOT NULL [timestamp:Timestamp(Millisecond, None), field_0:
 
         let prom_expr = parser::parse(case).unwrap();
         eval_stmt.expr = prom_expr;
+        eval_stmt = QueryLanguageParser::apply_alias_extension(eval_stmt, "my_series");
         let table_provider = build_test_table_provider_with_fields(
             &[
                 (
@@ -6205,15 +6201,10 @@ Filter: up.field_0 IS NOT NULL [timestamp:Timestamp(Millisecond, None), field_0:
         )
         .await;
 
-        let alias = Some("my_series".to_string());
-        let plan = PromPlanner::stmt_to_plan_with_alias(
-            table_provider,
-            &eval_stmt,
-            alias,
-            &build_query_engine_state(),
-        )
-        .await
-        .unwrap();
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
         let expected = r#"
 Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp [my_series:Int64, ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None)]
   Projection: count(prometheus_tsdb_head_series.greptime_value), prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp, series [count(prometheus_tsdb_head_series.greptime_value):Int64, ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), series:Float64;N]
