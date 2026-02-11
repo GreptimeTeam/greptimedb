@@ -12675,6 +12675,7 @@ dependencies = [
  "jsonb",
  "lazy_static",
  "pretty_assertions",
+ "promql-parser",
  "regex",
  "serde",
  "serde_json",
