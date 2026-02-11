@@ -377,21 +377,38 @@ WHERE a =
 
     #[test]
     fn test_extract_tables_from_tql_query() {
-        let sql = r#"
+        let testcases = vec![
+            (
+                r#"
 CREATE FLOW calc_reqs SINK TO cnt_reqs AS
-TQL EVAL (now() - '15s'::interval, now(), '5s') count_values("status_code", http_requests);"#;
-        let mut stmts =
-            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
-                .unwrap();
-        let Statement::CreateFlow(create_flow) = stmts.pop().unwrap() else {
-            unreachable!()
-        };
+TQL EVAL (now() - '15s'::interval, now(), '5s') count_values("status_code", http_requests);"#,
+                vec!["http_requests".to_string()],
+            ),
+            (
+                r#"
+CREATE FLOW calc_reqs SINK TO cnt_reqs AS
+TQL EVAL (now() - '15s'::interval, now(), '5s') count_values("status_code", {__name__="http_requests"});"#,
+                vec!["http_requests".to_string()],
+            ),
+        ];
 
-        let mut tables = extract_tables_from_query(&create_flow.query)
-            .map(|table| format_raw_object_name(&table))
-            .collect_vec();
-        tables.sort();
-        assert_eq!(vec!["http_requests".to_string()], tables);
+        for (sql, expected_tables) in testcases {
+            let mut stmts = ParserContext::create_with_dialect(
+                sql,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            )
+            .unwrap();
+            let Statement::CreateFlow(create_flow) = stmts.pop().unwrap() else {
+                unreachable!()
+            };
+
+            let mut tables = extract_tables_from_query(&create_flow.query)
+                .map(|table| format_raw_object_name(&table))
+                .collect_vec();
+            tables.sort();
+            assert_eq!(expected_tables, tables);
+        }
     }
 
     #[test]
