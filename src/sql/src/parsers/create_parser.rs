@@ -1890,7 +1890,12 @@ SELECT * FROM tql;
         let err =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap_err();
-        let _ = err;
+
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("Expected expression containing `now()`"),
+            "unexpected err: {msg}"
+        );
     }
 
     #[test]
