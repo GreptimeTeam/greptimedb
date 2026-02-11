@@ -173,8 +173,17 @@ impl FlatCompatBatch {
             return Ok(None);
         }
 
-        if actual_meta.primary_key_encoding == PrimaryKeyEncoding::Sparse && compaction {
-            // Special handling for sparse encoding in compaction.
+        // Only use special sparse compaction handling when tag columns are NOT
+        // decoded as separate columns (skip_auto_convert = true case).
+        let has_decoded_tags = actual_meta.primary_key.iter().any(|id| {
+            actual_format_projection
+                .column_id_to_projected_index
+                .contains_key(id)
+        });
+        if actual_meta.primary_key_encoding == PrimaryKeyEncoding::Sparse
+            && compaction
+            && !has_decoded_tags
+        {
             return FlatCompatBatch::try_new_compact_sparse(expected_meta, actual_meta);
         }
 

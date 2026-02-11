@@ -352,20 +352,21 @@ impl ParquetReaderBuilder {
         // - region partition expr is same with file partition expr (no need to auto convert)
         let skip_auto_convert = self.compaction && is_same_region_partition;
 
-        // Build a compaction projection helper when:
+        // Build a compaction projection mapper when:
         // - compaction is enabled
         // - region partition expr differs from file partition expr
         // - flat format is enabled
         // - primary key encoding is sparse
         //
-        // This is applied after row-group filtering to align batches with flat output schema
-        // before compat handling.
+        // Uses the expected metadata since compat transforms the batch to match
+        // the expected schema before projection.
         let compaction_projection_mapper = if self.compaction
             && !is_same_region_partition
             && self.flat_format
             && region_meta.primary_key_encoding == PrimaryKeyEncoding::Sparse
         {
-            Some(CompactionProjectionMapper::try_new(&region_meta)?)
+            let mapper_meta = self.expected_metadata.as_ref().unwrap_or(&region_meta);
+            Some(CompactionProjectionMapper::try_new(mapper_meta)?)
         } else {
             None
         };
