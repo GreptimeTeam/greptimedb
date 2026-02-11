@@ -180,6 +180,10 @@ impl BatchingTask {
         })
     }
 
+    pub fn last_execution_time_millis(&self) -> Option<i64> {
+        self.state.read().unwrap().last_execution_time_millis()
+    }
+
     /// mark time window range (now - expire_after, now) as dirty (or (0, now) if expire_after not set)
     ///
     /// useful for flush_flow to flush dirty time windows range

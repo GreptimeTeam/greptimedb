@@ -24,6 +24,7 @@ use common_error::ext::BoxedError;
 use common_meta::ddl::create_flow::FlowType;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::flow::FlowMetadataManagerRef;
+use common_meta::key::flow::flow_state::FlowStat;
 use common_meta::key::table_info::{TableInfoManager, TableInfoValue};
 use common_runtime::JoinHandle;
 use common_telemetry::tracing::warn;
@@ -46,7 +47,7 @@ use crate::batching_mode::frontend_client::FrontendClient;
 use crate::batching_mode::task::{BatchingTask, TaskArgs};
 use crate::batching_mode::time_window::{TimeWindowExpr, find_time_window_expr};
 use crate::batching_mode::utils::sql_to_df_plan;
-use crate::engine::FlowEngine;
+use crate::engine::{FlowEngine, FlowStatProvider};
 use crate::error::{
     CreateFlowSnafu, DatafusionSnafu, ExternalSnafu, FlowAlreadyExistSnafu, FlowNotFoundSnafu,
     InvalidQuerySnafu, TableNotFoundMetaSnafu, UnexpectedSnafu, UnsupportedSnafu,
@@ -90,6 +91,18 @@ impl BatchingEngine {
             query_engine,
             batch_opts: Arc::new(batch_opts),
         }
+    }
+
+    /// Returns last execution timestamps (millisecond) for all batching flows.
+    pub async fn get_last_exec_time_map(&self) -> BTreeMap<FlowId, i64> {
+        let tasks = self.tasks.read().await;
+        tasks
+            .iter()
+            .filter_map(|(flow_id, task)| {
+                task.last_execution_time_millis()
+                    .map(|timestamp| (*flow_id, timestamp))
+            })
+            .collect()
     }
 
     pub async fn handle_mark_dirty_time_window(
@@ -317,6 +330,20 @@ impl BatchingEngine {
         drop(tasks);
 
         Ok(())
+    }
+}
+
+impl FlowStatProvider for BatchingEngine {
+    async fn flow_stat(&self) -> FlowStat {
+        FlowStat {
+            state_size: BTreeMap::new(),
+            last_exec_time_map: self
+                .get_last_exec_time_map()
+                .await
+                .into_iter()
+                .map(|(flow_id, timestamp)| (flow_id as u32, timestamp))
+                .collect(),
+        }
     }
 }
 

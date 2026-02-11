@@ -167,6 +167,8 @@ struct FlownodeServerInner {
     server_shutdown_tx: Mutex<broadcast::Sender<()>>,
     /// streaming task handler
     streaming_task_handler: Mutex<Option<JoinHandle<()>>>,
+    /// state report task handler
+    state_report_task_handler: Mutex<Option<JoinHandle<()>>>,
     flow_service: FlowService,
 }
 
@@ -180,6 +182,7 @@ impl FlownodeServer {
                 worker_shutdown_tx: Mutex::new(tx),
                 server_shutdown_tx: Mutex::new(server_tx),
                 streaming_task_handler: Mutex::new(None),
+                state_report_task_handler: Mutex::new(None),
             }),
         }
     }
@@ -189,6 +192,11 @@ impl FlownodeServer {
     /// Should be called only after heartbeat is establish, hence can get cluster info
     async fn start_workers(&self) -> Result<(), Error> {
         let manager_ref = self.inner.flow_service.dual_engine.clone();
+        let mut state_report_task_handler = self.inner.state_report_task_handler.lock().await;
+        if state_report_task_handler.is_none() {
+            *state_report_task_handler = manager_ref.clone().start_state_report_task().await;
+        }
+        drop(state_report_task_handler);
         let handle = manager_ref
             .streaming_engine()
             .run_background(Some(self.inner.worker_shutdown_tx.lock().await.subscribe()));
@@ -213,6 +221,8 @@ impl FlownodeServer {
         if tx.send(()).is_err() {
             info!("Receiver dropped, the flow node server has already shutdown");
         }
+        // Keep state_report_task_handler alive across worker restarts.
+        // Dropping it here would permanently lose the report channel receiver.
         self.inner
             .flow_service
             .dual_engine
@@ -364,15 +374,18 @@ impl FlownodeBuilder {
             self.catalog_manager.clone(),
             self.opts.flow.batching_mode.clone(),
         ));
-        let dual = FlowDualEngine::new(
+        let dual = Arc::new(FlowDualEngine::new(
             manager.clone(),
             batching,
             self.flow_metadata_manager.clone(),
             self.catalog_manager.clone(),
             self.plugins.clone(),
-        );
+        ));
+        if let Some(handler) = self.state_report_handler.take() {
+            dual.set_state_report_handler(handler).await;
+        }
 
-        let server = FlownodeServer::new(FlowService::new(Arc::new(dual)));
+        let server = FlownodeServer::new(FlowService::new(dual));
 
         let heartbeat_task = self.heartbeat_task;
 
@@ -417,9 +430,6 @@ impl FlownodeBuilder {
                 .build()
             })?;
             man.add_worker_handle(worker_handle);
-        }
-        if let Some(handler) = self.state_report_handler.take() {
-            man = man.with_state_report_handler(handler).await;
         }
         info!("Flow Node Manager started");
         Ok(man)
@@ -661,4 +671,77 @@ pub(crate) async fn get_all_flow_ids(
     };
 
     Ok(ret)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use catalog::memory::new_memory_catalog_manager;
+    use common_base::Plugins;
+    use common_meta::key::TableMetadataManager;
+    use common_meta::key::flow::FlowMetadataManager;
+    use common_meta::kv_backend::memory::MemoryKvBackend;
+    use query::options::QueryOptions;
+
+    use super::*;
+    use crate::adapter::flownode_impl::FlowDualEngine;
+    use crate::batching_mode::BatchingModeOptions;
+    use crate::batching_mode::engine::BatchingEngine;
+    use crate::utils::SizeReportSender;
+
+    async fn new_test_flownode_server() -> (FlownodeServer, SizeReportSender) {
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let table_meta = Arc::new(TableMetadataManager::new(kv_backend.clone()));
+        table_meta.init().await.unwrap();
+        let flow_meta = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
+        let catalog_manager = new_memory_catalog_manager().unwrap();
+        let query_engine = crate::test_utils::create_test_query_engine();
+
+        let streaming_engine = Arc::new(StreamingEngine::new(
+            None,
+            query_engine.clone(),
+            table_meta.clone(),
+        ));
+        let (frontend_client, _handler) =
+            FrontendClient::from_empty_grpc_handler(QueryOptions::default());
+        let batching_engine = Arc::new(BatchingEngine::new(
+            Arc::new(frontend_client),
+            query_engine,
+            flow_meta.clone(),
+            table_meta,
+            catalog_manager.clone(),
+            BatchingModeOptions::default(),
+        ));
+        let dual_engine = Arc::new(FlowDualEngine::new(
+            streaming_engine,
+            batching_engine,
+            flow_meta,
+            catalog_manager,
+            Plugins::new(),
+        ));
+
+        let (report_sender, report_handler) = SizeReportSender::new();
+        dual_engine.set_state_report_handler(report_handler).await;
+
+        let server = FlownodeServer::new(FlowService::new(dual_engine));
+        (server, report_sender)
+    }
+
+    #[tokio::test]
+    async fn test_state_report_handler_survives_worker_restart() {
+        let (server, report_sender) = new_test_flownode_server().await;
+
+        server.start_workers().await.unwrap();
+        report_sender.query(Duration::from_secs(3)).await.unwrap();
+
+        server.stop_workers().await.unwrap();
+        report_sender.query(Duration::from_secs(3)).await.unwrap();
+
+        server.start_workers().await.unwrap();
+        report_sender.query(Duration::from_secs(3)).await.unwrap();
+
+        server.stop_workers().await.unwrap();
+    }
 }

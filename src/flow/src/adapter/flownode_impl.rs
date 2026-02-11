@@ -28,6 +28,7 @@ use common_error::ext::BoxedError;
 use common_meta::ddl::create_flow::FlowType;
 use common_meta::error::Result as MetaResult;
 use common_meta::key::flow::FlowMetadataManager;
+use common_meta::key::flow::flow_state::FlowStat;
 use common_runtime::JoinHandle;
 use common_telemetry::{error, info, trace, warn};
 use datatypes::value::Value;
@@ -41,7 +42,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::adapter::{CreateFlowArgs, StreamingEngine};
 use crate::batching_mode::engine::BatchingEngine;
-use crate::engine::FlowEngine;
+use crate::engine::{FlowEngine, FlowStatProvider};
 use crate::error::{
     CreateFlowSnafu, ExternalSnafu, FlowNotFoundSnafu, FlowNotRecoveredSnafu,
     IllegalCheckTaskStateSnafu, InsertIntoFlowSnafu, InternalSnafu, JoinTaskSnafu, ListFlowsSnafu,
@@ -49,6 +50,7 @@ use crate::error::{
 };
 use crate::metrics::{METRIC_FLOW_ROWS, METRIC_FLOW_TASK_COUNT};
 use crate::repr::{self, DiffRow};
+use crate::utils::StateReportHandler;
 use crate::{Error, FlowId};
 
 /// Ref to [`FlowDualEngine`]
@@ -61,6 +63,8 @@ pub type FlowDualEngineRef = Arc<FlowDualEngine>;
 pub struct FlowDualEngine {
     streaming_engine: Arc<StreamingEngine>,
     batching_engine: Arc<BatchingEngine>,
+    /// receive a oneshot sender to send state report
+    state_report_handler: RwLock<Option<StateReportHandler>>,
     /// helper struct for faster query flow by table id or vice versa
     src_table2flow: RwLock<SrcTableToFlow>,
     flow_metadata_manager: Arc<FlowMetadataManager>,
@@ -81,6 +85,7 @@ impl FlowDualEngine {
         Self {
             streaming_engine,
             batching_engine,
+            state_report_handler: Default::default(),
             src_table2flow: RwLock::new(SrcTableToFlow::default()),
             flow_metadata_manager,
             catalog_manager,
@@ -150,6 +155,47 @@ impl FlowDualEngine {
 
     pub fn batching_engine(&self) -> Arc<BatchingEngine> {
         self.batching_engine.clone()
+    }
+
+    pub async fn set_state_report_handler(&self, handler: StateReportHandler) {
+        *self.state_report_handler.write().await = Some(handler);
+    }
+
+    pub async fn gen_state_report(&self) -> FlowStat {
+        let streaming = self.streaming_engine.flow_stat().await;
+        let batching = self.batching_engine.flow_stat().await;
+
+        let mut state_size = streaming.state_size;
+        state_size.extend(batching.state_size);
+
+        let mut last_exec_time_map = streaming.last_exec_time_map;
+        last_exec_time_map.extend(batching.last_exec_time_map);
+
+        FlowStat {
+            state_size,
+            last_exec_time_map,
+        }
+    }
+
+    /// Start state report task, which receives a sender from heartbeat task and sends report back.
+    ///
+    /// if heartbeat task is shutdown, this future exits too.
+    pub async fn start_state_report_task(self: Arc<Self>) -> Option<JoinHandle<()>> {
+        let state_report_handler = self.state_report_handler.write().await.take();
+        if let Some(mut handler) = state_report_handler {
+            let zelf = self.clone();
+            let handler = common_runtime::spawn_global(async move {
+                while let Some(ret_handler) = handler.recv().await {
+                    let state_report = zelf.gen_state_report().await;
+                    ret_handler.send(state_report).unwrap_or_else(|err| {
+                        common_telemetry::error!(err; "Send state report error");
+                    });
+                }
+            });
+            Some(handler)
+        } else {
+            None
+        }
     }
 
     /// In distributed mode, scan periodically(1s) until available frontend is found, or timeout,
