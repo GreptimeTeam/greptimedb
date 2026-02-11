@@ -1519,6 +1519,7 @@ mod tests {
                     RegionMetaAction::Change(RegionChange {
                         metadata: Arc::new(changed_metadata),
                         sst_format: FormatType::PrimaryKey,
+                        append_mode: None,
                     }),
                     RegionMetaAction::Edit(empty_edit()),
                 ]),
@@ -1557,6 +1558,7 @@ mod tests {
                     RegionMetaAction::Change(RegionChange {
                         metadata: Arc::new(changed_metadata),
                         sst_format: FormatType::PrimaryKey,
+                        append_mode: None,
                     }),
                     RegionMetaAction::Edit(empty_edit()),
                 ]),
@@ -1589,6 +1591,7 @@ mod tests {
                     RegionMetaAction::Change(RegionChange {
                         metadata: Arc::new(changed_metadata),
                         sst_format: FormatType::PrimaryKey,
+                        append_mode: None,
                     }),
                     RegionMetaAction::Edit(empty_edit()),
                 ]),

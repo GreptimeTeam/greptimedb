@@ -925,6 +925,7 @@ async fn test_staging_exit_conflict_partition_expr_change_and_change_with_format
                 RegionMetaAction::Change(RegionChange {
                     metadata: Arc::new(changed_metadata),
                     sst_format: FormatType::PrimaryKey,
+                    append_mode: None,
                 }),
                 RegionMetaAction::Edit(RegionEdit {
                     files_to_add: Vec::new(),
