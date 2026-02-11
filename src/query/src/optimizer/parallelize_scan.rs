@@ -123,7 +123,7 @@ impl ParallelizeScan {
     ///
     /// Currently we assign ranges to partitions according to their rows so each partition
     /// has similar number of rows. This method always return `expected_partition_num` partitions.
-    fn assign_partition_range(
+    pub fn assign_partition_range(
         mut ranges: Vec<PartitionRange>,
         expected_partition_num: usize,
     ) -> Vec<Vec<PartitionRange>> {

@@ -66,7 +66,7 @@ pub struct ObjbenchCommand {
     pub pprof_file: Option<PathBuf>,
 }
 
-fn parse_config(config_path: &PathBuf) -> error::Result<(StorageConfig, MitoConfig)> {
+pub(super) fn parse_config(config_path: &PathBuf) -> error::Result<(StorageConfig, MitoConfig)> {
     let cfg_str = std::fs::read_to_string(config_path).map_err(|e| {
         error::IllegalConfigSnafu {
             msg: format!("failed to read config {}: {e}", config_path.display()),
@@ -490,7 +490,7 @@ fn extract_region_metadata(
     Ok(Arc::new(region))
 }
 
-async fn build_object_store(sc: &StorageConfig) -> error::Result<ObjectStore> {
+pub(super) async fn build_object_store(sc: &StorageConfig) -> error::Result<ObjectStore> {
     store::new_object_store(sc.store.clone(), &sc.data_home)
         .await
         .map_err(|e| {
