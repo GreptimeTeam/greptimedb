@@ -239,7 +239,7 @@ fn remove_cte_names(names: &mut HashSet<ObjectName>, cte_names: &[String]) {
             return true;
         };
 
-        !cte_names.iter().any(|cte| ident.value == *cte)
+        !cte_names.contains(&ident.value)
     });
 }
 
