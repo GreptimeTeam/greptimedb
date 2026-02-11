@@ -116,6 +116,8 @@ pub enum PredicateKey {
     Bloom(BloomFilterKey),
     /// Inverted index predicate.
     Inverted(InvertedIndexKey),
+    /// Min-max pruning predicate.
+    MinMax(MinMaxKey),
 }
 
 impl PredicateKey {
@@ -134,12 +136,18 @@ impl PredicateKey {
         Self::Inverted(InvertedIndexKey::new(predicates))
     }
 
+    /// Creates a new min-max pruning key.
+    pub fn new_minmax(exprs: Arc<Vec<String>>) -> Self {
+        Self::MinMax(MinMaxKey::new(exprs))
+    }
+
     /// Returns the memory usage of this key.
     pub fn mem_usage(&self) -> usize {
         match self {
             Self::Fulltext(key) => key.mem_usage,
             Self::Bloom(key) => key.mem_usage,
             Self::Inverted(key) => key.mem_usage,
+            Self::MinMax(key) => key.mem_usage,
         }
     }
 }
@@ -236,6 +244,20 @@ impl InvertedIndexKey {
             predicates,
             mem_usage,
         }
+    }
+}
+
+/// Key for min-max pruning.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct MinMaxKey {
+    exprs: Arc<Vec<String>>,
+    mem_usage: usize,
+}
+
+impl MinMaxKey {
+    pub fn new(exprs: Arc<Vec<String>>) -> Self {
+        let mem_usage = exprs.iter().map(|s| s.len()).sum::<usize>();
+        Self { exprs, mem_usage }
     }
 }
 

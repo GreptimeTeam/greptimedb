@@ -321,10 +321,10 @@ impl MitoConfig {
         );
         // Use 2x of global write buffer size as global write buffer reject size.
         let global_write_buffer_reject_size = global_write_buffer_size * 2;
-        // shouldn't be greater than 128MB in default mode.
+        // shouldn't be greater than 256MB in default mode.
         let sst_meta_cache_size = cmp::min(
             sys_memory / SST_META_CACHE_SIZE_FACTOR,
-            ReadableSize::mb(128),
+            ReadableSize::mb(256),
         );
         // shouldn't be greater than 512MB in default mode.
         let mem_cache_size = cmp::min(sys_memory / MEM_CACHE_SIZE_FACTOR, ReadableSize::mb(512));

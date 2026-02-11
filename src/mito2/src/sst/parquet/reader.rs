@@ -679,15 +679,14 @@ impl ParquetReaderBuilder {
         metrics.rg_total += num_row_groups;
         metrics.rows_total += num_rows as usize;
 
-        let mut output = RowGroupSelection::new(row_group_size, num_rows as _);
-
         // Compute skip_fields once for all pruning operations
         let skip_fields = self.compute_skip_fields(parquet_meta);
 
-        self.prune_row_groups_by_minmax(
+        let mut output = self.row_groups_by_minmax(
             read_format,
             parquet_meta,
-            &mut output,
+            row_group_size,
+            num_rows as usize,
             metrics,
             skip_fields,
         );
@@ -1136,20 +1135,43 @@ impl ParquetReaderBuilder {
         }
     }
 
-    /// Prunes row groups by min-max index.
-    fn prune_row_groups_by_minmax(
+    /// Computes row groups selection after min-max pruning.
+    fn row_groups_by_minmax(
         &self,
         read_format: &ReadFormat,
         parquet_meta: &ParquetMetaData,
-        output: &mut RowGroupSelection,
+        row_group_size: usize,
+        total_row_count: usize,
         metrics: &mut ReaderFilterMetrics,
         skip_fields: bool,
-    ) -> bool {
+    ) -> RowGroupSelection {
         let Some(predicate) = &self.predicate else {
-            return false;
+            return RowGroupSelection::new(row_group_size, total_row_count);
         };
 
-        let row_groups_before = output.row_group_count();
+        let file_id = self.file_handle.file_id().file_id();
+        let cached_minmax_key = if predicate.dyn_filters().is_empty() {
+            // Cache min-max pruning results keyed by predicate expressions. This avoids repeatedly
+            // building row-group pruning stats for identical predicates across queries.
+            let mut exprs = predicate
+                .exprs()
+                .iter()
+                .map(|expr| format!("{expr:?}"))
+                .collect::<Vec<_>>();
+            exprs.sort();
+            Some(PredicateKey::new_minmax(Arc::new(exprs)))
+        } else {
+            None
+        };
+
+        if let Some(index_result_cache) = self.cache_strategy.index_result_cache()
+            && let Some(predicate_key) = cached_minmax_key.as_ref()
+            && let Some(result) = index_result_cache.get(predicate_key, file_id)
+        {
+            let num_row_groups = parquet_meta.num_row_groups();
+            metrics.rg_minmax_filtered += num_row_groups.saturating_sub(result.row_group_count());
+            return (*result).clone();
+        }
 
         let region_meta = read_format.metadata();
         let row_groups = parquet_meta.row_groups();
@@ -1168,20 +1190,26 @@ impl ParquetReaderBuilder {
         // Here we use the schema of the SST to build the physical expression. If the column
         // in the SST doesn't have the same column id as the column in the expected metadata,
         // we will get a None statistics for that column.
-        predicate
-            .prune_with_stats(&stats, prune_schema)
-            .iter()
-            .zip(0..parquet_meta.num_row_groups())
-            .for_each(|(mask, row_group)| {
-                if !*mask {
-                    output.remove_row_group(row_group);
-                }
-            });
+        let mask = predicate.prune_with_stats(&stats, prune_schema);
+        let output = RowGroupSelection::from_full_row_group_ids(
+            mask.iter()
+                .enumerate()
+                .filter_map(|(row_group, keep)| keep.then_some(row_group)),
+            row_group_size,
+            total_row_count,
+        );
 
-        let row_groups_after = output.row_group_count();
-        metrics.rg_minmax_filtered += row_groups_before - row_groups_after;
+        metrics.rg_minmax_filtered += parquet_meta
+            .num_row_groups()
+            .saturating_sub(output.row_group_count());
 
-        true
+        if let Some(index_result_cache) = self.cache_strategy.index_result_cache()
+            && let Some(predicate_key) = cached_minmax_key
+        {
+            index_result_cache.put(predicate_key, file_id, Arc::new(output.clone()));
+        }
+
+        output
     }
 
     fn apply_index_result_and_update_cache(

@@ -69,6 +69,8 @@ use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::sst::location::{self, region_dir_from_table_dir};
+use crate::sst::parquet::metadata::MetadataLoader;
+use crate::sst::parquet::reader::MetadataCacheMetrics;
 use crate::time_provider::TimeProviderRef;
 use crate::wal::entry_reader::WalEntryReader;
 use crate::wal::{EntryId, Wal};
@@ -585,6 +587,7 @@ impl RegionOpener {
         let region = Arc::new(region);
 
         maybe_load_cache(&region, config, &self.cache_manager);
+        maybe_preload_parquet_meta_cache(&region, config, &self.cache_manager);
 
         Ok(Some(region))
     }
@@ -941,6 +944,89 @@ fn maybe_load_cache(
 
     let task = RegionLoadCacheTask::new(region.clone());
     write_cache.load_region_cache(task);
+}
+
+/// Preloads Parquet metadata into the in-memory SST meta cache on region open.
+///
+/// This improves the latency of the first query after server start by avoiding large Parquet
+/// metadata reads on demand.
+fn maybe_preload_parquet_meta_cache(
+    region: &MitoRegionRef,
+    config: &MitoConfig,
+    cache_manager: &Option<CacheManagerRef>,
+) {
+    let Some(cache_manager) = cache_manager else {
+        return;
+    };
+
+    // Skip if SST meta cache is disabled.
+    if config.sst_meta_cache_size.as_bytes() == 0 {
+        return;
+    }
+
+    let region = region.clone();
+    let cache_manager = cache_manager.clone();
+
+    tokio::spawn(async move {
+        let region_id = region.region_id;
+        let table_dir = region.access_layer.table_dir();
+        let path_type = region.access_layer.path_type();
+        let object_store = region.access_layer.object_store();
+
+        // Collect SST files. Do not hold the version longer than needed.
+        let mut files = Vec::new();
+        {
+            let version = region.version_control.current().version;
+            for level in version.ssts.levels() {
+                for file_handle in level.files.values() {
+                    files.push(file_handle.clone());
+                }
+            }
+        }
+
+        // Load older files first so the most recent files remain hot in the LRU cache.
+        files.sort_by(|a, b| a.meta_ref().time_range.1.cmp(&b.meta_ref().time_range.1));
+
+        let mut loaded = 0usize;
+        for file_handle in files {
+            let file_id = file_handle.file_id();
+            if cache_manager
+                .get_parquet_meta_data_from_mem_cache(file_id)
+                .is_some()
+            {
+                continue;
+            }
+
+            let file_size = file_handle.meta_ref().file_size;
+            if file_size == 0 {
+                continue;
+            }
+
+            let file_path = file_handle.file_path(table_dir, path_type);
+            let mut cache_metrics = MetadataCacheMetrics::default();
+            let loader = MetadataLoader::new(object_store.clone(), &file_path, file_size);
+            match loader.load(&mut cache_metrics).await {
+                Ok(metadata) => {
+                    cache_manager.put_parquet_meta_data(file_id, Arc::new(metadata));
+                    loaded += 1;
+                }
+                Err(err) => {
+                    // Preloading is best-effort. Failure shouldn't affect region open.
+                    warn!(
+                        err; "Failed to preload parquet metadata, region: {}, file: {}",
+                        region_id, file_path
+                    );
+                }
+            }
+        }
+
+        if loaded > 0 {
+            info!(
+                "Preloaded parquet metadata for region {}, loaded_files: {}",
+                region_id, loaded
+            );
+        }
+    });
 }
 
 fn can_load_cache(state: RegionRoleState) -> bool {
