@@ -23,7 +23,7 @@ use super::TsValueGenerator;
 use crate::context::TableContextRef;
 use crate::error::{Error, Result};
 use crate::fake::WordGenerator;
-use crate::generator::{Generator, Random, ValueGenerator};
+use crate::generator::{Generator, Random, ValueGenerator, ValueOverride};
 use crate::ir::insert_expr::{InsertIntoExpr, RowValue};
 use crate::ir::{Ident, generate_random_timestamp, generate_random_value};
 
@@ -34,6 +34,10 @@ pub struct InsertExprGenerator<R: Rng + 'static> {
     table_ctx: TableContextRef,
     // Whether to omit all columns, i.e. INSERT INTO table_name VALUES (...)
     omit_column_list: bool,
+    #[builder(default)]
+    required_columns: Vec<Ident>,
+    #[builder(default)]
+    value_overrides: Option<ValueOverride<R>>,
     #[builder(default = "1")]
     rows: usize,
     #[builder(default = "Box::new(WordGenerator)")]
@@ -57,10 +61,11 @@ impl<R: Rng + 'static> Generator<InsertIntoExpr, R> for InsertExprGenerator<R> {
             values_columns.clone_from(&self.table_ctx.columns);
         } else {
             for column in &self.table_ctx.columns {
+                let is_required = self.required_columns.contains(&column.name);
                 let can_omit = column.is_nullable() || column.has_default_value();
 
                 // 50% chance to omit a column if it's not required
-                if !can_omit || rng.random_bool(0.5) {
+                if is_required || !can_omit || rng.random_bool(0.5) {
                     values_columns.push(column.clone());
                 }
             }
@@ -76,15 +81,21 @@ impl<R: Rng + 'static> Generator<InsertIntoExpr, R> for InsertExprGenerator<R> {
         for _ in 0..self.rows {
             let mut row = Vec::with_capacity(values_columns.len());
             for column in &values_columns {
+                if let Some(override_fn) = self.value_overrides.as_ref()
+                    && let Some(value) = override_fn(column, rng)
+                {
+                    row.push(value);
+                    continue;
+                }
                 if column.is_nullable() && rng.random_bool(0.2) {
                     row.push(RowValue::Value(Value::Null));
                     continue;
                 }
 
-                if column.has_default_value() && rng.random_bool(0.2) {
-                    row.push(RowValue::Default);
-                    continue;
-                }
+                // if column.has_default_value() && rng.random_bool(0.2) {
+                //     row.push(RowValue::Default);
+                //     continue;
+                // }
                 if column.is_time_index() {
                     row.push(RowValue::Value((self.ts_value_generator)(
                         rng,

@@ -36,17 +36,19 @@ use datatypes::value::Value;
 use derive_builder::Builder;
 pub use insert_expr::InsertIntoExpr;
 use lazy_static::lazy_static;
+pub use partition_expr::SimplePartitions;
 use rand::Rng;
 use rand::seq::{IndexedRandom, SliceRandom};
 pub use repartition_expr::RepartitionExpr;
 use serde::{Deserialize, Serialize};
 
-use self::insert_expr::{RowValue, RowValues};
+use self::insert_expr::RowValues;
 use crate::context::TableContextRef;
 use crate::fake::WordGenerator;
 use crate::generator::{Random, TsValueGenerator};
 use crate::impl_random;
 use crate::ir::create_expr::ColumnOption;
+pub use crate::ir::insert_expr::RowValue;
 
 lazy_static! {
     pub static ref DATA_TYPES: Vec<ConcreteDataType> = vec![
@@ -168,8 +170,13 @@ pub fn generate_random_value<R: Rng>(
 /// Generate monotonically increasing timestamps for MySQL.
 pub fn generate_unique_timestamp_for_mysql<R: Rng>(base: i64) -> TsValueGenerator<R> {
     let base = Timestamp::new_millisecond(base);
-    let clock = Arc::new(Mutex::new(base));
+    generate_unique_timestamp_for_mysql_with_clock(Arc::new(Mutex::new(base)))
+}
 
+/// Generates a unique timestamp for MySQL.
+pub fn generate_unique_timestamp_for_mysql_with_clock<R: Rng>(
+    clock: Arc<Mutex<Timestamp>>,
+) -> TsValueGenerator<R> {
     Box::new(move |_rng, ts_type| -> Value {
         let mut clock = clock.lock().unwrap();
         let ts = clock.add_duration(Duration::from_secs(1)).unwrap();
@@ -253,6 +260,105 @@ fn generate_random_date<R: Rng>(rng: &mut R) -> Value {
     let value = rng.random_range(min..=max);
     let date = Timestamp::new_millisecond(value).to_chrono_date().unwrap();
     Value::from(Date::from(date))
+}
+
+/// Generates a partition value for the given column type and bounds.
+pub fn generate_partition_value<R: Rng + 'static>(
+    rng: &mut R,
+    column_type: &ConcreteDataType,
+    bounds: &[Value],
+    bound_idx: usize,
+) -> Value {
+    if bounds.is_empty() {
+        return generate_random_value(rng, column_type, None);
+    }
+    let first = bounds.first().unwrap();
+    let last = bounds.last().unwrap();
+    match column_type {
+        datatypes::data_type::ConcreteDataType::Int16(_) => {
+            let first_value = match first {
+                datatypes::value::Value::Int16(v) => *v,
+                _ => 0,
+            };
+            if bound_idx == 0 {
+                datatypes::value::Value::from(first_value.saturating_sub(1))
+            } else if bound_idx < bounds.len() {
+                bounds[bound_idx - 1].clone()
+            } else {
+                last.clone()
+            }
+        }
+        datatypes::data_type::ConcreteDataType::Int32(_) => {
+            let first_value = match first {
+                datatypes::value::Value::Int32(v) => *v,
+                _ => 0,
+            };
+            if bound_idx == 0 {
+                datatypes::value::Value::from(first_value.saturating_sub(1))
+            } else if bound_idx < bounds.len() {
+                bounds[bound_idx - 1].clone()
+            } else {
+                last.clone()
+            }
+        }
+        datatypes::data_type::ConcreteDataType::Int64(_) => {
+            let first_value = match first {
+                datatypes::value::Value::Int64(v) => *v,
+                _ => 0,
+            };
+            if bound_idx == 0 {
+                datatypes::value::Value::from(first_value.saturating_sub(1))
+            } else if bound_idx < bounds.len() {
+                bounds[bound_idx - 1].clone()
+            } else {
+                last.clone()
+            }
+        }
+        datatypes::data_type::ConcreteDataType::Float32(_) => {
+            let first_value = match first {
+                datatypes::value::Value::Float32(v) => v.0,
+                _ => 0.0,
+            };
+            if bound_idx == 0 {
+                datatypes::value::Value::from(first_value - 1.0)
+            } else if bound_idx < bounds.len() {
+                bounds[bound_idx - 1].clone()
+            } else {
+                last.clone()
+            }
+        }
+        datatypes::data_type::ConcreteDataType::Float64(_) => {
+            let first_value = match first {
+                datatypes::value::Value::Float64(v) => v.0,
+                _ => 0.0,
+            };
+            if bound_idx == 0 {
+                datatypes::value::Value::from(first_value - 1.0)
+            } else if bound_idx < bounds.len() {
+                bounds[bound_idx - 1].clone()
+            } else {
+                last.clone()
+            }
+        }
+        datatypes::data_type::ConcreteDataType::String(_) => {
+            let upper = match first {
+                datatypes::value::Value::String(v) => v.as_utf8(),
+                _ => "",
+            };
+            if bound_idx == 0 {
+                if upper <= "A" {
+                    datatypes::value::Value::from("")
+                } else {
+                    datatypes::value::Value::from("A")
+                }
+            } else if bound_idx < bounds.len() {
+                bounds[bound_idx - 1].clone()
+            } else {
+                last.clone()
+            }
+        }
+        _ => unimplemented!("unsupported partition column type: {column_type}"),
+    }
 }
 
 /// An identifier.

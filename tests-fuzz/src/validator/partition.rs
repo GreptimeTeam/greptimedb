@@ -52,6 +52,10 @@ pub async fn fetch_partitions_info_schema(
         })
 }
 
+fn normalize(s: &str) -> String {
+    s.replace("\\\"", "\"").replace("\\\\", "\\")
+}
+
 /// Asserts the partitions are equal to the expected partitions.
 pub fn assert_partitions(expected: &PartitionDef, actual: &[PartitionInfo]) -> Result<()> {
     ensure!(
@@ -69,17 +73,17 @@ pub fn assert_partitions(expected: &PartitionDef, actual: &[PartitionInfo]) -> R
     for expr in expected_exprs {
         let actual_expr = actual
             .iter()
-            .find(|info| info.partition_description == expr);
+            .find(|info| normalize(&info.partition_description) == normalize(&expr));
         ensure!(
             actual_expr.is_some(),
             error::AssertSnafu {
                 reason: format!(
-                    "Expected partition expression: {expr} not found, actual: {:?}",
+                    "Expected partition expression: '{expr:?}' not found, actual: {:?}",
                     actual
                         .iter()
-                        .map(|info| info.partition_description.clone())
+                        .map(|info| format!("'{:?}'", info.partition_description.clone()))
                         .collect::<Vec<_>>()
-                        .join(", ")
+                        .join("; ")
                 ),
             }
         );
