@@ -371,14 +371,7 @@ async fn run_adaptive_topk(
         }
         let result = match sort_and_limit(round_result.batches, schema, exprs, fetch, skip)? {
             SortLimitOutcome::Empty | SortLimitOutcome::Skipped => {
-                if should_retry_empty_round(
-                    round,
-                    max_rounds,
-                    k,
-                    max_k,
-                    round_result.requested_k,
-                    round_result.returned_k,
-                ) {
+                if should_retry_empty_round(round, max_rounds, k, max_k, round_result.returned_k) {
                     debug!(
                         "AdaptiveVectorTopK retries after empty/skip round: round={}, k={}, requested_k={}, returned_k={}",
                         round, k, round_result.requested_k, round_result.returned_k
@@ -404,14 +397,12 @@ async fn run_adaptive_topk(
             result.kth_distance,
         );
 
-        // `returned_k < requested_k` is a coarse aggregated metric and can be affected by
-        // partial collection. Treat exhaustion as reliable only when this round did not hit
-        // the row cap and the physical plan itself produced fewer than `k` rows.
         if should_finish_round(
             result.total_rows,
             desired,
             tie_stable,
             round_result.hit_max_rows,
+            round_result.returned_k,
             k,
         ) {
             debug!(
@@ -614,13 +605,15 @@ fn should_retry_empty_round(
     max_rounds: usize,
     k: usize,
     max_k: Option<usize>,
-    requested_k: usize,
     returned_k: usize,
 ) -> bool {
     if reached_adaptive_limits(round, max_rounds, k, max_k) {
         return false;
     }
-    requested_k > 0 && returned_k == requested_k
+    // Compare against k (per-region request) rather than aggregated requested_k,
+    // because one exhausted small region can drag the sum below requested_k
+    // while other regions still have candidates.
+    returned_k >= k
 }
 
 fn is_tie_stable(
@@ -731,8 +724,10 @@ fn sort_and_limit(
     }))
 }
 
-fn candidates_exhausted(hit_max_rows: bool, total_rows: usize, k: usize) -> bool {
-    !hit_max_rows && total_rows < k
+fn candidates_exhausted(hit_max_rows: bool, returned_k: usize, k: usize) -> bool {
+    // Same reasoning as should_retry_empty_round: compare against k rather
+    // than aggregated requested_k to handle multi-region correctly.
+    !hit_max_rows && returned_k < k
 }
 
 fn should_finish_round(
@@ -740,9 +735,10 @@ fn should_finish_round(
     desired: usize,
     tie_stable: bool,
     hit_max_rows: bool,
+    returned_k: usize,
     k: usize,
 ) -> bool {
-    total_rows >= desired && (tie_stable || candidates_exhausted(hit_max_rows, total_rows, k))
+    total_rows >= desired && (tie_stable || candidates_exhausted(hit_max_rows, returned_k, k))
 }
 
 fn extract_kth_distance(
@@ -1177,16 +1173,22 @@ mod tests {
 
     #[test]
     fn test_should_finish_round_conditions() {
-        // A capped round is not enough evidence of global exhaustion.
+        // (total_rows, desired, tie_stable, hit_max_rows, returned_k, k)
+
+        // Capped round → not exhausted.
         assert!(!super::should_finish_round(
-            100_000, 100_000, false, true, 200_000
+            100_000, 100_000, false, true, 200_000, 200_000
         ));
-        // Not capped and candidates exhausted → finish.
-        assert!(super::should_finish_round(128, 64, false, false, 256));
-        // Tie stable → finish regardless of cap.
-        assert!(super::should_finish_round(100, 100, true, true, 200));
-        // Not enough rows even when tie stable → don't finish.
-        assert!(!super::should_finish_round(50, 100, true, false, 200));
+        // returned_k < k → exhausted, finish.
+        assert!(super::should_finish_round(128, 64, false, false, 100, 256));
+        // Tie stable → finish.
+        assert!(super::should_finish_round(100, 100, true, true, 200, 200));
+        // Not enough rows → don't finish.
+        assert!(!super::should_finish_round(50, 100, true, false, 100, 200));
+        // returned_k == k → not exhausted, keep expanding.
+        assert!(!super::should_finish_round(3, 2, false, false, 10, 10));
+        // Multi-region: returned_k >= k despite aggregated < requested_k.
+        assert!(!super::should_finish_round(8, 2, false, false, 24, 16));
     }
 
     #[test]
