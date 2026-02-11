@@ -17,6 +17,8 @@ SELECT * FROM tql;
 
 SHOW CREATE TABLE metric_cte_sink;
 
+SELECT source_table_names FROM information_schema.flows WHERE flow_name = 'metric_cte_sink';
+
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('calc_cte');
 
