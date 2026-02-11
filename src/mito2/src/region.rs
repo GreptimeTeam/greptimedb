@@ -183,19 +183,13 @@ impl StagingPartitionInfo {
     pub(crate) fn from_partition_directive(partition_directive: StagingPartitionDirective) -> Self {
         let partition_rule_version = match &partition_directive {
             StagingPartitionDirective::PartitionExpr(expr) => partition_expr_version(Some(expr)),
-            StagingPartitionDirective::RejectAllWrites => {
-                reject_all_writes_partition_expr_version()
-            }
+            StagingPartitionDirective::RejectAllWrites => 0,
         };
         Self {
             partition_directive,
             partition_rule_version,
         }
     }
-}
-
-pub(crate) fn reject_all_writes_partition_expr_version() -> u64 {
-    partition_expr_version(Some("__greptime_reject_all_writes__"))
 }
 
 impl MitoRegion {
