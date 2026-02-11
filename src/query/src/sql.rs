@@ -1051,7 +1051,10 @@ pub fn show_create_flow(
 
     let stmt = CreateFlow {
         flow_name,
-        sink_table_name: ObjectName::from(vec![Ident::new(&flow_val.sink_table_name().table_name)]),
+        sink_table_name: ObjectName::from(vec![
+            Ident::new(&flow_val.sink_table_name().schema_name),
+            Ident::new(&flow_val.sink_table_name().table_name),
+        ]),
         // notice we don't want `OR REPLACE` and `IF NOT EXISTS` in same sql since it's unclear what to do
         // so we set `or_replace` to false.
         or_replace: false,

@@ -35,7 +35,7 @@ SHOW CREATE FLOW filter_numbers_show;
 | Flow                | Create Flow                                                |
 +---------------------+------------------------------------------------------------+
 | filter_numbers_show | CREATE FLOW IF NOT EXISTS filter_numbers_show              |
-|                     | SINK TO out_num_cnt_show                                   |
+|                     | SINK TO public.out_num_cnt_show                            |
 |                     | AS SELECT number FROM numbers_input_show WHERE number > 10 |
 +---------------------+------------------------------------------------------------+
 
@@ -45,7 +45,7 @@ SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORM
 | flow_name           | table_catalog | flow_definition                                            | source_table_names                 |
 +---------------------+---------------+------------------------------------------------------------+------------------------------------+
 | filter_numbers_show | greptime      | CREATE FLOW IF NOT EXISTS filter_numbers_show              | greptime.public.numbers_input_show |
-|                     |               | SINK TO out_num_cnt_show                                   |                                    |
+|                     |               | SINK TO public.out_num_cnt_show                            |                                    |
 |                     |               | AS SELECT number FROM numbers_input_show WHERE number > 10 |                                    |
 +---------------------+---------------+------------------------------------------------------------+------------------------------------+
 
@@ -83,7 +83,7 @@ SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORM
 | flow_name           | table_catalog | flow_definition                                                | source_table_names                 |
 +---------------------+---------------+----------------------------------------------------------------+------------------------------------+
 | filter_numbers_show | greptime      | CREATE FLOW IF NOT EXISTS filter_numbers_show                  | greptime.public.numbers_input_show |
-|                     |               | SINK TO out_num_cnt_show                                       |                                    |
+|                     |               | SINK TO public.out_num_cnt_show                                |                                    |
 |                     |               | AS SELECT number, ts FROM numbers_input_show WHERE number > 10 |                                    |
 +---------------------+---------------+----------------------------------------------------------------+------------------------------------+
 
@@ -99,7 +99,7 @@ SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORM
 | flow_name           | table_catalog | flow_definition                                                | source_table_names                 |
 +---------------------+---------------+----------------------------------------------------------------+------------------------------------+
 | filter_numbers_show | greptime      | CREATE FLOW IF NOT EXISTS filter_numbers_show                  | greptime.public.numbers_input_show |
-|                     |               | SINK TO out_num_cnt_show                                       |                                    |
+|                     |               | SINK TO public.out_num_cnt_show                                |                                    |
 |                     |               | AS SELECT number, ts FROM numbers_input_show WHERE number > 10 |                                    |
 +---------------------+---------------+----------------------------------------------------------------+------------------------------------+
 
@@ -138,7 +138,7 @@ SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORM
 | flow_name           | table_catalog | flow_definition                                                | source_table_names                 |
 +---------------------+---------------+----------------------------------------------------------------+------------------------------------+
 | filter_numbers_show | greptime      | CREATE FLOW IF NOT EXISTS filter_numbers_show                  | greptime.public.numbers_input_show |
-|                     |               | SINK TO out_num_cnt_show                                       |                                    |
+|                     |               | SINK TO public.out_num_cnt_show                                |                                    |
 |                     |               | AS SELECT number, ts FROM numbers_input_show WHERE number > 10 |                                    |
 +---------------------+---------------+----------------------------------------------------------------+------------------------------------+
 
@@ -178,7 +178,7 @@ SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORM
 | flow_name           | table_catalog | flow_definition                                               | source_table_names                 |
 +---------------------+---------------+---------------------------------------------------------------+------------------------------------+
 | filter_numbers_show | greptime      | CREATE FLOW IF NOT EXISTS filter_numbers_show                 | greptime.public.numbers_input_show |
-|                     |               | SINK TO out_num_cnt_show                                      |                                    |
+|                     |               | SINK TO public.out_num_cnt_show                               |                                    |
 |                     |               | AS SELECT number, ts FROM numbers_input_show WHERE number > 3 |                                    |
 +---------------------+---------------+---------------------------------------------------------------+------------------------------------+
 
@@ -220,7 +220,7 @@ SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORM
 | flow_name           | table_catalog | flow_definition                                               | source_table_names                 |
 +---------------------+---------------+---------------------------------------------------------------+------------------------------------+
 | filter_numbers_show | greptime      | CREATE FLOW IF NOT EXISTS filter_numbers_show                 | greptime.public.numbers_input_show |
-|                     |               | SINK TO out_num_cnt_show                                      |                                    |
+|                     |               | SINK TO public.out_num_cnt_show                               |                                    |
 |                     |               | AS SELECT number, ts FROM numbers_input_show WHERE number > 3 |                                    |
 +---------------------+---------------+---------------------------------------------------------------+------------------------------------+
 
@@ -254,7 +254,7 @@ SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORM
 | flow_name           | table_catalog | flow_definition                                                | source_table_names                 |
 +---------------------+---------------+----------------------------------------------------------------+------------------------------------+
 | filter_numbers_show | greptime      | CREATE FLOW IF NOT EXISTS filter_numbers_show                  | greptime.public.numbers_input_show |
-|                     |               | SINK TO out_num_cnt_show                                       |                                    |
+|                     |               | SINK TO public.out_num_cnt_show                                |                                    |
 |                     |               | AS SELECT number, ts FROM numbers_input_show WHERE number > -2 |                                    |
 +---------------------+---------------+----------------------------------------------------------------+------------------------------------+
 
@@ -273,7 +273,7 @@ SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORM
 | flow_name           | table_catalog | flow_definition                                                | source_table_names                 |
 +---------------------+---------------+----------------------------------------------------------------+------------------------------------+
 | filter_numbers_show | greptime      | CREATE FLOW IF NOT EXISTS filter_numbers_show                  | greptime.public.numbers_input_show |
-|                     |               | SINK TO out_num_cnt_show                                       |                                    |
+|                     |               | SINK TO public.out_num_cnt_show                                |                                    |
 |                     |               | AS SELECT number, ts FROM numbers_input_show WHERE number > -3 |                                    |
 +---------------------+---------------+----------------------------------------------------------------+------------------------------------+
 
@@ -294,7 +294,7 @@ SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORM
 | flow_name           | table_catalog | flow_definition                                                | source_table_names                 |
 +---------------------+---------------+----------------------------------------------------------------+------------------------------------+
 | filter_numbers_show | greptime      | CREATE FLOW IF NOT EXISTS filter_numbers_show                  | greptime.public.numbers_input_show |
-|                     |               | SINK TO out_num_cnt_show                                       |                                    |
+|                     |               | SINK TO public.out_num_cnt_show                                |                                    |
 |                     |               | AS SELECT number, ts FROM numbers_input_show WHERE number > -3 |                                    |
 +---------------------+---------------+----------------------------------------------------------------+------------------------------------+
 
@@ -408,7 +408,7 @@ SELECT flow_definition, source_table_names FROM INFORMATION_SCHEMA.FLOWS WHERE f
 | flow_definition                                                  | source_table_names                 |
 +------------------------------------------------------------------+------------------------------------+
 | CREATE FLOW IF NOT EXISTS filter_numbers_show                    | greptime.public.numbers_input_show |
-| SINK TO out_num_cnt_show                                         |                                    |
+| SINK TO public.out_num_cnt_show                                  |                                    |
 | AS SELECT number AS n1 FROM numbers_input_show WHERE number > 10 |                                    |
 +------------------------------------------------------------------+------------------------------------+
 

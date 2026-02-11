@@ -156,9 +156,10 @@ impl InformationSchemaFlows {
 
         let stmt = CreateFlow {
             flow_name: sql::ast::ObjectName::from(vec![Ident::new(flow_info.flow_name())]),
-            sink_table_name: sql::ast::ObjectName::from(vec![Ident::new(
-                &flow_info.sink_table_name().table_name,
-            )]),
+            sink_table_name: sql::ast::ObjectName::from(vec![
+                Ident::new(&flow_info.sink_table_name().schema_name),
+                Ident::new(&flow_info.sink_table_name().table_name),
+            ]),
             or_replace: false,
             if_not_exists: true,
             expire_after: flow_info.expire_after(),
