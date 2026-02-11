@@ -49,11 +49,13 @@ use crate::error::{
     Result, SimplificationSnafu, SyntaxSnafu,
 };
 use crate::parser::{ParseOptions, ParserContext};
+use crate::parsers::with_tql_parser::CteContent;
 use crate::statements::OptionMap;
+use crate::statements::query::Query;
 use crate::statements::statement::Statement;
 use crate::util::{OptionValue, parse_option_string};
 
-/// Check if the given SQL query is a TQL statement.
+/// Check if the given SQL query is a TQL statement. Simple tql cte query is also considered as TQL statement.
 pub fn is_tql(dialect: &dyn Dialect, sql: &str) -> Result<bool> {
     let stmts = ParserContext::create_with_dialect(sql, dialect, ParseOptions::default())?;
 
@@ -66,8 +68,50 @@ pub fn is_tql(dialect: &dyn Dialect, sql: &str) -> Result<bool> {
     let stmt = &stmts[0];
     match stmt {
         Statement::Tql(_) => Ok(true),
+        Statement::Query(query) => Ok(is_simple_tql_cte_query(query)),
         _ => Ok(false),
     }
+}
+
+pub(crate) fn is_simple_tql_cte_query(query: &Query) -> bool {
+    use sqlparser::ast::{SetExpr, TableFactor};
+
+    let Some(hybrid_cte) = &query.hybrid_cte else {
+        return false;
+    };
+
+    // Keep this deliberately strict: only recognize the simplest CTE shape where
+    // the main query is a single SELECT from exactly one TQL CTE.
+    if hybrid_cte.cte_tables.len() != 1 {
+        return false;
+    }
+    let cte = &hybrid_cte.cte_tables[0];
+    if !matches!(cte.content, CteContent::Tql(_)) {
+        return false;
+    }
+
+    let SetExpr::Select(select) = &*query.inner.body else {
+        return false;
+    };
+    if select.from.len() != 1 {
+        return false;
+    }
+    let table_with_joins = &select.from[0];
+    if !table_with_joins.joins.is_empty() {
+        return false;
+    }
+    let TableFactor::Table { name, .. } = &table_with_joins.relation else {
+        return false;
+    };
+
+    // CTE reference should be a bare table name.
+    if name.0.len() != 1 {
+        return false;
+    }
+    let Some(ident) = name.0[0].as_ident() else {
+        return false;
+    };
+    ident.value.eq_ignore_ascii_case(&cte.name.value)
 }
 
 /// Convert a parser expression to a scalar value. This function will try the
@@ -301,6 +345,50 @@ mod tests {
     use datatypes::arrow::datatypes::TimestampNanosecondType;
 
     use super::*;
+    use crate::dialect::GreptimeDbDialect;
+    use crate::parser::{ParseOptions, ParserContext};
+    use crate::statements::statement::Statement;
+
+    #[test]
+    fn test_is_tql() {
+        let dialect = GreptimeDbDialect {};
+
+        assert!(is_tql(&dialect, "TQL EVAL (0, 10, '1s') cpu_usage_total").unwrap());
+        assert!(!is_tql(&dialect, "SELECT 1").unwrap());
+
+        let tql_cte = r#"
+WITH tql_cte(ts, val) AS (
+    TQL EVAL (0, 15, '5s') metric
+)
+SELECT * FROM tql_cte
+"#;
+        assert!(is_tql(&dialect, tql_cte).unwrap());
+
+        let rename_cols = r#"
+WITH tql (the_timestamp, the_value) AS (
+    TQL EVAL (0, 40, '10s') metric
+)
+SELECT * FROM tql
+"#;
+        assert!(is_tql(&dialect, rename_cols).unwrap());
+        let stmts =
+            ParserContext::create_with_dialect(rename_cols, &dialect, ParseOptions::default())
+                .unwrap();
+        let Statement::Query(q) = &stmts[0] else {
+            panic!("Expected Query statement");
+        };
+        let hybrid = q.hybrid_cte.as_ref().expect("Expected hybrid cte");
+        assert_eq!(hybrid.cte_tables.len(), 1);
+        assert_eq!(hybrid.cte_tables[0].columns.len(), 2);
+        assert_eq!(hybrid.cte_tables[0].columns[0].to_string(), "the_timestamp");
+        assert_eq!(hybrid.cte_tables[0].columns[1].to_string(), "the_value");
+
+        let sql_cte = r#"
+WITH cte AS (SELECT 1)
+SELECT * FROM cte
+"#;
+        assert!(!is_tql(&dialect, sql_cte).unwrap());
+    }
 
     /// Keep this test to make sure we are using datafusion's `ExprSimplifier` correctly.
     #[test]

@@ -35,9 +35,9 @@ use table::requests::validate_database_option;
 
 use crate::ast::{ColumnDef, Ident, ObjectNamePartExt};
 use crate::error::{
-    self, InvalidColumnOptionSnafu, InvalidDatabaseOptionSnafu, InvalidIntervalSnafu,
-    InvalidSqlSnafu, InvalidTimeIndexSnafu, MissingTimeIndexSnafu, Result, SyntaxSnafu,
-    UnexpectedSnafu, UnsupportedSnafu,
+    self, InvalidColumnOptionSnafu, InvalidDatabaseOptionSnafu, InvalidFlowQuerySnafu,
+    InvalidIntervalSnafu, InvalidSqlSnafu, InvalidTimeIndexSnafu, MissingTimeIndexSnafu, Result,
+    SyntaxSnafu, UnexpectedSnafu, UnsupportedSnafu,
 };
 use crate::parser::{FLOW, ParserContext};
 use crate::parsers::tql_parser;
@@ -340,7 +340,7 @@ impl<'a> ParserContext<'a> {
             .expect_keyword(Keyword::AS)
             .context(SyntaxSnafu)?;
 
-        let query = Box::new(self.parse_sql_or_tql(true)?);
+        let query = Box::new(self.parse_flow_sql_or_tql(true)?);
 
         Ok(Statement::CreateFlow(CreateFlow {
             flow_name,
@@ -354,14 +354,20 @@ impl<'a> ParserContext<'a> {
         }))
     }
 
-    fn parse_sql_or_tql(&mut self, require_now_expr: bool) -> Result<SqlOrTql> {
+    fn parse_flow_sql_or_tql(&mut self, require_now_expr: bool) -> Result<SqlOrTql> {
         let start_loc = self.parser.peek_token().span.start;
         let start_index = location_to_index(self.sql, &start_loc);
+
+        let starts_with_with = matches!(
+            self.parser.peek_token().token,
+            Token::Word(w) if w.keyword == Keyword::WITH
+        );
 
         // only accept sql or tql
         let query = match self.parser.peek_token().token {
             Token::Word(w) => match w.keyword {
                 Keyword::SELECT => self.parse_query(),
+                Keyword::WITH => self.parse_with_tql_with_now(require_now_expr),
                 Keyword::NoKeyword
                     if w.quote_style.is_none() && w.value.to_uppercase() == tql_parser::TQL =>
                 {
@@ -373,6 +379,23 @@ impl<'a> ParserContext<'a> {
             _ => self.unsupported(self.peek_token_as_string()),
         }?;
 
+        if starts_with_with {
+            let Statement::Query(query) = &query else {
+                return InvalidFlowQuerySnafu {
+                    reason: "Expect a query after WITH".to_string(),
+                }
+                .fail();
+            };
+
+            if !utils::is_simple_tql_cte_query(query) {
+                return InvalidFlowQuerySnafu {
+                    reason: "WITH is only supported for the simplest TQL CTE in CREATE FLOW"
+                        .to_string(),
+                }
+                .fail();
+            }
+        }
+
         let end_token = self.parser.peek_token();
 
         let raw_query = if end_token == Token::EOF {
@@ -383,6 +406,7 @@ impl<'a> ParserContext<'a> {
             &self.sql[start_index..end_index.min(self.sql.len())]
         };
         let raw_query = raw_query.trim_end_matches(";");
+
         let query = SqlOrTql::try_from_statement(query, raw_query)?;
         Ok(query)
     }
@@ -1793,6 +1817,67 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
             let recreated = parse_create_flow(&show_create);
             assert_eq!(recreated, expected, "input sql is:\n{show_create}");
         }
+    }
+
+    #[test]
+    fn test_parse_create_flow_with_tql_cte_query() {
+        let sql = r#"
+CREATE FLOW calc_reqs_cte
+SINK TO cnt_reqs_cte
+EVAL INTERVAL '1m'
+AS
+WITH tql(the_timestamp, the_value) AS (
+    TQL EVAL (now() - '1m'::interval, now(), '5s') metric
+)
+SELECT * FROM tql;
+"#;
+
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        let Statement::CreateFlow(create_flow) = &stmts[0] else {
+            panic!("unexpected stmt: {:?}", stmts[0]);
+        };
+
+        let query = create_flow.query.to_string();
+        assert!(query.to_uppercase().contains("WITH"));
+        assert!(query.to_uppercase().contains("TQL EVAL"));
+    }
+
+    #[test]
+    fn test_parse_create_flow_with_sql_cte_is_unsupported() {
+        let sql = r#"
+CREATE FLOW f
+SINK TO s
+AS
+WITH cte AS (SELECT 1) SELECT * FROM cte;
+"#;
+
+        let err =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.to_uppercase().contains("WITH"), "err: {msg}");
+    }
+
+    #[test]
+    fn test_parse_create_flow_with_tql_cte_requires_now_expr() {
+        let sql = r#"
+CREATE FLOW f
+SINK TO s
+EVAL INTERVAL '1m'
+AS
+WITH tql(ts, val) AS (
+    TQL EVAL (0, 15, '5s') metric
+)
+SELECT * FROM tql;
+"#;
+
+        let err =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap_err();
+        let _ = err;
     }
 
     #[test]
