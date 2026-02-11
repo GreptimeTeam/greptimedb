@@ -1164,6 +1164,72 @@ TQL EVAL (now() - '15s'::interval, now(), '5s') count_values("status_code", http
     }
 
     #[test]
+    fn test_create_flow_tql_cte_source_tables() {
+        let sql = r#"
+CREATE FLOW calc_cte
+SINK TO metric_cte_sink
+EVAL INTERVAL '1m'
+AS
+WITH tql(ts, the_value) AS (
+  TQL EVAL (now() - '1m'::interval, now(), '5s') metric_cte
+)
+SELECT * FROM tql;
+"#;
+
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+
+        let Statement::CreateFlow(create_flow) = stmt else {
+            unreachable!()
+        };
+        let expr = to_create_flow_task_expr(create_flow, &QueryContext::arc()).unwrap();
+
+        let to_dot_sep =
+            |c: TableName| format!("{}.{}.{}", c.catalog_name, c.schema_name, c.table_name);
+        assert_eq!(1, expr.source_table_names.len());
+        assert_eq!(
+            "greptime.public.metric_cte",
+            to_dot_sep(expr.source_table_names[0].clone())
+        );
+    }
+
+    #[test]
+    fn test_create_flow_tql_cte_source_tables_same_name() {
+        let sql = r#"
+CREATE FLOW calc_cte
+SINK TO metric_cte_sink
+EVAL INTERVAL '1m'
+AS
+WITH tql(ts, the_value) AS (
+  TQL EVAL (now() - '1m'::interval, now(), '5s') tql
+)
+SELECT * FROM tql;
+"#;
+
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+
+        let Statement::CreateFlow(create_flow) = stmt else {
+            unreachable!()
+        };
+        let expr = to_create_flow_task_expr(create_flow, &QueryContext::arc()).unwrap();
+
+        let to_dot_sep =
+            |c: TableName| format!("{}.{}.{}", c.catalog_name, c.schema_name, c.table_name);
+        assert_eq!(1, expr.source_table_names.len());
+        assert_eq!(
+            "greptime.public.tql",
+            to_dot_sep(expr.source_table_names[0].clone())
+        );
+    }
+
+    #[test]
     fn test_create_flow_expr() {
         let sql = r"
 CREATE FLOW test_distinct_basic SINK TO out_distinct_basic AS
