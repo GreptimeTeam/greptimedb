@@ -68,6 +68,7 @@ use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
 use snafu::{OptionExt, ResultExt, ensure};
 use sql::parser::{ParseOptions, ParserContext};
+use sql::parsers::utils::is_tql;
 use sql::statements::OptionMap;
 #[cfg(feature = "enterprise")]
 use sql::statements::alter::trigger::AlterTrigger;
@@ -715,6 +716,13 @@ impl StatementExecutor {
             }
         );
         let stmt = &stmts[0];
+
+        if is_tql(query_ctx.sql_dialect(), &expr.sql)
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?
+        {
+            return Ok(FlowType::Batching);
+        }
 
         // support tql parse too
         let plan = match stmt {
