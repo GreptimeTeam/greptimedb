@@ -15,8 +15,8 @@
 //! USearch HNSW implementation of VectorIndexEngine.
 
 use common_error::ext::BoxedError;
-use store_api::storage::{VectorIndexEngine, VectorSearchMatches, VectorSearchPredicate};
-use usearch::{Index, IndexOptions, Key, ScalarKind};
+use store_api::storage::{VectorIndexEngine, VectorSearchMatches};
+use usearch::{Index, IndexOptions, ScalarKind};
 
 use crate::vector::distance_metric_to_usearch;
 use crate::vector::engine::VectorIndexConfig;
@@ -109,29 +109,6 @@ impl VectorIndexEngine for UsearchEngine {
             .index
             .search(query, k)
             .map_err(|e| Self::boxed_engine_error(format!("Failed to search: {}", e)))?;
-
-        Ok(VectorSearchMatches {
-            keys: matches.keys,
-            distances: matches.distances,
-        })
-    }
-
-    fn search_with_predicate(
-        &self,
-        query: &[f32],
-        k: usize,
-        predicate: Option<&dyn VectorSearchPredicate>,
-    ) -> EngineResult<VectorSearchMatches> {
-        let matches = match predicate {
-            Some(predicate) => self
-                .index
-                .filtered_search(query, k, |key: Key| predicate.allows(key))
-                .map_err(|e| Self::boxed_engine_error(format!("Failed to search: {}", e)))?,
-            None => self
-                .index
-                .search(query, k)
-                .map_err(|e| Self::boxed_engine_error(format!("Failed to search: {}", e)))?,
-        };
 
         Ok(VectorSearchMatches {
             keys: matches.keys,

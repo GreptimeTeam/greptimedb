@@ -1,8 +1,9 @@
+-- Part 1: Single-region (filter + tie-breaker)
 CREATE TABLE vector_overfetch_dist (
   ts TIMESTAMP TIME INDEX,
   "id" INT PRIMARY KEY,
   "tag" STRING,
-  v VECTOR(2) NULL VECTOR INDEX WITH(engine = 'usearch', metric = 'l2sq')
+  v VECTOR(2) NOT NULL VECTOR INDEX WITH(engine = 'usearch', metric = 'l2sq')
 );
 
 Affected Rows: 0
@@ -15,6 +16,14 @@ INSERT INTO vector_overfetch_dist VALUES
 ('2024-01-01T00:00:04Z', 4, 'odd',  '[-1.0, 0.0]');
 
 Affected Rows: 5
+
+ADMIN FLUSH_TABLE('vector_overfetch_dist');
+
++--------------------------------------------+
+| ADMIN FLUSH_TABLE('vector_overfetch_dist') |
++--------------------------------------------+
+| 0                                          |
++--------------------------------------------+
 
 SELECT
   "id",
@@ -32,6 +41,18 @@ LIMIT 2;
 | 4  | odd | 1.0 |
 +----+-----+-----+
 
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (SeqScan.*) REDACTED
+-- SQLNESS REPLACE (ProjectionExec.*) REDACTED
+-- SQLNESS REPLACE (CoalesceBatchesExec.*) REDACTED
+-- SQLNESS REPLACE (FilterExec.*) REDACTED
+-- SQLNESS REPLACE (CooperativeExec.*) REDACTED
+-- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
+EXPLAIN ANALYZE VERBOSE
 SELECT
   "id",
   "tag",
@@ -39,27 +60,35 @@ SELECT
 FROM vector_overfetch_dist
 WHERE "tag" = 'odd'
 ORDER BY d ASC, "id" ASC
-LIMIT 1 OFFSET 1;
+LIMIT 2;
 
-+----+-----+-----+
-| id | tag | d   |
-+----+-----+-----+
-| 4  | odd | 1.0 |
-+----+-----+-----+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_REDACTED
+|_|_|_AdaptiveVectorTopKExec metrics=[vector_index_approximate_result: 0, vector_index_requested_k: 4, vector_index_retry_rounds: 1, vector_index_returned_k: 4, ]_|
+|_|_|_REDACTED
+|_|_|_REDACTED
+|_|_|_REDACTED
+|_|_|_REDACTED
+|_|_|_REDACTED
+|_|_|_|
+|_|_| Total rows: REDACTED_|
++-+-+-+
 
 DROP TABLE vector_overfetch_dist;
 
 Affected Rows: 0
 
-DROP TABLE IF EXISTS vector_overfetch_partitioned_dist;
-
-Affected Rows: 0
-
+-- Part 2: Multi-region (cross-partition filter + tie-breaker + high offset)
 CREATE TABLE vector_overfetch_partitioned_dist (
   ts TIMESTAMP TIME INDEX,
   "id" INT PRIMARY KEY,
   "tag" STRING,
-  v VECTOR(2) NULL VECTOR INDEX WITH(engine = 'usearch', metric = 'l2sq')
+  v VECTOR(2) NOT NULL VECTOR INDEX WITH(engine = 'usearch', metric = 'l2sq')
 ) PARTITION ON COLUMNS ("tag") (
   "tag" < 'm',
   "tag" >= 'm'
@@ -111,6 +140,14 @@ INSERT INTO vector_overfetch_partitioned_dist VALUES
 
 Affected Rows: 40
 
+ADMIN FLUSH_TABLE('vector_overfetch_partitioned_dist');
+
++--------------------------------------------------------+
+| ADMIN FLUSH_TABLE('vector_overfetch_partitioned_dist') |
++--------------------------------------------------------+
+| 0                                                      |
++--------------------------------------------------------+
+
 SELECT
   "id",
   "tag",
@@ -127,22 +164,92 @@ LIMIT 2 OFFSET 20;
 | 144 | z   | 1.0 |
 +-----+-----+-----+
 
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (CooperativeExec.*) REDACTED
+-- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
+EXPLAIN ANALYZE VERBOSE
 SELECT
   "id",
   "tag",
   vec_l2sq_distance(v, '[0.0, 0.0]') AS d
 FROM vector_overfetch_partitioned_dist
-WHERE "tag" = 'z' AND ("id" % 4) = 0
+WHERE "tag" IN ('a', 'z') AND ("id" % 2) = 0
 ORDER BY d ASC, "id" ASC
-LIMIT 2 OFFSET 10;
+LIMIT 2 OFFSET 20;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_AdaptiveVectorTopKExec metrics=[vector_index_approximate_result: 0, vector_index_requested_k: 132, vector_index_retry_rounds: 1, vector_index_returned_k: 40, ] |
+|_|_|_REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+|_|_| Total rows: REDACTED_|
++-+-+-+
+
+-- Retry scenario: initial k=2 fetches nearest d=0 rows (all odd IDs),
+-- filter (id%2=0) eliminates them, forcing adaptive retry with larger k.
+SELECT
+  "id",
+  "tag",
+  vec_l2sq_distance(v, '[0.0, 0.0]') AS d
+FROM vector_overfetch_partitioned_dist
+WHERE "tag" IN ('a', 'z') AND ("id" % 2) = 0
+ORDER BY d ASC, "id" ASC
+LIMIT 2;
 
 +-----+-----+-----+
 | id  | tag | d   |
 +-----+-----+-----+
-| 144 | z   | 1.0 |
-| 148 | z   | 1.0 |
+| 102 | z   | 1.0 |
+| 104 | z   | 1.0 |
 +-----+-----+-----+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (CooperativeExec.*) REDACTED
+-- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
+EXPLAIN ANALYZE VERBOSE
+SELECT
+  "id",
+  "tag",
+  vec_l2sq_distance(v, '[0.0, 0.0]') AS d
+FROM vector_overfetch_partitioned_dist
+WHERE "tag" IN ('a', 'z') AND ("id" % 2) = 0
+ORDER BY d ASC, "id" ASC
+LIMIT 2;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_AdaptiveVectorTopKExec metrics=[vector_index_approximate_result: 0, vector_index_requested_k: 96, vector_index_retry_rounds: 4, vector_index_returned_k: 40, ] |
+|_|_|_REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+|_|_| Total rows: REDACTED_|
++-+-+-+
+
+-- Edge case: offset beyond available data returns empty result.
+SELECT
+  "id",
+  "tag",
+  vec_l2sq_distance(v, '[0.0, 0.0]') AS d
+FROM vector_overfetch_partitioned_dist
+WHERE "tag" = 'z'
+ORDER BY d ASC, "id" ASC
+LIMIT 2 OFFSET 50;
+
+++
+++
 
 DROP TABLE vector_overfetch_partitioned_dist;
 
 Affected Rows: 0
+

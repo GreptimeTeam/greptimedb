@@ -23,7 +23,7 @@ use index::vector::apply::HnswVectorIndexApplier;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
 use puffin::puffin_manager::{PuffinManager, PuffinReader};
 use snafu::ResultExt;
-use store_api::storage::{ColumnId, VectorSearchPredicate};
+use store_api::storage::ColumnId;
 
 use crate::access_layer::{RegionFilePathFactory, WriteCachePathProvider};
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
@@ -116,7 +116,6 @@ impl VectorIndexApplier {
         file_id: RegionIndexId,
         file_size_hint: Option<u64>,
         k: usize,
-        predicate: Option<&dyn VectorSearchPredicate>,
     ) -> Result<VectorIndexApplyOutput> {
         if k == 0 {
             return Ok(VectorIndexApplyOutput {
@@ -155,14 +154,12 @@ impl VectorIndexApplier {
             .fail();
         }
 
-        let output = applier
-            .search_with_predicate(&self.query_vector, k, predicate)
-            .map_err(|e| {
-                ApplyVectorIndexSnafu {
-                    reason: e.to_string(),
-                }
-                .build()
-            })?;
+        let output = applier.search(&self.query_vector, k).map_err(|e| {
+            ApplyVectorIndexSnafu {
+                reason: e.to_string(),
+            }
+            .build()
+        })?;
 
         Ok(VectorIndexApplyOutput {
             row_offsets: output.row_offsets,
@@ -466,7 +463,7 @@ mod tests {
         let (_dir, applier, index_id, size_bytes) =
             build_applier_with_blob(blob, 1, vec![1.0, 0.0], VectorDistanceMetric::L2sq).await;
         let output = applier
-            .apply_with_k(index_id, Some(size_bytes), 2, None)
+            .apply_with_k(index_id, Some(size_bytes), 2)
             .await
             .unwrap();
         assert_eq!(output.row_offsets, vec![0, 2]);
@@ -479,9 +476,7 @@ mod tests {
         let blob = build_blob_with_vectors(&config, vec![(0, vec![1.0, 0.0])], &null_bitmap, 1, 1);
         let (_dir, applier, index_id, size_bytes) =
             build_applier_with_blob(blob, 1, vec![1.0, 0.0, 0.0], VectorDistanceMetric::L2sq).await;
-        let res = applier
-            .apply_with_k(index_id, Some(size_bytes), 1, None)
-            .await;
+        let res = applier.apply_with_k(index_id, Some(size_bytes), 1).await;
         assert!(res.is_err());
     }
 
@@ -500,7 +495,7 @@ mod tests {
         let (_dir, applier, index_id, size_bytes) =
             build_applier_with_blob(blob, 1, vec![1.0], VectorDistanceMetric::L2sq).await;
         let output = applier
-            .apply_with_k(index_id, Some(size_bytes), 1, None)
+            .apply_with_k(index_id, Some(size_bytes), 1)
             .await
             .unwrap();
         assert!(output.row_offsets.is_empty());

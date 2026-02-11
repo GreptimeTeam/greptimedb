@@ -14,8 +14,6 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use arrow_schema::SortOptions;
-use common_recordbatch::OrderOption;
 use common_telemetry::debug;
 use datafusion_common::{Column, ScalarValue};
 use datafusion_expr::utils::split_conjunction;
@@ -63,7 +61,6 @@ struct VectorDistanceInfo {
     column_name: String,
     query_vector: Vec<f32>,
     metric: VectorDistanceMetric,
-    tie_breakers: Vec<OrderOption>,
 }
 
 #[derive(Clone)]
@@ -216,9 +213,6 @@ impl VectorSearchState {
             query_vector: info.query_vector.clone(),
             k,
             metric: info.metric,
-            limit: Some(hint.limit.fetch),
-            offset: Some(hint.limit.skip),
-            tie_breakers: (!info.tie_breakers.is_empty()).then(|| info.tie_breakers.clone()),
         })
     }
 
@@ -245,7 +239,6 @@ impl VectorSearchState {
             column_name,
             query_vector,
             metric,
-            tie_breakers: Vec::new(),
         })
     }
 
@@ -264,11 +257,7 @@ impl VectorSearchState {
         }
 
         if Self::tie_breakers_allowed(&sort.expr[1..], &info) {
-            let tie_breakers = Self::build_tie_breakers(&sort.expr[1..]);
-            Some(VectorDistanceInfo {
-                tie_breakers,
-                ..info
-            })
+            Some(info)
         } else {
             if sort.expr.len() > 1 {
                 debug!(
@@ -337,24 +326,6 @@ impl VectorSearchState {
                 None => col.relation.is_none(),
             }
         })
-    }
-
-    fn build_tie_breakers(sort_exprs: &[SortExpr]) -> Vec<OrderOption> {
-        sort_exprs
-            .iter()
-            .filter_map(|sort_expr| {
-                let Expr::Column(col) = &sort_expr.expr else {
-                    return None;
-                };
-                Some(OrderOption {
-                    name: col.name.clone(),
-                    options: SortOptions {
-                        descending: !sort_expr.asc,
-                        nulls_first: sort_expr.nulls_first,
-                    },
-                })
-            })
-            .collect()
     }
 
     fn extract_limit_from_sort(
@@ -657,12 +628,7 @@ mod tests {
         let _ = ScanHintRule.rewrite(plan, &context).unwrap();
 
         let hint = dummy_provider.get_vector_search_hint().unwrap();
-        assert_eq!(hint.limit, Some(7));
-        assert_eq!(hint.offset, Some(3));
-        let tie_breakers = hint.tie_breakers.unwrap();
-        assert_eq!(tie_breakers.len(), 1);
-        assert_eq!(tie_breakers[0].name, "k0");
-        assert!(!tie_breakers[0].options.descending);
+        assert_eq!(hint.k, 10); // fetch(7) + skip(3)
     }
 
     #[test]

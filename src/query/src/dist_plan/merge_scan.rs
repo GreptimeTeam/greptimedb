@@ -818,44 +818,7 @@ mod tests {
     }
 
     #[test]
-    fn test_record_vector_index_k_adds_per_region_increments_once() {
-        let metrics_set = ExecutionPlanMetricsSet::new();
-        let metric = MergeScanMetric::new(&metrics_set);
-
-        let region_1 = RecordBatchMetrics {
-            plan_metrics: vec![PlanMetrics {
-                plan: "r1".to_string(),
-                level: 0,
-                metrics: vec![
-                    ("vector_index_requested_k".to_string(), 10),
-                    ("vector_index_returned_k".to_string(), 6),
-                ],
-            }],
-            ..Default::default()
-        };
-        let (requested_1, returned_1) = collect_vector_index_k_from_region_metrics(&region_1);
-        metric.record_vector_index_k(requested_1, returned_1);
-
-        let region_2 = RecordBatchMetrics {
-            plan_metrics: vec![PlanMetrics {
-                plan: "r2".to_string(),
-                level: 0,
-                metrics: vec![
-                    ("vector_index_requested_k".to_string(), 20),
-                    ("vector_index_returned_k".to_string(), 15),
-                ],
-            }],
-            ..Default::default()
-        };
-        let (requested_2, returned_2) = collect_vector_index_k_from_region_metrics(&region_2);
-        metric.record_vector_index_k(requested_2, returned_2);
-
-        assert_eq!(metric_value(&metrics_set, "vector_index_requested_k"), 30);
-        assert_eq!(metric_value(&metrics_set, "vector_index_returned_k"), 21);
-    }
-
-    #[test]
-    fn test_record_vector_index_k_delta_avoids_double_count() {
+    fn test_record_vector_index_k_delta() {
         let metrics_set = ExecutionPlanMetricsSet::new();
         let metric = MergeScanMetric::new(&metrics_set);
         let mut last = (0usize, 0usize);
@@ -872,7 +835,10 @@ mod tests {
             ..Default::default()
         };
         record_vector_index_k_delta(&metric, &snapshot_1, &mut last);
+        assert_eq!(metric_value(&metrics_set, "vector_index_requested_k"), 10);
+        assert_eq!(metric_value(&metrics_set, "vector_index_returned_k"), 6);
 
+        // Monotonically increasing snapshot → only delta is added.
         let snapshot_2 = RecordBatchMetrics {
             plan_metrics: vec![PlanMetrics {
                 plan: "region".to_string(),
@@ -885,32 +851,11 @@ mod tests {
             ..Default::default()
         };
         record_vector_index_k_delta(&metric, &snapshot_2, &mut last);
-
         assert_eq!(metric_value(&metrics_set, "vector_index_requested_k"), 15);
         assert_eq!(metric_value(&metrics_set, "vector_index_returned_k"), 9);
-    }
 
-    #[test]
-    fn test_record_vector_index_k_delta_handles_metrics_reset() {
-        let metrics_set = ExecutionPlanMetricsSet::new();
-        let metric = MergeScanMetric::new(&metrics_set);
-        let mut last = (0usize, 0usize);
-
-        let snapshot_1 = RecordBatchMetrics {
-            plan_metrics: vec![PlanMetrics {
-                plan: "region".to_string(),
-                level: 0,
-                metrics: vec![
-                    ("vector_index_requested_k".to_string(), 10),
-                    ("vector_index_returned_k".to_string(), 6),
-                ],
-            }],
-            ..Default::default()
-        };
-        record_vector_index_k_delta(&metric, &snapshot_1, &mut last);
-
-        // Simulate a metrics reset in upstream stream reporting.
-        let snapshot_2 = RecordBatchMetrics {
+        // Backward snapshot (metrics reset) → no extra increments.
+        let snapshot_3 = RecordBatchMetrics {
             plan_metrics: vec![PlanMetrics {
                 plan: "region".to_string(),
                 level: 0,
@@ -921,10 +866,8 @@ mod tests {
             }],
             ..Default::default()
         };
-        record_vector_index_k_delta(&metric, &snapshot_2, &mut last);
-
-        // Backward snapshot should not create extra increments.
-        assert_eq!(metric_value(&metrics_set, "vector_index_requested_k"), 10);
-        assert_eq!(metric_value(&metrics_set, "vector_index_returned_k"), 6);
+        record_vector_index_k_delta(&metric, &snapshot_3, &mut last);
+        assert_eq!(metric_value(&metrics_set, "vector_index_requested_k"), 15);
+        assert_eq!(metric_value(&metrics_set, "vector_index_returned_k"), 9);
     }
 }

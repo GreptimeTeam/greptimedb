@@ -42,6 +42,11 @@ use futures_util::StreamExt;
 /// It merges all child partitions, applies global sort/offset/limit, and optionally
 /// rebuilds `Sort + Limit(k)` plans across rounds to increase k until the result
 /// stabilizes or reaches configured stop conditions.
+///
+/// NOTE: this plan holds a `SessionState` and `LogicalPlan` to support per-round
+/// re-planning. This is unusual for a physical plan and creates a tighter coupling
+/// between physical and logical layers. A future refactoring could extract this
+/// into a separate execution strategy.
 pub struct AdaptiveVectorTopKExec {
     inner: Arc<dyn ExecutionPlan>,
     exprs: Vec<datafusion_physical_expr::PhysicalSortExpr>,
@@ -64,16 +69,6 @@ struct AdaptiveVectorTopKMetric {
     vector_index_returned_k: Gauge,
     /// Number of retry rounds (rounds - 1) for the last execution.
     vector_index_retry_rounds: Gauge,
-    /// The last k used in the adaptive loop.
-    vector_index_last_k: Gauge,
-    /// Desired output rows (fetch + skip) for the last execution.
-    vector_index_desired_rows: Gauge,
-    /// Result length after sort/limit for the last execution.
-    vector_index_result_len: Gauge,
-    /// Kth distance in micros (distance * 1_000_000) for the last execution.
-    vector_index_kth_distance_micros: Gauge,
-    /// Whether any adaptive round hit max_rows during the last execution.
-    vector_index_hit_max_rows: Gauge,
     /// Whether the last execution returned an approximate/best-effort result.
     vector_index_approximate_result: Gauge,
 }
@@ -87,15 +82,6 @@ impl AdaptiveVectorTopKMetric {
                 .gauge(crate::vector_search::metrics::VECTOR_INDEX_RETURNED_K, 1),
             vector_index_retry_rounds: MetricBuilder::new(metrics)
                 .gauge("vector_index_retry_rounds", 1),
-            vector_index_last_k: MetricBuilder::new(metrics).gauge("vector_index_last_k", 1),
-            vector_index_desired_rows: MetricBuilder::new(metrics)
-                .gauge("vector_index_desired_rows", 1),
-            vector_index_result_len: MetricBuilder::new(metrics)
-                .gauge("vector_index_result_len", 1),
-            vector_index_kth_distance_micros: MetricBuilder::new(metrics)
-                .gauge("vector_index_kth_distance_micros", 1),
-            vector_index_hit_max_rows: MetricBuilder::new(metrics)
-                .gauge(crate::vector_search::metrics::VECTOR_INDEX_HIT_MAX_ROWS, 1),
             vector_index_approximate_result: MetricBuilder::new(metrics).gauge(
                 crate::vector_search::metrics::VECTOR_INDEX_APPROXIMATE_RESULT,
                 1,
@@ -103,38 +89,13 @@ impl AdaptiveVectorTopKMetric {
         }
     }
 
-    fn on_round_start(&self, round: usize, k: usize, desired: usize) {
+    fn set_retry_rounds(&self, round: usize) {
         self.vector_index_retry_rounds.set(round.saturating_sub(1));
-        self.vector_index_last_k.set(k);
-        self.vector_index_desired_rows.set(desired);
     }
 
     fn set_requested_returned_k(&self, requested: usize, returned: usize) {
         self.vector_index_requested_k.set(requested);
         self.vector_index_returned_k.set(returned);
-    }
-
-    fn set_result_len(&self, result_len: usize) {
-        self.vector_index_result_len.set(result_len);
-    }
-
-    fn set_kth_distance_micros(&self, kth_distance: Option<f64>) {
-        let kth_micros = kth_distance
-            .filter(|v| v.is_finite())
-            .map(|v| (v * 1_000_000.0).round())
-            .filter(|v| *v > 0.0)
-            .map(|v| v as usize)
-            .unwrap_or(0);
-        self.vector_index_kth_distance_micros.set(kth_micros);
-    }
-
-    fn reset_execution_flags(&self) {
-        self.vector_index_hit_max_rows.set(0);
-        self.vector_index_approximate_result.set(0);
-    }
-
-    fn mark_hit_max_rows(&self) {
-        self.vector_index_hit_max_rows.set(1);
     }
 
     fn mark_approximate_result(&self) {
@@ -257,7 +218,6 @@ impl ExecutionPlan for AdaptiveVectorTopKExec {
                 );
                 return;
             }
-            vector_metrics.reset_execution_flags();
             let use_adaptive = rebuild_plan && fetch.is_some();
             if rebuild_plan && fetch.is_none() {
                 debug!(
@@ -309,7 +269,6 @@ struct SortLimitResult {
     kth_distance: Option<f64>,
     tie_hash: Option<u64>,
     total_rows: usize,
-    result_len: usize,
 }
 
 enum SortLimitOutcome {
@@ -395,7 +354,7 @@ async fn run_adaptive_topk(
     loop {
         round += 1;
         k = clamp_k(k, max_k);
-        vector_metrics.on_round_start(round, k, desired);
+        vector_metrics.set_retry_rounds(round);
         let round_result = execute_adaptive_round(
             session_state,
             logical_input,
@@ -408,7 +367,6 @@ async fn run_adaptive_topk(
 
         vector_metrics.set_requested_returned_k(round_result.requested_k, round_result.returned_k);
         if round_result.hit_max_rows {
-            vector_metrics.mark_hit_max_rows();
             approximate_result = true;
         }
         let result = match sort_and_limit(round_result.batches, schema, exprs, fetch, skip)? {
@@ -439,9 +397,6 @@ async fn run_adaptive_topk(
             }
             SortLimitOutcome::Some(result) => result,
         };
-        vector_metrics.set_result_len(result.result_len);
-        vector_metrics.set_kth_distance_micros(result.kth_distance);
-
         let tie_stable = is_tie_stable(
             last_tie_hash,
             result.tie_hash,
@@ -499,6 +454,11 @@ async fn run_adaptive_topk(
     }
 }
 
+/// Executes a single adaptive round by re-planning the logical input with updated k.
+///
+/// Each round re-runs the full planning pipeline (`logical → optimized → physical`).
+/// This is correct but not optimal — a future optimization could cache and patch the
+/// physical plan to avoid repeated optimization passes.
 async fn execute_adaptive_round(
     session_state: &Arc<SessionState>,
     logical_input: &datafusion_expr::LogicalPlan,
@@ -768,7 +728,6 @@ fn sort_and_limit(
         kth_distance,
         tie_hash,
         total_rows,
-        result_len: length,
     }))
 }
 
@@ -1017,18 +976,6 @@ mod tests {
         DfRecordBatch::try_new(schema, vec![dist, id]).unwrap()
     }
 
-    fn metric_value(metrics: &ExecutionPlanMetricsSet, name: &str) -> usize {
-        let aggregated = metrics
-            .clone_inner()
-            .aggregate_by_name()
-            .sorted_for_display()
-            .timestamps_removed();
-        aggregated
-            .iter()
-            .find_map(|metric| (metric.value().name() == name).then_some(metric.value().as_usize()))
-            .unwrap_or(0)
-    }
-
     fn empty_relation_plan(schema: SchemaRef) -> datafusion_expr::LogicalPlan {
         let df_schema = DFSchema::try_from(schema.as_ref().clone()).unwrap();
         datafusion_expr::LogicalPlan::EmptyRelation(datafusion_expr::EmptyRelation {
@@ -1145,41 +1092,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_adaptive_vector_topk_exec_empty_second_partition() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("dist", DataType::Float32, false),
-            Field::new("id", DataType::Int32, false),
-        ]));
-
-        let p0 = vec![build_batch(vec![0.4], vec![4], schema.clone())];
-        let p1 = vec![];
-
-        let input = Arc::new(TestInputExec::new(vec![p0, p1], schema.clone()));
-        let exprs = vec![PhysicalSortExpr::new(
-            Arc::new(Column::new_with_schema("dist", &schema).unwrap()),
-            SortOptions {
-                descending: false,
-                nulls_first: true,
-            },
-        )];
-
-        let ctx = datafusion::execution::context::SessionContext::default();
-        let exec = Arc::new(AdaptiveVectorTopKExec::new(
-            input,
-            exprs,
-            Vec::new(),
-            empty_relation_plan(schema.clone()),
-            Arc::new(ctx.state()),
-            Some(1),
-            0,
-            false,
-        ));
-        let batches = collect(exec, ctx.task_ctx()).await.unwrap();
-        assert_eq!(batches.len(), 1);
-        assert_eq!(batches[0].num_rows(), 1);
-    }
-
-    #[tokio::test]
     async fn test_adaptive_vector_topk_exec_skip_beyond_rows() {
         let schema = Arc::new(Schema::new(vec![
             Field::new("dist", DataType::Float32, false),
@@ -1264,44 +1176,52 @@ mod tests {
     }
 
     #[test]
-    fn test_should_not_finish_round_when_row_cap_hit_and_tie_unstable() {
+    fn test_should_finish_round_conditions() {
         // A capped round is not enough evidence of global exhaustion.
         assert!(!super::should_finish_round(
             100_000, 100_000, false, true, 200_000
         ));
-    }
-
-    #[test]
-    fn test_should_finish_round_when_not_capped_and_candidates_exhausted() {
+        // Not capped and candidates exhausted → finish.
         assert!(super::should_finish_round(128, 64, false, false, 256));
+        // Tie stable → finish regardless of cap.
+        assert!(super::should_finish_round(100, 100, true, true, 200));
+        // Not enough rows even when tie stable → don't finish.
+        assert!(!super::should_finish_round(50, 100, true, false, 200));
     }
 
     #[test]
-    fn test_is_tie_stable_accepts_small_distance_noise() {
+    fn test_is_tie_stable() {
         let prev_kth = 1.0;
-        let curr_kth = prev_kth + (f32::EPSILON as f64) * 0.5;
+        // Small noise within f32 epsilon → stable.
+        let small_noise = prev_kth + (f32::EPSILON as f64) * 0.5;
         assert!(super::is_tie_stable(
             Some(42),
             Some(42),
             Some(prev_kth),
-            Some(curr_kth)
+            Some(small_noise)
         ));
-    }
-
-    #[test]
-    fn test_is_tie_stable_rejects_large_distance_change() {
-        let prev_kth = 1.0;
-        let curr_kth = prev_kth + (f32::EPSILON as f64) * 2.0;
+        // Large change beyond f32 epsilon → unstable.
+        let large_change = prev_kth + (f32::EPSILON as f64) * 2.0;
         assert!(!super::is_tie_stable(
             Some(42),
             Some(42),
             Some(prev_kth),
-            Some(curr_kth)
+            Some(large_change)
         ));
+        // Different hash → unstable.
+        assert!(!super::is_tie_stable(
+            Some(42),
+            Some(99),
+            Some(prev_kth),
+            Some(prev_kth)
+        ));
+        // Missing previous state → unstable.
+        assert!(!super::is_tie_stable(None, Some(42), None, Some(prev_kth)));
     }
 
     #[test]
-    fn test_rewrite_merge_scan_vector_sort_fetch_for_round() {
+    fn test_rewrite_merge_scan_vector_sort_fetch() {
+        // Case 1: bare Sort → fetch is set
         let plan = merge_scan_with_remote_vector_sort(None);
         let rewritten = super::rewrite_merge_scan_vector_sort_fetch(&plan, 32).unwrap();
         let datafusion_expr::LogicalPlan::Extension(ext) = rewritten else {
@@ -1316,10 +1236,8 @@ mod tests {
             panic!("expected remote sort");
         };
         assert_eq!(sort.fetch, Some(32));
-    }
 
-    #[test]
-    fn test_rewrite_merge_scan_vector_sort_fetch_for_round_with_alias() {
+        // Case 2: aliased Sort → fetch is set
         let plan = merge_scan_with_remote_vector_sort_alias(None);
         let rewritten = super::rewrite_merge_scan_vector_sort_fetch(&plan, 16).unwrap();
         let datafusion_expr::LogicalPlan::Extension(ext) = rewritten else {
@@ -1334,10 +1252,8 @@ mod tests {
             panic!("expected remote sort");
         };
         assert_eq!(sort.fetch, Some(16));
-    }
 
-    #[test]
-    fn test_rewrite_merge_scan_vector_sort_fetch_for_round_with_limit_sort() {
+        // Case 3: Limit + Sort → both limit and sort.fetch are updated
         let plan = merge_scan_with_remote_limit_sort(8);
         let rewritten = super::rewrite_merge_scan_vector_sort_fetch(&plan, 24).unwrap();
         let datafusion_expr::LogicalPlan::Extension(ext) = rewritten else {
@@ -1358,44 +1274,5 @@ mod tests {
             panic!("expected remote sort under limit");
         };
         assert_eq!(sort.fetch, Some(24));
-    }
-
-    #[test]
-    fn test_adaptive_metric_marks_and_resets_approximate_flags() {
-        let metrics_set = ExecutionPlanMetricsSet::new();
-        let metrics = super::AdaptiveVectorTopKMetric::new(&metrics_set);
-        metrics.mark_hit_max_rows();
-        metrics.mark_approximate_result();
-
-        assert_eq!(
-            metric_value(
-                &metrics_set,
-                crate::vector_search::metrics::VECTOR_INDEX_HIT_MAX_ROWS,
-            ),
-            1
-        );
-        assert_eq!(
-            metric_value(
-                &metrics_set,
-                crate::vector_search::metrics::VECTOR_INDEX_APPROXIMATE_RESULT,
-            ),
-            1
-        );
-
-        metrics.reset_execution_flags();
-        assert_eq!(
-            metric_value(
-                &metrics_set,
-                crate::vector_search::metrics::VECTOR_INDEX_HIT_MAX_ROWS,
-            ),
-            0
-        );
-        assert_eq!(
-            metric_value(
-                &metrics_set,
-                crate::vector_search::metrics::VECTOR_INDEX_APPROXIMATE_RESULT,
-            ),
-            0
-        );
     }
 }

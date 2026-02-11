@@ -18,7 +18,7 @@ use greptime_proto::v1::index::VectorIndexMeta;
 use prost::Message;
 use roaring::RoaringBitmap;
 use snafu::ResultExt;
-use store_api::storage::{VectorIndexEngine, VectorSearchPredicate};
+use store_api::storage::VectorIndexEngine;
 
 use crate::vector::VectorDistanceMetric;
 use crate::vector::engine::{self, VectorIndexConfig};
@@ -41,14 +41,6 @@ pub struct VectorSearchOutput {
 pub trait IndexApplier: Send + Sync {
     /// Searches for k nearest neighbors.
     fn search(&self, query: &[f32], k: usize) -> Result<VectorSearchOutput>;
-
-    /// Searches for k nearest neighbors with an optional predicate.
-    fn search_with_predicate(
-        &self,
-        query: &[f32],
-        k: usize,
-        predicate: Option<&dyn VectorSearchPredicate>,
-    ) -> Result<VectorSearchOutput>;
 
     /// Returns the memory usage.
     fn memory_usage(&self) -> usize;
@@ -292,72 +284,6 @@ impl IndexApplier for HnswVectorIndexApplier {
         })
     }
 
-    fn search_with_predicate(
-        &self,
-        query: &[f32],
-        k: usize,
-        predicate: Option<&dyn VectorSearchPredicate>,
-    ) -> Result<VectorSearchOutput> {
-        if self.indexed_rows == 0 || k == 0 {
-            return Ok(VectorSearchOutput {
-                row_offsets: Vec::new(),
-                distances: Vec::new(),
-            });
-        }
-
-        let actual_k = k.min(self.indexed_rows as usize);
-        let matches = if let Some(predicate) = predicate {
-            let total_rows_u32 = u32::try_from(self.total_rows).map_err(|_| {
-                KeyMappingSnafu {
-                    reason: format!("Total rows {} exceeds u32::MAX", self.total_rows),
-                }
-                .build()
-            })?;
-
-            struct RowOffsetPredicateAdapter<'a> {
-                applier: &'a HnswVectorIndexApplier,
-                total_rows: u32,
-                predicate: &'a dyn VectorSearchPredicate,
-            }
-
-            // The engine-level predicate receives HNSW internal keys.
-            // Adapt it to row offsets so upper layers can write predicates
-            // against table row positions consistently.
-            impl VectorSearchPredicate for RowOffsetPredicateAdapter<'_> {
-                fn allows(&self, key: u64) -> bool {
-                    match self.applier.hnsw_key_to_row_offset(self.total_rows, key) {
-                        Ok(row_offset) => self.predicate.allows(row_offset as u64),
-                        // Fail closed: on key mapping failure we must not leak unmatched rows.
-                        Err(_) => false,
-                    }
-                }
-            }
-
-            let adapter = RowOffsetPredicateAdapter {
-                applier: self,
-                total_rows: total_rows_u32,
-                predicate,
-            };
-            self.engine
-                .search_with_predicate(query, actual_k, Some(&adapter))
-        } else {
-            self.engine.search_with_predicate(query, actual_k, None)
-        }
-        .map_err(|e| {
-            EngineSnafu {
-                reason: e.to_string(),
-            }
-            .build()
-        })?;
-
-        let row_offsets = self.map_keys_to_row_offsets(matches.keys)?;
-
-        Ok(VectorSearchOutput {
-            row_offsets,
-            distances: matches.distances,
-        })
-    }
-
     fn memory_usage(&self) -> usize {
         self.engine.memory_usage()
             + self.null_bitmap.serialized_size()
@@ -386,7 +312,7 @@ mod tests {
     use greptime_proto::v1::index::{VectorIndexMeta, VectorIndexStats};
     use prost::Message;
     use roaring::RoaringBitmap;
-    use store_api::storage::{VectorIndexEngineType, VectorSearchPredicate};
+    use store_api::storage::VectorIndexEngineType;
 
     use super::*;
     use crate::vector::engine::VectorIndexConfig;
@@ -498,34 +424,5 @@ mod tests {
         let applier = HnswVectorIndexApplier::from_blob(&blob).unwrap();
         let output = applier.search(&[1.0, 0.0], 0).unwrap();
         assert!(output.row_offsets.is_empty());
-    }
-
-    #[test]
-    fn test_hnsw_vector_index_applier_search_with_predicate() {
-        struct OnlyRowOffsetTwo;
-
-        impl VectorSearchPredicate for OnlyRowOffsetTwo {
-            fn allows(&self, key: u64) -> bool {
-                key == 2
-            }
-        }
-
-        let config = test_config();
-        let mut null_bitmap = RoaringBitmap::new();
-        null_bitmap.insert(1);
-
-        let blob = build_test_blob(
-            &config,
-            vec![(0, vec![1.0, 0.0]), (1, vec![0.0, 1.0])],
-            &null_bitmap,
-            3,
-            2,
-        );
-
-        let applier = HnswVectorIndexApplier::from_blob(&blob).unwrap();
-        let output = applier
-            .search_with_predicate(&[1.0, 0.0], 2, Some(&OnlyRowOffsetTwo))
-            .unwrap();
-        assert_eq!(output.row_offsets, vec![2]);
     }
 }

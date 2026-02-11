@@ -1009,7 +1009,7 @@ impl ParquetReaderBuilder {
 
         let file_size_hint = self.file_handle.meta_ref().index_file_size();
         let apply_res = applier
-            .apply_with_k(self.file_handle.index_id(), Some(file_size_hint), k, None)
+            .apply_with_k(self.file_handle.index_id(), Some(file_size_hint), k)
             .await;
         let row_ids = match apply_res {
             Ok(res) => res.row_offsets,

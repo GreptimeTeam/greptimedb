@@ -34,6 +34,9 @@ task_local! {
     // Prevent recursive rewrite when adaptive execution rebuilds a logical plan per round.
     // The rebuilt plan still contains Sort + Limit shape; without this guard, the optimizer
     // would keep wrapping it with AdaptiveVectorTopK again.
+    //
+    // Safety: relies on `SessionState::create_physical_plan` running entirely within the
+    // current tokio task, which holds for the single-threaded planning pipeline.
     static SKIP_REWRITE: bool;
 }
 
@@ -259,22 +262,27 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_vector_topk_rewrites_merge_sort_fetch_by_alias() {
+    fn adaptive_vector_topk_rewrites_by_alias() {
         let provider = build_dummy_provider(10);
         let source = DefaultTableSource::new(provider);
 
-        let remote_sort =
-            LogicalPlanBuilder::scan_with_filters("t", Arc::new(source), None, vec![])
-                .unwrap()
-                .project(vec![
-                    col("k0"),
-                    vec_distance_expr(VEC_L2SQ_DISTANCE).alias("d"),
-                ])
-                .unwrap()
-                .sort(vec![col("d").sort(true, false)])
-                .unwrap()
-                .build()
-                .unwrap();
+        // Case 1: MergeSort with fetch (alias "d")
+        let remote_sort = LogicalPlanBuilder::scan_with_filters(
+            "t",
+            Arc::new(DefaultTableSource::new(build_dummy_provider(10))),
+            None,
+            vec![],
+        )
+        .unwrap()
+        .project(vec![
+            col("k0"),
+            vec_distance_expr(VEC_L2SQ_DISTANCE).alias("d"),
+        ])
+        .unwrap()
+        .sort(vec![col("d").sort(true, false)])
+        .unwrap()
+        .build()
+        .unwrap();
         let merge_scan =
             MergeScanLogicalPlan::new(remote_sort, false, Default::default()).into_logical_plan();
         let merge_sort = MergeSortLogicalPlan::new(
@@ -287,15 +295,9 @@ mod tests {
         let context = OptimizerContext::new();
         let plan = ScanHintRule.rewrite(merge_sort, &context).unwrap().data;
         let result = AdaptiveVectorTopKRule.rewrite(plan, &context).unwrap().data;
-        let plan_str = result.display().to_string();
-        assert!(plan_str.contains("AdaptiveVectorTopK"));
-    }
+        assert!(result.display().to_string().contains("AdaptiveVectorTopK"));
 
-    #[test]
-    fn adaptive_vector_topk_rewrites_limit_merge_sort_by_alias() {
-        let provider = build_dummy_provider(10);
-        let source = DefaultTableSource::new(provider);
-
+        // Case 2: Limit + MergeSort (alias "d")
         let remote_sort =
             LogicalPlanBuilder::scan_with_filters("t", Arc::new(source), None, vec![])
                 .unwrap()
@@ -322,8 +324,7 @@ mod tests {
         let context = OptimizerContext::new();
         let plan = ScanHintRule.rewrite(plan, &context).unwrap().data;
         let result = AdaptiveVectorTopKRule.rewrite(plan, &context).unwrap().data;
-        let plan_str = result.display().to_string();
-        assert!(plan_str.contains("AdaptiveVectorTopK"));
+        assert!(result.display().to_string().contains("AdaptiveVectorTopK"));
     }
 
     #[test]
