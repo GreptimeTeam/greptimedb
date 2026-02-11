@@ -325,6 +325,8 @@ impl MergeScanExec {
 
                 let mut poll_duration = Duration::ZERO;
                 let mut poll_timer = Instant::now();
+                #[cfg(feature = "vector_index")]
+                let mut last_vector_index_k = (0usize, 0usize);
                 while let Some(batch) = stream.next().instrument(region_span.clone()).await {
                     let poll_elapsed = poll_timer.elapsed();
                     poll_duration += poll_elapsed;
@@ -340,6 +342,8 @@ impl MergeScanExec {
                     }
 
                     if let Some(metrics) = stream.metrics() {
+                        #[cfg(feature = "vector_index")]
+                        record_vector_index_k_delta(&metric, &metrics, &mut last_vector_index_k);
                         let mut sub_stage_metrics = sub_stage_metrics_moved.lock().unwrap();
                         sub_stage_metrics.insert(region_id, metrics);
                     }
@@ -396,11 +400,7 @@ impl MergeScanExec {
                     // Re-adding cumulative totals across all finished regions will over-count.
                     #[cfg(feature = "vector_index")]
                     {
-                        let (requested_k, returned_k) =
-                            crate::vector_search::metrics::collect_vector_index_k_from_region_metrics(
-                                &metrics,
-                            );
-                        metric.record_vector_index_k(requested_k, returned_k);
+                        record_vector_index_k_delta(&metric, &metrics, &mut last_vector_index_k);
                     }
 
                     // Keep per-region metrics for explain/debug output.
@@ -744,6 +744,31 @@ impl MergeScanMetric {
     }
 }
 
+#[cfg(feature = "vector_index")]
+fn record_vector_index_k_delta(
+    metric: &MergeScanMetric,
+    metrics: &RecordBatchMetrics,
+    last: &mut (usize, usize),
+) {
+    let (requested_k, returned_k) =
+        crate::vector_search::metrics::collect_vector_index_k_from_region_metrics(metrics);
+    // Region metrics should be monotonic snapshots. If they go backwards,
+    // avoid double counting by clamping delta to zero and keep a debug breadcrumb.
+    if requested_k < last.0 || returned_k < last.1 {
+        common_telemetry::debug!(
+            "vector index metrics moved backwards: last=({},{}) current=({},{})",
+            last.0,
+            last.1,
+            requested_k,
+            returned_k
+        );
+    }
+    let delta_requested = requested_k.saturating_sub(last.0);
+    let delta_returned = returned_k.saturating_sub(last.1);
+    metric.record_vector_index_k(delta_requested, delta_returned);
+    *last = (requested_k, returned_k);
+}
+
 #[cfg(all(test, feature = "vector_index"))]
 mod tests {
     use common_recordbatch::adapter::{PlanMetrics, RecordBatchMetrics};
@@ -827,5 +852,79 @@ mod tests {
 
         assert_eq!(metric_value(&metrics_set, "vector_index_requested_k"), 30);
         assert_eq!(metric_value(&metrics_set, "vector_index_returned_k"), 21);
+    }
+
+    #[test]
+    fn test_record_vector_index_k_delta_avoids_double_count() {
+        let metrics_set = ExecutionPlanMetricsSet::new();
+        let metric = MergeScanMetric::new(&metrics_set);
+        let mut last = (0usize, 0usize);
+
+        let snapshot_1 = RecordBatchMetrics {
+            plan_metrics: vec![PlanMetrics {
+                plan: "region".to_string(),
+                level: 0,
+                metrics: vec![
+                    ("vector_index_requested_k".to_string(), 10),
+                    ("vector_index_returned_k".to_string(), 6),
+                ],
+            }],
+            ..Default::default()
+        };
+        record_vector_index_k_delta(&metric, &snapshot_1, &mut last);
+
+        let snapshot_2 = RecordBatchMetrics {
+            plan_metrics: vec![PlanMetrics {
+                plan: "region".to_string(),
+                level: 0,
+                metrics: vec![
+                    ("vector_index_requested_k".to_string(), 15),
+                    ("vector_index_returned_k".to_string(), 9),
+                ],
+            }],
+            ..Default::default()
+        };
+        record_vector_index_k_delta(&metric, &snapshot_2, &mut last);
+
+        assert_eq!(metric_value(&metrics_set, "vector_index_requested_k"), 15);
+        assert_eq!(metric_value(&metrics_set, "vector_index_returned_k"), 9);
+    }
+
+    #[test]
+    fn test_record_vector_index_k_delta_handles_metrics_reset() {
+        let metrics_set = ExecutionPlanMetricsSet::new();
+        let metric = MergeScanMetric::new(&metrics_set);
+        let mut last = (0usize, 0usize);
+
+        let snapshot_1 = RecordBatchMetrics {
+            plan_metrics: vec![PlanMetrics {
+                plan: "region".to_string(),
+                level: 0,
+                metrics: vec![
+                    ("vector_index_requested_k".to_string(), 10),
+                    ("vector_index_returned_k".to_string(), 6),
+                ],
+            }],
+            ..Default::default()
+        };
+        record_vector_index_k_delta(&metric, &snapshot_1, &mut last);
+
+        // Simulate a metrics reset in upstream stream reporting.
+        let snapshot_2 = RecordBatchMetrics {
+            plan_metrics: vec![PlanMetrics {
+                plan: "region".to_string(),
+                level: 0,
+                metrics: vec![
+                    ("vector_index_requested_k".to_string(), 3),
+                    ("vector_index_returned_k".to_string(), 2),
+                ],
+            }],
+            ..Default::default()
+        };
+        record_vector_index_k_delta(&metric, &snapshot_2, &mut last);
+
+        // Backward snapshot should not create extra increments.
+        assert_eq!(metric_value(&metrics_set, "vector_index_requested_k"), 10);
+        assert_eq!(metric_value(&metrics_set, "vector_index_returned_k"), 6);
     }
 }

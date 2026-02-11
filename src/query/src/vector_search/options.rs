@@ -20,6 +20,7 @@ pub struct AdaptiveVectorTopKOptions {
     pub max_k: Option<usize>,
     // Per-round candidate collection cap during adaptive execution.
     // This bounds one retry round's memory/CPU cost; it is not final result size.
+    // When this cap is hit, adaptive top-k may return best-effort (approximate) results.
     pub max_rows: usize,
 }
 
@@ -95,7 +96,7 @@ impl ExtensionOptions for AdaptiveVectorTopKOptions {
             datafusion::config::ConfigEntry {
                 key: "max_rows".to_string(),
                 value: Some(self.max_rows.to_string()),
-                description: "Maximum rows collected per adaptive round",
+                description: "Maximum rows collected per adaptive round; hitting it may return approximate results",
             },
         ]
     }

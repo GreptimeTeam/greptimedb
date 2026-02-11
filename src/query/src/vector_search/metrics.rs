@@ -18,6 +18,8 @@ use datafusion::physical_plan::metrics::MetricsSet;
 
 pub(crate) const VECTOR_INDEX_REQUESTED_K: &str = "vector_index_requested_k";
 pub(crate) const VECTOR_INDEX_RETURNED_K: &str = "vector_index_returned_k";
+pub(crate) const VECTOR_INDEX_HIT_MAX_ROWS: &str = "vector_index_hit_max_rows";
+pub(crate) const VECTOR_INDEX_APPROXIMATE_RESULT: &str = "vector_index_approximate_result";
 
 /// Recursively collects vector index requested/returned k from an `ExecutionPlan` tree.
 ///

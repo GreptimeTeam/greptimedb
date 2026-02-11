@@ -17,15 +17,17 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use arrow_schema::SortOptions;
 use common_recordbatch::OrderOption;
 use common_telemetry::debug;
-use datafusion_common::ScalarValue;
+use datafusion_common::{Column, ScalarValue};
 use datafusion_expr::utils::split_conjunction;
-use datafusion_expr::{Expr, SortExpr};
+use datafusion_expr::{Expr, LogicalPlan, SortExpr};
 use datafusion_sql::TableReference;
 use datatypes::types::parse_string_to_vector_type_value;
 use store_api::storage::{VectorDistanceMetric, VectorSearchRequest};
 
 use crate::dummy_catalog::DummyTableProvider;
-use crate::vector_search::utils::{distance_metric, extract_limit_info};
+use crate::vector_search::utils::{
+    MAX_ALIAS_DEPTH, distance_metric, extract_limit_info, resolve_from_projection_column,
+};
 
 /// Tracks vector search hints while traversing the logical plan.
 ///
@@ -194,7 +196,7 @@ impl VectorSearchState {
         let k = hint.limit.k()?;
 
         if let Some(ref hint_table) = info.table_reference
-            && table_name != hint_table
+            && !Self::table_reference_matches(hint_table, table_name)
         {
             return None;
         }
@@ -255,7 +257,7 @@ impl VectorSearchState {
             return None;
         }
         let sort_expr: &SortExpr = &sort.expr[0];
-        let info = Self::extract_distance_info(&sort_expr.expr)?;
+        let info = Self::extract_distance_info_from_expr(sort.input.as_ref(), &sort_expr.expr)?;
         let expected_asc = info.metric != VectorDistanceMetric::InnerProduct;
         if sort_expr.asc != expected_asc {
             return None;
@@ -278,6 +280,45 @@ impl VectorSearchState {
         }
     }
 
+    fn extract_distance_info_from_expr(
+        sort_input: &LogicalPlan,
+        expr: &Expr,
+    ) -> Option<VectorDistanceInfo> {
+        Self::extract_distance_info(expr).or_else(|| match expr {
+            Expr::Alias(alias) => {
+                Self::extract_distance_info_from_expr(sort_input, alias.expr.as_ref())
+            }
+            Expr::Column(column) => Self::extract_distance_info_from_column(sort_input, column, 0),
+            _ => None,
+        })
+    }
+
+    fn extract_distance_info_from_column(
+        plan: &LogicalPlan,
+        target: &Column,
+        depth: usize,
+    ) -> Option<VectorDistanceInfo> {
+        resolve_from_projection_column(plan, target, depth, &mut |expr, next_depth| {
+            Self::extract_distance_info_from_projection_expr(expr, next_depth)
+        })
+    }
+
+    fn extract_distance_info_from_projection_expr(
+        expr: &Expr,
+        depth: usize,
+    ) -> Option<VectorDistanceInfo> {
+        if depth > MAX_ALIAS_DEPTH {
+            return None;
+        }
+
+        Self::extract_distance_info(expr).or_else(|| match expr {
+            Expr::Alias(alias) => {
+                Self::extract_distance_info_from_projection_expr(alias.expr.as_ref(), depth + 1)
+            }
+            _ => None,
+        })
+    }
+
     fn tie_breakers_allowed(sort_exprs: &[SortExpr], distance_info: &VectorDistanceInfo) -> bool {
         if sort_exprs.is_empty() {
             return true;
@@ -289,7 +330,10 @@ impl VectorSearchState {
             };
 
             match &distance_info.table_reference {
-                Some(table) => col.relation.as_ref() == Some(table),
+                Some(table) => col
+                    .relation
+                    .as_ref()
+                    .is_some_and(|relation| Self::table_reference_matches(relation, table)),
                 None => col.relation.is_none(),
             }
         })
@@ -329,7 +373,7 @@ impl VectorSearchState {
         };
         // Only emit hints when distance+limit are present and the table matches the sort target.
         if let Some(ref hint_table) = distance.table_reference
-            && hint_table != &table_scan.table_name
+            && !Self::table_reference_matches(hint_table, &table_scan.table_name)
         {
             return;
         }
@@ -364,6 +408,10 @@ impl VectorSearchState {
             table_reference: table_reference.clone(),
             column_name: column_name.to_string(),
         })
+    }
+
+    fn table_reference_matches(left: &TableReference, right: &TableReference) -> bool {
+        left.resolved_eq(right)
     }
 
     fn extract_query_vector(expr: &Expr) -> Option<Vec<f32>> {
@@ -414,7 +462,7 @@ mod tests {
     use datafusion::datasource::DefaultTableSource;
     use datafusion_common::Column;
     use datafusion_expr::logical_plan::JoinType;
-    use datafusion_expr::{LogicalPlan, LogicalPlanBuilder, Subquery, col};
+    use datafusion_expr::{Expr, LogicalPlan, LogicalPlanBuilder, Subquery, col, lit};
     use datafusion_optimizer::{OptimizerContext, OptimizerRule};
     use datatypes::schema::ColumnSchema;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
@@ -458,6 +506,51 @@ mod tests {
                 ),
                 semantic_type: SemanticType::Field,
                 column_id,
+            })
+            .primary_key(vec![1]);
+        let metadata = Arc::new(builder.build().unwrap());
+        let engine = Arc::new(MetaRegionEngine::with_metadata(metadata.clone()));
+        Arc::new(DummyTableProvider::new(0.into(), engine, metadata))
+    }
+
+    fn build_dist_shape_dummy_provider(column_id: u32) -> Arc<DummyTableProvider> {
+        let mut builder = RegionMetadataBuilder::new(0.into());
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "vec_id",
+                    ConcreteDataType::int32_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "part_tag",
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "embedding",
+                    ConcreteDataType::vector_datatype(2),
+                    false,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 4,
             })
             .primary_key(vec![1]);
         let metadata = Arc::new(builder.build().unwrap());
@@ -519,6 +612,31 @@ mod tests {
         assert_eq!(hint.k, 5);
         assert_eq!(hint.metric, VectorDistanceMetric::L2sq);
         assert_eq!(hint.query_vector, vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn test_dummy_provider_vector_hint_with_sort_alias() {
+        let dummy_provider = build_dummy_provider(10);
+        let table_source = Arc::new(DefaultTableSource::new(dummy_provider.clone()));
+        let expr = vec_distance_expr(VEC_L2SQ_DISTANCE);
+        let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+            .unwrap()
+            .project(vec![col("k0"), expr.alias("d")])
+            .unwrap()
+            .sort(vec![col("d").sort(true, false)])
+            .unwrap()
+            .limit(0, Some(5))
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let context = OptimizerContext::default();
+        let _ = ScanHintRule.rewrite(plan, &context).unwrap();
+
+        let hint = dummy_provider.get_vector_search_hint().unwrap();
+        assert_eq!(hint.column_id, 10);
+        assert_eq!(hint.k, 5);
+        assert_eq!(hint.metric, VectorDistanceMetric::L2sq);
     }
 
     #[test]
@@ -860,5 +978,73 @@ mod tests {
         let hint = t2_provider.get_vector_search_hint().unwrap();
         assert_eq!(hint.column_id, 20);
         assert_eq!(hint.k, 5);
+    }
+
+    #[test]
+    fn test_full_table_name_matches_bare_vector_relation() {
+        let provider = build_dummy_provider(10);
+        let source = Arc::new(DefaultTableSource::new(provider.clone()));
+        let expr = vec_distance_expr_qualified(VEC_L2SQ_DISTANCE, "t2", "v");
+
+        let plan =
+            LogicalPlanBuilder::scan_with_filters("greptime.public.t2", source, None, vec![])
+                .unwrap()
+                .sort(vec![expr.sort(true, false), col("k0").sort(true, false)])
+                .unwrap()
+                .limit(0, Some(7))
+                .unwrap()
+                .build()
+                .unwrap();
+
+        let context = OptimizerContext::default();
+        let _ = ScanHintRule.rewrite(plan, &context).unwrap();
+
+        let hint = provider.get_vector_search_hint().unwrap();
+        assert_eq!(hint.column_id, 10);
+        assert_eq!(hint.k, 7);
+    }
+
+    #[test]
+    fn test_dist_shape_with_unaliased_projection_distance_column_builds_vector_hint() {
+        use datafusion_common::Column as DfColumn;
+
+        let provider = build_dist_shape_dummy_provider(10);
+        let source = Arc::new(DefaultTableSource::new(provider.clone()));
+
+        let distance_expr =
+            vec_distance_expr_qualified(VEC_L2SQ_DISTANCE, "vectors_explain_dist", "embedding");
+        let distance_col_name = distance_expr.schema_name().to_string();
+        let tie_breaker = Expr::Column(DfColumn::new(Some("vectors_explain_dist"), "vec_id"));
+        let filter = col("part_tag")
+            .eq(lit("a"))
+            .or(col("part_tag").eq(lit("z")));
+
+        let plan = LogicalPlanBuilder::scan_with_filters(
+            "greptime.public.vectors_explain_dist",
+            source,
+            None,
+            vec![],
+        )
+        .unwrap()
+        .filter(filter)
+        .unwrap()
+        .project(vec![col("vec_id"), col("part_tag"), distance_expr.clone()])
+        .unwrap()
+        .sort(vec![
+            col(distance_col_name).sort(true, false),
+            tie_breaker.sort(true, false),
+        ])
+        .unwrap()
+        .limit(0, Some(22))
+        .unwrap()
+        .build()
+        .unwrap();
+
+        let context = OptimizerContext::default();
+        let _ = ScanHintRule.rewrite(plan, &context).unwrap();
+
+        let hint = provider.get_vector_search_hint().unwrap();
+        assert_eq!(hint.column_id, 10);
+        assert_eq!(hint.k, 22);
     }
 }

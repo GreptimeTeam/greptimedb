@@ -15,17 +15,24 @@
 use common_function::scalars::vector::distance::{
     VEC_COS_DISTANCE, VEC_DOT_PRODUCT, VEC_L2SQ_DISTANCE,
 };
-use datafusion_expr::Expr;
+use datafusion_common::Column;
 use datafusion_expr::logical_plan::{FetchType, Limit, SkipType, Sort};
+use datafusion_expr::{Expr, LogicalPlan, SortExpr};
 use store_api::storage::VectorDistanceMetric;
+
+pub(crate) const MAX_ALIAS_DEPTH: usize = 16;
 
 /// Returns `true` if `sort` is a vector-distance sort with the expected ordering
 /// (ascending for L2/Cosine, descending for InnerProduct).
 pub(crate) fn is_vector_sort(sort: &Sort) -> bool {
-    let Some(primary) = sort.expr.first() else {
+    is_vector_sort_exprs(sort.input.as_ref(), &sort.expr)
+}
+
+pub(crate) fn is_vector_sort_exprs(input: &LogicalPlan, exprs: &[SortExpr]) -> bool {
+    let Some(primary) = exprs.first() else {
         return false;
     };
-    let Some(metric) = distance_metric(&primary.expr) else {
+    let Some(metric) = resolve_sort_metric(input, &primary.expr) else {
         return false;
     };
     let expected_asc = metric != VectorDistanceMetric::InnerProduct;
@@ -55,4 +62,73 @@ pub(crate) fn extract_limit_info(limit: &Limit) -> Option<(usize, usize)> {
         SkipType::UnsupportedExpr => return None,
     };
     Some((fetch, skip))
+}
+
+fn resolve_sort_metric(input: &LogicalPlan, expr: &Expr) -> Option<VectorDistanceMetric> {
+    distance_metric(expr).or_else(|| match expr {
+        Expr::Alias(alias) => resolve_sort_metric(input, alias.expr.as_ref()),
+        Expr::Column(column) => resolve_metric_from_column(input, column, 0),
+        _ => None,
+    })
+}
+
+fn resolve_metric_from_column(
+    plan: &LogicalPlan,
+    target: &Column,
+    depth: usize,
+) -> Option<VectorDistanceMetric> {
+    resolve_from_projection_column(plan, target, depth, &mut |expr, next_depth| {
+        resolve_metric_from_expr(expr, next_depth)
+    })
+}
+
+fn resolve_metric_from_expr(expr: &Expr, depth: usize) -> Option<VectorDistanceMetric> {
+    if depth > MAX_ALIAS_DEPTH {
+        return None;
+    }
+
+    distance_metric(expr).or_else(|| match expr {
+        Expr::Alias(alias) => resolve_metric_from_expr(alias.expr.as_ref(), depth + 1),
+        _ => None,
+    })
+}
+
+fn projection_expr_matches_column(expr: &Expr, target: &Column) -> bool {
+    match expr {
+        Expr::Alias(alias) => alias.name == target.name,
+        Expr::Column(column) => column.name == target.name,
+        _ => expr.schema_name().to_string() == target.name,
+    }
+}
+
+pub(crate) fn resolve_from_projection_column<T, F>(
+    plan: &LogicalPlan,
+    target: &Column,
+    depth: usize,
+    resolve_projection_expr: &mut F,
+) -> Option<T>
+where
+    F: FnMut(&Expr, usize) -> Option<T>,
+{
+    if depth > MAX_ALIAS_DEPTH {
+        return None;
+    }
+
+    if let LogicalPlan::Projection(projection) = plan {
+        for expr in &projection.expr {
+            if projection_expr_matches_column(expr, target)
+                && let Some(value) = resolve_projection_expr(expr, depth + 1)
+            {
+                return Some(value);
+            }
+        }
+    }
+
+    let mut inputs = plan.inputs().into_iter();
+    match (inputs.next(), inputs.next()) {
+        (Some(child), None) => {
+            resolve_from_projection_column(child, target, depth + 1, resolve_projection_expr)
+        }
+        _ => None,
+    }
 }
