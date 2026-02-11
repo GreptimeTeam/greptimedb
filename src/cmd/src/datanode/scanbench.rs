@@ -33,6 +33,8 @@ use moka::future::CacheBuilder;
 use object_store::manager::ObjectStoreManager;
 use query::optimizer::parallelize_scan::ParallelizeScan;
 use serde::Deserialize;
+use snafu::{OptionExt, ResultExt};
+use store_api::metadata::RegionMetadata;
 use store_api::region_engine::{PrepareRequest, QueryScanContext, RegionEngine};
 use store_api::region_request::{PathType, RegionOpenRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector};
@@ -88,8 +90,53 @@ pub struct ScanbenchCommand {
 #[derive(Debug, Deserialize, Default)]
 struct ScanConfig {
     projection: Option<Vec<usize>>,
+    projection_names: Option<Vec<String>>,
     limit: Option<usize>,
     series_row_selector: Option<String>,
+}
+
+fn resolve_projection(
+    scan_config: &ScanConfig,
+    metadata: Option<&RegionMetadata>,
+) -> error::Result<Option<Vec<usize>>> {
+    if scan_config.projection.is_some() && scan_config.projection_names.is_some() {
+        return Err(error::IllegalConfigSnafu {
+            msg: "scan config cannot contain both 'projection' and 'projection_names'".to_string(),
+        }
+        .build());
+    }
+
+    if let Some(projection) = &scan_config.projection {
+        return Ok(Some(projection.clone()));
+    }
+
+    if let Some(projection_names) = &scan_config.projection_names {
+        let metadata = metadata.context(error::IllegalConfigSnafu {
+            msg: "Missing region metadata while resolving 'projection_names'".to_string(),
+        })?;
+        let projection = projection_names
+            .iter()
+            .map(|name| {
+                let available_columns = metadata
+                    .column_metadatas
+                    .iter()
+                    .map(|column| column.column_schema.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                metadata
+                    .column_index_by_name(name)
+                    .with_context(|| error::IllegalConfigSnafu {
+                        msg: format!(
+                            "Unknown column '{}' in projection_names, available columns: [{}]",
+                            name, available_columns
+                        ),
+                    })
+            })
+            .collect::<error::Result<Vec<_>>>()?;
+        return Ok(Some(projection));
+    }
+
+    Ok(None)
 }
 
 fn parse_region_id(s: &str) -> error::Result<RegionId> {
@@ -235,21 +282,18 @@ impl ScanbenchCommand {
 
         // Load scan config
         let scan_config = if let Some(path) = &self.scan_config {
-            let content = std::fs::read_to_string(path).map_err(|e| {
-                error::IllegalConfigSnafu {
-                    msg: format!("Failed to read scan config {}: {e}", path.display()),
-                }
-                .build()
-            })?;
-            serde_json::from_str::<ScanConfig>(&content).map_err(|e| {
-                error::IllegalConfigSnafu {
-                    msg: format!("Failed to parse scan config: {e}"),
-                }
-                .build()
-            })?
+            let content = std::fs::read_to_string(path).context(error::FileIoSnafu)?;
+            serde_json::from_str::<ScanConfig>(&content).context(error::SerdeJsonSnafu)?
         } else {
             ScanConfig::default()
         };
+        let metadata = engine.get_metadata(region_id).await.map_err(|e| {
+            error::IllegalConfigSnafu {
+                msg: format!("Failed to get region metadata: {e:?}"),
+            }
+            .build()
+        })?;
+        let projection = resolve_projection(&scan_config, Some(&metadata))?;
 
         // Build scan request
         let distribution = match self.scanner.as_str() {
@@ -319,7 +363,7 @@ impl ScanbenchCommand {
 
         for iteration in 0..self.iterations {
             let request = ScanRequest {
-                projection: scan_config.projection.clone(),
+                projection: projection.clone(),
                 limit: scan_config.limit,
                 series_row_selector,
                 distribution,
@@ -473,5 +517,69 @@ impl ScanbenchCommand {
 
         println!("\n{}", "Benchmark completed!".green().bold());
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ScanConfig, resolve_projection};
+    use crate::error;
+
+    #[test]
+    fn test_parse_scan_config_projection_names() {
+        let json = r#"{"projection_names":["host","ts"],"limit":100}"#;
+        let config: ScanConfig = serde_json::from_str(json).unwrap();
+
+        assert_eq!(
+            config.projection_names,
+            Some(vec!["host".to_string(), "ts".to_string()])
+        );
+        assert_eq!(config.projection, None);
+        assert_eq!(config.limit, Some(100));
+    }
+
+    #[test]
+    fn test_resolve_projection_by_indexes() -> error::Result<()> {
+        let config = ScanConfig {
+            projection: Some(vec![0, 2]),
+            projection_names: None,
+            limit: None,
+            series_row_selector: None,
+        };
+
+        let projection = resolve_projection(&config, None)?;
+        assert_eq!(projection, Some(vec![0, 2]));
+        Ok(())
+    }
+
+    #[test]
+    fn test_resolve_projection_by_names_without_metadata() {
+        let config = ScanConfig {
+            projection: None,
+            projection_names: Some(vec!["cpu".to_string(), "host".to_string()]),
+            limit: None,
+            series_row_selector: None,
+        };
+
+        let err = resolve_projection(&config, None).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Missing region metadata while resolving 'projection_names'")
+        );
+    }
+
+    #[test]
+    fn test_resolve_projection_conflict_fields() {
+        let config = ScanConfig {
+            projection: Some(vec![0]),
+            projection_names: Some(vec!["host".to_string()]),
+            limit: None,
+            series_row_selector: None,
+        };
+
+        let err = resolve_projection(&config, None).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("projection"));
+        assert!(msg.contains("projection_names"));
     }
 }
