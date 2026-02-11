@@ -316,27 +316,25 @@ impl FlatReadFormat {
         };
 
         // Then apply sequence override if provided
-        let Some(override_array) = override_sequence_array else {
-            return Ok(batch);
-        };
+        let batch = if let Some(override_array) = override_sequence_array {
+            let mut columns = batch.columns().to_vec();
+            let sequence_column_idx = sequence_column_index(batch.num_columns());
 
-        let mut columns = batch.columns().to_vec();
-        let sequence_column_idx = sequence_column_index(batch.num_columns());
+            // Use the provided override sequence array, slicing if necessary to match batch length
+            let sequence_array = if override_array.len() > batch.num_rows() {
+                override_array.slice(0, batch.num_rows())
+            } else {
+                override_array.clone()
+            };
 
-        // Use the provided override sequence array, slicing if necessary to match batch length
-        let sequence_array = if override_array.len() > batch.num_rows() {
-            override_array.slice(0, batch.num_rows())
+            columns[sequence_column_idx] = sequence_array;
+
+            RecordBatch::try_new(batch.schema(), columns).context(NewRecordBatchSnafu)?
         } else {
-            override_array.clone()
+            batch
         };
 
-        columns[sequence_column_idx] = sequence_array;
-
-        RecordBatch::try_new(batch.schema(), columns).context(NewRecordBatchSnafu)
-    }
-
-    /// Adapts a record batch to expected schema if compat is enabled.
-    pub(crate) fn compat_record_batch(&self, batch: RecordBatch) -> Result<RecordBatch> {
+        // Finally, apply compat if needed.
         if let Some(compat) = &self.compat {
             compat.compat(batch)
         } else {

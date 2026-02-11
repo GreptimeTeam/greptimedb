@@ -269,11 +269,6 @@ impl FileRange {
         self.context.compaction_projection_mapper()
     }
 
-    /// Returns the format helper.
-    pub(crate) fn read_format(&self) -> &ReadFormat {
-        self.context.read_format()
-    }
-
     /// Returns the file handle of the file range.
     pub(crate) fn file_handle(&self) -> &FileHandle {
         self.context.reader_builder.file_handle()

@@ -1462,9 +1462,7 @@ pub fn build_flat_file_range_scan_stream(
             part_metrics.inc_build_reader_cost(build_cost);
 
             let mapper = range.compaction_projection_mapper();
-            let flat_format = range.read_format().as_flat().unwrap();
             while let Some(record_batch) = reader.next_batch()? {
-                let record_batch = flat_format.compat_record_batch(record_batch)?;
                 let record_batch = if let Some(mapper) = mapper {
                     mapper.project(record_batch)?
                 } else {
