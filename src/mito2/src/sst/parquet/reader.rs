@@ -1159,7 +1159,16 @@ impl ParquetReaderBuilder {
                 .map(|expr| format!("{expr:?}"))
                 .collect::<Vec<_>>();
             exprs.sort();
-            Some(PredicateKey::new_minmax(Arc::new(exprs)))
+            let schema_version = self
+                .expected_metadata
+                .as_ref()
+                .map(|meta| meta.schema_version)
+                .unwrap_or_else(|| read_format.metadata().schema_version);
+            Some(PredicateKey::new_minmax(
+                Arc::new(exprs),
+                schema_version,
+                skip_fields,
+            ))
         } else {
             None
         };

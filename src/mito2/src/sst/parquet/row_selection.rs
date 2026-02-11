@@ -116,16 +116,20 @@ impl RowGroupSelection {
             };
 
             let selection = RowSelection::from(vec![RowSelector::select(rg_row_count)]);
-            selection_in_rg.insert(
-                rg_id,
-                RowSelectionWithCount {
-                    selection,
-                    row_count: rg_row_count,
-                    selector_len: 1,
-                },
-            );
-            row_count += rg_row_count;
-            selector_len += 1;
+            if selection_in_rg
+                .insert(
+                    rg_id,
+                    RowSelectionWithCount {
+                        selection,
+                        row_count: rg_row_count,
+                        selector_len: 1,
+                    },
+                )
+                .is_none()
+            {
+                row_count += rg_row_count;
+                selector_len += 1;
+            }
         }
 
         Self {
@@ -804,6 +808,16 @@ mod tests {
 
         let row_selection = selection.get(1).unwrap();
         assert_eq!(row_selection.row_count(), 1);
+    }
+
+    #[test]
+    fn test_from_full_row_group_ids_dedup_duplicates() {
+        let selection = RowGroupSelection::from_full_row_group_ids([0, 0, 2, 2], 10, 25);
+        assert_eq!(selection.row_group_count(), 2);
+        assert_eq!(selection.row_count(), 15);
+
+        assert_eq!(selection.get(0).unwrap().row_count(), 10);
+        assert_eq!(selection.get(2).unwrap().row_count(), 5);
     }
 
     #[test]
