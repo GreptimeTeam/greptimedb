@@ -176,10 +176,10 @@ impl FlowDualEngine {
         }
     }
 
-    /// Start state report handler, which will receive a sender from heartbeat task and send report back.
+    /// Start state report task, which receives a sender from heartbeat task and sends report back.
     ///
     /// if heartbeat task is shutdown, this future exits too.
-    pub async fn start_state_report_handler(self: Arc<Self>) -> Option<JoinHandle<()>> {
+    pub async fn start_state_report_task(self: Arc<Self>) -> Option<JoinHandle<()>> {
         let state_report_handler = self.state_report_handler.write().await.take();
         if let Some(mut handler) = state_report_handler {
             let zelf = self.clone();

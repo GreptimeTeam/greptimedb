@@ -194,7 +194,7 @@ impl FlownodeServer {
         let manager_ref = self.inner.flow_service.dual_engine.clone();
         let mut state_report_task_handler = self.inner.state_report_task_handler.lock().await;
         if state_report_task_handler.is_none() {
-            *state_report_task_handler = manager_ref.clone().start_state_report_handler().await;
+            *state_report_task_handler = manager_ref.clone().start_state_report_task().await;
         }
         drop(state_report_task_handler);
         let handle = manager_ref
