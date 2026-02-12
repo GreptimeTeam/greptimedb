@@ -978,10 +978,6 @@ async fn preload_parquet_meta_cache_for_files(
         }
 
         let file_size = file_handle.meta_ref().file_size;
-        if file_size == 0 {
-            continue;
-        }
-
         let file_path = file_handle.file_path(&table_dir, path_type);
         let loader = MetadataLoader::new(object_store.clone(), &file_path, file_size);
         match loader.load(&mut cache_metrics).await {
@@ -1173,6 +1169,79 @@ mod tests {
         .await;
 
         // Should warm the in-memory cache from file cache even if remote store misses.
+        assert_eq!(loaded, 1);
+        assert!(
+            cache_manager
+                .get_parquet_meta_data_from_mem_cache(region_file_id)
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_preload_parquet_meta_cache_with_unknown_file_size() {
+        let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let cache_manager = Arc::new(
+            CacheManager::builder()
+                .sst_meta_cache_size(1024 * 1024)
+                .build(),
+        );
+
+        let region_id = RegionId::new(1, 1);
+        let file_id = FileId::random();
+
+        let col = Arc::new(Int64Array::from_iter_values([1, 2, 3])) as ArrayRef;
+        let batch = RecordBatch::try_from_iter([("col", col)]).unwrap();
+        let mut parquet_bytes = Vec::new();
+        let mut writer = ArrowWriter::try_new(&mut parquet_bytes, batch.schema(), None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+
+        // file_size is 0 when it's missing/defaulted in manifests; MetadataLoader::load will stat
+        // the object store to retrieve it.
+        let file_meta = FileMeta {
+            region_id,
+            file_id,
+            time_range: (Timestamp::new_millisecond(0), Timestamp::new_millisecond(1)),
+            level: 0,
+            file_size: 0,
+            max_row_group_uncompressed_size: 0,
+            available_indexes: Default::default(),
+            indexes: vec![],
+            index_file_size: 0,
+            index_version: 0,
+            num_rows: 3,
+            num_row_groups: 1,
+            sequence: None,
+            partition_expr: None,
+            num_series: 0,
+        };
+        let file_handle = FileHandle::new(file_meta, Arc::new(NoopFilePurger));
+
+        let table_dir = "test_table";
+        let path_type = PathType::Bare;
+        let remote_path = file_handle.file_path(table_dir, path_type);
+        object_store
+            .write(&remote_path, parquet_bytes)
+            .await
+            .unwrap();
+
+        let region_file_id = file_handle.file_id();
+        assert!(
+            cache_manager
+                .get_parquet_meta_data_from_mem_cache(region_file_id)
+                .is_none()
+        );
+
+        let loaded = preload_parquet_meta_cache_for_files(
+            region_id,
+            table_dir.to_string(),
+            path_type,
+            object_store,
+            cache_manager.clone(),
+            vec![file_handle],
+        )
+        .await;
+
         assert_eq!(loaded, 1);
         assert!(
             cache_manager
