@@ -39,9 +39,9 @@ pub mod writer;
 pub const PARQUET_METADATA_KEY: &str = "greptime:metadata";
 
 /// Default batch size to read parquet files.
-pub(crate) const DEFAULT_READ_BATCH_SIZE: usize = 4096;
+pub(crate) const DEFAULT_READ_BATCH_SIZE: usize = 1024;
 /// Default row group size for parquet files.
-pub const DEFAULT_ROW_GROUP_SIZE: usize = 100 * 1024;
+pub const DEFAULT_ROW_GROUP_SIZE: usize = 100 * DEFAULT_READ_BATCH_SIZE;
 
 /// Parquet write options.
 #[derive(Debug, Clone)]
