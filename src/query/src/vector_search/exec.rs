@@ -141,7 +141,20 @@ impl AdaptiveVectorTopKExec {
 
 impl DisplayAs for AdaptiveVectorTopKExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "AdaptiveVectorTopKExec")
+        write!(f, "AdaptiveVectorTopKExec: ")?;
+        for (i, expr) in self.exprs.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "{expr}")?;
+        }
+        if let Some(fetch) = self.fetch {
+            write!(f, ", fetch={fetch}")?;
+        }
+        if self.skip > 0 {
+            write!(f, ", skip={}", self.skip)?;
+        }
+        Ok(())
     }
 }
 
@@ -624,7 +637,7 @@ fn is_tie_stable(
 ) -> bool {
     match (last_tie_hash, tie_hash, last_kth, kth_distance) {
         (Some(prev_hash), Some(curr_hash), Some(prev_kth), Some(curr_kth)) => {
-            prev_hash == curr_hash && distance_equal(prev_kth, curr_kth)
+            prev_hash == curr_hash && f32_distance_equal(prev_kth, curr_kth)
         }
         _ => false,
     }
@@ -798,7 +811,7 @@ fn hash_tie_group(
             _ => None,
         };
         if let Some(value) = value
-            && distance_equal(value, kth_distance)
+            && f32_distance_equal(value, kth_distance)
         {
             tie_indices.push(row_index as u32);
         }
@@ -808,26 +821,31 @@ fn hash_tie_group(
         return Ok(0);
     }
 
+    let tie_indices_arr = UInt32Array::from(tie_indices);
     let fields = sort_columns
         .iter()
         .map(|c| SortField::new(c.values.data_type().clone()))
         .collect::<Vec<_>>();
     let converter = RowConverter::new(fields)?;
 
-    let arrays = sort_columns
+    let tie_arrays = sort_columns
         .iter()
-        .map(|c| c.values.clone())
-        .collect::<Vec<_>>();
+        .map(|c| take(c.values.as_ref(), &tie_indices_arr, None).map_err(Into::into))
+        .collect::<datafusion_common::Result<Vec<_>>>()?;
 
-    let rows = converter.convert_columns(&arrays)?;
+    let rows = converter.convert_columns(&tie_arrays)?;
     let mut hasher = ahash::AHasher::default();
-    for idx in tie_indices {
-        rows.row(idx as usize).as_ref().hash(&mut hasher);
+    for i in 0..rows.num_rows() {
+        rows.row(i).as_ref().hash(&mut hasher);
     }
     Ok(hasher.finish())
 }
 
-fn distance_equal(lhs: f64, rhs: f64) -> bool {
+/// Compares two distance values with f32-level tolerance.
+///
+/// Vector distance functions typically produce f32 results even when stored as f64.
+/// Using `f32::EPSILON` avoids false negatives from floating-point representation noise.
+fn f32_distance_equal(lhs: f64, rhs: f64) -> bool {
     let scale = lhs.abs().max(rhs.abs()).max(1.0);
     let tol = (f32::EPSILON as f64) * scale;
     (lhs - rhs).abs() <= tol

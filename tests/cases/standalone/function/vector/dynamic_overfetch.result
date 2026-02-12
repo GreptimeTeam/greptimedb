@@ -67,7 +67,7 @@ LIMIT 2;
 | 0_| 0_|_REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_AdaptiveVectorTopKExec metrics=[vector_index_approximate_result: 0, vector_index_requested_k: 8, vector_index_retry_rounds: 2, vector_index_returned_k: 5, ]_|
+| 1_| 0_|_AdaptiveVectorTopKExec: d@2 ASC NULLS LAST, id@0 ASC NULLS LAST, fetch=2 metrics=[vector_index_approximate_result: 0, vector_index_requested_k: 8, vector_index_retry_rounds: 2, vector_index_returned_k: 5, ]_|
 |_|_|_REDACTED
 |_|_|_REDACTED
 |_|_|_REDACTED
@@ -185,7 +185,7 @@ LIMIT 2 OFFSET 20;
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_AdaptiveVectorTopKExec metrics=[vector_index_approximate_result: 0, vector_index_requested_k: 88, vector_index_retry_rounds: 1, vector_index_returned_k: 40, ] |
+| 0_| 0_|_AdaptiveVectorTopKExec: d@2 ASC NULLS LAST, id@0 ASC NULLS LAST, fetch=2, skip=20 metrics=[vector_index_approximate_result: 0, vector_index_requested_k: 88, vector_index_retry_rounds: 1, vector_index_returned_k: 40, ] |
 |_|_|_REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
@@ -233,7 +233,7 @@ LIMIT 2;
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_AdaptiveVectorTopKExec metrics=[vector_index_approximate_result: 0, vector_index_requested_k: 128, vector_index_retry_rounds: 5, vector_index_returned_k: 40, ] |
+| 0_| 0_|_AdaptiveVectorTopKExec: d@2 ASC NULLS LAST, id@0 ASC NULLS LAST, fetch=2 metrics=[vector_index_approximate_result: 0, vector_index_requested_k: 128, vector_index_retry_rounds: 5, vector_index_returned_k: 40, ] |
 |_|_|_REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
