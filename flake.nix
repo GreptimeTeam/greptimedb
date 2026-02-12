@@ -51,6 +51,9 @@
 
           buildInputs = buildInputs;
           NIX_HARDENING_ENABLE = "";
+          LD_LIBRARY_PATH = with pkgs; lib.makeLibraryPath [
+            stdenv.cc.cc.lib
+          ];
         };
       });
 }
