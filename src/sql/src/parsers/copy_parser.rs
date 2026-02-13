@@ -163,6 +163,23 @@ impl ParserContext<'_> {
         if self.parser.parse_keyword(Keyword::STDOUT) {
             // early return without parsing options
             // we will deal with copy to stdout on postgres protocol layer
+            // consume WITH (...) options if present (they will be ignored)
+            // we support both "WITH (FORMAT binary)" and "WITH (FORMAT = 'binary')"
+            // but we just consume them without parsing
+            if self.parser.parse_keyword(Keyword::WITH) {
+                if self.parser.peek_token().token == Token::LParen {
+                    let _ = self.parser.next_token();
+                    // consume all tokens until we find matching RParen
+                    let mut depth = 1;
+                    while depth > 0 {
+                        match self.parser.next_token().token {
+                            Token::LParen => depth += 1,
+                            Token::RParen => depth -= 1,
+                            _ => {}
+                        }
+                    }
+                }
+            }
             Ok(CopyQueryTo {
                 query: Box::new(query),
                 arg: CopyQueryToArgument {
@@ -599,6 +616,111 @@ mod tests {
         let query_str = "SELECT generate_series(1, 2), generate_series(2, 3)";
         let expected_query = ParserContext::create_with_dialect(
             query_str,
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap()
+        .remove(0);
+
+        assert_eq!(&expected_query, &stmt);
+    }
+
+    #[test]
+    fn test_copy_query_to_stdout_with_binary_format() {
+        let sql = "COPY (SELECT * FROM test_table) TO STDOUT WITH (FORMAT binary)";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+
+        if let Err(e) = &result {
+            panic!(
+                "COPY TO STDOUT WITH (FORMAT binary) should parse without error, got: {:?}",
+                e
+            );
+        }
+
+        let stmt = result.unwrap().pop().unwrap();
+
+        let expected_query = ParserContext::create_with_dialect(
+            "SELECT * FROM test_table",
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap()
+        .remove(0);
+
+        assert_eq!(&expected_query, &stmt);
+    }
+
+    #[test]
+    fn test_copy_query_to_stdout_with_csv_format() {
+        let sql = "COPY (SELECT * FROM test_table) TO STDOUT WITH (FORMAT csv)";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+
+        if let Err(e) = &result {
+            panic!(
+                "COPY TO STDOUT WITH (FORMAT csv) should parse without error, got: {:?}",
+                e
+            );
+        }
+
+        let stmt = result.unwrap().pop().unwrap();
+
+        let expected_query = ParserContext::create_with_dialect(
+            "SELECT * FROM test_table",
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap()
+        .remove(0);
+
+        assert_eq!(&expected_query, &stmt);
+    }
+
+    #[test]
+    fn test_copy_query_to_stdout_with_equals_format() {
+        let sql = "COPY (SELECT * FROM test_table) TO STDOUT WITH (FORMAT = 'binary')";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+
+        if let Err(e) = &result {
+            panic!(
+                "COPY TO STDOUT WITH (FORMAT = 'binary') should parse without error, got: {:?}",
+                e
+            );
+        }
+
+        let stmt = result.unwrap().pop().unwrap();
+
+        let expected_query = ParserContext::create_with_dialect(
+            "SELECT * FROM test_table",
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap()
+        .remove(0);
+
+        assert_eq!(&expected_query, &stmt);
+    }
+
+    #[test]
+    fn test_copy_query_to_stdout_with_multiple_options() {
+        let sql =
+            "COPY (SELECT * FROM test_table) TO STDOUT WITH (FORMAT csv, DELIMITER ',', HEADER)";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+
+        if let Err(e) = &result {
+            panic!(
+                "COPY TO STDOUT WITH multiple options should parse without error, got: {:?}",
+                e
+            );
+        }
+
+        let stmt = result.unwrap().pop().unwrap();
+
+        let expected_query = ParserContext::create_with_dialect(
+            "SELECT * FROM test_table",
             &GreptimeDbDialect {},
             ParseOptions::default(),
         )

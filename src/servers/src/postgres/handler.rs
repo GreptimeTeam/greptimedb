@@ -91,12 +91,12 @@ impl SimpleQueryHandler for PostgresServerHandlerInner {
 
             let mut results = Vec::with_capacity(outputs.len());
 
-            let copy_format = parsed_query
-                .ok()
-                .and_then(|statements| statements.into_iter().next())
-                .and_then(|stmt| check_copy_to_stdout(&stmt));
-
-            for output in outputs {
+            let statements = parsed_query.ok();
+            for (idx, output) in outputs.into_iter().enumerate() {
+                let copy_format = statements
+                    .as_ref()
+                    .and_then(|stmts| stmts.get(idx))
+                    .and_then(|stmt| check_copy_to_stdout(stmt));
                 let resp = if let Some(format) = &copy_format {
                     output_to_copy_response(query_ctx.clone(), output, format)?
                 } else {
@@ -231,14 +231,20 @@ fn recordbatches_to_copy_response<S>(
 where
     S: Stream<Item = RecordBatchResult<RecordBatch>> + Send + Unpin + 'static,
 {
+    fn create_encode(format: &str, pg_schema: Arc<Vec<FieldInfo>>) -> CopyEncoder {
+        match format {
+            "csv" => CopyEncoder::new_csv(pg_schema, CopyCsvOptions::default()),
+            "binary" => CopyEncoder::new_binary(pg_schema),
+            _ => CopyEncoder::new_text(pg_schema, CopyTextOptions::default()),
+        }
+    }
     let format_options = format_options_from_query_ctx(&query_ctx);
     let pg_fields = schema_to_pg(schema.as_ref(), &Format::UnifiedText, Some(format_options))
         .map_err(convert_err)?;
 
     let copy_format = match format.to_lowercase().as_str() {
-        "csv" => 0,
         "binary" => 1,
-        _ => 2,
+        _ => 0,
     };
 
     let pg_schema = Arc::new(pg_fields);
@@ -251,11 +257,8 @@ where
     let copy_stream = recordbatches_stream
         .map(move |result| match result {
             Ok(record_batch) => {
-                let copy_encoder = match format_lower_for_stream.as_str() {
-                    "csv" => CopyEncoder::new_csv(pg_schema_clone.clone(), CopyCsvOptions::default()),
-                    "binary" => CopyEncoder::new_binary(pg_schema_clone.clone()),
-                    _ => CopyEncoder::new_text(pg_schema_clone.clone(), CopyTextOptions::default()),
-                };
+                let copy_encoder =
+                    create_encode(format_lower_for_stream.as_str(), pg_schema_clone.clone());
                 stream::iter(RecordBatchRowIterator::new(
                     query_ctx.clone(),
                     pg_schema_clone.clone(),
@@ -268,12 +271,9 @@ where
         })
         .flatten();
 
-    let mut final_encoder = match format_lower.as_str() {
-        "csv" => CopyEncoder::new_csv(pg_schema.clone(), CopyCsvOptions::default()),
-        "binary" => CopyEncoder::new_binary(pg_schema.clone()),
-        _ => CopyEncoder::new_text(pg_schema.clone(), CopyTextOptions::default()),
-    };
-    let final_stream = copy_stream.chain(stream::once(async move { Ok(final_encoder.finish_copy()) }));
+    let mut final_encoder = create_encode(format_lower.as_str(), pg_schema);
+    let final_stream =
+        copy_stream.chain(stream::once(async move { Ok(final_encoder.finish_copy()) }));
 
     Ok(Response::CopyOut(CopyResponse::new(
         copy_format,
@@ -653,43 +653,54 @@ mod tests {
 
     #[test]
     fn test_check_copy_out_with_csv_format() {
-        let statement = parse_copy_statement("COPY test_table TO STDOUT WITH FORMAT CSV");
+        let statement = parse_copy_statement("COPY (SELECT 1) TO STDOUT WITH (FORMAT CSV)");
         assert_eq!(check_copy_to_stdout(&statement), Some("csv".to_string()));
     }
 
     #[test]
     fn test_check_copy_out_with_txt_format() {
-        let statement = parse_copy_statement("COPY test_table TO STDOUT WITH FORMAT TXT");
+        let statement = parse_copy_statement("COPY (SELECT 1) TO STDOUT WITH (FORMAT TXT)");
         assert_eq!(check_copy_to_stdout(&statement), Some("txt".to_string()));
     }
 
     #[test]
+    fn test_check_copy_out_with_binary_format() {
+        let statement = parse_copy_statement("COPY (SELECT 1) TO STDOUT WITH (FORMAT BINARY)");
+        assert_eq!(check_copy_to_stdout(&statement), Some("binary".to_string()));
+    }
+
+    #[test]
     fn test_check_copy_out_without_format() {
-        let statement = parse_copy_statement("COPY test_table TO STDOUT");
+        let statement = parse_copy_statement("COPY (SELECT 1) TO STDOUT");
         assert_eq!(check_copy_to_stdout(&statement), Some("txt".to_string()));
     }
 
     #[test]
     fn test_check_copy_out_to_file() {
-        let statement = parse_copy_statement("COPY test_table TO '/path/to/file.csv' WITH FORMAT CSV");
+        let statement =
+            parse_copy_statement("COPY (SELECT 1) TO '/path/to/file.csv' WITH (FORMAT CSV)");
         assert_eq!(check_copy_to_stdout(&statement), None);
     }
 
     #[test]
-    fn test_check_copy_out_with_other_options() {
-        let statement = parse_copy_statement("COPY test_table TO STDOUT WITH DELIMITER ',' HEADER FORMAT CSV");
+    fn test_check_copy_out_case_insensitive() {
+        let statement = parse_copy_statement("COPY (SELECT 1) TO STDOUT WITH (FORMAT csv)");
         assert_eq!(check_copy_to_stdout(&statement), Some("csv".to_string()));
-    }
 
-    #[test]
-    fn test_check_copy_out_format_before_other_options() {
-        let statement = parse_copy_statement("COPY test_table TO STDOUT WITH FORMAT BINARY DELIMITER ',' HEADER");
+        let statement = parse_copy_statement("COPY (SELECT 1) TO STDOUT WITH (FORMAT binary)");
         assert_eq!(check_copy_to_stdout(&statement), Some("binary".to_string()));
     }
 
     #[test]
-    fn test_check_copy_out_case_insensitive() {
-        let statement = parse_copy_statement("COPY test_table TO STDOUT WITH FORMAT CSV");
+    fn test_check_copy_out_with_multiple_options() {
+        let statement = parse_copy_statement(
+            "COPY (SELECT 1) TO STDOUT WITH (FORMAT csv, DELIMITER ',', HEADER)",
+        );
         assert_eq!(check_copy_to_stdout(&statement), Some("csv".to_string()));
+
+        let statement = parse_copy_statement(
+            "COPY (SELECT 1) TO STDOUT WITH (DELIMITER ',', HEADER, FORMAT binary)",
+        );
+        assert_eq!(check_copy_to_stdout(&statement), Some("binary".to_string()));
     }
 }
