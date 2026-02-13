@@ -761,7 +761,7 @@ pub(super) fn parameters_to_scalar_values(
                 }
             }
             &Type::INT2_ARRAY => {
-                let data = portal.parameter::<Vec<i16>>(idx, &client_type)?;
+                let data = portal.parameter::<Vec<Option<i16>>>(idx, &client_type)?;
                 if let Some(data) = data {
                     let values = data.into_iter().map(|i| i.into()).collect::<Vec<_>>();
                     ScalarValue::List(ScalarValue::new_list(&values, &ArrowDataType::Int16, true))
@@ -770,7 +770,7 @@ pub(super) fn parameters_to_scalar_values(
                 }
             }
             &Type::INT4_ARRAY => {
-                let data = portal.parameter::<Vec<i32>>(idx, &client_type)?;
+                let data = portal.parameter::<Vec<Option<i32>>>(idx, &client_type)?;
                 if let Some(data) = data {
                     let values = data.into_iter().map(|i| i.into()).collect::<Vec<_>>();
                     ScalarValue::List(ScalarValue::new_list(&values, &ArrowDataType::Int32, true))
@@ -779,7 +779,7 @@ pub(super) fn parameters_to_scalar_values(
                 }
             }
             &Type::INT8_ARRAY => {
-                let data = portal.parameter::<Vec<i64>>(idx, &client_type)?;
+                let data = portal.parameter::<Vec<Option<i64>>>(idx, &client_type)?;
                 if let Some(data) = data {
                     let values = data.into_iter().map(|i| i.into()).collect::<Vec<_>>();
                     ScalarValue::List(ScalarValue::new_list(&values, &ArrowDataType::Int64, true))
@@ -788,7 +788,7 @@ pub(super) fn parameters_to_scalar_values(
                 }
             }
             &Type::VARCHAR_ARRAY => {
-                let data = portal.parameter::<Vec<String>>(idx, &client_type)?;
+                let data = portal.parameter::<Vec<Option<String>>>(idx, &client_type)?;
                 if let Some(data) = data {
                     let values = data.into_iter().map(|i| i.into()).collect::<Vec<_>>();
                     ScalarValue::List(ScalarValue::new_list(&values, &ArrowDataType::Utf8, true))
@@ -797,7 +797,7 @@ pub(super) fn parameters_to_scalar_values(
                 }
             }
             &Type::TIMESTAMP_ARRAY => {
-                let data = portal.parameter::<Vec<NaiveDateTime>>(idx, &client_type)?;
+                let data = portal.parameter::<Vec<Option<NaiveDateTime>>>(idx, &client_type)?;
                 if let Some(data) = data {
                     if let Some(ConcreteDataType::List(list_type)) = &server_type {
                         match list_type.item_type() {
@@ -807,7 +807,7 @@ pub(super) fn parameters_to_scalar_values(
                                         .into_iter()
                                         .map(|ts| {
                                             ScalarValue::TimestampSecond(
-                                                Some(ts.and_utc().timestamp()),
+                                                ts.map(|ts| ts.and_utc().timestamp()),
                                                 None,
                                             )
                                         })
@@ -823,7 +823,7 @@ pub(super) fn parameters_to_scalar_values(
                                         .into_iter()
                                         .map(|ts| {
                                             ScalarValue::TimestampMillisecond(
-                                                Some(ts.and_utc().timestamp_millis()),
+                                                ts.map(|ts| ts.and_utc().timestamp_millis()),
                                                 None,
                                             )
                                         })
@@ -839,7 +839,7 @@ pub(super) fn parameters_to_scalar_values(
                                         .into_iter()
                                         .map(|ts| {
                                             ScalarValue::TimestampMicrosecond(
-                                                Some(ts.and_utc().timestamp_micros()),
+                                                ts.map(|ts| ts.and_utc().timestamp_micros()),
                                                 None,
                                             )
                                         })
@@ -854,8 +854,13 @@ pub(super) fn parameters_to_scalar_values(
                                     let values = data
                                         .into_iter()
                                         .filter_map(|ts| {
-                                            ts.and_utc().timestamp_nanos_opt().map(|nanos| {
-                                                ScalarValue::TimestampNanosecond(Some(nanos), None)
+                                            ts.and_then(|ts| {
+                                                ts.and_utc().timestamp_nanos_opt().map(|nanos| {
+                                                    ScalarValue::TimestampNanosecond(
+                                                        Some(nanos),
+                                                        None,
+                                                    )
+                                                })
                                             })
                                         })
                                         .collect::<Vec<_>>();
@@ -878,12 +883,11 @@ pub(super) fn parameters_to_scalar_values(
                             }
                         }
                     } else {
-                        // Default to millisecond when no server type is specified
                         let values = data
                             .into_iter()
                             .map(|ts| {
                                 ScalarValue::TimestampMillisecond(
-                                    Some(ts.and_utc().timestamp_millis()),
+                                    ts.map(|ts| ts.and_utc().timestamp_millis()),
                                     None,
                                 )
                             })
@@ -899,7 +903,8 @@ pub(super) fn parameters_to_scalar_values(
                 }
             }
             &Type::TIMESTAMPTZ_ARRAY => {
-                let data = portal.parameter::<Vec<DateTime<FixedOffset>>>(idx, &client_type)?;
+                let data =
+                    portal.parameter::<Vec<Option<DateTime<FixedOffset>>>>(idx, &client_type)?;
                 if let Some(data) = data {
                     if let Some(ConcreteDataType::List(list_type)) = &server_type {
                         match list_type.item_type() {
@@ -908,7 +913,10 @@ pub(super) fn parameters_to_scalar_values(
                                     let values = data
                                         .into_iter()
                                         .map(|ts| {
-                                            ScalarValue::TimestampSecond(Some(ts.timestamp()), None)
+                                            ScalarValue::TimestampSecond(
+                                                ts.map(|ts| ts.timestamp()),
+                                                None,
+                                            )
                                         })
                                         .collect::<Vec<_>>();
                                     ScalarValue::List(ScalarValue::new_list(
@@ -922,7 +930,7 @@ pub(super) fn parameters_to_scalar_values(
                                         .into_iter()
                                         .map(|ts| {
                                             ScalarValue::TimestampMillisecond(
-                                                Some(ts.timestamp_millis()),
+                                                ts.map(|ts| ts.timestamp_millis()),
                                                 None,
                                             )
                                         })
@@ -938,7 +946,7 @@ pub(super) fn parameters_to_scalar_values(
                                         .into_iter()
                                         .map(|ts| {
                                             ScalarValue::TimestampMicrosecond(
-                                                Some(ts.timestamp_micros()),
+                                                ts.map(|ts| ts.timestamp_micros()),
                                                 None,
                                             )
                                         })
@@ -953,8 +961,13 @@ pub(super) fn parameters_to_scalar_values(
                                     let values = data
                                         .into_iter()
                                         .filter_map(|ts| {
-                                            ts.timestamp_nanos_opt().map(|nanos| {
-                                                ScalarValue::TimestampNanosecond(Some(nanos), None)
+                                            ts.and_then(|ts| {
+                                                ts.timestamp_nanos_opt().map(|nanos| {
+                                                    ScalarValue::TimestampNanosecond(
+                                                        Some(nanos),
+                                                        None,
+                                                    )
+                                                })
                                             })
                                         })
                                         .collect::<Vec<_>>();
@@ -977,11 +990,13 @@ pub(super) fn parameters_to_scalar_values(
                             }
                         }
                     } else {
-                        // Default to millisecond when no server type is specified
                         let values = data
                             .into_iter()
                             .map(|ts| {
-                                ScalarValue::TimestampMillisecond(Some(ts.timestamp_millis()), None)
+                                ScalarValue::TimestampMillisecond(
+                                    ts.map(|ts| ts.timestamp_millis()),
+                                    None,
+                                )
                             })
                             .collect::<Vec<_>>();
                         ScalarValue::List(ScalarValue::new_list(

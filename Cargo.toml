@@ -343,6 +343,7 @@ datafusion-datasource = { git = "https://github.com/GreptimeTeam/datafusion.git"
 datafusion-sql = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7143b2fc4492a7970774583ed0997a459f3e5c05" }
 datafusion-substrait = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7143b2fc4492a7970774583ed0997a459f3e5c05" }
 sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "d7d95a44889e099e32d78e9bad9bc00598faef28" }                           # on branch v0.59.x
+pgwire = { git = "https://github.com/sunng87/pgwire.git", branch = "feature/copy-encoding" }
 
 [profile.release]
 debug = 1
