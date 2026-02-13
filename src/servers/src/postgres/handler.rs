@@ -96,7 +96,7 @@ impl SimpleQueryHandler for PostgresServerHandlerInner {
                 let copy_format = statements
                     .as_ref()
                     .and_then(|stmts| stmts.get(idx))
-                    .and_then(|stmt| check_copy_to_stdout(stmt));
+                    .and_then(check_copy_to_stdout);
                 let resp = if let Some(format) = &copy_format {
                     output_to_copy_response(query_ctx.clone(), output, format)?
                 } else {
@@ -626,16 +626,16 @@ fn check_copy_to_stdout(statement: &SqlParserStatement) -> Option<String> {
     if let SqlParserStatement::Copy {
         target, options, ..
     } = statement
+        && matches!(target, CopyTarget::Stdout)
     {
-        if matches!(target, CopyTarget::Stdout) {
-            for opt in options {
-                if let CopyOption::Format(format_ident) = opt {
-                    return Some(format_ident.value.to_lowercase());
-                }
+        for opt in options {
+            if let CopyOption::Format(format_ident) = opt {
+                return Some(format_ident.value.to_lowercase());
             }
-            return Some("txt".to_string());
         }
+        return Some("txt".to_string());
     }
+
     None
 }
 

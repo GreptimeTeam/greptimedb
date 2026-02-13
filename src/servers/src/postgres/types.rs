@@ -171,7 +171,7 @@ impl<S: Encoder> RecordBatchRowIterator<S> {
                 }
                 DataType::Struct(_) => {
                     encode_struct(
-                        &mut &self.query_ctx,
+                        &self.query_ctx,
                         Default::default(),
                         &mut self.encoder,
                         pg_field,
