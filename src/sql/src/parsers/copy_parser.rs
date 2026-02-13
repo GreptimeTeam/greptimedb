@@ -163,23 +163,26 @@ impl ParserContext<'_> {
         if self.parser.parse_keyword(Keyword::STDOUT) {
             // early return without parsing options
             // we will deal with copy to stdout on postgres protocol layer
-            // consume WITH (...) options if present (they will be ignored)
-            // we support both "WITH (FORMAT binary)" and "WITH (FORMAT = 'binary')"
-            // but we just consume them without parsing
-            if self.parser.parse_keyword(Keyword::WITH) {
-                if self.parser.peek_token().token == Token::LParen {
-                    let _ = self.parser.next_token();
-                    // consume all tokens until we find matching RParen
-                    let mut depth = 1;
-                    while depth > 0 {
-                        match self.parser.next_token().token {
-                            Token::LParen => depth += 1,
-                            Token::RParen => depth -= 1,
-                            _ => {}
-                        }
+            // consume [WITH] (...) options if present (they will be ignored)
+            // we support both "WITH (FORMAT binary)" and "(FORMAT binary)"
+            // for PostgreSQL compatibility
+
+            // Check for optional WITH keyword or direct LParen (PostgreSQL syntax)
+            // Both "WITH (...)" and "(...)" are valid after STDOUT
+            let _ = self.parser.parse_keyword(Keyword::WITH);
+            if self.parser.peek_token().token == Token::LParen {
+                let _ = self.parser.next_token();
+                // consume all tokens until we find matching RParen
+                let mut depth = 1;
+                while depth > 0 {
+                    match self.parser.next_token().token {
+                        Token::LParen => depth += 1,
+                        Token::RParen => depth -= 1,
+                        _ => {}
                     }
                 }
             }
+
             Ok(CopyQueryTo {
                 query: Box::new(query),
                 arg: CopyQueryToArgument {
@@ -713,6 +716,84 @@ mod tests {
         if let Err(e) = &result {
             panic!(
                 "COPY TO STDOUT WITH multiple options should parse without error, got: {:?}",
+                e
+            );
+        }
+
+        let stmt = result.unwrap().pop().unwrap();
+
+        let expected_query = ParserContext::create_with_dialect(
+            "SELECT * FROM test_table",
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap()
+        .remove(0);
+
+        assert_eq!(&expected_query, &stmt);
+    }
+
+    #[test]
+    fn test_copy_query_to_stdout_without_with_keyword() {
+        let sql = "COPY (SELECT * FROM test_table) TO STDOUT (FORMAT binary)";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+
+        if let Err(e) = &result {
+            panic!(
+                "COPY TO STDOUT (FORMAT binary) without WITH keyword should parse without error, got: {:?}",
+                e
+            );
+        }
+
+        let stmt = result.unwrap().pop().unwrap();
+
+        let expected_query = ParserContext::create_with_dialect(
+            "SELECT * FROM test_table",
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap()
+        .remove(0);
+
+        assert_eq!(&expected_query, &stmt);
+    }
+
+    #[test]
+    fn test_copy_query_to_stdout_without_with_csv_format() {
+        let sql = "COPY (SELECT * FROM test_table) TO STDOUT (FORMAT csv)";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+
+        if let Err(e) = &result {
+            panic!(
+                "COPY TO STDOUT (FORMAT csv) without WITH keyword should parse without error, got: {:?}",
+                e
+            );
+        }
+
+        let stmt = result.unwrap().pop().unwrap();
+
+        let expected_query = ParserContext::create_with_dialect(
+            "SELECT * FROM test_table",
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap()
+        .remove(0);
+
+        assert_eq!(&expected_query, &stmt);
+    }
+
+    #[test]
+    fn test_copy_query_to_stdout_without_with_multiple_options() {
+        let sql = "COPY (SELECT * FROM test_table) TO STDOUT (FORMAT csv, DELIMITER ',', HEADER)";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+
+        if let Err(e) = &result {
+            panic!(
+                "COPY TO STDOUT (FORMAT csv, ...) without WITH keyword should parse without error, got: {:?}",
                 e
             );
         }
