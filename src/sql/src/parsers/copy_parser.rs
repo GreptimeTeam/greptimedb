@@ -32,22 +32,34 @@ impl ParserContext<'_> {
     pub(crate) fn parse_copy(&mut self) -> Result<Statement> {
         let _ = self.parser.next_token();
         let next = self.parser.peek_token();
-        let copy = if next.token == Token::LParen {
+        if next.token == Token::LParen {
             let copy_query = self.parse_copy_query_to()?;
-
-            crate::statements::copy::Copy::CopyQueryTo(copy_query)
+            // the COPY ... TO STDOUT is a special case for postgres wire protocol
+            // the logic is completely identical to query, but with an alternative data encoding on transport
+            //
+            // so at the query engine level, we simple parse the command as it's inner query
+            // we will deal with the encoding and its format options in server/src/postgres/handler.rs
+            if copy_query.arg.location == "STDOUT" {
+                Ok(*copy_query.query)
+            } else {
+                Ok(Statement::Copy(crate::statements::copy::Copy::CopyQueryTo(
+                    copy_query,
+                )))
+            }
         } else if let Word(word) = next.token
             && word.keyword == Keyword::DATABASE
         {
             let _ = self.parser.next_token();
             let copy_database = self.parser_copy_database()?;
-            crate::statements::copy::Copy::CopyDatabase(copy_database)
+            Ok(Statement::Copy(
+                crate::statements::copy::Copy::CopyDatabase(copy_database),
+            ))
         } else {
             let copy_table = self.parse_copy_table()?;
-            crate::statements::copy::Copy::CopyTable(copy_table)
-        };
-
-        Ok(Statement::Copy(copy))
+            Ok(Statement::Copy(crate::statements::copy::Copy::CopyTable(
+                copy_table,
+            )))
+        }
     }
 
     fn parser_copy_database(&mut self) -> Result<CopyDatabase> {
@@ -147,21 +159,36 @@ impl ParserContext<'_> {
         self.parser
             .expect_keyword(Keyword::TO)
             .context(error::SyntaxSnafu)?;
-        let (with, connection, location, limit) = self.parse_copy_parameters()?;
-        if limit.is_some() {
-            return error::InvalidSqlSnafu {
-                msg: "limit is not supported",
+
+        if self.parser.parse_keyword(Keyword::STDOUT) {
+            self.parser
+                .parse_options(Keyword::WITH)
+                .context(error::SyntaxSnafu)?;
+            Ok(CopyQueryTo {
+                query: Box::new(query),
+                arg: CopyQueryToArgument {
+                    with: OptionMap::default(),
+                    connection: OptionMap::default(),
+                    location: "STDOUT".to_string(),
+                },
+            })
+        } else {
+            let (with, connection, location, limit) = self.parse_copy_parameters()?;
+            if limit.is_some() {
+                return error::InvalidSqlSnafu {
+                    msg: "limit is not supported",
+                }
+                .fail();
             }
-            .fail();
+            Ok(CopyQueryTo {
+                query: Box::new(query),
+                arg: CopyQueryToArgument {
+                    with,
+                    connection,
+                    location,
+                },
+            })
         }
-        Ok(CopyQueryTo {
-            query: Box::new(query),
-            arg: CopyQueryToArgument {
-                with,
-                connection,
-                location,
-            },
-        })
     }
 
     fn parse_copy_parameters(&mut self) -> Result<(OptionMap, OptionMap, String, Option<u64>)> {
@@ -539,5 +566,46 @@ mod tests {
                 .is_err()
             )
         }
+    }
+
+    #[test]
+    fn test_copy_query_to_stdout() {
+        let sql = "COPY (SELECT * FROM tbl WHERE ts > 10) TO STDOUT WITH (FORMAT = 'csv')";
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+
+        let expected_query = ParserContext::create_with_dialect(
+            "SELECT * FROM tbl WHERE ts > 10",
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap()
+        .remove(0);
+
+        assert_eq!(&expected_query, &stmt);
+    }
+
+    #[test]
+    fn test_copy_query_to_stdout_without_format() {
+        let sql = "COPY (SELECT generate_series(1, 2), generate_series(2, 3)) TO STDOUT";
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+
+        let query_str = "SELECT generate_series(1, 2), generate_series(2, 3)";
+        let expected_query = ParserContext::create_with_dialect(
+            query_str,
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap()
+        .remove(0);
+
+        assert_eq!(&expected_query, &stmt);
     }
 }
