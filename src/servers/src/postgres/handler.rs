@@ -20,6 +20,7 @@ use common_query::{Output, OutputData};
 use common_recordbatch::RecordBatch;
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_telemetry::{debug, tracing};
+use datafusion::sql::sqlparser::ast::{CopyOption, CopyTarget, Statement as SqlParserStatement};
 use datafusion_common::ParamValues;
 use datafusion_pg_catalog::sql::PostgresCompatibilityParser;
 use datatypes::prelude::ConcreteDataType;
@@ -28,6 +29,7 @@ use futures::{Sink, SinkExt, Stream, StreamExt, future, stream};
 use pgwire::api::portal::{Format, Portal};
 use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
 use pgwire::api::results::{
+    CopyCsvOptions, CopyEncoder, CopyResponse, CopyTextOptions, DataRowEncoder,
     DescribePortalResponse, DescribeStatementResponse, FieldInfo, QueryResponse, Response, Tag,
 };
 use pgwire::api::stmt::{QueryParser, StoredStatement};
@@ -69,7 +71,9 @@ impl SimpleQueryHandler for PostgresServerHandlerInner {
             return Ok(vec![Response::EmptyQuery]);
         }
 
-        let query = if let Ok(statements) = self.query_parser.compatibility_parser.parse(query) {
+        let parsed_query = self.query_parser.compatibility_parser.parse(query);
+
+        let query = if let Ok(statements) = &parsed_query {
             statements
                 .iter()
                 .map(|s| s.to_string())
@@ -87,9 +91,17 @@ impl SimpleQueryHandler for PostgresServerHandlerInner {
 
             let mut results = Vec::with_capacity(outputs.len());
 
+            let copy_format = parsed_query
+                .ok()
+                .and_then(|statements| statements.into_iter().next())
+                .and_then(|stmt| check_copy_to_stdout(&stmt));
+
             for output in outputs {
-                let resp =
-                    output_to_query_response(query_ctx.clone(), output, &Format::UnifiedText)?;
+                let resp = if let Some(format) = &copy_format {
+                    output_to_copy_response(query_ctx.clone(), output, format)?
+                } else {
+                    output_to_query_response(query_ctx.clone(), output, &Format::UnifiedText)?
+                };
                 results.push(resp);
             }
 
@@ -165,12 +177,16 @@ where
     let pg_schema_ref = pg_schema.clone();
     let data_row_stream = recordbatches_stream
         .map(move |result| match result {
-            Ok(record_batch) => stream::iter(RecordBatchRowIterator::new(
-                query_ctx.clone(),
-                pg_schema_ref.clone(),
-                record_batch,
-            ))
-            .boxed(),
+            Ok(record_batch) => {
+                let data_row_encoder = DataRowEncoder::new(pg_schema_ref.clone());
+                stream::iter(RecordBatchRowIterator::new(
+                    query_ctx.clone(),
+                    pg_schema_ref.clone(),
+                    record_batch,
+                    data_row_encoder,
+                ))
+                .boxed()
+            }
             Err(e) => stream::once(future::err(convert_err(e))).boxed(),
         })
         .flatten();
@@ -178,6 +194,91 @@ where
     Ok(Response::Query(QueryResponse::new(
         pg_schema,
         data_row_stream,
+    )))
+}
+
+pub(crate) fn output_to_copy_response(
+    query_ctx: QueryContextRef,
+    output: Result<Output>,
+    format: &str,
+) -> PgWireResult<Response> {
+    match output {
+        Ok(o) => match o.data {
+            OutputData::AffectedRows(_) => Err(PgWireError::UserError(Box::new(ErrorInfo::new(
+                "ERROR".to_string(),
+                "42601".to_string(),
+                "COPY cannot be used with non-query statements".to_string(),
+            )))),
+            OutputData::Stream(record_stream) => {
+                let schema = record_stream.schema();
+                recordbatches_to_copy_response(query_ctx, record_stream, schema, format)
+            }
+            OutputData::RecordBatches(recordbatches) => {
+                let schema = recordbatches.schema();
+                recordbatches_to_copy_response(query_ctx, recordbatches.as_stream(), schema, format)
+            }
+        },
+        Err(e) => Err(convert_err(e)),
+    }
+}
+
+fn recordbatches_to_copy_response<S>(
+    query_ctx: QueryContextRef,
+    recordbatches_stream: S,
+    schema: SchemaRef,
+    format: &str,
+) -> PgWireResult<Response>
+where
+    S: Stream<Item = RecordBatchResult<RecordBatch>> + Send + Unpin + 'static,
+{
+    let format_options = format_options_from_query_ctx(&query_ctx);
+    let pg_fields = schema_to_pg(schema.as_ref(), &Format::UnifiedText, Some(format_options))
+        .map_err(convert_err)?;
+
+    let copy_format = match format.to_lowercase().as_str() {
+        "csv" => 0,
+        "binary" => 1,
+        _ => 2,
+    };
+
+    let pg_schema = Arc::new(pg_fields);
+    let num_columns = pg_schema.len();
+
+    let format_lower = format.to_lowercase();
+    let pg_schema_clone = pg_schema.clone();
+    let format_lower_for_stream = format_lower.clone();
+
+    let copy_stream = recordbatches_stream
+        .map(move |result| match result {
+            Ok(record_batch) => {
+                let copy_encoder = match format_lower_for_stream.as_str() {
+                    "csv" => CopyEncoder::new_csv(pg_schema_clone.clone(), CopyCsvOptions::default()),
+                    "binary" => CopyEncoder::new_binary(pg_schema_clone.clone()),
+                    _ => CopyEncoder::new_text(pg_schema_clone.clone(), CopyTextOptions::default()),
+                };
+                stream::iter(RecordBatchRowIterator::new(
+                    query_ctx.clone(),
+                    pg_schema_clone.clone(),
+                    record_batch,
+                    copy_encoder,
+                ))
+                .boxed()
+            }
+            Err(e) => stream::once(future::err(convert_err(e))).boxed(),
+        })
+        .flatten();
+
+    let mut final_encoder = match format_lower.as_str() {
+        "csv" => CopyEncoder::new_csv(pg_schema.clone(), CopyCsvOptions::default()),
+        "binary" => CopyEncoder::new_binary(pg_schema.clone()),
+        _ => CopyEncoder::new_text(pg_schema.clone(), CopyTextOptions::default()),
+    };
+    let final_stream = copy_stream.chain(stream::once(async move { Ok(final_encoder.finish_copy()) }));
+
+    Ok(Response::CopyOut(CopyResponse::new(
+        copy_format,
+        num_columns,
+        final_stream,
     )))
 }
 
@@ -217,15 +318,19 @@ impl QueryParser for DefaultQueryParser {
                 statement: None,
                 plan: None,
                 schema: None,
+                copy_to_stdout_format: None,
             });
         }
 
-        let sql = if let Ok(mut statements) = self.compatibility_parser.parse(sql) {
-            statements.remove(0).to_string()
+        let parsed_statements = self.compatibility_parser.parse(sql);
+        let (sql, copy_to_stdout_format) = if let Ok(mut statements) = parsed_statements {
+            let first_stmt = statements.remove(0);
+            let format = check_copy_to_stdout(&first_stmt);
+            (first_stmt.to_string(), format)
         } else {
             // bypass the error: it can run into error because of different
             // versions of sqlparser
-            sql.to_string()
+            (sql.to_string(), None)
         };
 
         let mut stmts = ParserContext::create_with_dialect(
@@ -262,6 +367,7 @@ impl QueryParser for DefaultQueryParser {
                 statement: Some(stmt),
                 plan,
                 schema,
+                copy_to_stdout_format,
             })
         }
     }
@@ -354,7 +460,12 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
         };
 
         send_warning_opt(client, query_ctx.clone()).await?;
-        output_to_query_response(query_ctx, output, &portal.result_column_format)
+
+        if let Some(format) = &sql_plan.copy_to_stdout_format {
+            output_to_copy_response(query_ctx, output, format)
+        } else {
+            output_to_query_response(query_ctx, output, &portal.result_column_format)
+        }
     }
 
     async fn do_describe_statement<C>(
@@ -508,5 +619,77 @@ impl ErrorHandler for PostgresServerHandlerInner {
         C: ClientInfo,
     {
         debug!("Postgres interface error {}", error)
+    }
+}
+
+fn check_copy_to_stdout(statement: &SqlParserStatement) -> Option<String> {
+    if let SqlParserStatement::Copy {
+        target, options, ..
+    } = statement
+    {
+        if matches!(target, CopyTarget::Stdout) {
+            for opt in options {
+                if let CopyOption::Format(format_ident) = opt {
+                    return Some(format_ident.value.to_lowercase());
+                }
+            }
+            return Some("txt".to_string());
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use datafusion_pg_catalog::sql::PostgresCompatibilityParser;
+
+    use super::*;
+
+    fn parse_copy_statement(sql: &str) -> SqlParserStatement {
+        let parser = PostgresCompatibilityParser::new();
+        let statements = parser.parse(sql).unwrap();
+        statements.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn test_check_copy_out_with_csv_format() {
+        let statement = parse_copy_statement("COPY test_table TO STDOUT WITH FORMAT CSV");
+        assert_eq!(check_copy_to_stdout(&statement), Some("csv".to_string()));
+    }
+
+    #[test]
+    fn test_check_copy_out_with_txt_format() {
+        let statement = parse_copy_statement("COPY test_table TO STDOUT WITH FORMAT TXT");
+        assert_eq!(check_copy_to_stdout(&statement), Some("txt".to_string()));
+    }
+
+    #[test]
+    fn test_check_copy_out_without_format() {
+        let statement = parse_copy_statement("COPY test_table TO STDOUT");
+        assert_eq!(check_copy_to_stdout(&statement), Some("txt".to_string()));
+    }
+
+    #[test]
+    fn test_check_copy_out_to_file() {
+        let statement = parse_copy_statement("COPY test_table TO '/path/to/file.csv' WITH FORMAT CSV");
+        assert_eq!(check_copy_to_stdout(&statement), None);
+    }
+
+    #[test]
+    fn test_check_copy_out_with_other_options() {
+        let statement = parse_copy_statement("COPY test_table TO STDOUT WITH DELIMITER ',' HEADER FORMAT CSV");
+        assert_eq!(check_copy_to_stdout(&statement), Some("csv".to_string()));
+    }
+
+    #[test]
+    fn test_check_copy_out_format_before_other_options() {
+        let statement = parse_copy_statement("COPY test_table TO STDOUT WITH FORMAT BINARY DELIMITER ',' HEADER");
+        assert_eq!(check_copy_to_stdout(&statement), Some("binary".to_string()));
+    }
+
+    #[test]
+    fn test_check_copy_out_case_insensitive() {
+        let statement = parse_copy_statement("COPY test_table TO STDOUT WITH FORMAT CSV");
+        assert_eq!(check_copy_to_stdout(&statement), Some("csv".to_string()));
     }
 }

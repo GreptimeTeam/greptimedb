@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow::array::{Array, AsArray};
-use arrow_pg::encoder::encode_value;
+use arrow_pg::encoder::{Encoder, encode_value};
 use arrow_pg::list_encoder::encode_list;
 use arrow_schema::{DataType, TimeUnit};
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime};
@@ -35,9 +35,8 @@ use datatypes::value::StructValue;
 use pg_interval::Interval as PgInterval;
 use pgwire::api::Type;
 use pgwire::api::portal::{Format, Portal};
-use pgwire::api::results::{DataRowEncoder, FieldInfo};
+use pgwire::api::results::FieldInfo;
 use pgwire::error::{PgWireError, PgWireResult};
-use pgwire::messages::data::DataRow;
 use pgwire::types::format::FormatOptions as PgFormatOptions;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
@@ -81,49 +80,51 @@ pub(super) fn schema_to_pg(
 /// there are alternatives like records, arrays, etc. but there are also limitations:
 /// records: there is no support for include keys
 /// arrays: element in array must be the same type
-fn encode_struct(
+fn encode_struct<S: Encoder>(
     _query_ctx: &QueryContextRef,
     struct_value: StructValue,
-    builder: &mut DataRowEncoder,
+    builder: &mut S,
+    pg_field: &FieldInfo,
 ) -> PgWireResult<()> {
     let encoding_setting = JsonStructureSettings::Structured(None);
     let json_value = encoding_setting
         .decode(Value::Struct(struct_value))
         .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
 
-    builder.encode_field(&json_value)
+    builder.encode_field(&json_value, pg_field)
 }
 
-pub(crate) struct RecordBatchRowIterator {
+pub(crate) struct RecordBatchRowIterator<S: Encoder> {
     query_ctx: QueryContextRef,
     pg_schema: Arc<Vec<FieldInfo>>,
     schema: SchemaRef,
     record_batch: arrow::record_batch::RecordBatch,
+    encoder: S,
     i: usize,
 }
 
-impl Iterator for RecordBatchRowIterator {
-    type Item = PgWireResult<DataRow>;
+impl<S: Encoder> Iterator for RecordBatchRowIterator<S> {
+    type Item = PgWireResult<S::Item>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let mut encoder = DataRowEncoder::new(self.pg_schema.clone());
         if self.i < self.record_batch.num_rows() {
-            if let Err(e) = self.encode_row(self.i, &mut encoder) {
+            if let Err(e) = self.encode_row(self.i) {
                 return Some(Err(e));
             }
             self.i += 1;
-            Some(Ok(encoder.take_row()))
+            Some(Ok(self.encoder.take_row()))
         } else {
             None
         }
     }
 }
 
-impl RecordBatchRowIterator {
+impl<S: Encoder> RecordBatchRowIterator<S> {
     pub(crate) fn new(
         query_ctx: QueryContextRef,
         pg_schema: Arc<Vec<FieldInfo>>,
         record_batch: RecordBatch,
+        encoder: S,
     ) -> Self {
         let schema = record_batch.schema.clone();
         let record_batch = record_batch.into_df_record_batch();
@@ -132,19 +133,21 @@ impl RecordBatchRowIterator {
             pg_schema,
             schema,
             record_batch,
+            encoder,
             i: 0,
         }
     }
 
-    fn encode_row(&mut self, i: usize, encoder: &mut DataRowEncoder) -> PgWireResult<()> {
+    fn encode_row(&mut self, i: usize) -> PgWireResult<()> {
         let arrow_schema = self.record_batch.schema();
         for (j, column) in self.record_batch.columns().iter().enumerate() {
+            let pg_field = &self.pg_schema[j];
+
             if column.is_null(i) {
-                encoder.encode_field(&None::<&i8>)?;
+                self.encoder.encode_field(&None::<&i8>, pg_field)?;
                 continue;
             }
 
-            let pg_field = &self.pg_schema[j];
             match column.data_type() {
                 // these types are greptimedb specific or custom
                 DataType::Binary | DataType::LargeBinary | DataType::BinaryView => {
@@ -152,11 +155,11 @@ impl RecordBatchRowIterator {
                     if let ConcreteDataType::Json(_) = &self.schema.column_schemas()[j].data_type {
                         let v = datatypes::arrow_array::binary_array_value(column, i);
                         let s = jsonb_to_string(v).map_err(convert_err)?;
-                        encoder.encode_field(&s)?;
+                        self.encoder.encode_field(&s, pg_field)?;
                     } else {
                         // bytea
                         let arrow_field = arrow_schema.field(j);
-                        encode_value(encoder, column, i, arrow_field, pg_field)?;
+                        encode_value(&mut self.encoder, column, i, arrow_field, pg_field)?;
                     }
                 }
 
@@ -164,15 +167,20 @@ impl RecordBatchRowIterator {
                     let array = column.as_list::<i32>();
                     let items = array.value(i);
 
-                    encode_list(encoder, items, pg_field)?;
+                    encode_list(&mut self.encoder, items, pg_field)?;
                 }
                 DataType::Struct(_) => {
-                    encode_struct(&self.query_ctx, Default::default(), encoder)?;
+                    encode_struct(
+                        &mut &self.query_ctx,
+                        Default::default(),
+                        &mut self.encoder,
+                        pg_field,
+                    )?;
                 }
                 _ => {
                     // Encode value using arrow-pg
                     let arrow_field = arrow_schema.field(j);
-                    encode_value(encoder, column, i, arrow_field, pg_field)?;
+                    encode_value(&mut self.encoder, column, i, arrow_field, pg_field)?;
                 }
             }
         }
@@ -1066,7 +1074,7 @@ mod test {
         TimestampSecondVector, UInt8Vector, UInt16Vector, UInt32Vector, UInt64Vector, VectorRef,
     };
     use pgwire::api::Type;
-    use pgwire::api::results::{FieldFormat, FieldInfo};
+    use pgwire::api::results::{DataRowEncoder, FieldFormat, FieldInfo};
     use session::context::QueryContextBuilder;
 
     use super::*;
@@ -1433,9 +1441,12 @@ mod test {
             .into();
         let schema = Arc::new(schema);
 
-        let rows = RecordBatchRowIterator::new(query_context, schema.clone(), record_batch)
-            .filter_map(|x| x.ok())
-            .collect::<Vec<_>>();
+        let encoder = DataRowEncoder::new(schema.clone());
+
+        let rows =
+            RecordBatchRowIterator::new(query_context, schema.clone(), record_batch, encoder)
+                .filter_map(|x| x.ok())
+                .collect::<Vec<_>>();
         assert_eq!(rows.len(), 3);
         for row in rows {
             assert_eq!(row.field_count, schema.len() as i16);

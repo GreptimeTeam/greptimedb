@@ -161,9 +161,8 @@ impl ParserContext<'_> {
             .context(error::SyntaxSnafu)?;
 
         if self.parser.parse_keyword(Keyword::STDOUT) {
-            self.parser
-                .parse_options(Keyword::WITH)
-                .context(error::SyntaxSnafu)?;
+            // early return without parsing options
+            // we will deal with copy to stdout on postgres protocol layer
             Ok(CopyQueryTo {
                 query: Box::new(query),
                 arg: CopyQueryToArgument {
