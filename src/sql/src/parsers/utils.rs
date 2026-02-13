@@ -76,6 +76,8 @@ pub fn is_tql(dialect: &dyn Dialect, sql: &str) -> Result<bool> {
 pub(crate) fn is_simple_tql_cte_query(query: &Query) -> bool {
     use sqlparser::ast::{SetExpr, TableFactor};
 
+    use crate::parser::ParserContext;
+
     let Some(hybrid_cte) = &query.hybrid_cte else {
         return false;
     };
@@ -111,7 +113,10 @@ pub(crate) fn is_simple_tql_cte_query(query: &Query) -> bool {
     let Some(ident) = name.0[0].as_ident() else {
         return false;
     };
-    ident.value.eq_ignore_ascii_case(&cte.name.value)
+
+    let reference = ParserContext::canonicalize_identifier(ident.clone()).value;
+    let cte_name = ParserContext::canonicalize_identifier(cte.name.clone()).value;
+    reference == cte_name
 }
 
 /// Convert a parser expression to a scalar value. This function will try the

@@ -21,6 +21,38 @@ SELECT * FROM tql;
 
 Affected Rows: 0
 
+CREATE TABLE tql (
+  ts timestamp(3) time index,
+  val DOUBLE,
+);
+
+Affected Rows: 0
+
+INSERT INTO TABLE tql VALUES
+  (0::Timestamp, 10),
+  (5000::Timestamp, 20),
+  (10000::Timestamp, 30),
+  (15000::Timestamp, 40);
+
+Affected Rows: 4
+
+-- Fail due to case sensitivity of CTE name
+CREATE FLOW calc_cte_case SINK TO metric_cte_join_sink EVAL INTERVAL '1m' AS
+WITH "TQL"(ts, the_value) AS (
+  TQL EVAL (now() - now(), now() - (now() - '15s'::interval), '5s') metric_cte
+)
+SELECT * FROM TQL;
+
+Error: 1004(InvalidArguments), Invalid flow query: WITH is only supported for the simplest TQL CTE in CREATE FLOW
+
+CREATE FLOW calc_cte_case SINK TO metric_cte_join_sink EVAL INTERVAL '1m' AS
+WITH "TQL"(ts, the_value) AS (
+  TQL EVAL (now() - now(), now() - (now() - '15s'::interval), '5s') metric_cte
+)
+SELECT * FROM "TQL";
+
+Affected Rows: 0
+
 SHOW CREATE TABLE metric_cte_sink;
 
 +-----------------+---------------------------------------------------+
@@ -39,6 +71,31 @@ SHOW CREATE TABLE metric_cte_sink;
 +-----------------+---------------------------------------------------+
 
 SELECT source_table_names FROM information_schema.flows WHERE flow_name = 'calc_cte';
+
++----------------------------+
+| source_table_names         |
++----------------------------+
+| greptime.public.metric_cte |
++----------------------------+
+
+SHOW CREATE TABLE metric_cte_join_sink;
+
++----------------------+-----------------------------------------------------+
+| Table                | Create Table                                        |
++----------------------+-----------------------------------------------------+
+| metric_cte_join_sink | CREATE TABLE IF NOT EXISTS "metric_cte_join_sink" ( |
+|                      |   "ts" TIMESTAMP(3) NOT NULL,                       |
+|                      |   "the_value" DOUBLE NULL,                          |
+|                      |   TIME INDEX ("ts")                                 |
+|                      | )                                                   |
+|                      |                                                     |
+|                      | ENGINE=mito                                         |
+|                      | WITH(                                               |
+|                      |   'comment' = 'Auto created table by flow engine'   |
+|                      | )                                                   |
++----------------------+-----------------------------------------------------+
+
+SELECT source_table_names FROM information_schema.flows WHERE flow_name = 'calc_cte_case';
 
 +----------------------------+
 | source_table_names         |
@@ -66,7 +123,31 @@ SELECT * FROM metric_cte_sink ORDER BY ts;
 | 1970-01-01T00:00:15 | 3.0       |
 +---------------------+-----------+
 
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('calc_cte_case');
+
++-----------------------------------+
+| ADMIN FLUSH_FLOW('calc_cte_case') |
++-----------------------------------+
+|  FLOW_FLUSHED  |
++-----------------------------------+
+
+SELECT * FROM metric_cte_join_sink ORDER BY ts;
+
++---------------------+-----------+
+| ts                  | the_value |
++---------------------+-----------+
+| 1970-01-01T00:00:00 | 0.0       |
+| 1970-01-01T00:00:05 | 1.0       |
+| 1970-01-01T00:00:10 | 2.0       |
+| 1970-01-01T00:00:15 | 3.0       |
++---------------------+-----------+
+
 DROP FLOW calc_cte;
+
+Affected Rows: 0
+
+DROP FLOW calc_cte_case;
 
 Affected Rows: 0
 
@@ -74,7 +155,15 @@ DROP TABLE metric_cte;
 
 Affected Rows: 0
 
+DROP TABLE tql;
+
+Affected Rows: 0
+
 DROP TABLE metric_cte_sink;
+
+Affected Rows: 0
+
+DROP TABLE metric_cte_join_sink;
 
 Affected Rows: 0
 
