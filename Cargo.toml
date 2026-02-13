@@ -191,8 +191,8 @@ pin-project = "1.0"
 pretty_assertions = "1.4.0"
 prometheus = { version = "0.14", features = ["process"] }
 promql-parser = { version = "0.7.1", features = ["ser"] }
-prost = { version = "0.14", features = ["no-recursion-limit"] }
-prost-types = "0.14"
+prost = { version = "=0.14.1", features = ["no-recursion-limit"] }
+prost-types = "=0.14.1"
 raft-engine = { version = "0.4.1", default-features = false }
 rand = "0.9"
 ratelimit = "0.10"
@@ -246,7 +246,7 @@ tower = "0.5"
 tower-http = "0.6"
 tracing = "0.1"
 tracing-appender = "0.2"
-tracing-opentelemetry = "0.31.0"
+tracing-opentelemetry = "0.32.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
 typetag = "0.2"
 uuid = { version = "1.17", features = ["serde", "v4", "fast-rng"] }
