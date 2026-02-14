@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use arrow::array::{Array, AsArray};
-use arrow_pg::encoder::{encode_value, Encoder};
+use arrow_pg::encoder::{Encoder, encode_value};
 use arrow_pg::list_encoder::encode_list;
 use arrow_schema::{DataType, TimeUnit};
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime};
@@ -33,22 +33,22 @@ use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::json::JsonStructureSettings;
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::{Schema, SchemaRef};
-use datatypes::types::{jsonb_to_string, IntervalType, TimestampType};
+use datatypes::types::{IntervalType, TimestampType, jsonb_to_string};
 use datatypes::value::StructValue;
 use futures::Stream;
 use pg_interval::Interval as PgInterval;
+use pgwire::api::Type;
 use pgwire::api::portal::{Format, Portal};
 use pgwire::api::results::FieldInfo;
-use pgwire::api::Type;
 use pgwire::error::{PgWireError, PgWireResult};
 use pgwire::types::format::FormatOptions as PgFormatOptions;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 
 pub use self::error::{PgErrorCode, PgErrorSeverity};
+use crate::SqlPlan;
 use crate::error::{self as server_error, DataFusionSnafu, Result};
 use crate::postgres::utils::convert_err;
-use crate::SqlPlan;
 
 pub(super) fn schema_to_pg(
     origin: &Schema,
@@ -150,9 +150,7 @@ where
 
                 Poll::Ready(Some(Ok(results)))
             }
-            Poll::Ready(Some(Err(e))) => {
-                Poll::Ready(Some(Err(convert_err(e))))
-            }
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(convert_err(e)))),
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
         }
@@ -1112,14 +1110,14 @@ mod test {
     use arrow_schema::{Field, IntervalUnit};
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{
-        BinaryVector, BooleanVector, DateVector, Float32Vector, Float64Vector, Int16Vector,
-        Int32Vector, Int64Vector, Int8Vector, IntervalDayTimeVector, IntervalMonthDayNanoVector,
+        BinaryVector, BooleanVector, DateVector, Float32Vector, Float64Vector, Int8Vector,
+        Int16Vector, Int32Vector, Int64Vector, IntervalDayTimeVector, IntervalMonthDayNanoVector,
         IntervalYearMonthVector, ListVector, NullVector, StringVector, TimeSecondVector,
-        TimestampSecondVector, UInt16Vector, UInt32Vector, UInt64Vector, UInt8Vector, VectorRef,
+        TimestampSecondVector, UInt8Vector, UInt16Vector, UInt32Vector, UInt64Vector, VectorRef,
     };
-    use futures::{stream, StreamExt as FuturesStreamExt};
-    use pgwire::api::results::{DataRowEncoder, FieldFormat, FieldInfo};
+    use futures::{StreamExt as FuturesStreamExt, stream};
     use pgwire::api::Type;
+    use pgwire::api::results::{DataRowEncoder, FieldFormat, FieldInfo};
     use session::context::QueryContextBuilder;
 
     use super::*;
