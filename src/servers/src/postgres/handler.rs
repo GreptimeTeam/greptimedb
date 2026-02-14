@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::fmt::Debug;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -36,6 +37,8 @@ use pgwire::api::stmt::{QueryParser, StoredStatement};
 use pgwire::api::{ClientInfo, ErrorHandler, Type};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use pgwire::messages::PgWireBackendMessage;
+use pgwire::messages::copy::CopyData;
+use pgwire::messages::data::DataRow;
 use query::query_engine::DescribeResult;
 use session::Session;
 use session::context::QueryContextRef;
@@ -161,6 +164,8 @@ pub(crate) fn output_to_query_response(
     }
 }
 
+type RowStream<T> = Pin<Box<dyn Stream<Item = PgWireResult<T>> + Send + Unpin>>;
+
 fn recordbatches_to_query_response<S>(
     query_ctx: QueryContextRef,
     recordbatches_stream: S,
@@ -174,22 +179,24 @@ where
     let pg_schema = Arc::new(
         schema_to_pg(schema.as_ref(), field_format, Some(format_options)).map_err(convert_err)?,
     );
-    let pg_schema_ref = pg_schema.clone();
-    let data_row_stream = recordbatches_stream
-        .map(move |result| match result {
-            Ok(record_batch) => {
-                let data_row_encoder = DataRowEncoder::new(pg_schema_ref.clone());
-                stream::iter(RecordBatchRowIterator::new(
-                    query_ctx.clone(),
-                    pg_schema_ref.clone(),
-                    record_batch,
-                    data_row_encoder,
-                ))
-                .boxed()
-            }
-            Err(e) => stream::once(future::err(convert_err(e))).boxed(),
-        })
-        .flatten();
+
+    let encoder = DataRowEncoder::new(pg_schema.clone());
+    let row_stream = RecordBatchRowStream::new(
+        query_ctx.clone(),
+        pg_schema.clone(),
+        schema.clone(),
+        recordbatches_stream,
+        encoder,
+    );
+
+    let data_row_stream: RowStream<DataRow> = Box::pin(
+        row_stream
+            .map(move |result| match result {
+                Ok(rows) => Box::pin(stream::iter(rows.into_iter().map(Ok))) as RowStream<DataRow>,
+                Err(e) => Box::pin(stream::once(future::ready(Err(e)))) as RowStream<DataRow>,
+            })
+            .flatten(),
+    );
 
     Ok(Response::Query(QueryResponse::new(
         pg_schema,
@@ -231,13 +238,6 @@ fn recordbatches_to_copy_response<S>(
 where
     S: Stream<Item = RecordBatchResult<RecordBatch>> + Send + Unpin + 'static,
 {
-    fn create_encode(format: &str, pg_schema: Arc<Vec<FieldInfo>>) -> CopyEncoder {
-        match format {
-            "csv" => CopyEncoder::new_csv(pg_schema, CopyCsvOptions::default()),
-            "binary" => CopyEncoder::new_binary(pg_schema),
-            _ => CopyEncoder::new_text(pg_schema, CopyTextOptions::default()),
-        }
-    }
     let format_options = format_options_from_query_ctx(&query_ctx);
     let pg_fields = schema_to_pg(schema.as_ref(), &Format::UnifiedText, Some(format_options))
         .map_err(convert_err)?;
@@ -250,30 +250,33 @@ where
     let pg_schema = Arc::new(pg_fields);
     let num_columns = pg_schema.len();
 
-    let format_lower = format.to_lowercase();
-    let pg_schema_clone = pg_schema.clone();
-    let format_lower_for_stream = format_lower.clone();
+    let copy_encoder = match format.to_lowercase().as_str() {
+        "csv" => CopyEncoder::new_csv(pg_schema.clone(), CopyCsvOptions::default()),
+        "binary" => CopyEncoder::new_binary(pg_schema.clone()),
+        _ => CopyEncoder::new_text(pg_schema.clone(), CopyTextOptions::default()),
+    };
 
-    let copy_stream = recordbatches_stream
-        .map(move |result| match result {
-            Ok(record_batch) => {
-                let copy_encoder =
-                    create_encode(format_lower_for_stream.as_str(), pg_schema_clone.clone());
-                stream::iter(RecordBatchRowIterator::new(
-                    query_ctx.clone(),
-                    pg_schema_clone.clone(),
-                    record_batch,
-                    copy_encoder,
-                ))
-                .boxed()
-            }
-            Err(e) => stream::once(future::err(convert_err(e))).boxed(),
-        })
-        .flatten();
+    let row_stream = RecordBatchRowStream::new(
+        query_ctx.clone(),
+        pg_schema.clone(),
+        schema.clone(),
+        recordbatches_stream,
+        copy_encoder,
+    );
 
-    let mut final_encoder = create_encode(format_lower.as_str(), pg_schema);
-    let final_stream =
-        copy_stream.chain(stream::once(async move { Ok(final_encoder.finish_copy()) }));
+    let copy_stream: RowStream<CopyData> = Box::pin(
+        row_stream
+            .map(move |result| match result {
+                Ok(rows) => Box::pin(stream::iter(rows.into_iter().map(Ok))) as RowStream<CopyData>,
+                Err(e) => Box::pin(stream::once(future::ready(Err(e)))) as RowStream<CopyData>,
+            })
+            .flatten(),
+    );
+
+    // for binary format, prepend header and finish packet
+    let final_stream = copy_stream.chain(stream::once(async move {
+        Ok(CopyEncoder::finish_copy(copy_format))
+    }));
 
     Ok(Response::CopyOut(CopyResponse::new(
         copy_format,

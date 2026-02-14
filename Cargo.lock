@@ -643,7 +643,7 @@ dependencies = [
 [[package]]
 name = "arrow-pg"
 version = "0.11.0"
-source = "git+https://github.com/datafusion-contrib/datafusion-postgres.git?branch=feature%2Farrow-pg-copy-encoder#c70891a1ba4f93543bf9224ba556fae28b9e31cf"
+source = "git+https://github.com/datafusion-contrib/datafusion-postgres.git?branch=feature%2Farrow-pg-copy-encoder#b48a109b9dbe60914a129f40bbb22351a69aaba3"
 dependencies = [
  "arrow 57.0.0",
  "arrow-schema 57.0.0",
@@ -6378,7 +6378,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.57.0",
+ "windows-core 0.61.2",
 ]
 
 [[package]]
@@ -9710,7 +9710,7 @@ dependencies = [
 [[package]]
 name = "pgwire"
 version = "0.37.3"
-source = "git+https://github.com/sunng87/pgwire.git?branch=feature%2Fcopy-encoding#8b420f8104f808b5011b3859554cf16356c11914"
+source = "git+https://github.com/sunng87/pgwire.git?branch=feature%2Fcopy-encoding#c1c09365b5a949bcf144e578397115ff689ff4a8"
 dependencies = [
  "async-trait",
  "base64 0.22.1",

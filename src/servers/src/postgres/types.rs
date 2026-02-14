@@ -15,14 +15,17 @@
 mod error;
 
 use std::collections::HashMap;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use arrow::array::{Array, AsArray};
-use arrow_pg::encoder::{Encoder, encode_value};
+use arrow_pg::encoder::{encode_value, Encoder};
 use arrow_pg::list_encoder::encode_list;
 use arrow_schema::{DataType, TimeUnit};
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime};
 use common_recordbatch::RecordBatch;
+use common_recordbatch::error::Result as RecordBatchResult;
 use common_time::{IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth};
 use datafusion_common::ScalarValue;
 use datafusion_expr::LogicalPlan;
@@ -30,21 +33,22 @@ use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::json::JsonStructureSettings;
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::{Schema, SchemaRef};
-use datatypes::types::{IntervalType, TimestampType, jsonb_to_string};
+use datatypes::types::{jsonb_to_string, IntervalType, TimestampType};
 use datatypes::value::StructValue;
+use futures::Stream;
 use pg_interval::Interval as PgInterval;
-use pgwire::api::Type;
 use pgwire::api::portal::{Format, Portal};
 use pgwire::api::results::FieldInfo;
+use pgwire::api::Type;
 use pgwire::error::{PgWireError, PgWireResult};
 use pgwire::types::format::FormatOptions as PgFormatOptions;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 
 pub use self::error::{PgErrorCode, PgErrorSeverity};
-use crate::SqlPlan;
 use crate::error::{self as server_error, DataFusionSnafu, Result};
 use crate::postgres::utils::convert_err;
+use crate::SqlPlan;
 
 pub(super) fn schema_to_pg(
     origin: &Schema,
@@ -94,57 +98,102 @@ fn encode_struct<S: Encoder>(
     builder.encode_field(&json_value, pg_field)
 }
 
-pub(crate) struct RecordBatchRowIterator<S: Encoder> {
+pub(crate) struct RecordBatchRowStream<S, B>
+where
+    S: Encoder,
+    B: Stream<Item = RecordBatchResult<RecordBatch>>,
+{
     query_ctx: QueryContextRef,
     pg_schema: Arc<Vec<FieldInfo>>,
     schema: SchemaRef,
-    record_batch: arrow::record_batch::RecordBatch,
+    record_batches: Pin<Box<B>>,
     encoder: S,
-    i: usize,
 }
 
-impl<S: Encoder> Iterator for RecordBatchRowIterator<S> {
-    type Item = PgWireResult<S::Item>;
+impl<S, B> Stream for RecordBatchRowStream<S, B>
+where
+    S: Encoder + Unpin,
+    B: Stream<Item = RecordBatchResult<RecordBatch>>,
+{
+    type Item = PgWireResult<Vec<S::Item>>;
 
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.i < self.record_batch.num_rows() {
-            if let Err(e) = self.encode_row(self.i) {
-                return Some(Err(e));
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match self.record_batches.as_mut().poll_next(cx) {
+            Poll::Ready(Some(Ok(batch))) => {
+                let record_batch = batch.into_df_record_batch();
+                let num_rows = record_batch.num_rows();
+
+                if num_rows == 0 {
+                    return Poll::Ready(Some(Ok(vec![])));
+                }
+
+                let arrow_schema = record_batch.schema();
+                let query_ctx = self.query_ctx.clone();
+                let pg_schema = self.pg_schema.clone();
+                let schema = self.schema.clone();
+                let mut results = Vec::with_capacity(num_rows);
+
+                for i in 0..num_rows {
+                    if let Err(e) = Self::encode_row(
+                        &query_ctx,
+                        &pg_schema,
+                        &schema,
+                        arrow_schema.as_ref(),
+                        &mut self.encoder,
+                        &record_batch,
+                        i,
+                    ) {
+                        return Poll::Ready(Some(Err(e)));
+                    }
+                    results.push(self.encoder.take_row());
+                }
+
+                Poll::Ready(Some(Ok(results)))
             }
-            self.i += 1;
-            Some(Ok(self.encoder.take_row()))
-        } else {
-            None
+            Poll::Ready(Some(Err(e))) => {
+                Poll::Ready(Some(Err(convert_err(e))))
+            }
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
         }
     }
 }
 
-impl<S: Encoder> RecordBatchRowIterator<S> {
+impl<S, B> RecordBatchRowStream<S, B>
+where
+    S: Encoder,
+    B: Stream<Item = RecordBatchResult<RecordBatch>>,
+{
     pub(crate) fn new(
         query_ctx: QueryContextRef,
         pg_schema: Arc<Vec<FieldInfo>>,
-        record_batch: RecordBatch,
+        schema: SchemaRef,
+        record_batches: B,
         encoder: S,
     ) -> Self {
-        let schema = record_batch.schema.clone();
-        let record_batch = record_batch.into_df_record_batch();
         Self {
             query_ctx,
             pg_schema,
             schema,
-            record_batch,
+            record_batches: Box::pin(record_batches),
             encoder,
-            i: 0,
         }
     }
 
-    fn encode_row(&mut self, i: usize) -> PgWireResult<()> {
-        let arrow_schema = self.record_batch.schema();
-        for (j, column) in self.record_batch.columns().iter().enumerate() {
-            let pg_field = &self.pg_schema[j];
+    fn encode_row(
+        query_ctx: &QueryContextRef,
+        pg_schema: &Arc<Vec<FieldInfo>>,
+        schema: &SchemaRef,
+        arrow_schema: &arrow::datatypes::Schema,
+        encoder: &mut S,
+        record_batch: &arrow::record_batch::RecordBatch,
+        i: usize,
+    ) -> PgWireResult<()> {
+        for (j, column) in record_batch.columns().iter().enumerate() {
+            let pg_field = &pg_schema[j];
 
             if column.is_null(i) {
-                self.encoder.encode_field(&None::<&i8>, pg_field)?;
+                encoder.encode_field(&None::<&i8>, pg_field)?;
                 continue;
             }
 
@@ -152,14 +201,14 @@ impl<S: Encoder> RecordBatchRowIterator<S> {
                 // these types are greptimedb specific or custom
                 DataType::Binary | DataType::LargeBinary | DataType::BinaryView => {
                     // jsonb
-                    if let ConcreteDataType::Json(_) = &self.schema.column_schemas()[j].data_type {
+                    if let ConcreteDataType::Json(_) = &schema.column_schemas()[j].data_type {
                         let v = datatypes::arrow_array::binary_array_value(column, i);
                         let s = jsonb_to_string(v).map_err(convert_err)?;
-                        self.encoder.encode_field(&s, pg_field)?;
+                        encoder.encode_field(&s, pg_field)?;
                     } else {
                         // bytea
                         let arrow_field = arrow_schema.field(j);
-                        encode_value(&mut self.encoder, column, i, arrow_field, pg_field)?;
+                        encode_value(encoder, column, i, arrow_field, pg_field)?;
                     }
                 }
 
@@ -167,20 +216,15 @@ impl<S: Encoder> RecordBatchRowIterator<S> {
                     let array = column.as_list::<i32>();
                     let items = array.value(i);
 
-                    encode_list(&mut self.encoder, items, pg_field)?;
+                    encode_list(encoder, items, pg_field)?;
                 }
                 DataType::Struct(_) => {
-                    encode_struct(
-                        &self.query_ctx,
-                        Default::default(),
-                        &mut self.encoder,
-                        pg_field,
-                    )?;
+                    encode_struct(query_ctx, Default::default(), encoder, pg_field)?;
                 }
                 _ => {
                     // Encode value using arrow-pg
                     let arrow_field = arrow_schema.field(j);
-                    encode_value(&mut self.encoder, column, i, arrow_field, pg_field)?;
+                    encode_value(encoder, column, i, arrow_field, pg_field)?;
                 }
             }
         }
@@ -1068,13 +1112,14 @@ mod test {
     use arrow_schema::{Field, IntervalUnit};
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{
-        BinaryVector, BooleanVector, DateVector, Float32Vector, Float64Vector, Int8Vector,
-        Int16Vector, Int32Vector, Int64Vector, IntervalDayTimeVector, IntervalMonthDayNanoVector,
+        BinaryVector, BooleanVector, DateVector, Float32Vector, Float64Vector, Int16Vector,
+        Int32Vector, Int64Vector, Int8Vector, IntervalDayTimeVector, IntervalMonthDayNanoVector,
         IntervalYearMonthVector, ListVector, NullVector, StringVector, TimeSecondVector,
-        TimestampSecondVector, UInt8Vector, UInt16Vector, UInt32Vector, UInt64Vector, VectorRef,
+        TimestampSecondVector, UInt16Vector, UInt32Vector, UInt64Vector, UInt8Vector, VectorRef,
     };
-    use pgwire::api::Type;
+    use futures::{stream, StreamExt as FuturesStreamExt};
     use pgwire::api::results::{DataRowEncoder, FieldFormat, FieldInfo};
+    use pgwire::api::Type;
     use session::context::QueryContextBuilder;
 
     use super::*;
@@ -1178,7 +1223,7 @@ mod test {
 
     #[test]
     fn test_encode_text_format_data() {
-        let schema = vec![
+        let pg_schema = vec![
             FieldInfo::new("nulls".into(), None, None, Type::UNKNOWN, FieldFormat::Text),
             FieldInfo::new("bools".into(), None, None, Type::BOOL, FieldFormat::Text),
             FieldInfo::new("uint8s".into(), None, None, Type::INT2, FieldFormat::Text),
@@ -1439,17 +1484,28 @@ mod test {
             .configuration_parameter(Default::default())
             .build()
             .into();
-        let schema = Arc::new(schema);
+        let schema = record_batch.schema.clone();
+        let pg_schema_ref = Arc::new(pg_schema);
 
-        let encoder = DataRowEncoder::new(schema.clone());
+        let encoder = DataRowEncoder::new(pg_schema_ref.clone());
 
-        let rows =
-            RecordBatchRowIterator::new(query_context, schema.clone(), record_batch, encoder)
-                .filter_map(|x| x.ok())
-                .collect::<Vec<_>>();
+        let row_stream = RecordBatchRowStream::new(
+            query_context,
+            pg_schema_ref.clone(),
+            schema,
+            stream::once(async { Ok(record_batch) }),
+            encoder,
+        );
+
+        let rows: Vec<_> = futures::executor::block_on(
+            row_stream
+                .filter_map(|x: PgWireResult<_>| async move { x.ok() })
+                .flat_map(stream::iter)
+                .collect::<Vec<_>>(),
+        );
         assert_eq!(rows.len(), 3);
         for row in rows {
-            assert_eq!(row.field_count, schema.len() as i16);
+            assert_eq!(row.field_count, pg_schema_ref.len() as i16);
         }
     }
 
