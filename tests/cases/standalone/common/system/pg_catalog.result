@@ -1099,3 +1099,32 @@ WHERE oid = pg_my_temp_schema();
 | OID| public             | t                 |         |
 +-------+--------------------+-------------------+---------+
 
+-- SQLNESS PROTOCOL POSTGRES
+CREATE table foo
+(
+    ts TIMESTAMP TIME INDEX,
+    log_data TEXT,
+    count_num BIGINT,
+);
+
+Affected Rows: 0
+
+-- SQLNESS PROTOCOL POSTGRES
+SELECT attname, atttypid FROM pg_catalog.pg_class AS cls INNER JOIN
+pg_catalog.pg_attribute AS attr ON cls.oid = attr.attrelid INNER JOIN
+pg_catalog.pg_type AS typ ON attr.atttypid = typ.oid WHERE attr.attnum >= 0 AND
+cls.oid = 'foo'::regclass::oid ORDER BY attr.attnum;
+
++-----------+----------+
+| attname   | atttypid |
++-----------+----------+
+| ts        | 1114     |
+| log_data  | 25       |
+| count_num | 20       |
++-----------+----------+
+
+-- SQLNESS PROTOCOL POSTGRES
+DROP TABLE foo;
+
+Affected Rows: 0
+
