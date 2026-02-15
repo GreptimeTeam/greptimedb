@@ -6378,7 +6378,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.61.2",
+ "windows-core 0.57.0",
 ]
 
 [[package]]
@@ -9710,7 +9710,7 @@ dependencies = [
 [[package]]
 name = "pgwire"
 version = "0.37.3"
-source = "git+https://github.com/sunng87/pgwire.git?branch=feature%2Fcopy-encoding#c1c09365b5a949bcf144e578397115ff689ff4a8"
+source = "git+https://github.com/sunng87/pgwire.git?branch=feature%2Fcopy-encoding#43a1f7b636efbeaa3b388bfc955c3b46bd8924b0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",

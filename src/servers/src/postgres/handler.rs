@@ -273,15 +273,10 @@ where
             .flatten(),
     );
 
-    // for binary format, prepend header and finish packet
-    let final_stream = copy_stream.chain(stream::once(async move {
-        Ok(CopyEncoder::finish_copy(copy_format))
-    }));
-
     Ok(Response::CopyOut(CopyResponse::new(
         copy_format,
         num_columns,
-        final_stream,
+        copy_stream,
     )))
 }
 
