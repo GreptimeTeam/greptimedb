@@ -14,7 +14,6 @@
 
 use api::v1::region::{DeleteRequest, InsertRequest};
 use api::v1::{PartitionExprVersion, Rows};
-use common_time::Timestamp;
 use partition::manager::PartitionRuleManager;
 use snafu::ResultExt;
 use store_api::storage::RegionId;

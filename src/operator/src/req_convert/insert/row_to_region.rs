@@ -112,8 +112,8 @@ pub fn filter_normal_requests_by_ttl(
             continue;
         };
 
-        // Skip filtering for instant TTL.
-        if matches!(ttl, TimeToLive::Instant) {
+        // Skip filtering for instant and forever TTL.
+        if matches!(ttl, TimeToLive::Instant | TimeToLive::Forever) {
             filtered_requests.push(request);
             continue;
         }
@@ -268,6 +268,7 @@ mod tests {
                 schema: build_column_schema(),
                 rows,
             }),
+            partition_expr_version: None,
         }
     }
 
@@ -479,6 +480,7 @@ mod tests {
             requests: vec![RegionInsertRequest {
                 region_id: region_id.as_u64(),
                 rows: None,
+                partition_expr_version: None,
             }],
         };
 
