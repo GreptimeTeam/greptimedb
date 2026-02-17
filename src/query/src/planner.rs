@@ -14,9 +14,11 @@
 
 use std::any::Any;
 use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
 
+use arrow_schema::DataType;
 use async_trait::async_trait;
 use catalog::table_source::DfTableSourceProvider;
 use common_error::ext::BoxedError;
@@ -25,6 +27,7 @@ use datafusion::common::{DFSchema, plan_err};
 use datafusion::execution::context::SessionState;
 use datafusion::sql::planner::PlannerContext;
 use datafusion_common::ToDFSchema;
+use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_expr::{
     Analyze, Explain, ExplainFormat, Expr as DfExpr, LogicalPlan, LogicalPlanBuilder, PlanType,
     ToStringifiedPlan, col,
@@ -405,6 +408,89 @@ impl DfLogicalPlanner {
             .fail(),
         }
     }
+
+    /// Extracts cast types for all placeholders in a logical plan.
+    /// Returns a map where each placeholder ID is mapped to:
+    /// - Some(DataType) if the placeholder is cast to a specific type
+    /// - None if the placeholder exists but has no cast
+    ///
+    /// Example: `$1::TEXT` returns `{"$1": Some(DataType::Utf8)}`
+    ///
+    /// This function walks through all expressions in the logical plan,
+    /// including subqueries, to identify placeholders and their cast types.
+    pub fn extract_placeholder_cast_types(
+        plan: &LogicalPlan,
+    ) -> Result<HashMap<String, Option<DataType>>> {
+        let mut placeholder_types = HashMap::new();
+        let mut casted_placeholders = HashSet::new();
+
+        let _ = plan.apply(|node| {
+            for expr in node.expressions() {
+                let _ = expr.apply(|e| {
+                    if let DfExpr::Cast(cast) = e
+                        && let DfExpr::Placeholder(ph) = &*cast.expr
+                    {
+                        placeholder_types.insert(ph.id.clone(), Some(cast.data_type.clone()));
+                        casted_placeholders.insert(ph.id.clone());
+                    }
+
+                    if let DfExpr::Placeholder(ph) = e
+                        && !casted_placeholders.contains(&ph.id)
+                        && !placeholder_types.contains_key(&ph.id)
+                    {
+                        placeholder_types.insert(ph.id.clone(), None);
+                    }
+
+                    Ok(TreeNodeRecursion::Continue)
+                });
+            }
+            Ok(TreeNodeRecursion::Continue)
+        })?;
+
+        Ok(placeholder_types)
+    }
+
+    /// Gets inferred parameter types from a logical plan.
+    /// Returns a map where each parameter ID is mapped to:
+    /// - Some(DataType) if the parameter type could be inferred
+    /// - None if the parameter type could not be inferred
+    ///
+    /// This function first uses DataFusion's `get_parameter_types()` to infer types.
+    /// If any parameters have `None` values (i.e., DataFusion couldn't infer their types),
+    /// it falls back to using `extract_placeholder_cast_types()` to detect explicit casts.
+    ///
+    /// This is because datafusion can only infer types for a limited cases.
+    ///
+    /// Example: For query `WHERE $1::TEXT AND $2`, DataFusion may not infer `$2`'s type,
+    /// but this function will return `{"$1": Some(DataType::Utf8), "$2": None}`.
+    pub fn get_infered_parameter_types(
+        plan: &LogicalPlan,
+    ) -> Result<HashMap<String, Option<DataType>>> {
+        let param_types = plan.get_parameter_types().context(PlanSqlSnafu)?;
+
+        let has_none = param_types.values().any(|v| v.is_none());
+
+        if !has_none {
+            Ok(param_types)
+        } else {
+            let cast_types = Self::extract_placeholder_cast_types(plan)?;
+
+            let mut merged = param_types;
+
+            for (id, opt_type) in cast_types {
+                merged
+                    .entry(id)
+                    .and_modify(|existing| {
+                        if existing.is_none() {
+                            *existing = opt_type.clone();
+                        }
+                    })
+                    .or_insert(opt_type);
+            }
+
+            Ok(merged)
+        }
+    }
 }
 
 #[async_trait]
@@ -451,5 +537,86 @@ impl LogicalPlanner for DfLogicalPlanner {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use arrow_schema::DataType;
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::{ColumnSchema, Schema};
+    use session::context::QueryContext;
+    use table::metadata::{TableInfoBuilder, TableMetaBuilder};
+    use table::test_util::EmptyTable;
+
+    use super::*;
+    use crate::QueryEngineRef;
+    use crate::parser::QueryLanguageParser;
+
+    async fn create_test_engine() -> QueryEngineRef {
+        let columns = vec![
+            ColumnSchema::new("id", ConcreteDataType::int32_datatype(), false),
+            ColumnSchema::new("name", ConcreteDataType::string_datatype(), true),
+        ];
+        let schema = Arc::new(Schema::new(columns));
+        let table_meta = TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .value_indices(vec![1])
+            .next_column_id(1024)
+            .build()
+            .unwrap();
+        let table_info = TableInfoBuilder::new("test", table_meta).build().unwrap();
+        let table = EmptyTable::from_table_info(&table_info);
+
+        crate::tests::new_query_engine_with_table(table)
+    }
+
+    async fn parse_sql_to_plan(sql: &str) -> LogicalPlan {
+        let stmt = QueryLanguageParser::parse_sql(sql, &QueryContext::arc()).unwrap();
+        let engine = create_test_engine().await;
+        engine
+            .planner()
+            .plan(&stmt, QueryContext::arc())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_extract_placeholder_cast_types_multiple() {
+        let plan = parse_sql_to_plan(
+            "SELECT $1::INT, $2::TEXT, $3, $4::INTEGER FROM test WHERE $5::FLOAT > 0",
+        )
+        .await;
+        let types = DfLogicalPlanner::extract_placeholder_cast_types(&plan).unwrap();
+
+        assert_eq!(types.len(), 5);
+        assert_eq!(types.get("$1"), Some(&Some(DataType::Int32)));
+        assert_eq!(types.get("$2"), Some(&Some(DataType::Utf8)));
+        assert_eq!(types.get("$3"), Some(&None));
+        assert_eq!(types.get("$4"), Some(&Some(DataType::Int32)));
+        assert_eq!(types.get("$5"), Some(&Some(DataType::Float32)));
+    }
+
+    #[tokio::test]
+    async fn test_get_infered_parameter_types_fallback_for_udf_args() {
+        // datafusion is not able to infer type for scalar function arguments
+        let plan = parse_sql_to_plan(
+            "SELECT parse_ident($1), parse_ident($2::TEXT) FROM test WHERE id > $3",
+        )
+        .await;
+        let types = DfLogicalPlanner::get_infered_parameter_types(&plan).unwrap();
+
+        assert_eq!(types.len(), 3);
+
+        let type_1 = types.get("$1").unwrap();
+        let type_2 = types.get("$2").unwrap();
+        let type_3 = types.get("$3").unwrap();
+
+        assert!(type_1.is_none(), "Expected $1 to be None");
+        assert_eq!(type_2, &Some(DataType::Utf8));
+        assert_eq!(type_3, &Some(DataType::Int32));
     }
 }

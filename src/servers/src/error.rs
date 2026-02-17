@@ -445,6 +445,14 @@ pub enum Error {
         error: query::error::Error,
     },
 
+    #[snafu(display("Failed to infer parameter types"))]
+    InferParameterTypes {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: query::error::Error,
+    },
+
     #[snafu(display("{}", reason))]
     UnexpectedResult {
         reason: String,
@@ -721,6 +729,7 @@ impl ErrorExt for Error {
             | InvalidPromRemoteRequest { .. }
             | InvalidFlightTicket { .. }
             | InvalidPrepareStatement { .. }
+            | InferParameterTypes { .. }
             | DataFrame { .. }
             | PreparedStmtTypeMismatch { .. }
             | TimePrecision { .. }

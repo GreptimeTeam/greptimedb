@@ -34,6 +34,7 @@ use opensrv_mysql::{
     StatementMetaWriter, ValueInner,
 };
 use parking_lot::RwLock;
+use query::planner::DfLogicalPlanner;
 use query::query_engine::DescribeResult;
 use rand::RngCore;
 use session::context::{Channel, QueryContextRef};
@@ -45,7 +46,9 @@ use sql::statements::statement::Statement;
 use tokio::io::AsyncWrite;
 
 use crate::SqlPlan;
-use crate::error::{self, DataFrameSnafu, InvalidPrepareStatementSnafu, Result};
+use crate::error::{
+    self, DataFrameSnafu, InferParameterTypesSnafu, InvalidPrepareStatementSnafu, Result,
+};
 use crate::metrics::METRIC_AUTH_FAILURE;
 use crate::mysql::helper::{
     self, fix_placeholder_types, format_placeholder, replace_placeholders, transform_placeholders,
@@ -219,14 +222,12 @@ impl MysqlInstanceShim {
         let params = if let Some(plan) = &mut plan {
             fix_placeholder_types(plan)?;
             debug!("Plan after fix placeholder types: {:#?}", plan);
-            prepared_params(
-                &plan
-                    .get_parameter_types()
-                    .context(DataFrameSnafu)?
-                    .into_iter()
-                    .map(|(k, v)| (k, v.map(|v| ConcreteDataType::from_arrow_type(&v))))
-                    .collect(),
-            )?
+            let param_types = DfLogicalPlanner::get_infered_parameter_types(plan)
+                .context(InferParameterTypesSnafu)?
+                .into_iter()
+                .map(|(k, v)| (k, v.map(|v| ConcreteDataType::from_arrow_type(&v))))
+                .collect();
+            prepared_params(&param_types)?
         } else {
             dummy_params(param_num)?
         };
@@ -295,9 +296,8 @@ impl MysqlInstanceShim {
         let outputs = match sql_plan.plan {
             Some(mut plan) => {
                 fix_placeholder_types(&mut plan)?;
-                let param_types = plan
-                    .get_parameter_types()
-                    .context(DataFrameSnafu)?
+                let param_types = DfLogicalPlanner::get_infered_parameter_types(&plan)
+                    .context(InferParameterTypesSnafu)?
                     .into_iter()
                     .map(|(k, v)| (k, v.map(|v| ConcreteDataType::from_arrow_type(&v))))
                     .collect::<HashMap<_, _>>();

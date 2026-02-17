@@ -39,12 +39,13 @@ use pgwire::api::results::{DataRowEncoder, FieldInfo};
 use pgwire::error::{PgWireError, PgWireResult};
 use pgwire::messages::data::DataRow;
 use pgwire::types::format::FormatOptions as PgFormatOptions;
+use query::planner::DfLogicalPlanner;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 
 pub use self::error::{PgErrorCode, PgErrorSeverity};
 use crate::SqlPlan;
-use crate::error::{self as server_error, DataFusionSnafu, Result};
+use crate::error::{self as server_error, InferParameterTypesSnafu, Result};
 use crate::postgres::utils::convert_err;
 
 pub(super) fn schema_to_pg(
@@ -364,9 +365,8 @@ pub(super) fn parameters_to_scalar_values(
     let mut results = Vec::with_capacity(param_count);
 
     let client_param_types = &portal.statement.parameter_types;
-    let server_param_types = plan
-        .get_parameter_types()
-        .context(DataFusionSnafu)
+    let server_param_types = DfLogicalPlanner::get_infered_parameter_types(plan)
+        .context(InferParameterTypesSnafu)
         .map_err(convert_err)?
         .into_iter()
         .map(|(k, v)| (k, v.map(|v| ConcreteDataType::from_arrow_type(&v))))
