@@ -370,7 +370,7 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
         // client provided parameter types, can be empty if client doesn't try to parse statement
         let provided_param_types = &stmt.parameter_types;
         let server_inferenced_types = if let Some(plan) = &sql_plan.plan {
-            let param_types = DfLogicalPlanner::get_infered_parameter_types(plan)
+            let param_types = DfLogicalPlanner::get_inferred_parameter_types(plan)
                 .context(InferParameterTypesSnafu)
                 .map_err(convert_err)?
                 .into_iter()

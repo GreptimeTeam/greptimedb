@@ -222,7 +222,7 @@ impl MysqlInstanceShim {
         let params = if let Some(plan) = &mut plan {
             fix_placeholder_types(plan)?;
             debug!("Plan after fix placeholder types: {:#?}", plan);
-            let param_types = DfLogicalPlanner::get_infered_parameter_types(plan)
+            let param_types = DfLogicalPlanner::get_inferred_parameter_types(plan)
                 .context(InferParameterTypesSnafu)?
                 .into_iter()
                 .map(|(k, v)| (k, v.map(|v| ConcreteDataType::from_arrow_type(&v))))
@@ -296,7 +296,7 @@ impl MysqlInstanceShim {
         let outputs = match sql_plan.plan {
             Some(mut plan) => {
                 fix_placeholder_types(&mut plan)?;
-                let param_types = DfLogicalPlanner::get_infered_parameter_types(&plan)
+                let param_types = DfLogicalPlanner::get_inferred_parameter_types(&plan)
                     .context(InferParameterTypesSnafu)?
                     .into_iter()
                     .map(|(k, v)| (k, v.map(|v| ConcreteDataType::from_arrow_type(&v))))

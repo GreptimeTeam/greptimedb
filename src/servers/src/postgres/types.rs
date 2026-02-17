@@ -365,7 +365,7 @@ pub(super) fn parameters_to_scalar_values(
     let mut results = Vec::with_capacity(param_count);
 
     let client_param_types = &portal.statement.parameter_types;
-    let server_param_types = DfLogicalPlanner::get_infered_parameter_types(plan)
+    let server_param_types = DfLogicalPlanner::get_inferred_parameter_types(plan)
         .context(InferParameterTypesSnafu)
         .map_err(convert_err)?
         .into_iter()

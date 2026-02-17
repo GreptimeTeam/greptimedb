@@ -463,7 +463,7 @@ impl DfLogicalPlanner {
     ///
     /// Example: For query `WHERE $1::TEXT AND $2`, DataFusion may not infer `$2`'s type,
     /// but this function will return `{"$1": Some(DataType::Utf8), "$2": None}`.
-    pub fn get_infered_parameter_types(
+    pub fn get_inferred_parameter_types(
         plan: &LogicalPlan,
     ) -> Result<HashMap<String, Option<DataType>>> {
         let param_types = plan.get_parameter_types().context(PlanSqlSnafu)?;
@@ -607,7 +607,7 @@ mod tests {
             "SELECT parse_ident($1), parse_ident($2::TEXT) FROM test WHERE id > $3",
         )
         .await;
-        let types = DfLogicalPlanner::get_infered_parameter_types(&plan).unwrap();
+        let types = DfLogicalPlanner::get_inferred_parameter_types(&plan).unwrap();
 
         assert_eq!(types.len(), 3);
 
