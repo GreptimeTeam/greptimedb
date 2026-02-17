@@ -424,7 +424,7 @@ impl DfLogicalPlanner {
         let mut placeholder_types = HashMap::new();
         let mut casted_placeholders = HashSet::new();
 
-        let _ = plan.apply(|node| {
+        plan.apply(|node| {
             for expr in node.expressions() {
                 let _ = expr.apply(|e| {
                     if let DfExpr::Cast(cast) = e
@@ -601,7 +601,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_infered_parameter_types_fallback_for_udf_args() {
+    async fn test_get_inferred_parameter_types_fallback_for_udf_args() {
         // datafusion is not able to infer type for scalar function arguments
         let plan = parse_sql_to_plan(
             "SELECT parse_ident($1), parse_ident($2::TEXT) FROM test WHERE id > $3",
