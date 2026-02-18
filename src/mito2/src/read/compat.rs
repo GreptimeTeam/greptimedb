@@ -147,6 +147,7 @@ impl FlatCompatBatch {
     /// - `actual_format_projection` is the projection of the read format for the input parquet.
     /// - `column_ids` are the projected column ids to read.
     /// - `compaction` indicates whether the reader is for compaction.
+    ///
     /// Creates a [FlatCompatBatch] and returns it along with a mapping from column_id
     /// to projected index in the post-compat batch.
     ///
@@ -212,7 +213,9 @@ impl FlatCompatBatch {
     /// Builds a mapping from column_id to its index in the output (post-compat) batch.
     /// The schema is the list of (column_id, data_type) that will appear in the output batch
     /// before internal columns.
-    fn build_column_id_to_index(schema: &[(ColumnId, ConcreteDataType)]) -> HashMap<ColumnId, usize> {
+    fn build_column_id_to_index(
+        schema: &[(ColumnId, ConcreteDataType)],
+    ) -> HashMap<ColumnId, usize> {
         schema
             .iter()
             .enumerate()
