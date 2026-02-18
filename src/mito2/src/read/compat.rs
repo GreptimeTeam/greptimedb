@@ -147,13 +147,18 @@ impl FlatCompatBatch {
     /// - `actual_format_projection` is the projection of the read format for the input parquet.
     /// - `column_ids` are the projected column ids to read.
     /// - `compaction` indicates whether the reader is for compaction.
+    /// Creates a [FlatCompatBatch] and returns it along with a mapping from column_id
+    /// to projected index in the post-compat batch.
+    ///
+    /// The mapping is needed because compat may insert default columns or reorder columns,
+    /// so filters must use the post-compat positions instead of the pre-compat ones.
     pub(crate) fn try_new(
         expected_meta: &RegionMetadataRef,
         actual_meta: &RegionMetadataRef,
         actual_format_projection: &FormatProjection,
         column_ids: &[ColumnId],
         compaction: bool,
-    ) -> Result<Option<Self>> {
+    ) -> Result<Option<(Self, HashMap<ColumnId, usize>)>> {
         let actual_schema = flat_projected_columns(actual_meta, actual_format_projection);
 
         // Compute expected format projection and batch schema.
@@ -187,16 +192,32 @@ impl FlatCompatBatch {
             return FlatCompatBatch::try_new_compact_sparse(expected_meta, actual_meta);
         }
 
+        let column_id_to_index = Self::build_column_id_to_index(&expect_schema);
+
         let (index_or_defaults, fields) =
             Self::compute_index_and_fields(&actual_schema, &expect_schema, expected_meta)?;
 
         let compat_pk = FlatCompatPrimaryKey::new(expected_meta, actual_meta)?;
 
-        Ok(Some(Self {
-            index_or_defaults,
-            arrow_schema: Arc::new(Schema::new(fields)),
-            compat_pk,
-        }))
+        Ok(Some((
+            Self {
+                index_or_defaults,
+                arrow_schema: Arc::new(Schema::new(fields)),
+                compat_pk,
+            },
+            column_id_to_index,
+        )))
+    }
+
+    /// Builds a mapping from column_id to its index in the output (post-compat) batch.
+    /// The schema is the list of (column_id, data_type) that will appear in the output batch
+    /// before internal columns.
+    fn build_column_id_to_index(schema: &[(ColumnId, ConcreteDataType)]) -> HashMap<ColumnId, usize> {
+        schema
+            .iter()
+            .enumerate()
+            .map(|(idx, (column_id, _))| (*column_id, idx))
+            .collect()
     }
 
     fn compute_index_and_fields(
@@ -271,7 +292,7 @@ impl FlatCompatBatch {
     fn try_new_compact_sparse(
         expected_meta: &RegionMetadataRef,
         actual_meta: &RegionMetadataRef,
-    ) -> Result<Option<Self>> {
+    ) -> Result<Option<(Self, HashMap<ColumnId, usize>)>> {
         // Currently, we don't support converting sparse encoding back to dense encoding in
         // flat format.
         ensure!(
@@ -294,16 +315,21 @@ impl FlatCompatBatch {
             .map(|col| (col.column_id, col.column_schema.data_type.clone()))
             .collect();
 
+        let column_id_to_index = Self::build_column_id_to_index(&expect_schema);
+
         let (index_or_defaults, fields) =
             Self::compute_index_and_fields(&actual_schema, &expect_schema, expected_meta)?;
 
         let compat_pk = FlatCompatPrimaryKey::default();
 
-        Ok(Some(Self {
-            index_or_defaults,
-            arrow_schema: Arc::new(Schema::new(fields)),
-            compat_pk,
-        }))
+        Ok(Some((
+            Self {
+                index_or_defaults,
+                arrow_schema: Arc::new(Schema::new(fields)),
+                compat_pk,
+            },
+            column_id_to_index,
+        )))
     }
 
     /// Make columns of the `batch` compatible.
@@ -1573,6 +1599,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
+        let (compat_batch, _column_id_to_index) = compat_batch;
 
         let mut tag_builder = StringDictionaryBuilder::<UInt32Type>::new();
         tag_builder.append_value("tag1");
@@ -1670,6 +1697,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
+        let (compat_batch, _column_id_to_index) = compat_batch;
 
         let mut tag_builder = StringDictionaryBuilder::<UInt32Type>::new();
         tag_builder.append_value("tag1");
@@ -1763,7 +1791,7 @@ mod tests {
         .unwrap();
         let format_projection = read_format.format_projection();
 
-        let compat_batch = FlatCompatBatch::try_new(
+        let (compat_batch, _column_id_to_index) = FlatCompatBatch::try_new(
             &expected_metadata,
             &actual_metadata,
             format_projection,
@@ -1868,7 +1896,7 @@ mod tests {
         .unwrap();
         let format_projection = read_format.format_projection();
 
-        let compat_batch = FlatCompatBatch::try_new(
+        let (compat_batch, _column_id_to_index) = FlatCompatBatch::try_new(
             &expected_metadata,
             &actual_metadata,
             format_projection,

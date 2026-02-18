@@ -141,6 +141,10 @@ pub struct FlatReadFormat {
     compat: Option<FlatCompatBatch>,
     /// Parquet format adapter.
     parquet_adapter: ParquetAdapter,
+    /// Column id to projected index mapping based on the expected (post-compat) format projection.
+    /// When compat is active, filters must use this mapping instead of the actual format projection
+    /// because compat may insert default columns or reorder columns.
+    compat_column_id_to_index: Option<HashMap<ColumnId, usize>>,
 }
 
 impl FlatReadFormat {
@@ -187,23 +191,27 @@ impl FlatReadFormat {
             ParquetAdapter::Flat(p) => &p.format_projection,
             ParquetAdapter::PrimaryKeyToFlat(p) => &p.format_projection,
         };
-        let compat = match expected_metadata {
+        let (compat, compat_column_id_to_index) = match expected_metadata {
             Some(expected) if !has_same_columns_and_pk_encoding(expected, &actual_metadata) => {
-                FlatCompatBatch::try_new(
+                match FlatCompatBatch::try_new(
                     expected,
                     &actual_metadata,
                     format_projection,
                     &column_ids,
                     compaction,
-                )?
+                )? {
+                    Some((compat, column_id_to_index)) => (Some(compat), Some(column_id_to_index)),
+                    None => (None, None),
+                }
             }
-            _ => None,
+            _ => (None, None),
         };
 
         Ok(FlatReadFormat {
             override_sequence: None,
             compat,
             parquet_adapter,
+            compat_column_id_to_index,
         })
     }
 
@@ -213,11 +221,18 @@ impl FlatReadFormat {
     }
 
     /// Index of a column in the projected batch by its column id.
+    ///
+    /// When compat is active, returns positions based on the expected (post-compat) format
+    /// projection, since the batch will be transformed by compat before filtering.
     pub fn projected_index_by_id(&self, column_id: ColumnId) -> Option<usize> {
-        self.format_projection()
-            .column_id_to_projected_index
-            .get(&column_id)
-            .copied()
+        if let Some(compat_map) = &self.compat_column_id_to_index {
+            compat_map.get(&column_id).copied()
+        } else {
+            self.format_projection()
+                .column_id_to_projected_index
+                .get(&column_id)
+                .copied()
+        }
     }
 
     /// Returns min values of specific column in row groups.
