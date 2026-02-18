@@ -418,7 +418,7 @@ impl DfLogicalPlanner {
     ///
     /// This function walks through all expressions in the logical plan,
     /// including subqueries, to identify placeholders and their cast types.
-    pub fn extract_placeholder_cast_types(
+    fn extract_placeholder_cast_types(
         plan: &LogicalPlan,
     ) -> Result<HashMap<String, Option<DataType>>> {
         let mut placeholder_types = HashMap::new();
