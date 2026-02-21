@@ -51,7 +51,7 @@ use crate::error::{
 };
 use crate::metrics::METRIC_AUTH_FAILURE;
 use crate::mysql::helper::{
-    self, fix_placeholder_types, format_placeholder, replace_placeholders, transform_placeholders,
+    self, format_placeholder, replace_placeholders, transform_placeholders,
 };
 use crate::mysql::writer;
 use crate::mysql::writer::{create_mysql_column, handle_err};
@@ -209,7 +209,7 @@ impl MysqlInstanceShim {
         let describe_result = self
             .do_describe(statement.clone(), query_ctx.clone())
             .await?;
-        let (mut plan, schema) = if let Some(DescribeResult {
+        let (plan, schema) = if let Some(DescribeResult {
             logical_plan,
             schema,
         }) = describe_result
@@ -219,9 +219,7 @@ impl MysqlInstanceShim {
             (None, None)
         };
 
-        let params = if let Some(plan) = &mut plan {
-            fix_placeholder_types(plan)?;
-            debug!("Plan after fix placeholder types: {:#?}", plan);
+        let params = if let Some(plan) = &plan {
             let param_types = DfLogicalPlanner::get_inferred_parameter_types(plan)
                 .context(InferParameterTypesSnafu)?
                 .into_iter()
@@ -294,8 +292,7 @@ impl MysqlInstanceShim {
         };
 
         let outputs = match sql_plan.plan {
-            Some(mut plan) => {
-                fix_placeholder_types(&mut plan)?;
+            Some(plan) => {
                 let param_types = DfLogicalPlanner::get_inferred_parameter_types(&plan)
                     .context(InferParameterTypesSnafu)?
                     .into_iter()
