@@ -228,10 +228,20 @@ async fn test_append_mode_compaction_with_format(flat_format: bool) {
 
 #[tokio::test]
 async fn test_alter_append_mode_clears_merge_mode() {
+    test_alter_append_mode_clears_merge_mode_with_format(false).await;
+    test_alter_append_mode_clears_merge_mode_with_format(true).await;
+}
+
+async fn test_alter_append_mode_clears_merge_mode_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
 
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
 
     let region_id = RegionId::new(1, 1);
 
@@ -315,7 +325,18 @@ async fn test_alter_append_mode_clears_merge_mode() {
     assert_eq!(expected, sort_batches_and_print(&batches, &["tag_0", "ts"]));
 
     // Reopen engine and region to verify persistence.
-    let engine = env.reopen_engine(engine, MitoConfig::default()).await;
+    let engine = env
+        .reopen_engine(
+            engine,
+            MitoConfig {
+                default_experimental_flat_format: flat_format,
+                ..Default::default()
+            },
+        )
+        .await;
+    let mut options = HashMap::default();
+    options.insert("append_mode".to_string(), "true".to_string());
+    options.insert("merge_mode".to_string(), "last_non_null".to_string());
     engine
         .handle_request(
             region_id,
@@ -323,7 +344,7 @@ async fn test_alter_append_mode_clears_merge_mode() {
                 engine: String::new(),
                 table_dir,
                 path_type: PathType::Bare,
-                options: HashMap::default(),
+                options,
                 skip_wal_replay: false,
                 checkpoint: None,
             }),
