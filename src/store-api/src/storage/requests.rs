@@ -124,6 +124,8 @@ pub struct ScanRequest {
     /// Optional hint for KNN vector search. When set, the scan should use
     /// vector index to find the k nearest neighbors.
     pub vector_search: Option<VectorSearchRequest>,
+    /// Whether to force reading region data in flat format.
+    pub force_flat_format: bool,
 }
 
 impl Display for ScanRequest {
@@ -206,6 +208,14 @@ impl Display for ScanRequest {
                 vector_search.metric
             )?;
         }
+        if self.force_flat_format {
+            write!(
+                f,
+                "{}force_flat_format: {}",
+                delimiter.as_str(),
+                self.force_flat_format
+            )?;
+        }
         write!(f, " }}")
     }
 }
@@ -258,6 +268,15 @@ mod tests {
         assert_eq!(
             request.to_string(),
             "ScanRequest { projection: [1, 2], limit: 10 }"
+        );
+
+        let request = ScanRequest {
+            force_flat_format: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            request.to_string(),
+            "ScanRequest { force_flat_format: true }"
         );
     }
 }

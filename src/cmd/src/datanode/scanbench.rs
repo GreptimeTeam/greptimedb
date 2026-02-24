@@ -84,6 +84,10 @@ pub struct ScanbenchCommand {
     /// Output pprof flamegraph
     #[clap(long, value_name = "FILE")]
     pprof_file: Option<PathBuf>,
+
+    /// Force reading the region in flat format.
+    #[clap(long, default_value_t = false)]
+    force_flat_format: bool,
 }
 
 /// JSON config for scan request parameters.
@@ -323,11 +327,12 @@ impl ScanbenchCommand {
         };
 
         println!(
-            "{} Scanner: {}, Parallelism: {}, Iterations: {}",
+            "{} Scanner: {}, Parallelism: {}, Iterations: {}, Force flat format: {}",
             "ℹ".blue(),
             self.scanner,
             self.parallelism,
             self.iterations,
+            self.force_flat_format,
         );
 
         // Start profiling if pprof_file is specified
@@ -367,6 +372,7 @@ impl ScanbenchCommand {
                 limit: scan_config.limit,
                 series_row_selector,
                 distribution,
+                force_flat_format: self.force_flat_format,
                 ..Default::default()
             };
 
