@@ -897,15 +897,26 @@ mod test_split_record_batch {
 
     #[test]
     fn test_split_record_batch_with_scalar_predicate() {
-        // This expression does not reference any column and evaluates to Scalar(Boolean(false)).
+        // Ensure split handles conjunctive/disjunctive predicates on the same column.
         let rule = MultiDimPartitionRule::try_new(
-            vec!["host".to_string(), "value".to_string()],
-            vec![1],
-            vec![PartitionExpr::new(
-                Operand::Value(Value::Boolean(false)),
-                RestrictedOp::Eq,
-                Operand::Value(Value::Boolean(true)),
-            )],
+            vec!["host".to_string()],
+            vec![0, 1],
+            vec![
+                PartitionExpr::new(
+                    Operand::Column("host".to_string()),
+                    RestrictedOp::Lt,
+                    Operand::Value(Value::String("never_happen_1".into())),
+                ),
+                PartitionExpr::new(
+                    Operand::Expr(PartitionExpr::new(
+                        Operand::Column("host".to_string()),
+                        RestrictedOp::GtEq,
+                        Operand::Value(Value::String("never_happen_1".into())),
+                    )),
+                    RestrictedOp::And,
+                    Operand::Value(Value::Boolean(false)),
+                ),
+            ],
             false,
         )
         .unwrap();
@@ -914,8 +925,10 @@ mod test_split_record_batch {
         let result = rule.split_record_batch(&batch).unwrap();
 
         assert_eq!(result.len(), 1);
-        assert!(result.contains_key(&1));
-        assert_eq!(result.get(&1).unwrap().selected_rows(), batch.num_rows());
+        assert!(result.contains_key(&0));
+
+        let total_rows = result.get(&0).unwrap().selected_rows();
+        assert_eq!(total_rows, batch.num_rows());
     }
 
     #[test]
