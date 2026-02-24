@@ -336,7 +336,8 @@ mod tests {
         AskLeaderRequest, AskLeaderResponse, DdlTaskRequest, DdlTaskResponse, HeartbeatRequest,
         HeartbeatResponse, MigrateRegionRequest, MigrateRegionResponse, Peer,
         ProcedureDetailRequest, ProcedureDetailResponse, ProcedureStateResponse,
-        QueryProcedureRequest, ReconcileRequest, ReconcileResponse, ResponseHeader, Role,
+        PullMetaConfigRequest, PullMetaConfigResponse, QueryProcedureRequest, ReconcileRequest,
+        ReconcileResponse, ResponseHeader, Role, pull_meta_config_response,
     };
     use async_trait::async_trait;
     use common_error::status_code::StatusCode;
@@ -384,6 +385,18 @@ mod tests {
                     addr: self.leader_addr.clone(),
                 }),
             }))
+        }
+
+        async fn pull_meta_config(
+            &self,
+            _: Request<PullMetaConfigRequest>,
+        ) -> Result<Response<PullMetaConfigResponse>, Status> {
+            let res = PullMetaConfigResponse {
+                header: Some(ResponseHeader::success()),
+                payload: Some(pull_meta_config_response::Payload::Json("{}".to_string())),
+            };
+
+            Ok(Response::new(res))
         }
     }
 

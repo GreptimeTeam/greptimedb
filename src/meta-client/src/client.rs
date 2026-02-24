@@ -26,7 +26,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::{
-    MetasrvNodeInfo, ProcedureDetailResponse, ReconcileRequest, ReconcileResponse, Role,
+    MetasrvNodeInfo, ProcedureDetailResponse, PullMetaConfigResponse, ReconcileRequest,
+    ReconcileResponse, Role,
 };
 pub use ask_leader::{AskLeader, LeaderProvider, LeaderProviderRef};
 use cluster::Client as ClusterClient;
@@ -582,6 +583,10 @@ impl MetaClient {
     /// needs to create a bidirectional streaming to the leader.
     pub async fn ask_leader(&self) -> Result<String> {
         self.heartbeat_client()?.ask_leader().await
+    }
+
+    pub async fn pull_meta_config(&self) -> Result<PullMetaConfigResponse> {
+        self.heartbeat_client()?.pull_meta_config().await
     }
 
     /// Returns a heartbeat bidirectional streaming: (sender, receiver), the

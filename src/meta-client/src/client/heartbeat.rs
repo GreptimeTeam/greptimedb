@@ -17,7 +17,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::heartbeat_client::HeartbeatClient;
-use api::v1::meta::{HeartbeatRequest, HeartbeatResponse, RequestHeader, Role};
+use api::v1::meta::{
+    HeartbeatRequest, HeartbeatResponse, PullMetaConfigRequest, PullMetaConfigResponse,
+    RequestHeader, Role,
+};
 use common_grpc::channel_manager::ChannelManager;
 use common_meta::distributed_time_constants::BASE_HEARTBEAT_INTERVAL;
 use common_meta::util;
@@ -171,6 +174,12 @@ impl Client {
         inner.ask_leader().await?;
         inner.heartbeat().await
     }
+
+    pub async fn pull_meta_config(&self) -> Result<PullMetaConfigResponse> {
+        let inner = self.inner.read().await;
+        inner.ask_leader().await?;
+        inner.pull_meta_config().await
+    }
 }
 
 #[derive(Debug)]
@@ -272,6 +281,42 @@ impl Inner {
             HeartbeatStream::new(self.id, stream),
             config,
         ))
+    }
+
+    async fn pull_meta_config(&self) -> Result<PullMetaConfigResponse> {
+        ensure!(
+            self.is_started(),
+            error::IllegalGrpcClientStateSnafu {
+                err_msg: "Heartbeat client not start"
+            }
+        );
+
+        let leader_addr = self
+            .leader_provider
+            .as_ref()
+            .unwrap()
+            .leader()
+            .context(error::NoLeaderSnafu)?;
+        let mut client = self.make_client(&leader_addr)?;
+
+        let header = RequestHeader::new(
+            self.id,
+            self.role,
+            TracingContext::from_current_span().to_w3c(),
+        );
+        let req = PullMetaConfigRequest {
+            header: Some(header),
+        };
+
+        let res = client
+            .pull_meta_config(req)
+            .await
+            .map_err(error::Error::from)?
+            .into_inner();
+
+        util::check_response_header(res.header.as_ref()).context(InvalidResponseHeaderSnafu)?;
+
+        Ok(res)
     }
 
     fn make_client(&self, addr: impl AsRef<str>) -> Result<HeartbeatClient<Channel>> {

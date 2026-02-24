@@ -152,7 +152,8 @@ mod tests {
     use api::v1::meta::mailbox_message::Payload;
     use api::v1::meta::{
         AskLeaderRequest, AskLeaderResponse, HeartbeatRequest, HeartbeatResponse, MailboxMessage,
-        Peer, ResponseHeader, Role, heartbeat_server,
+        Peer, PullMetaConfigRequest, PullMetaConfigResponse, ResponseHeader, Role,
+        heartbeat_server, pull_meta_config_response,
     };
     use async_trait::async_trait;
     use client::{Client, Database};
@@ -256,6 +257,18 @@ mod tests {
                     ..Default::default()
                 }),
             }))
+        }
+
+        async fn pull_meta_config(
+            &self,
+            _: Request<PullMetaConfigRequest>,
+        ) -> std::result::Result<Response<PullMetaConfigResponse>, Status> {
+            let res = PullMetaConfigResponse {
+                header: Some(ResponseHeader::success()),
+                payload: Some(pull_meta_config_response::Payload::Json("{}".to_string())),
+            };
+
+            Ok(Response::new(res))
         }
     }
 

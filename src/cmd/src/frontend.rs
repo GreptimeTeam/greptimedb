@@ -370,6 +370,13 @@ impl StartCommand {
         .await
         .context(error::MetaClientInitSnafu)?;
 
+        // TODO(shuiyisong): init load meta config
+        let meta_config = meta_client
+            .pull_meta_config()
+            .await
+            .context(error::MetaClientInitSnafu)?;
+        info!("Meta config: {:#?}", meta_config);
+
         // TODO(discord9): add helper function to ease the creation of cache registry&such
         let cached_meta_backend =
             CachedKvBackendBuilder::new(Arc::new(MetaKvBackend::new(meta_client.clone())))
