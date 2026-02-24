@@ -164,8 +164,7 @@ SHOW CREATE TABLE test_alter_append_with_merge;
 |                              |                                                             |
 |                              | ENGINE=mito                                                 |
 |                              | WITH(                                                       |
-|                              |   append_mode = 'true',                                     |
-|                              |   merge_mode = 'last_non_null'                              |
+|                              |   append_mode = 'true'                                      |
 |                              | )                                                           |
 +------------------------------+-------------------------------------------------------------+
 
