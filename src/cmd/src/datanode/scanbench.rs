@@ -25,6 +25,9 @@ use common_error::status_code::StatusCode;
 use common_meta::cache::{new_schema_cache, new_table_schema_cache};
 use common_meta::key::SchemaMetadataManager;
 use common_meta::kv_backend::memory::MemoryKvBackend;
+use datafusion::execution::SessionStateBuilder;
+use datafusion::logical_expr::Expr as DfExpr;
+use datafusion_common::ToDFSchema;
 use datafusion_physical_plan::metrics::ExecutionPlanMetricsSet;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
@@ -36,6 +39,9 @@ use object_store::manager::ObjectStoreManager;
 use query::optimizer::parallelize_scan::ParallelizeScan;
 use serde::Deserialize;
 use snafu::{OptionExt, ResultExt};
+use sqlparser::ast::ExprWithAlias as SqlExprWithAlias;
+use sqlparser::dialect::GenericDialect;
+use sqlparser::parser::Parser as SqlParser;
 use store_api::metadata::RegionMetadata;
 use store_api::region_engine::{PrepareRequest, QueryScanContext, RegionEngine};
 use store_api::region_request::{PathType, RegionOpenRequest, RegionRequest};
@@ -97,6 +103,7 @@ pub struct ScanbenchCommand {
 struct ScanConfig {
     projection: Option<Vec<usize>>,
     projection_names: Option<Vec<String>>,
+    filters: Option<Vec<String>>,
     limit: Option<usize>,
     series_row_selector: Option<String>,
 }
@@ -182,6 +189,72 @@ fn parse_path_type(s: &str) -> error::Result<PathType> {
         }
         .build()),
     }
+}
+
+fn resolve_filters(
+    scan_config: &ScanConfig,
+    metadata: &RegionMetadata,
+) -> error::Result<Vec<DfExpr>> {
+    let Some(filters) = &scan_config.filters else {
+        return Ok(Vec::new());
+    };
+
+    let df_schema = metadata
+        .schema
+        .arrow_schema()
+        .clone()
+        .to_dfschema()
+        .map_err(|e| {
+            error::IllegalConfigSnafu {
+                msg: format!("Failed to convert region schema to DataFusion schema: {e}"),
+            }
+            .build()
+        })?;
+
+    let state = SessionStateBuilder::new()
+        .with_config(Default::default())
+        .with_runtime_env(Default::default())
+        .with_default_features()
+        .build();
+
+    filters
+        .iter()
+        .enumerate()
+        .map(|(idx, filter)| {
+            let mut parser = SqlParser::new(&GenericDialect {})
+                .try_with_sql(filter)
+                .map_err(|e| {
+                    error::IllegalConfigSnafu {
+                        msg: format!("Invalid filter at index {idx} ('{filter}'): {e}"),
+                    }
+                    .build()
+                })?;
+
+            let sql_expr = parser.parse_expr().map_err(|e| {
+                error::IllegalConfigSnafu {
+                    msg: format!("Invalid filter at index {idx} ('{filter}'): {e}"),
+                }
+                .build()
+            })?;
+
+            state
+                .create_logical_expr_from_sql_expr(
+                    SqlExprWithAlias {
+                        expr: sql_expr,
+                        alias: None,
+                    },
+                    &df_schema,
+                )
+                .map_err(|e| {
+                    error::IllegalConfigSnafu {
+                        msg: format!(
+                            "Failed to convert filter at index {idx} ('{filter}') to logical expr: {e}"
+                        ),
+                    }
+                    .build()
+                })
+        })
+        .collect()
 }
 
 fn noop_partition_expr_fetcher() -> mito2::region::opener::PartitionExprFetcherRef {
@@ -291,6 +364,7 @@ impl ScanbenchCommand {
             .map_err(BoxedError::new)
             .context(error::BuildCliSnafu)?;
         let projection = resolve_projection(&scan_config, Some(&metadata))?;
+        let filters = resolve_filters(&scan_config, &metadata)?;
 
         // Build scan request
         let distribution = match self.scanner.as_str() {
@@ -363,6 +437,7 @@ impl ScanbenchCommand {
         for iteration in 0..self.iterations {
             let request = ScanRequest {
                 projection: projection.clone(),
+                filters: filters.clone(),
                 limit: scan_config.limit,
                 series_row_selector,
                 distribution,
@@ -521,6 +596,10 @@ impl ScanbenchCommand {
 
 #[cfg(test)]
 mod tests {
+    use sqlparser::ast::{BinaryOperator, Expr};
+    use sqlparser::dialect::GenericDialect;
+    use sqlparser::parser::Parser;
+
     use super::{ScanConfig, resolve_projection};
     use crate::error;
 
@@ -542,6 +621,7 @@ mod tests {
         let config = ScanConfig {
             projection: Some(vec![0, 2]),
             projection_names: None,
+            filters: None,
             limit: None,
             series_row_selector: None,
         };
@@ -556,6 +636,7 @@ mod tests {
         let config = ScanConfig {
             projection: None,
             projection_names: Some(vec!["cpu".to_string(), "host".to_string()]),
+            filters: None,
             limit: None,
             series_row_selector: None,
         };
@@ -572,6 +653,7 @@ mod tests {
         let config = ScanConfig {
             projection: Some(vec![0]),
             projection_names: Some(vec!["host".to_string()]),
+            filters: None,
             limit: None,
             series_row_selector: None,
         };
@@ -580,5 +662,31 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("projection"));
         assert!(msg.contains("projection_names"));
+    }
+
+    #[test]
+    fn test_sqlparser_parse_expr_string() {
+        let dialect = GenericDialect {};
+        let mut parser = Parser::new(&dialect)
+            .try_with_sql("host = 'web-1' AND cpu > 80")
+            .unwrap();
+
+        let expr = parser.parse_expr().unwrap();
+
+        match expr {
+            Expr::BinaryOp { op, .. } => assert_eq!(op, BinaryOperator::And),
+            other => panic!("expected BinaryOp, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_scan_config_filters() {
+        let json = r#"{"filters":["host = 'web-1'","cpu > 80"]}"#;
+        let config: ScanConfig = serde_json::from_str(json).unwrap();
+
+        assert_eq!(
+            config.filters,
+            Some(vec!["host = 'web-1'".to_string(), "cpu > 80".to_string()])
+        );
     }
 }
