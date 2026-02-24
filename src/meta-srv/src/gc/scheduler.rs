@@ -30,6 +30,9 @@ use crate::error::{Error, Result};
 use crate::gc::ctx::{DefaultGcSchedulerCtx, SchedulerCtx};
 use crate::gc::options::{GcSchedulerOptions, TICKER_INTERVAL};
 use crate::gc::tracker::RegionGcTracker;
+use crate::metrics::{
+    METRIC_META_GC_SCHEDULER_CYCLES_TOTAL, METRIC_META_GC_SCHEDULER_DURATION_SECONDS,
+};
 use crate::service::mailbox::MailboxRef;
 
 /// Report for a GC job.
@@ -141,6 +144,8 @@ impl GcScheduler {
     }
 
     pub(crate) async fn handle_tick(&self) -> Result<GcJobReport> {
+        METRIC_META_GC_SCHEDULER_CYCLES_TOTAL.inc();
+        let _timer = METRIC_META_GC_SCHEDULER_DURATION_SECONDS.start_timer();
         info!("Start to trigger gc");
         let report = self.trigger_gc().await?;
 
