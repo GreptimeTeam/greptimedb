@@ -1720,8 +1720,8 @@ mod tests {
     use store_api::storage::ScanRequest;
 
     use super::*;
-    use crate::region::options::RegionOptions;
     use crate::memtable::time_partition::TimePartitions;
+    use crate::region::options::RegionOptions;
     use crate::region::version::VersionBuilder;
     use crate::sst::FormatType;
     use crate::test_util::memtable_util::{EmptyMemtableBuilder, metadata_with_primary_key};
@@ -1737,7 +1737,10 @@ mod tests {
         Arc::new(VersionBuilder::new(metadata, mutable).build())
     }
 
-    fn new_version_with_sst_format(metadata: RegionMetadataRef, sst_format: Option<FormatType>) -> VersionRef {
+    fn new_version_with_sst_format(
+        metadata: RegionMetadataRef,
+        sst_format: Option<FormatType>,
+    ) -> VersionRef {
         let mutable = Arc::new(TimePartitions::new(
             metadata.clone(),
             Arc::new(EmptyMemtableBuilder::default()),
@@ -1748,7 +1751,11 @@ mod tests {
             sst_format,
             ..Default::default()
         };
-        Arc::new(VersionBuilder::new(metadata, mutable).options(options).build())
+        Arc::new(
+            VersionBuilder::new(metadata, mutable)
+                .options(options)
+                .build(),
+        )
     }
 
     #[tokio::test]
@@ -1836,7 +1843,8 @@ mod tests {
         let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
         let env = SchedulerEnv::new().await;
 
-        let primary_key_version = new_version_with_sst_format(metadata.clone(), Some(FormatType::PrimaryKey));
+        let primary_key_version =
+            new_version_with_sst_format(metadata.clone(), Some(FormatType::PrimaryKey));
         let request = ScanRequest::default();
         let scan_region = ScanRegion::new(
             primary_key_version.clone(),

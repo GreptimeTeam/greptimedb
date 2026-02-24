@@ -20,6 +20,8 @@ use std::time::Instant;
 use clap::Parser;
 use colored::Colorize;
 use common_base::Plugins;
+use common_error::ext::{BoxedError, PlainError};
+use common_error::status_code::StatusCode;
 use common_meta::cache::{new_schema_cache, new_table_schema_cache};
 use common_meta::key::SchemaMetadataManager;
 use common_meta::kv_backend::memory::MemoryKvBackend;
@@ -255,12 +257,8 @@ impl ScanbenchCommand {
             Plugins::default(),
         )
         .await
-        .map_err(|e| {
-            error::IllegalConfigSnafu {
-                msg: format!("Failed to create MitoEngine: {e:?}"),
-            }
-            .build()
-        })?;
+        .map_err(BoxedError::new)
+        .context(error::BuildCliSnafu)?;
         println!("{} MitoEngine created (NoopLogStore)", "✓".green());
 
         // Open region
@@ -276,12 +274,8 @@ impl ScanbenchCommand {
         engine
             .handle_request(region_id, RegionRequest::Open(open_request))
             .await
-            .map_err(|e| {
-                error::IllegalConfigSnafu {
-                    msg: format!("Failed to open region: {e:?}"),
-                }
-                .build()
-            })?;
+            .map_err(BoxedError::new)
+            .context(error::BuildCliSnafu)?;
         println!("{} Region opened", "✓".green());
 
         // Load scan config
@@ -291,12 +285,11 @@ impl ScanbenchCommand {
         } else {
             ScanConfig::default()
         };
-        let metadata = engine.get_metadata(region_id).await.map_err(|e| {
-            error::IllegalConfigSnafu {
-                msg: format!("Failed to get region metadata: {e:?}"),
-            }
-            .build()
-        })?;
+        let metadata = engine
+            .get_metadata(region_id)
+            .await
+            .map_err(BoxedError::new)
+            .context(error::BuildCliSnafu)?;
         let projection = resolve_projection(&scan_config, Some(&metadata))?;
 
         // Build scan request
@@ -345,11 +338,12 @@ impl ScanbenchCommand {
                     .blocklist(&["libc", "libgcc", "pthread", "vdso"])
                     .build()
                     .map_err(|e| {
-                        error::IllegalConfigSnafu {
-                            msg: format!("Failed to start profiler: {e}"),
-                        }
-                        .build()
-                    })?,
+                        BoxedError::new(PlainError::new(
+                            format!("Failed to start profiler: {e}"),
+                            StatusCode::Unexpected,
+                        ))
+                    })
+                    .context(error::BuildCliSnafu)?,
             )
         } else {
             None
@@ -379,12 +373,11 @@ impl ScanbenchCommand {
             let start = Instant::now();
 
             // Get scanner
-            let mut scanner = engine.handle_query(region_id, request).await.map_err(|e| {
-                error::IllegalConfigSnafu {
-                    msg: format!("Failed to get scanner: {e:?}"),
-                }
-                .build()
-            })?;
+            let mut scanner = engine
+                .handle_query(region_id, request)
+                .await
+                .map_err(BoxedError::new)
+                .context(error::BuildCliSnafu)?;
 
             // Get partition ranges and apply parallelism
             let original_partitions = scanner.properties().partitions.clone();
@@ -418,12 +411,8 @@ impl ScanbenchCommand {
                             .with_ranges(partitions)
                             .with_target_partitions(self.parallelism),
                     )
-                    .map_err(|e| {
-                        error::IllegalConfigSnafu {
-                            msg: format!("Failed to prepare scanner: {e:?}"),
-                        }
-                        .build()
-                    })?;
+                    .map_err(BoxedError::new)
+                    .context(error::BuildCliSnafu)?;
             }
 
             // Scan all partitions
@@ -436,14 +425,10 @@ impl ScanbenchCommand {
             for partition_idx in 0..num_partitions {
                 let mut stream = scanner
                     .scan_partition(&ctx, &metrics_set, partition_idx)
-                    .map_err(|e| {
-                        error::IllegalConfigSnafu {
-                            msg: format!("scan_partition failed: {e:?}"),
-                        }
-                        .build()
-                    })?;
+                    .map_err(BoxedError::new)
+                    .context(error::BuildCliSnafu)?;
 
-                scan_futures.push(async move {
+                scan_futures.push(tokio::spawn(async move {
                     let mut rows = 0u64;
                     while let Some(batch_result) = stream.next().await {
                         match batch_result {
@@ -451,17 +436,25 @@ impl ScanbenchCommand {
                                 rows += batch.num_rows() as u64;
                             }
                             Err(e) => {
-                                return Err(format!("Error reading batch: {e:?}"));
+                                return Err(BoxedError::new(e));
                             }
                         }
                     }
-                    Ok::<u64, String>(rows)
-                });
+                    Ok::<u64, BoxedError>(rows)
+                }));
             }
 
             let mut total_rows = 0u64;
-            while let Some(result) = scan_futures.next().await {
-                let rows = result.map_err(|e| error::IllegalConfigSnafu { msg: e }.build())?;
+            while let Some(task) = scan_futures.next().await {
+                let result = task
+                    .map_err(|e| {
+                        BoxedError::new(PlainError::new(
+                            format!("scan task failed: {e}"),
+                            StatusCode::Unexpected,
+                        ))
+                    })
+                    .context(error::BuildCliSnafu)?;
+                let rows = result.context(error::BuildCliSnafu)?;
                 total_rows += rows;
             }
 
