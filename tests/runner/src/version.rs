@@ -16,7 +16,7 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::str::FromStr;
 
-use semver::{Prerelease, Version as SemverVersion};
+use semver::Version as SemverVersion;
 
 pub type Result<T> = std::result::Result<T, VersionError>;
 
@@ -81,86 +81,8 @@ impl Version {
         let v2 = other.to_semantic();
 
         match (v1, v2) {
-            (Some(v1), Some(v2)) => Self::compare_semantic(&v1, &v2),
+            (Some(v1), Some(v2)) => v1.cmp(&v2),
             (None, _) | (_, None) => Ordering::Equal,
-        }
-    }
-
-    fn compare_semantic(v1: &SemverVersion, v2: &SemverVersion) -> Ordering {
-        match v1
-            .major
-            .cmp(&v2.major)
-            .then_with(|| v1.minor.cmp(&v2.minor))
-            .then_with(|| v1.patch.cmp(&v2.patch))
-        {
-            Ordering::Equal => Self::compare_pre_release(v1, v2),
-            ordering => ordering,
-        }
-    }
-
-    fn compare_pre_release(v1: &SemverVersion, v2: &SemverVersion) -> Ordering {
-        let pre1_empty = v1.pre.is_empty();
-        let pre2_empty = v2.pre.is_empty();
-
-        match (pre1_empty, pre2_empty) {
-            (true, true) => Ordering::Equal,
-            (true, false) => Ordering::Greater,
-            (false, true) => Ordering::Less,
-            (false, false) => {
-                let rank1 = Self::pre_release_rank(&v1.pre);
-                let rank2 = Self::pre_release_rank(&v2.pre);
-                rank1
-                    .cmp(&rank2)
-                    .then_with(|| Self::compare_pre_release_identifiers(&v1.pre, &v2.pre))
-            }
-        }
-    }
-
-    fn compare_pre_release_identifiers(pre1: &Prerelease, pre2: &Prerelease) -> Ordering {
-        let mut parts1 = pre1.as_str().split('.');
-        let mut parts2 = pre2.as_str().split('.');
-
-        loop {
-            match (parts1.next(), parts2.next()) {
-                (None, None) => return Ordering::Equal,
-                (None, Some(_)) => return Ordering::Less,
-                (Some(_), None) => return Ordering::Greater,
-                (Some(a), Some(b)) => {
-                    let ordering = Self::compare_pre_release_part(a, b);
-                    if ordering != Ordering::Equal {
-                        return ordering;
-                    }
-                }
-            }
-        }
-    }
-
-    fn compare_pre_release_part(a: &str, b: &str) -> Ordering {
-        let a_numeric = a.chars().all(|c| c.is_ascii_digit());
-        let b_numeric = b.chars().all(|c| c.is_ascii_digit());
-
-        match (a_numeric, b_numeric) {
-            (true, true) => {
-                let a_num = a.parse::<u64>().unwrap_or(u64::MAX);
-                let b_num = b.parse::<u64>().unwrap_or(u64::MAX);
-                a_num.cmp(&b_num)
-            }
-            (true, false) => Ordering::Less,
-            (false, true) => Ordering::Greater,
-            (false, false) => a.cmp(b),
-        }
-    }
-
-    fn pre_release_rank(pre: &Prerelease) -> u8 {
-        let s = pre.as_str();
-        if s.starts_with("alpha") {
-            0
-        } else if s.starts_with("beta") {
-            1
-        } else if s.starts_with("rc") {
-            2
-        } else {
-            3
         }
     }
 }

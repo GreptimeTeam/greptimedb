@@ -13,12 +13,53 @@ This compatibility test is inspired by [Databend](https://github.com/datafuselab
 
 ## Usage
 
+### Legacy script flow
+
 ```shell
 tests/compat/test-compat.sh <old_ver>
 ```
 
 E.g. `tests/compat/test-compat.sh 0.6.0` tests if the data written by GreptimeDB **v0.6.0** can be read by **current**
 version of GreptimeDB, and vice-versa. By "current", it's meant the fresh binary built by current codes.
+
+### Sqlness compat command (recommended)
+
+```shell
+cargo sqlness compat --from=1.0.0-beta.1 --to=current --preserve-state
+```
+
+The compat command runs cases in three phases:
+
+1. `1.feature` on `--from`
+2. `2.verify` on `--to`
+3. `3.cleanup` on `--to`
+
+## Case markers
+
+Compatibility cases can use sqlness markers:
+
+- `-- SQLNESS SINCE <version>`
+- `-- SQLNESS TILL <version>`
+
+For `since`/`till` skips, runner rewrites the statement before execution to avoid running skipped SQL.
+
+## Filter behavior
+
+`--test-filter` still accepts sqlness regex. Compat runner also recognizes optional leading path prefixes:
+
+- phase prefix: `1.feature/`, `2.verify/`, `3.cleanup/`
+- mode prefix: `standalone/`, `distributed/`
+- group prefix: `common/`, `only/`
+
+Examples:
+
+```shell
+# run one standalone case path
+cargo sqlness compat --from=1.0.0-beta.1 --to=current --test-filter="standalone/common/show-create-table.sql"
+
+# same target with explicit phase prefix
+cargo sqlness compat --from=1.0.0-beta.1 --to=current --test-filter="2.verify/distributed/common/show-create-table.sql"
+```
 
 ## Prerequisites
 
