@@ -102,7 +102,7 @@ lazy_static! {
     pub static ref METRIC_META_GC_SCHEDULER_DURATION_SECONDS: Histogram = register_histogram!(
         "greptime_metasrv_gc_scheduler_duration_seconds",
         "Time for a full GC scheduler cycle",
-        exponential_buckets(1.0, 10.0, 6).unwrap(),
+        vec![0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0],
     )
     .unwrap();
 
