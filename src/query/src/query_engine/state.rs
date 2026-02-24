@@ -57,6 +57,8 @@ use crate::dist_plan::{
 };
 use crate::metrics::{QUERY_MEMORY_POOL_REJECTED_TOTAL, QUERY_MEMORY_POOL_USAGE_BYTES};
 use crate::optimizer::ExtensionAnalyzerRule;
+#[cfg(feature = "vector_index")]
+use crate::optimizer::adaptive_vector_topk::AdaptiveVectorTopKRule;
 use crate::optimizer::constant_term::MatchesConstantTermOptimizer;
 use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
 use crate::optimizer::parallelize_scan::ParallelizeScan;
@@ -72,6 +74,10 @@ use crate::query_engine::DefaultSerializer;
 use crate::query_engine::options::QueryOptions;
 use crate::range_select::planner::RangeSelectPlanner;
 use crate::region_query::RegionQueryHandlerRef;
+#[cfg(feature = "vector_index")]
+use crate::vector_search::options::AdaptiveVectorTopKOptions;
+#[cfg(feature = "vector_index")]
+use crate::vector_search::planner::AdaptiveVectorTopKPlanner;
 
 /// Query engine global state
 #[derive(Clone)]
@@ -131,6 +137,15 @@ impl QueryEngineState {
                     allow_query_fallback: true,
                 });
         }
+        #[cfg(feature = "vector_index")]
+        session_config
+            .options_mut()
+            .extensions
+            .insert(AdaptiveVectorTopKOptions {
+                max_rounds: options.vector_topk_max_rounds,
+                max_k: options.vector_topk_max_k,
+                ..Default::default()
+            });
 
         // todo(hl): This serves as a workaround for https://github.com/GreptimeTeam/greptimedb/issues/5659
         // and we can add that check back once we upgrade datafusion.
@@ -161,6 +176,10 @@ impl QueryEngineState {
 
         let mut optimizer = Optimizer::new();
         optimizer.rules.push(Arc::new(ScanHintRule));
+        // Order matters: ScanHintRule attaches vector_search hints to scans first,
+        // then AdaptiveVectorTopKRule rewrites top-level Sort+Limit shape.
+        #[cfg(feature = "vector_index")]
+        optimizer.rules.push(Arc::new(AdaptiveVectorTopKRule));
 
         // add physical optimizer
         let mut physical_optimizer = PhysicalOptimizer::new();
@@ -459,6 +478,8 @@ impl DfQueryPlanner {
     ) -> Self {
         let mut planners: Vec<Arc<dyn ExtensionPlanner + Send + Sync>> =
             vec![Arc::new(PromExtensionPlanner), Arc::new(RangeSelectPlanner)];
+        #[cfg(feature = "vector_index")]
+        planners.push(Arc::new(AdaptiveVectorTopKPlanner));
         if let (Some(region_query_handler), Some(partition_rule_manager)) =
             (region_query_handler, partition_rule_manager)
         {

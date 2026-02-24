@@ -234,6 +234,8 @@ fn test_load_flownode_example_config() {
                 parallelism: 1,
                 allow_query_fallback: false,
                 memory_pool_size: MemoryLimit::Percentage(50),
+                vector_topk_max_rounds: 8,
+                vector_topk_max_k: None,
             },
             meta_client: Some(MetaClientOptions {
                 metasrv_addrs: vec!["127.0.0.1:3002".to_string()],
