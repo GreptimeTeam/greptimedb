@@ -238,6 +238,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                                 err: "Only allow changing append_mode from false to true",
                             }
                         );
+                        // Clear merge_mode since it's incompatible with append_mode.
+                        current_options.merge_mode = None;
                         all_options_altered = false;
                     }
                 }
@@ -281,6 +283,7 @@ fn new_region_options_on_empty_memtable(
                 assert!(*new_append_mode && !current_options.append_mode);
 
                 current_options.append_mode = true;
+                current_options.merge_mode = None;
             }
         }
     }
