@@ -21,7 +21,7 @@ use sqlness::{ConfigBuilder, Runner};
 use crate::cmd::bare::ServerAddr;
 use crate::env::bare::{StoreConfig, WalConfig};
 use crate::env::compat::Env;
-use crate::interceptors::{ignore_result, since, till};
+use crate::interceptors::{since, till};
 use crate::version::Version;
 use crate::{protocol_interceptor, util};
 
@@ -81,27 +81,27 @@ impl CompatibilityRunner {
     }
 
     pub async fn run(&self) -> anyhow::Result<()> {
-        self.run_phase(&self.from_version, "1.feature").await?;
-        self.run_phase(&self.to_version, "2.verify").await?;
-        self.run_phase(&self.to_version, "3.cleanup").await?;
+        self.run_phase(&self.from_version, Phase::Feature).await?;
+        self.run_phase(&self.to_version, Phase::Verify).await?;
+        self.run_phase(&self.to_version, Phase::Cleanup).await?;
 
         Ok(())
     }
 
-    async fn run_phase(&self, version: &Version, phase: &str) -> anyhow::Result<()> {
+    async fn run_phase(&self, version: &Version, phase: Phase) -> anyhow::Result<()> {
         if !self.case_dir.exists() {
             return Ok(());
         }
 
         let (mode_filter, remainder) = Self::split_filter(self.test_filter.as_str());
-        let case_root = self.case_dir.join(phase);
+        let case_root = self.case_dir.join(phase.dir_name());
         if !case_root.exists() {
             return Ok(());
         }
 
         let bins_dir = Self::resolve_bins_dir(version).await?;
         let mut store_config = self.store_config.clone();
-        store_config.setup_etcd = phase == "1.feature";
+        store_config.setup_etcd = phase.should_setup_etcd();
         let env = Env::new_bare(
             self.data_dir.clone(),
             self.server_addr.clone(),
@@ -116,10 +116,6 @@ impl CompatibilityRunner {
         interceptor_registry.register(
             protocol_interceptor::PREFIX,
             Arc::new(protocol_interceptor::ProtocolInterceptorFactory),
-        );
-        interceptor_registry.register(
-            ignore_result::PREFIX,
-            Arc::new(ignore_result::IgnoreResultInterceptorFactory),
         );
         interceptor_registry.register(
             since::PREFIX,
@@ -138,7 +134,7 @@ impl CompatibilityRunner {
             .unwrap_or_else(|| "<build>".to_string());
         println!(
             "compat phase={} version={} case_dir={} test_filter={} env_filter={} phase_root={} bins_dir={}",
-            phase,
+            phase.dir_name(),
             version,
             self.case_dir.display(),
             self.test_filter,
@@ -169,46 +165,76 @@ impl CompatibilityRunner {
             return (ModeFilter::Any, String::new());
         }
 
-        let mut normalized = trimmed;
+        let normalized = Self::trim_anchors(trimmed);
+        let (mode, mut rest) = Self::extract_mode_and_path(normalized);
+        rest = Self::trim_case_group_prefixes(rest);
+
+        (mode, rest.to_string())
+    }
+
+    fn trim_anchors(filter: &str) -> &str {
+        let mut normalized = filter;
         if let Some(rest) = normalized.strip_prefix('^') {
             normalized = rest;
         }
         if let Some(rest) = normalized.strip_suffix('$') {
             normalized = rest;
         }
-
-        if let Some(rest) = normalized.strip_prefix("standalone/") {
-            return (ModeFilter::Standalone, Self::strip_path_prefixes(rest));
-        }
-        if let Some(rest) = normalized.strip_prefix("distributed/") {
-            return (ModeFilter::Distributed, Self::strip_path_prefixes(rest));
-        }
-        if normalized == "standalone" {
-            return (ModeFilter::Standalone, String::new());
-        }
-        if normalized == "distributed" {
-            return (ModeFilter::Distributed, String::new());
-        }
-
-        (ModeFilter::Any, Self::strip_path_prefixes(normalized))
+        normalized
     }
 
-    fn strip_path_prefixes(input: &str) -> String {
-        let mut rest = input;
-        for prefix in [
-            "1.feature/",
-            "2.verify/",
-            "3.cleanup/",
-            "standalone/",
-            "distributed/",
-            "common/",
-            "only/",
-        ] {
-            if let Some(stripped) = rest.strip_prefix(prefix) {
-                rest = stripped;
+    fn extract_mode_and_path(filter: &str) -> (ModeFilter, &str) {
+        if let Some((mode, rest)) = Self::extract_mode_prefix(filter) {
+            return (mode, rest);
+        }
+
+        if let Some(after_phase) = Self::strip_phase_prefix(filter)
+            && let Some((mode, rest)) = Self::extract_mode_prefix(after_phase)
+        {
+            return (mode, rest);
+        }
+
+        if let Some(after_phase) = Self::strip_phase_prefix(filter) {
+            return (ModeFilter::Any, after_phase);
+        }
+
+        (ModeFilter::Any, filter)
+    }
+
+    fn extract_mode_prefix(filter: &str) -> Option<(ModeFilter, &str)> {
+        if let Some(rest) = filter.strip_prefix("standalone/") {
+            return Some((ModeFilter::Standalone, rest));
+        }
+        if let Some(rest) = filter.strip_prefix("distributed/") {
+            return Some((ModeFilter::Distributed, rest));
+        }
+        if filter == "standalone" {
+            return Some((ModeFilter::Standalone, ""));
+        }
+        if filter == "distributed" {
+            return Some((ModeFilter::Distributed, ""));
+        }
+
+        None
+    }
+
+    fn strip_phase_prefix(filter: &str) -> Option<&str> {
+        for phase in ["1.feature/", "2.verify/", "3.cleanup/"] {
+            if let Some(rest) = filter.strip_prefix(phase) {
+                return Some(rest);
             }
         }
-        rest.to_string()
+        None
+    }
+
+    fn trim_case_group_prefixes(mut path: &str) -> &str {
+        for prefix in ["common/", "only/"] {
+            if let Some(rest) = path.strip_prefix(prefix) {
+                path = rest;
+            }
+        }
+
+        path
     }
 
     fn env_filter(mode_filter: ModeFilter) -> String {
@@ -250,4 +276,70 @@ enum ModeFilter {
     Any,
     Standalone,
     Distributed,
+}
+
+#[derive(Copy, Clone)]
+enum Phase {
+    Feature,
+    Verify,
+    Cleanup,
+}
+
+impl Phase {
+    fn dir_name(self) -> &'static str {
+        match self {
+            Self::Feature => "1.feature",
+            Self::Verify => "2.verify",
+            Self::Cleanup => "3.cleanup",
+        }
+    }
+
+    fn should_setup_etcd(self) -> bool {
+        matches!(self, Self::Feature)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_split_filter_mode_only() {
+        let (mode, remainder) = CompatibilityRunner::split_filter("standalone");
+        assert!(matches!(mode, ModeFilter::Standalone));
+        assert!(remainder.is_empty());
+    }
+
+    #[test]
+    fn test_split_filter_mode_and_case_path() {
+        let (mode, remainder) = CompatibilityRunner::split_filter("distributed/common/show.sql");
+        assert!(matches!(mode, ModeFilter::Distributed));
+        assert_eq!(remainder, "show.sql");
+    }
+
+    #[test]
+    fn test_split_filter_phase_then_mode() {
+        let (mode, remainder) =
+            CompatibilityRunner::split_filter("1.feature/standalone/only/a.sql");
+        assert!(matches!(mode, ModeFilter::Standalone));
+        assert_eq!(remainder, "a.sql");
+    }
+
+    #[test]
+    fn test_split_filter_regex_anchors() {
+        let (mode, remainder) =
+            CompatibilityRunner::split_filter("^2.verify/distributed/common/t.sql$");
+        assert!(matches!(mode, ModeFilter::Distributed));
+        assert_eq!(remainder, "t.sql");
+    }
+
+    #[test]
+    fn test_split_filter_passthrough_regex_with_colon() {
+        let (mode, remainder) = CompatibilityRunner::split_filter(".*:foo/bar");
+        assert!(matches!(mode, ModeFilter::Any));
+        assert_eq!(
+            CompatibilityRunner::build_test_filter(&remainder),
+            ".*:foo/bar"
+        );
+    }
 }
