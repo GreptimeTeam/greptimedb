@@ -55,17 +55,13 @@ pub fn median_f64(values: &mut [f64]) -> Option<f64> {
         return None;
     }
     let mid = len / 2;
-    values.select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).unwrap());
+    let (lower, median, _) = values.select_nth_unstable_by(mid, |a, b| a.total_cmp(b));
     if len % 2 == 1 {
-        Some(values[mid])
+        Some(*median)
     } else {
-        let right = values[mid];
+        let right = *median;
         // For even length, find the max of the left half (all elements before mid).
-        let left = values[..mid]
-            .iter()
-            .copied()
-            .max_by(|a, b| a.partial_cmp(b).unwrap())
-            .unwrap();
+        let left = lower.iter().copied().max_by(|a, b| a.total_cmp(b)).unwrap();
         Some((left + right) / 2.0)
     }
 }
