@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_recordbatch::adapter::RecordBatchMetrics;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::metrics::MetricsSet;
 
@@ -55,26 +54,6 @@ pub(crate) fn collect_vector_index_k_from_plan(plan: &dyn ExecutionPlan) -> (usi
         let (child_requested, child_returned) = collect_vector_index_k_from_plan(child.as_ref());
         requested = requested.saturating_add(child_requested);
         returned = returned.saturating_add(child_returned);
-    }
-    (requested, returned)
-}
-
-/// Collects vector index requested/returned k from `RecordBatchMetrics` (flat plan_metrics list).
-///
-/// Used in `MergeScanExec` where region metrics arrive as a flat list of `(String, usize)` pairs.
-pub(crate) fn collect_vector_index_k_from_region_metrics(
-    metrics: &RecordBatchMetrics,
-) -> (usize, usize) {
-    let mut requested = 0usize;
-    let mut returned = 0usize;
-    for plan_metric in &metrics.plan_metrics {
-        for (name, value) in &plan_metric.metrics {
-            match name.as_str() {
-                VECTOR_INDEX_REQUESTED_K => requested = requested.saturating_add(*value),
-                VECTOR_INDEX_RETURNED_K => returned = returned.saturating_add(*value),
-                _ => {}
-            }
-        }
     }
     (requested, returned)
 }

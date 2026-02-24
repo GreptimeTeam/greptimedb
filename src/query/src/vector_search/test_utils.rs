@@ -76,21 +76,3 @@ pub(crate) fn vec_distance_expr(function_name: &'static str) -> Expr {
         ],
     ))
 }
-
-pub(crate) fn vec_distance_expr_qualified(
-    function_name: &'static str,
-    table_name: &str,
-    column_name: &str,
-) -> Expr {
-    use datafusion_common::Column;
-
-    let udf = create_udf(Arc::new(TestVectorFunction::new(function_name)));
-    let qualified_col = Expr::Column(Column::new(Some(table_name.to_string()), column_name));
-    Expr::ScalarFunction(ScalarFunction::new_udf(
-        Arc::new(udf),
-        vec![
-            qualified_col,
-            lit(ScalarValue::Utf8(Some("[1.0, 2.0]".to_string()))),
-        ],
-    ))
-}
