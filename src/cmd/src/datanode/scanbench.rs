@@ -104,9 +104,9 @@ pub struct ScanbenchCommand {
     #[clap(long, default_value_t = false)]
     force_flat_format: bool,
 
-    /// Skip WAL replay when opening the region.
-    #[clap(long, default_value_t = true, num_args = 1)]
-    skip_wal_replay: bool,
+    /// Enable WAL replay when opening the region.
+    #[clap(long, default_value_t = false)]
+    enable_wal: bool,
 }
 
 /// JSON config for scan request parameters.
@@ -369,7 +369,7 @@ impl ScanbenchCommand {
         };
 
         let engine = match &wal_config {
-            DatanodeWalConfig::RaftEngine(raft_engine_config) if !self.skip_wal_replay => {
+            DatanodeWalConfig::RaftEngine(raft_engine_config) if self.enable_wal => {
                 let data_home = normalize_dir(&store_cfg.data_home);
                 let wal_dir = match &raft_engine_config.dir {
                     Some(dir) => dir.clone(),
@@ -390,7 +390,7 @@ impl ScanbenchCommand {
                 println!("{} Using RaftEngine WAL", "✓".green());
                 components.build(log_store).await?
             }
-            DatanodeWalConfig::Kafka(kafka_config) if !self.skip_wal_replay => {
+            DatanodeWalConfig::Kafka(kafka_config) if self.enable_wal => {
                 let log_store = Arc::new(
                     KafkaLogStore::try_new(kafka_config, None)
                         .await
@@ -403,9 +403,9 @@ impl ScanbenchCommand {
             _ => {
                 let log_store = Arc::new(NoopLogStore);
                 println!(
-                    "{} Using NoopLogStore (skip_wal_replay={})",
+                    "{} Using NoopLogStore (enable_wal={})",
                     "✓".green(),
-                    self.skip_wal_replay
+                    self.enable_wal
                 );
                 components.build(log_store).await?
             }
@@ -417,7 +417,7 @@ impl ScanbenchCommand {
             table_dir: self.table_dir.clone(),
             path_type,
             options: HashMap::default(),
-            skip_wal_replay: self.skip_wal_replay,
+            skip_wal_replay: !self.enable_wal,
             checkpoint: None,
         };
 

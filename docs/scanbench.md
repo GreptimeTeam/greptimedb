@@ -25,7 +25,7 @@ cargo build -p cmd --bin greptime
   [--iterations <N>] \
   [--path-type <bare|data|metadata>] \
   [--force-flat-format] \
-  [--skip-wal-replay <true|false>] \
+  [--enable-wal] \
   [--pprof-file <FLAMEGRAPH_SVG>] \
   [--verbose]
 ```
@@ -49,7 +49,7 @@ cargo build -p cmd --bin greptime
 - `--iterations`: Benchmark iterations. Default: `1`.
 - `--path-type`: Region path type (`bare`, `data`, `metadata`). Default: `bare`.
 - `--force-flat-format`: Force reading the region in flat format. Default: disabled.
-- `--skip-wal-replay`: Skip WAL replay when opening the region. Default: `true`. Set to `false` to enable WAL replay using the log store configured in the `[wal]` section of the config TOML (raft-engine or Kafka). When `true` or when no WAL is configured, a `NoopLogStore` is used.
+- `--enable-wal`: Enable WAL replay when opening the region. Default: disabled. When enabled, scanbench uses the log store configured in the `[wal]` section of the config TOML (raft-engine or Kafka). When disabled or when no WAL is configured, a `NoopLogStore` is used.
 - `--pprof-file`: Output flamegraph path (Unix only).
 - `--verbose` / `-v`: Enable verbose output.
 
@@ -124,5 +124,5 @@ Scan with WAL replay enabled (uses `[wal]` config from TOML):
   --config /path/to/config.toml \
   --region-id 1024:0 \
   --table-dir greptime/public/1024 \
-  --skip-wal-replay false
+  --enable-wal
 ```
