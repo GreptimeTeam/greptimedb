@@ -619,6 +619,14 @@ impl BatchGcProcedure {
         let mut recv_tasks = Vec::new();
         // store error to make sure metrics doesn't ignore other peers
         let mut first_error = None;
+        let mut record_get_file_refs_error = |e| {
+            METRIC_META_GC_DATANODE_CALLS_TOTAL
+                .with_label_values(&["get_file_refs", "error"])
+                .inc();
+            if first_error.is_none() {
+                first_error = Some(e);
+            }
+        };
         for (peer, regions, related_regions_for_peer, reply) in join_all(tasks).await {
             match reply {
                 Ok(mailbox_rx) => {
@@ -627,14 +635,7 @@ impl BatchGcProcedure {
                         (peer, regions, related_regions_for_peer, reply)
                     });
                 }
-                Err(e) => {
-                    METRIC_META_GC_DATANODE_CALLS_TOTAL
-                        .with_label_values(&["get_file_refs", "error"])
-                        .inc();
-                    if first_error.is_none() {
-                        first_error = Some(e);
-                    }
-                }
+                Err(e) => record_get_file_refs_error(e),
             }
         }
 
@@ -642,19 +643,9 @@ impl BatchGcProcedure {
 
         for (peer, regions, related_regions_for_peer, reply) in replies {
             let reply = match reply {
-                Ok(reply) => {
-                    METRIC_META_GC_DATANODE_CALLS_TOTAL
-                        .with_label_values(&["get_file_refs", "success"])
-                        .inc();
-                    reply
-                }
+                Ok(reply) => reply,
                 Err(e) => {
-                    METRIC_META_GC_DATANODE_CALLS_TOTAL
-                        .with_label_values(&["get_file_refs", "error"])
-                        .inc();
-                    if first_error.is_none() {
-                        first_error = Some(e);
-                    }
+                    record_get_file_refs_error(e);
                     continue;
                 }
             };
@@ -664,6 +655,9 @@ impl BatchGcProcedure {
             );
 
             if !reply.success {
+                METRIC_META_GC_DATANODE_CALLS_TOTAL
+                    .with_label_values(&["get_file_refs", "error"])
+                    .inc();
                 let err = error::UnexpectedSnafu {
                     violated: format!(
                         "Failed to get file references from datanode {}: {:?}",
@@ -671,11 +665,12 @@ impl BatchGcProcedure {
                     ),
                 }
                 .build();
-                if first_error.is_none() {
-                    first_error = Some(err);
-                }
+                record_get_file_refs_error(err);
                 continue;
             }
+            METRIC_META_GC_DATANODE_CALLS_TOTAL
+                .with_label_values(&["get_file_refs", "success"])
+                .inc();
 
             // Merge the file references from this datanode
             for (region_id, file_refs) in reply.file_refs_manifest.file_refs {
@@ -747,11 +742,13 @@ impl BatchGcProcedure {
             .map(|(peer, regions_for_peer)| {
                 let gc_regions = GcRegions {
                     regions: regions_for_peer.clone(),
-                    // file_refs_manifest can be large; cloning for each datanode is acceptable here since this is an admin-only operation.
+                    // file_refs_manifest could be somewhere large. But still intentionally clone per datanode here:
+                    // this path is admin-triggered or scheduler-triggered, peer count is expected to be bounded, and
+                    // and abnormal manifest growth should be addressed at the source
                     file_refs_manifest: file_refs.clone(),
                     full_file_listing,
                 };
-                let failed_region_count = gc_regions.regions.len() as u64;
+                let region_count = gc_regions.regions.len() as u64;
 
                 async move {
                     let report = send_gc_regions_inner(
@@ -764,36 +761,37 @@ impl BatchGcProcedure {
                     )
                     .await;
 
-                    (peer, gc_regions, failed_region_count, report)
+                    (peer, gc_regions, region_count, report)
                 }
             });
 
         let mut recv_tasks = Vec::new();
         let mut first_error = None;
-        for (peer, gc_regions, failed_region_count, report) in join_all(tasks).await {
+        let mut record_gc_error = |e, region_count| {
+            METRIC_META_GC_DATANODE_CALLS_TOTAL
+                .with_label_values(&["gc_regions", "error"])
+                .inc();
+            if region_count > 0 {
+                METRIC_META_GC_FAILED_REGIONS_TOTAL.inc_by(region_count);
+            }
+            if first_error.is_none() {
+                first_error = Some(e);
+            }
+        };
+        for (peer, gc_regions, region_count, report) in join_all(tasks).await {
             match report {
                 Ok(mailbox_rx) => {
                     recv_tasks.push(async move {
                         let report =
                             recv_gc_regions_reply(&peer, &gc_regions, "Batch GC", mailbox_rx).await;
-                        (peer, failed_region_count, report)
+                        (peer, region_count, report)
                     });
                 }
-                Err(e) => {
-                    METRIC_META_GC_DATANODE_CALLS_TOTAL
-                        .with_label_values(&["gc_regions", "error"])
-                        .inc();
-                    if failed_region_count > 0 {
-                        METRIC_META_GC_FAILED_REGIONS_TOTAL.inc_by(failed_region_count);
-                    }
-                    if first_error.is_none() {
-                        first_error = Some(e);
-                    }
-                }
+                Err(e) => record_gc_error(e, region_count),
             }
         }
 
-        for (peer, failed_region_count, report) in join_all(recv_tasks).await {
+        for (peer, region_count, report) in join_all(recv_tasks).await {
             let report = match report {
                 Ok(report) => {
                     METRIC_META_GC_DATANODE_CALLS_TOTAL
@@ -806,15 +804,7 @@ impl BatchGcProcedure {
                     report
                 }
                 Err(e) => {
-                    METRIC_META_GC_DATANODE_CALLS_TOTAL
-                        .with_label_values(&["gc_regions", "error"])
-                        .inc();
-                    if failed_region_count > 0 {
-                        METRIC_META_GC_FAILED_REGIONS_TOTAL.inc_by(failed_region_count);
-                    }
-                    if first_error.is_none() {
-                        first_error = Some(e);
-                    }
+                    record_gc_error(e, region_count);
                     continue;
                 }
             };
