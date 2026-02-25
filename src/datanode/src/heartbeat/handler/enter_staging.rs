@@ -77,8 +77,8 @@ impl EnterStagingRegionsHandler {
         common_telemetry::info!("Datanode received enter staging region: {}", region_id);
 
         let partition_directive = match partition_directive {
-            InstructionStagingPartitionDirective::PartitionExpr(expr) => {
-                RequestStagingPartitionDirective::PartitionExpr(expr)
+            InstructionStagingPartitionDirective::UpdatePartitionExpr(expr) => {
+                RequestStagingPartitionDirective::UpdatePartitionExpr(expr)
             }
             InstructionStagingPartitionDirective::RejectAllWrites => {
                 RequestStagingPartitionDirective::RejectAllWrites
@@ -150,7 +150,7 @@ mod tests {
                 &handler_context,
                 vec![EnterStagingRegion {
                     region_id,
-                    partition_directive: InstructionStagingPartitionDirective::PartitionExpr(
+                    partition_directive: InstructionStagingPartitionDirective::UpdatePartitionExpr(
                         "".to_string(),
                     ),
                 }],
@@ -181,7 +181,7 @@ mod tests {
                 &handler_context,
                 vec![EnterStagingRegion {
                     region_id,
-                    partition_directive: InstructionStagingPartitionDirective::PartitionExpr(
+                    partition_directive: InstructionStagingPartitionDirective::UpdatePartitionExpr(
                         "".to_string(),
                     ),
                 }],
@@ -222,7 +222,7 @@ mod tests {
                 &handler_context,
                 vec![EnterStagingRegion {
                     region_id,
-                    partition_directive: InstructionStagingPartitionDirective::PartitionExpr(
+                    partition_directive: InstructionStagingPartitionDirective::UpdatePartitionExpr(
                         PARTITION_EXPR.to_string(),
                     ),
                 }],
@@ -241,7 +241,7 @@ mod tests {
                 &handler_context,
                 vec![EnterStagingRegion {
                     region_id,
-                    partition_directive: InstructionStagingPartitionDirective::PartitionExpr(
+                    partition_directive: InstructionStagingPartitionDirective::UpdatePartitionExpr(
                         PARTITION_EXPR.to_string(),
                     ),
                 }],
@@ -260,7 +260,7 @@ mod tests {
                 &handler_context,
                 vec![EnterStagingRegion {
                     region_id,
-                    partition_directive: InstructionStagingPartitionDirective::PartitionExpr(
+                    partition_directive: InstructionStagingPartitionDirective::UpdatePartitionExpr(
                         "".to_string(),
                     ),
                 }],

@@ -100,7 +100,7 @@ impl EnterStagingRegion {
                 .map(|region_id| common_meta::instruction::EnterStagingRegion {
                     region_id,
                     // Safety: the target_routes is constructed from the targets, so the region_id is always present in the map.
-                    partition_directive: StagingPartitionDirective::PartitionExpr(
+                    partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
                         target_partition_expr_by_region[&region_id].clone(),
                     ),
                 })
@@ -499,7 +499,7 @@ mod tests {
             instruction_1,
             vec![common_meta::instruction::EnterStagingRegion {
                 region_id: RegionId::new(table_id, 1),
-                partition_directive: StagingPartitionDirective::PartitionExpr(
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
                     range_expr("x", 0, 10).as_json_str().unwrap(),
                 ),
             }]
@@ -509,7 +509,7 @@ mod tests {
             instruction_2,
             vec![common_meta::instruction::EnterStagingRegion {
                 region_id: RegionId::new(table_id, 2),
-                partition_directive: StagingPartitionDirective::PartitionExpr(
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
                     range_expr("x", 10, 20).as_json_str().unwrap(),
                 ),
             }]
@@ -523,7 +523,7 @@ mod tests {
         let peer = Peer::empty(1);
         let enter_staging_regions = vec![common_meta::instruction::EnterStagingRegion {
             region_id: RegionId::new(1024, 1),
-            partition_directive: StagingPartitionDirective::PartitionExpr(
+            partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
                 range_expr("x", 0, 10).as_json_str().unwrap(),
             ),
         }];
@@ -554,7 +554,7 @@ mod tests {
         let peer = Peer::empty(1);
         let enter_staging_regions = vec![common_meta::instruction::EnterStagingRegion {
             region_id: RegionId::new(1024, 1),
-            partition_directive: StagingPartitionDirective::PartitionExpr(
+            partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
                 range_expr("x", 0, 10).as_json_str().unwrap(),
             ),
         }];
@@ -587,7 +587,7 @@ mod tests {
         let peer = Peer::empty(1);
         let enter_staging_regions = vec![common_meta::instruction::EnterStagingRegion {
             region_id: RegionId::new(1024, 1),
-            partition_directive: StagingPartitionDirective::PartitionExpr(
+            partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
                 range_expr("x", 0, 10).as_json_str().unwrap(),
             ),
         }];
@@ -625,7 +625,7 @@ mod tests {
         let peer = Peer::empty(1);
         let enter_staging_regions = vec![common_meta::instruction::EnterStagingRegion {
             region_id: RegionId::new(1024, 1),
-            partition_directive: StagingPartitionDirective::PartitionExpr(
+            partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
                 range_expr("x", 0, 10).as_json_str().unwrap(),
             ),
         }];

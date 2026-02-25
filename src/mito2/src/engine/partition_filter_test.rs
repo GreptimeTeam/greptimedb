@@ -103,7 +103,7 @@ async fn test_partition_filter_basic_with_format(flat_format: bool) {
         .handle_request(
             region_id,
             RegionRequest::EnterStaging(EnterStagingRequest {
-                partition_directive: StagingPartitionDirective::PartitionExpr(
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
                     new_partition_expr.clone(),
                 ),
             }),

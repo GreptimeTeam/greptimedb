@@ -1474,7 +1474,7 @@ impl RegionBulkInsertsRequest {
 /// empty, then enters the staging mode with the new directive.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StagingPartitionDirective {
-    PartitionExpr(String),
+    UpdatePartitionExpr(String),
     RejectAllWrites,
 }
 
@@ -1482,7 +1482,7 @@ impl StagingPartitionDirective {
     /// Returns the partition expression carried by this directive, if any.
     pub fn partition_expr(&self) -> Option<&str> {
         match self {
-            Self::PartitionExpr(expr) => Some(expr),
+            Self::UpdatePartitionExpr(expr) => Some(expr),
             Self::RejectAllWrites => None,
         }
     }
@@ -1498,7 +1498,7 @@ impl EnterStagingRequest {
     /// Builds an enter-staging request with a partition expression directive.
     pub fn with_partition_expr(partition_expr: String) -> Self {
         Self {
-            partition_directive: StagingPartitionDirective::PartitionExpr(partition_expr),
+            partition_directive: StagingPartitionDirective::UpdatePartitionExpr(partition_expr),
         }
     }
 }

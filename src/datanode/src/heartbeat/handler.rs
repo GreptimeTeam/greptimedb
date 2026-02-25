@@ -382,7 +382,7 @@ mod tests {
         // Enter staging region
         let instruction = Instruction::EnterStagingRegions(vec![EnterStagingRegion {
             region_id,
-            partition_directive: StagingPartitionDirective::PartitionExpr("".to_string()),
+            partition_directive: StagingPartitionDirective::UpdatePartitionExpr("".to_string()),
         }]);
         assert!(
             heartbeat_handler.is_acceptable(&heartbeat_env.create_handler_ctx((meta, instruction)))

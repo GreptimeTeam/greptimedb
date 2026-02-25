@@ -538,7 +538,7 @@ impl Display for EnterStagingRegion {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StagingPartitionDirective {
-    PartitionExpr(String),
+    UpdatePartitionExpr(String),
     RejectAllWrites,
 }
 
@@ -546,7 +546,7 @@ impl StagingPartitionDirective {
     /// Returns the partition expression carried by this directive, if any.
     pub fn as_partition_expr(&self) -> Option<&str> {
         match self {
-            Self::PartitionExpr(expr) => Some(expr),
+            Self::UpdatePartitionExpr(expr) => Some(expr),
             Self::RejectAllWrites => None,
         }
     }
@@ -555,7 +555,7 @@ impl StagingPartitionDirective {
 impl Display for StagingPartitionDirective {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::PartitionExpr(expr) => write!(f, "PartitionExpr({})", expr),
+            Self::UpdatePartitionExpr(expr) => write!(f, "UpdatePartitionExpr({})", expr),
             Self::RejectAllWrites => write!(f, "RejectAllWrites"),
         }
     }
@@ -569,7 +569,7 @@ where
     S: Serializer,
 {
     match rule {
-        StagingPartitionDirective::PartitionExpr(expr) => serializer.serialize_str(expr),
+        StagingPartitionDirective::UpdatePartitionExpr(expr) => serializer.serialize_str(expr),
         StagingPartitionDirective::RejectAllWrites => {
             #[derive(Serialize)]
             struct RejectAllWritesSer<'a> {
@@ -598,7 +598,7 @@ where
     }
 
     match Compat::deserialize(deserializer)? {
-        Compat::Legacy(expr) => Ok(StagingPartitionDirective::PartitionExpr(expr)),
+        Compat::Legacy(expr) => Ok(StagingPartitionDirective::UpdatePartitionExpr(expr)),
         Compat::TypeTagged { r#type } if r#type == "reject_all_writes" => {
             Ok(StagingPartitionDirective::RejectAllWrites)
         }
@@ -1293,7 +1293,7 @@ mod tests {
         assert_eq!(enter.region_id, RegionId::new(1024, 1));
         assert_eq!(
             enter.partition_directive,
-            StagingPartitionDirective::PartitionExpr(
+            StagingPartitionDirective::UpdatePartitionExpr(
                 "{\"Expr\":{\"lhs\":{\"Column\":\"x\"},\"op\":\"GtEq\",\"rhs\":{\"Value\":{\"Int32\":0}}}}"
                     .to_string()
             )

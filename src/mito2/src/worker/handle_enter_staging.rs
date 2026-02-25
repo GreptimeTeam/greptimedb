@@ -128,7 +128,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
 
         let partition_expr = match partition_directive {
-            StagingPartitionDirective::PartitionExpr(partition_expr) => partition_expr.clone(),
+            StagingPartitionDirective::UpdatePartitionExpr(partition_expr) => {
+                partition_expr.clone()
+            }
             StagingPartitionDirective::RejectAllWrites => {
                 info!(
                     "Enter staging with reject all writes, region_id: {}",

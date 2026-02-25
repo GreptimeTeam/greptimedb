@@ -1202,7 +1202,7 @@ mod tests {
             .handle_request(
                 physical_region_id,
                 RegionRequest::EnterStaging(EnterStagingRequest {
-                    partition_directive: StagingPartitionDirective::PartitionExpr(
+                    partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
                         partition_expr.clone(),
                     ),
                 }),

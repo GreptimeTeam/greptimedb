@@ -216,7 +216,7 @@ mod tests {
                 .handle_request(
                     region_id,
                     RegionRequest::EnterStaging(EnterStagingRequest {
-                        partition_directive: StagingPartitionDirective::PartitionExpr(
+                        partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
                             partition_expr.as_json_str().unwrap(),
                         ),
                     }),
