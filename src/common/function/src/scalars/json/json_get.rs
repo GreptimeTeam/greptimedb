@@ -24,7 +24,7 @@ use datafusion_common::arrow::array::{
     StringViewBuilder,
 };
 use datafusion_common::arrow::datatypes::DataType;
-use datafusion_common::{DataFusionError, Result, ScalarValue};
+use datafusion_common::{DataFusionError, Result};
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
 use datatypes::arrow_array::{int_array_value_at_index, string_array_value_at_index};
 use datatypes::json::JsonStructureSettings;
@@ -117,6 +117,7 @@ impl Default for JsonGet {
     }
 }
 
+// TODO: refactor this to StringLikeArrayBuilder from Arrow 57
 struct StringResultBuilder(StringViewBuilder);
 
 impl JsonGetResultBuilder for StringResultBuilder {
@@ -507,6 +508,9 @@ fn json_struct_to_value(raw: &str, jsons: &StructArray, i: usize) -> Result<Valu
     Ok(json)
 }
 
+/// This function is mostly called as `json_get(value, 'attr')::type` and rewritten by
+/// `json_get_rewriter::JsonGetRewriter` to `json_get(value, 'attr', NULL::type)`. So we
+/// use the third argument's type to determine the return type.
 #[derive(Debug, Display)]
 #[display("{}", Self::NAME.to_ascii_uppercase())]
 pub(super) struct JsonGetWithType {
@@ -514,13 +518,13 @@ pub(super) struct JsonGetWithType {
 }
 
 impl JsonGetWithType {
-    const NAME: &'static str = "json_get";
+    pub(crate) const NAME: &'static str = "json_get";
 }
 
 impl Default for JsonGetWithType {
     fn default() -> Self {
         Self {
-            signature: Signature::any(3, Volatility::Immutable),
+            signature: Signature::variadic_any(Volatility::Immutable),
         }
     }
 }
@@ -540,31 +544,16 @@ impl Function for JsonGetWithType {
         &self,
         args: datafusion_expr::ReturnFieldArgs<'_>,
     ) -> datafusion_common::Result<Arc<Field>> {
-        match args.scalar_arguments[2] {
-            Some(ScalarValue::Utf8(Some(type_str)))
-            | Some(ScalarValue::Utf8View(Some(type_str)))
-            | Some(ScalarValue::LargeUtf8(Some(type_str))) => {
-                let type_str = type_str.to_ascii_lowercase();
-                match type_str.as_str() {
-                    "bool" | "boolean" => {
-                        Ok(Arc::new(Field::new(self.name(), DataType::Boolean, true)))
-                    }
-                    "int" | "integer" => {
-                        Ok(Arc::new(Field::new(self.name(), DataType::Int64, true)))
-                    }
-                    "float" | "double" => {
-                        Ok(Arc::new(Field::new(self.name(), DataType::Float64, true)))
-                    }
-                    "string" => Ok(Arc::new(Field::new(self.name(), DataType::Utf8View, true))),
-                    _ => Err(DataFusionError::Internal(format!(
-                        "Unsupported type: {}",
-                        type_str
-                    ))),
+        match args.scalar_arguments.get(2) {
+            Some(Some(v)) => {
+                let mut data_type = v.data_type();
+                if matches!(data_type, DataType::Utf8 | DataType::LargeUtf8) {
+                    data_type = DataType::Utf8View;
                 }
+
+                Ok(Arc::new(Field::new(self.name(), data_type, true)))
             }
-            _ => Err(DataFusionError::Internal(
-                "Invalid argument provided for type".to_string(),
-            )),
+            _ => Ok(Arc::new(Field::new(self.name(), DataType::Utf8View, true))),
         }
     }
 
@@ -576,7 +565,7 @@ impl Function for JsonGetWithType {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion_common::Result<ColumnarValue> {
-        let [arg0, arg1, _] = extract_args("JSON_GET", &args)?;
+        let [arg0, arg1, _] = extract_args(self.name(), &args)?;
         let len = arg0.len();
 
         let arg1 = compute::cast(&arg1, &DataType::Utf8View)?;
@@ -590,10 +579,11 @@ impl Function for JsonGetWithType {
             DataType::Int64 => Box::new(IntResultBuilder(Int64Builder::with_capacity(len))),
             DataType::Float64 => Box::new(FloatResultBuilder(Float64Builder::with_capacity(len))),
             DataType::Boolean => Box::new(BoolResultBuilder(BooleanBuilder::with_capacity(len))),
-            _ => {
-                return Err(DataFusionError::Internal(
-                    "Unsupported return type".to_string(),
-                ));
+            _type => {
+                return Err(DataFusionError::Internal(format!(
+                    "Unsupported return type {}",
+                    _type
+                )));
             }
         };
 

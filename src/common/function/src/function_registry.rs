@@ -18,6 +18,7 @@ use std::sync::{Arc, LazyLock, RwLock};
 
 use datafusion::catalog::TableFunction;
 use datafusion_expr::AggregateUDF;
+use datafusion_expr::expr_rewriter::FunctionRewrite;
 
 use crate::admin::AdminFunction;
 use crate::aggrs::aggr_wrapper::StateMergeHelper;
@@ -46,6 +47,7 @@ pub struct FunctionRegistry {
     functions: RwLock<HashMap<String, ScalarFunctionFactory>>,
     aggregate_functions: RwLock<HashMap<String, AggregateUDF>>,
     table_functions: RwLock<HashMap<String, Arc<TableFunction>>>,
+    function_rewrites: RwLock<Vec<Arc<dyn FunctionRewrite + Send + Sync>>>,
 }
 
 impl FunctionRegistry {
@@ -100,6 +102,11 @@ impl FunctionRegistry {
             .insert(func.name().to_string(), Arc::new(func));
     }
 
+    /// Register a function rewrite rule.
+    pub fn register_function_rewrite(&self, func: impl FunctionRewrite + Send + Sync + 'static) {
+        self.function_rewrites.write().unwrap().push(Arc::new(func));
+    }
+
     pub fn get_function(&self, name: &str) -> Option<ScalarFunctionFactory> {
         self.functions.read().unwrap().get(name).cloned()
     }
@@ -131,6 +138,11 @@ impl FunctionRegistry {
     /// Returns true if an aggregate function with the given name exists in the registry.
     pub fn is_aggr_func_exist(&self, name: &str) -> bool {
         self.aggregate_functions.read().unwrap().contains_key(name)
+    }
+
+    /// Returns a list of all function rewrite rules registered in the registry.
+    pub fn function_rewrites(&self) -> Vec<Arc<dyn FunctionRewrite + Send + Sync>> {
+        self.function_rewrites.read().unwrap().clone()
     }
 }
 

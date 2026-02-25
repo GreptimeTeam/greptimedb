@@ -84,6 +84,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 |_|_Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST_|
 |_|_Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(10000, None)_|
 |_|_TableScan: test_|
+| logical_plan after apply_function_rewrites_| SAME TEXT AS ABOVE_|
 | logical_plan after count_wildcard_to_time_index_rule_| SAME TEXT AS ABOVE_|
 | logical_plan after StringNormalizationRule_| SAME TEXT AS ABOVE_|
 | logical_plan after TranscribeAtatRule_| SAME TEXT AS ABOVE_|
@@ -223,6 +224,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test AS series;
 |_|_Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST_|
 |_|_Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(10000, None)_|
 |_|_TableScan: test_|
+| logical_plan after apply_function_rewrites_| SAME TEXT AS ABOVE_|
 | logical_plan after count_wildcard_to_time_index_rule_| SAME TEXT AS ABOVE_|
 | logical_plan after StringNormalizationRule_| SAME TEXT AS ABOVE_|
 | logical_plan after TranscribeAtatRule_| SAME TEXT AS ABOVE_|

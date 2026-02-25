@@ -315,6 +315,7 @@ impl Instance {
             unreachable!()
         };
         query_interceptor.pre_execute(&stmt, Some(&plan), query_ctx.clone())?;
+
         self.statement_executor
             .exec_plan(plan, query_ctx.clone())
             .await
