@@ -855,11 +855,10 @@ impl Procedure for BatchGcProcedure {
     async fn execute(&mut self, ctx: &ProcedureContext) -> ProcedureResult<Status> {
         match self.data.state {
             State::Start => {
-                let regions = self.data.regions.clone();
                 let _regions_span = common_telemetry::tracing::debug_span!(
                     "meta_gc_procedure_regions",
                     state = "start",
-                    regions = ?regions
+                    regions = ?self.data.regions
                 )
                 .entered();
                 info!(
@@ -909,7 +908,6 @@ impl Procedure for BatchGcProcedure {
                 }
             }
             State::Gcing => {
-                let regions = self.data.regions.clone();
                 info!(
                     "Batch GC procedure sending GC instructions for {} regions",
                     self.data.regions.len()
@@ -921,7 +919,7 @@ impl Procedure for BatchGcProcedure {
                     .instrument(common_telemetry::tracing::debug_span!(
                         "meta_gc_procedure_regions",
                         state = "gcing",
-                        regions = ?regions
+                        regions = ?self.data.regions
                     ))
                     .instrument(common_telemetry::tracing::info_span!(
                         "meta_gc_procedure_send_gc_instructions",
