@@ -14,6 +14,7 @@ common-base.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
 common-meta.workspace = true
+common-telemetry.workspace = true
 common-query.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true

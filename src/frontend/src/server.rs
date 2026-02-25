@@ -126,8 +126,9 @@ where
 
         if opts.prom_store.enable {
             let pending_rows_batcher = PendingRowsBatcher::try_new(
-                self.instance.clone(),
-                opts.prom_store.with_metric_engine,
+                self.instance.partition_manager().clone(),
+                self.instance.node_manager().clone(),
+                self.instance.catalog_manager().clone(),
                 opts.prom_store.pending_rows_flush_interval,
                 opts.prom_store.max_batch_rows,
                 opts.prom_store.max_concurrent_flushes,
