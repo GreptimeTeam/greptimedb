@@ -941,7 +941,6 @@ mod tests {
                     region: Region {
                         id: RegionId::new(0, 1),
                         name: "r1".to_string(),
-                        partition: None,
                         attrs: Default::default(),
                         partition_expr: Default::default(),
                     },
@@ -952,12 +951,12 @@ mod tests {
                     follower_peers: vec![],
                     leader_state: None,
                     leader_down_since: None,
+                    write_route_policy: None,
                 },
                 RegionRoute {
                     region: Region {
                         id: RegionId::new(0, 1),
                         name: "r1".to_string(),
-                        partition: None,
                         attrs: Default::default(),
                         partition_expr: Default::default(),
                     },
@@ -968,6 +967,7 @@ mod tests {
                     follower_peers: vec![],
                     leader_state: None,
                     leader_down_since: None,
+                    write_route_policy: None,
                 },
             ],
             max_region_number: 1,

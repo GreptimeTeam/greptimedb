@@ -189,7 +189,6 @@ fn create_region_routes(regions: Vec<RegionNumber>) -> Vec<RegionRoute> {
             region: Region {
                 id: region_id.into(),
                 name: String::new(),
-                partition: None,
                 attrs: BTreeMap::new(),
                 partition_expr: Default::default(),
             },
@@ -200,6 +199,7 @@ fn create_region_routes(regions: Vec<RegionNumber>) -> Vec<RegionRoute> {
             follower_peers: vec![],
             leader_state: None,
             leader_down_since: None,
+            write_route_policy: None,
         });
     }
 

@@ -26,7 +26,7 @@ use store_api::region_engine::{
 };
 use store_api::region_request::{
     ApplyStagingManifestRequest, EnterStagingRequest, RegionFlushRequest, RegionPutRequest,
-    RegionRequest,
+    RegionRequest, StagingPartitionDirective,
 };
 use store_api::storage::{FileId, RegionId};
 
@@ -141,7 +141,9 @@ async fn test_apply_staging_manifest_mismatched_partition_expr_with_format(flat_
         .handle_request(
             region_id,
             RegionRequest::EnterStaging(EnterStagingRequest {
-                partition_expr: range_expr("x", 0, 50).as_json_str().unwrap(),
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                    range_expr("x", 0, 50).as_json_str().unwrap(),
+                ),
             }),
         )
         .await
@@ -292,7 +294,9 @@ async fn test_apply_staging_manifest_success_with_format(flat_format: bool) {
         .handle_request(
             new_region_id_1,
             RegionRequest::EnterStaging(EnterStagingRequest {
-                partition_expr: range_expr("tag_0", 0, 50).as_json_str().unwrap(),
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                    range_expr("tag_0", 0, 50).as_json_str().unwrap(),
+                ),
             }),
         )
         .await
@@ -417,7 +421,9 @@ async fn test_apply_staging_manifest_invalid_files_to_add_with_format(flat_forma
         .handle_request(
             region_id,
             RegionRequest::EnterStaging(EnterStagingRequest {
-                partition_expr: range_expr("tag_0", 0, 50).as_json_str().unwrap(),
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                    range_expr("tag_0", 0, 50).as_json_str().unwrap(),
+                ),
             }),
         )
         .await
@@ -510,7 +516,9 @@ async fn test_apply_staging_manifest_change_edit_different_columns_fails_with_fo
         .handle_request(
             region_id,
             RegionRequest::EnterStaging(EnterStagingRequest {
-                partition_expr: partition_expr.clone(),
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                    partition_expr.clone(),
+                ),
             }),
         )
         .await
@@ -629,7 +637,9 @@ async fn test_apply_staging_manifest_preserves_unflushed_memtable_with_format(fl
         .handle_request(
             region_id,
             RegionRequest::EnterStaging(EnterStagingRequest {
-                partition_expr: partition_expr.clone(),
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                    partition_expr.clone(),
+                ),
             }),
         )
         .await
@@ -740,7 +750,9 @@ async fn test_split_repartition_causes_duplicate_data() {
         .handle_request(
             source_region_id,
             RegionRequest::EnterStaging(EnterStagingRequest {
-                partition_expr: target_partition_expr_1.as_json_str().unwrap(),
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                    target_partition_expr_1.as_json_str().unwrap(),
+                ),
             }),
         )
         .await
@@ -784,7 +796,9 @@ async fn test_split_repartition_causes_duplicate_data() {
         .handle_request(
             target_region_id_2,
             RegionRequest::EnterStaging(EnterStagingRequest {
-                partition_expr: target_partition_expr_2.as_json_str().unwrap(),
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                    target_partition_expr_2.as_json_str().unwrap(),
+                ),
             }),
         )
         .await
@@ -952,7 +966,9 @@ async fn test_merge_repartition_data_integrity() {
         .handle_request(
             target_region_id,
             RegionRequest::EnterStaging(EnterStagingRequest {
-                partition_expr: target_partition_expr.as_json_str().unwrap(),
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                    target_partition_expr.as_json_str().unwrap(),
+                ),
             }),
         )
         .await

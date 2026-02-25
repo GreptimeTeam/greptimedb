@@ -36,7 +36,7 @@ use store_api::region_engine::{
 };
 use store_api::region_request::{
     ApplyStagingManifestRequest, EnterStagingRequest, RegionAlterRequest, RegionFlushRequest,
-    RegionPutRequest, RegionRequest, RegionTruncateRequest,
+    RegionPutRequest, RegionRequest, RegionTruncateRequest, StagingPartitionDirective,
 };
 use store_api::storage::{RegionId, ScanRequest};
 
@@ -253,6 +253,52 @@ fn default_partition_expr() -> String {
 }
 
 #[tokio::test]
+async fn test_staging_reject_all_writes_rejects_put() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(2048, 0);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = rows_schema(&request);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_directive: StagingPartitionDirective::RejectAllWrites,
+            }),
+        )
+        .await
+        .unwrap();
+
+    let rows = Rows {
+        schema: column_schemas,
+        rows: build_rows(0, 2),
+    };
+    let err = engine
+        .handle_request(
+            region_id,
+            RegionRequest::Put(RegionPutRequest {
+                rows,
+                hint: None,
+                partition_expr_version: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.status_code(), StatusCode::StorageUnavailable);
+    assert_matches!(
+        err.into_inner().as_any().downcast_ref::<Error>().unwrap(),
+        Error::RejectWrite { .. }
+    );
+}
+
+#[tokio::test]
 async fn test_staging_write_partition_expr_version() {
     test_staging_write_partition_expr_version_with_format(false).await;
     test_staging_write_partition_expr_version_with_format(true).await;
@@ -285,7 +331,9 @@ async fn test_staging_write_partition_expr_version_with_format(flat_format: bool
         .handle_request(
             region_id,
             RegionRequest::EnterStaging(EnterStagingRequest {
-                partition_expr: partition_expr.clone(),
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                    partition_expr.clone(),
+                ),
             }),
         )
         .await
@@ -316,7 +364,7 @@ async fn test_staging_write_partition_expr_version_with_format(flat_format: bool
     assert_eq!(err.status_code(), StatusCode::InvalidArguments);
     assert_matches!(
         err.into_inner().as_any().downcast_ref::<Error>().unwrap(),
-        Error::PartitionRuleVersionMismatch { .. }
+        Error::PartitionExprVersionMismatch { .. }
     );
 
     let compat_rows = Rows {
@@ -492,7 +540,9 @@ async fn test_staging_manifest_directory_with_format(flat_format: bool) {
         .handle_request(
             region_id,
             RegionRequest::EnterStaging(EnterStagingRequest {
-                partition_expr: partition_expr.clone(),
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                    partition_expr.clone(),
+                ),
             }),
         )
         .await
@@ -500,8 +550,12 @@ async fn test_staging_manifest_directory_with_format(flat_format: bool) {
     let region = engine.get_region(region_id).unwrap();
     let staging_partition_info = region.staging_partition_info.lock().unwrap().clone();
     assert_eq!(
-        staging_partition_info.unwrap().partition_expr,
-        partition_expr
+        staging_partition_info
+            .unwrap()
+            .partition_expr()
+            .unwrap()
+            .to_string(),
+        partition_expr,
     );
     {
         let manager = region.manifest_ctx.manifest_manager.read().await;
@@ -523,7 +577,9 @@ async fn test_staging_manifest_directory_with_format(flat_format: bool) {
         .handle_request(
             region_id,
             RegionRequest::EnterStaging(EnterStagingRequest {
-                partition_expr: partition_expr.clone(),
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                    partition_expr.clone(),
+                ),
             }),
         )
         .await
@@ -534,7 +590,7 @@ async fn test_staging_manifest_directory_with_format(flat_format: bool) {
         .handle_request(
             region_id,
             RegionRequest::EnterStaging(EnterStagingRequest {
-                partition_expr: "".to_string(),
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr("".to_string()),
             }),
         )
         .await
@@ -629,7 +685,9 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
         .handle_request(
             region_id,
             RegionRequest::EnterStaging(EnterStagingRequest {
-                partition_expr: partition_expr.clone(),
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                    partition_expr.clone(),
+                ),
             }),
         )
         .await
@@ -843,7 +901,9 @@ async fn test_enter_staging_writes_partition_expr_change_action_with_format(flat
         .handle_request(
             region_id,
             RegionRequest::EnterStaging(EnterStagingRequest {
-                partition_expr: partition_expr.clone(),
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                    partition_expr.clone(),
+                ),
             }),
         )
         .await
@@ -905,7 +965,9 @@ async fn test_staging_exit_conflict_partition_expr_change_and_change_with_format
         .handle_request(
             region_id,
             RegionRequest::EnterStaging(EnterStagingRequest {
-                partition_expr: partition_expr.clone(),
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                    partition_expr.clone(),
+                ),
             }),
         )
         .await
@@ -1006,7 +1068,9 @@ async fn test_write_stall_on_enter_staging_with_format(flat_format: bool) {
             .handle_request(
                 region_id,
                 RegionRequest::EnterStaging(EnterStagingRequest {
-                    partition_expr: partition_expr.clone(),
+                    partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                        partition_expr.clone(),
+                    ),
                 }),
             )
             .await
@@ -1108,7 +1172,9 @@ async fn test_enter_staging_error(env: &mut TestEnv, flat_format: bool) {
         .handle_request(
             region_id,
             RegionRequest::EnterStaging(EnterStagingRequest {
-                partition_expr: partition_expr.clone(),
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                    partition_expr.clone(),
+                ),
             }),
         )
         .await

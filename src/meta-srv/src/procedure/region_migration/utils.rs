@@ -274,6 +274,7 @@ mod tests {
             follower_peers: vec![],
             leader_state: None,
             leader_down_since: None,
+            write_route_policy: None,
         };
         update_result_with_region_route(&mut result, &region_route, 2, 1).unwrap();
         assert_eq!(
@@ -293,6 +294,7 @@ mod tests {
             follower_peers: vec![],
             leader_state: None,
             leader_down_since: None,
+            write_route_policy: None,
         };
         update_result_with_region_route(&mut result, &region_route, 2, 3).unwrap();
         assert_eq!(
@@ -312,6 +314,7 @@ mod tests {
             follower_peers: vec![Peer::empty(2)],
             leader_state: None,
             leader_down_since: None,
+            write_route_policy: None,
         };
         update_result_with_region_route(&mut result, &region_route, 1, 2).unwrap();
         assert_eq!(
@@ -331,6 +334,7 @@ mod tests {
             follower_peers: vec![],
             leader_state: None,
             leader_down_since: None,
+            write_route_policy: None,
         };
         update_result_with_region_route(&mut result, &region_route, 1, 3).unwrap();
         assert_eq!(
@@ -350,6 +354,7 @@ mod tests {
             follower_peers: vec![],
             leader_state: None,
             leader_down_since: None,
+            write_route_policy: None,
         };
         let err = update_result_with_region_route(&mut result, &region_route, 1, 3).unwrap_err();
         assert_matches!(err, Error::Unexpected { .. });
@@ -438,6 +443,7 @@ mod tests {
                         follower_peers: vec![],
                         leader_state: None,
                         leader_down_since: None,
+                        write_route_policy: None,
                     },
                     // Leader peer changed.
                     RegionRoute {
@@ -446,6 +452,7 @@ mod tests {
                         follower_peers: vec![],
                         leader_state: None,
                         leader_down_since: None,
+                        write_route_policy: None,
                     },
                     // Peer conflict.
                     RegionRoute {
@@ -454,6 +461,7 @@ mod tests {
                         follower_peers: vec![Peer::empty(2)],
                         leader_state: None,
                         leader_down_since: None,
+                        write_route_policy: None,
                     },
                     // Normal case.
                     RegionRoute {
@@ -462,6 +470,7 @@ mod tests {
                         follower_peers: vec![],
                         leader_state: None,
                         leader_down_since: None,
+                        write_route_policy: None,
                     },
                 ])),
             )

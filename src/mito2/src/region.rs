@@ -25,6 +25,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
+use common_base::hash::partition_expr_version;
 use common_telemetry::{error, info, warn};
 use crossbeam_utils::atomic::AtomicCell;
 use partition::expr::PartitionExpr;
@@ -36,7 +37,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
     RegionManifestInfo, RegionRole, RegionStatistic, SettableRegionRoleState,
 };
-use store_api::region_request::PathType;
+use store_api::region_request::{PathType, StagingPartitionDirective};
 use store_api::sst_entry::ManifestSstEntry;
 use store_api::storage::{FileId, RegionId, SequenceNumber};
 use tokio::sync::RwLockWriteGuard;
@@ -168,8 +169,29 @@ pub type MitoRegionRef = Arc<MitoRegion>;
 
 #[derive(Debug, Clone)]
 pub(crate) struct StagingPartitionInfo {
-    pub(crate) partition_expr: String,
-    pub(crate) partition_expr_version: u64,
+    pub(crate) partition_directive: StagingPartitionDirective,
+    pub(crate) partition_rule_version: u64,
+}
+
+impl StagingPartitionInfo {
+    /// Returns the partition expression carried by the staging directive, if any.
+    pub(crate) fn partition_expr(&self) -> Option<&str> {
+        self.partition_directive.partition_expr()
+    }
+
+    /// Builds staging partition info from a directive and derives its version marker.
+    pub(crate) fn from_partition_directive(partition_directive: StagingPartitionDirective) -> Self {
+        let partition_rule_version = match &partition_directive {
+            StagingPartitionDirective::UpdatePartitionExpr(expr) => {
+                partition_expr_version(Some(expr))
+            }
+            StagingPartitionDirective::RejectAllWrites => 0,
+        };
+        Self {
+            partition_directive,
+            partition_rule_version,
+        }
+    }
 }
 
 impl MitoRegion {
@@ -801,7 +823,7 @@ impl MitoRegion {
             }
             staging_partition_info
                 .as_ref()
-                .map(|info| info.partition_expr.clone())
+                .and_then(|info| info.partition_expr().map(ToString::to_string))
         } else {
             let version = self.version();
             version.metadata.partition_expr.clone()
@@ -813,11 +835,28 @@ impl MitoRegion {
             let staging_partition_info = self.staging_partition_info.lock().unwrap();
             staging_partition_info
                 .as_ref()
-                .map(|info| info.partition_expr_version)
+                .map(|info| info.partition_rule_version)
                 .unwrap_or_default()
         } else {
             self.version().metadata.partition_expr_version
         }
+    }
+
+    /// Returns whether writes should be rejected for this region in staging mode.
+    pub(crate) fn reject_all_writes_in_staging(&self) -> bool {
+        if !self.is_staging() {
+            return false;
+        }
+        let staging_partition_info = self.staging_partition_info.lock().unwrap();
+        staging_partition_info
+            .as_ref()
+            .map(|info| {
+                matches!(
+                    info.partition_directive,
+                    StagingPartitionDirective::RejectAllWrites
+                )
+            })
+            .unwrap_or(false)
     }
 }
 

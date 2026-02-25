@@ -186,7 +186,7 @@ impl MetricEngineInner {
                         merged_version == request_version,
                         InvalidRequestSnafu {
                             region_id: physical_region_id,
-                            reason: "inconsistent partition rule version in batch"
+                            reason: "inconsistent partition expr version in batch"
                         }
                     );
                 } else {
@@ -312,7 +312,7 @@ impl MetricEngineInner {
                         merged_version == request_version,
                         InvalidRequestSnafu {
                             region_id: logical_region_id,
-                            reason: "inconsistent partition rule version in batch"
+                            reason: "inconsistent partition expr version in batch"
                         }
                     );
                 } else {
@@ -569,7 +569,9 @@ mod tests {
     };
     use store_api::path_utils::table_dir;
     use store_api::region_engine::RegionEngine;
-    use store_api::region_request::{EnterStagingRequest, RegionRequest};
+    use store_api::region_request::{
+        EnterStagingRequest, RegionRequest, StagingPartitionDirective,
+    };
     use store_api::storage::ScanRequest;
     use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 
@@ -1200,7 +1202,9 @@ mod tests {
             .handle_request(
                 physical_region_id,
                 RegionRequest::EnterStaging(EnterStagingRequest {
-                    partition_expr: partition_expr.clone(),
+                    partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                        partition_expr.clone(),
+                    ),
                 }),
             )
             .await

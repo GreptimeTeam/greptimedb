@@ -1539,7 +1539,6 @@ mod tests {
             region: Region {
                 id: region_id.into(),
                 name: "r1".to_string(),
-                partition: None,
                 attrs: BTreeMap::new(),
                 partition_expr: Default::default(),
             },
@@ -1547,6 +1546,7 @@ mod tests {
             follower_peers: vec![],
             leader_state: None,
             leader_down_since: None,
+            write_route_policy: None,
         }
     }
 
@@ -2045,7 +2045,6 @@ mod tests {
                 region: Region {
                     id: 1.into(),
                     name: "r1".to_string(),
-                    partition: None,
                     attrs: BTreeMap::new(),
                     partition_expr: Default::default(),
                 },
@@ -2053,12 +2052,12 @@ mod tests {
                 leader_state: Some(LeaderState::Downgrading),
                 follower_peers: vec![],
                 leader_down_since: Some(current_time_millis()),
+                write_route_policy: None,
             },
             RegionRoute {
                 region: Region {
                     id: 2.into(),
                     name: "r2".to_string(),
-                    partition: None,
                     attrs: BTreeMap::new(),
                     partition_expr: Default::default(),
                 },
@@ -2066,6 +2065,7 @@ mod tests {
                 leader_state: None,
                 follower_peers: vec![],
                 leader_down_since: None,
+                write_route_policy: None,
             },
         ];
         let table_info = new_test_table_info();
@@ -2504,6 +2504,7 @@ mod tests {
                         follower_peers: vec![Peer::empty(5)],
                         leader_state: None,
                         leader_down_since: None,
+                        write_route_policy: None,
                     },
                     RegionRoute {
                         region: Region::new_test(RegionId::new(table_id, 2)),
@@ -2511,6 +2512,7 @@ mod tests {
                         follower_peers: vec![Peer::empty(4)],
                         leader_state: None,
                         leader_down_since: None,
+                        write_route_policy: None,
                     },
                     RegionRoute {
                         region: Region::new_test(RegionId::new(table_id, 3)),
@@ -2518,6 +2520,7 @@ mod tests {
                         follower_peers: vec![],
                         leader_state: None,
                         leader_down_since: None,
+                        write_route_policy: None,
                     },
                 ]),
                 serialized_options,
@@ -2561,6 +2564,7 @@ mod tests {
                         follower_peers: vec![Peer::empty(5)],
                         leader_state: None,
                         leader_down_since: None,
+                        write_route_policy: None,
                     },
                     RegionRoute {
                         region: Region::new_test(RegionId::new(table_id, 2)),
@@ -2568,6 +2572,7 @@ mod tests {
                         follower_peers: vec![Peer::empty(4)],
                         leader_state: None,
                         leader_down_since: None,
+                        write_route_policy: None,
                     },
                     RegionRoute {
                         region: Region::new_test(RegionId::new(table_id, 3)),
@@ -2575,6 +2580,7 @@ mod tests {
                         follower_peers: vec![],
                         leader_state: None,
                         leader_down_since: None,
+                        write_route_policy: None,
                     },
                 ]),
                 serialized_options,

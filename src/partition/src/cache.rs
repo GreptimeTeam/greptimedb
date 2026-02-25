@@ -57,6 +57,12 @@ pub fn create_partitions_with_version_from_region_routes(
 ) -> common_meta::error::Result<Vec<PartitionInfoWithVersion>> {
     let mut partitions = Vec::with_capacity(region_routes.len());
     for r in region_routes {
+        // Ignore regions marked as reject-all-writes; they should not participate
+        // in writable partition-cache construction.
+        if r.is_ignore_all_writes() {
+            continue;
+        }
+
         let expr_json = r.region.partition_expr();
         let partition_expr_version = if expr_json.is_empty() {
             None
@@ -126,4 +132,51 @@ pub fn new_partition_info_cache(
         init_factory(table_route_cache),
         |ident| matches!(ident, CacheIdent::TableId(_)),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use common_base::hash::partition_expr_version;
+    use common_meta::rpc::router::{Region, RegionRoute, WriteRoutePolicy};
+    use store_api::storage::RegionId;
+
+    use super::create_partitions_with_version_from_region_routes;
+
+    #[test]
+    fn test_create_partitions_with_version_excludes_reject_all_writes() {
+        let table_id = 1024;
+        let expr_json =
+            r#"{"Expr":{"lhs":{"Column":"a"},"op":"GtEq","rhs":{"Value":{"UInt32":10}}}}"#;
+        let region_routes = vec![
+            RegionRoute {
+                region: Region {
+                    id: RegionId::new(table_id, 1),
+                    partition_expr: expr_json.to_string(),
+                    ..Default::default()
+                },
+                leader_peer: None,
+                follower_peers: vec![],
+                leader_state: None,
+                leader_down_since: None,
+                write_route_policy: Some(WriteRoutePolicy::IgnoreAllWrites),
+            },
+            RegionRoute {
+                region: Region {
+                    id: RegionId::new(table_id, 2),
+                    partition_expr: expr_json.to_string(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ];
+
+        let partitions =
+            create_partitions_with_version_from_region_routes(table_id, &region_routes).unwrap();
+        assert_eq!(1, partitions.len());
+        assert_eq!(RegionId::new(table_id, 2), partitions[0].id);
+        assert_eq!(
+            Some(partition_expr_version(Some(expr_json))),
+            partitions[0].partition_expr_version
+        );
+    }
 }

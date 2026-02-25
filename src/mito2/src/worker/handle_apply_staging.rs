@@ -76,17 +76,17 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
 
         let staging_partition_info = region.staging_partition_info.lock().unwrap().clone();
-        // If the partition expr mismatch, return error.
-        if staging_partition_info
+
+        let staging_partition_expr = staging_partition_info
             .as_ref()
-            .map(|info| &info.partition_expr)
-            != Some(&request.partition_expr)
-        {
+            .and_then(|info| info.partition_expr());
+        // If the partition expr mismatch, return error.
+        if staging_partition_expr != Some(request.partition_expr.as_str()) {
             sender.send(
                 StagingPartitionExprMismatchSnafu {
                     manifest_expr: staging_partition_info
                         .as_ref()
-                        .map(|info| info.partition_expr.clone()),
+                        .and_then(|info| info.partition_expr().map(ToString::to_string)),
                     request_expr: request.partition_expr,
                 }
                 .fail(),

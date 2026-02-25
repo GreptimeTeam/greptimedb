@@ -1476,26 +1476,51 @@ impl RegionBulkInsertsRequest {
     }
 }
 
-/// Request to stage a region with a new region rule(partition expression).
+/// Request to stage a region with a new partition directive.
 ///
 /// This request transitions a region into the staging mode.
-/// It first flushes the memtable for the old region rule if it is not empty,
-/// then enters the staging mode with the new region rule.
+/// It first flushes the memtable for the old partition expression if it is not
+/// empty, then enters the staging mode with the new directive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StagingPartitionDirective {
+    UpdatePartitionExpr(String),
+    RejectAllWrites,
+}
+
+impl StagingPartitionDirective {
+    /// Returns the partition expression carried by this directive, if any.
+    pub fn partition_expr(&self) -> Option<&str> {
+        match self {
+            Self::UpdatePartitionExpr(expr) => Some(expr),
+            Self::RejectAllWrites => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct EnterStagingRequest {
-    /// The partition expression of the staging region.
-    pub partition_expr: String,
+    /// The staging partition directive of the region.
+    pub partition_directive: StagingPartitionDirective,
+}
+
+impl EnterStagingRequest {
+    /// Builds an enter-staging request with a partition expression directive.
+    pub fn with_partition_expr(partition_expr: String) -> Self {
+        Self {
+            partition_directive: StagingPartitionDirective::UpdatePartitionExpr(partition_expr),
+        }
+    }
 }
 
 /// This request is used as part of the region repartition.
 ///
-/// After a region has entered staging mode with a new region rule (partition
+/// After a region has entered staging mode with a new partition expression
 /// expression) and a separate process (for example, `remap_manifests`) has
 /// generated the new file assignments for the staging region, this request
 /// applies that generated manifest to the region.
 ///
 /// In practice, this means:
-/// - The `partition_expr` identifies the staging region rule that the manifest
+/// - The `partition_expr` identifies the staging partition expression that the manifest
 ///   was generated for.
 /// - `central_region_id` specifies which region holds the staging blob storage
 ///   where the manifest was written during the `remap_manifests` operation.

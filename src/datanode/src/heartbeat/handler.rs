@@ -289,7 +289,7 @@ mod tests {
         HeartbeatMailbox, IncomingMessage, MailboxRef, MessageMeta,
     };
     use common_meta::instruction::{
-        DowngradeRegion, EnterStagingRegion, OpenRegion, UpgradeRegion,
+        DowngradeRegion, EnterStagingRegion, OpenRegion, StagingPartitionDirective, UpgradeRegion,
     };
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use mito2::config::MitoConfig;
@@ -382,7 +382,7 @@ mod tests {
         // Enter staging region
         let instruction = Instruction::EnterStagingRegions(vec![EnterStagingRegion {
             region_id,
-            partition_expr: "".to_string(),
+            partition_directive: StagingPartitionDirective::UpdatePartitionExpr("".to_string()),
         }]);
         assert!(
             heartbeat_handler.is_acceptable(&heartbeat_env.create_handler_ctx((meta, instruction)))
