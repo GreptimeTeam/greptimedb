@@ -104,7 +104,7 @@ pub struct ScanbenchCommand {
     force_flat_format: bool,
 
     /// Skip WAL replay when opening the region.
-    #[clap(long, default_value_t = true)]
+    #[clap(long, default_value_t = true, num_args = 1)]
     skip_wal_replay: bool,
 }
 
