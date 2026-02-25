@@ -29,6 +29,7 @@ use common_procedure::{
     Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
     Result as ProcedureResult, Status,
 };
+use common_telemetry::tracing::Instrument as _;
 use common_telemetry::{debug, error, info, warn};
 use futures::future::join_all;
 use itertools::Itertools as _;
@@ -524,7 +525,13 @@ impl BatchGcProcedure {
 
     /// Get file references from all datanodes that host the regions
     async fn get_file_references(&mut self) -> Result<FileRefsManifest> {
-        self.set_routes_and_related_regions().await?;
+        let region_count = self.data.regions.len();
+        self.set_routes_and_related_regions()
+            .instrument(common_telemetry::tracing::info_span!(
+                "meta_gc_procedure_prepare_routes",
+                region_count = region_count
+            ))
+            .await?;
 
         let query_regions = &self.data.regions;
         let related_regions = &self.data.related_regions;
@@ -848,14 +855,49 @@ impl Procedure for BatchGcProcedure {
     async fn execute(&mut self, ctx: &ProcedureContext) -> ProcedureResult<Status> {
         match self.data.state {
             State::Start => {
+                let regions = self.data.regions.clone();
+                let _regions_span = common_telemetry::tracing::debug_span!(
+                    "meta_gc_procedure_regions",
+                    state = "start",
+                    regions = ?regions
+                )
+                .entered();
+                info!(
+                    "Batch GC procedure transitioning from Start to Acquiring for {} regions",
+                    self.data.regions.len()
+                );
                 // Transition to Acquiring state
                 self.data.state = State::Acquiring;
                 Ok(Status::executing(false))
             }
             State::Acquiring => {
+                let region_count = self.data.regions.len();
+                let full_file_listing = self.data.full_file_listing;
+                let regions = self.data.regions.clone();
+                info!(
+                    "Batch GC procedure acquiring file references for {} regions",
+                    region_count
+                );
                 // Get file references from all datanodes
-                match self.get_file_references().await {
+                match self
+                    .get_file_references()
+                    .instrument(common_telemetry::tracing::debug_span!(
+                        "meta_gc_procedure_regions",
+                        state = "acquiring",
+                        regions = ?regions
+                    ))
+                    .instrument(common_telemetry::tracing::info_span!(
+                        "meta_gc_procedure_get_file_references",
+                        region_count = region_count,
+                        full_file_listing = full_file_listing
+                    ))
+                    .await
+                {
                     Ok(file_refs) => {
+                        info!(
+                            "Batch GC procedure acquired file references for {} regions",
+                            file_refs.file_refs.len()
+                        );
                         self.data.file_refs = file_refs;
                         self.data.state = State::Gcing;
                         Ok(Status::executing(false))
@@ -867,10 +909,32 @@ impl Procedure for BatchGcProcedure {
                 }
             }
             State::Gcing => {
+                let regions = self.data.regions.clone();
+                info!(
+                    "Batch GC procedure sending GC instructions for {} regions",
+                    self.data.regions.len()
+                );
                 // Send GC instructions to all datanodes
                 // TODO(discord9): handle need-retry regions
-                match self.send_gc_instructions().await {
+                match self
+                    .send_gc_instructions()
+                    .instrument(common_telemetry::tracing::debug_span!(
+                        "meta_gc_procedure_regions",
+                        state = "gcing",
+                        regions = ?regions
+                    ))
+                    .instrument(common_telemetry::tracing::info_span!(
+                        "meta_gc_procedure_send_gc_instructions",
+                        region_count = self.data.regions.len(),
+                        full_file_listing = self.data.full_file_listing
+                    ))
+                    .await
+                {
                     Ok(report) => {
+                        info!(
+                            "Batch GC procedure received GC report, retry region count: {}",
+                            report.need_retry_regions.len()
+                        );
                         self.data.state = State::UpdateRepartition;
                         self.data.gc_report = Some(report);
                         Ok(Status::executing(false))
@@ -881,9 +945,21 @@ impl Procedure for BatchGcProcedure {
                     }
                 }
             }
-            State::UpdateRepartition => match self.cleanup_region_repartition(ctx).await {
+            State::UpdateRepartition => match self
+                .cleanup_region_repartition(ctx)
+                .instrument(common_telemetry::tracing::debug_span!(
+                    "meta_gc_procedure_regions",
+                    state = "update_repartition",
+                    regions = ?self.data.regions
+                ))
+                .instrument(common_telemetry::tracing::info_span!(
+                    "meta_gc_procedure_update_repartition",
+                    region_count = self.data.regions.len()
+                ))
+                .await
+            {
                 Ok(()) => {
-                    info!(
+                    debug!(
                         "Cleanup region repartition info completed successfully for regions {:?}",
                         self.data.regions
                     );
