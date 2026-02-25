@@ -524,7 +524,6 @@ impl JsonGetWithType {
 impl Default for JsonGetWithType {
     fn default() -> Self {
         Self {
-            //signature: Signature::any(3, Volatility::Immutable),
             signature: Signature::variadic_any(Volatility::Immutable),
         }
     }
