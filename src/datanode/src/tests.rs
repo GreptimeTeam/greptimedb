@@ -25,7 +25,7 @@ use common_runtime::Runtime;
 use common_runtime::runtime::{BuilderBuild, RuntimeTrait};
 use datafusion::catalog::TableFunction;
 use datafusion::dataframe::DataFrame;
-use datafusion_expr::{AggregateUDF, LogicalPlan};
+use datafusion_expr::{AggregateUDF, LogicalPlan, WindowUDF};
 use query::planner::LogicalPlanner;
 use query::query_engine::{DescribeResult, QueryEngineState};
 use query::{QueryEngine, QueryEngineContext};
@@ -83,6 +83,8 @@ impl QueryEngine for MockQueryEngine {
     fn register_scalar_function(&self, _func: ScalarFunctionFactory) {}
 
     fn register_table_function(&self, _func: Arc<TableFunction>) {}
+
+    fn register_window_function(&self, _func: WindowUDF) {}
 
     fn read_table(&self, _table: TableRef) -> query::error::Result<DataFrame> {
         unimplemented!()
