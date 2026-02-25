@@ -66,7 +66,13 @@ pub struct ObjbenchCommand {
     pub pprof_file: Option<PathBuf>,
 }
 
-pub(super) fn parse_config(config_path: &PathBuf) -> error::Result<(StorageConfig, MitoConfig)> {
+pub(super) fn parse_config(
+    config_path: &PathBuf,
+) -> error::Result<(
+    StorageConfig,
+    MitoConfig,
+    common_wal::config::DatanodeWalConfig,
+)> {
     let cfg_str = std::fs::read_to_string(config_path).map_err(|e| {
         error::IllegalConfigSnafu {
             msg: format!("failed to read config {}: {e}", config_path.display()),
@@ -81,6 +87,7 @@ pub(super) fn parse_config(config_path: &PathBuf) -> error::Result<(StorageConfi
         .build()
     })?;
 
+    let wal_config = store_cfg.wal;
     let storage_config = store_cfg.storage;
     let mito_engine_config = store_cfg
         .region_engine
@@ -96,7 +103,7 @@ pub(super) fn parse_config(config_path: &PathBuf) -> error::Result<(StorageConfi
         .with_context(|| error::IllegalConfigSnafu {
             msg: format!("Engine config not found in {:?}", config_path),
         })?;
-    Ok((storage_config, mito_engine_config))
+    Ok((storage_config, mito_engine_config, wal_config))
 }
 
 impl ObjbenchCommand {
@@ -108,7 +115,7 @@ impl ObjbenchCommand {
         println!("{}", "Starting objbench with config:".cyan().bold());
 
         // Build object store from config
-        let (store_cfg, mut mito_engine_config) = parse_config(&self.config)?;
+        let (store_cfg, mut mito_engine_config, _wal_config) = parse_config(&self.config)?;
 
         let object_store = build_object_store(&store_cfg).await?;
         println!("{} Object store initialized", "✓".green());
@@ -685,7 +692,7 @@ mod tests {
     #[test]
     fn test_parse_config() {
         let path = "../../config/datanode.example.toml";
-        let (storage, engine) = parse_config(&PathBuf::from_str(path).unwrap()).unwrap();
+        let (storage, engine, _wal) = parse_config(&PathBuf::from_str(path).unwrap()).unwrap();
         assert_eq!(storage.data_home, "./greptimedb_data");
         assert_eq!(engine.index.staging_size, ReadableSize::gb(2));
     }

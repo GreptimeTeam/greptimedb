@@ -166,6 +166,7 @@ pub struct StorageConfig {
 struct StorageConfigWrapper {
     storage: StorageConfig,
     region_engine: Vec<RegionEngineConfig>,
+    wal: DatanodeWalConfig,
 }
 
 #[derive(Debug, Parser, Default)]

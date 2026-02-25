@@ -25,17 +25,21 @@ use common_error::status_code::StatusCode;
 use common_meta::cache::{new_schema_cache, new_table_schema_cache};
 use common_meta::key::SchemaMetadataManager;
 use common_meta::kv_backend::memory::MemoryKvBackend;
+use common_wal::config::DatanodeWalConfig;
 use datafusion::execution::SessionStateBuilder;
 use datafusion::logical_expr::Expr as DfExpr;
 use datafusion_common::ToDFSchema;
 use datafusion_physical_plan::metrics::ExecutionPlanMetricsSet;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
+use log_store::kafka::log_store::KafkaLogStore;
 use log_store::noop::log_store::NoopLogStore;
+use log_store::raft_engine::log_store::RaftEngineLogStore;
 use mito2::engine::MitoEngine;
 use mito2::sst::file_ref::FileReferenceManager;
 use moka::future::CacheBuilder;
 use object_store::manager::ObjectStoreManager;
+use object_store::util::normalize_dir;
 use query::optimizer::parallelize_scan::ParallelizeScan;
 use serde::Deserialize;
 use snafu::{OptionExt, ResultExt};
@@ -43,9 +47,11 @@ use sqlparser::ast::ExprWithAlias as SqlExprWithAlias;
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser as SqlParser;
 use store_api::metadata::RegionMetadata;
+use store_api::path_utils::WAL_DIR;
 use store_api::region_engine::{PrepareRequest, QueryScanContext, RegionEngine};
 use store_api::region_request::{PathType, RegionOpenRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector};
+use tokio::fs;
 
 use crate::datanode::objbench::{build_object_store, parse_config};
 use crate::error;
@@ -96,6 +102,10 @@ pub struct ScanbenchCommand {
     /// Force reading the region in flat format.
     #[clap(long, default_value_t = false)]
     force_flat_format: bool,
+
+    /// Skip WAL replay when opening the region.
+    #[clap(long, default_value_t = true)]
+    skip_wal_replay: bool,
 }
 
 /// JSON config for scan request parameters.
@@ -303,7 +313,7 @@ impl ScanbenchCommand {
         );
 
         // Parse config and build object store
-        let (store_cfg, mito_config) = parse_config(&self.config)?;
+        let (store_cfg, mito_config, wal_config) = parse_config(&self.config)?;
         println!("{} Config parsed", "✓".green());
 
         let object_store = build_object_store(&store_cfg).await?;
@@ -317,22 +327,85 @@ impl ScanbenchCommand {
         let file_ref_manager = Arc::new(FileReferenceManager::new(None));
         let partition_expr_fetcher = noop_partition_expr_fetcher();
 
-        // Create MitoEngine with NoopLogStore (skip WAL)
-        let log_store = Arc::new(NoopLogStore);
-        let engine = MitoEngine::new(
-            &store_cfg.data_home,
-            mito_config,
-            log_store,
-            object_store_manager,
-            schema_metadata_manager,
-            file_ref_manager,
-            partition_expr_fetcher,
-            Plugins::default(),
-        )
-        .await
-        .map_err(BoxedError::new)
-        .context(error::BuildCliSnafu)?;
-        println!("{} MitoEngine created (NoopLogStore)", "✓".green());
+        // Create MitoEngine with appropriate log store
+        let engine = match &wal_config {
+            DatanodeWalConfig::RaftEngine(raft_engine_config) if !self.skip_wal_replay => {
+                let data_home = normalize_dir(&store_cfg.data_home);
+                let wal_dir = match &raft_engine_config.dir {
+                    Some(dir) => dir.clone(),
+                    None => format!("{}{WAL_DIR}", data_home),
+                };
+                fs::create_dir_all(&wal_dir).await.map_err(|e| {
+                    error::IllegalConfigSnafu {
+                        msg: format!("failed to create WAL directory {}: {e}", wal_dir),
+                    }
+                    .build()
+                })?;
+                let log_store = Arc::new(
+                    RaftEngineLogStore::try_new(wal_dir, raft_engine_config)
+                        .await
+                        .map_err(BoxedError::new)
+                        .context(error::BuildCliSnafu)?,
+                );
+                println!("{} Using RaftEngine WAL", "✓".green());
+                MitoEngine::new(
+                    &store_cfg.data_home,
+                    mito_config,
+                    log_store,
+                    object_store_manager,
+                    schema_metadata_manager,
+                    file_ref_manager,
+                    partition_expr_fetcher,
+                    Plugins::default(),
+                )
+                .await
+                .map_err(BoxedError::new)
+                .context(error::BuildCliSnafu)?
+            }
+            DatanodeWalConfig::Kafka(kafka_config) if !self.skip_wal_replay => {
+                let log_store = Arc::new(
+                    KafkaLogStore::try_new(kafka_config, None)
+                        .await
+                        .map_err(BoxedError::new)
+                        .context(error::BuildCliSnafu)?,
+                );
+                println!("{} Using Kafka WAL", "✓".green());
+                MitoEngine::new(
+                    &store_cfg.data_home,
+                    mito_config,
+                    log_store,
+                    object_store_manager,
+                    schema_metadata_manager,
+                    file_ref_manager,
+                    partition_expr_fetcher,
+                    Plugins::default(),
+                )
+                .await
+                .map_err(BoxedError::new)
+                .context(error::BuildCliSnafu)?
+            }
+            _ => {
+                let log_store = Arc::new(NoopLogStore);
+                println!(
+                    "{} Using NoopLogStore (skip_wal_replay={})",
+                    "✓".green(),
+                    self.skip_wal_replay
+                );
+                MitoEngine::new(
+                    &store_cfg.data_home,
+                    mito_config,
+                    log_store,
+                    object_store_manager,
+                    schema_metadata_manager,
+                    file_ref_manager,
+                    partition_expr_fetcher,
+                    Plugins::default(),
+                )
+                .await
+                .map_err(BoxedError::new)
+                .context(error::BuildCliSnafu)?
+            }
+        };
 
         // Open region
         let open_request = RegionOpenRequest {
@@ -340,7 +413,7 @@ impl ScanbenchCommand {
             table_dir: self.table_dir.clone(),
             path_type,
             options: HashMap::default(),
-            skip_wal_replay: true,
+            skip_wal_replay: self.skip_wal_replay,
             checkpoint: None,
         };
 
