@@ -194,6 +194,7 @@ impl RegionManifestManager {
             RegionChange {
                 metadata: metadata.clone(),
                 sst_format,
+                append_mode: None,
             },
         );
         let manifest = manifest_builder.try_build()?;
@@ -207,6 +208,7 @@ impl RegionManifestManager {
         let mut actions = vec![RegionMetaAction::Change(RegionChange {
             metadata,
             sst_format,
+            append_mode: None,
         })];
         if flushed_entry_id > 0 {
             actions.push(RegionMetaAction::Edit(RegionEdit {
@@ -893,6 +895,7 @@ mod test {
             RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange {
                 metadata: new_metadata.clone(),
                 sst_format: FormatType::PrimaryKey,
+                append_mode: None,
             }));
 
         let current_version = manager.update(action_list, false).await.unwrap();
@@ -956,6 +959,7 @@ mod test {
             RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange {
                 metadata: new_metadata.clone(),
                 sst_format: FormatType::PrimaryKey,
+                append_mode: None,
             }));
 
         let current_version = manager.update(action_list, false).await.unwrap();
@@ -1005,6 +1009,6 @@ mod test {
 
         // get manifest size again
         let manifest_size = manager.manifest_usage();
-        assert_eq!(manifest_size, 1378);
+        assert_eq!(manifest_size, 1397);
     }
 }

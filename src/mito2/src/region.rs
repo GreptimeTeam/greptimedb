@@ -492,6 +492,7 @@ impl MitoRegion {
                 let action = RegionMetaAction::Change(RegionChange {
                     metadata: current_meta.clone(),
                     sst_format: current_version.options.sst_format.unwrap_or_default(),
+                    append_mode: None,
                 });
                 let result = manager
                     .update(RegionMetaActionList::with_action(action), false)
@@ -1518,6 +1519,7 @@ mod tests {
                     RegionMetaAction::Change(RegionChange {
                         metadata: Arc::new(changed_metadata),
                         sst_format: FormatType::PrimaryKey,
+                        append_mode: None,
                     }),
                     RegionMetaAction::Edit(empty_edit()),
                 ]),
@@ -1556,6 +1558,7 @@ mod tests {
                     RegionMetaAction::Change(RegionChange {
                         metadata: Arc::new(changed_metadata),
                         sst_format: FormatType::PrimaryKey,
+                        append_mode: None,
                     }),
                     RegionMetaAction::Edit(empty_edit()),
                 ]),
@@ -1588,6 +1591,7 @@ mod tests {
                     RegionMetaAction::Change(RegionChange {
                         metadata: Arc::new(changed_metadata),
                         sst_format: FormatType::PrimaryKey,
+                        append_mode: None,
                     }),
                     RegionMetaAction::Edit(empty_edit()),
                 ]),

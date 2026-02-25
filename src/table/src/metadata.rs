@@ -28,7 +28,9 @@ use derive_builder::Builder;
 use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
-use store_api::mito_engine_options::{COMPACTION_TYPE, COMPACTION_TYPE_TWCS, SST_FORMAT_KEY};
+use store_api::mito_engine_options::{
+    APPEND_MODE_KEY, COMPACTION_TYPE, COMPACTION_TYPE_TWCS, MERGE_MODE_KEY, SST_FORMAT_KEY,
+};
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 use store_api::storage::{ColumnDescriptor, ColumnDescriptorBuilder, ColumnId};
 
@@ -363,6 +365,14 @@ impl TableMeta {
                     new_options
                         .extra_options
                         .insert(SST_FORMAT_KEY.to_string(), value.clone());
+                }
+                SetRegionOption::AppendMode(value) => {
+                    new_options
+                        .extra_options
+                        .insert(APPEND_MODE_KEY.to_string(), value.to_string());
+                    if *value {
+                        new_options.extra_options.remove(MERGE_MODE_KEY);
+                    }
                 }
             }
         }
@@ -1501,6 +1511,85 @@ mod tests {
         assert_eq!(&["col1", "ts", "col2", "my_tag", "my_field"], &names[..]);
         assert_eq!(&[0, 3], &new_meta.primary_key_indices[..]);
         assert_eq!(&[1, 2, 4], &new_meta.value_indices[..]);
+    }
+
+    #[test]
+    fn test_set_append_mode_true_clears_merge_mode_option() {
+        let schema = Arc::new(new_test_schema());
+        let mut table_options = TableOptions::default();
+        table_options
+            .extra_options
+            .insert(MERGE_MODE_KEY.to_string(), "last_non_null".to_string());
+        let meta = TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .options(table_options)
+            .build()
+            .unwrap();
+
+        let alter_kind = AlterKind::SetTableOptions {
+            options: vec![SetRegionOption::AppendMode(true)],
+        };
+        let new_meta = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            Some("true"),
+            new_meta
+                .options
+                .extra_options
+                .get(APPEND_MODE_KEY)
+                .map(String::as_str)
+        );
+        assert!(!new_meta.options.extra_options.contains_key(MERGE_MODE_KEY));
+    }
+
+    #[test]
+    fn test_set_append_mode_false_keeps_merge_mode_option() {
+        let schema = Arc::new(new_test_schema());
+        let mut table_options = TableOptions::default();
+        table_options
+            .extra_options
+            .insert(MERGE_MODE_KEY.to_string(), "last_non_null".to_string());
+        let meta = TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .options(table_options)
+            .build()
+            .unwrap();
+
+        let alter_kind = AlterKind::SetTableOptions {
+            options: vec![SetRegionOption::AppendMode(false)],
+        };
+        let new_meta = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            Some("false"),
+            new_meta
+                .options
+                .extra_options
+                .get(APPEND_MODE_KEY)
+                .map(String::as_str)
+        );
+        assert_eq!(
+            Some("last_non_null"),
+            new_meta
+                .options
+                .extra_options
+                .get(MERGE_MODE_KEY)
+                .map(String::as_str)
+        );
     }
 
     #[test]

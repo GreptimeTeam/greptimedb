@@ -543,6 +543,7 @@ async fn test_apply_staging_manifest_change_edit_different_columns_fails_with_fo
                 RegionMetaAction::Change(RegionChange {
                     metadata: Arc::new(changed_metadata),
                     sst_format: FormatType::PrimaryKey,
+                    append_mode: None,
                 }),
                 RegionMetaAction::Edit(RegionEdit {
                     files_to_add: Vec::new(),
