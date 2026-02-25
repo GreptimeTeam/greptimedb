@@ -178,6 +178,13 @@ impl ParserContext<'_> {
                     match self.parser.next_token().token {
                         Token::LParen => depth += 1,
                         Token::RParen => depth -= 1,
+                        Token::EOF => {
+                            return error::UnexpectedTokenSnafu {
+                                expected: ")",
+                                actual: "EOF",
+                            }
+                            .fail();
+                        }
                         _ => {}
                     }
                 }
@@ -809,5 +816,14 @@ mod tests {
         .remove(0);
 
         assert_eq!(&expected_query, &stmt);
+    }
+
+    #[test]
+    fn test_invalid_copy_query() {
+        let sql = "COPY (SELECT * FROM test_table) TO STDOUT (FORMAT csv";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+
+        assert!(result.is_err());
     }
 }
