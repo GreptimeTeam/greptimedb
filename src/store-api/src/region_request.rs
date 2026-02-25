@@ -52,7 +52,8 @@ use crate::metadata::{
 use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use crate::metrics;
 use crate::mito_engine_options::{
-    SST_FORMAT_KEY, TTL_KEY, TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM,
+    APPEND_MODE_KEY, SST_FORMAT_KEY, TTL_KEY, TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW,
+    TWCS_TRIGGER_FILE_NUM,
 };
 use crate::path_utils::table_dir;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
@@ -1316,6 +1317,8 @@ pub enum SetRegionOption {
     Twsc(String, String),
     // Modifying the SST format.
     Format(String),
+    // Modifying the append mode.
+    AppendMode(bool),
 }
 
 impl TryFrom<&PbOption> for SetRegionOption {
@@ -1334,6 +1337,12 @@ impl TryFrom<&PbOption> for SetRegionOption {
                 Ok(Self::Twsc(key.clone(), value.clone()))
             }
             SST_FORMAT_KEY => Ok(Self::Format(value.clone())),
+            APPEND_MODE_KEY => {
+                let append_mode = value
+                    .parse::<bool>()
+                    .map_err(|_| InvalidSetRegionOptionRequestSnafu { key, value }.build())?;
+                Ok(Self::AppendMode(append_mode))
+            }
             _ => InvalidSetRegionOptionRequestSnafu { key, value }.fail(),
         }
     }

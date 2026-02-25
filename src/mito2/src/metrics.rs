@@ -508,8 +508,8 @@ lazy_static! {
         .unwrap();
 
     /// Counter for the number of files deleted by the GC worker.
-    pub static ref GC_DELETE_FILE_CNT: IntGauge =
-        register_int_gauge!(
+    pub static ref GC_DELETE_FILE_CNT: IntCounter =
+        register_int_counter!(
             "greptime_mito_gc_delete_file_count",
             "mito gc deleted file count",
         ).unwrap();
@@ -527,6 +527,35 @@ lazy_static! {
             "greptime_mito_gc_orphaned_index_files",
             "mito gc orphaned index files count",
         ).unwrap();
+
+    /// Histogram for GC operation duration by stage.
+    pub static ref GC_DURATION_SECONDS: HistogramVec = register_histogram_vec!(
+        "greptime_mito_gc_duration_seconds",
+        "GC operation duration by stage",
+        &[STAGE_LABEL],
+        exponential_buckets(0.01, 10.0, 6).unwrap(),
+    ).unwrap();
+
+    /// Counter for GC runs by mode.
+    pub static ref GC_RUNS_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "greptime_mito_gc_runs_total",
+        "Total GC runs by mode",
+        &["mode"],
+    ).unwrap();
+
+    /// Counter for GC errors by type.
+    pub static ref GC_ERRORS_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "greptime_mito_gc_errors_total",
+        "Total GC errors by type",
+        &["error_type"],
+    ).unwrap();
+
+    /// Counter for total files deleted by GC, labeled by file type.
+    pub static ref GC_FILES_DELETED_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "greptime_mito_gc_files_deleted_total",
+        "Total files deleted by GC",
+        &[FILE_TYPE_LABEL],
+    ).unwrap();
 
     /// Total number of files downloaded during cache fill on region open.
     pub static ref CACHE_FILL_DOWNLOADED_FILES: IntCounter = register_int_counter!(

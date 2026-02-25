@@ -619,6 +619,36 @@ pub(crate) fn sanitize_region_options(manifest: &RegionManifest, options: &mut R
         );
         options.sst_format = Some(manifest.sst_format);
     }
+    if let Some(manifest_append_mode) = manifest.append_mode
+        && options.append_mode != manifest_append_mode
+    {
+        common_telemetry::warn!(
+            "Overriding append_mode from {} to {} for region {}",
+            options.append_mode,
+            manifest_append_mode,
+            manifest.metadata.region_id,
+        );
+        options.append_mode = manifest_append_mode;
+    }
+    if options.append_mode && options.merge_mode.take().is_some() {
+        common_telemetry::warn!(
+            "Ignoring merge_mode because append_mode is enabled for region {}",
+            manifest.metadata.region_id,
+        );
+    }
+}
+
+/// Sanitizes open request options before parsing.
+pub(crate) fn sanitize_open_request_options(options: &mut HashMap<String, String>) {
+    let append_mode_enabled = options
+        .get("append_mode")
+        .is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "true" | "1"));
+
+    if append_mode_enabled && options.remove("merge_mode").is_some() {
+        common_telemetry::warn!(
+            "Ignoring merge_mode in open request options because append_mode is enabled"
+        );
+    }
 }
 
 /// Returns an object store corresponding to `name`. If `name` is `None`, this method returns the default object store.

@@ -39,6 +39,7 @@ use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use pgwire::messages::PgWireBackendMessage;
 use pgwire::messages::copy::CopyData;
 use pgwire::messages::data::DataRow;
+use query::planner::DfLogicalPlanner;
 use query::query_engine::DescribeResult;
 use session::Session;
 use session::context::QueryContextRef;
@@ -48,7 +49,7 @@ use sql::parser::{ParseOptions, ParserContext};
 use sql::statements::statement::Statement;
 
 use crate::SqlPlan;
-use crate::error::{DataFusionSnafu, Result};
+use crate::error::{DataFusionSnafu, InferParameterTypesSnafu, Result};
 use crate::postgres::types::*;
 use crate::postgres::utils::convert_err;
 use crate::postgres::{PostgresServerHandlerInner, fixtures};
@@ -478,9 +479,8 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
         // client provided parameter types, can be empty if client doesn't try to parse statement
         let provided_param_types = &stmt.parameter_types;
         let server_inferenced_types = if let Some(plan) = &sql_plan.plan {
-            let param_types = plan
-                .get_parameter_types()
-                .context(DataFusionSnafu)
+            let param_types = DfLogicalPlanner::get_inferred_parameter_types(plan)
+                .context(InferParameterTypesSnafu)
                 .map_err(convert_err)?
                 .into_iter()
                 .map(|(k, v)| (k, v.map(|v| ConcreteDataType::from_arrow_type(&v))))

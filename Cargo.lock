@@ -11477,9 +11477,9 @@ dependencies = [
 
 [[package]]
 name = "rsasl"
-version = "2.2.0"
+version = "2.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8b534a23662bb559c5c73213be63ecd6524e774d291f3618c2b04b723d184eb"
+checksum = "9f1bcb95b531681a622f3d6972eaab523e17e2aad6d6209f0276628eb1cb5038"
 dependencies = [
  "base64 0.22.1",
  "core2",
@@ -11491,7 +11491,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "stringprep",
- "thiserror 1.0.69",
+ "thiserror 2.0.17",
 ]
 
 [[package]]
