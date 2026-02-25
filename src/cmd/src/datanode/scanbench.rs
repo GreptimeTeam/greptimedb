@@ -35,6 +35,7 @@ use futures::stream::FuturesUnordered;
 use log_store::kafka::log_store::KafkaLogStore;
 use log_store::noop::log_store::NoopLogStore;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
+use mito2::config::MitoConfig;
 use mito2::engine::MitoEngine;
 use mito2::sst::file_ref::FileReferenceManager;
 use moka::future::CacheBuilder;
@@ -137,15 +138,15 @@ fn resolve_projection(
         let metadata = metadata.context(error::IllegalConfigSnafu {
             msg: "Missing region metadata while resolving 'projection_names'".to_string(),
         })?;
+        let available_columns = metadata
+            .column_metadatas
+            .iter()
+            .map(|column| column.column_schema.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
         let projection = projection_names
             .iter()
             .map(|name| {
-                let available_columns = metadata
-                    .column_metadatas
-                    .iter()
-                    .map(|column| column.column_schema.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ");
                 metadata
                     .column_index_by_name(name)
                     .with_context(|| error::IllegalConfigSnafu {
@@ -280,6 +281,36 @@ fn noop_partition_expr_fetcher() -> mito2::region::opener::PartitionExprFetcherR
     Arc::new(NoopPartitionExprFetcher)
 }
 
+struct EngineComponents {
+    data_home: String,
+    mito_config: MitoConfig,
+    object_store_manager: Arc<ObjectStoreManager>,
+    schema_metadata_manager: Arc<SchemaMetadataManager>,
+    file_ref_manager: Arc<FileReferenceManager>,
+    partition_expr_fetcher: mito2::region::opener::PartitionExprFetcherRef,
+}
+
+impl EngineComponents {
+    async fn build<S: store_api::logstore::LogStore>(
+        self,
+        log_store: Arc<S>,
+    ) -> error::Result<MitoEngine> {
+        MitoEngine::new(
+            &self.data_home,
+            self.mito_config,
+            log_store,
+            self.object_store_manager,
+            self.schema_metadata_manager,
+            self.file_ref_manager,
+            self.partition_expr_fetcher,
+            Plugins::default(),
+        )
+        .await
+        .map_err(BoxedError::new)
+        .context(error::BuildCliSnafu)
+    }
+}
+
 fn mock_schema_metadata_manager() -> Arc<SchemaMetadataManager> {
     let kv_backend = Arc::new(MemoryKvBackend::new());
     let table_schema_cache = Arc::new(new_table_schema_cache(
@@ -328,6 +359,15 @@ impl ScanbenchCommand {
         let partition_expr_fetcher = noop_partition_expr_fetcher();
 
         // Create MitoEngine with appropriate log store
+        let components = EngineComponents {
+            data_home: store_cfg.data_home.clone(),
+            mito_config,
+            object_store_manager,
+            schema_metadata_manager,
+            file_ref_manager,
+            partition_expr_fetcher,
+        };
+
         let engine = match &wal_config {
             DatanodeWalConfig::RaftEngine(raft_engine_config) if !self.skip_wal_replay => {
                 let data_home = normalize_dir(&store_cfg.data_home);
@@ -348,19 +388,7 @@ impl ScanbenchCommand {
                         .context(error::BuildCliSnafu)?,
                 );
                 println!("{} Using RaftEngine WAL", "✓".green());
-                MitoEngine::new(
-                    &store_cfg.data_home,
-                    mito_config,
-                    log_store,
-                    object_store_manager,
-                    schema_metadata_manager,
-                    file_ref_manager,
-                    partition_expr_fetcher,
-                    Plugins::default(),
-                )
-                .await
-                .map_err(BoxedError::new)
-                .context(error::BuildCliSnafu)?
+                components.build(log_store).await?
             }
             DatanodeWalConfig::Kafka(kafka_config) if !self.skip_wal_replay => {
                 let log_store = Arc::new(
@@ -370,19 +398,7 @@ impl ScanbenchCommand {
                         .context(error::BuildCliSnafu)?,
                 );
                 println!("{} Using Kafka WAL", "✓".green());
-                MitoEngine::new(
-                    &store_cfg.data_home,
-                    mito_config,
-                    log_store,
-                    object_store_manager,
-                    schema_metadata_manager,
-                    file_ref_manager,
-                    partition_expr_fetcher,
-                    Plugins::default(),
-                )
-                .await
-                .map_err(BoxedError::new)
-                .context(error::BuildCliSnafu)?
+                components.build(log_store).await?
             }
             _ => {
                 let log_store = Arc::new(NoopLogStore);
@@ -391,19 +407,7 @@ impl ScanbenchCommand {
                     "✓".green(),
                     self.skip_wal_replay
                 );
-                MitoEngine::new(
-                    &store_cfg.data_home,
-                    mito_config,
-                    log_store,
-                    object_store_manager,
-                    schema_metadata_manager,
-                    file_ref_manager,
-                    partition_expr_fetcher,
-                    Plugins::default(),
-                )
-                .await
-                .map_err(BoxedError::new)
-                .context(error::BuildCliSnafu)?
+                components.build(log_store).await?
             }
         };
 
@@ -426,7 +430,9 @@ impl ScanbenchCommand {
 
         // Load scan config
         let scan_config = if let Some(path) = &self.scan_config {
-            let content = std::fs::read_to_string(path).context(error::FileIoSnafu)?;
+            let content = tokio::fs::read_to_string(path)
+                .await
+                .context(error::FileIoSnafu)?;
             serde_json::from_str::<ScanConfig>(&content).context(error::SerdeJsonSnafu)?
         } else {
             ScanConfig::default()
