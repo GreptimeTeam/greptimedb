@@ -47,8 +47,8 @@ use session::context::QueryContextRef;
 use snafu::ResultExt;
 
 pub use self::error::{PgErrorCode, PgErrorSeverity};
-use crate::SqlPlan;
 use crate::error::{self as server_error, InferParameterTypesSnafu, Result};
+use crate::postgres::handler::PgSqlPlan;
 use crate::postgres::utils::convert_err;
 
 pub(super) fn schema_to_pg(
@@ -327,7 +327,7 @@ pub(super) fn type_pg_to_gt(origin: &Type) -> Result<ConcreteDataType> {
     }
 }
 
-pub(super) fn parameter_to_string(portal: &Portal<SqlPlan>, idx: usize) -> PgWireResult<String> {
+pub(super) fn parameter_to_string(portal: &Portal<PgSqlPlan>, idx: usize) -> PgWireResult<String> {
     // the index is managed from portal's parameters count so it's safe to
     // unwrap here.
     let param_type = portal
@@ -444,7 +444,7 @@ where
 
 pub(super) fn parameters_to_scalar_values(
     plan: &LogicalPlan,
-    portal: &Portal<SqlPlan>,
+    portal: &Portal<PgSqlPlan>,
 ) -> PgWireResult<Vec<ScalarValue>> {
     let param_count = portal.parameter_len();
     let mut results = Vec::with_capacity(param_count);

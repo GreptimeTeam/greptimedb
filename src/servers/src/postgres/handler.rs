@@ -297,9 +297,16 @@ impl DefaultQueryParser {
     }
 }
 
+/// A container type of parse result types
+#[derive(Clone, Debug)]
+pub struct PgSqlPlan {
+    plan: SqlPlan,
+    copy_to_stdout_format: Option<String>,
+}
+
 #[async_trait]
 impl QueryParser for DefaultQueryParser {
-    type Statement = SqlPlan;
+    type Statement = PgSqlPlan;
 
     async fn parse_sql<C>(
         &self,
@@ -312,11 +319,13 @@ impl QueryParser for DefaultQueryParser {
 
         // do not parse if query is empty or matches rules
         if sql.is_empty() || fixtures::matches(sql) {
-            return Ok(SqlPlan {
-                query: sql.to_owned(),
-                statement: None,
-                plan: None,
-                schema: None,
+            return Ok(PgSqlPlan {
+                plan: SqlPlan {
+                    query: sql.to_owned(),
+                    statement: None,
+                    plan: None,
+                    schema: None,
+                },
                 copy_to_stdout_format: None,
             });
         }
@@ -361,11 +370,13 @@ impl QueryParser for DefaultQueryParser {
                 (None, None)
             };
 
-            Ok(SqlPlan {
-                query: sql.clone(),
-                statement: Some(stmt),
-                plan,
-                schema,
+            Ok(PgSqlPlan {
+                plan: SqlPlan {
+                    query: sql.clone(),
+                    statement: Some(stmt),
+                    plan,
+                    schema,
+                },
                 copy_to_stdout_format,
             })
         }
@@ -394,7 +405,7 @@ impl QueryParser for DefaultQueryParser {
 
 #[async_trait]
 impl ExtendedQueryHandler for PostgresServerHandlerInner {
-    type Statement = SqlPlan;
+    type Statement = PgSqlPlan;
     type QueryParser = DefaultQueryParser;
 
     fn query_parser(&self) -> Arc<Self::QueryParser> {
@@ -418,7 +429,8 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
             .with_label_values(&[crate::metrics::METRIC_POSTGRES_EXTENDED_QUERY, db.as_str()])
             .start_timer();
 
-        let sql_plan = &portal.statement.statement;
+        let pg_sql_plan = &portal.statement.statement;
+        let sql_plan = &pg_sql_plan.plan;
 
         if sql_plan.query.is_empty() {
             // early return if query is empty
@@ -460,7 +472,7 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
 
         send_warning_opt(client, query_ctx.clone()).await?;
 
-        if let Some(format) = &sql_plan.copy_to_stdout_format {
+        if let Some(format) = &pg_sql_plan.copy_to_stdout_format {
             output_to_copy_response(query_ctx, output, format)
         } else {
             output_to_query_response(query_ctx, output, &portal.result_column_format)
@@ -475,7 +487,7 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
     where
         C: ClientInfo + Unpin + Send + Sync,
     {
-        let sql_plan = &stmt.statement;
+        let sql_plan = &stmt.statement.plan;
         // client provided parameter types, can be empty if client doesn't try to parse statement
         let provided_param_types = &stmt.parameter_types;
         let server_inferenced_types = if let Some(plan) = &sql_plan.plan {
@@ -543,7 +555,7 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
     where
         C: ClientInfo + Unpin + Send + Sync,
     {
-        let sql_plan = &portal.statement.statement;
+        let sql_plan = &portal.statement.statement.plan;
         let format = &portal.result_column_format;
 
         match sql_plan.statement.as_ref() {

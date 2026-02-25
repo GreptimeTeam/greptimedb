@@ -64,8 +64,6 @@ pub struct SqlPlan {
     statement: Option<Statement>,
     plan: Option<LogicalPlan>,
     schema: Option<Schema>,
-    // Cached result of check_copy_to_stdout for COPY TO STDOUT statements
-    copy_to_stdout_format: Option<String>,
 }
 
 /// Install the ring crypto provider for rustls process-wide. see:

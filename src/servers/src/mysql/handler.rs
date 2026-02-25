@@ -252,7 +252,6 @@ impl MysqlInstanceShim {
                     statement: Some(statement),
                     plan: None,
                     schema: None,
-                    copy_to_stdout_format: None,
                 },
                 stmt_key,
             )
@@ -267,7 +266,6 @@ impl MysqlInstanceShim {
                     statement: Some(statement),
                     plan,
                     schema,
-                    copy_to_stdout_format: None,
                 },
                 stmt_key,
             )
