@@ -742,7 +742,7 @@ dependencies = [
  "memchr",
  "num",
  "regex",
- "regex-syntax 0.8.7",
+ "regex-syntax",
 ]
 
 [[package]]
@@ -759,7 +759,7 @@ dependencies = [
  "memchr",
  "num-traits",
  "regex",
- "regex-syntax 0.8.7",
+ "regex-syntax",
 ]
 
 [[package]]
@@ -1499,7 +1499,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "234113d19d0d7d613b40e86fb654acf958910802bcceab913a4f9e7cda03b1a4"
 dependencies = [
  "memchr",
- "regex-automata 0.4.13",
+ "regex-automata",
  "serde",
 ]
 
@@ -2031,7 +2031,7 @@ dependencies = [
  "humantime",
  "meta-client",
  "meta-srv",
- "nu-ansi-term",
+ "nu-ansi-term 0.46.0",
  "object-store",
  "operator",
  "partition",
@@ -2175,7 +2175,7 @@ dependencies = [
  "metric-engine",
  "mito2",
  "moka",
- "nu-ansi-term",
+ "nu-ansi-term 0.46.0",
  "object-store",
  "parquet",
  "plugins",
@@ -4094,7 +4094,7 @@ dependencies = [
  "log",
  "recursive",
  "regex",
- "regex-syntax 0.8.7",
+ "regex-syntax",
 ]
 
 [[package]]
@@ -4999,8 +4999,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6e24cb5a94bcae1e5408b0effca5cd7172ea3c5755049c5f3af4cd283a165298"
 dependencies = [
  "bit-set",
- "regex-automata 0.4.13",
- "regex-syntax 0.8.7",
+ "regex-automata",
+ "regex-syntax",
 ]
 
 [[package]]
@@ -6549,7 +6549,7 @@ dependencies = [
  "rand 0.9.1",
  "rand_chacha 0.9.0",
  "regex",
- "regex-automata 0.4.13",
+ "regex-automata",
  "roaring",
  "serde",
  "serde_json",
@@ -7142,7 +7142,7 @@ dependencies = [
  "lalrpop-util",
  "petgraph 0.7.1",
  "regex",
- "regex-syntax 0.8.7",
+ "regex-syntax",
  "sha3",
  "string_cache",
  "term",
@@ -7156,7 +7156,7 @@ version = "0.22.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b5baa5e9ff84f1aefd264e6869907646538a52147a755d494517a8007fb48733"
 dependencies = [
- "regex-automata 0.4.13",
+ "regex-automata",
  "rustversion",
 ]
 
@@ -7550,7 +7550,7 @@ dependencies = [
  "num-traits",
  "quote",
  "regex",
- "regex-syntax 0.8.7",
+ "regex-syntax",
  "serde",
  "vergen",
 ]
@@ -7676,11 +7676,11 @@ checksum = "ffbee8634e0d45d258acb448e7eaab3fce7a0a467395d4d9f228e3c1f01fb2e4"
 
 [[package]]
 name = "matchers"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8263075bb86c5a1b1427b5ae862e8889656f126e9f77c484496e8b47cf5c5558"
+checksum = "d1525a2a28c7f4fa0fc98bb91ae755d1e2d1505079e05539e35bc876b5d65ae9"
 dependencies = [
- "regex-automata 0.1.10",
+ "regex-automata",
 ]
 
 [[package]]
@@ -8546,6 +8546,15 @@ checksum = "77a8165726e8236064dbb45459242600304b42a5ea24ee2948e18e023bf7ba84"
 dependencies = [
  "overload",
  "winapi",
+]
+
+[[package]]
+name = "nu-ansi-term"
+version = "0.50.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
+dependencies = [
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -10322,7 +10331,7 @@ dependencies = [
  "rand 0.9.1",
  "rand_chacha 0.9.0",
  "rand_xorshift",
- "regex-syntax 0.8.7",
+ "regex-syntax",
  "unarray",
 ]
 
@@ -11112,17 +11121,8 @@ checksum = "843bc0191f75f3e22651ae5f1e72939ab2f72a4bc30fa80a066bd66edefc24d4"
 dependencies = [
  "aho-corasick",
  "memchr",
- "regex-automata 0.4.13",
- "regex-syntax 0.8.7",
-]
-
-[[package]]
-name = "regex-automata"
-version = "0.1.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c230d73fb8d8c1b9c0b3135c5142a8acee3a0558fb8db5cf1cb65f8d7862132"
-dependencies = [
- "regex-syntax 0.6.29",
+ "regex-automata",
+ "regex-syntax",
 ]
 
 [[package]]
@@ -11133,7 +11133,7 @@ checksum = "5276caf25ac86c8d810222b3dbb938e512c55c6831a10f3e6ed1c93b84041f1c"
 dependencies = [
  "aho-corasick",
  "memchr",
- "regex-syntax 0.8.7",
+ "regex-syntax",
 ]
 
 [[package]]
@@ -11147,7 +11147,7 @@ dependencies = [
  "itertools 0.13.0",
  "nohash",
  "regex",
- "regex-syntax 0.8.7",
+ "regex-syntax",
 ]
 
 [[package]]
@@ -11155,12 +11155,6 @@ name = "regex-lite"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "53a49587ad06b26609c52e423de037e7f57f20d53535d66e08c695f347df952a"
-
-[[package]]
-name = "regex-syntax"
-version = "0.6.29"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f162c6dd7b008981e4d40210aca20b4bd0f9b60ca9271061b07f78537722f2e1"
 
 [[package]]
 name = "regex-syntax"
@@ -13510,7 +13504,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d60769b80ad7953d8a7b2c70cdfe722bbcdcac6bccc8ac934c40c034d866fc18"
 dependencies = [
  "byteorder",
- "regex-syntax 0.8.7",
+ "regex-syntax",
  "utf8-ranges",
 ]
 
@@ -14501,14 +14495,14 @@ dependencies = [
 
 [[package]]
 name = "tracing-subscriber"
-version = "0.3.19"
+version = "0.3.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e8189decb5ac0fa7bc8b96b7cb9b2701d60d48805aca84a238004d665fcc4008"
+checksum = "2054a14f5307d601f88daf0553e1cbf472acc4f2c51afab632431cdcd72124d5"
 dependencies = [
  "matchers",
- "nu-ansi-term",
+ "nu-ansi-term 0.50.3",
  "once_cell",
- "regex",
+ "regex-automata",
  "serde",
  "serde_json",
  "sharded-slab",
