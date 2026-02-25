@@ -166,7 +166,30 @@ pub struct StorageConfig {
 struct StorageConfigWrapper {
     storage: StorageConfig,
     region_engine: Vec<RegionEngineConfig>,
+    #[serde(default, deserialize_with = "deserialize_wal_config")]
     wal: DatanodeWalConfig,
+}
+
+/// Deserializes [`DatanodeWalConfig`], defaulting `provider` to `"raft_engine"` when
+/// the `[wal]` section is present but omits it. This mirrors the behavior of the
+/// datanode's layered config loader which merges over a default that already contains
+/// `provider`.
+fn deserialize_wal_config<'de, D>(
+    deserializer: D,
+) -> std::result::Result<DatanodeWalConfig, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+
+    let mut table = <toml::value::Table as serde::Deserialize>::deserialize(deserializer)?;
+    if !table.contains_key("provider") {
+        table.insert(
+            "provider".to_string(),
+            toml::Value::String("raft_engine".to_string()),
+        );
+    }
+    DatanodeWalConfig::deserialize(toml::Value::Table(table)).map_err(D::Error::custom)
 }
 
 #[derive(Debug, Parser, Default)]
