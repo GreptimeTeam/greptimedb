@@ -1010,15 +1010,11 @@ pub(super) fn parameters_to_scalar_values(
                                 TimestampType::Nanosecond(_) => {
                                     let values = data
                                         .into_iter()
-                                        .filter_map(|ts| {
-                                            ts.and_then(|ts| {
-                                                ts.timestamp_nanos_opt().map(|nanos| {
-                                                    ScalarValue::TimestampNanosecond(
-                                                        Some(nanos),
-                                                        None,
-                                                    )
-                                                })
-                                            })
+                                        .map(|ts| {
+                                            ScalarValue::TimestampNanosecond(
+                                                ts.and_then(|ts| ts.timestamp_nanos_opt()),
+                                                None,
+                                            )
                                         })
                                         .collect::<Vec<_>>();
                                     ScalarValue::List(ScalarValue::new_list(
