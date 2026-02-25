@@ -60,7 +60,6 @@ cargo build -p cmd --bin greptime
   "projection": [0, 1, 2],
   "projection_names": ["host", "cpu"],
   "filters": ["host = 'web-1'", "cpu > 80"],
-  "limit": 100000,
   "series_row_selector": "last_row"
 }
 ```

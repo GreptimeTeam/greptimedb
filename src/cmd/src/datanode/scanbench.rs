@@ -115,7 +115,6 @@ struct ScanConfig {
     projection: Option<Vec<usize>>,
     projection_names: Option<Vec<String>>,
     filters: Option<Vec<String>>,
-    limit: Option<usize>,
     series_row_selector: Option<String>,
 }
 
@@ -517,7 +516,6 @@ impl ScanbenchCommand {
             let request = ScanRequest {
                 projection: projection.clone(),
                 filters: filters.clone(),
-                limit: scan_config.limit,
                 series_row_selector,
                 distribution,
                 force_flat_format: self.force_flat_format,
@@ -684,7 +682,7 @@ mod tests {
 
     #[test]
     fn test_parse_scan_config_projection_names() {
-        let json = r#"{"projection_names":["host","ts"],"limit":100}"#;
+        let json = r#"{"projection_names":["host","ts"]}"#;
         let config: ScanConfig = serde_json::from_str(json).unwrap();
 
         assert_eq!(
@@ -692,7 +690,6 @@ mod tests {
             Some(vec!["host".to_string(), "ts".to_string()])
         );
         assert_eq!(config.projection, None);
-        assert_eq!(config.limit, Some(100));
     }
 
     #[test]
@@ -701,7 +698,6 @@ mod tests {
             projection: Some(vec![0, 2]),
             projection_names: None,
             filters: None,
-            limit: None,
             series_row_selector: None,
         };
 
@@ -716,7 +712,6 @@ mod tests {
             projection: None,
             projection_names: Some(vec!["cpu".to_string(), "host".to_string()]),
             filters: None,
-            limit: None,
             series_row_selector: None,
         };
 
@@ -733,7 +728,6 @@ mod tests {
             projection: Some(vec![0]),
             projection_names: Some(vec!["host".to_string()]),
             filters: None,
-            limit: None,
             series_row_selector: None,
         };
 
