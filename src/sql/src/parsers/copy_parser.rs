@@ -825,5 +825,11 @@ mod tests {
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
 
         assert!(result.is_err());
+
+        let sql = "COPY (SELECT * FROM test_table) TO STDOUT (FORMAT csv))";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+
+        assert!(result.is_err());
     }
 }
