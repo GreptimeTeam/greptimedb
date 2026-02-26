@@ -1558,19 +1558,45 @@ pub(crate) async fn maybe_scan_other_ranges(
     }
 }
 
+/// Build the stream of scanning the extension range in flat format denoted by the [`RowGroupIndex`].
+#[cfg(feature = "enterprise")]
+pub(crate) async fn scan_flat_extension_range(
+    context: Arc<StreamContext>,
+    index: RowGroupIndex,
+    partition_metrics: PartitionMetrics,
+) -> Result<BoxedRecordBatchStream> {
+    use snafu::ResultExt;
+
+    let range = context.input.extension_range(index.index);
+    let reader = range.flat_reader(context.as_ref());
+    let stream = reader
+        .read(context, partition_metrics, index)
+        .await
+        .context(crate::error::ScanExternalRangeSnafu)?;
+    Ok(stream)
+}
+
 pub(crate) async fn maybe_scan_flat_other_ranges(
     context: &Arc<StreamContext>,
     index: RowGroupIndex,
     metrics: &PartitionMetrics,
 ) -> Result<BoxedRecordBatchStream> {
-    let _ = context;
-    let _ = index;
-    let _ = metrics;
-
-    crate::error::UnexpectedSnafu {
-        reason: "no other ranges scannable in flat format",
+    #[cfg(feature = "enterprise")]
+    {
+        scan_flat_extension_range(context.clone(), index, metrics.clone()).await
     }
-    .fail()
+
+    #[cfg(not(feature = "enterprise"))]
+    {
+        let _ = context;
+        let _ = index;
+        let _ = metrics;
+
+        crate::error::UnexpectedSnafu {
+            reason: "no other ranges scannable in flat format",
+        }
+        .fail()
+    }
 }
 
 /// A stream wrapper that splits record batches from an inner stream.
