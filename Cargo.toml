@@ -124,6 +124,7 @@ chrono-tz = { version = "0.10", features = ["case-insensitive"] }
 clap = { version = "4.4", features = ["derive"] }
 config = "0.13.0"
 const_format = "0.2"
+criterion = "0.7"
 crossbeam-utils = "0.8"
 dashmap = "6.1"
 datafusion = "51.0"

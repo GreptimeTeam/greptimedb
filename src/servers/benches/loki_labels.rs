@@ -13,8 +13,9 @@
 // limitations under the License.
 
 use std::collections::BTreeMap;
+use std::hint::black_box;
 
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use servers::error::Result;
 use servers::http::loki::parse_loki_labels;
 
