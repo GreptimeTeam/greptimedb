@@ -50,6 +50,7 @@ impl MetasrvCacheInvalidator {
             "Frontend broadcast",
             common_time::util::current_time_millis(),
             &instruction,
+            None,
         )
         .with_context(|_| meta_error::SerdeJsonSnafu)?;
 

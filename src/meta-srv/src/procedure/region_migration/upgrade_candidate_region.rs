@@ -256,6 +256,7 @@ impl UpgradeCandidateRegion {
             &format!("Datanode-{}@{}", candidate.id, candidate.addr),
             common_time::util::current_time_millis(),
             &upgrade_instruction,
+            None,
         )
         .with_context(|_| error::SerializeToJsonSnafu {
             input: upgrade_instruction.to_string(),

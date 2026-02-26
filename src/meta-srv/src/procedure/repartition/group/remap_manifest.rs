@@ -20,6 +20,7 @@ use api::v1::meta::MailboxMessage;
 use common_meta::instruction::{Instruction, InstructionReply, RemapManifestReply};
 use common_meta::peer::Peer;
 use common_procedure::{Context as ProcedureContext, Status};
+use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{info, warn};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
@@ -131,6 +132,7 @@ impl RemapManifest {
     ) -> Result<HashMap<RegionId, String>> {
         let ch = Channel::Datanode(peer.id);
         let instruction = Instruction::RemapManifest(remap.clone());
+        let tracing_ctx = TracingContext::from_current_span();
         let message = MailboxMessage::json_message(
             &format!(
                 "Remap manifests, central region: {}, input regions: {:?}",
@@ -140,6 +142,7 @@ impl RemapManifest {
             &format!("Datanode-{}@{}", peer.id, peer.addr),
             common_time::util::current_time_millis(),
             &instruction,
+            Some(tracing_ctx.to_w3c()),
         )
         .with_context(|_| error::SerializeToJsonSnafu {
             input: instruction.to_string(),

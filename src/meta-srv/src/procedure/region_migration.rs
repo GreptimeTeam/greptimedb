@@ -858,6 +858,12 @@ impl Procedure for RegionMigrationProcedure {
         true
     }
 
+    #[tracing::instrument(skip_all, fields(
+        state = %self.state.name(),
+        region_count = self.context.persistent_ctx.region_ids.len(),
+        from_peer = self.context.persistent_ctx.from_peer.id,
+        to_peer = self.context.persistent_ctx.to_peer.id,
+    ))]
     async fn execute(&mut self, ctx: &ProcedureContext) -> ProcedureResult<Status> {
         let state = &mut self.state;
 

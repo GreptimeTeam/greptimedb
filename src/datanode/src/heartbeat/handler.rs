@@ -20,8 +20,10 @@ use common_meta::heartbeat::handler::{
 use common_meta::instruction::{Instruction, InstructionReply};
 use common_meta::kv_backend::KvBackendRef;
 use common_telemetry::error;
+use common_telemetry::tracing_context::FutureExt;
 use snafu::OptionExt;
 use store_api::storage::GcReport;
+use strum::AsRefStr;
 
 mod apply_staging_manifest;
 mod close_region;
@@ -149,6 +151,7 @@ impl RegionHeartbeatResponseHandler {
 }
 
 #[allow(clippy::enum_variant_names)]
+#[derive(AsRefStr)]
 pub enum InstructionHandlers {
     CloseRegions(CloseRegionsHandler),
     OpenRegions(OpenRegionsHandler),
@@ -161,6 +164,13 @@ pub enum InstructionHandlers {
     SyncRegions(SyncRegionHandler),
     RemapManifest(RemapManifestHandler),
     ApplyStagingManifests(ApplyStagingManifestsHandler),
+}
+
+impl InstructionHandlers {
+    // Returns the string representation of the instruction handler.
+    pub fn as_ref_str(&self) -> &str {
+        self.as_ref()
+    }
 }
 
 macro_rules! impl_from_handler {
@@ -240,14 +250,14 @@ dispatch_instr!(
 #[async_trait]
 impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
     fn is_acceptable(&self, ctx: &HeartbeatResponseHandlerContext) -> bool {
-        if let Some((_, instruction)) = ctx.incoming_message.as_ref() {
+        if let Some((_, _, instruction)) = ctx.incoming_message.as_ref() {
             return InstructionHandlers::is_acceptable(instruction);
         }
         false
     }
 
     async fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> MetaResult<HandleControl> {
-        let (meta, instruction) = ctx
+        let (meta, tracing_ctx, instruction) = ctx
             .incoming_message
             .take()
             .context(InvalidHeartbeatResponseSnafu)?;
@@ -261,8 +271,14 @@ impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
                 gc_tasks: self.gc_tasks.clone(),
                 kv_backend: self.kv_backend.clone(),
             };
+            let span = tracing_ctx.attach(tracing::info_span!(
+                "RegionHeartbeatResponseHandler::handle",
+                from = %meta.from,
+                to = %meta.to,
+                handler = %handler.as_ref_str(),
+            ));
             let _handle = common_runtime::spawn_global(async move {
-                let reply = handler.handle(&context, instruction).await;
+                let reply = handler.handle(&context, instruction).trace(span).await;
                 if let Some(reply) = reply
                     && let Err(e) = mailbox.send((meta, reply)).await
                 {
@@ -348,15 +364,21 @@ mod tests {
         let storage_path = "test";
         let instruction = open_region_instruction(region_id, storage_path);
         assert!(
-            heartbeat_handler
-                .is_acceptable(&heartbeat_env.create_handler_ctx((meta.clone(), instruction)))
+            heartbeat_handler.is_acceptable(&heartbeat_env.create_handler_ctx((
+                meta.clone(),
+                Default::default(),
+                instruction
+            )))
         );
 
         // Close region
         let instruction = close_region_instruction(region_id);
         assert!(
-            heartbeat_handler
-                .is_acceptable(&heartbeat_env.create_handler_ctx((meta.clone(), instruction)))
+            heartbeat_handler.is_acceptable(&heartbeat_env.create_handler_ctx((
+                meta.clone(),
+                Default::default(),
+                instruction
+            )))
         );
 
         // Downgrade region
@@ -365,8 +387,11 @@ mod tests {
             flush_timeout: Some(Duration::from_secs(1)),
         }]);
         assert!(
-            heartbeat_handler
-                .is_acceptable(&heartbeat_env.create_handler_ctx((meta.clone(), instruction)))
+            heartbeat_handler.is_acceptable(&heartbeat_env.create_handler_ctx((
+                meta.clone(),
+                Default::default(),
+                instruction
+            )))
         );
 
         // Upgrade region
@@ -375,8 +400,11 @@ mod tests {
             ..Default::default()
         }]);
         assert!(
-            heartbeat_handler
-                .is_acceptable(&heartbeat_env.create_handler_ctx((meta.clone(), instruction)))
+            heartbeat_handler.is_acceptable(&heartbeat_env.create_handler_ctx((
+                meta.clone(),
+                Default::default(),
+                instruction
+            )))
         );
 
         // Enter staging region
@@ -385,7 +413,11 @@ mod tests {
             partition_directive: StagingPartitionDirective::UpdatePartitionExpr("".to_string()),
         }]);
         assert!(
-            heartbeat_handler.is_acceptable(&heartbeat_env.create_handler_ctx((meta, instruction)))
+            heartbeat_handler.is_acceptable(&heartbeat_env.create_handler_ctx((
+                meta,
+                Default::default(),
+                instruction
+            )))
         );
     }
 
@@ -441,7 +473,7 @@ mod tests {
             let meta = MessageMeta::new_test(1, "test", "dn-1", "me-0");
             let instruction = close_region_instruction(region_id);
 
-            let mut ctx = heartbeat_env.create_handler_ctx((meta, instruction));
+            let mut ctx = heartbeat_env.create_handler_ctx((meta, Default::default(), instruction));
             let control = heartbeat_handler.handle(&mut ctx).await.unwrap();
             assert_matches!(control, HandleControl::Continue);
 
@@ -498,7 +530,7 @@ mod tests {
             let meta = MessageMeta::new_test(1, "test", "dn-1", "me-0");
             let instruction = open_region_instruction(region_id, storage_path);
 
-            let mut ctx = heartbeat_env.create_handler_ctx((meta, instruction));
+            let mut ctx = heartbeat_env.create_handler_ctx((meta, Default::default(), instruction));
             let control = heartbeat_handler.handle(&mut ctx).await.unwrap();
             assert_matches!(control, HandleControl::Continue);
 
@@ -533,7 +565,7 @@ mod tests {
         let meta = MessageMeta::new_test(1, "test", "dn-1", "me-0");
         let instruction = open_region_instruction(region_id, storage_path);
 
-        let mut ctx = heartbeat_env.create_handler_ctx((meta, instruction));
+        let mut ctx = heartbeat_env.create_handler_ctx((meta, Default::default(), instruction));
         let control = heartbeat_handler.handle(&mut ctx).await.unwrap();
         assert_matches!(control, HandleControl::Continue);
 
@@ -581,7 +613,7 @@ mod tests {
                 flush_timeout: Some(Duration::from_secs(1)),
             }]);
 
-            let mut ctx = heartbeat_env.create_handler_ctx((meta, instruction));
+            let mut ctx = heartbeat_env.create_handler_ctx((meta, Default::default(), instruction));
             let control = heartbeat_handler.handle(&mut ctx).await.unwrap();
             assert_matches!(control, HandleControl::Continue);
 
@@ -599,7 +631,7 @@ mod tests {
             region_id: RegionId::new(2048, 1),
             flush_timeout: Some(Duration::from_secs(1)),
         }]);
-        let mut ctx = heartbeat_env.create_handler_ctx((meta, instruction));
+        let mut ctx = heartbeat_env.create_handler_ctx((meta, Default::default(), instruction));
         let control = heartbeat_handler.handle(&mut ctx).await.unwrap();
         assert_matches!(control, HandleControl::Continue);
 

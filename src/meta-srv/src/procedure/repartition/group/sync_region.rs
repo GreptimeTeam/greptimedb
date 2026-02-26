@@ -22,6 +22,7 @@ use common_meta::peer::Peer;
 use common_meta::rpc::router::RegionRoute;
 use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::info;
+use common_telemetry::tracing_context::TracingContext;
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
@@ -218,6 +219,8 @@ impl SyncRegion {
     ) -> Result<()> {
         let ch = Channel::Datanode(peer.id);
         let instruction = Instruction::SyncRegions(sync_regions.to_vec());
+        let tracing_ctx = TracingContext::from_current_span();
+        let tracing_header = tracing_ctx.to_w3c();
         let message = MailboxMessage::json_message(
             &format!(
                 "Sync regions: {:?}",
@@ -227,6 +230,7 @@ impl SyncRegion {
             &format!("Datanode-{}@{}", peer.id, peer.addr),
             common_time::util::current_time_millis(),
             &instruction,
+            Some(tracing_header),
         )
         .with_context(|_| error::SerializeToJsonSnafu {
             input: instruction.to_string(),

@@ -219,6 +219,7 @@ impl DowngradeLeaderRegion {
             &format!("Datanode-{}@{}", leader.id, leader.addr),
             common_time::util::current_time_millis(),
             &downgrade_instruction,
+            None,
         )
         .with_context(|_| error::SerializeToJsonSnafu {
             input: downgrade_instruction.to_string(),

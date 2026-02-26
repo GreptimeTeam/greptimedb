@@ -154,7 +154,7 @@ mod tests {
         let meta = MessageMeta::new_test(1, "test", "dn-1", "me-0");
         let instruction = open_regions_instruction([region_id, region_id1], storage_path);
         let mut heartbeat_env = HeartbeatResponseTestEnv::new();
-        let mut ctx = heartbeat_env.create_handler_ctx((meta, instruction));
+        let mut ctx = heartbeat_env.create_handler_ctx((meta, Default::default(), instruction));
         let control = heartbeat_handler.handle(&mut ctx).await.unwrap();
         assert_matches!(control, HandleControl::Continue);
         let (_, reply) = heartbeat_env.receiver.recv().await.unwrap();
