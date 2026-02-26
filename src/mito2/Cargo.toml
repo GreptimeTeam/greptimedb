@@ -92,7 +92,7 @@ uuid.workspace = true
 common-function.workspace = true
 common-meta = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
-criterion = { version = "0.4", features = ["async", "async_tokio"] }
+criterion = { workspace = true, features = ["async", "async_tokio"] }
 dotenv.workspace = true
 log-store.workspace = true
 mito-codec = { workspace = true, features = ["testing"] }

@@ -49,7 +49,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 common-test-util.workspace = true
-criterion = "0.4"
+criterion.workspace = true
 rand.workspace = true
 rand_chacha = "0.9"
 tempfile.workspace = true

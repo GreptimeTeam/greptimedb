@@ -48,7 +48,7 @@ common-meta = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
 mito2 = { workspace = true, features = ["test"] }
 common-wal = { workspace = true }
-criterion = { version = "0.4", features = ["async", "async_tokio"] }
+criterion = { workspace = true, features = ["async", "async_tokio"] }
 mur3 = "0.1"
 common-function = { workspace = true }
 partition = { workspace = true }
