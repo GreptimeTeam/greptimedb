@@ -184,8 +184,16 @@ async fn write_loop<R: Rng + 'static>(
 ) -> Result<()> {
     info!("Start write loop");
     let clock = shared_state.lock().unwrap().clock.clone();
-    while shared_state.lock().unwrap().running {
-        let table_ctx = shared_state.lock().unwrap().table_ctx.clone();
+    loop {
+        let (is_running, table_ctx) = {
+            let state = shared_state.lock().unwrap();
+            (state.running, state.table_ctx.clone())
+        };
+
+        if !is_running {
+            break;
+        }
+
         let partitions = SimplePartitions::from_table_ctx(&table_ctx).unwrap();
         let insert_expr = build_insert_expr(&table_ctx, &mut rng, &partitions, &clock);
 
@@ -196,7 +204,10 @@ async fn write_loop<R: Rng + 'static>(
         let now = Instant::now();
         execute_insert_with_retry(&ctx, &sql).await?;
         info!("Execute insert sql: {sql}, elapsed: {:?}", now.elapsed());
-        shared_state.lock().unwrap().inserted_rows += new_inserted_rows;
+        {
+            let mut state = shared_state.lock().unwrap();
+            state.inserted_rows += new_inserted_rows;
+        }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     info!("Write loop ended");
