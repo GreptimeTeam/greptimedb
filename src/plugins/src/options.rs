@@ -24,7 +24,7 @@ pub enum PluginOptions {
 }
 
 impl MetasrvConfigSerializer for PluginOptions {
-    fn serialize(&self) -> Result<MetasrvConfigWrapper, serde_json::Error> {
+    fn to_wrapper_str(&self) -> Result<MetasrvConfigWrapper, serde_json::Error> {
         serde_json::to_string(self).map(MetasrvConfigWrapper)
     }
 }

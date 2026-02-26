@@ -145,7 +145,7 @@ impl heartbeat_server::Heartbeat for Metasrv {
 
     async fn pull_meta_config(
         &self,
-        _req: Request<PullMetaConfigRequest>,
+        req: Request<PullMetaConfigRequest>,
     ) -> GrpcResult<PullMetaConfigResponse> {
         let payload = self
             .plugins()
@@ -158,8 +158,8 @@ impl heartbeat_server::Heartbeat for Metasrv {
             payload,
         };
 
-        // TODO
-        info!("Sending meta config");
+        let member_id = req.into_inner().header.as_ref().map(|h| h.member_id);
+        info!("Sending meta config to member: {member_id:?}");
 
         Ok(Response::new(res))
     }
