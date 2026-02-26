@@ -2097,7 +2097,6 @@ dependencies = [
  "serde_json",
  "snafu 0.8.6",
  "store-api",
- "substrait 0.37.3",
  "substrait 1.0.0-rc.1",
  "tokio",
  "tokio-stream",
@@ -10433,24 +10432,6 @@ dependencies = [
 
 [[package]]
 name = "prost-build"
-version = "0.13.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
-dependencies = [
- "heck 0.4.1",
- "itertools 0.10.5",
- "log",
- "multimap",
- "once_cell",
- "petgraph 0.7.1",
- "prost 0.13.5",
- "prost-types 0.13.5",
- "regex",
- "tempfile",
-]
-
-[[package]]
-name = "prost-build"
 version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac6c3320f9abac597dcbc668774ef006702672474aad53c6d596b62e487b40b1"
@@ -11213,16 +11194,6 @@ name = "regex-syntax"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3160422bbd54dd5ecfdca71e5fd59b7b8fe2b1697ab2baf64f6d05dcc66d298"
-
-[[package]]
-name = "regress"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0eae2a1ebfecc58aff952ef8ccd364329abe627762f5bf09ff42eb9d98522479"
-dependencies = [
- "hashbrown 0.14.5",
- "memchr",
-]
 
 [[package]]
 name = "regress"
@@ -13244,27 +13215,6 @@ dependencies = [
 
 [[package]]
 name = "substrait"
-version = "0.37.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ec889155c56a34200d2c5aee147b8d29545fa7cce7f68b38d927f5d24ced8ef"
-dependencies = [
- "heck 0.5.0",
- "prettyplease",
- "prost 0.13.5",
- "prost-build 0.13.5",
- "prost-types 0.13.5",
- "schemars",
- "semver",
- "serde",
- "serde_json",
- "serde_yaml",
- "syn 2.0.114",
- "typify 0.1.0",
- "walkdir",
-]
-
-[[package]]
-name = "substrait"
 version = "0.62.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "62fc4b483a129b9772ccb9c3f7945a472112fdd9140da87f8a4e7f1d44e045d0"
@@ -13277,14 +13227,14 @@ dependencies = [
  "prost 0.14.1",
  "prost-build 0.14.1",
  "prost-types 0.14.1",
- "regress 0.10.5",
+ "regress",
  "schemars",
  "semver",
  "serde",
  "serde_json",
  "serde_yaml",
  "syn 2.0.114",
- "typify 0.5.0",
+ "typify",
  "walkdir",
 ]
 
@@ -13306,7 +13256,6 @@ dependencies = [
  "promql",
  "prost 0.14.1",
  "snafu 0.8.6",
- "substrait 0.37.3",
  "tokio",
 ]
 
@@ -14622,42 +14571,12 @@ dependencies = [
 
 [[package]]
 name = "typify"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "adb6beec125971dda80a086f90b4a70f60f222990ce4d63ad0fc140492f53444"
-dependencies = [
- "typify-impl 0.1.0",
- "typify-macro 0.1.0",
-]
-
-[[package]]
-name = "typify"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6d5bcc6f62eb1fa8aa4098f39b29f93dcb914e17158b76c50360911257aa629"
 dependencies = [
- "typify-impl 0.5.0",
- "typify-macro 0.5.0",
-]
-
-[[package]]
-name = "typify-impl"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93bbb24e990654aff858d80fee8114f4322f7d7a1b1ecb45129e2fcb0d0ad5ae"
-dependencies = [
- "heck 0.5.0",
- "log",
- "proc-macro2",
- "quote",
- "regress 0.9.1",
- "schemars",
- "semver",
- "serde",
- "serde_json",
- "syn 2.0.114",
- "thiserror 1.0.69",
- "unicode-ident",
+ "typify-impl",
+ "typify-macro",
 ]
 
 [[package]]
@@ -14670,7 +14589,7 @@ dependencies = [
  "log",
  "proc-macro2",
  "quote",
- "regress 0.10.5",
+ "regress",
  "schemars",
  "semver",
  "serde",
@@ -14678,23 +14597,6 @@ dependencies = [
  "syn 2.0.114",
  "thiserror 2.0.17",
  "unicode-ident",
-]
-
-[[package]]
-name = "typify-macro"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8e6491896e955692d68361c68db2b263e3bec317ec0b684e0e2fa882fb6e31e"
-dependencies = [
- "proc-macro2",
- "quote",
- "schemars",
- "semver",
- "serde",
- "serde_json",
- "serde_tokenstream",
- "syn 2.0.114",
- "typify-impl 0.1.0",
 ]
 
 [[package]]
@@ -14711,7 +14613,7 @@ dependencies = [
  "serde_json",
  "serde_tokenstream",
  "syn 2.0.114",
- "typify-impl 0.5.0",
+ "typify-impl",
 ]
 
 [[package]]

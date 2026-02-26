@@ -22,10 +22,6 @@ promql.workspace = true
 prost.workspace = true
 snafu.workspace = true
 
-[dependencies.substrait_proto]
-package = "substrait"
-version = "0.37"
-
 [dev-dependencies]
 datatypes.workspace = true
 tokio.workspace = true
