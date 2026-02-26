@@ -110,7 +110,7 @@ struct SharedState {
     table_ctx: TableContextRef,
     clock: Arc<Mutex<Timestamp>>,
     inserted_rows: u64,
-    runninng: bool,
+    running: bool,
 }
 
 fn build_insert_expr<R: Rng + 'static>(
@@ -184,7 +184,7 @@ async fn write_loop<R: Rng + 'static>(
 ) -> Result<()> {
     info!("Start write loop");
     let clock = shared_state.lock().unwrap().clock.clone();
-    while shared_state.lock().unwrap().runninng {
+    while shared_state.lock().unwrap().running {
         let table_ctx = shared_state.lock().unwrap().table_ctx.clone();
         let partitions = SimplePartitions::from_table_ctx(&table_ctx).unwrap();
         let insert_expr = build_insert_expr(&table_ctx, &mut rng, &partitions, &clock);
@@ -221,7 +221,7 @@ async fn execute_repartition_table(ctx: FuzzContext, input: FuzzInput) -> Result
     let shared_state = Arc::new(Mutex::new(SharedState {
         table_ctx: table_ctx.clone(),
         clock: Arc::new(Mutex::new(Timestamp::current_millis())),
-        runninng: true,
+        running: true,
         inserted_rows: 0,
     }));
 
@@ -288,7 +288,7 @@ async fn execute_repartition_table(ctx: FuzzContext, input: FuzzInput) -> Result
             &partition_entries,
         )?;
     }
-    shared_state.lock().unwrap().runninng = false;
+    shared_state.lock().unwrap().running = false;
     writer_task.await.unwrap().unwrap();
     let count_sql = format!("SELECT COUNT(1) AS count FROM {}", table_ctx.name);
     let count = count_values(&ctx.greptime, &count_sql).await?;
