@@ -393,7 +393,7 @@ mod tests {
         ) -> Result<Response<PullMetaConfigResponse>, Status> {
             let res = PullMetaConfigResponse {
                 header: Some(ResponseHeader::success()),
-                payload: "{}".to_string(),
+                payload: None,
             };
 
             Ok(Response::new(res))
