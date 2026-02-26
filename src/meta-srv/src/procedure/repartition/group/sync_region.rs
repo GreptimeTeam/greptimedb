@@ -220,7 +220,6 @@ impl SyncRegion {
         let ch = Channel::Datanode(peer.id);
         let instruction = Instruction::SyncRegions(sync_regions.to_vec());
         let tracing_ctx = TracingContext::from_current_span();
-        let tracing_header = tracing_ctx.to_w3c();
         let message = MailboxMessage::json_message(
             &format!(
                 "Sync regions: {:?}",
@@ -230,7 +229,7 @@ impl SyncRegion {
             &format!("Datanode-{}@{}", peer.id, peer.addr),
             common_time::util::current_time_millis(),
             &instruction,
-            Some(tracing_header),
+            Some(tracing_ctx.to_w3c()),
         )
         .with_context(|_| error::SerializeToJsonSnafu {
             input: instruction.to_string(),
