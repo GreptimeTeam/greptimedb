@@ -15,7 +15,7 @@ datanode:
     global_rt_size = 4
     compact_rt_size = 2
 
-    [region_engine]
+    [[region_engine]]
     [region_engine.mito]
     [region_engine.mito.gc]
     enable = true
