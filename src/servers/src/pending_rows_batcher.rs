@@ -47,7 +47,6 @@ use crate::metrics::{
     FLUSH_DROPPED_ROWS, FLUSH_ELAPSED, FLUSH_FAILURES, FLUSH_ROWS, FLUSH_TOTAL, PENDING_BATCHES,
     PENDING_ROWS, PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED,
 };
-use crate::prom_row_builder::PromRecordBatchGroup;
 
 const PHYSICAL_TABLE_KEY: &str = "physical_table";
 
@@ -165,46 +164,6 @@ impl PendingRowsBatcher {
                 .start_timer();
             build_table_batches(requests)?
         };
-        self.submit_table_batches(table_batches, total_rows, ctx)
-            .await
-    }
-
-    pub async fn submit_prom_record_batch_groups(
-        &self,
-        groups: Vec<PromRecordBatchGroup>,
-        ctx: QueryContextRef,
-    ) -> Result<u64> {
-        let mut total_rows = 0;
-        for group in groups {
-            let prom_ctx = group.prom_ctx;
-            let table_batches = group.table_batches;
-            let rows: usize = table_batches.iter().map(|(_, rb)| rb.num_rows()).sum();
-            if rows == 0 {
-                continue;
-            }
-
-            let mut temp_ctx = ctx.as_ref().clone();
-            if let Some(schema) = prom_ctx.schema {
-                temp_ctx.set_current_schema(&schema);
-            }
-            if let Some(physical_table) = prom_ctx.physical_table {
-                temp_ctx.set_extension(PHYSICAL_TABLE_KEY, physical_table);
-            }
-
-            total_rows += self
-                .submit_table_batches(table_batches, rows, Arc::new(temp_ctx))
-                .await?;
-        }
-
-        Ok(total_rows)
-    }
-
-    async fn submit_table_batches(
-        &self,
-        table_batches: Vec<(String, RecordBatch)>,
-        total_rows: usize,
-        ctx: QueryContextRef,
-    ) -> Result<u64> {
         if total_rows == 0 {
             return Ok(0);
         }
