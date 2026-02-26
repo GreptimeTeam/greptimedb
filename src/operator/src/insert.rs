@@ -40,7 +40,6 @@ use common_query::Output;
 use common_query::prelude::{greptime_timestamp, greptime_value};
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{error, info, warn};
-use common_time::TimeToLive::Instant;
 use datatypes::schema::SkippingIndexOptions;
 use futures_util::future;
 use meter_macros::write_meter;
