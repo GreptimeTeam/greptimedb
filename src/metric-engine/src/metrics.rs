@@ -19,6 +19,7 @@ use prometheus::*;
 
 /// Stage label.
 pub const OPERATION_LABEL: &str = "operation";
+pub const STAGE_LABEL: &str = "stage";
 
 lazy_static! {
     /// Gauge for opened regions
@@ -48,6 +49,15 @@ lazy_static! {
         &[OPERATION_LABEL],
         // 0.01 ~ 10000
         exponential_buckets(0.01, 10.0, 7).unwrap(),
+    )
+    .unwrap();
+
+    /// Histogram for stage-level elapsed time in bulk insert path.
+    pub static ref BULK_INSERT_STAGE_ELAPSED: HistogramVec = register_histogram_vec!(
+        "greptime_metric_engine_bulk_insert_stage_elapsed",
+        "metric engine bulk insert stage elapsed",
+        &[STAGE_LABEL],
+        exponential_buckets(0.0005, 5.0, 10).unwrap(),
     )
     .unwrap();
 }

@@ -45,7 +45,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, mpsc, oneshot};
 use crate::error::{Error, Result};
 use crate::metrics::{
     FLUSH_DROPPED_ROWS, FLUSH_ELAPSED, FLUSH_FAILURES, FLUSH_ROWS, FLUSH_TOTAL, PENDING_BATCHES,
-    PENDING_ROWS,
+    PENDING_ROWS, PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED,
 };
 
 const PHYSICAL_TABLE_KEY: &str = "physical_table";
@@ -158,20 +158,33 @@ impl PendingRowsBatcher {
     }
 
     pub async fn submit(&self, requests: RowInsertRequests, ctx: QueryContextRef) -> Result<u64> {
-        let (table_batches, total_rows) = build_table_batches(requests)?;
+        let (table_batches, total_rows) = {
+            let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+                .with_label_values(&["submit_build_table_batches"])
+                .start_timer();
+            build_table_batches(requests)?
+        };
         if total_rows == 0 {
             return Ok(0);
         }
-        let table_batches = self
-            .align_table_batches_to_region_schema(table_batches, &ctx)
-            .await?;
+        let table_batches = {
+            let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+                .with_label_values(&["submit_align_region_schema"])
+                .start_timer();
+            self.align_table_batches_to_region_schema(table_batches, &ctx)
+                .await?
+        };
 
-        let permit = self
-            .inflight_semaphore
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|_| Error::BatcherChannelClosed)?;
+        let permit = {
+            let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+                .with_label_values(&["submit_acquire_inflight_permit"])
+                .start_timer();
+            self.inflight_semaphore
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| Error::BatcherChannelClosed)?
+        };
 
         let (response_tx, response_rx) = oneshot::channel();
 
@@ -184,16 +197,24 @@ impl PendingRowsBatcher {
             _permit: permit,
         };
 
-        worker
-            .tx
-            .send(cmd)
-            .await
-            .map_err(|_| Error::BatcherChannelClosed)?;
+        {
+            let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+                .with_label_values(&["submit_send_to_worker"])
+                .start_timer();
+            worker
+                .tx
+                .send(cmd)
+                .await
+                .map_err(|_| Error::BatcherChannelClosed)?;
+        }
 
-        response_rx
-            .await
-            .map_err(|_| Error::BatcherChannelClosed)?
-            .map(|()| total_rows as u64)
+        let result = {
+            let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+                .with_label_values(&["submit_wait_flush_result"])
+                .start_timer();
+            response_rx.await.map_err(|_| Error::BatcherChannelClosed)?
+        };
+        result.map(|()| total_rows as u64)
     }
 
     async fn align_table_batches_to_region_schema(
@@ -466,81 +487,101 @@ async fn flush_batch(
         };
 
         let schema_ref = first_batch.schema();
-        let record_batch = match concat_batches(&schema_ref, &table_batch.batches) {
-            Ok(batch) => batch,
-            Err(err) => {
-                record_failure!(
-                    table_batch.row_count,
-                    format!(
-                        "Failed to concat table batch {}: {:?}",
-                        table_batch.table_name, err
-                    )
-                );
-                continue;
+        let record_batch = {
+            let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+                .with_label_values(&["flush_concat_table_batches"])
+                .start_timer();
+            match concat_batches(&schema_ref, &table_batch.batches) {
+                Ok(batch) => batch,
+                Err(err) => {
+                    record_failure!(
+                        table_batch.row_count,
+                        format!(
+                            "Failed to concat table batch {}: {:?}",
+                            table_batch.table_name, err
+                        )
+                    );
+                    continue;
+                }
             }
         };
 
-        let table = match catalog_manager
-            .table(
-                &catalog,
-                &schema,
-                &table_batch.table_name,
-                Some(ctx.as_ref()),
-            )
-            .await
-        {
-            Ok(Some(table)) => table,
-            Ok(None) => {
-                record_failure!(
-                    table_batch.row_count,
-                    format!(
-                        "Table not found during pending flush: {}",
-                        table_batch.table_name
-                    )
-                );
-                continue;
-            }
-            Err(err) => {
-                record_failure!(
-                    table_batch.row_count,
-                    format!(
-                        "Failed to resolve table {} for pending flush: {:?}",
-                        table_batch.table_name, err
-                    )
-                );
-                continue;
+        let table = {
+            let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+                .with_label_values(&["flush_resolve_table"])
+                .start_timer();
+            match catalog_manager
+                .table(
+                    &catalog,
+                    &schema,
+                    &table_batch.table_name,
+                    Some(ctx.as_ref()),
+                )
+                .await
+            {
+                Ok(Some(table)) => table,
+                Ok(None) => {
+                    record_failure!(
+                        table_batch.row_count,
+                        format!(
+                            "Table not found during pending flush: {}",
+                            table_batch.table_name
+                        )
+                    );
+                    continue;
+                }
+                Err(err) => {
+                    record_failure!(
+                        table_batch.row_count,
+                        format!(
+                            "Failed to resolve table {} for pending flush: {:?}",
+                            table_batch.table_name, err
+                        )
+                    );
+                    continue;
+                }
             }
         };
         let table_info = table.table_info();
 
-        let partition_rule = match partition_manager
-            .find_table_partition_rule(&table_info)
-            .await
-        {
-            Ok(rule) => rule,
-            Err(err) => {
-                record_failure!(
-                    table_batch.row_count,
-                    format!(
-                        "Failed to fetch partition rule for table {}: {:?}",
-                        table_batch.table_name, err
-                    )
-                );
-                continue;
+        let partition_rule = {
+            let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+                .with_label_values(&["flush_fetch_partition_rule"])
+                .start_timer();
+            match partition_manager
+                .find_table_partition_rule(&table_info)
+                .await
+            {
+                Ok(rule) => rule,
+                Err(err) => {
+                    record_failure!(
+                        table_batch.row_count,
+                        format!(
+                            "Failed to fetch partition rule for table {}: {:?}",
+                            table_batch.table_name, err
+                        )
+                    );
+                    continue;
+                }
             }
         };
 
-        let region_masks = match partition_rule.split_record_batch(&record_batch) {
-            Ok(masks) => masks,
-            Err(err) => {
-                record_failure!(
-                    table_batch.row_count,
-                    format!(
-                        "Failed to split record batch for table {}: {:?}",
-                        table_batch.table_name, err
-                    )
-                );
-                continue;
+        let region_masks = {
+            let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+                .with_label_values(&["flush_split_record_batch"])
+                .start_timer();
+            match partition_rule.split_record_batch(&record_batch) {
+                Ok(masks) => masks,
+                Err(err) => {
+                    record_failure!(
+                        table_batch.row_count,
+                        format!(
+                            "Failed to split record batch for table {}: {:?}",
+                            table_batch.table_name, err
+                        )
+                    );
+                    continue;
+                }
             }
         };
 
@@ -552,6 +593,9 @@ async fn flush_batch(
             let region_batch = if mask.select_all() {
                 record_batch.clone()
             } else {
+                let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+                    .with_label_values(&["flush_filter_record_batch"])
+                    .start_timer();
                 match filter_record_batch(&record_batch, mask.array()) {
                     Ok(batch) => batch,
                     Err(err) => {
@@ -573,28 +617,38 @@ async fn flush_batch(
             }
 
             let region_id = RegionId::new(table_info.table_id(), region_number);
-            let datanode = match partition_manager.find_region_leader(region_id).await {
-                Ok(peer) => peer,
-                Err(err) => {
-                    record_failure!(
-                        row_count,
-                        format!("Failed to resolve region leader {}: {:?}", region_id, err)
-                    );
-                    continue;
+            let datanode = {
+                let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+                    .with_label_values(&["flush_resolve_region_leader"])
+                    .start_timer();
+                match partition_manager.find_region_leader(region_id).await {
+                    Ok(peer) => peer,
+                    Err(err) => {
+                        record_failure!(
+                            row_count,
+                            format!("Failed to resolve region leader {}: {:?}", region_id, err)
+                        );
+                        continue;
+                    }
                 }
             };
 
-            let (schema_bytes, data_header, payload) = match record_batch_to_ipc(region_batch) {
-                Ok(encoded) => encoded,
-                Err(err) => {
-                    record_failure!(
-                        row_count,
-                        format!(
-                            "Failed to encode Arrow IPC for region {}: {:?}",
-                            region_id, err
-                        )
-                    );
-                    continue;
+            let (schema_bytes, data_header, payload) = {
+                let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+                    .with_label_values(&["flush_encode_ipc"])
+                    .start_timer();
+                match record_batch_to_ipc(region_batch) {
+                    Ok(encoded) => encoded,
+                    Err(err) => {
+                        record_failure!(
+                            row_count,
+                            format!(
+                                "Failed to encode Arrow IPC for region {}: {:?}",
+                                region_id, err
+                            )
+                        );
+                        continue;
+                    }
                 }
             };
 
@@ -614,6 +668,9 @@ async fn flush_batch(
             };
 
             let datanode = node_manager.datanode(&datanode).await;
+            let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+                .with_label_values(&["flush_write_region"])
+                .start_timer();
             match datanode.handle(request).await {
                 Ok(_) => {
                     FLUSH_TOTAL.inc();
