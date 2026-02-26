@@ -22,6 +22,7 @@ use common_meta::instruction::{
     DowngradeRegion, DowngradeRegionReply, DowngradeRegionsReply, Instruction, InstructionReply,
 };
 use common_procedure::{Context as ProcedureContext, Status};
+use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{debug, error, info, warn};
 use common_time::util::current_time_millis;
 use serde::{Deserialize, Serialize};
@@ -213,12 +214,14 @@ impl DowngradeLeaderRegion {
         let downgrade_instruction = self.build_downgrade_region_instruction(ctx, operation_timeout);
 
         let leader = &ctx.persistent_ctx.from_peer;
+        let tracing_ctx = TracingContext::from_current_span();
         let msg = MailboxMessage::json_message(
             &format!("Downgrade leader regions: {:?}", region_ids),
             &format!("Metasrv@{}", ctx.server_addr()),
             &format!("Datanode-{}@{}", leader.id, leader.addr),
             common_time::util::current_time_millis(),
             &downgrade_instruction,
+            Some(tracing_ctx.to_w3c()),
         )
         .with_context(|_| error::SerializeToJsonSnafu {
             input: downgrade_instruction.to_string(),

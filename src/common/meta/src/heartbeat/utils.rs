@@ -15,6 +15,7 @@
 use api::v1::meta::heartbeat_request::NodeWorkloads;
 use api::v1::meta::mailbox_message::Payload;
 use api::v1::meta::{DatanodeWorkloads, MailboxMessage};
+use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::warn;
 use common_time::util::current_time_millis;
 use common_workload::DatanodeWorkloadType;
@@ -36,6 +37,9 @@ pub fn mailbox_message_to_incoming_message(m: MailboxMessage) -> Result<Incoming
                         to: m.to,
                         from: m.from,
                     },
+                    m.header
+                        .map(|h| TracingContext::from_w3c(&h.tracing_context))
+                        .unwrap_or_default(),
                     instruction,
                 ))
             }
@@ -49,6 +53,10 @@ pub fn outgoing_message_to_mailbox_message(
     (meta, reply): OutgoingMessage,
 ) -> Result<MailboxMessage> {
     Ok(MailboxMessage {
+        // Design note: mailbox communication is one-way for tracing propagation.
+        // We only carry tracing headers on incoming command messages, and replies
+        // intentionally do not echo/propagate tracing context.
+        header: None,
         id: meta.id,
         subject: meta.subject,
         from: meta.to,

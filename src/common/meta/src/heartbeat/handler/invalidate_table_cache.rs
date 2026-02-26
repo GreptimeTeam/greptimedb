@@ -32,12 +32,13 @@ impl HeartbeatResponseHandler for InvalidateCacheHandler {
     fn is_acceptable(&self, ctx: &HeartbeatResponseHandlerContext) -> bool {
         matches!(
             ctx.incoming_message.as_ref(),
-            Some((_, Instruction::InvalidateCaches(_)))
+            Some((_, _, Instruction::InvalidateCaches(_)))
         )
     }
 
     async fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> MetaResult<HandleControl> {
-        let Some((_, Instruction::InvalidateCaches(caches))) = ctx.incoming_message.take() else {
+        let Some((_, _, Instruction::InvalidateCaches(caches))) = ctx.incoming_message.take()
+        else {
             unreachable!("InvalidateCacheHandler: should be guarded by 'is_acceptable'")
         };
 
