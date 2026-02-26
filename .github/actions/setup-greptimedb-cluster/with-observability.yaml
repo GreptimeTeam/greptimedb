@@ -5,3 +5,24 @@ tracing:
 
 monitoring:
   enabled: true
+  standalone:
+    base:
+      main:
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+      datanodeStorage:
+        fs:
+          storageSize: 1Gi
+  vector:
+    resources:
+      requests:
+        cpu: "50m"
+        memory: "64Mi"
+      limits:
+        cpu: "500m"
+        memory: "256Mi"
