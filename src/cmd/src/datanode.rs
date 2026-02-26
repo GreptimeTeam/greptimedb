@@ -15,6 +15,8 @@
 pub mod builder;
 #[allow(clippy::print_stdout)]
 mod objbench;
+#[allow(clippy::print_stdout)]
+mod scanbench;
 
 use std::path::Path;
 use std::time::Duration;
@@ -35,6 +37,7 @@ use tracing_appender::non_blocking::WorkerGuard;
 use crate::App;
 use crate::datanode::builder::InstanceBuilder;
 use crate::datanode::objbench::ObjbenchCommand;
+use crate::datanode::scanbench::ScanbenchCommand;
 use crate::error::{
     LoadLayeredConfigSnafu, MissingConfigSnafu, Result, ShutdownDatanodeSnafu, StartDatanodeSnafu,
 };
@@ -105,9 +108,9 @@ impl Command {
     pub fn load_options(&self, global_options: &GlobalOptions) -> Result<DatanodeOptions> {
         match &self.subcmd {
             SubCommand::Start(cmd) => cmd.load_options(global_options),
-            SubCommand::Objbench(_) => {
-                // For objbench command, we don't need to load DatanodeOptions
-                // It's a standalone utility command
+            SubCommand::Objbench(_) | SubCommand::Scanbench(_) => {
+                // For bench commands, we don't need to load DatanodeOptions
+                // They are standalone utility commands
                 let mut opts = datanode::config::DatanodeOptions::default();
                 opts.sanitize();
                 Ok(DatanodeOptions {
@@ -125,6 +128,8 @@ pub enum SubCommand {
     Start(StartCommand),
     /// Object storage benchmark tool
     Objbench(ObjbenchCommand),
+    /// Scan benchmark tool - benchmarks scanning a region directly from storage
+    Scanbench(ScanbenchCommand),
 }
 
 impl SubCommand {
@@ -135,6 +140,10 @@ impl SubCommand {
                 builder.build().await
             }
             SubCommand::Objbench(cmd) => {
+                cmd.run().await?;
+                std::process::exit(0);
+            }
+            SubCommand::Scanbench(cmd) => {
                 cmd.run().await?;
                 std::process::exit(0);
             }
@@ -157,6 +166,30 @@ pub struct StorageConfig {
 struct StorageConfigWrapper {
     storage: StorageConfig,
     region_engine: Vec<RegionEngineConfig>,
+    #[serde(default, deserialize_with = "deserialize_wal_config")]
+    wal: DatanodeWalConfig,
+}
+
+/// Deserializes [`DatanodeWalConfig`], defaulting `provider` to `"raft_engine"` when
+/// the `[wal]` section is present but omits it. This mirrors the behavior of the
+/// datanode's layered config loader which merges over a default that already contains
+/// `provider`.
+fn deserialize_wal_config<'de, D>(
+    deserializer: D,
+) -> std::result::Result<DatanodeWalConfig, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+
+    let mut table = <toml::value::Table as serde::Deserialize>::deserialize(deserializer)?;
+    if !table.contains_key("provider") {
+        table.insert(
+            "provider".to_string(),
+            toml::Value::String("raft_engine".to_string()),
+        );
+    }
+    DatanodeWalConfig::deserialize(toml::Value::Table(table)).map_err(D::Error::custom)
 }
 
 #[derive(Debug, Parser, Default)]

@@ -111,6 +111,7 @@ async fn start(cli: Command) -> Result<()> {
                 cmd.build_with(builder).await?.run().await
             }
             datanode::SubCommand::Objbench(ref bench) => bench.run().await,
+            datanode::SubCommand::Scanbench(ref bench) => bench.run().await,
         },
         SubCommand::Flownode(cmd) => {
             cmd.build(cmd.load_options(&cli.global_options)?)
