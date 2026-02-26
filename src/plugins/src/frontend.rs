@@ -38,7 +38,7 @@ pub async fn setup_frontend_plugins(
 }
 
 pub async fn process_meta_config(
-    _meta_config: Option<PluginOptions>,
+    _meta_config: Vec<PluginOptions>,
     _plugins: &mut Plugins,
 ) -> Result<()> {
     Ok(())

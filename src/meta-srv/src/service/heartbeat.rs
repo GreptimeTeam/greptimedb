@@ -17,11 +17,11 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use api::v1::meta::{
-    AskLeaderRequest, AskLeaderResponse, HeartbeatRequest, HeartbeatResponse, MetaConfig, Peer,
+    AskLeaderRequest, AskLeaderResponse, HeartbeatRequest, HeartbeatResponse, Peer,
     PullMetaConfigRequest, PullMetaConfigResponse, RequestHeader, ResponseHeader, Role,
     heartbeat_server,
 };
-use common_options::meta_config::MetasrvConfigWrapper;
+use common_options::meta_config::PluginOptionsSerializerRef;
 use common_telemetry::{debug, error, info, warn};
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
@@ -149,9 +149,9 @@ impl heartbeat_server::Heartbeat for Metasrv {
     ) -> GrpcResult<PullMetaConfigResponse> {
         let payload = self
             .plugins()
-            .get::<MetasrvConfigWrapper>()
-            .map(|w| w.0)
-            .map(|w| MetaConfig { content: w });
+            .get::<PluginOptionsSerializerRef>()
+            .and_then(|p| p.serialize().ok())
+            .unwrap_or_default();
 
         let res = PullMetaConfigResponse {
             header: Some(ResponseHeader::success()),

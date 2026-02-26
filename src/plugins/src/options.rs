@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_options::meta_config::{MetasrvConfigSerializer, MetasrvConfigWrapper};
+use common_options::meta_config::PluginOptionsSerializer;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -23,8 +23,10 @@ pub enum PluginOptions {
     Dummy(DummyOptions),
 }
 
-impl MetasrvConfigSerializer for PluginOptions {
-    fn to_wrapper_str(&self) -> Result<MetasrvConfigWrapper, serde_json::Error> {
-        serde_json::to_string(self).map(MetasrvConfigWrapper)
+pub struct PluginOptionsList(pub Vec<PluginOptions>);
+
+impl PluginOptionsSerializer for PluginOptionsList {
+    fn serialize(&self) -> Result<Vec<String>, serde_json::Error> {
+        self.0.iter().map(serde_json::to_string).collect()
     }
 }

@@ -265,7 +265,7 @@ mod tests {
         ) -> std::result::Result<Response<PullMetaConfigResponse>, Status> {
             let res = PullMetaConfigResponse {
                 header: Some(ResponseHeader::success()),
-                payload: None,
+                payload: vec![],
             };
 
             Ok(Response::new(res))

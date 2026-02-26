@@ -12,13 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 /// A trait for serializing Metasrv config to a JSON string.
 /// So it can be used in the metasrv's crate instead of depending on the plugins' crate.
-pub trait MetasrvConfigSerializer {
-    fn to_wrapper_str(&self) -> Result<MetasrvConfigWrapper, serde_json::Error>;
+pub trait PluginOptionsSerializer: Send + Sync {
+    fn serialize(&self) -> Result<Vec<String>, serde_json::Error>;
 }
 
-/// A wrapper for the serialized Metasrv config.
-/// Avoid type collision for String in the plugins.
-#[derive(Debug, Clone, PartialEq)]
-pub struct MetasrvConfigWrapper(pub String);
+pub type PluginOptionsSerializerRef = Arc<dyn PluginOptionsSerializer>;

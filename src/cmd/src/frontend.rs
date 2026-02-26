@@ -372,7 +372,7 @@ impl StartCommand {
         .await
         .context(error::MetaClientInitSnafu)?;
 
-        let meta_config: Option<PluginOptions> = meta_client
+        let meta_config: Vec<PluginOptions> = meta_client
             .pull_meta_config()
             .await
             .context(error::MetaClientInitSnafu)?;
