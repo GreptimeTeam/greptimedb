@@ -40,7 +40,7 @@ use datatypes::schema::{ColumnSchema as DtColumnSchema, Schema as DtSchema};
 use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
 use store_api::storage::RegionId;
-use tokio::sync::{Semaphore, broadcast, mpsc};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, mpsc, oneshot};
 
 use crate::error::{Error, Result};
 use crate::metrics::{
@@ -69,12 +69,19 @@ struct PendingBatch {
     created_at: Option<Instant>,
     total_row_count: usize,
     ctx: Option<QueryContextRef>,
+    waiters: Vec<FlushWaiter>,
+}
+
+struct FlushWaiter {
+    response_tx: oneshot::Sender<Result<()>>,
+    _permit: OwnedSemaphorePermit,
 }
 
 struct FlushBatch {
     table_batches: Vec<TableBatch>,
     total_row_count: usize,
     ctx: QueryContextRef,
+    waiters: Vec<FlushWaiter>,
 }
 
 #[derive(Clone)]
@@ -87,6 +94,8 @@ enum WorkerCommand {
         table_batches: Vec<(String, RecordBatch)>,
         total_rows: usize,
         ctx: QueryContextRef,
+        response_tx: oneshot::Sender<Result<()>>,
+        _permit: OwnedSemaphorePermit,
     },
 }
 
@@ -113,6 +122,7 @@ pub struct PendingRowsBatcher {
     node_manager: NodeManagerRef,
     catalog_manager: CatalogManagerRef,
     flush_semaphore: Arc<Semaphore>,
+    inflight_semaphore: Arc<Semaphore>,
     worker_channel_capacity: usize,
     shutdown: broadcast::Sender<()>,
 }
@@ -126,6 +136,7 @@ impl PendingRowsBatcher {
         max_batch_rows: usize,
         max_concurrent_flushes: usize,
         worker_channel_capacity: usize,
+        max_inflight_requests: usize,
     ) -> Option<Arc<Self>> {
         if flush_interval.is_zero() {
             return None;
@@ -140,6 +151,7 @@ impl PendingRowsBatcher {
             node_manager,
             catalog_manager,
             flush_semaphore: Arc::new(Semaphore::new(max_concurrent_flushes)),
+            inflight_semaphore: Arc::new(Semaphore::new(max_inflight_requests)),
             worker_channel_capacity,
             shutdown,
         }))
@@ -154,20 +166,34 @@ impl PendingRowsBatcher {
             .align_table_batches_to_region_schema(table_batches, &ctx)
             .await?;
 
+        let permit = self
+            .inflight_semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| Error::BatcherChannelClosed)?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
         let worker = self.get_or_spawn_worker(batch_key_from_ctx(&ctx));
         let cmd = WorkerCommand::Submit {
             table_batches,
             total_rows,
             ctx,
+            response_tx,
+            _permit: permit,
         };
 
-        match worker.tx.try_send(cmd) {
-            Ok(()) => Ok(total_rows as u64),
-            Err(mpsc::error::TrySendError::Full(_)) => Err(Error::BatcherQueueFull {
-                capacity: self.worker_channel_capacity,
-            }),
-            Err(mpsc::error::TrySendError::Closed(_)) => Err(Error::BatcherChannelClosed),
-        }
+        worker
+            .tx
+            .send(cmd)
+            .await
+            .map_err(|_| Error::BatcherChannelClosed)?;
+
+        response_rx
+            .await
+            .map_err(|_| Error::BatcherChannelClosed)?
+            .map(|()| total_rows as u64)
     }
 
     async fn align_table_batches_to_region_schema(
@@ -255,6 +281,7 @@ impl PendingBatch {
             created_at: None,
             total_row_count: 0,
             ctx: None,
+            waiters: Vec::new(),
         }
     }
 }
@@ -278,12 +305,14 @@ fn start_worker(
             tokio::select! {
                 cmd = rx.recv() => {
                     match cmd {
-                        Some(WorkerCommand::Submit { table_batches, total_rows, ctx }) => {
+                        Some(WorkerCommand::Submit { table_batches, total_rows, ctx, response_tx, _permit }) => {
                             if batch.total_row_count == 0 {
                                 batch.created_at = Some(Instant::now());
                                 batch.ctx = Some(ctx);
                                 PENDING_BATCHES.inc();
                             }
+
+                            batch.waiters.push(FlushWaiter { response_tx, _permit });
 
                             for (table_name, record_batch) in table_batches {
                                 let entry = batch.tables.entry(table_name.clone()).or_insert_with(|| TableBatch {
@@ -367,6 +396,7 @@ fn drain_batch(batch: &mut PendingBatch) -> Option<FlushBatch> {
 
     let total_row_count = batch.total_row_count;
     let table_batches = std::mem::take(&mut batch.tables).into_values().collect();
+    let waiters = std::mem::take(&mut batch.waiters);
     batch.total_row_count = 0;
     batch.created_at = None;
 
@@ -377,6 +407,7 @@ fn drain_batch(batch: &mut PendingBatch) -> Option<FlushBatch> {
         table_batches,
         total_row_count,
         ctx,
+        waiters,
     })
 }
 
@@ -411,11 +442,23 @@ async fn flush_batch(
         table_batches,
         total_row_count,
         ctx,
+        waiters,
     } = flush;
     let start = Instant::now();
+    let mut first_error: Option<String> = None;
 
     let catalog = ctx.current_catalog().to_string();
     let schema = ctx.current_schema();
+
+    macro_rules! record_failure {
+        ($row_count:expr, $msg:expr) => {{
+            let msg = $msg;
+            if first_error.is_none() {
+                first_error = Some(msg.clone());
+            }
+            mark_flush_failure($row_count, &msg);
+        }};
+    }
 
     for table_batch in table_batches {
         let Some(first_batch) = table_batch.batches.first() else {
@@ -426,12 +469,12 @@ async fn flush_batch(
         let record_batch = match concat_batches(&schema_ref, &table_batch.batches) {
             Ok(batch) => batch,
             Err(err) => {
-                mark_flush_failure(
+                record_failure!(
                     table_batch.row_count,
-                    &format!(
+                    format!(
                         "Failed to concat table batch {}: {:?}",
                         table_batch.table_name, err
-                    ),
+                    )
                 );
                 continue;
             }
@@ -448,22 +491,22 @@ async fn flush_batch(
         {
             Ok(Some(table)) => table,
             Ok(None) => {
-                mark_flush_failure(
+                record_failure!(
                     table_batch.row_count,
-                    &format!(
+                    format!(
                         "Table not found during pending flush: {}",
                         table_batch.table_name
-                    ),
+                    )
                 );
                 continue;
             }
             Err(err) => {
-                mark_flush_failure(
+                record_failure!(
                     table_batch.row_count,
-                    &format!(
+                    format!(
                         "Failed to resolve table {} for pending flush: {:?}",
                         table_batch.table_name, err
-                    ),
+                    )
                 );
                 continue;
             }
@@ -476,12 +519,12 @@ async fn flush_batch(
         {
             Ok(rule) => rule,
             Err(err) => {
-                mark_flush_failure(
+                record_failure!(
                     table_batch.row_count,
-                    &format!(
+                    format!(
                         "Failed to fetch partition rule for table {}: {:?}",
                         table_batch.table_name, err
-                    ),
+                    )
                 );
                 continue;
             }
@@ -490,12 +533,12 @@ async fn flush_batch(
         let region_masks = match partition_rule.split_record_batch(&record_batch) {
             Ok(masks) => masks,
             Err(err) => {
-                mark_flush_failure(
+                record_failure!(
                     table_batch.row_count,
-                    &format!(
+                    format!(
                         "Failed to split record batch for table {}: {:?}",
                         table_batch.table_name, err
-                    ),
+                    )
                 );
                 continue;
             }
@@ -512,12 +555,12 @@ async fn flush_batch(
                 match filter_record_batch(&record_batch, mask.array()) {
                     Ok(batch) => batch,
                     Err(err) => {
-                        mark_flush_failure(
+                        record_failure!(
                             table_batch.row_count,
-                            &format!(
+                            format!(
                                 "Failed to filter record batch for table {}: {:?}",
                                 table_batch.table_name, err
-                            ),
+                            )
                         );
                         continue;
                     }
@@ -533,9 +576,9 @@ async fn flush_batch(
             let datanode = match partition_manager.find_region_leader(region_id).await {
                 Ok(peer) => peer,
                 Err(err) => {
-                    mark_flush_failure(
+                    record_failure!(
                         row_count,
-                        &format!("Failed to resolve region leader {}: {:?}", region_id, err),
+                        format!("Failed to resolve region leader {}: {:?}", region_id, err)
                     );
                     continue;
                 }
@@ -544,12 +587,12 @@ async fn flush_batch(
             let (schema_bytes, data_header, payload) = match record_batch_to_ipc(region_batch) {
                 Ok(encoded) => encoded,
                 Err(err) => {
-                    mark_flush_failure(
+                    record_failure!(
                         row_count,
-                        &format!(
+                        format!(
                             "Failed to encode Arrow IPC for region {}: {:?}",
                             region_id, err
-                        ),
+                        )
                     );
                     continue;
                 }
@@ -577,12 +620,12 @@ async fn flush_batch(
                     FLUSH_ROWS.observe(row_count as f64);
                 }
                 Err(err) => {
-                    mark_flush_failure(
+                    record_failure!(
                         row_count,
-                        &format!(
+                        format!(
                             "Bulk insert flush failed for region {}: {:?}",
                             region_id, err
-                        ),
+                        )
                     );
                 }
             }
@@ -595,6 +638,21 @@ async fn flush_batch(
         "Pending rows batch flushed, total rows: {}, elapsed time: {}s",
         total_row_count, elapsed
     );
+
+    notify_waiters(waiters, &first_error);
+}
+
+fn notify_waiters(waiters: Vec<FlushWaiter>, first_error: &Option<String>) {
+    for waiter in waiters {
+        let result = match first_error {
+            Some(err_msg) => Err(Error::Internal {
+                err_msg: err_msg.clone(),
+            }),
+            None => Ok(()),
+        };
+        let _ = waiter.response_tx.send(result);
+        // waiter._permit is dropped here, releasing the inflight semaphore slot
+    }
 }
 
 fn mark_flush_failure(row_count: usize, message: &str) {
@@ -609,6 +667,7 @@ fn flush_with_error(batch: &mut PendingBatch, message: &str) {
     }
 
     let row_count = batch.total_row_count;
+    let waiters = std::mem::take(&mut batch.waiters);
     batch.tables.clear();
     batch.total_row_count = 0;
     batch.created_at = None;
@@ -617,6 +676,8 @@ fn flush_with_error(batch: &mut PendingBatch, message: &str) {
     PENDING_ROWS.sub(row_count as i64);
     PENDING_BATCHES.dec();
 
+    let err_msg = Some(message.to_string());
+    notify_waiters(waiters, &err_msg);
     mark_flush_failure(row_count, message);
 }
 

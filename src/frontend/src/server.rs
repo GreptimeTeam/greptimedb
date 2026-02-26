@@ -133,6 +133,7 @@ where
                 opts.prom_store.max_batch_rows,
                 opts.prom_store.max_concurrent_flushes,
                 opts.prom_store.worker_channel_capacity,
+                opts.prom_store.max_inflight_requests,
             );
             builder = builder
                 .with_prom_handler(

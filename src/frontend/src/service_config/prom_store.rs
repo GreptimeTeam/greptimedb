@@ -28,6 +28,8 @@ pub struct PromStoreOptions {
     pub max_concurrent_flushes: usize,
     #[serde(default = "default_worker_channel_capacity")]
     pub worker_channel_capacity: usize,
+    #[serde(default = "default_max_inflight_requests")]
+    pub max_inflight_requests: usize,
 }
 
 fn default_max_batch_rows() -> usize {
@@ -42,6 +44,10 @@ fn default_worker_channel_capacity() -> usize {
     65526
 }
 
+fn default_max_inflight_requests() -> usize {
+    3000
+}
+
 impl Default for PromStoreOptions {
     fn default() -> Self {
         Self {
@@ -51,6 +57,7 @@ impl Default for PromStoreOptions {
             max_batch_rows: default_max_batch_rows(),
             max_concurrent_flushes: default_max_concurrent_flushes(),
             worker_channel_capacity: default_worker_channel_capacity(),
+            max_inflight_requests: default_max_inflight_requests(),
         }
     }
 }
@@ -61,7 +68,8 @@ mod tests {
 
     use super::PromStoreOptions;
     use crate::service_config::prom_store::{
-        default_max_batch_rows, default_max_concurrent_flushes, default_worker_channel_capacity,
+        default_max_batch_rows, default_max_concurrent_flushes, default_max_inflight_requests,
+        default_worker_channel_capacity,
     };
 
     #[test]
@@ -78,6 +86,10 @@ mod tests {
         assert_eq!(
             default.worker_channel_capacity,
             default_worker_channel_capacity()
+        );
+        assert_eq!(
+            default.max_inflight_requests,
+            default_max_inflight_requests()
         );
     }
 }
