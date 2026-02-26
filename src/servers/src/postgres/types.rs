@@ -15,14 +15,17 @@
 mod error;
 
 use std::collections::HashMap;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use arrow::array::{Array, AsArray};
-use arrow_pg::encoder::encode_value;
+use arrow_pg::encoder::{Encoder, encode_value};
 use arrow_pg::list_encoder::encode_list;
 use arrow_schema::{DataType, TimeUnit};
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime};
 use common_recordbatch::RecordBatch;
+use common_recordbatch::error::Result as RecordBatchResult;
 use common_time::{IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth};
 use datafusion_common::ScalarValue;
 use datafusion_expr::LogicalPlan;
@@ -32,20 +35,20 @@ use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::{Schema, SchemaRef};
 use datatypes::types::{IntervalType, TimestampType, jsonb_to_string};
 use datatypes::value::StructValue;
+use futures::Stream;
 use pg_interval::Interval as PgInterval;
 use pgwire::api::Type;
 use pgwire::api::portal::{Format, Portal};
-use pgwire::api::results::{DataRowEncoder, FieldInfo};
+use pgwire::api::results::FieldInfo;
 use pgwire::error::{PgWireError, PgWireResult};
-use pgwire::messages::data::DataRow;
 use pgwire::types::format::FormatOptions as PgFormatOptions;
 use query::planner::DfLogicalPlanner;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 
 pub use self::error::{PgErrorCode, PgErrorSeverity};
-use crate::SqlPlan;
 use crate::error::{self as server_error, InferParameterTypesSnafu, Result};
+use crate::postgres::handler::PgSqlPlan;
 use crate::postgres::utils::convert_err;
 
 pub(super) fn schema_to_pg(
@@ -82,78 +85,125 @@ pub(super) fn schema_to_pg(
 /// there are alternatives like records, arrays, etc. but there are also limitations:
 /// records: there is no support for include keys
 /// arrays: element in array must be the same type
-fn encode_struct(
+fn encode_struct<S: Encoder>(
     _query_ctx: &QueryContextRef,
     struct_value: StructValue,
-    builder: &mut DataRowEncoder,
+    builder: &mut S,
+    pg_field: &FieldInfo,
 ) -> PgWireResult<()> {
     let encoding_setting = JsonStructureSettings::Structured(None);
     let json_value = encoding_setting
         .decode(Value::Struct(struct_value))
         .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
 
-    builder.encode_field(&json_value)
+    builder.encode_field(&json_value, pg_field)
 }
 
-pub(crate) struct RecordBatchRowIterator {
+pub(crate) struct RecordBatchRowStream<S, B>
+where
+    S: Encoder,
+    B: Stream<Item = RecordBatchResult<RecordBatch>>,
+{
     query_ctx: QueryContextRef,
     pg_schema: Arc<Vec<FieldInfo>>,
     schema: SchemaRef,
-    record_batch: arrow::record_batch::RecordBatch,
-    i: usize,
+    record_batches: Pin<Box<B>>,
+    encoder: S,
 }
 
-impl Iterator for RecordBatchRowIterator {
-    type Item = PgWireResult<DataRow>;
+impl<S, B> Stream for RecordBatchRowStream<S, B>
+where
+    S: Encoder + Unpin,
+    B: Stream<Item = RecordBatchResult<RecordBatch>>,
+{
+    type Item = PgWireResult<Vec<S::Item>>;
 
-    fn next(&mut self) -> Option<Self::Item> {
-        let mut encoder = DataRowEncoder::new(self.pg_schema.clone());
-        if self.i < self.record_batch.num_rows() {
-            if let Err(e) = self.encode_row(self.i, &mut encoder) {
-                return Some(Err(e));
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match self.record_batches.as_mut().poll_next(cx) {
+            Poll::Ready(Some(Ok(batch))) => {
+                let record_batch = batch.into_df_record_batch();
+                let num_rows = record_batch.num_rows();
+
+                if num_rows == 0 {
+                    return Poll::Ready(Some(Ok(vec![])));
+                }
+
+                let arrow_schema = record_batch.schema();
+                let query_ctx = self.query_ctx.clone();
+                let pg_schema = self.pg_schema.clone();
+                let schema = self.schema.clone();
+                let mut results = Vec::with_capacity(num_rows);
+
+                for i in 0..num_rows {
+                    if let Err(e) = Self::encode_row(
+                        &query_ctx,
+                        &pg_schema,
+                        &schema,
+                        arrow_schema.as_ref(),
+                        &mut self.encoder,
+                        &record_batch,
+                        i,
+                    ) {
+                        return Poll::Ready(Some(Err(e)));
+                    }
+                    results.push(self.encoder.take_row());
+                }
+
+                Poll::Ready(Some(Ok(results)))
             }
-            self.i += 1;
-            Some(Ok(encoder.take_row()))
-        } else {
-            None
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(convert_err(e)))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
         }
     }
 }
 
-impl RecordBatchRowIterator {
+impl<S, B> RecordBatchRowStream<S, B>
+where
+    S: Encoder,
+    B: Stream<Item = RecordBatchResult<RecordBatch>>,
+{
     pub(crate) fn new(
         query_ctx: QueryContextRef,
         pg_schema: Arc<Vec<FieldInfo>>,
-        record_batch: RecordBatch,
+        schema: SchemaRef,
+        record_batches: B,
+        encoder: S,
     ) -> Self {
-        let schema = record_batch.schema.clone();
-        let record_batch = record_batch.into_df_record_batch();
         Self {
             query_ctx,
             pg_schema,
             schema,
-            record_batch,
-            i: 0,
+            record_batches: Box::pin(record_batches),
+            encoder,
         }
     }
 
-    fn encode_row(&mut self, i: usize, encoder: &mut DataRowEncoder) -> PgWireResult<()> {
-        let arrow_schema = self.record_batch.schema();
-        for (j, column) in self.record_batch.columns().iter().enumerate() {
+    fn encode_row(
+        query_ctx: &QueryContextRef,
+        pg_schema: &Arc<Vec<FieldInfo>>,
+        schema: &SchemaRef,
+        arrow_schema: &arrow::datatypes::Schema,
+        encoder: &mut S,
+        record_batch: &arrow::record_batch::RecordBatch,
+        i: usize,
+    ) -> PgWireResult<()> {
+        for (j, column) in record_batch.columns().iter().enumerate() {
+            let pg_field = &pg_schema[j];
+
             if column.is_null(i) {
-                encoder.encode_field(&None::<&i8>)?;
+                encoder.encode_field(&None::<&i8>, pg_field)?;
                 continue;
             }
 
-            let pg_field = &self.pg_schema[j];
             match column.data_type() {
                 // these types are greptimedb specific or custom
                 DataType::Binary | DataType::LargeBinary | DataType::BinaryView => {
                     // jsonb
-                    if let ConcreteDataType::Json(_) = &self.schema.column_schemas()[j].data_type {
+                    if let ConcreteDataType::Json(_) = &schema.column_schemas()[j].data_type {
                         let v = datatypes::arrow_array::binary_array_value(column, i);
                         let s = jsonb_to_string(v).map_err(convert_err)?;
-                        encoder.encode_field(&s)?;
+                        encoder.encode_field(&s, pg_field)?;
                     } else {
                         // bytea
                         let arrow_field = arrow_schema.field(j);
@@ -168,7 +218,7 @@ impl RecordBatchRowIterator {
                     encode_list(encoder, items, pg_field)?;
                 }
                 DataType::Struct(_) => {
-                    encode_struct(&self.query_ctx, Default::default(), encoder)?;
+                    encode_struct(query_ctx, Default::default(), encoder, pg_field)?;
                 }
                 _ => {
                     // Encode value using arrow-pg
@@ -277,7 +327,7 @@ pub(super) fn type_pg_to_gt(origin: &Type) -> Result<ConcreteDataType> {
     }
 }
 
-pub(super) fn parameter_to_string(portal: &Portal<SqlPlan>, idx: usize) -> PgWireResult<String> {
+pub(super) fn parameter_to_string(portal: &Portal<PgSqlPlan>, idx: usize) -> PgWireResult<String> {
     // the index is managed from portal's parameters count so it's safe to
     // unwrap here.
     let param_type = portal
@@ -359,7 +409,7 @@ where
 
 pub(super) fn parameters_to_scalar_values(
     plan: &LogicalPlan,
-    portal: &Portal<SqlPlan>,
+    portal: &Portal<PgSqlPlan>,
 ) -> PgWireResult<Vec<ScalarValue>> {
     let param_count = portal.parameter_len();
     let mut results = Vec::with_capacity(param_count);
@@ -761,7 +811,7 @@ pub(super) fn parameters_to_scalar_values(
                 }
             }
             &Type::INT2_ARRAY => {
-                let data = portal.parameter::<Vec<i16>>(idx, &client_type)?;
+                let data = portal.parameter::<Vec<Option<i16>>>(idx, &client_type)?;
                 if let Some(data) = data {
                     let values = data.into_iter().map(|i| i.into()).collect::<Vec<_>>();
                     ScalarValue::List(ScalarValue::new_list(&values, &ArrowDataType::Int16, true))
@@ -770,7 +820,7 @@ pub(super) fn parameters_to_scalar_values(
                 }
             }
             &Type::INT4_ARRAY => {
-                let data = portal.parameter::<Vec<i32>>(idx, &client_type)?;
+                let data = portal.parameter::<Vec<Option<i32>>>(idx, &client_type)?;
                 if let Some(data) = data {
                     let values = data.into_iter().map(|i| i.into()).collect::<Vec<_>>();
                     ScalarValue::List(ScalarValue::new_list(&values, &ArrowDataType::Int32, true))
@@ -779,7 +829,7 @@ pub(super) fn parameters_to_scalar_values(
                 }
             }
             &Type::INT8_ARRAY => {
-                let data = portal.parameter::<Vec<i64>>(idx, &client_type)?;
+                let data = portal.parameter::<Vec<Option<i64>>>(idx, &client_type)?;
                 if let Some(data) = data {
                     let values = data.into_iter().map(|i| i.into()).collect::<Vec<_>>();
                     ScalarValue::List(ScalarValue::new_list(&values, &ArrowDataType::Int64, true))
@@ -788,7 +838,7 @@ pub(super) fn parameters_to_scalar_values(
                 }
             }
             &Type::VARCHAR_ARRAY => {
-                let data = portal.parameter::<Vec<String>>(idx, &client_type)?;
+                let data = portal.parameter::<Vec<Option<String>>>(idx, &client_type)?;
                 if let Some(data) = data {
                     let values = data.into_iter().map(|i| i.into()).collect::<Vec<_>>();
                     ScalarValue::List(ScalarValue::new_list(&values, &ArrowDataType::Utf8, true))
@@ -797,7 +847,7 @@ pub(super) fn parameters_to_scalar_values(
                 }
             }
             &Type::TIMESTAMP_ARRAY => {
-                let data = portal.parameter::<Vec<NaiveDateTime>>(idx, &client_type)?;
+                let data = portal.parameter::<Vec<Option<NaiveDateTime>>>(idx, &client_type)?;
                 if let Some(data) = data {
                     if let Some(ConcreteDataType::List(list_type)) = &server_type {
                         match list_type.item_type() {
@@ -807,7 +857,7 @@ pub(super) fn parameters_to_scalar_values(
                                         .into_iter()
                                         .map(|ts| {
                                             ScalarValue::TimestampSecond(
-                                                Some(ts.and_utc().timestamp()),
+                                                ts.map(|ts| ts.and_utc().timestamp()),
                                                 None,
                                             )
                                         })
@@ -823,7 +873,7 @@ pub(super) fn parameters_to_scalar_values(
                                         .into_iter()
                                         .map(|ts| {
                                             ScalarValue::TimestampMillisecond(
-                                                Some(ts.and_utc().timestamp_millis()),
+                                                ts.map(|ts| ts.and_utc().timestamp_millis()),
                                                 None,
                                             )
                                         })
@@ -839,7 +889,7 @@ pub(super) fn parameters_to_scalar_values(
                                         .into_iter()
                                         .map(|ts| {
                                             ScalarValue::TimestampMicrosecond(
-                                                Some(ts.and_utc().timestamp_micros()),
+                                                ts.map(|ts| ts.and_utc().timestamp_micros()),
                                                 None,
                                             )
                                         })
@@ -854,8 +904,13 @@ pub(super) fn parameters_to_scalar_values(
                                     let values = data
                                         .into_iter()
                                         .filter_map(|ts| {
-                                            ts.and_utc().timestamp_nanos_opt().map(|nanos| {
-                                                ScalarValue::TimestampNanosecond(Some(nanos), None)
+                                            ts.and_then(|ts| {
+                                                ts.and_utc().timestamp_nanos_opt().map(|nanos| {
+                                                    ScalarValue::TimestampNanosecond(
+                                                        Some(nanos),
+                                                        None,
+                                                    )
+                                                })
                                             })
                                         })
                                         .collect::<Vec<_>>();
@@ -878,12 +933,11 @@ pub(super) fn parameters_to_scalar_values(
                             }
                         }
                     } else {
-                        // Default to millisecond when no server type is specified
                         let values = data
                             .into_iter()
                             .map(|ts| {
                                 ScalarValue::TimestampMillisecond(
-                                    Some(ts.and_utc().timestamp_millis()),
+                                    ts.map(|ts| ts.and_utc().timestamp_millis()),
                                     None,
                                 )
                             })
@@ -899,7 +953,8 @@ pub(super) fn parameters_to_scalar_values(
                 }
             }
             &Type::TIMESTAMPTZ_ARRAY => {
-                let data = portal.parameter::<Vec<DateTime<FixedOffset>>>(idx, &client_type)?;
+                let data =
+                    portal.parameter::<Vec<Option<DateTime<FixedOffset>>>>(idx, &client_type)?;
                 if let Some(data) = data {
                     if let Some(ConcreteDataType::List(list_type)) = &server_type {
                         match list_type.item_type() {
@@ -908,7 +963,10 @@ pub(super) fn parameters_to_scalar_values(
                                     let values = data
                                         .into_iter()
                                         .map(|ts| {
-                                            ScalarValue::TimestampSecond(Some(ts.timestamp()), None)
+                                            ScalarValue::TimestampSecond(
+                                                ts.map(|ts| ts.timestamp()),
+                                                None,
+                                            )
                                         })
                                         .collect::<Vec<_>>();
                                     ScalarValue::List(ScalarValue::new_list(
@@ -922,7 +980,7 @@ pub(super) fn parameters_to_scalar_values(
                                         .into_iter()
                                         .map(|ts| {
                                             ScalarValue::TimestampMillisecond(
-                                                Some(ts.timestamp_millis()),
+                                                ts.map(|ts| ts.timestamp_millis()),
                                                 None,
                                             )
                                         })
@@ -938,7 +996,7 @@ pub(super) fn parameters_to_scalar_values(
                                         .into_iter()
                                         .map(|ts| {
                                             ScalarValue::TimestampMicrosecond(
-                                                Some(ts.timestamp_micros()),
+                                                ts.map(|ts| ts.timestamp_micros()),
                                                 None,
                                             )
                                         })
@@ -952,10 +1010,11 @@ pub(super) fn parameters_to_scalar_values(
                                 TimestampType::Nanosecond(_) => {
                                     let values = data
                                         .into_iter()
-                                        .filter_map(|ts| {
-                                            ts.timestamp_nanos_opt().map(|nanos| {
-                                                ScalarValue::TimestampNanosecond(Some(nanos), None)
-                                            })
+                                        .map(|ts| {
+                                            ScalarValue::TimestampNanosecond(
+                                                ts.and_then(|ts| ts.timestamp_nanos_opt()),
+                                                None,
+                                            )
                                         })
                                         .collect::<Vec<_>>();
                                     ScalarValue::List(ScalarValue::new_list(
@@ -977,11 +1036,13 @@ pub(super) fn parameters_to_scalar_values(
                             }
                         }
                     } else {
-                        // Default to millisecond when no server type is specified
                         let values = data
                             .into_iter()
                             .map(|ts| {
-                                ScalarValue::TimestampMillisecond(Some(ts.timestamp_millis()), None)
+                                ScalarValue::TimestampMillisecond(
+                                    ts.map(|ts| ts.timestamp_millis()),
+                                    None,
+                                )
                             })
                             .collect::<Vec<_>>();
                         ScalarValue::List(ScalarValue::new_list(
@@ -1050,8 +1111,9 @@ mod test {
         IntervalYearMonthVector, ListVector, NullVector, StringVector, TimeSecondVector,
         TimestampSecondVector, UInt8Vector, UInt16Vector, UInt32Vector, UInt64Vector, VectorRef,
     };
+    use futures::{StreamExt as FuturesStreamExt, stream};
     use pgwire::api::Type;
-    use pgwire::api::results::{FieldFormat, FieldInfo};
+    use pgwire::api::results::{DataRowEncoder, FieldFormat, FieldInfo};
     use session::context::QueryContextBuilder;
 
     use super::*;
@@ -1155,7 +1217,7 @@ mod test {
 
     #[test]
     fn test_encode_text_format_data() {
-        let schema = vec![
+        let pg_schema = vec![
             FieldInfo::new("nulls".into(), None, None, Type::UNKNOWN, FieldFormat::Text),
             FieldInfo::new("bools".into(), None, None, Type::BOOL, FieldFormat::Text),
             FieldInfo::new("uint8s".into(), None, None, Type::INT2, FieldFormat::Text),
@@ -1416,14 +1478,28 @@ mod test {
             .configuration_parameter(Default::default())
             .build()
             .into();
-        let schema = Arc::new(schema);
+        let schema = record_batch.schema.clone();
+        let pg_schema_ref = Arc::new(pg_schema);
 
-        let rows = RecordBatchRowIterator::new(query_context, schema.clone(), record_batch)
-            .filter_map(|x| x.ok())
-            .collect::<Vec<_>>();
+        let encoder = DataRowEncoder::new(pg_schema_ref.clone());
+
+        let row_stream = RecordBatchRowStream::new(
+            query_context,
+            pg_schema_ref.clone(),
+            schema,
+            stream::once(async { Ok(record_batch) }),
+            encoder,
+        );
+
+        let rows: Vec<_> = futures::executor::block_on(
+            row_stream
+                .filter_map(|x: PgWireResult<_>| async move { x.ok() })
+                .flat_map(stream::iter)
+                .collect::<Vec<_>>(),
+        );
         assert_eq!(rows.len(), 3);
         for row in rows {
-            assert_eq!(row.field_count, schema.len() as i16);
+            assert_eq!(row.field_count, pg_schema_ref.len() as i16);
         }
     }
 
