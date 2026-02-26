@@ -21,7 +21,7 @@ use api::v1::meta::{
     PullMetaConfigRequest, PullMetaConfigResponse, RequestHeader, ResponseHeader, Role,
     heartbeat_server,
 };
-use common_options::meta_config::PluginOptionsSerializerRef;
+use common_options::plugin_options::PluginOptionsSerializerRef;
 use common_telemetry::{debug, error, info, warn};
 use futures::StreamExt;
 use once_cell::sync::OnceCell;

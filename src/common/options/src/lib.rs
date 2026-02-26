@@ -14,4 +14,4 @@
 
 pub mod datanode;
 pub mod memory;
-pub mod meta_config;
+pub mod plugin_options;

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_options::meta_config::PluginOptionsSerializer;
+use common_options::plugin_options::PluginOptionsSerializer;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -23,6 +23,7 @@ pub enum PluginOptions {
     Dummy(DummyOptions),
 }
 
+#[allow(unused)]
 pub struct PluginOptionsList(pub Vec<PluginOptions>);
 
 impl PluginOptionsSerializer for PluginOptionsList {
