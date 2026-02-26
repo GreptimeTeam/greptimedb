@@ -64,7 +64,6 @@ impl BatchToRecordBatchAdapter {
     /// - `metadata`: region metadata describing the schema.
     /// - `codec`: codec for decoding the encoded primary key bytes.
     /// - `format_projection`: projection information in flat format.
-    #[allow(dead_code)]
     pub(crate) fn new(
         iter: BoxedBatchIterator,
         metadata: RegionMetadataRef,

@@ -26,6 +26,7 @@ use common_time::Timestamp;
 use datatypes::arrow::record_batch::RecordBatch;
 use mito_codec::key_values::KeyValue;
 pub use mito_codec::key_values::KeyValues;
+use mito_codec::row_converter::{PrimaryKeyCodec, build_primary_key_codec};
 use serde::{Deserialize, Serialize};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, SequenceNumber, SequenceRange};
@@ -38,6 +39,7 @@ use crate::memtable::partition_tree::{PartitionTreeConfig, PartitionTreeMemtable
 use crate::memtable::time_series::TimeSeriesMemtableBuilder;
 use crate::metrics::WRITE_BUFFER_BYTES;
 use crate::read::Batch;
+use crate::read::batch_adapter::BatchToRecordBatchAdapter;
 use crate::read::prune::PruneTimeIterator;
 use crate::read::scan_region::PredicateGroup;
 use crate::region::options::{MemtableOptions, MergeMode, RegionOptions};
@@ -45,6 +47,8 @@ use crate::sst::FormatType;
 use crate::sst::file::FileTimeRange;
 use crate::sst::parquet::SstInfo;
 use crate::sst::parquet::file_range::PreFilterMode;
+use crate::sst::parquet::flat_format::sst_column_id_indices;
+use crate::sst::parquet::format::{FormatProjection, INTERNAL_COLUMN_NUM};
 
 mod builder;
 pub mod bulk;
@@ -560,6 +564,48 @@ pub trait IterBuilder: Send + Sync {
 
 pub type BoxedIterBuilder = Box<dyn IterBuilder>;
 
+/// Context to adapt batch iterators to record batch iterators for flat scan.
+pub struct BatchToRecordBatchContext {
+    metadata: RegionMetadataRef,
+    read_column_ids: Vec<ColumnId>,
+    codec: Arc<dyn PrimaryKeyCodec>,
+}
+
+impl BatchToRecordBatchContext {
+    /// Creates a new context for adapting batch iterators.
+    pub fn new(metadata: RegionMetadataRef, mut read_column_ids: Vec<ColumnId>) -> Self {
+        if read_column_ids.is_empty() {
+            read_column_ids.push(metadata.time_index_column().column_id);
+        }
+
+        let codec = build_primary_key_codec(&metadata);
+        Self {
+            metadata,
+            read_column_ids,
+            codec,
+        }
+    }
+
+    fn format_projection(&self) -> FormatProjection {
+        let id_to_index = sst_column_id_indices(&self.metadata);
+        FormatProjection::compute_format_projection(
+            &id_to_index,
+            self.metadata.column_metadatas.len() + INTERNAL_COLUMN_NUM,
+            self.read_column_ids.iter().copied(),
+        )
+    }
+
+    fn adapt_iter(&self, iter: BoxedBatchIterator) -> BoxedRecordBatchIterator {
+        let format_projection = self.format_projection();
+        Box::new(BatchToRecordBatchAdapter::new(
+            iter,
+            self.metadata.clone(),
+            self.codec.clone(),
+            &format_projection,
+        ))
+    }
+}
+
 /// Context shared by ranges of the same memtable.
 pub struct MemtableRangeContext {
     /// Id of the memtable.
@@ -568,6 +614,8 @@ pub struct MemtableRangeContext {
     builder: BoxedIterBuilder,
     /// All filters.
     predicate: PredicateGroup,
+    /// Optional context to adapt batch iterators for flat scans.
+    batch_to_record_batch: Option<BatchToRecordBatchContext>,
 }
 
 pub type MemtableRangeContextRef = Arc<MemtableRangeContext>;
@@ -575,10 +623,21 @@ pub type MemtableRangeContextRef = Arc<MemtableRangeContext>;
 impl MemtableRangeContext {
     /// Creates a new [MemtableRangeContext].
     pub fn new(id: MemtableId, builder: BoxedIterBuilder, predicate: PredicateGroup) -> Self {
+        Self::new_with_batch_to_record_batch(id, builder, predicate, None)
+    }
+
+    /// Creates a new [MemtableRangeContext] with optional adapter context.
+    pub fn new_with_batch_to_record_batch(
+        id: MemtableId,
+        builder: BoxedIterBuilder,
+        predicate: PredicateGroup,
+        batch_to_record_batch: Option<BatchToRecordBatchContext>,
+    ) -> Self {
         Self {
             id,
             builder,
             predicate,
+            batch_to_record_batch,
         }
     }
 }
@@ -638,7 +697,19 @@ impl MemtableRange {
         &self,
         metrics: Option<MemScanMetrics>,
     ) -> Result<BoxedRecordBatchIterator> {
-        self.context.builder.build_record_batch(metrics)
+        if self.context.builder.is_record_batch() {
+            return self.context.builder.build_record_batch(metrics);
+        }
+
+        if let Some(context) = self.context.batch_to_record_batch.as_ref() {
+            let iter = self.context.builder.build(metrics)?;
+            return Ok(context.adapt_iter(iter));
+        }
+
+        UnsupportedOperationSnafu {
+            err_msg: "Record batch iterator is not supported by this memtable",
+        }
+        .fail()
     }
 
     /// Returns whether the iterator is a record batch iterator.
@@ -658,10 +729,48 @@ impl MemtableRange {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use common_base::readable_size::ReadableSize;
+    use datatypes::value::Value;
+    use datatypes::vectors::{
+        Int64Vector, TimestampMillisecondVector, UInt8Vector, UInt64Vector, VectorRef,
+    };
+    use mito_codec::row_converter::CompositeValues;
 
     use super::*;
     use crate::flush::{WriteBufferManager, WriteBufferManagerImpl};
+    use crate::read::BatchColumn;
+    use crate::test_util::memtable_util::metadata_for_test;
+
+    struct MockBatchIterBuilder {
+        batch: Batch,
+    }
+
+    impl IterBuilder for MockBatchIterBuilder {
+        fn build(&self, _metrics: Option<MemScanMetrics>) -> Result<BoxedBatchIterator> {
+            Ok(Box::new(vec![Ok(self.batch.clone())].into_iter()))
+        }
+    }
+
+    fn new_test_batch() -> Batch {
+        let mut batch = Batch::new(
+            vec![],
+            Arc::new(TimestampMillisecondVector::from_vec(vec![1000, 2000])) as VectorRef,
+            Arc::new(UInt64Vector::from_vec(vec![10, 11])),
+            Arc::new(UInt8Vector::from_vec(vec![0, 0])),
+            vec![BatchColumn {
+                column_id: 3,
+                data: Arc::new(Int64Vector::from_vec(vec![1, 2])),
+            }],
+        )
+        .unwrap();
+        batch.set_pk_values(CompositeValues::Dense(vec![
+            (0, Value::from("k0")),
+            (1, Value::from(1_u32)),
+        ]));
+        batch
+    }
 
     #[test]
     fn test_deserialize_memtable_config() {
@@ -732,5 +841,39 @@ fork_dictionary_bytes = "512MiB"
 
         assert_eq!(0, manager.memory_usage());
         assert_eq!(0, manager.mutable_usage());
+    }
+
+    #[test]
+    fn test_build_record_batch_iter_fallback_adapter() {
+        let metadata = metadata_for_test();
+        let builder = Box::new(MockBatchIterBuilder {
+            batch: new_test_batch(),
+        });
+        let adapter_context = BatchToRecordBatchContext::new(metadata.clone(), vec![0, 1, 2, 3]);
+        let context = Arc::new(MemtableRangeContext::new_with_batch_to_record_batch(
+            1,
+            builder,
+            PredicateGroup::default(),
+            Some(adapter_context),
+        ));
+        let range = MemtableRange::new(context, MemtableStats::default());
+
+        let mut iter = range.build_record_batch_iter(None).unwrap();
+        let rb = iter.next().transpose().unwrap().unwrap();
+        assert_eq!(2, rb.num_rows());
+        assert!(rb.num_columns() >= 4);
+    }
+
+    #[test]
+    fn test_build_record_batch_iter_without_adapter_context() {
+        let context = Arc::new(MemtableRangeContext::new(
+            1,
+            Box::new(MockBatchIterBuilder {
+                batch: new_test_batch(),
+            }),
+            PredicateGroup::default(),
+        ));
+        let range = MemtableRange::new(context, MemtableStats::default());
+        assert!(range.build_record_batch_iter(None).is_err());
     }
 }

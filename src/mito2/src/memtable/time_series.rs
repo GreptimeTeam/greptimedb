@@ -51,9 +51,9 @@ use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::simple_bulk_memtable::SimpleBulkMemtable;
 use crate::memtable::stats::WriteMetrics;
 use crate::memtable::{
-    AllocTracker, BoxedBatchIterator, IterBuilder, KeyValues, MemScanMetrics, Memtable,
-    MemtableBuilder, MemtableId, MemtableRange, MemtableRangeContext, MemtableRanges, MemtableRef,
-    MemtableStats, RangesOptions,
+    AllocTracker, BatchToRecordBatchContext, BoxedBatchIterator, IterBuilder, KeyValues,
+    MemScanMetrics, Memtable, MemtableBuilder, MemtableId, MemtableRange, MemtableRangeContext,
+    MemtableRanges, MemtableRef, MemtableStats, RangesOptions,
 };
 use crate::metrics::{
     MEMTABLE_ACTIVE_FIELD_BUILDER_COUNT, MEMTABLE_ACTIVE_SERIES_COUNT, READ_ROWS_TOTAL,
@@ -307,6 +307,15 @@ impl Memtable for TimeSeriesMemtable {
     ) -> Result<MemtableRanges> {
         let predicate = options.predicate;
         let sequence = options.sequence;
+        let read_column_ids = if let Some(projection) = projection {
+            projection.to_vec()
+        } else {
+            self.region_metadata
+                .column_metadatas
+                .iter()
+                .map(|c| c.column_id)
+                .collect()
+        };
         let projection = if let Some(projection) = projection {
             projection.iter().copied().collect()
         } else {
@@ -323,7 +332,14 @@ impl Memtable for TimeSeriesMemtable {
             merge_mode: self.merge_mode,
             sequence,
         });
-        let context = Arc::new(MemtableRangeContext::new(self.id, builder, predicate));
+        let adapter_context =
+            BatchToRecordBatchContext::new(self.region_metadata.clone(), read_column_ids);
+        let context = Arc::new(MemtableRangeContext::new_with_batch_to_record_batch(
+            self.id,
+            builder,
+            predicate,
+            Some(adapter_context),
+        ));
 
         let range_stats = self.stats();
         let range = MemtableRange::new(context, range_stats);

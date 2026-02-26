@@ -34,8 +34,9 @@ use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::stats::WriteMetrics;
 use crate::memtable::time_series::Series;
 use crate::memtable::{
-    AllocTracker, BoxedBatchIterator, IterBuilder, KeyValues, MemScanMetrics, Memtable, MemtableId,
-    MemtableRange, MemtableRangeContext, MemtableRanges, MemtableRef, MemtableStats, RangesOptions,
+    AllocTracker, BatchToRecordBatchContext, BoxedBatchIterator, IterBuilder, KeyValues,
+    MemScanMetrics, Memtable, MemtableId, MemtableRange, MemtableRangeContext, MemtableRanges,
+    MemtableRef, MemtableStats, RangesOptions,
 };
 use crate::metrics::MEMTABLE_ACTIVE_SERIES_COUNT;
 use crate::read::Batch;
@@ -236,6 +237,16 @@ impl Memtable for SimpleBulkMemtable {
         let predicate = options.predicate;
         let sequence = options.sequence;
         let start_time = Instant::now();
+        let read_column_ids = if let Some(projection) = projection {
+            projection.to_vec()
+        } else {
+            self.region_metadata
+                .column_metadatas
+                .iter()
+                .map(|c| c.column_id)
+                .collect()
+        };
+        let read_column_ids = Arc::new(read_column_ids);
         let projection = Arc::new(self.build_projection(projection));
 
         // Use the memtable's overall time range and max sequence for all ranges
@@ -298,10 +309,14 @@ impl Memtable for SimpleBulkMemtable {
                     };
                     (
                         range_stats,
-                        Arc::new(MemtableRangeContext::new(
+                        Arc::new(MemtableRangeContext::new_with_batch_to_record_batch(
                             self.id,
                             Box::new(builder),
                             predicate.clone(),
+                            Some(BatchToRecordBatchContext::new(
+                                self.region_metadata.clone(),
+                                read_column_ids.as_ref().clone(),
+                            )),
                         )),
                     )
                 })

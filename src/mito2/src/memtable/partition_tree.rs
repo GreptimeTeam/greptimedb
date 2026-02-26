@@ -42,9 +42,9 @@ use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::partition_tree::tree::PartitionTree;
 use crate::memtable::stats::WriteMetrics;
 use crate::memtable::{
-    AllocTracker, BoxedBatchIterator, IterBuilder, KeyValues, MemScanMetrics, Memtable,
-    MemtableBuilder, MemtableId, MemtableRange, MemtableRangeContext, MemtableRanges, MemtableRef,
-    MemtableStats, RangesOptions,
+    AllocTracker, BatchToRecordBatchContext, BoxedBatchIterator, IterBuilder, KeyValues,
+    MemScanMetrics, Memtable, MemtableBuilder, MemtableId, MemtableRange, MemtableRangeContext,
+    MemtableRanges, MemtableRef, MemtableStats, RangesOptions,
 };
 use crate::region::options::MergeMode;
 
@@ -194,6 +194,16 @@ impl Memtable for PartitionTreeMemtable {
     ) -> Result<MemtableRanges> {
         let predicate = options.predicate;
         let sequence = options.sequence;
+        let read_column_ids = if let Some(projection) = projection {
+            projection.to_vec()
+        } else {
+            self.tree
+                .metadata
+                .column_metadatas
+                .iter()
+                .map(|c| c.column_id)
+                .collect()
+        };
         let projection = projection.map(|ids| ids.to_vec());
         let builder = Box::new(PartitionTreeIterBuilder {
             tree: self.tree.clone(),
@@ -201,7 +211,14 @@ impl Memtable for PartitionTreeMemtable {
             predicate: predicate.predicate().cloned(),
             sequence,
         });
-        let context = Arc::new(MemtableRangeContext::new(self.id, builder, predicate));
+        let adapter_context =
+            BatchToRecordBatchContext::new(self.tree.metadata.clone(), read_column_ids);
+        let context = Arc::new(MemtableRangeContext::new_with_batch_to_record_batch(
+            self.id,
+            builder,
+            predicate,
+            Some(adapter_context),
+        ));
 
         let range_stats = self.stats();
         let range = MemtableRange::new(context, range_stats);
