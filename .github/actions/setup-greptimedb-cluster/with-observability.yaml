@@ -1,0 +1,7 @@
+tracing:
+  enabled: true
+  endpoint: "http://my-greptimedb-monitor-standalone.my-greptimedb:4000/v1/otlp/v1/traces"
+  sampleRatio: "1.0"
+
+monitoring:
+  enabled: true
