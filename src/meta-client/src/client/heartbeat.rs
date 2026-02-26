@@ -283,6 +283,8 @@ impl Inner {
         ))
     }
 
+    /// Pull meta config(plugin options) from Metasrv.
+    /// This is called during the frontend's startup, would stop the startup if failed.
     async fn pull_meta_config(&self) -> Result<PullMetaConfigResponse> {
         ensure!(
             self.is_started(),
