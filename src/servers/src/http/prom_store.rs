@@ -39,7 +39,7 @@ use crate::prom_remote_write::decode::PromSeriesProcessor;
 use crate::prom_remote_write::decode_remote_write_request;
 use crate::prom_remote_write::validation::PromValidationMode;
 use crate::pending_rows_batcher::PendingRowsBatcher;
-use crate::prom_row_builder::TablesBuilder;
+use crate::prom_row_builder::{PromRecordBatchGroup, TablesBuilder};
 use crate::prom_store::{extract_schema_from_read_request, snappy_decompress, zstd_decompress};
 use crate::proto::{PromSeriesProcessor, PromWriteRequest};
 use crate::query_handler::{PipelineHandlerRef, PromStoreProtocolHandlerRef, PromStoreResponse};
@@ -48,6 +48,11 @@ pub const PHYSICAL_TABLE_PARAM: &str = "physical_table";
 pub const DEFAULT_ENCODING: &str = "snappy";
 pub const VM_ENCODING: &str = "zstd";
 pub const VM_PROTO_VERSION: &str = "1";
+
+pub enum DecodedPromWriteRequest {
+    Tables(TablesBuilder),
+    RecordBatchGroups(Vec<PromRecordBatchGroup>),
+}
 
 #[derive(Clone)]
 pub struct PromStoreState {
@@ -134,23 +139,57 @@ pub async fn remote_write(
         processor.set_pipeline(pipeline_handler, query_ctx.clone(), pipeline_def);
     }
 
-    let mut req = decode_remote_write_request(is_zstd, body, prom_validation_mode, &mut processor)?;
-
-    let req = if processor.use_pipeline {
-        processor.exec_pipeline().await?
-    } else {
-        req.as_insert_requests()
-    };
+    let decode_to_record_batches = pending_rows_batcher.is_some() && !processor.use_pipeline;
+    let req = decode_remote_write_request(
+        is_zstd,
+        body,
+        prom_validation_mode,
+        &mut processor,
+        decode_to_record_batches,
+    )?;
 
     if let Some(batcher) = pending_rows_batcher {
-        for (temp_ctx, reqs) in req.as_req_iter(query_ctx) {
-            let rows = batcher.submit(reqs, temp_ctx).await?;
+        if processor.use_pipeline {
+            let req = processor.exec_pipeline().await?;
+            for (temp_ctx, reqs) in req.as_req_iter(query_ctx) {
+                let rows = batcher.submit(reqs, temp_ctx).await?;
+                crate::metrics::PROM_STORE_REMOTE_WRITE_SAMPLES
+                    .with_label_values(&[db.as_str()])
+                    .inc_by(rows);
+            }
+        } else {
+            let DecodedPromWriteRequest::RecordBatchGroups(groups) = req else {
+                return InternalSnafu {
+                    err_msg: "Expected record batch groups for non-pipeline remote write"
+                        .to_string(),
+                }
+                .fail();
+            };
+            let rows = batcher
+                .submit_prom_record_batch_groups(groups, query_ctx)
+                .await?;
             crate::metrics::PROM_STORE_REMOTE_WRITE_SAMPLES
                 .with_label_values(&[db.as_str()])
                 .inc_by(rows);
         }
         return Ok((StatusCode::NO_CONTENT, write_cost_header_map(0)).into_response());
     }
+
+    let req = match req {
+        DecodedPromWriteRequest::Tables(mut req) => {
+            if processor.use_pipeline {
+                processor.exec_pipeline().await?
+            } else {
+                req.as_insert_requests()
+            }
+        }
+        DecodedPromWriteRequest::RecordBatchGroups(_) => {
+            return InternalSnafu {
+                err_msg: "Unexpected record batch groups without pending rows batcher".to_string(),
+            }
+            .fail();
+        }
+    };
 
     let mut cost = 0;
     for (temp_ctx, reqs) in req.as_req_iter(query_ctx) {
@@ -217,6 +256,51 @@ pub async fn remote_read(
         .start_timer();
 
     state.prom_store_handler.read(request, query_ctx).await
+}
+
+pub fn try_decompress(is_zstd: bool, body: &[u8]) -> Result<Bytes> {
+    Ok(Bytes::from(if is_zstd {
+        zstd_decompress(body)?
+    } else {
+        snappy_decompress(body)?
+    }))
+}
+
+pub fn decode_remote_write_request(
+    is_zstd: bool,
+    body: Bytes,
+    prom_validation_mode: PromValidationMode,
+    processor: &mut PromSeriesProcessor,
+    decode_to_record_batches: bool,
+) -> Result<DecodedPromWriteRequest> {
+    let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_DECODE_ELAPSED.start_timer();
+
+    // due to vmagent's limitation, there is a chance that vmagent is
+    // sending content type wrong so we have to apply a fallback with decoding
+    // the content in another method.
+    //
+    // see https://github.com/VictoriaMetrics/VictoriaMetrics/issues/5301
+    // see https://github.com/GreptimeTeam/greptimedb/issues/3929
+    let buf = if let Ok(buf) = try_decompress(is_zstd, &body[..]) {
+        buf
+    } else {
+        // fallback to the other compression method
+        try_decompress(!is_zstd, &body[..])?
+    };
+
+    let mut request = PROM_WRITE_REQUEST_POOL.pull(PromWriteRequest::default);
+
+    request
+        .merge(buf, prom_validation_mode, processor)
+        .context(error::DecodePromRemoteRequestSnafu)?;
+    if decode_to_record_batches {
+        let groups = request.as_record_batch_groups()?;
+        Ok(DecodedPromWriteRequest::RecordBatchGroups(groups))
+    } else {
+        Ok(DecodedPromWriteRequest::Tables(std::mem::take(
+            &mut request.table_data,
+        )))
+    }
 }
 
 async fn decode_remote_read_request(body: Bytes) -> Result<ReadRequest> {
