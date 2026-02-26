@@ -21,6 +21,7 @@ futures-util.workspace = true
 humantime-serde.workspace = true
 rand.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 snafu.workspace = true
 tokio.workspace = true
 tokio-stream = { workspace = true, features = ["net"] }

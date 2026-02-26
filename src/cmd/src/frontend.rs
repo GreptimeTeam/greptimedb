@@ -48,9 +48,11 @@ use frontend::heartbeat::HeartbeatTask;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
 use meta_client::{MetaClientOptions, MetaClientRef, MetaClientType};
+use plugins::PluginOptions;
 use plugins::frontend::context::{
     CatalogManagerConfigureContext, DistributedCatalogManagerConfigureContext,
 };
+use plugins::frontend::process_meta_config;
 use servers::addrs;
 use servers::grpc::GrpcOptions;
 use servers::tls::{TlsMode, TlsOption, merge_tls_option};
@@ -370,12 +372,13 @@ impl StartCommand {
         .await
         .context(error::MetaClientInitSnafu)?;
 
-        // TODO(shuiyisong): init load meta config
-        let meta_config = meta_client
+        let meta_config: PluginOptions = meta_client
             .pull_meta_config()
             .await
             .context(error::MetaClientInitSnafu)?;
-        info!("Meta config: {:#?}", meta_config);
+        process_meta_config(meta_config, &mut plugins)
+            .await
+            .context(error::StartFrontendSnafu)?;
 
         // TODO(discord9): add helper function to ease the creation of cache registry&such
         let cached_meta_backend =

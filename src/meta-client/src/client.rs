@@ -26,8 +26,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::{
-    MetasrvNodeInfo, ProcedureDetailResponse, PullMetaConfigResponse, ReconcileRequest,
-    ReconcileResponse, Role,
+    MetasrvNodeInfo, ProcedureDetailResponse, ReconcileRequest, ReconcileResponse, Role,
 };
 pub use ask_leader::{AskLeader, LeaderProvider, LeaderProviderRef};
 use cluster::Client as ClusterClient;
@@ -61,14 +60,15 @@ use common_telemetry::info;
 use futures::TryStreamExt;
 use heartbeat::{Client as HeartbeatClient, HeartbeatConfig};
 use procedure::Client as ProcedureClient;
+use serde::de::DeserializeOwned;
 use snafu::{OptionExt, ResultExt};
 use store::Client as StoreClient;
 
 pub use self::heartbeat::{HeartbeatSender, HeartbeatStream};
 use crate::client::ask_leader::{LeaderProviderFactoryImpl, LeaderProviderFactoryRef};
 use crate::error::{
-    ConvertMetaRequestSnafu, ConvertMetaResponseSnafu, Error, GetFlowStatSnafu, NotStartedSnafu,
-    Result,
+    ConvertMetaConfigSnafu, ConvertMetaRequestSnafu, ConvertMetaResponseSnafu, Error,
+    GetFlowStatSnafu, NotStartedSnafu, Result,
 };
 
 pub type Id = u64;
@@ -585,8 +585,12 @@ impl MetaClient {
         self.heartbeat_client()?.ask_leader().await
     }
 
-    pub async fn pull_meta_config(&self) -> Result<PullMetaConfigResponse> {
-        self.heartbeat_client()?.pull_meta_config().await
+    pub async fn pull_meta_config<T>(&self) -> Result<T>
+    where
+        T: DeserializeOwned,
+    {
+        let res = self.heartbeat_client()?.pull_meta_config().await?;
+        serde_json::from_str(&res.payload).context(ConvertMetaConfigSnafu)
     }
 
     /// Returns a heartbeat bidirectional streaming: (sender, receiver), the

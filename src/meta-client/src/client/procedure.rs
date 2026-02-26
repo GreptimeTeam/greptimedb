@@ -337,7 +337,7 @@ mod tests {
         HeartbeatResponse, MigrateRegionRequest, MigrateRegionResponse, Peer,
         ProcedureDetailRequest, ProcedureDetailResponse, ProcedureStateResponse,
         PullMetaConfigRequest, PullMetaConfigResponse, QueryProcedureRequest, ReconcileRequest,
-        ReconcileResponse, ResponseHeader, Role, pull_meta_config_response,
+        ReconcileResponse, ResponseHeader, Role,
     };
     use async_trait::async_trait;
     use common_error::status_code::StatusCode;
@@ -393,7 +393,7 @@ mod tests {
         ) -> Result<Response<PullMetaConfigResponse>, Status> {
             let res = PullMetaConfigResponse {
                 header: Some(ResponseHeader::success()),
-                payload: Some(pull_meta_config_response::Payload::Json("{}".to_string())),
+                payload: "{}".to_string(),
             };
 
             Ok(Response::new(res))

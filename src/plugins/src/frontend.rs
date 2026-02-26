@@ -37,6 +37,12 @@ pub async fn setup_frontend_plugins(
     Ok(())
 }
 
+pub async fn process_meta_config(meta_config: PluginOptions, _plugins: &mut Plugins) -> Result<()> {
+    // TODO(shuiyisong): remove this print
+    //println!("meta_config = {:?}", meta_config);
+    Ok(())
+}
+
 pub async fn start_frontend_plugins(_plugins: Plugins) -> Result<()> {
     Ok(())
 }

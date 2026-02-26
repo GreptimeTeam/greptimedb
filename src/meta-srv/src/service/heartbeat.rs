@@ -16,7 +16,6 @@ use std::io::ErrorKind;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
-use api::v1::meta::pull_meta_config_response::{self};
 use api::v1::meta::{
     AskLeaderRequest, AskLeaderResponse, HeartbeatRequest, HeartbeatResponse, Peer,
     PullMetaConfigRequest, PullMetaConfigResponse, RequestHeader, ResponseHeader, Role,
@@ -147,11 +146,9 @@ impl heartbeat_server::Heartbeat for Metasrv {
         &self,
         _req: Request<PullMetaConfigRequest>,
     ) -> GrpcResult<PullMetaConfigResponse> {
-        // let req = req.into_inner();
-        // let ctx = self.new_ctx();
         let res = PullMetaConfigResponse {
             header: Some(ResponseHeader::success()),
-            payload: Some(pull_meta_config_response::Payload::Json("{}".to_string())),
+            payload: "{}".to_string(),
         };
 
         Ok(Response::new(res))
