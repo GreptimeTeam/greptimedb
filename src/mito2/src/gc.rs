@@ -26,6 +26,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common_meta::datanode::GcStat;
+use common_telemetry::tracing::Instrument as _;
 use common_telemetry::{debug, error, info, warn};
 use common_time::Timestamp;
 use itertools::Itertools;
@@ -268,6 +269,10 @@ impl LocalGcWorker {
     /// may cause too many concurrent listing operations.
     ///
     /// TODO(discord9): consider instead running in parallel mode
+    #[common_telemetry::tracing::instrument(
+        skip_all,
+        fields(region_count = self.regions.len(), full_file_listing = self.full_file_listing)
+    )]
     pub async fn run(self) -> Result<GcReport> {
         info!("LocalGcWorker started");
         let _timer = GC_DURATION_SECONDS
@@ -336,6 +341,14 @@ impl LocalGcWorker {
     ///
     /// Note that the files that are still in use or may still be kept for a while are not deleted
     /// to avoid deleting files that are still needed.
+    #[common_telemetry::tracing::instrument(
+        skip_all,
+        fields(
+            region_id = %region_id,
+            full_file_listing = self.full_file_listing,
+            region_present = region.is_some()
+        )
+    )]
     pub async fn do_region_gc(
         &self,
         region_id: RegionId,
@@ -457,7 +470,7 @@ impl LocalGcWorker {
         let unused_file_cnt = deletable_files.len();
 
         info!(
-            "gc: for region{}{region_id}: In manifest file cnt: {}, Tmp ref file cnt: {}, recently removed files: {}, Unused files to delete: {:?}",
+            "gc: for region{}{region_id}: In manifest file cnt: {}, Tmp ref file cnt: {}, recently removed files: {}, Unused files to delete count: {}",
             if region.is_none() {
                 "(region dropped)"
             } else {
@@ -466,7 +479,11 @@ impl LocalGcWorker {
             current_files.map(|c| c.len()).unwrap_or(0),
             tmp_ref_files.len(),
             removed_file_cnt,
-            &deletable_files,
+            deletable_files.len(),
+        );
+        debug!(
+            "gc: deletable files for region {}: {:?}",
+            region_id, &deletable_files
         );
 
         debug!(
@@ -495,6 +512,10 @@ impl LocalGcWorker {
         Ok(deletable_files)
     }
 
+    #[common_telemetry::tracing::instrument(
+        skip_all,
+        fields(region_id = %region_id, removed_file_count = removed_files.len())
+    )]
     async fn delete_files(&self, region_id: RegionId, removed_files: &[RemovedFile]) -> Result<()> {
         let mut index_ids = vec![];
         let file_pairs = removed_files
@@ -543,6 +564,10 @@ impl LocalGcWorker {
     }
 
     /// Update region manifest for clear the actually deleted files
+    #[common_telemetry::tracing::instrument(
+        skip_all,
+        fields(region_id = %region.region_id(), deleted_file_count = deleted_files.len())
+    )]
     async fn update_manifest_removed_files(
         &self,
         region: &MitoRegionRef,
@@ -618,6 +643,10 @@ impl LocalGcWorker {
     /// List all files in the region directory.
     /// Returns a vector of all file entries found.
     /// This might take a long time if there are many files in the region directory.
+    #[common_telemetry::tracing::instrument(
+        skip_all,
+        fields(region_id = %region_id, file_cnt_hint = file_cnt_hint)
+    )]
     async fn list_from_object_store(
         &self,
         region_id: RegionId,
@@ -666,38 +695,41 @@ impl LocalGcWorker {
 
         for (lister, end) in listers {
             let tx = tx.clone();
-            let handle = tokio::spawn(async move {
-                let stream = lister.take_while(|e: &std::result::Result<Entry, _>| match e {
-                    Ok(e) => {
-                        if let Some(end) = &end {
-                            // reach end, stop listing
-                            e.name() < end.as_str()
-                        } else {
-                            // no end, take all entries
+            let handle = tokio::spawn(
+                async move {
+                    let stream = lister.take_while(|e: &std::result::Result<Entry, _>| match e {
+                        Ok(e) => {
+                            if let Some(end) = &end {
+                                // reach end, stop listing
+                                e.name() < end.as_str()
+                            } else {
+                                // no end, take all entries
+                                true
+                            }
+                        }
+                        // entry went wrong, log and skip it
+                        Err(err) => {
+                            warn!("Failed to list entry: {}", err);
                             true
                         }
-                    }
-                    // entry went wrong, log and skip it
-                    Err(err) => {
-                        warn!("Failed to list entry: {}", err);
-                        true
-                    }
-                });
-                let stream = stream
-                    .filter(|e| {
-                        if let Ok(e) = &e {
-                            // notice that we only care about files, skip dirs
-                            e.metadata().is_file()
-                        } else {
-                            // error entry, take for further logging
-                            true
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .await;
-                // ordering of files doesn't matter here, so we can send them directly
-                tx.send(stream).await.expect("Failed to send entries");
-            });
+                    });
+                    let stream = stream
+                        .filter(|e| {
+                            if let Ok(e) = &e {
+                                // notice that we only care about files, skip dirs
+                                e.metadata().is_file()
+                            } else {
+                                // error entry, take for further logging
+                                true
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .await;
+                    // ordering of files doesn't matter here, so we can send them directly
+                    tx.send(stream).await.expect("Failed to send entries");
+                }
+                .instrument(common_telemetry::tracing::info_span!("gc_list_partition")),
+            );
 
             handles.push(handle);
         }

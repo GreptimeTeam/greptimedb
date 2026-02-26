@@ -19,6 +19,7 @@ use std::time::Instant;
 use common_meta::DatanodeId;
 use common_meta::key::TableMetadataManagerRef;
 use common_procedure::ProcedureManagerRef;
+use common_telemetry::tracing::Instrument as _;
 use common_telemetry::{error, info};
 use store_api::storage::GcReport;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -123,13 +124,17 @@ impl GcScheduler {
             match event {
                 Event::Tick => {
                     info!("Received gc tick");
-                    if let Err(e) = self.handle_tick().await {
+                    let span =
+                        common_telemetry::tracing::info_span!("meta_gc_tick", trigger = "ticker");
+                    if let Err(e) = self.handle_tick().instrument(span).await {
                         error!(e; "Failed to handle gc tick");
                     }
                 }
                 Event::Manually(sender) => {
                     info!("Received manually gc request");
-                    match self.handle_tick().await {
+                    let span =
+                        common_telemetry::tracing::info_span!("meta_gc_tick", trigger = "manual");
+                    match self.handle_tick().instrument(span).await {
                         Ok(report) => {
                             // ignore error
                             let _ = sender.send(report);
@@ -147,7 +152,8 @@ impl GcScheduler {
         METRIC_META_GC_SCHEDULER_CYCLES_TOTAL.inc();
         let _timer = METRIC_META_GC_SCHEDULER_DURATION_SECONDS.start_timer();
         info!("Start to trigger gc");
-        let report = self.trigger_gc().await?;
+        let span = common_telemetry::tracing::info_span!("meta_gc_handle_tick");
+        let report = self.trigger_gc().instrument(span).await?;
 
         // Periodically clean up stale tracker entries
         self.cleanup_tracker_if_needed().await?;

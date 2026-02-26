@@ -18,6 +18,7 @@ use std::time::Instant;
 use common_catalog::consts::MITO_ENGINE;
 use common_meta::datanode::{RegionManifestInfo, RegionStat};
 use common_meta::peer::Peer;
+use common_telemetry::tracing::Instrument as _;
 use common_telemetry::{debug, error, info, warn};
 use futures::StreamExt;
 use itertools::Itertools;
@@ -40,18 +41,40 @@ impl GcScheduler {
         info!("Starting GC cycle");
 
         // limit gc region scope to regions whose datanode have reported stats(by heartbeat)
-        let table_to_region_stats = self.ctx.get_table_to_region_stats().await?;
+        let table_to_region_stats = self
+            .ctx
+            .get_table_to_region_stats()
+            .instrument(common_telemetry::tracing::info_span!(
+                "meta_gc_get_region_stats"
+            ))
+            .await?;
         info!(
             "Fetched region stats for {} tables",
             table_to_region_stats.len()
         );
 
-        let per_table_candidates = self.select_gc_candidates(&table_to_region_stats).await?;
+        let per_table_candidates = self
+            .select_gc_candidates(&table_to_region_stats)
+            .instrument(common_telemetry::tracing::info_span!(
+                "meta_gc_select_candidates"
+            ))
+            .await?;
 
-        let table_reparts = self.ctx.get_table_reparts().await?;
+        let table_reparts = self
+            .ctx
+            .get_table_reparts()
+            .instrument(common_telemetry::tracing::info_span!(
+                "meta_gc_get_table_reparts"
+            ))
+            .await?;
         let dropped_collector =
             DroppedRegionCollector::new(self.ctx.as_ref(), &self.config, &self.region_gc_tracker);
-        let dropped_assignment = dropped_collector.collect_and_assign(&table_reparts).await?;
+        let dropped_assignment = dropped_collector
+            .collect_and_assign(&table_reparts)
+            .instrument(common_telemetry::tracing::info_span!(
+                "meta_gc_collect_dropped_regions"
+            ))
+            .await?;
         let candidate_count: usize = per_table_candidates.values().map(|c| c.len()).sum();
         let dropped_count: usize = dropped_assignment
             .regions_by_peer
@@ -67,6 +90,9 @@ impl GcScheduler {
 
         let mut datanode_to_candidates = self
             .aggregate_candidates_by_datanode(per_table_candidates)
+            .instrument(common_telemetry::tracing::info_span!(
+                "meta_gc_aggregate_by_datanode"
+            ))
             .await?;
 
         self.merge_dropped_regions(&mut datanode_to_candidates, &dropped_assignment);
@@ -82,6 +108,9 @@ impl GcScheduler {
                 dropped_assignment.force_full_listing,
                 dropped_assignment.region_routes_override,
             )
+            .instrument(common_telemetry::tracing::info_span!(
+                "meta_gc_dispatch_to_datanodes"
+            ))
             .await;
 
         let duration = start_time.elapsed();
@@ -280,6 +309,12 @@ impl GcScheduler {
                         self.config.mailbox_timeout,
                         region_routes_override.clone(),
                     )
+                    .instrument(common_telemetry::tracing::info_span!(
+                        "meta_gc_call_datanode",
+                        peer = %peer,
+                        mode = "fast",
+                        region_count = fast_list_regions.len()
+                    ))
                     .await
                 {
                     Ok(report) => combined_report.merge(report),
@@ -306,6 +341,12 @@ impl GcScheduler {
                         self.config.mailbox_timeout,
                         region_routes_override,
                     )
+                    .instrument(common_telemetry::tracing::info_span!(
+                        "meta_gc_call_datanode",
+                        peer = %peer,
+                        mode = "full",
+                        region_count = need_full_list_regions.len()
+                    ))
                     .await
                 {
                     Ok(report) => combined_report.merge(report),
