@@ -25,6 +25,7 @@ use common_meta::key::topic_region::TopicRegionKey;
 use common_meta::lock_key::RemoteWalLock;
 use common_meta::wal_provider::extract_topic_from_wal_options;
 use common_procedure::{Context as ProcedureContext, Status};
+use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{error, info};
 use common_wal::options::WalOptions;
 use serde::{Deserialize, Serialize};
@@ -250,13 +251,14 @@ impl UpgradeCandidateRegion {
         let region_ids = &pc.region_ids;
         let candidate = &pc.to_peer;
 
+        let tracing_ctx = TracingContext::from_current_span();
         let msg = MailboxMessage::json_message(
             &format!("Upgrade candidate regions: {:?}", region_ids),
             &format!("Metasrv@{}", ctx.server_addr()),
             &format!("Datanode-{}@{}", candidate.id, candidate.addr),
             common_time::util::current_time_millis(),
             &upgrade_instruction,
-            None,
+            Some(tracing_ctx.to_w3c()),
         )
         .with_context(|_| error::SerializeToJsonSnafu {
             input: upgrade_instruction.to_string(),
