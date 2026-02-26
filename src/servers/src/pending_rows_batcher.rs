@@ -35,13 +35,15 @@ use common_telemetry::{error, info, warn};
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 use datatypes::data_type::DataType;
-use datatypes::prelude::ConcreteDataType;
+use datatypes::prelude::{ConcreteDataType, MutableVector};
 use datatypes::schema::{ColumnSchema as DtColumnSchema, Schema as DtSchema};
 use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
+use snafu::{ResultExt, ensure};
 use store_api::storage::RegionId;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, mpsc, oneshot};
 
+use crate::error;
 use crate::error::{Error, Result};
 use crate::metrics::{
     FLUSH_DROPPED_ROWS, FLUSH_ELAPSED, FLUSH_FAILURES, FLUSH_ROWS, FLUSH_TOTAL, PENDING_BATCHES,
@@ -818,16 +820,17 @@ fn rows_to_record_batch(rows: &Rows) -> Result<RecordBatch> {
     let column_count = rows.schema.len();
 
     for (idx, row) in rows.rows.iter().enumerate() {
-        if row.values.len() != column_count {
-            return Err(Error::Internal {
+        ensure!(
+            row.values.len() == column_count,
+            error::InternalSnafu {
                 err_msg: format!(
                     "Column count mismatch in row {}, expected {}, got {}",
                     idx,
                     column_count,
                     row.values.len()
-                ),
-            });
-        }
+                )
+            }
+        );
     }
 
     let mut vectors = Vec::with_capacity(column_count);
@@ -847,7 +850,7 @@ fn rows_to_record_batch(rows: &Rows) -> Result<RecordBatch> {
         })
         .map(ConcreteDataType::from)?;
 
-        let mut mutable = data_type.create_mutable_vector(row_count);
+        let mut mutable: Box<dyn MutableVector> = data_type.create_mutable_vector(row_count);
         for row in &rows.rows {
             let value_ref =
                 pb_value_to_value_ref(&row.values[idx], column_schema.datatype_extension.as_ref());
