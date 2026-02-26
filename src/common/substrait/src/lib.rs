@@ -21,10 +21,8 @@ use bytes::{Buf, Bytes};
 use datafusion::execution::context::SessionState;
 pub use datafusion::execution::registry::SerializerRegistry;
 /// Re-export the Substrait module of datafusion,
-/// note this is a different version of the `substrait_proto` crate
 pub use datafusion_substrait::substrait as substrait_proto_df;
 pub use datafusion_substrait::{logical_plan as df_logical_plan, variation_const};
-pub use substrait_proto;
 
 pub use crate::df_substrait::DFLogicalSubstraitConvertor;
 #[async_trait]
