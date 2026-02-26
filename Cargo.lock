@@ -2688,6 +2688,7 @@ dependencies = [
  "common-grpc",
  "humantime-serde",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -10011,12 +10012,14 @@ dependencies = [
  "common-base",
  "common-error",
  "common-meta",
+ "common-options",
  "datanode",
  "flow",
  "frontend",
  "meta-client",
  "meta-srv",
  "serde",
+ "serde_json",
  "snafu 0.8.6",
  "standalone",
 ]

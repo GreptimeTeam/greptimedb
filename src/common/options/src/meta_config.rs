@@ -12,6 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod datanode;
-pub mod memory;
-pub mod meta_config;
+use serde::Serialize;
+
+/// A trait for serializing Metasrv config to a JSON string.
+/// So it can be used in the metasrv's crate instead of depending on the plugins' crate.
+pub trait MetasrvConfigSerializer: Serialize {
+    fn serialize(&self) -> Result<MetasrvConfigWrapper, serde_json::Error>;
+}
+
+/// A wrapper for the serialized Metasrv config.
+/// Avoid type collision for String in the plugins.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MetasrvConfigWrapper(pub String);
