@@ -41,6 +41,7 @@ pub mod mysql;
 pub mod opentsdb;
 pub mod otel_arrow;
 pub mod otlp;
+pub mod pending_rows_batcher;
 mod pipeline;
 pub mod postgres;
 pub mod prom_row_builder;
