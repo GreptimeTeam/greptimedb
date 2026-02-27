@@ -8,10 +8,10 @@ use common_time::range::TimestampRange;
 use store_api::storage::{ScanRequest, SequenceNumber};
 
 use crate::error::Result;
-use crate::read::BoxedBatchStream;
 use crate::read::range::RowGroupIndex;
 use crate::read::scan_region::StreamContext;
 use crate::read::scan_util::PartitionMetrics;
+use crate::read::{BoxedBatchStream, BoxedRecordBatchStream};
 use crate::region::MitoRegionRef;
 
 pub type InclusiveTimeRange = (Timestamp, Timestamp);
@@ -32,6 +32,9 @@ pub trait ExtensionRange: Debug + Send + Sync {
 
     /// Create the reader for reading this range.
     fn reader(&self, context: &StreamContext) -> BoxedExtensionRangeReader;
+
+    /// Create the flat reader for reading this range in flat format.
+    fn flat_reader(&self, context: &StreamContext) -> BoxedExtensionFlatRangeReader;
 }
 
 pub type BoxedExtensionRange = Box<dyn ExtensionRange>;
@@ -49,6 +52,20 @@ pub trait ExtensionRangeReader: Send {
 }
 
 pub type BoxedExtensionRangeReader = Box<dyn ExtensionRangeReader>;
+
+/// The reader to read an extension range in flat format (producing [`RecordBatch`]).
+#[async_trait]
+pub trait ExtensionFlatRangeReader: Send {
+    /// Read the extension range by creating a stream that produces [`RecordBatch`].
+    async fn read(
+        self: Box<Self>,
+        context: Arc<StreamContext>,
+        metrics: PartitionMetrics,
+        index: RowGroupIndex,
+    ) -> Result<BoxedRecordBatchStream, BoxedError>;
+}
+
+pub type BoxedExtensionFlatRangeReader = Box<dyn ExtensionFlatRangeReader>;
 
 /// The provider to feed the extension ranges into the mito scanner.
 #[async_trait]
