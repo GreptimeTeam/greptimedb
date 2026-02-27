@@ -24,13 +24,13 @@ use common_options::plugin_options::PluginOptionsSerializerRef;
 use common_telemetry::{debug, error, info, warn};
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
-use crate::error::{self, Result};
+use crate::error::{self, Result, SerializeConfigSnafu};
 use crate::handler::{HeartbeatHandlerGroup, Pusher, PusherId};
 use crate::metasrv::{Context, Metasrv};
 use crate::metrics::METRIC_META_HEARTBEAT_RECV;
@@ -143,11 +143,14 @@ impl heartbeat_server::Heartbeat for Metasrv {
     }
 
     async fn pull_config(&self, req: Request<PullConfigRequest>) -> GrpcResult<PullConfigResponse> {
-        let payload = self
-            .plugins()
-            .get::<PluginOptionsSerializerRef>()
-            .and_then(|p| p.serialize().ok())
-            .unwrap_or_default();
+        // this is a blocking operation for frontend to startup
+        let payload = match self.plugins().get::<PluginOptionsSerializerRef>() {
+            Some(p) => p
+                .serialize()
+                .inspect_err(|e| warn!(e; "Failed to serialize plugin options"))
+                .context(SerializeConfigSnafu)?,
+            None => String::new(),
+        };
 
         let res = PullConfigResponse {
             header: Some(ResponseHeader::success()),
