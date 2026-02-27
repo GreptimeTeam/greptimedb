@@ -407,7 +407,7 @@ pub(crate) struct RangeBase {
     /// Filters pushed down.
     pub(crate) filters: Vec<SimpleFilterContext>,
     /// Dynamic filter physical exprs.
-    pub(crate) dyn_filters: Arc<Vec<DynamicFilterPhysicalExpr>>,
+    pub(crate) dyn_filters: Vec<Arc<DynamicFilterPhysicalExpr>>,
     /// Helper to read the SST.
     pub(crate) read_format: ReadFormat,
     pub(crate) expected_metadata: Option<RegionMetadataRef>,

@@ -30,7 +30,7 @@ use datafusion::error::Result as DfResult;
 use datafusion::execution::context::TaskContext;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::filter_pushdown::{
-    ChildPushdownResult, FilterPushdownPhase, FilterPushdownPropagation,
+    ChildPushdownResult, FilterPushdownPhase, FilterPushdownPropagation, PushedDown,
 };
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
@@ -53,6 +53,7 @@ use store_api::storage::{ScanRequest, TimeSeriesDistribution};
 use crate::table::metrics::StreamMetrics;
 
 /// A plan to read multiple partitions from a region of a table.
+#[derive(Clone)]
 pub struct RegionScanExec {
     scanner: Arc<Mutex<RegionScannerRef>>,
     arrow_schema: ArrowSchemaRef,
@@ -445,7 +446,28 @@ impl ExecutionPlan for RegionScanExec {
         _config: &datafusion::config::ConfigOptions,
     ) -> DfResult<FilterPushdownPropagation<Arc<dyn ExecutionPlan>>> {
         // TODO(discord9): use the pushdown result to update the scanner's predicate
-        Ok(FilterPushdownPropagation::if_all(child_pushdown_result))
+
+        let parent_filters = child_pushdown_result
+            .parent_filters
+            .into_iter()
+            .map(|f| f.filter)
+            .collect::<Vec<_>>();
+
+        let supported = self
+            .scanner
+            .lock()
+            .unwrap()
+            .update_predicate_with_dyn_filter(parent_filters);
+        // datafusion api require to clone self after mutate, even though we are only mutate inside mutex
+        let new_self = Arc::new(self.clone());
+
+        Ok(FilterPushdownPropagation {
+            filters: supported
+                .into_iter()
+                .map(|s| if s { PushedDown::Yes } else { PushedDown::No })
+                .collect(),
+            updated_node: Some(new_self),
+        })
     }
 }
 
