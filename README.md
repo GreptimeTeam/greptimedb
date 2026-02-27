@@ -179,7 +179,7 @@ cargo run -- standalone start
 
 GreptimeDB v1.0 represents a major milestone toward maturity — marking stable APIs, production readiness, and proven performance.
 
-**Roadmap:**[v1.0 highlights and release plan](https://greptime.com/blogs/2025-11-05-greptimedb-v1-highlights)  and [2026 roadmap](https://greptime.com/blogs/2026-02-11-greptimedb-roadmap-2026).
+**Roadmap:** [v1.0 highlights and release plan](https://greptime.com/blogs/2025-11-05-greptimedb-v1-highlights) and [2026 roadmap](https://greptime.com/blogs/2026-02-11-greptimedb-roadmap-2026).
 
 For production use, we recommend using the latest stable release.
 
