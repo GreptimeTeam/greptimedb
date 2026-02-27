@@ -307,6 +307,17 @@ async fn execute_repartition_table(ctx: FuzzContext, input: FuzzInput) -> Result
         count.count as usize,
         shared_state.lock().unwrap().inserted_rows as usize
     );
+    let timestamp_column_name = table_ctx.timestamp_column().unwrap().name.clone();
+    // Since each timestamp value is unique, the count of distinct timestamps should match the total row count.
+    let distinct_count_sql = format!(
+        "SELECT COUNT(DISTINCT {}) AS count FROM {}",
+        timestamp_column_name, table_ctx.name
+    );
+    let distinct_count = count_values(&ctx.greptime, &distinct_count_sql).await?;
+    assert_eq!(
+        distinct_count.count as usize,
+        shared_state.lock().unwrap().inserted_rows as usize
+    );
 
     // Cleans up
     let table_name = table_ctx.name.clone();
