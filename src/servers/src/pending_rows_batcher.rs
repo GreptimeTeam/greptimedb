@@ -16,15 +16,21 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use api::helper::{ColumnDataTypeWrapper, pb_value_to_value_ref};
+use api::helper::ColumnDataTypeWrapper;
 use api::v1::region::{
     BulkInsertRequest, RegionRequest, RegionRequestHeader, bulk_insert_request, region_request,
 };
+use api::v1::value::ValueData;
 use api::v1::{ArrowIpc, RowInsertRequests, Rows};
-use arrow::array::new_null_array;
+use arrow::array::{
+    ArrayRef, Float64Builder, StringBuilder, TimestampMicrosecondBuilder,
+    TimestampMillisecondBuilder, TimestampNanosecondBuilder, TimestampSecondBuilder,
+    new_null_array,
+};
 use arrow::compute::{cast, concat_batches, filter_record_batch};
-use arrow::datatypes::Schema as ArrowSchema;
+use arrow::datatypes::{Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
+use arrow_schema::TimeUnit;
 use bytes::Bytes;
 use catalog::CatalogManagerRef;
 use common_grpc::flight::{FlightEncoder, FlightMessage};
@@ -35,8 +41,7 @@ use common_telemetry::{error, info, warn};
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 use datatypes::data_type::DataType;
-use datatypes::prelude::{ConcreteDataType, MutableVector};
-use datatypes::schema::{ColumnSchema as DtColumnSchema, Schema as DtSchema};
+use datatypes::prelude::ConcreteDataType;
 use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
 use snafu::{ResultExt, ensure};
@@ -833,52 +838,152 @@ fn rows_to_record_batch(rows: &Rows) -> Result<RecordBatch> {
         );
     }
 
-    let mut vectors = Vec::with_capacity(column_count);
-    let mut column_schemas = Vec::with_capacity(column_count);
+    let mut fields = Vec::with_capacity(column_count);
+    let mut columns = Vec::with_capacity(column_count);
 
     for (idx, column_schema) in rows.schema.iter().enumerate() {
-        let data_type = ColumnDataTypeWrapper::try_new(
+        let datatype_wrapper = ColumnDataTypeWrapper::try_new(
             column_schema.datatype,
             column_schema.datatype_extension.clone(),
-        )
-        .map_err(|err| Error::InvalidParameter {
-            reason: format!(
-                "Invalid datatype for column '{}': {}",
-                column_schema.column_name, err
-            ),
-            location: snafu::Location::new(file!(), line!(), column!()),
-        })
-        .map(ConcreteDataType::from)?;
-
-        let mut mutable: Box<dyn MutableVector> = data_type.create_mutable_vector(row_count);
-        for row in &rows.rows {
-            let value_ref =
-                pb_value_to_value_ref(&row.values[idx], column_schema.datatype_extension.as_ref());
-            mutable
-                .try_push_value_ref(&value_ref)
-                .map_err(|err| Error::InvalidParameter {
-                    reason: format!(
-                        "Failed to convert value for column '{}': {}",
-                        column_schema.column_name, err
-                    ),
-                    location: snafu::Location::new(file!(), line!(), column!()),
-                })?;
-        }
-
-        vectors.push(mutable.to_vector());
-        column_schemas.push(DtColumnSchema::new(
+        )?;
+        let data_type = ConcreteDataType::from(datatype_wrapper);
+        fields.push(Field::new(
             column_schema.column_name.clone(),
-            data_type,
+            data_type.as_arrow_type(),
             true,
         ));
+        columns.push(build_arrow_array(
+            rows,
+            idx,
+            &column_schema.column_name,
+            data_type.as_arrow_type(),
+            row_count,
+        )?);
     }
 
-    let schema = Arc::new(DtSchema::new(column_schemas));
-    common_recordbatch::RecordBatch::new(schema, vectors)
-        .map(|rb| rb.into_df_record_batch())
-        .map_err(|err| Error::Internal {
-            err_msg: format!("Failed to build record batch from rows: {}", err),
-        })
+    RecordBatch::try_new(Arc::new(ArrowSchema::new(fields)), columns).context(error::ArrowSnafu)
+}
+
+fn build_arrow_array(
+    rows: &Rows,
+    col_idx: usize,
+    column_name: &String,
+    column_data_type: arrow::datatypes::DataType,
+    row_count: usize,
+) -> Result<ArrayRef> {
+    let array: ArrayRef = match column_data_type {
+        arrow::datatypes::DataType::Float64 => {
+            let mut builder = Float64Builder::with_capacity(row_count);
+            for row in &rows.rows {
+                match row.values[col_idx].value_data.as_ref() {
+                    Some(ValueData::F64Value(v)) => builder.append_value(*v),
+                    Some(v) => {
+                        return error::InvalidPromRemoteRequestSnafu {
+                            msg: format!("Unexpected value: {:?}", v),
+                        }
+                        .fail();
+                    }
+                    None => builder.append_null(),
+                }
+            }
+            Arc::new(builder.finish())
+        }
+        arrow::datatypes::DataType::Utf8 => {
+            let mut builder = StringBuilder::with_capacity(row_count, 0);
+            for row in &rows.rows {
+                match row.values[col_idx].value_data.as_ref() {
+                    Some(ValueData::StringValue(v)) => builder.append_value(v),
+                    Some(v) => {
+                        return error::InvalidPromRemoteRequestSnafu {
+                            msg: format!("Unexpected value: {:?}", v),
+                        }
+                        .fail();
+                    }
+                    None => builder.append_null(),
+                }
+            }
+            Arc::new(builder.finish())
+        }
+        arrow::datatypes::DataType::Timestamp(u, _) => match u {
+            TimeUnit::Second => {
+                let mut builder = TimestampSecondBuilder::with_capacity(row_count);
+                for row in &rows.rows {
+                    match row.values[col_idx].value_data.as_ref() {
+                        Some(ValueData::TimestampSecondValue(v)) => builder.append_value(*v),
+                        Some(v) => {
+                            return error::InvalidPromRemoteRequestSnafu {
+                                msg: format!("Unexpected value: {:?}", v),
+                            }
+                            .fail();
+                        }
+                        None => builder.append_null(),
+                    }
+                }
+                Arc::new(builder.finish())
+            }
+            TimeUnit::Millisecond => {
+                let mut builder = TimestampMillisecondBuilder::with_capacity(row_count);
+                for row in &rows.rows {
+                    match row.values[col_idx].value_data.as_ref() {
+                        Some(ValueData::TimestampMillisecondValue(v)) => builder.append_value(*v),
+                        Some(v) => {
+                            return error::InvalidPromRemoteRequestSnafu {
+                                msg: format!("Unexpected value: {:?}", v),
+                            }
+                            .fail();
+                        }
+                        None => builder.append_null(),
+                    }
+                }
+                Arc::new(builder.finish())
+            }
+            TimeUnit::Microsecond => {
+                let mut builder = TimestampMicrosecondBuilder::with_capacity(row_count);
+                for row in &rows.rows {
+                    match row.values[col_idx].value_data.as_ref() {
+                        Some(
+                            ValueData::DatetimeValue(v) | ValueData::TimestampMicrosecondValue(v),
+                        ) => builder.append_value(*v),
+                        Some(v) => {
+                            return error::InvalidPromRemoteRequestSnafu {
+                                msg: format!("Unexpected value: {:?}", v),
+                            }
+                            .fail();
+                        }
+                        None => builder.append_null(),
+                    }
+                }
+                Arc::new(builder.finish())
+            }
+            TimeUnit::Nanosecond => {
+                let mut builder = TimestampNanosecondBuilder::with_capacity(row_count);
+                for row in &rows.rows {
+                    match row.values[col_idx].value_data.as_ref() {
+                        Some(ValueData::TimestampNanosecondValue(v)) => builder.append_value(*v),
+                        Some(v) => {
+                            return error::InvalidPromRemoteRequestSnafu {
+                                msg: format!("Unexpected value: {:?}", v),
+                            }
+                            .fail();
+                        }
+                        None => builder.append_null(),
+                    }
+                }
+                Arc::new(builder.finish())
+            }
+        },
+        ty => {
+            return error::InvalidPromRemoteRequestSnafu {
+                msg: format!(
+                    "Unexpected column type {:?}, column name: {}",
+                    ty, column_name
+                ),
+            }
+            .fail();
+        }
+    };
+
+    Ok(array)
 }
 
 fn record_batch_to_ipc(record_batch: RecordBatch) -> Result<(Bytes, Bytes, Bytes)> {
