@@ -14,10 +14,16 @@
 
 use std::sync::Arc;
 
+use serde::de::DeserializeOwned;
+
 /// A trait for serializing Metasrv config to a JSON string.
 /// So it can be used in the metasrv's crate instead of depending on the plugins' crate.
 pub trait PluginOptionsSerializer: Send + Sync {
     fn serialize(&self) -> Result<String, serde_json::Error>;
 }
-
 pub type PluginOptionsSerializerRef = Arc<dyn PluginOptionsSerializer>;
+
+/// A trait for deserializing Metasrv config from a JSON string.
+pub trait PluginOptionsDeserializer<T: DeserializeOwned>: Send + Sync {
+    fn deserialize(&self, payload: &str) -> Result<T, serde_json::Error>;
+}

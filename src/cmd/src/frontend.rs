@@ -53,6 +53,7 @@ use plugins::frontend::context::{
     CatalogManagerConfigureContext, DistributedCatalogManagerConfigureContext,
 };
 use plugins::frontend::setup_frontend_dynamic_plugins;
+use plugins::options::PluginOptionsDeserializerImpl;
 use servers::addrs;
 use servers::grpc::GrpcOptions;
 use servers::tls::{TlsMode, TlsOption, merge_tls_option};
@@ -373,7 +374,7 @@ impl StartCommand {
         .context(error::MetaClientInitSnafu)?;
 
         let meta_config: Vec<PluginOptions> = meta_client
-            .pull_config()
+            .pull_config(PluginOptionsDeserializerImpl)
             .await
             .context(error::MetaClientInitSnafu)?;
         setup_frontend_dynamic_plugins(meta_config, &mut plugins)

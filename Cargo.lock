@@ -7769,6 +7769,7 @@ dependencies = [
  "common-grpc",
  "common-macro",
  "common-meta",
+ "common-options",
  "common-telemetry",
  "datatypes",
  "futures",

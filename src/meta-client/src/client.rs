@@ -56,6 +56,7 @@ use common_meta::rpc::store::{
     BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
     DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
 };
+use common_options::plugin_options::PluginOptionsDeserializer;
 use common_telemetry::info;
 use futures::TryStreamExt;
 use heartbeat::{Client as HeartbeatClient, HeartbeatConfig};
@@ -585,16 +586,16 @@ impl MetaClient {
         self.heartbeat_client()?.ask_leader().await
     }
 
-    pub async fn pull_config<T>(&self) -> Result<T>
+    pub async fn pull_config<T, U>(&self, deserializer: T) -> Result<U>
     where
-        T: DeserializeOwned + Default,
+        T: PluginOptionsDeserializer<U>,
+        U: DeserializeOwned,
     {
         let res = self.heartbeat_client()?.pull_config().await?;
-        if res.payload.is_empty() {
-            Ok(T::default())
-        } else {
-            serde_json::from_str(&res.payload).context(ConvertMetaConfigSnafu)
-        }
+        let v = deserializer
+            .deserialize(&res.payload)
+            .context(ConvertMetaConfigSnafu)?;
+        Ok(v)
     }
 
     /// Returns a heartbeat bidirectional streaming: (sender, receiver), the
