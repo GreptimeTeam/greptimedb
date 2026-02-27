@@ -38,6 +38,7 @@ pub mod query_engine;
 mod range_select;
 pub mod region_query;
 pub mod sql;
+pub mod vector_search;
 pub(crate) mod window_sort;
 
 #[cfg(test)]

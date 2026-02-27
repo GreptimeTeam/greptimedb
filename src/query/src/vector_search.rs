@@ -12,17 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod analyzer;
-mod commutativity;
-mod merge_scan;
-mod merge_sort;
-mod planner;
-mod predicate_extractor;
-mod region_pruner;
-
-pub use analyzer::{DistPlannerAnalyzer, DistPlannerOptions};
-pub use merge_scan::{MergeScanExec, MergeScanLogicalPlan};
-pub use merge_sort::MergeSortLogicalPlan;
-pub use planner::{DistExtensionPlanner, MergeSortExtensionPlanner};
-pub use predicate_extractor::PredicateExtractor;
-pub use region_pruner::ConstraintPruner;
+#[cfg(feature = "vector_index")]
+pub mod exec;
+#[cfg(feature = "vector_index")]
+pub(crate) mod metrics;
+#[cfg(feature = "vector_index")]
+pub mod options;
+#[cfg(feature = "vector_index")]
+pub mod plan;
+#[cfg(feature = "vector_index")]
+pub mod planner;
+#[cfg(all(test, feature = "vector_index"))]
+pub(crate) mod test_utils;
+#[cfg(feature = "vector_index")]
+pub(crate) mod utils;
