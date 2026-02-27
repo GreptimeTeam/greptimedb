@@ -52,7 +52,7 @@ use plugins::PluginOptions;
 use plugins::frontend::context::{
     CatalogManagerConfigureContext, DistributedCatalogManagerConfigureContext,
 };
-use plugins::frontend::process_meta_config;
+use plugins::frontend::setup_frontend_dynamic_plugins;
 use servers::addrs;
 use servers::grpc::GrpcOptions;
 use servers::tls::{TlsMode, TlsOption, merge_tls_option};
@@ -376,7 +376,7 @@ impl StartCommand {
             .pull_meta_config()
             .await
             .context(error::MetaClientInitSnafu)?;
-        process_meta_config(meta_config, &mut plugins)
+        setup_frontend_dynamic_plugins(meta_config, &mut plugins)
             .await
             .context(error::StartFrontendSnafu)?;
 

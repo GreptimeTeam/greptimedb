@@ -37,7 +37,13 @@ pub async fn setup_frontend_plugins(
     Ok(())
 }
 
-pub async fn process_meta_config(
+/// Setup dynamic plugins based on the meta config in frontend.
+/// This is called after the `setup_frontend_plugins` because the meta client needs to be created first.
+///
+/// For those configs/plugins which are corresponding with the metasrv's config,
+/// we pull from metasrv first, then create/override the current config/plugin.
+/// Note: make sure the override works as expected.
+pub async fn setup_frontend_dynamic_plugins(
     _meta_config: Vec<PluginOptions>,
     _plugins: &mut Plugins,
 ) -> Result<()> {
