@@ -16,17 +16,11 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use common_function::aggrs::aggr_wrapper::{StateMergeHelper, is_all_aggr_exprs_steppable};
-#[cfg(feature = "vector_index")]
-use common_function::scalars::vector::distance::{
-    VEC_COS_DISTANCE, VEC_DOT_PRODUCT, VEC_L2SQ_DISTANCE,
-};
 use common_telemetry::debug;
 use datafusion::error::Result as DfResult;
 #[cfg(feature = "vector_index")]
 use datafusion_common::DataFusionError;
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
-#[cfg(feature = "vector_index")]
-use datafusion_expr::Sort;
 use datafusion_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
 use promql::extension_plan::{
     EmptyMetric, InstantManipulate, RangeManipulate, SeriesDivide, SeriesNormalize,
@@ -36,21 +30,8 @@ use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 use crate::dist_plan::MergeScanLogicalPlan;
 use crate::dist_plan::analyzer::AliasMapping;
 use crate::dist_plan::merge_sort::{MergeSortLogicalPlan, merge_sort_transformer};
-
 #[cfg(feature = "vector_index")]
-fn is_vector_sort(sort: &Sort) -> bool {
-    if sort.expr.len() != 1 {
-        return false;
-    }
-    let sort_expr = &sort.expr[0].expr;
-    let Expr::ScalarFunction(func) = sort_expr else {
-        return false;
-    };
-    matches!(
-        func.name().to_lowercase().as_str(),
-        VEC_L2SQ_DISTANCE | VEC_COS_DISTANCE | VEC_DOT_PRODUCT
-    )
-}
+use crate::vector_search::utils::is_vector_sort;
 
 #[cfg(feature = "vector_index")]
 fn vector_sort_transformer(plan: &LogicalPlan) -> DfResult<TransformerAction> {
