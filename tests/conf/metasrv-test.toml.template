@@ -5,7 +5,7 @@ heartbeat_interval = "1s"
 store_addrs = [{store_addrs | unescaped}]
 
 ## The datastore for meta server.
-backend = "EtcdStore"
+backend = "etcd_store"
 {{ endif }}
 [wal]
 {{ if is_raft_engine }}

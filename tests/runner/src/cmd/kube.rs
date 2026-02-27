@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use anyhow::{Context, Result, ensure};
 use clap::Parser;
 use sqlness::interceptor::Registry;
 use sqlness::{ConfigBuilder, Runner};
@@ -50,17 +51,15 @@ pub struct KubeCommand {
 }
 
 impl KubeCommand {
-    pub async fn run(self) {
+    pub async fn run(self) -> Result<()> {
         let mut interceptor_registry: Registry = Default::default();
         interceptor_registry.register(
             protocol_interceptor::PREFIX,
             Arc::new(protocol_interceptor::ProtocolInterceptorFactory),
         );
 
-        if let Some(d) = &self.config.case_dir
-            && !d.is_dir()
-        {
-            panic!("{} is not a directory", d.display());
+        if let Some(d) = &self.config.case_dir {
+            ensure!(d.is_dir(), "{} is not a directory", d.display());
         }
 
         let config = ConfigBuilder::default()
@@ -71,7 +70,7 @@ impl KubeCommand {
             .env_config_file(self.config.env_config_file)
             .interceptor_registry(interceptor_registry)
             .build()
-            .unwrap();
+            .context("Failed to build sqlness config")?;
 
         let runner = Runner::new(
             config,
@@ -84,12 +83,9 @@ impl KubeCommand {
                 resources_manager: Arc::new(NaiveResourcesManager::new(self.namespace)),
             },
         );
-        match runner.run().await {
-            Ok(_) => println!("\x1b[32mAll sqlness tests passed!\x1b[0m"),
-            Err(e) => {
-                println!("\x1b[31mTest failed: {}\x1b[0m", e);
-                std::process::exit(1);
-            }
-        }
+        runner.run().await.context("Sqlness tests failed")?;
+
+        println!("\x1b[32mAll sqlness tests passed!\x1b[0m");
+        Ok(())
     }
 }
