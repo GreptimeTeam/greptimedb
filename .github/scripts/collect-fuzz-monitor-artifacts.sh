@@ -63,7 +63,17 @@ trap cleanup EXIT
 log "port-forward pid=${PORT_FORWARD_PID}"
 
 log "wait for port-forward bootstrap"
-sleep 3
+for i in {1..30}; do
+  if curl -s --fail "http://127.0.0.1:${GT_MONITOR_HTTP_LOCAL_PORT}/health" &> /dev/null; then
+    log "port-forward is ready"
+    break
+  fi
+  if [ "$i" -eq 30 ]; then
+    log "Timed out waiting for port-forward to be ready."
+    exit 1
+  fi
+  sleep 1
+done
 
 log "ensure export dir exists in pod ${MONITOR_POD}"
 kubectl exec -n "${GT_FUZZ_NS}" "${MONITOR_POD}" -- mkdir -p "${GT_MONITOR_SERVER_EXPORT_DIR}" >>"${COPY_LOG}" 2>&1

@@ -431,7 +431,7 @@ jobs:
           path: /tmp/kind
           retention-days: 3
       - name: Collect monitor dumps
-        if: success()
+        if: failure()
         shell: bash
         env:
           GT_FUZZ_NS: my-greptimedb
@@ -441,7 +441,7 @@ jobs:
         run: |
           bash .github/scripts/collect-fuzz-monitor-artifacts.sh
       - name: Upload monitor dumps
-        if: success()
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: fuzz-tests-monitor-dumps-${{ matrix.mode.name }}-${{ matrix.target }}
@@ -590,6 +590,18 @@ jobs:
         shell: bash
         run: |
           kubectl describe pod -n my-greptimedb
+      - name: Export kind logs
+        if: failure()
+        shell: bash
+        run: |
+          kind export logs /tmp/kind
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-tests-kind-logs-${{ matrix.mode.name }}-${{ matrix.target }}
+          path: /tmp/kind
+          retention-days: 3
       - name: Collect monitor dumps
         if: failure()
         shell: bash
@@ -599,12 +611,7 @@ jobs:
           GT_MONITOR_HTTP_LOCAL_PORT: 14000
           GT_MONITOR_ARTIFACT_DIR: /tmp/fuzz-monitor-dumps
         run: |
-          bash .github/scripts/collect-fuzz-monitor-artifacts.sh
-      - name: Export kind logs
-        if: failure()
-        shell: bash
-        run: |
-          kind export logs /tmp/kind
+          bash .github/scripts/collect-fuzz-monitor-artifacts.sh          
       - name: Upload monitor dumps
         if: failure()
         uses: actions/upload-artifact@v4
@@ -612,13 +619,6 @@ jobs:
           name: fuzz-tests-monitor-dumps-${{ matrix.mode.name }}-${{ matrix.target }}
           path: /tmp/fuzz-monitor-dumps
           if-no-files-found: warn
-          retention-days: 3
-      - name: Upload logs
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: fuzz-tests-kind-logs-${{ matrix.mode.name }}-${{ matrix.target }}
-          path: /tmp/kind
           retention-days: 3
       - name: Delete cluster
         if: success()
