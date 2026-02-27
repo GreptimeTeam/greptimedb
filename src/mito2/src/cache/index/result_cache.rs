@@ -116,6 +116,8 @@ pub enum PredicateKey {
     Bloom(BloomFilterKey),
     /// Inverted index predicate.
     Inverted(InvertedIndexKey),
+    /// Min-max pruning predicate.
+    MinMax(MinMaxKey),
 }
 
 impl PredicateKey {
@@ -134,12 +136,18 @@ impl PredicateKey {
         Self::Inverted(InvertedIndexKey::new(predicates))
     }
 
+    /// Creates a new min-max pruning key.
+    pub fn new_minmax(exprs: Arc<Vec<String>>, schema_version: u64, skip_fields: bool) -> Self {
+        Self::MinMax(MinMaxKey::new(exprs, schema_version, skip_fields))
+    }
+
     /// Returns the memory usage of this key.
     pub fn mem_usage(&self) -> usize {
         match self {
             Self::Fulltext(key) => key.mem_usage,
             Self::Bloom(key) => key.mem_usage,
             Self::Inverted(key) => key.mem_usage,
+            Self::MinMax(key) => key.mem_usage,
         }
     }
 }
@@ -239,6 +247,28 @@ impl InvertedIndexKey {
     }
 }
 
+/// Key for min-max pruning.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct MinMaxKey {
+    exprs: Arc<Vec<String>>,
+    schema_version: u64,
+    skip_fields: bool,
+    mem_usage: usize,
+}
+
+impl MinMaxKey {
+    pub fn new(exprs: Arc<Vec<String>>, schema_version: u64, skip_fields: bool) -> Self {
+        let mem_usage =
+            exprs.iter().map(|s| s.len()).sum::<usize>() + size_of::<u64>() + size_of::<bool>();
+        Self {
+            exprs,
+            schema_version,
+            skip_fields,
+            mem_usage,
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::single_range_in_vec_init)]
 mod tests {
@@ -280,6 +310,18 @@ mod tests {
         // Test get non-existent key
         let non_existent_file_id = FileId::random();
         assert!(cache.get(&key, non_existent_file_id).is_none());
+    }
+
+    #[test]
+    fn test_minmax_key_should_distinguish_schema_version_and_skip_fields() {
+        let exprs = Arc::new(vec!["col > 1".to_string()]);
+
+        let key1 = PredicateKey::new_minmax(exprs.clone(), 1, false);
+        let key2 = PredicateKey::new_minmax(exprs.clone(), 2, false);
+        assert_ne!(key1, key2);
+
+        let key3 = PredicateKey::new_minmax(exprs, 1, true);
+        assert_ne!(key1, key3);
     }
 
     #[test]

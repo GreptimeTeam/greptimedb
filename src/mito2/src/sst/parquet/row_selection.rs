@@ -77,6 +77,68 @@ impl RowGroupSelection {
         }
     }
 
+    /// Creates a new `RowGroupSelection` that selects all rows in the specified row groups.
+    ///
+    /// This is useful for fast construction after coarse pruning (e.g. min-max pruning),
+    /// avoiding building and then removing a full selection of all row groups.
+    pub fn from_full_row_group_ids<I>(
+        row_group_ids: I,
+        row_group_size: usize,
+        total_row_count: usize,
+    ) -> Self
+    where
+        I: IntoIterator<Item = usize>,
+    {
+        if row_group_size == 0 || total_row_count == 0 {
+            return Self::default();
+        }
+
+        let row_group_count = total_row_count.div_ceil(row_group_size);
+        if row_group_count == 0 {
+            return Self::default();
+        }
+
+        let last_row_group_size = total_row_count - (row_group_count - 1) * row_group_size;
+
+        let mut selection_in_rg = BTreeMap::new();
+        let mut row_count = 0usize;
+        let mut selector_len = 0usize;
+
+        for rg_id in row_group_ids {
+            if rg_id >= row_group_count {
+                continue;
+            }
+
+            let rg_row_count = if rg_id == row_group_count - 1 {
+                last_row_group_size
+            } else {
+                row_group_size
+            };
+
+            let selection = RowSelection::from(vec![RowSelector::select(rg_row_count)]);
+            if selection_in_rg
+                .insert(
+                    rg_id,
+                    RowSelectionWithCount {
+                        selection,
+                        row_count: rg_row_count,
+                        selector_len: 1,
+                    },
+                )
+                .is_none()
+            {
+                row_count += rg_row_count;
+                selector_len += 1;
+            }
+        }
+
+        Self {
+            selection_in_rg,
+            row_count,
+            selector_len,
+        }
+    }
+
     /// Returns the row selection for a given row group.
     ///
     /// `None` indicates not selected.
@@ -746,6 +808,16 @@ mod tests {
 
         let row_selection = selection.get(1).unwrap();
         assert_eq!(row_selection.row_count(), 1);
+    }
+
+    #[test]
+    fn test_from_full_row_group_ids_dedup_duplicates() {
+        let selection = RowGroupSelection::from_full_row_group_ids([0, 0, 2, 2], 10, 25);
+        assert_eq!(selection.row_group_count(), 2);
+        assert_eq!(selection.row_count(), 15);
+
+        assert_eq!(selection.get(0).unwrap().row_count(), 10);
+        assert_eq!(selection.get(2).unwrap().row_count(), 5);
     }
 
     #[test]
