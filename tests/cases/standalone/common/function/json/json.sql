@@ -26,3 +26,13 @@ SELECT json_path_match(parse_json('{"a":1,"b":[1,2,3]}'), '$.b[1 to last] >= 2')
 SELECT json_path_match(parse_json('{"a":1,"b":[1,2,3]}'), 'null');
 
 SELECT json_path_match(parse_json('null'), '$.a == 1');
+
+--- json path query ---
+
+SELECT json_to_string(json_path_query(parse_json('{"a": 1, "b": 2}'), '$.a'));
+
+SELECT json_to_string(json_path_query(parse_json('{"a": 1, "b": 2}'), '$.*'));
+
+SELECT json_to_string(json_path_query(parse_json('{"a": 1, "b": 2}'), '$.* ? (@ > 1)'));
+
+SELECT json_to_string(json_path_query(parse_json('{"a": 1, "b": 2}'), '$.a.type()'));
