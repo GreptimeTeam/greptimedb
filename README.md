@@ -75,7 +75,7 @@ replacing Prometheus, Loki, and Elasticsearch</h2>
 | --------- | ----------- |
 | Drop-in replacement | [PromQL](https://docs.greptime.com/user-guide/query-data/promql/), [Prometheus remote write](https://docs.greptime.com/user-guide/ingest-data/for-observability/prometheus/), [Jaeger](https://docs.greptime.com/user-guide/query-data/jaeger/), and [OpenTelemetry](https://docs.greptime.com/user-guide/ingest-data/for-observability/opentelemetry/) native. Use as your single backend for all three signals, or migrate one at a time.|
 | 50x lower cost | Object storage (S3, GCS, Azure Blob etc.) as [primary storage](https://docs.greptime.com/user-guide/deployments-administration/configuration/#storage-options). Compute-storage separation scales without pain.|
-| SQL + PromQL| Monitor with [PromQL](https://docs.greptime.com/user-guide/query-data/promql), analyze with [SQL](https://docs.greptime.com/user-guide/query-data/sql). One database replaces Prometheus + your data warehouse.|
+| SQL + PromQL | Monitor with [PromQL](https://docs.greptime.com/user-guide/query-data/promql), analyze with [SQL](https://docs.greptime.com/user-guide/query-data/sql). One database replaces Prometheus + your data warehouse.|
 | Sub-second at PB-EB scale | Columnar engine with [fulltext, inverted, and skipping indexes](https://docs.greptime.com/user-guide/manage-data/data-index). Written in Rust.|
 
   ✅ **Perfect for:**
