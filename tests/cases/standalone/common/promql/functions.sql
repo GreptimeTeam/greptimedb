@@ -30,7 +30,11 @@ tql eval (3, 3, '1s') predict_linear(prom_series[3s], 3);
 -- SQLNESS SORT_RESULT 3 1
 tql eval (3, 3, '1s') predict_linear(prom_series[3s], 40 + 2);
 
--- holt_winters
+-- double_exponential_smoothing
+-- SQLNESS SORT_RESULT 3 1
+tql eval (10, 10, '1s') double_exponential_smoothing(prom_series[10s], 0.4 + 0.1, 0.1);
+
+-- holt_winters (backward compatibility)
 -- SQLNESS SORT_RESULT 3 1
 tql eval (10, 10, '1s') holt_winters(prom_series[10s], 0.4 + 0.1, 0.1);
 

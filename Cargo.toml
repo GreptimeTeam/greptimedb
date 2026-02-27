@@ -192,7 +192,7 @@ paste = "1.0"
 pin-project = "1.0"
 pretty_assertions = "1.4.0"
 prometheus = { version = "0.14", features = ["process"] }
-promql-parser = { version = "0.7.1", features = ["ser"] }
+promql-parser = { version = "0.7.2", features = ["ser"] }
 prost = { version = "0.14", features = ["no-recursion-limit"] }
 prost-types = "0.14"
 raft-engine = { version = "0.4.1", default-features = false }

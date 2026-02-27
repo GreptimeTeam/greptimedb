@@ -59,8 +59,8 @@ use promql::extension_plan::{
     ScalarCalculate, SeriesDivide, SeriesNormalize, UnionDistinctOn, build_special_time_expr,
 };
 use promql::functions::{
-    AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, HoltWinters, IDelta,
-    Increase, LastOverTime, MaxOverTime, MinOverTime, PredictLinear, PresentOverTime,
+    AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, DoubleExponentialSmoothing,
+    IDelta, Increase, LastOverTime, MaxOverTime, MinOverTime, PredictLinear, PresentOverTime,
     QuantileOverTime, Rate, Resets, Round, StddevOverTime, StdvarOverTime, SumOverTime,
     quantile_udaf,
 };
@@ -2219,7 +2219,9 @@ impl PromPlanner {
                 });
                 ScalarFunc::Udf(Arc::new(PredictLinear::scalar_udf()))
             }
-            "holt_winters" => ScalarFunc::Udf(Arc::new(HoltWinters::scalar_udf())),
+            "double_exponential_smoothing" | "holt_winters" => {
+                ScalarFunc::Udf(Arc::new(DoubleExponentialSmoothing::scalar_udf()))
+            }
             "time" => {
                 exprs.push(build_special_time_expr(
                     self.ctx.time_index_column.as_ref().unwrap(),
