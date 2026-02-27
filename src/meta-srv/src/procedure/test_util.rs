@@ -103,6 +103,7 @@ pub fn new_open_region_reply(id: u64, result: bool, error: Option<String>) -> Ma
             }))
             .unwrap(),
         )),
+        header: None,
     }
 }
 
@@ -125,6 +126,7 @@ pub fn new_flush_region_reply(id: u64, result: bool, error: Option<String>) -> M
         payload: Some(Payload::Json(
             serde_json::to_string(&InstructionReply::FlushRegions(flush_reply)).unwrap(),
         )),
+        header: None,
     }
 }
 
@@ -150,6 +152,7 @@ pub fn new_flush_region_reply_for_region(
         payload: Some(Payload::Json(
             serde_json::to_string(&InstructionReply::FlushRegions(flush_reply)).unwrap(),
         )),
+        header: None,
     }
 }
 
@@ -168,6 +171,7 @@ pub fn new_close_region_reply(id: u64) -> MailboxMessage {
             }))
             .unwrap(),
         )),
+        header: None,
     }
 }
 
@@ -196,6 +200,7 @@ pub fn new_downgrade_region_reply(
             ))
             .unwrap(),
         )),
+        header: None,
     }
 }
 
@@ -223,6 +228,7 @@ pub fn new_upgrade_region_reply(
             ))
             .unwrap(),
         )),
+        header: None,
     }
 }
 
@@ -251,6 +257,7 @@ pub fn new_enter_staging_region_reply(
             ))
             .unwrap(),
         )),
+        header: None,
     }
 }
 
@@ -279,6 +286,7 @@ pub fn new_sync_region_reply(
             ])))
             .unwrap(),
         )),
+        header: None,
     }
 }
 

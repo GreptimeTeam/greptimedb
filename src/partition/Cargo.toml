@@ -30,7 +30,7 @@ store-api.workspace = true
 table.workspace = true
 
 [dev-dependencies]
-criterion = "0.5"
+criterion.workspace = true
 rand = "0.8"
 
 [[bench]]

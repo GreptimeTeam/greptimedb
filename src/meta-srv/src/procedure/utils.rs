@@ -17,6 +17,7 @@ use std::time::Duration;
 use api::v1::meta::MailboxMessage;
 use common_meta::instruction::{FlushErrorStrategy, FlushRegions, Instruction, InstructionReply};
 use common_meta::peer::Peer;
+use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{info, warn};
 use snafu::ResultExt;
 use store_api::storage::RegionId;
@@ -104,12 +105,14 @@ pub(crate) async fn flush_region(
         FlushErrorStrategy::TryAll,
     ));
 
+    let tracing_ctx = TracingContext::from_current_span();
     let msg = MailboxMessage::json_message(
         &format!("Flush regions: {:?}", region_ids),
         &format!("Metasrv@{}", server_addr),
         &format!("Datanode-{}@{}", datanode.id, datanode.addr),
         common_time::util::current_time_millis(),
         &flush_instruction,
+        Some(tracing_ctx.to_w3c()),
     )
     .with_context(|_| error::SerializeToJsonSnafu {
         input: flush_instruction.to_string(),

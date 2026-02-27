@@ -373,7 +373,7 @@ impl StartCommand {
         .context(error::MetaClientInitSnafu)?;
 
         let meta_config: Vec<PluginOptions> = meta_client
-            .pull_meta_config()
+            .pull_config()
             .await
             .context(error::MetaClientInitSnafu)?;
         setup_frontend_dynamic_plugins(meta_config, &mut plugins)

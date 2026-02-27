@@ -252,6 +252,7 @@ mod tests {
                 to: "test-to".to_string(),
                 timestamp_millis,
                 payload: None,
+                header: None,
             }))
         });
 

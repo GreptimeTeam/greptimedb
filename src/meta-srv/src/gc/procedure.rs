@@ -30,6 +30,7 @@ use common_procedure::{
     Result as ProcedureResult, Status,
 };
 use common_telemetry::tracing::Instrument as _;
+use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{debug, error, info, warn};
 use futures::future::join_all;
 use itertools::Itertools as _;
@@ -53,12 +54,14 @@ async fn send_get_file_refs_inner(
     timeout: Duration,
 ) -> Result<MailboxReceiver> {
     let instruction = instruction::Instruction::GetFileRefs(instruction);
+    let tracing_ctx = TracingContext::from_current_span();
     let msg = MailboxMessage::json_message(
         &format!("Get file references: {}", instruction),
         &format!("Metasrv@{}", server_addr),
         &format!("Datanode-{}@{}", peer.id, peer.addr),
         common_time::util::current_time_millis(),
         &instruction,
+        Some(tracing_ctx.to_w3c()),
     )
     .with_context(|_| SerializeToJsonSnafu {
         input: instruction.to_string(),
@@ -104,12 +107,14 @@ async fn send_gc_regions_inner(
     description: &str,
 ) -> Result<MailboxReceiver> {
     let instruction = instruction::Instruction::GcRegions(gc_regions.clone());
+    let tracing_ctx = TracingContext::from_current_span();
     let msg = MailboxMessage::json_message(
         &format!("{}: {}", description, instruction),
         &format!("Metasrv@{}", server_addr),
         &format!("Datanode-{}@{}", peer.id, peer.addr),
         common_time::util::current_time_millis(),
         &instruction,
+        Some(tracing_ctx.to_w3c()),
     )
     .with_context(|_| SerializeToJsonSnafu {
         input: instruction.to_string(),

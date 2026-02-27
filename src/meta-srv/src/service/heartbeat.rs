@@ -18,8 +18,7 @@ use std::sync::atomic::AtomicU64;
 
 use api::v1::meta::{
     AskLeaderRequest, AskLeaderResponse, HeartbeatRequest, HeartbeatResponse, Peer,
-    PullMetaConfigRequest, PullMetaConfigResponse, RequestHeader, ResponseHeader, Role,
-    heartbeat_server,
+    PullConfigRequest, PullConfigResponse, RequestHeader, ResponseHeader, Role, heartbeat_server,
 };
 use common_options::plugin_options::PluginOptionsSerializerRef;
 use common_telemetry::{debug, error, info, warn};
@@ -143,17 +142,14 @@ impl heartbeat_server::Heartbeat for Metasrv {
         Ok(Response::new(res))
     }
 
-    async fn pull_meta_config(
-        &self,
-        req: Request<PullMetaConfigRequest>,
-    ) -> GrpcResult<PullMetaConfigResponse> {
+    async fn pull_config(&self, req: Request<PullConfigRequest>) -> GrpcResult<PullConfigResponse> {
         let payload = self
             .plugins()
             .get::<PluginOptionsSerializerRef>()
             .and_then(|p| p.serialize().ok())
             .unwrap_or_default();
 
-        let res = PullMetaConfigResponse {
+        let res = PullConfigResponse {
             header: Some(ResponseHeader::success()),
             payload,
         };

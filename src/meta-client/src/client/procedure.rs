@@ -335,9 +335,9 @@ mod tests {
     use api::v1::meta::{
         AskLeaderRequest, AskLeaderResponse, DdlTaskRequest, DdlTaskResponse, HeartbeatRequest,
         HeartbeatResponse, MigrateRegionRequest, MigrateRegionResponse, Peer,
-        ProcedureDetailRequest, ProcedureDetailResponse, ProcedureStateResponse,
-        PullMetaConfigRequest, PullMetaConfigResponse, QueryProcedureRequest, ReconcileRequest,
-        ReconcileResponse, ResponseHeader, Role,
+        ProcedureDetailRequest, ProcedureDetailResponse, ProcedureStateResponse, PullConfigRequest,
+        PullConfigResponse, QueryProcedureRequest, ReconcileRequest, ReconcileResponse,
+        ResponseHeader, Role,
     };
     use async_trait::async_trait;
     use common_error::status_code::StatusCode;
@@ -387,13 +387,13 @@ mod tests {
             }))
         }
 
-        async fn pull_meta_config(
+        async fn pull_config(
             &self,
-            _: Request<PullMetaConfigRequest>,
-        ) -> Result<Response<PullMetaConfigResponse>, Status> {
-            let res = PullMetaConfigResponse {
+            _: Request<PullConfigRequest>,
+        ) -> Result<Response<PullConfigResponse>, Status> {
+            let res = PullConfigResponse {
                 header: Some(ResponseHeader::success()),
-                payload: vec![],
+                payload: "".to_string(),
             };
 
             Ok(Response::new(res))

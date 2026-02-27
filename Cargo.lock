@@ -955,17 +955,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
-name = "atty"
-version = "0.2.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d9b39be18770d11421cdb1b9947a45dd3f37e93092cbf377614828a319d5fee8"
-dependencies = [
- "hermit-abi 0.1.19",
- "libc",
- "winapi",
-]
-
-[[package]]
 name = "auth"
 version = "1.0.0-rc.1"
 dependencies = [
@@ -1948,18 +1937,6 @@ dependencies = [
 
 [[package]]
 name = "clap"
-version = "3.2.25"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ea181bf566f71cb9a5d17a59e1871af638180a18fb0035c92ae62b705207123"
-dependencies = [
- "bitflags 1.3.2",
- "clap_lex 0.2.4",
- "indexmap 1.9.3",
- "textwrap",
-]
-
-[[package]]
-name = "clap"
 version = "4.5.40"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40b6887a1d8685cebccf115538db5c0efe625ccac9696ad45c409d96566e910f"
@@ -1976,7 +1953,7 @@ checksum = "e0c66c08ce9f0c698cbce5c0279d0bb6ac936d8674174fe48f736533b964f59e"
 dependencies = [
  "anstream",
  "anstyle",
- "clap_lex 0.7.5",
+ "clap_lex",
  "strsim 0.11.1",
 ]
 
@@ -1990,15 +1967,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.114",
-]
-
-[[package]]
-name = "clap_lex"
-version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2850f2f5a82cbf437dd5af4d49848fbdfc27c157c3d010345776f952765261c5"
-dependencies = [
- "os_str_bytes",
 ]
 
 [[package]]
@@ -2018,7 +1986,7 @@ dependencies = [
  "cache",
  "catalog",
  "chrono",
- "clap 4.5.40",
+ "clap",
  "client",
  "common-base",
  "common-catalog",
@@ -2097,7 +2065,6 @@ dependencies = [
  "serde_json",
  "snafu 0.8.6",
  "store-api",
- "substrait 0.37.3",
  "substrait 1.0.0-rc.1",
  "tokio",
  "tokio-stream",
@@ -2146,7 +2113,7 @@ dependencies = [
  "cache",
  "catalog",
  "chrono",
- "clap 4.5.40",
+ "clap",
  "cli",
  "client",
  "colored",
@@ -2530,7 +2497,7 @@ dependencies = [
  "common-runtime",
  "common-telemetry",
  "common-time",
- "criterion 0.4.0",
+ "criterion 0.7.0",
  "dashmap",
  "datatypes",
  "flatbuffers",
@@ -2800,7 +2767,7 @@ name = "common-runtime"
 version = "1.0.0-rc.1"
 dependencies = [
  "async-trait",
- "clap 4.5.40",
+ "clap",
  "common-error",
  "common-macro",
  "common-telemetry",
@@ -3247,34 +3214,6 @@ dependencies = [
 
 [[package]]
 name = "criterion"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e7c76e09c1aae2bc52b3d2f29e13c6572553b30c4aa1b8a49fd70de6412654cb"
-dependencies = [
- "anes",
- "atty",
- "cast",
- "ciborium",
- "clap 3.2.25",
- "criterion-plot 0.5.0",
- "futures",
- "itertools 0.10.5",
- "lazy_static",
- "num-traits",
- "oorandom",
- "plotters",
- "rayon",
- "regex",
- "serde",
- "serde_derive",
- "serde_json",
- "tinytemplate",
- "tokio",
- "walkdir",
-]
-
-[[package]]
-name = "criterion"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2b12d017a929603d80db1831cd3a24082f8137ce19c69e6447f54f5fc8d692f"
@@ -3282,7 +3221,7 @@ dependencies = [
  "anes",
  "cast",
  "ciborium",
- "clap 4.5.40",
+ "clap",
  "criterion-plot 0.5.0",
  "is-terminal",
  "itertools 0.10.5",
@@ -3308,7 +3247,7 @@ dependencies = [
  "anes",
  "cast",
  "ciborium",
- "clap 4.5.40",
+ "clap",
  "criterion-plot 0.6.0",
  "itertools 0.13.0",
  "num-traits",
@@ -3319,6 +3258,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tinytemplate",
+ "tokio",
  "walkdir",
 ]
 
@@ -3496,7 +3436,7 @@ version = "1.0.190"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b1f29a879d35f7906e3c9b77d7a1005a6a0787d330c09dfe4ffb5f617728cb44"
 dependencies = [
- "clap 4.5.40",
+ "clap",
  "codespan-reporting 0.13.1",
  "indexmap 2.12.0",
  "proc-macro2",
@@ -4373,6 +4313,7 @@ dependencies = [
  "session",
  "snafu 0.8.6",
  "store-api",
+ "strum 0.27.1",
  "table",
  "tokio",
  "toml 0.8.23",
@@ -6006,15 +5947,6 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "hermit-abi"
-version = "0.1.19"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62b467343b94ba476dcb2500d242dadbb39557df889310ac77c5d99100aaac33"
-dependencies = [
- "libc",
-]
-
-[[package]]
-name = "hermit-abi"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
@@ -6577,7 +6509,7 @@ dependencies = [
  "common-runtime",
  "common-telemetry",
  "common-test-util",
- "criterion 0.4.0",
+ "criterion 0.7.0",
  "datatypes",
  "fastbloom",
  "fst",
@@ -6663,7 +6595,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2094aecddc672e902cd773bad7071542f63641e01e9187c3bba4b43005e837e9"
 dependencies = [
  "ahash 0.8.12",
- "clap 4.5.40",
+ "clap",
  "crossbeam-channel",
  "crossbeam-utils",
  "dashmap",
@@ -6804,7 +6736,7 @@ version = "0.4.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e04d7f318608d35d4b61ddd75cbdaee86b023ebe2bd5a66ee0915f0bf93095a9"
 dependencies = [
- "hermit-abi 0.5.2",
+ "hermit-abi",
  "libc",
  "windows-sys 0.52.0",
 ]
@@ -7867,7 +7799,7 @@ dependencies = [
  "axum-macros",
  "bytes",
  "chrono",
- "clap 4.5.40",
+ "clap",
  "client",
  "common-base",
  "common-catalog",
@@ -7979,7 +7911,7 @@ dependencies = [
  "common-test-util",
  "common-time",
  "common-wal",
- "criterion 0.4.0",
+ "criterion 0.7.0",
  "datafusion",
  "datatypes",
  "futures-util",
@@ -8112,7 +8044,7 @@ dependencies = [
  "common-time",
  "common-wal",
  "crc32fast",
- "criterion 0.4.0",
+ "criterion 0.7.0",
  "crossbeam-utils",
  "dashmap",
  "datafusion",
@@ -8724,7 +8656,7 @@ version = "1.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "91df4bbde75afed763b708b7eee1e8e7651e02d97f6d5dd763e89367e957b23b"
 dependencies = [
- "hermit-abi 0.5.2",
+ "hermit-abi",
  "libc",
 ]
 
@@ -9296,12 +9228,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "os_str_bytes"
-version = "6.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e2355d85b9a3786f481747ced0e0ff2ba35213a1f9bd406ed906554d7af805a1"
-
-[[package]]
 name = "otel-arrow-rust"
 version = "0.1.0"
 source = "git+https://github.com/GreptimeTeam/otel-arrow?rev=5da284414e9b14f678344b51e5292229e4b5f8d2#5da284414e9b14f678344b51e5292229e4b5f8d2"
@@ -9500,7 +9426,7 @@ dependencies = [
  "common-macro",
  "common-meta",
  "common-query",
- "criterion 0.5.1",
+ "criterion 0.7.0",
  "datafusion-common",
  "datafusion-expr",
  "datafusion-physical-expr",
@@ -9866,7 +9792,7 @@ dependencies = [
  "common-runtime",
  "common-telemetry",
  "common-time",
- "criterion 0.4.0",
+ "criterion 0.7.0",
  "crossbeam-utils",
  "csv",
  "dashmap",
@@ -10007,7 +9933,7 @@ version = "1.0.0-rc.1"
 dependencies = [
  "auth",
  "catalog",
- "clap 4.5.40",
+ "clap",
  "cli",
  "common-base",
  "common-error",
@@ -10432,24 +10358,6 @@ dependencies = [
  "prost-types 0.12.6",
  "regex",
  "syn 2.0.114",
- "tempfile",
-]
-
-[[package]]
-name = "prost-build"
-version = "0.13.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
-dependencies = [
- "heck 0.4.1",
- "itertools 0.10.5",
- "log",
- "multimap",
- "once_cell",
- "petgraph 0.7.1",
- "prost 0.13.5",
- "prost-types 0.13.5",
- "regex",
  "tempfile",
 ]
 
@@ -11217,16 +11125,6 @@ name = "regex-syntax"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3160422bbd54dd5ecfdca71e5fd59b7b8fe2b1697ab2baf64f6d05dcc66d298"
-
-[[package]]
-name = "regress"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0eae2a1ebfecc58aff952ef8ccd364329abe627762f5bf09ff42eb9d98522479"
-dependencies = [
- "hashbrown 0.14.5",
- "memchr",
-]
 
 [[package]]
 name = "regress"
@@ -12760,7 +12658,7 @@ name = "sqlness-runner"
 version = "1.0.0-rc.1"
 dependencies = [
  "async-trait",
- "clap 4.5.40",
+ "clap",
  "client",
  "common-error",
  "common-query",
@@ -13248,27 +13146,6 @@ dependencies = [
 
 [[package]]
 name = "substrait"
-version = "0.37.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ec889155c56a34200d2c5aee147b8d29545fa7cce7f68b38d927f5d24ced8ef"
-dependencies = [
- "heck 0.5.0",
- "prettyplease",
- "prost 0.13.5",
- "prost-build 0.13.5",
- "prost-types 0.13.5",
- "schemars",
- "semver",
- "serde",
- "serde_json",
- "serde_yaml",
- "syn 2.0.114",
- "typify 0.1.0",
- "walkdir",
-]
-
-[[package]]
-name = "substrait"
 version = "0.62.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "62fc4b483a129b9772ccb9c3f7945a472112fdd9140da87f8a4e7f1d44e045d0"
@@ -13281,14 +13158,14 @@ dependencies = [
  "prost 0.14.1",
  "prost-build 0.14.1",
  "prost-types 0.14.1",
- "regress 0.10.5",
+ "regress",
  "schemars",
  "semver",
  "serde",
  "serde_json",
  "serde_yaml",
  "syn 2.0.114",
- "typify 0.5.0",
+ "typify",
  "walkdir",
 ]
 
@@ -13310,7 +13187,6 @@ dependencies = [
  "promql",
  "prost 0.14.1",
  "snafu 0.8.6",
- "substrait 0.37.3",
  "tokio",
 ]
 
@@ -13741,7 +13617,7 @@ dependencies = [
  "cache",
  "catalog",
  "chrono",
- "clap 4.5.40",
+ "clap",
  "client",
  "cmd",
  "common-base",
@@ -13822,12 +13698,6 @@ dependencies = [
  "yaml-rust",
  "zstd 0.13.3",
 ]
-
-[[package]]
-name = "textwrap"
-version = "0.16.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c13547615a44dc9c452a8a534638acdf07120d4b6847c8178705da06306a3057"
 
 [[package]]
 name = "thiserror"
@@ -14626,42 +14496,12 @@ dependencies = [
 
 [[package]]
 name = "typify"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "adb6beec125971dda80a086f90b4a70f60f222990ce4d63ad0fc140492f53444"
-dependencies = [
- "typify-impl 0.1.0",
- "typify-macro 0.1.0",
-]
-
-[[package]]
-name = "typify"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6d5bcc6f62eb1fa8aa4098f39b29f93dcb914e17158b76c50360911257aa629"
 dependencies = [
- "typify-impl 0.5.0",
- "typify-macro 0.5.0",
-]
-
-[[package]]
-name = "typify-impl"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93bbb24e990654aff858d80fee8114f4322f7d7a1b1ecb45129e2fcb0d0ad5ae"
-dependencies = [
- "heck 0.5.0",
- "log",
- "proc-macro2",
- "quote",
- "regress 0.9.1",
- "schemars",
- "semver",
- "serde",
- "serde_json",
- "syn 2.0.114",
- "thiserror 1.0.69",
- "unicode-ident",
+ "typify-impl",
+ "typify-macro",
 ]
 
 [[package]]
@@ -14674,7 +14514,7 @@ dependencies = [
  "log",
  "proc-macro2",
  "quote",
- "regress 0.10.5",
+ "regress",
  "schemars",
  "semver",
  "serde",
@@ -14682,23 +14522,6 @@ dependencies = [
  "syn 2.0.114",
  "thiserror 2.0.17",
  "unicode-ident",
-]
-
-[[package]]
-name = "typify-macro"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8e6491896e955692d68361c68db2b263e3bec317ec0b684e0e2fa882fb6e31e"
-dependencies = [
- "proc-macro2",
- "quote",
- "schemars",
- "semver",
- "serde",
- "serde_json",
- "serde_tokenstream",
- "syn 2.0.114",
- "typify-impl 0.1.0",
 ]
 
 [[package]]
@@ -14715,7 +14538,7 @@ dependencies = [
  "serde_json",
  "serde_tokenstream",
  "syn 2.0.114",
- "typify-impl 0.5.0",
+ "typify-impl",
 ]
 
 [[package]]
@@ -15029,7 +14852,7 @@ dependencies = [
  "chrono-tz",
  "ciborium",
  "cidr",
- "clap 4.5.40",
+ "clap",
  "codespan-reporting 0.12.0",
  "community-id",
  "convert_case 0.7.1",

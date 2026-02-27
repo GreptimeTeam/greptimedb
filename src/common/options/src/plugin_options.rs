@@ -17,7 +17,7 @@ use std::sync::Arc;
 /// A trait for serializing Metasrv config to a JSON string.
 /// So it can be used in the metasrv's crate instead of depending on the plugins' crate.
 pub trait PluginOptionsSerializer: Send + Sync {
-    fn serialize(&self) -> Result<Vec<String>, serde_json::Error>;
+    fn serialize(&self) -> Result<String, serde_json::Error>;
 }
 
 pub type PluginOptionsSerializerRef = Arc<dyn PluginOptionsSerializer>;

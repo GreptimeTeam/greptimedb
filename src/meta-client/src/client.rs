@@ -585,15 +585,16 @@ impl MetaClient {
         self.heartbeat_client()?.ask_leader().await
     }
 
-    pub async fn pull_meta_config<T>(&self) -> Result<Vec<T>>
+    pub async fn pull_config<T>(&self) -> Result<T>
     where
-        T: DeserializeOwned,
+        T: DeserializeOwned + Default,
     {
-        let res = self.heartbeat_client()?.pull_meta_config().await?;
-        res.payload
-            .into_iter()
-            .map(|p| serde_json::from_str(&p).context(ConvertMetaConfigSnafu))
-            .collect()
+        let res = self.heartbeat_client()?.pull_config().await?;
+        if res.payload.is_empty() {
+            Ok(T::default())
+        } else {
+            serde_json::from_str(&res.payload).context(ConvertMetaConfigSnafu)
+        }
     }
 
     /// Returns a heartbeat bidirectional streaming: (sender, receiver), the

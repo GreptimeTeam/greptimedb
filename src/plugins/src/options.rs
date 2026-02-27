@@ -27,7 +27,7 @@ pub enum PluginOptions {
 pub struct PluginOptionsList(pub Vec<PluginOptions>);
 
 impl PluginOptionsSerializer for PluginOptionsList {
-    fn serialize(&self) -> Result<Vec<String>, serde_json::Error> {
-        self.0.iter().map(serde_json::to_string).collect()
+    fn serialize(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(&self.0)
     }
 }

@@ -24,6 +24,7 @@ use common_meta::key::topic_region::{ReplayCheckpoint, TopicRegionKey, TopicRegi
 use common_meta::peer::Peer;
 use common_meta::region_registry::{LeaderRegion, LeaderRegionRegistryRef};
 use common_meta::stats::topic::TopicStatsRegistryRef;
+use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{debug, error, info, warn};
 use common_time::util::current_time_millis;
 use common_wal::config::kafka::common::{
@@ -362,6 +363,8 @@ impl RegionFlushTrigger {
                 (leader, flush_instruction)
             });
 
+        let tracing_ctx = TracingContext::from_current_span();
+        let tracing_header = tracing_ctx.to_w3c();
         for (peer, flush_instruction) in flush_instructions {
             let msg = MailboxMessage::json_message(
                 &format!("Flush regions: {}", flush_instruction),
@@ -369,6 +372,7 @@ impl RegionFlushTrigger {
                 &format!("Datanode-{}@{}", peer.id, peer.addr),
                 common_time::util::current_time_millis(),
                 &flush_instruction,
+                Some(tracing_header.clone()),
             )
             .with_context(|_| error::SerializeToJsonSnafu {
                 input: flush_instruction.to_string(),

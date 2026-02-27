@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::hint::black_box;
 use std::sync::Arc;
 
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use pipeline::error::Result;
 use pipeline::{Content, Pipeline, PipelineContext, SchemaInfo, parse, setup_pipeline};
 use serde_json::Deserializer;

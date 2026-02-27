@@ -28,6 +28,7 @@ use store_api::path_utils::table_dir;
 use store_api::region_request::PathType;
 use store_api::storage::{FileRefsManifest, GcReport, RegionId};
 use table::requests::STORAGE_KEY;
+use tracing::Instrument;
 
 use crate::error::{GcMitoEngineSnafu, GetMetadataSnafu, Result, UnexpectedSnafu};
 use crate::heartbeat::handler::{HandlerContext, InstructionHandler};
@@ -74,44 +75,47 @@ impl InstructionHandler for GcRegionsHandler {
             .gc_tasks
             .try_register(
                 target_region_id,
-                Box::pin(async move {
-                    let mut reports = Vec::with_capacity(table_to_regions.len());
-                    for (table_id, regions) in table_to_regions {
-                        debug!(
-                            "Starting gc worker for table {}, regions: {:?}",
-                            table_id, regions
-                        );
-                        let gc_worker = GcRegionsHandler::create_gc_worker(
-                            &ctx_clone,
-                            table_id,
-                            regions,
-                            &file_refs_manifest,
-                            full_file_listing,
-                        )
-                        .await?;
+                Box::pin(
+                    async move {
+                        let mut reports = Vec::with_capacity(table_to_regions.len());
+                        for (table_id, regions) in table_to_regions {
+                            debug!(
+                                "Starting gc worker for table {}, regions: {:?}",
+                                table_id, regions
+                            );
+                            let gc_worker = GcRegionsHandler::create_gc_worker(
+                                &ctx_clone,
+                                table_id,
+                                regions,
+                                &file_refs_manifest,
+                                full_file_listing,
+                            )
+                            .await?;
 
-                        let report = gc_worker.run().await.context(GcMitoEngineSnafu {
-                            region_id: target_region_id,
-                        })?;
-                        debug!(
-                            "Gc worker for table {} finished, report: {:?}",
-                            table_id, report
-                        );
-                        reports.push(report);
-                    }
+                            let report = gc_worker.run().await.context(GcMitoEngineSnafu {
+                                region_id: target_region_id,
+                            })?;
+                            debug!(
+                                "Gc worker for table {} finished, report: {:?}",
+                                table_id, report
+                            );
+                            reports.push(report);
+                        }
 
-                    // Merge reports
-                    let mut merged_report = GcReport::default();
-                    for report in reports {
-                        merged_report
-                            .deleted_files
-                            .extend(report.deleted_files.into_iter());
-                        merged_report
-                            .deleted_indexes
-                            .extend(report.deleted_indexes.into_iter());
+                        // Merge reports
+                        let mut merged_report = GcReport::default();
+                        for report in reports {
+                            merged_report
+                                .deleted_files
+                                .extend(report.deleted_files.into_iter());
+                            merged_report
+                                .deleted_indexes
+                                .extend(report.deleted_indexes.into_iter());
+                        }
+                        Ok(merged_report)
                     }
-                    Ok(merged_report)
-                }),
+                    .instrument(common_telemetry::tracing::info_span!("gc_worker_run")),
+                ),
             )
             .await;
 

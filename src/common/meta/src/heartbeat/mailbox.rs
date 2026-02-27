@@ -14,12 +14,13 @@
 
 use std::sync::Arc;
 
+use common_telemetry::tracing_context::TracingContext;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::mpsc::error::SendError;
 
 use crate::instruction::{Instruction, InstructionReply};
 
-pub type IncomingMessage = (MessageMeta, Instruction);
+pub type IncomingMessage = (MessageMeta, TracingContext, Instruction);
 pub type OutgoingMessage = (MessageMeta, InstructionReply);
 
 #[derive(Debug, PartialEq, Eq, Clone)]
