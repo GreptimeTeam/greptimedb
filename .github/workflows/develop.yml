@@ -316,6 +316,13 @@ jobs:
             minio: true
             kafka: true
             values: "with-remote-wal.yaml"
+        include:
+          - target: "fuzz_repartition_table"
+            mode:
+              name: "Local WAL Repartition GC"
+              minio: true
+              kafka: false
+              values: "with-minio-repartition-gc.yaml"
     steps:
       - name: Remove unused software
         run: |

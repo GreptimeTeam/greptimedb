@@ -18,6 +18,7 @@ use partition::expr::{Operand, PartitionExpr, RestrictedOp};
 use rand::Rng;
 use snafu::ensure;
 
+use crate::context::TableContext;
 use crate::error::{self, Result};
 use crate::ir::{Ident, generate_random_value};
 
@@ -36,6 +37,7 @@ use crate::ir::{Ident, generate_random_value};
 /// # Fields
 /// - `column_name`: The name of the column used for partitioning.
 /// - `bounds`: The partition boundary values; must be sorted for correct partitioning logic.
+#[derive(Clone)]
 pub struct SimplePartitions {
     /// The column to partition by.
     pub column_name: Ident,
@@ -134,6 +136,15 @@ impl SimplePartitions {
             }
         }
         Ok(Self::new(column_name, bounds))
+    }
+
+    /// Reconstructs a `SimplePartitions` instance from a `TableContext`.
+    pub fn from_table_ctx(table_ctx: &TableContext) -> Result<Self> {
+        let partition_def = table_ctx
+            .partition
+            .as_ref()
+            .expect("expected partition def");
+        Self::from_exprs(partition_def.columns[0].clone(), &partition_def.exprs)
     }
 
     /// Inserts a new bound into the partition bounds and returns the index of the new bound.

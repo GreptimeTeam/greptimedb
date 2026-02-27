@@ -1,0 +1,39 @@
+meta:
+  configData: |-
+    [runtime]
+    global_rt_size = 4
+
+    [datanode]
+    [datanode.client]
+    timeout = "120s"
+
+    [gc]
+    enable = true
+datanode:
+  configData: |-
+    [runtime]
+    global_rt_size = 4
+    compact_rt_size = 2
+
+    [[region_engine]]
+    [region_engine.mito]
+    [region_engine.mito.gc]
+    enable = true
+    lingering_time = "0s"
+    unknown_file_lingering_time = "0s"
+frontend:
+  configData: |-
+    [runtime]
+    global_rt_size = 4
+
+    [meta_client]
+    ddl_timeout = "120s"
+objectStorage:
+  s3:
+    bucket: default
+    region: us-west-2
+    root: test-root
+    endpoint: http://minio.minio.svc.cluster.local
+  credentials:
+    accessKeyId: rootuser
+    secretAccessKey: rootpass123

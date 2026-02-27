@@ -73,6 +73,7 @@ pub enum RowValue {
 }
 
 impl RowValue {
+    #[allow(clippy::should_implement_trait)]
     pub fn cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         match (self, other) {
             (RowValue::Value(Value::Null), RowValue::Value(v2)) => v2.partial_cmp(&Value::Null),
