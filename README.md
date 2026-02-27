@@ -175,7 +175,6 @@ cargo run -- standalone start
 
 - Deployed in production handling billions of data points daily
 - Stable APIs, actively maintained, with regular releases ([version info](https://docs.greptime.com/nightly/reference/about-greptimedb-version))
-- Suitable for evaluation and pilot deployments
 
 GreptimeDB v1.0 represents a major milestone toward maturity — marking stable APIs, production readiness, and proven performance.
 
