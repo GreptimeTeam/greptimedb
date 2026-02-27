@@ -171,7 +171,7 @@ cargo run -- standalone start
 ## Project Status
 
 > **Status:** RC — marching toward v1.0 GA!
-> **GA (v1.0):** March, 2026
+> **GA (v1.0):** March 2026
 
 - Deployed in production handling billions of data points daily
 - Stable APIs, actively maintained, with regular releases ([version info](https://docs.greptime.com/nightly/reference/about-greptimedb-version))
