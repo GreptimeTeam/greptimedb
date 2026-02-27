@@ -1,0 +1,279 @@
+-- Test CSV import optional parameter `header` functionality
+-- First, create tables and export data into csv files as test files
+CREATE TABLE demo_1(host string, cpu double, memory double, jsons JSON, ts TIMESTAMP time index);
+
+Affected Rows: 0
+
+insert into
+    demo_1(host, cpu, memory, jsons, ts)
+values
+    ('host1', 66.6, 1024, '{"host1":"1"}', 1655276557000),
+    ('host2', 88.8, 333.3, '{"host2":"2"}', 1655276558000),
+    ('host3', 99.9, 444.4, '{"host3":"3"}', 1722077263000);
+
+Affected Rows: 3
+
+CREATE TABLE demo_2(host string, jsons JSON, ts TIMESTAMP time index);
+
+Affected Rows: 0
+
+insert into
+    demo_2(host, jsons, ts)
+values
+    ('host4', '{"host4":"4"}', 1755276557000),
+    ('host5', '{"host5":"5"}', 1755276558000),
+    ('host6', '{"host6":"6"}', 1822077263000);
+
+Affected Rows: 3
+
+Copy demo_1 TO '${SQLNESS_HOME}/demo/export/csv_header/demo_1.csv' with (format='csv');
+
+Affected Rows: 3
+
+Copy demo_2 TO '${SQLNESS_HOME}/demo/export/csv_header/demo_2.csv' with (format='csv');
+
+Affected Rows: 3
+
+-- Test the case where a CSV has more fields than the table. (header=true, continue_on_error=false) (table: 4, file: 5)
+CREATE TABLE enable_long_fields(host string, cpu double, jsons JSON, ts TIMESTAMP time index);
+
+Affected Rows: 0
+
+Copy enable_long_fields FROM '${SQLNESS_HOME}/demo/export/csv_header/demo_1.csv' with (format='csv', header='true', continue_on_error='false');
+
+Error: 1004(InvalidArguments), The number of fields in the CSV file does not match the table schema, expected table schema: 4, actual file schema: 5
+
+SELECT count(*) FROM enable_long_fields;
+
++----------+
+| count(*) |
++----------+
+| 0        |
++----------+
+
+-- Test the number of CSV fields is fewer than the table’s. (header=true, continue_on_error=false) (table: 5, file: 3)
+CREATE TABLE enable_short_fields(host string, cpu double, memory double, jsons JSON, ts TIMESTAMP time index);
+
+Affected Rows: 0
+
+Copy enable_short_fields FROM '${SQLNESS_HOME}/demo/export/csv_header/demo_2.csv' with (format='csv', header='true', continue_on_error='false');
+
+Error: 1004(InvalidArguments), The number of fields in the CSV file does not match the table schema, expected table schema: 5, actual file schema: 3
+
+SELECT count(*) FROM enable_short_fields;
+
++----------+
+| count(*) |
++----------+
+| 0        |
++----------+
+
+-- Test the case where a CSV has more fields than the table. (header=false) (table: 4, file: 5)
+CREATE TABLE disable_long_fields(host string, cpu double, jsons JSON, ts TIMESTAMP time index);
+
+Affected Rows: 0
+
+Copy disable_long_fields FROM '${SQLNESS_HOME}/demo/export/csv_header/demo_1.csv' with (format='csv', header='false');
+
+Affected Rows: 3
+
+SELECT count(*) FROM disable_long_fields;
+
++----------+
+| count(*) |
++----------+
+| 3        |
++----------+
+
+SELECT * FROM disable_long_fields order by ts;
+
++-------+------+----------------------------+---------------------+
+| host  | cpu  | jsons                      | ts                  |
++-------+------+----------------------------+---------------------+
+| host1 | 66.6 | 7b22686f737431223a2231227d | 2022-06-15T07:02:37 |
+| host2 | 88.8 | 7b22686f737432223a2232227d | 2022-06-15T07:02:38 |
+| host3 | 99.9 | 7b22686f737433223a2233227d | 2024-07-27T10:47:43 |
++-------+------+----------------------------+---------------------+
+
+-- Test the number of CSV fields is fewer than the table’s. (header=false) (table: 5, file: 3)
+CREATE TABLE disable_short_fields(host string, cpu double, memory double, jsons JSON, ts TIMESTAMP time index);
+
+Affected Rows: 0
+
+Copy disable_short_fields FROM '${SQLNESS_HOME}/demo/export/csv_header/demo_2.csv' with (format='csv', header='false');
+
+Affected Rows: 3
+
+SELECT count(*) FROM disable_short_fields;
+
++----------+
+| count(*) |
++----------+
+| 3        |
++----------+
+
+SELECT * FROM disable_short_fields order by ts;
+
++-------+-----+--------+----------------------------+---------------------+
+| host  | cpu | memory | jsons                      | ts                  |
++-------+-----+--------+----------------------------+---------------------+
+| host4 |     |        | 7b22686f737434223a2234227d | 2025-08-15T16:49:17 |
+| host5 |     |        | 7b22686f737435223a2235227d | 2025-08-15T16:49:18 |
+| host6 |     |        | 7b22686f737436223a2236227d | 2027-09-27T20:34:23 |
++-------+-----+--------+----------------------------+---------------------+
+
+-- Test the order of CSV fields differs from the table’s. (header=true, continue_on_error=false)
+CREATE TABLE enable_different_order(host string, memory double, jsons JSON, cpu double, ts TIMESTAMP time index);
+
+Affected Rows: 0
+
+Copy enable_different_order FROM '${SQLNESS_HOME}/demo/export/csv_header/demo_1.csv' with (format='csv', header='true', continue_on_error='false');
+
+Error: 1004(InvalidArguments), Schema datatypes not match at index 2, expected table schema: Binary, actual file schema: Float64
+
+SELECT count(*) FROM enable_different_order;
+
++----------+
+| count(*) |
++----------+
+| 0        |
++----------+
+
+-- Test the order of CSV fields differs from the table’s. (header=false)
+CREATE TABLE disable_different_order(host string, memory double, jsons JSON, cpu double, ts TIMESTAMP time index);
+
+Affected Rows: 0
+
+Copy disable_different_order FROM '${SQLNESS_HOME}/demo/export/csv_header/demo_1.csv' with (format='csv', header='false');
+
+Affected Rows: 3
+
+SELECT count(*) FROM disable_different_order;
+
++----------+
+| count(*) |
++----------+
+| 3        |
++----------+
+
+-- Test the order of CSV fields differs from the table’s. (header=true, continue_on_error=false)
+CREATE TABLE different_order(host string, memory double, jsons JSON, cpu double, ts TIMESTAMP time index);
+
+Affected Rows: 0
+
+Copy different_order FROM '${SQLNESS_HOME}/demo/export/csv_header/demo_1.csv' with (format='csv', header='true', continue_on_error='false');
+
+Error: 1004(InvalidArguments), Schema datatypes not match at index 2, expected table schema: Binary, actual file schema: Float64
+
+SELECT count(*) FROM different_order;
+
++----------+
+| count(*) |
++----------+
+| 0        |
++----------+
+
+-- Test to validate that the header schema of the file matches the table schema
+-- Import only the files that successfully pass the checks
+CREATE TABLE check_header(host string, cpu double, memory double, jsons JSON, ts TIMESTAMP time index);
+
+Affected Rows: 0
+
+Copy check_header FROM '${SQLNESS_HOME}/demo/export/csv_header/' with (pattern = 'demo*', format='csv', header='true', continue_on_error='false');
+
+Error: 1004(InvalidArguments), The number of fields in the CSV file does not match the table schema, expected table schema: 5, actual file schema: 3
+
+SELECT count(*) from check_header;
+
++----------+
+| count(*) |
++----------+
+| 0        |
++----------+
+
+CREATE TABLE check_header_continue_error(host string, cpu double, memory double, jsons JSON, ts TIMESTAMP time index);
+
+Affected Rows: 0
+
+Copy check_header_continue_error FROM '${SQLNESS_HOME}/demo/export/csv_header/' with (pattern = 'demo*', format='csv', header='true', continue_on_error='true');
+
+Affected Rows: 3
+
+SELECT count(*) from check_header_continue_error;
+
++----------+
+| count(*) |
++----------+
+| 3        |
++----------+
+
+-- Test to skip the header validation
+CREATE TABLE non_check_header(host string, cpu double, memory double, jsons JSON, ts TIMESTAMP time index);
+
+Affected Rows: 0
+
+Copy non_check_header FROM '${SQLNESS_HOME}/demo/export/csv_header/' with (pattern = 'demo*', format='csv', header='false');
+
+Affected Rows: 6
+
+SELECT * from non_check_header order by ts;
+
++-------+------+--------+----------------------------+---------------------+
+| host  | cpu  | memory | jsons                      | ts                  |
++-------+------+--------+----------------------------+---------------------+
+| host1 | 66.6 | 1024.0 | 7b22686f737431223a2231227d | 2022-06-15T07:02:37 |
+| host2 | 88.8 | 333.3  | 7b22686f737432223a2232227d | 2022-06-15T07:02:38 |
+| host3 | 99.9 | 444.4  | 7b22686f737433223a2233227d | 2024-07-27T10:47:43 |
+| host4 |      |        | 7b22686f737434223a2234227d | 2025-08-15T16:49:17 |
+| host5 |      |        | 7b22686f737435223a2235227d | 2025-08-15T16:49:18 |
+| host6 |      |        | 7b22686f737436223a2236227d | 2027-09-27T20:34:23 |
++-------+------+--------+----------------------------+---------------------+
+
+drop table demo_1;
+
+Affected Rows: 0
+
+drop table demo_2;
+
+Affected Rows: 0
+
+drop table enable_long_fields;
+
+Affected Rows: 0
+
+drop table enable_short_fields;
+
+Affected Rows: 0
+
+drop table disable_long_fields;
+
+Affected Rows: 0
+
+drop table disable_short_fields;
+
+Affected Rows: 0
+
+drop table enable_different_order;
+
+Affected Rows: 0
+
+drop table disable_different_order;
+
+Affected Rows: 0
+
+drop table different_order;
+
+Affected Rows: 0
+
+drop table check_header;
+
+Affected Rows: 0
+
+drop table check_header_continue_error;
+
+Affected Rows: 0
+
+drop table non_check_header;
+
+Affected Rows: 0
+

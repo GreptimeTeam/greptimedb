@@ -357,6 +357,11 @@ impl StatementExecutor {
             .into_iter()
             .collect::<Vec<_>>();
 
+        let csv_format_opt = match &format {
+            Format::Csv(csv_format) => Some(csv_format),
+            _ => None,
+        };
+
         for entry in entries.iter() {
             if entry.metadata().mode() != EntryMode::FILE {
                 continue;
@@ -367,6 +372,18 @@ impl StatementExecutor {
                 .await?;
 
             let file_schema = file_metadata.schema();
+
+            if let Some(csv_format) = csv_format_opt
+                && csv_format.header
+                && let Err(e) = check_file_header(file_schema, &table_schema)
+            {
+                if csv_format.continue_on_error {
+                    continue;
+                } else {
+                    return Err(e);
+                }
+            };
+
             let (file_schema_projection, table_schema_projection, compat_schema) =
                 generated_schema_projection_and_compatible_file_schema(file_schema, &table_schema);
             let projected_file_schema = Arc::new(
@@ -498,6 +515,18 @@ fn can_cast_types_for_greptime(from: &ArrowDataType, to: &ArrowDataType) -> bool
     can_cast_types(from, to)
 }
 
+fn check_file_header(from: &SchemaRef, to: &SchemaRef) -> Result<()> {
+    if from.fields().len() != to.fields().len() {
+        return error::InvalidHeaderSnafu {
+            table_schema: to.fields().len(),
+            file_schema: from.fields().len(),
+        }
+        .fail();
+    }
+
+    ensure_schema_compatible(from, to)
+}
+
 fn ensure_schema_compatible(from: &SchemaRef, to: &SchemaRef) -> Result<()> {
     let not_match = from
         .fields
@@ -510,8 +539,8 @@ fn ensure_schema_compatible(from: &SchemaRef, to: &SchemaRef) -> Result<()> {
     if let Some((index, _)) = not_match {
         error::InvalidSchemaSnafu {
             index,
-            table_schema: to.to_string(),
-            file_schema: from.to_string(),
+            table_schema: to.field(index).data_type().to_string(),
+            file_schema: from.field(index).data_type().to_string(),
         }
         .fail()
     } else {
