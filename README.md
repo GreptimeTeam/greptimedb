@@ -88,7 +88,7 @@ Learn more in [Why GreptimeDB](https://docs.greptime.com/user-guide/concepts/why
 
 ## How GreptimeDB Compares
 
-| | GreptimeDB | Prometheus / Thanos / Mimir | Grafana Loki | Elasticsearch |
+| Feature | GreptimeDB | Prometheus / Thanos / Mimir | Grafana Loki | Elasticsearch |
 |---|---|---|---|---|
 | Data types | Metrics, logs, traces | Metrics only | Logs only | Logs, traces |
 | Query language | SQL + PromQL | PromQL | LogQL | Query DSL |
