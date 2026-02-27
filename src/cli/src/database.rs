@@ -36,6 +36,7 @@ pub struct DatabaseClient {
     auth_header: Option<String>,
     timeout: Duration,
     proxy: Option<reqwest::Proxy>,
+    no_proxy: bool,
 }
 
 pub fn parse_proxy_opts(
@@ -61,6 +62,7 @@ impl DatabaseClient {
         auth_basic: Option<String>,
         timeout: Duration,
         proxy: Option<reqwest::Proxy>,
+        no_proxy: bool,
     ) -> Self {
         let auth_header = if let Some(basic) = auth_basic {
             let encoded = general_purpose::STANDARD.encode(basic);
@@ -69,7 +71,9 @@ impl DatabaseClient {
             None
         };
 
-        if let Some(ref proxy) = proxy {
+        if no_proxy {
+            common_telemetry::info!("Proxy disabled");
+        } else if let Some(ref proxy) = proxy {
             common_telemetry::info!("Using proxy: {:?}", proxy);
         } else {
             common_telemetry::info!("Using system proxy(if any)");
@@ -81,6 +85,7 @@ impl DatabaseClient {
             auth_header,
             timeout,
             proxy,
+            no_proxy,
         }
     }
 
@@ -95,12 +100,14 @@ impl DatabaseClient {
             ("db", format!("{}-{}", self.catalog, schema)),
             ("sql", sql.to_string()),
         ];
-        let client = self
-            .proxy
-            .clone()
-            .map(|proxy| reqwest::Client::builder().proxy(proxy).build())
-            .unwrap_or_else(|| Ok(reqwest::Client::new()))
-            .context(BuildClientSnafu)?;
+        let mut builder = reqwest::Client::builder();
+        if let Some(proxy) = self.proxy.clone() {
+            builder = builder.proxy(proxy);
+        }
+        if self.no_proxy {
+            builder = builder.no_proxy();
+        }
+        let client = builder.build().context(BuildClientSnafu)?;
         let mut request = client
             .post(&url)
             .form(&params)
