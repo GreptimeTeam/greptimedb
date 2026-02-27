@@ -35,6 +35,7 @@ impl PluginOptionsSerializer for PluginOptionsList {
     }
 }
 pub struct PluginOptionsDeserializerImpl;
+
 impl PluginOptionsDeserializer<Vec<PluginOptions>> for PluginOptionsDeserializerImpl {
     fn deserialize(&self, payload: &str) -> Result<Vec<PluginOptions>, serde_json::Error> {
         if payload.is_empty() {
