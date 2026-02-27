@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -215,13 +216,21 @@ impl PendingRowsBatcher {
                 .map_err(|_| Error::BatcherChannelClosed)?;
         }
 
-        let result = {
-            let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
-                .with_label_values(&["submit_wait_flush_result"])
-                .start_timer();
-            response_rx.await.map_err(|_| Error::BatcherChannelClosed)?
-        };
-        result.map(|()| total_rows as u64)
+        if std::env::var("PENDING_ROWS_BATCH_SYNC")
+            .ok()
+            .and_then(|v| bool::from_str(&v).ok())
+            .unwrap_or(false)
+        {
+            let result = {
+                let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+                    .with_label_values(&["submit_wait_flush_result"])
+                    .start_timer();
+                response_rx.await.map_err(|_| Error::BatcherChannelClosed)?
+            };
+            result.map(|()| total_rows as u64)
+        } else {
+            Ok(total_rows as u64)
+        }
     }
 
     async fn align_table_batches_to_region_schema(
