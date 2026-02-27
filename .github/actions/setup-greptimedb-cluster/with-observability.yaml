@@ -17,7 +17,7 @@ monitoring:
             memory: 256Mi
       datanodeStorage:
         fs:
-          storageSize: 1Gi
+          storageSize: 5Gi
   vector:
     resources:
       requests:
