@@ -16,6 +16,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use api::v1::meta::cluster_server::ClusterServer;
+use api::v1::meta::config_server::ConfigServer;
 use api::v1::meta::heartbeat_server::HeartbeatServer;
 use api::v1::meta::procedure_service_server::ProcedureServiceServer;
 use api::v1::meta::store_server::StoreServer;
@@ -255,6 +256,7 @@ pub fn router(metasrv: Arc<Metasrv>) -> Router {
     let router = add_compressed_service!(router, StoreServer::from_arc(metasrv.clone()));
     let router = add_compressed_service!(router, ClusterServer::from_arc(metasrv.clone()));
     let router = add_compressed_service!(router, ProcedureServiceServer::from_arc(metasrv.clone()));
+    let router = add_compressed_service!(router, ConfigServer::from_arc(metasrv.clone()));
     router.add_service(admin::make_admin_service(metasrv))
 }
 

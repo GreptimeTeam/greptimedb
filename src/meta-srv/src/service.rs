@@ -19,6 +19,7 @@ use tonic::{Response, Status};
 
 pub mod admin;
 pub mod cluster;
+mod config;
 mod heartbeat;
 pub mod mailbox;
 pub mod procedure;

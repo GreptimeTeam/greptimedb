@@ -2655,6 +2655,7 @@ dependencies = [
  "common-grpc",
  "humantime-serde",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -5724,7 +5725,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=19a5104851a86a27b92a5e00e69c60465c7e5d83#19a5104851a86a27b92a5e00e69c60465c7e5d83"
+source = "git+https://github.com/shuiyisong/greptime-proto.git?rev=a7c1498725264946a772cdb0e79d6323aac19392#a7c1498725264946a772cdb0e79d6323aac19392"
 dependencies = [
  "prost 0.14.1",
  "prost-types 0.14.1",
@@ -7768,6 +7769,7 @@ dependencies = [
  "common-grpc",
  "common-macro",
  "common-meta",
+ "common-options",
  "common-telemetry",
  "datatypes",
  "futures",
@@ -7776,6 +7778,7 @@ dependencies = [
  "meta-srv",
  "rand 0.9.1",
  "serde",
+ "serde_json",
  "session",
  "snafu 0.8.6",
  "tokio",
@@ -9936,12 +9939,14 @@ dependencies = [
  "common-base",
  "common-error",
  "common-meta",
+ "common-options",
  "datanode",
  "flow",
  "frontend",
  "meta-client",
  "meta-srv",
  "serde",
+ "serde_json",
  "snafu 0.8.6",
  "standalone",
 ]

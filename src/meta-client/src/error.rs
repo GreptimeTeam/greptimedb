@@ -116,6 +116,14 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to convert meta config"))]
+    ConvertMetaConfig {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: serde_json::Error,
+    },
 }
 
 #[allow(dead_code)]
@@ -136,7 +144,8 @@ impl ErrorExt for Error {
             | Error::CreateHeartbeatStream { .. }
             | Error::CreateChannel { .. }
             | Error::RetryTimesExceeded { .. }
-            | Error::ReadOnlyKvBackend { .. } => StatusCode::Internal,
+            | Error::ReadOnlyKvBackend { .. }
+            | Error::ConvertMetaConfig { .. } => StatusCode::Internal,
 
             Error::MetaServer { code, .. } => *code,
 

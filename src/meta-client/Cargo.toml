@@ -15,12 +15,14 @@ common-error.workspace = true
 common-grpc.workspace = true
 common-macro.workspace = true
 common-meta.workspace = true
+common-options.workspace = true
 common-telemetry.workspace = true
 futures.workspace = true
 futures-util.workspace = true
 humantime-serde.workspace = true
 rand.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 snafu.workspace = true
 tokio.workspace = true
 tokio-stream = { workspace = true, features = ["net"] }

@@ -140,6 +140,7 @@ impl heartbeat_server::Heartbeat for Metasrv {
 
         Ok(Response::new(res))
     }
+
 }
 
 async fn handle_ask_leader(_req: AskLeaderRequest, ctx: Context) -> Result<AskLeaderResponse> {
