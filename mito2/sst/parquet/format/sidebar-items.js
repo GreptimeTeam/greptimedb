@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["FIXED_POS_COLUMN_NUM","INTERNAL_COLUMN_NUM"],"enum":["ReadFormat","StatValues"],"fn":["need_override_sequence","new_primary_key_array","parquet_row_group_time_range","primary_key_offsets"],"struct":["FormatProjection","PrimaryKeyReadFormat","PrimaryKeyWriteFormat"],"type":["PrimaryKeyArray","PrimaryKeyArrayBuilder"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["QueryStatement"],"struct":["CancellableProcess","ProcessManager","SlowQueryTimer","Ticket"],"type":["ProcessId","ProcessManagerRef"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["END_TIME","INIT_CAPACITY","LOCK_KEYS","PROCEDURE_ID","PROCEDURE_TYPE","START_TIME","STATUS"],"struct":["InformationSchemaProcedureInfo","InformationSchemaProcedureInfoBuilder"]};

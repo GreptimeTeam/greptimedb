@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ColumnChunkData"],"fn":["align_to_pooled_buf_size","compute_total_range_size"],"struct":["ColumnChunkIterator","InMemoryRowGroup","ParquetFetchMetrics","ParquetFetchMetricsData","RowGroupBase"]};

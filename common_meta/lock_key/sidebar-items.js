@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CATALOG_LOCK_PREFIX","FLOW_LOCK_PREFIX","FLOW_NAME_LOCK_PREFIX","REGION_LOCK_PREFIX","REMOTE_WAL_LOCK_PREFIX","SCHEMA_LOCK_PREFIX","TABLE_LOCK_PREFIX","TABLE_NAME_LOCK_PREFIX"],"enum":["CatalogLock","FlowLock","FlowNameLock","RegionLock","RemoteWalLock","SchemaLock","TableLock","TableNameLock"]};

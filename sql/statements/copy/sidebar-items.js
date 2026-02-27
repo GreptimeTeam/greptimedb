@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Copy","CopyDatabase","CopyTable"],"struct":["CopyDatabaseArgument","CopyQueryTo","CopyQueryToArgument","CopyTableArgument"]};

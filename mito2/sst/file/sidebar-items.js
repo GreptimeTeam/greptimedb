@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_LEVEL"],"enum":["IndexType"],"fn":["delete_files","delete_index","deserialize_partition_expr","overlaps","purge_index_cache_stager","serialize_partition_expr"],"struct":["ColumnIndexMetadata","FileHandle","FileHandleInner","FileMeta","RegionFileId","RegionIndexId"],"type":["FileTimeRange","IndexTypes","Level"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["is_tql","parse_with_options","parser_expr_to_scalar_value_literal","validate_column_fulltext_create_option","validate_column_skipping_index_create_option","validate_column_vector_index_create_option"],"struct":["StubContextProvider"]};

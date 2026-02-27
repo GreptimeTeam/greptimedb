@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_CONTEXT","META_REGION_STATS_HISTORY_TABLE_NAME"],"fn":["align_ts","compute_persist_region_stat","to_persisted_if_leader"],"struct":["PersistRegionStat","PersistStatsHandler","PersistedRegionStat"]};

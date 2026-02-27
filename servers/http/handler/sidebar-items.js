@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["config","from_output","health","metrics","promql","sql","sql_format","sql_parse","status","validate_schema"],"struct":["HealthQuery","HealthResponse","PromqlQuery","SqlFormatResponse","SqlQuery","StatusResponse"]};

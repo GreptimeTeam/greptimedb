@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["WalProvider"],"fn":["build_kafka_client","build_kafka_topic_creator","build_wal_provider","extract_topic_from_wal_options","prepare_wal_options"],"mod":["selector","topic_creator","topic_manager","topic_pool"],"type":["WalProviderRef"]};

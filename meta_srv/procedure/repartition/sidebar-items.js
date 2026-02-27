@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["default_timeout"],"mod":["allocate_region","collect","deallocate_region","dispatch","group","plan","repartition_end","repartition_start","utils"],"struct":["Context","DefaultRepartitionProcedureFactory","Metrics","PersistentContext","RepartitionData","RepartitionDataOwned","RepartitionProcedure","VolatileContext"],"trait":["State"]};

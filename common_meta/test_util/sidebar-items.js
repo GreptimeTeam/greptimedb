@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["etcd_certs_dir","new_ddl_context","new_ddl_context_with_kv_backend","test_certs_dir","test_kafka_topic_pool"],"struct":["MockDatanodeManager","MockFlownodeManager","MockNode","NoopPeerResolver"],"trait":["MockDatanodeHandler","MockFlownodeHandler"],"type":["AffectedRows"]};

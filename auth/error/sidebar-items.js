@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Error"],"struct":["AccessDeniedSnafu","AuthBackendSnafu","FileWatchSnafu","FromUtf8Snafu","IllegalParamSnafu","InternalStateSnafu","InvalidConfigSnafu","IoSnafu","PermissionDeniedSnafu","UnsupportedPasswordTypeSnafu","UserNotFoundSnafu","UserPasswordMismatchSnafu"],"type":["Result"]};

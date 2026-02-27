@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["is_relevant_event"],"struct":["FileWatcherBuilder","FileWatcherConfig"]};

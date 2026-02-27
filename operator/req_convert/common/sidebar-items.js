@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["column_schema","columns_to_rows","encode_string_to_jsonb_binary","prepare_rows","preprocess_row_delete_requests","preprocess_row_insert_requests","push_column_to_rows","row_count","semantic_type","validate_rows","validate_vector_col"],"mod":["partitioner"]};

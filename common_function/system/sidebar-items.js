@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"macro":["define_nullary_udf"],"mod":["build","database","pg_catalog","procedure_state","timezone","version"],"struct":["SystemFunction"]};

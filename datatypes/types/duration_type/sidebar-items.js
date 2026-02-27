@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["DurationType"],"macro":["impl_data_type_for_duration"],"struct":["DurationMicrosecondType","DurationMillisecondType","DurationNanosecondType","DurationSecondType"]};

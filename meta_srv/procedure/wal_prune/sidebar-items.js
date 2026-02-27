@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["manager","utils"],"struct":["Context","WalPruneData","WalPruneProcedure"],"type":["KafkaClientRef"]};

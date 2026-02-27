@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_WARNINGS"],"enum":["ReadPreference"],"mod":["context","hints","protocol_ctx","session_config","table_name"],"struct":["MutableInner","Session"],"type":["SessionRef"]};

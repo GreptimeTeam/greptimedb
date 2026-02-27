@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["renew_region_lease_via_region_route"],"struct":["RegionLeaseInfo","RegionLeaseKeeper","RenewRegionLeasesResponse"],"type":["RegionLeaseKeeperRef"]};

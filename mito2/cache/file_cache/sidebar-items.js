@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_INDEX_CACHE_PERCENT","DOWNLOAD_TASK_CHANNEL_SIZE","FILE_DIR","MIN_CACHE_CAPACITY"],"enum":["FileType"],"fn":["cache_file_path","parse_index_key"],"struct":["DownloadTask","FileCache","FileCacheInner","IndexKey","IndexValue"],"type":["FileCacheRef"]};

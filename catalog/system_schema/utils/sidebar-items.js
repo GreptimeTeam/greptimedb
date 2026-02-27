@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["information_extension","table_meta_manager"],"mod":["tables"]};

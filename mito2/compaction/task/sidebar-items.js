@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_PARALLEL_COMPACTION"],"struct":["CompactionTaskImpl"]};

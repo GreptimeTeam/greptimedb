@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ObjectStoreConfig","RegionEngineConfig"],"struct":["DatanodeOptions","ProcedureConfig","StorageConfig"]};

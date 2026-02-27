@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["OTHER_PHY_PART_COL_PLACEHOLDER"],"enum":["RewriterStatus"],"mod":["fallback","utils"],"struct":["DistPlannerAnalyzer","DistPlannerOptions","EnforceDistRequirementRewriter","PlanRewriter"]};

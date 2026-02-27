@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["build_time_range_predicate","extract_from_between_expr","extract_from_binary_expr","extract_from_in_list_expr","extract_time_range_from_expr","get_timestamp_filter"],"macro":["return_none_if_utf8"],"struct":["Predicate"]};

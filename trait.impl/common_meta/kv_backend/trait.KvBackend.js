@@ -1,0 +1,9 @@
+(function() {
+    var implementors = Object.fromEntries([["catalog",[["impl KvBackend for <a class=\"struct\" href=\"catalog/kvbackend/struct.CachedKvBackend.html\" title=\"struct catalog::kvbackend::CachedKvBackend\">CachedKvBackend</a>"],["impl KvBackend for <a class=\"struct\" href=\"catalog/kvbackend/struct.MetaKvBackend.html\" title=\"struct catalog::kvbackend::MetaKvBackend\">MetaKvBackend</a>"]]],["common_meta",[]],["log_store",[["impl KvBackend for <a class=\"struct\" href=\"log_store/raft_engine/struct.RaftEngineBackend.html\" title=\"struct log_store::raft_engine::RaftEngineBackend\">RaftEngineBackend</a>"]]],["meta_client",[["impl KvBackend for <a class=\"struct\" href=\"meta_client/client/cluster/struct.Client.html\" title=\"struct meta_client::client::cluster::Client\">Client</a>"],["impl KvBackend for <a class=\"struct\" href=\"meta_client/client/struct.ClusterKvBackend.html\" title=\"struct meta_client::client::ClusterKvBackend\">ClusterKvBackend</a>"]]],["meta_srv",[["impl KvBackend for <a class=\"struct\" href=\"meta_srv/cluster/struct.MetaPeerClient.html\" title=\"struct meta_srv::cluster::MetaPeerClient\">MetaPeerClient</a>"],["impl KvBackend for <a class=\"struct\" href=\"meta_srv/service/store/cached_kv/struct.LeaderCachedKvBackend.html\" title=\"struct meta_srv::service::store::cached_kv::LeaderCachedKvBackend\">LeaderCachedKvBackend</a>"]]]]);
+    if (window.register_implementors) {
+        window.register_implementors(implementors);
+    } else {
+        window.pending_implementors = implementors;
+    }
+})()
+//{"start":57,"fragment_lengths":[349,19,201,357,402]}

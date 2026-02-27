@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Event"],"struct":["WalPruneManager","WalPruneProcedureGuard","WalPruneProcedureTracker","WalPruneTicker"],"type":["WalPruneTickerRef"]};

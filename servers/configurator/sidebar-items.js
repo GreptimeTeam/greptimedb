@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"trait":["GrpcBuilderConfigurator","GrpcRouterConfigurator","HttpConfigurator"],"type":["GrpcBuilderConfiguratorRef","GrpcRouterConfiguratorRef","HttpConfiguratorRef"]};

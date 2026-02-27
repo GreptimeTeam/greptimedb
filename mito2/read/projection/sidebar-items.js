@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_VECTOR_LENGTH_TO_CACHE"],"enum":["BatchIndex","ProjectionMapper"],"fn":["new_repeated_vector","read_column_ids_from_projection","repeated_vector_with_cache"],"struct":["PrimaryKeyProjectionMapper"]};

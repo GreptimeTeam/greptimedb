@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["check_copy_to_stdout","output_to_copy_response","output_to_query_response","recordbatches_to_copy_response","recordbatches_to_query_response","send_warning_opt"],"struct":["DefaultQueryParser","PgSqlPlan"],"type":["RowStream"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_LIST_FIELD_NAME","QUANTILE_NAME","VALUES_FIELD_NAME"],"fn":["quantile_udaf"],"struct":["QuantileAccumulator"]};

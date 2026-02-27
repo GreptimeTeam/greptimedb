@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_PARTITION"],"fn":["build_kafka_client","build_kafka_topic_creator"],"struct":["KafkaTopicCreator"]};

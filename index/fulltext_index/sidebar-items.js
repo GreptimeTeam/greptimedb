@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["KEY_FULLTEXT_CONFIG"],"enum":["Analyzer"],"mod":["create","error","search","tokenizer"],"struct":["Config"]};

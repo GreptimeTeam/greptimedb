@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["VEC_COS_DISTANCE","VEC_DOT_PRODUCT","VEC_L2SQ_DISTANCE"],"macro":["define_distance_function"],"mod":["cos","dot","l2sq"],"struct":["CosDistanceFunction","DotProductFunction","L2SqDistanceFunction"]};

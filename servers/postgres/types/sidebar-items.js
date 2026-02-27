@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["encode_struct","format_options_from_query_ctx","invalid_parameter_error","param_types_to_pg_types","parameter_to_string","parameters_to_scalar_values","schema_to_pg","to_timestamp_scalar_value","type_gt_to_pg","type_pg_to_gt"],"mod":["error"],"struct":["RecordBatchRowStream"]};

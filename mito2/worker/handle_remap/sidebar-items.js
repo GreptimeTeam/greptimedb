@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["remap_manifest_key"]};
