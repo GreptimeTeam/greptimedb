@@ -45,6 +45,26 @@ exec_sql() {
   fi
 }
 
+export_show_create_table() {
+  local table="$1"
+  local output_file="${GT_MONITOR_ARTIFACT_DIR}/${table}.show_create_table.sql"
+  local output
+
+  log "export SHOW CREATE TABLE for ${table}"
+  output="$(curl -sS -G "http://127.0.0.1:${GT_MONITOR_HTTP_LOCAL_PORT}/v1/sql" \
+    --data-urlencode "db=public" \
+    --data-urlencode "sql=SHOW CREATE TABLE ${table};")"
+
+  printf '%s\n' "${output}" >>"${SQL_LOG}"
+
+  if printf '%s' "${output}" | grep -q '"error"'; then
+    log "show create table failed for ${table}: ${output}"
+    return 1
+  fi
+
+  printf '%s' "${output}" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["output"][0]["records"]["rows"][0][1])' >"${output_file}"
+}
+
 mkdir -p "${GT_MONITOR_ARTIFACT_DIR}"
 rm -rf "${GT_MONITOR_ARTIFACT_DIR:?}/"*
 
@@ -77,6 +97,9 @@ done
 
 log "ensure export dir exists in pod ${MONITOR_POD}"
 kubectl exec -n "${GT_FUZZ_NS}" "${MONITOR_POD}" -- mkdir -p "${GT_MONITOR_SERVER_EXPORT_DIR}" >>"${COPY_LOG}" 2>&1
+
+export_show_create_table "_gt_logs"
+export_show_create_table "opentelemetry_traces"
 
 exec_sql "public" "COPY _gt_logs TO '${GT_MONITOR_SERVER_EXPORT_DIR}/_gt_logs.parquet' WITH (FORMAT='parquet');"
 exec_sql "public" "COPY opentelemetry_traces TO '${GT_MONITOR_SERVER_EXPORT_DIR}/opentelemetry_traces.parquet' WITH (FORMAT='parquet');"
