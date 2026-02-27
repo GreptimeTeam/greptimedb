@@ -24,6 +24,8 @@ inputs:
     description: "Etcd endpoints"
   values-filename:
     default: "with-minio.yaml"
+  base-values-filename:
+    default: "with-observability.yaml"
   enable-region-failover:
     default: false
 
@@ -49,6 +51,9 @@ runs:
   - name: Install GreptimeDB cluster
     shell: bash
     run: |
+      BASE_VALUES="./.github/actions/setup-greptimedb-cluster/${{ inputs.base-values-filename }}"
+      SCENARIO_VALUES="./.github/actions/setup-greptimedb-cluster/${{ inputs.values-filename }}"
+
       helm upgrade \
         --install my-greptimedb \
         --set 'meta.backendStorage.etcd.endpoints[0]=${{ inputs.etcd-endpoints }}' \
@@ -66,7 +71,8 @@ runs:
         greptime/greptimedb-cluster \
         --create-namespace \
         -n my-greptimedb \
-        --values ./.github/actions/setup-greptimedb-cluster/${{ inputs.values-filename }} \
+        --values "${BASE_VALUES}" \
+        --values "${SCENARIO_VALUES}" \
         --wait \
         --wait-for-jobs
   - name: Wait for GreptimeDB
