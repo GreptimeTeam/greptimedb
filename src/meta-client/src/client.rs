@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod ask_leader;
+mod config;
 pub mod heartbeat;
 mod load_balance;
 mod procedure;
@@ -59,6 +60,7 @@ use common_meta::rpc::store::{
 use common_options::plugin_options::PluginOptionsDeserializer;
 use common_telemetry::info;
 use futures::TryStreamExt;
+use config::Client as ConfigClient;
 use heartbeat::{Client as HeartbeatClient, HeartbeatConfig};
 use procedure::Client as ProcedureClient;
 use serde::de::DeserializeOwned;
@@ -207,6 +209,9 @@ impl MetaClientBuilder {
 
             HeartbeatClient::new(self.id, self.role, heartbeat_channel_manager.clone())
         });
+        let config = self
+            .enable_heartbeat
+            .then(|| ConfigClient::new(self.id, self.role, mgr.clone()));
         let store = self
             .enable_store
             .then(|| StoreClient::new(self.id, self.role, mgr.clone()));
@@ -235,6 +240,7 @@ impl MetaClientBuilder {
                 heartbeat_channel_manager,
             )),
             heartbeat,
+            config,
             store,
             procedure,
             cluster,
@@ -249,6 +255,7 @@ pub struct MetaClient {
     channel_manager: ChannelManager,
     leader_provider_factory: LeaderProviderFactoryRef,
     heartbeat: Option<HeartbeatClient>,
+    config: Option<ConfigClient>,
     store: Option<StoreClient>,
     procedure: Option<ProcedureClient>,
     cluster: Option<ClusterClient>,
@@ -267,6 +274,7 @@ impl MetaClient {
                 ChannelManager::default(),
             )),
             heartbeat: None,
+            config: None,
             store: None,
             procedure: None,
             cluster: None,
@@ -563,6 +571,11 @@ impl MetaClient {
             client.start_with(leader_provider.clone()).await?;
         }
 
+        if let Some(client) = &self.config {
+            info!("Starting config client ...");
+            client.start_with(leader_provider.clone()).await?;
+        }
+
         if let Some(client) = &mut self.store {
             info!("Starting store client ...");
             client.start(peers.clone()).await?;
@@ -591,7 +604,7 @@ impl MetaClient {
         T: PluginOptionsDeserializer<U>,
         U: DeserializeOwned,
     {
-        let res = self.heartbeat_client()?.pull_config().await?;
+        let res = self.config_client()?.pull_config().await?;
         let v = deserializer
             .deserialize(&res.payload)
             .context(ConvertMetaConfigSnafu)?;
@@ -720,6 +733,12 @@ impl MetaClient {
     pub fn heartbeat_client(&self) -> Result<HeartbeatClient> {
         self.heartbeat.clone().context(NotStartedSnafu {
             name: "heartbeat_client",
+        })
+    }
+
+    pub fn config_client(&self) -> Result<ConfigClient> {
+        self.config.clone().context(NotStartedSnafu {
+            name: "config_client",
         })
     }
 

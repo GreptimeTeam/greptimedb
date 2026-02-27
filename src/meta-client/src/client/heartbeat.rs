@@ -17,9 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::heartbeat_client::HeartbeatClient;
-use api::v1::meta::{
-    HeartbeatRequest, HeartbeatResponse, PullConfigRequest, PullConfigResponse, RequestHeader, Role,
-};
+use api::v1::meta::{HeartbeatRequest, HeartbeatResponse, RequestHeader, Role};
 use common_grpc::channel_manager::ChannelManager;
 use common_meta::distributed_time_constants::BASE_HEARTBEAT_INTERVAL;
 use common_meta::util;
@@ -174,11 +172,6 @@ impl Client {
         inner.heartbeat().await
     }
 
-    pub async fn pull_config(&self) -> Result<PullConfigResponse> {
-        let inner = self.inner.read().await;
-        inner.ask_leader().await?;
-        inner.pull_config().await
-    }
 }
 
 #[derive(Debug)]
@@ -280,44 +273,6 @@ impl Inner {
             HeartbeatStream::new(self.id, stream),
             config,
         ))
-    }
-
-    /// Pull meta config(plugin options) from Metasrv.
-    /// This is called during the frontend's startup, would stop the startup if failed.
-    async fn pull_config(&self) -> Result<PullConfigResponse> {
-        ensure!(
-            self.is_started(),
-            error::IllegalGrpcClientStateSnafu {
-                err_msg: "Heartbeat client not start"
-            }
-        );
-
-        let leader_addr = self
-            .leader_provider
-            .as_ref()
-            .unwrap()
-            .leader()
-            .context(error::NoLeaderSnafu)?;
-        let mut client = self.make_client(&leader_addr)?;
-
-        let header = RequestHeader::new(
-            self.id,
-            self.role,
-            TracingContext::from_current_span().to_w3c(),
-        );
-        let req = PullConfigRequest {
-            header: Some(header),
-        };
-
-        let res = client
-            .pull_config(req)
-            .await
-            .map_err(error::Error::from)?
-            .into_inner();
-
-        util::check_response_header(res.header.as_ref()).context(InvalidResponseHeaderSnafu)?;
-
-        Ok(res)
     }
 
     fn make_client(&self, addr: impl AsRef<str>) -> Result<HeartbeatClient<Channel>> {
