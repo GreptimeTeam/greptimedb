@@ -162,7 +162,7 @@ humantime-serde = "1.1"
 hyper = "1.1"
 hyper-util = "0.1"
 itertools = "0.14"
-jsonb = { git = "https://github.com/databendlabs/jsonb.git", rev = "8c8d2fc294a39f3ff08909d60f718639cfba3875", default-features = false }
+jsonb = "0.4.4"
 lazy_static = "1.4"
 local-ip-address = "0.6"
 loki-proto = { git = "https://github.com/GreptimeTeam/loki-proto.git", rev = "f69c8924c4babe516373e26a4118be82d976629c" }
