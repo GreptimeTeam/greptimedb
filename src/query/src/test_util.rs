@@ -49,19 +49,19 @@ pub fn new_ts_array(unit: TimeUnit, arr: Vec<i64>) -> ArrayRef {
 pub struct MockInputExec {
     input: Vec<Vec<DfRecordBatch>>,
     schema: SchemaRef,
-    properties: PlanProperties,
+    properties: Arc<PlanProperties>,
     metrics: ExecutionPlanMetricsSet,
 }
 
 impl MockInputExec {
     pub fn new(input: Vec<Vec<DfRecordBatch>>, schema: SchemaRef) -> Self {
         Self {
-            properties: PlanProperties::new(
+            properties: Arc::new(PlanProperties::new(
                 EquivalenceProperties::new(schema.clone()),
                 Partitioning::UnknownPartitioning(1),
                 EmissionType::Incremental,
                 Boundedness::Bounded,
-            ),
+            )),
             input,
             schema,
             metrics: ExecutionPlanMetricsSet::new(),
@@ -84,7 +84,7 @@ impl ExecutionPlan for MockInputExec {
         self
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
     }
 

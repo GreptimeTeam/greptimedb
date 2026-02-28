@@ -111,6 +111,7 @@ impl TransformRule for ExpandIntervalTransformRule {
             Expr::Cast {
                 expr: cast_exp,
                 data_type,
+                array,
                 kind,
                 format,
             } => {
@@ -130,6 +131,7 @@ impl TransformRule for ExpandIntervalTransformRule {
                                 kind: kind.clone(),
                                 expr: single_quoted_string_expr(interval_value),
                                 data_type: data_type.clone(),
+                                array: *array,
                                 format: std::mem::take(format),
                             }
                         }
@@ -396,6 +398,7 @@ mod tests {
                 fields: None,
                 precision: None,
             },
+            array: false,
             format: None,
             kind: sqlparser::ast::CastKind::Cast,
         };
@@ -414,6 +417,7 @@ mod tests {
                     fields: None,
                     precision: None,
                 },
+                array: false,
                 format: None,
             }
         );
@@ -421,6 +425,7 @@ mod tests {
         let mut cast_to_i64_expr = Expr::Cast {
             expr: single_quoted_string_expr("5".to_string()),
             data_type: DataType::Int64,
+            array: false,
             format: None,
             kind: sqlparser::ast::CastKind::Cast,
         };
@@ -431,6 +436,7 @@ mod tests {
             Expr::Cast {
                 expr: single_quoted_string_expr("5".to_string()),
                 data_type: DataType::Int64,
+                array: false,
                 format: None,
                 kind: sqlparser::ast::CastKind::Cast,
             }

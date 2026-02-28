@@ -17,7 +17,6 @@ use std::sync::Arc;
 
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::ExecutionPlan;
-use datafusion::physical_plan::coalesce_batches::CoalesceBatchesExec;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::coop::CooperativeExec;
 use datafusion::physical_plan::filter::FilterExec;
@@ -80,8 +79,6 @@ impl WindowedSortPhysicalRule {
                     let preserve_partitioning = sort_exec.preserve_partitioning();
 
                     let sort_input = remove_repartition(sort_exec.input().clone())?.data;
-                    let sort_input =
-                        remove_coalesce_batches_exec(sort_input, sort_exec.fetch())?.data;
 
                     // Gets scanner info from the input without repartition before filter.
                     let Some(scanner_info) = fetch_partition_range(sort_input.clone())? else {
@@ -164,7 +161,6 @@ fn fetch_partition_range(input: Arc<dyn ExecutionPlan>) -> DataFusionResult<Opti
     let mut time_index = HashSet::new();
     let mut alias_map = Vec::new();
     let mut tag_columns = None;
-    let mut is_batch_coalesced = false;
 
     input.transform_up(|plan| {
         if plan.as_any().is::<CooperativeExec>() {
@@ -180,16 +176,9 @@ fn fetch_partition_range(input: Arc<dyn ExecutionPlan>) -> DataFusionResult<Opti
             partition_ranges = None;
         }
 
-        if plan.as_any().is::<CoalesceBatchesExec>() {
-            is_batch_coalesced = true;
-        }
-
         // only a very limited set of plans can exist between region scan and sort exec
         // other plans might make this optimize wrong, so be safe here by limiting it
-        if !(plan.as_any().is::<ProjectionExec>()
-            || plan.as_any().is::<FilterExec>()
-            || plan.as_any().is::<CoalesceBatchesExec>())
-        {
+        if !(plan.as_any().is::<ProjectionExec>() || plan.as_any().is::<FilterExec>()) {
             partition_ranges = None;
         }
 
@@ -219,10 +208,7 @@ fn fetch_partition_range(input: Arc<dyn ExecutionPlan>) -> DataFusionResult<Opti
             time_index = HashSet::from([region_scan_exec.time_index()]);
             tag_columns = Some(region_scan_exec.tag_columns());
 
-            // set distinguish_partition_ranges to true, this is an incorrect workaround
-            if !is_batch_coalesced {
-                region_scan_exec.with_distinguish_partition_range(true);
-            }
+            region_scan_exec.with_distinguish_partition_range(true);
         }
 
         Ok(Transformed::no(plan))
@@ -253,33 +239,6 @@ fn remove_repartition(
                     let new_filter = plan.clone().with_new_children(vec![maybe_scan.clone()])?;
                     return Ok(Transformed::yes(new_filter));
                 }
-            }
-        }
-
-        Ok(Transformed::no(plan))
-    })
-}
-
-/// Remove `CoalesceBatchesExec` if the limit is less than the batch size.
-///
-/// so that if limit is too small we can avoid need to scan for more rows than necessary
-fn remove_coalesce_batches_exec(
-    plan: Arc<dyn ExecutionPlan>,
-    fetch: Option<usize>,
-) -> DataFusionResult<Transformed<Arc<dyn ExecutionPlan>>> {
-    let Some(fetch) = fetch else {
-        return Ok(Transformed::no(plan));
-    };
-
-    // Avoid removing multiple coalesce batches
-    let mut is_done = false;
-
-    plan.transform_down(|plan| {
-        if let Some(coalesce_batches_exec) = plan.as_any().downcast_ref::<CoalesceBatchesExec>() {
-            let target_batch_size = coalesce_batches_exec.target_batch_size();
-            if fetch < target_batch_size && !is_done {
-                is_done = true;
-                return Ok(Transformed::yes(coalesce_batches_exec.input().clone()));
             }
         }
 

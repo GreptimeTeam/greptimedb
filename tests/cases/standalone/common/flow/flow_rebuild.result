@@ -1,5 +1,5 @@
 CREATE TABLE input_basic (
-    number INT,
+    "number" INT,
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(number),
     TIME INDEX(ts)
@@ -56,7 +56,7 @@ Affected Rows: 0
 
 -- combination of different order of rebuild input table/flow
 CREATE TABLE input_basic (
-    number INT,
+    "number" INT,
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(number),
     TIME INDEX(ts)
@@ -102,7 +102,7 @@ DROP TABLE input_basic;
 Affected Rows: 0
 
 CREATE TABLE input_basic (
-    number INT,
+    "number" INT,
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(number),
     TIME INDEX(ts)
@@ -198,7 +198,7 @@ DROP TABLE out_basic;
 Affected Rows: 0
 
 CREATE TABLE input_basic (
-    number INT,
+    "number" INT,
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(number),
     TIME INDEX(ts)
@@ -295,7 +295,7 @@ DROP FLOW test_wildcard_basic;
 Affected Rows: 0
 
 CREATE TABLE input_basic (
-    number INT,
+    "number" INT,
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(number),
     TIME INDEX(ts)
@@ -362,7 +362,7 @@ Affected Rows: 0
 
 -- combination of different order of rebuild input table/flow
 CREATE TABLE input_basic (
-    number INT,
+    "number" INT,
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(number),
     TIME INDEX(ts)
@@ -420,7 +420,7 @@ DROP TABLE input_basic;
 Affected Rows: 0
 
 CREATE TABLE input_basic (
-    number INT,
+    "number" INT,
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(number),
     TIME INDEX(ts)
@@ -540,7 +540,7 @@ DROP TABLE out_basic;
 Affected Rows: 0
 
 CREATE TABLE input_basic (
-    number INT,
+    "number" INT,
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(number),
     TIME INDEX(ts)

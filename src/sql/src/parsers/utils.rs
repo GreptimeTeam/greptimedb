@@ -15,7 +15,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use chrono::Utc;
 use datafusion::config::ConfigOptions;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::SessionStateBuilder;
@@ -23,7 +22,6 @@ use datafusion::execution::context::SessionState;
 use datafusion::optimizer::simplify_expressions::ExprSimplifier;
 use datafusion_common::tree_node::{TreeNode, TreeNodeVisitor};
 use datafusion_common::{DFSchema, ScalarValue};
-use datafusion_expr::execution_props::ExecutionProps;
 use datafusion_expr::simplify::SimplifyContext;
 use datafusion_expr::{AggregateUDF, Expr, ScalarUDF, TableSource, WindowUDF};
 use datafusion_sql::TableReference;
@@ -130,10 +128,7 @@ pub fn parser_expr_to_scalar_value_literal(
     }
 
     // 2. simplify logical expr
-    let execution_props = ExecutionProps::new().with_query_execution_start_time(Utc::now());
-    let info =
-        SimplifyContext::new(&execution_props).with_schema(Arc::new(empty_df_schema.clone()));
-
+    let info = SimplifyContext::default().with_current_time();
     let simplifier = ExprSimplifier::new(info);
 
     // Coerce the logical expression so simplifier can handle it correctly. This is necessary for const eval with possible type mismatch. i.e.: `now() - now() + '15s'::interval` which is `TimestampNanosecond - TimestampNanosecond + IntervalMonthDayNano`.
@@ -293,8 +288,6 @@ pub fn parse_with_options(parser: &mut Parser) -> Result<OptionMap> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use chrono::DateTime;
     use datafusion::functions::datetime::expr_fn::now;
     use datafusion_expr::lit;
@@ -343,9 +336,7 @@ mod tests {
             ),
         ];
 
-        let execution_props = ExecutionProps::new().with_query_execution_start_time(now_time);
-        let info = SimplifyContext::new(&execution_props).with_schema(Arc::new(DFSchema::empty()));
-
+        let info = SimplifyContext::default().with_query_execution_start_time(Some(now_time));
         let simplifier = ExprSimplifier::new(info);
         for (expr, expected) in testcases {
             let expr_name = expr.schema_name().to_string();

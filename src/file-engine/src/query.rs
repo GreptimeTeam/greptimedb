@@ -37,10 +37,7 @@ use snafu::{GenerateImplicitData, ResultExt, ensure};
 use store_api::storage::ScanRequest;
 
 use self::file_stream::ScanPlanConfig;
-use crate::error::{
-    BuildBackendSnafu, ExtractColumnFromFilterSnafu, ProjectSchemaSnafu,
-    ProjectionOutOfBoundsSnafu, Result,
-};
+use crate::error::{BuildBackendSnafu, ProjectSchemaSnafu, ProjectionOutOfBoundsSnafu, Result};
 use crate::region::FileRegion;
 
 impl FileRegion {
@@ -126,8 +123,7 @@ impl FileRegion {
 
         let mut aux_column_set = HashSet::new();
         for scan_filter in scan_filters {
-            df_logical_expr_utils::expr_to_columns(scan_filter, &mut aux_column_set)
-                .context(ExtractColumnFromFilterSnafu)?;
+            df_logical_expr_utils::expr_to_columns(scan_filter, &mut aux_column_set)?;
 
             let all_file_columns = aux_column_set
                 .iter()

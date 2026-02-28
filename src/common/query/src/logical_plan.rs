@@ -48,7 +48,7 @@ pub fn rename_logical_plan_columns(
             plan.schema().qualified_field_from_column(&old_column)?;
 
         for (qualifier, field) in plan.schema().iter() {
-            if qualifier.eq(&qualifier_rename) && field.as_ref() == field_rename {
+            if qualifier.eq(&qualifier_rename) && field == field_rename {
                 projection.push(col(Column::from((qualifier, field))).alias(new_name));
             }
         }

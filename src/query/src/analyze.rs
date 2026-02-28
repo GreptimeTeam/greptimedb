@@ -49,7 +49,7 @@ const PLAN: &str = "plan";
 pub struct DistAnalyzeExec {
     input: Arc<dyn ExecutionPlan>,
     schema: SchemaRef,
-    properties: PlanProperties,
+    properties: Arc<PlanProperties>,
     verbose: bool,
     format: AnalyzeFormat,
 }
@@ -62,7 +62,7 @@ impl DistAnalyzeExec {
             Field::new(NODE, DataType::UInt32, true),
             Field::new(PLAN, DataType::Utf8, true),
         ]));
-        let properties = Self::compute_properties(&input, schema.clone());
+        let properties = Arc::new(Self::compute_properties(&input, schema.clone()));
         Self {
             input,
             schema,
@@ -108,7 +108,7 @@ impl ExecutionPlan for DistAnalyzeExec {
         self
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
     }
 

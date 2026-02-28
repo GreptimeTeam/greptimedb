@@ -353,7 +353,7 @@ DROP TABLE temp_alerts;
 CREATE TABLE ngx_access_log (
     client STRING,
     stat INT,
-    size INT,
+    "size" INT,
     access_time TIMESTAMP TIME INDEX
 );
 

@@ -391,17 +391,12 @@ LIMIT 3;
 |               |   SortPreservingMergeExec: [ts@2 ASC NULLS LAST], fetch=3                                                                                             |
 |               |     SortExec: TopK(fetch=3), expr=[ts@2 ASC NULLS LAST], preserve_REDACTED
 |               |       ProjectionExec: expr=[val@1 as metric_val, cpu@2 as label_val, ts@0 as ts]                                                                      |
-|               |         CoalesceBatchesExec: target_batch_size=8192                                                                                                   |
-|               |           HashJoinExec: mode=Partitioned, join_type=Inner, on=[(ts@0, ts@0)], projection=[ts@0, val@1, cpu@3]                                         |
-|               |             CoalesceBatchesExec: target_batch_size=8192                                                                                               |
-|               |               RepartitionExec: REDACTED
-|               |                 CooperativeExec                                                                                                                       |
-|               |                   MergeScanExec: REDACTED
-|               |             CoalesceBatchesExec: target_batch_size=8192                                                                                               |
-|               |               RepartitionExec: REDACTED
-|               |                 ProjectionExec: expr=[ts@0 as ts, cpu@2 as cpu]                                                                                       |
-|               |                   CooperativeExec                                                                                                                     |
-|               |                     MergeScanExec: REDACTED
+|               |         HashJoinExec: mode=Partitioned, join_type=Inner, on=[(ts@0, ts@0)], projection=[ts@0, val@1, cpu@3]                                           |
+|               |           RepartitionExec: REDACTED
+|               |             MergeScanExec: REDACTED
+|               |           RepartitionExec: REDACTED
+|               |             ProjectionExec: expr=[ts@0 as ts, cpu@2 as cpu]                                                                                           |
+|               |               MergeScanExec: REDACTED
 |               |                                                                                                                                                       |
 +---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------+
 
@@ -495,8 +490,7 @@ ORDER BY ts;
 |               |   BoundedWindowAggExec: wdw=[lag(tql_base.val,Int64(1)) ORDER BY [tql_base.ts ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW: Field { "lag(tql_base.val,Int64(1)) ORDER BY [tql_base.ts ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW": nullable Float64 }, frame: RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW], mode=[Sorted] |
 |               |     SortPreservingMergeExec: [ts@0 ASC NULLS LAST]                                                                                                                                                                                                                                                                                                                          |
 |               |       SortExec: expr=[ts@0 ASC NULLS LAST], preserve_REDACTED
-|               |         CooperativeExec                                                                                                                                                                                                                                                                                                                                                     |
-|               |           MergeScanExec: REDACTED
+|               |         MergeScanExec: REDACTED
 |               |                                                                                                                                                                                                                                                                                                                                                                             |
 +---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
@@ -743,51 +737,45 @@ WHERE l.host = 'host1'
 ORDER BY t.ts, l.host, avg_value
 LIMIT 5;
 
-+---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                                                                                                   |
-+---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| logical_plan  | Sort: t.ts ASC NULLS LAST, l.host ASC NULLS LAST, avg_value ASC NULLS LAST, fetch=5                                                                                    |
-|               |   Projection: t.ts, t.cpu AS avg_value, l.host                                                                                                                         |
-|               |     Inner Join: date_trunc(Utf8("second"), t.ts) = date_trunc(Utf8("second"), l.ts)                                                                                    |
-|               |       Projection: t.ts, t.cpu                                                                                                                                          |
-|               |         MergeScan [is_placeholder=false, remote_input=[                                                                                                                |
-|               | SubqueryAlias: t                                                                                                                                                       |
-|               |   SubqueryAlias: tql_summary                                                                                                                                           |
-|               |     Projection: labels.ts AS ts, prom_avg_over_time(ts_range,cpu) AS host, labels.host AS cpu                                                                          |
-|               |       Filter: prom_avg_over_time(ts_range,cpu) IS NOT NULL                                                                                                             |
-|               |         Projection: labels.ts, prom_avg_over_time(ts_range, cpu) AS prom_avg_over_time(ts_range,cpu), labels.host                                                      |
-|               |           PromRangeManipulate: req range=[0..40000], interval=[10000], eval range=[30000], time index=[ts], values=["cpu"]                                             |
-|               |             PromSeriesNormalize: offset=[0], time index=[ts], filter NaN: [true]                                                                                       |
-|               |               PromSeriesDivide: tags=["host"]                                                                                                                          |
-|               |                 Filter: labels.ts >= TimestampMillisecond(-29999, None) AND labels.ts <= TimestampMillisecond(40000, None)                                             |
-|               |                   TableScan: labels                                                                                                                                    |
-|               | ]]                                                                                                                                                                     |
-|               |       Filter: l.host = Utf8("host1")                                                                                                                                   |
-|               |         Projection: l.ts, l.host                                                                                                                                       |
-|               |           MergeScan [is_placeholder=false, remote_input=[                                                                                                              |
-|               | SubqueryAlias: l                                                                                                                                                       |
-|               |   TableScan: labels                                                                                                                                                    |
-|               | ]]                                                                                                                                                                     |
-| physical_plan | SortPreservingMergeExec: [ts@0 ASC NULLS LAST, avg_value@1 ASC NULLS LAST], fetch=5                                                                                    |
++---------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                 |
++---------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | Sort: t.ts ASC NULLS LAST, l.host ASC NULLS LAST, avg_value ASC NULLS LAST, fetch=5                                                                                  |
+|               |   Projection: t.ts, t.cpu AS avg_value, l.host                                                                                                                       |
+|               |     Inner Join: date_trunc(Utf8("second"), t.ts) = date_trunc(Utf8("second"), l.ts)                                                                                  |
+|               |       Projection: t.ts, t.cpu                                                                                                                                        |
+|               |         MergeScan [is_placeholder=false, remote_input=[                                                                                                              |
+|               | SubqueryAlias: t                                                                                                                                                     |
+|               |   SubqueryAlias: tql_summary                                                                                                                                         |
+|               |     Projection: labels.ts AS ts, prom_avg_over_time(ts_range,cpu) AS host, labels.host AS cpu                                                                        |
+|               |       Filter: prom_avg_over_time(ts_range,cpu) IS NOT NULL                                                                                                           |
+|               |         Projection: labels.ts, prom_avg_over_time(ts_range, cpu) AS prom_avg_over_time(ts_range,cpu), labels.host                                                    |
+|               |           PromRangeManipulate: req range=[0..40000], interval=[10000], eval range=[30000], time index=[ts], values=["cpu"]                                           |
+|               |             PromSeriesNormalize: offset=[0], time index=[ts], filter NaN: [true]                                                                                     |
+|               |               PromSeriesDivide: tags=["host"]                                                                                                                        |
+|               |                 Filter: labels.ts >= TimestampMillisecond(-29999, None) AND labels.ts <= TimestampMillisecond(40000, None)                                           |
+|               |                   TableScan: labels                                                                                                                                  |
+|               | ]]                                                                                                                                                                   |
+|               |       Filter: l.host = Utf8("host1")                                                                                                                                 |
+|               |         Projection: l.ts, l.host                                                                                                                                     |
+|               |           MergeScan [is_placeholder=false, remote_input=[                                                                                                            |
+|               | SubqueryAlias: l                                                                                                                                                     |
+|               |   TableScan: labels                                                                                                                                                  |
+|               | ]]                                                                                                                                                                   |
+| physical_plan | SortPreservingMergeExec: [ts@0 ASC NULLS LAST, avg_value@1 ASC NULLS LAST], fetch=5                                                                                  |
 |               |   SortExec: TopK(fetch=5), expr=[ts@0 ASC NULLS LAST, avg_value@1 ASC NULLS LAST], preserve_REDACTED
-|               |     ProjectionExec: expr=[ts@0 as ts, cpu@1 as avg_value, host@2 as host]                                                                                              |
-|               |       CoalesceBatchesExec: target_batch_size=8192                                                                                                                      |
-|               |         HashJoinExec: mode=Partitioned, join_type=Inner, on=[(date_trunc(Utf8("second"),t.ts)@2, date_trunc(Utf8("second"),l.ts)@2)], projection=[ts@0, cpu@1, host@4] |
-|               |           CoalesceBatchesExec: target_batch_size=8192                                                                                                                  |
-|               |             RepartitionExec: REDACTED
-|               |               ProjectionExec: expr=[ts@0 as ts, cpu@2 as cpu, date_trunc(second, ts@0) as date_trunc(Utf8("second"),t.ts)]                                             |
-|               |                 CooperativeExec                                                                                                                                        |
-|               |                   MergeScanExec: REDACTED
-|               |           CoalesceBatchesExec: target_batch_size=8192                                                                                                                  |
-|               |             RepartitionExec: REDACTED
-|               |               ProjectionExec: expr=[ts@0 as ts, host@1 as host, date_trunc(second, ts@0) as date_trunc(Utf8("second"),l.ts)]                                           |
-|               |                 CoalesceBatchesExec: target_batch_size=8192                                                                                                            |
-|               |                   FilterExec: host@1 = host1                                                                                                                           |
-|               |                     ProjectionExec: expr=[ts@0 as ts, host@1 as host]                                                                                                  |
-|               |                       CooperativeExec                                                                                                                                  |
-|               |                         MergeScanExec: REDACTED
-|               |                                                                                                                                                                        |
-+---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+|               |     ProjectionExec: expr=[ts@0 as ts, cpu@1 as avg_value, host@2 as host]                                                                                            |
+|               |       HashJoinExec: mode=Partitioned, join_type=Inner, on=[(date_trunc(Utf8("second"),t.ts)@2, date_trunc(Utf8("second"),l.ts)@2)], projection=[ts@0, cpu@1, host@4] |
+|               |         RepartitionExec: REDACTED
+|               |           ProjectionExec: expr=[ts@0 as ts, cpu@2 as cpu, date_trunc(second, ts@0) as date_trunc(Utf8("second"),t.ts)]                                               |
+|               |             MergeScanExec: REDACTED
+|               |         RepartitionExec: REDACTED
+|               |           ProjectionExec: expr=[ts@0 as ts, host@1 as host, date_trunc(second, ts@0) as date_trunc(Utf8("second"),l.ts)]                                             |
+|               |             FilterExec: host@1 = host1                                                                                                                               |
+|               |               ProjectionExec: expr=[ts@0 as ts, host@1 as host]                                                                                                      |
+|               |                 MergeScanExec: REDACTED
+|               |                                                                                                                                                                      |
++---------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
 -- TQL CTE with JOIN and value aliasing
 -- SQLNESS SORT_RESULT 3 1
@@ -829,51 +817,45 @@ WHERE l.host = 'host1'
 ORDER BY t.ts, l.host, avg_value
 LIMIT 5;
 
-+---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                                                                                                   |
-+---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| logical_plan  | Sort: t.ts ASC NULLS LAST, l.host ASC NULLS LAST, avg_value ASC NULLS LAST, fetch=5                                                                                    |
-|               |   Projection: t.ts, t.cpu AS avg_value, l.host                                                                                                                         |
-|               |     Inner Join: date_trunc(Utf8("second"), t.ts) = date_trunc(Utf8("second"), l.ts)                                                                                    |
-|               |       Projection: t.cpu, t.ts                                                                                                                                          |
-|               |         MergeScan [is_placeholder=false, remote_input=[                                                                                                                |
-|               | SubqueryAlias: t                                                                                                                                                       |
-|               |   SubqueryAlias: tql_summary                                                                                                                                           |
-|               |     Projection: prom_avg_over_time(ts_range,cpu) AS cpu, labels.host, labels.ts                                                                                        |
-|               |       Filter: prom_avg_over_time(ts_range,cpu) IS NOT NULL                                                                                                             |
-|               |         Projection: labels.ts, prom_avg_over_time(ts_range, cpu) AS prom_avg_over_time(ts_range,cpu), labels.host                                                      |
-|               |           PromRangeManipulate: req range=[0..40000], interval=[10000], eval range=[30000], time index=[ts], values=["cpu"]                                             |
-|               |             PromSeriesNormalize: offset=[0], time index=[ts], filter NaN: [true]                                                                                       |
-|               |               PromSeriesDivide: tags=["host"]                                                                                                                          |
-|               |                 Filter: labels.ts >= TimestampMillisecond(-29999, None) AND labels.ts <= TimestampMillisecond(40000, None)                                             |
-|               |                   TableScan: labels                                                                                                                                    |
-|               | ]]                                                                                                                                                                     |
-|               |       Filter: l.host = Utf8("host1")                                                                                                                                   |
-|               |         Projection: l.ts, l.host                                                                                                                                       |
-|               |           MergeScan [is_placeholder=false, remote_input=[                                                                                                              |
-|               | SubqueryAlias: l                                                                                                                                                       |
-|               |   TableScan: labels                                                                                                                                                    |
-|               | ]]                                                                                                                                                                     |
-| physical_plan | SortPreservingMergeExec: [ts@0 ASC NULLS LAST, avg_value@1 ASC NULLS LAST], fetch=5                                                                                    |
++---------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                 |
++---------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | Sort: t.ts ASC NULLS LAST, l.host ASC NULLS LAST, avg_value ASC NULLS LAST, fetch=5                                                                                  |
+|               |   Projection: t.ts, t.cpu AS avg_value, l.host                                                                                                                       |
+|               |     Inner Join: date_trunc(Utf8("second"), t.ts) = date_trunc(Utf8("second"), l.ts)                                                                                  |
+|               |       Projection: t.cpu, t.ts                                                                                                                                        |
+|               |         MergeScan [is_placeholder=false, remote_input=[                                                                                                              |
+|               | SubqueryAlias: t                                                                                                                                                     |
+|               |   SubqueryAlias: tql_summary                                                                                                                                         |
+|               |     Projection: prom_avg_over_time(ts_range,cpu) AS cpu, labels.host, labels.ts                                                                                      |
+|               |       Filter: prom_avg_over_time(ts_range,cpu) IS NOT NULL                                                                                                           |
+|               |         Projection: labels.ts, prom_avg_over_time(ts_range, cpu) AS prom_avg_over_time(ts_range,cpu), labels.host                                                    |
+|               |           PromRangeManipulate: req range=[0..40000], interval=[10000], eval range=[30000], time index=[ts], values=["cpu"]                                           |
+|               |             PromSeriesNormalize: offset=[0], time index=[ts], filter NaN: [true]                                                                                     |
+|               |               PromSeriesDivide: tags=["host"]                                                                                                                        |
+|               |                 Filter: labels.ts >= TimestampMillisecond(-29999, None) AND labels.ts <= TimestampMillisecond(40000, None)                                           |
+|               |                   TableScan: labels                                                                                                                                  |
+|               | ]]                                                                                                                                                                   |
+|               |       Filter: l.host = Utf8("host1")                                                                                                                                 |
+|               |         Projection: l.ts, l.host                                                                                                                                     |
+|               |           MergeScan [is_placeholder=false, remote_input=[                                                                                                            |
+|               | SubqueryAlias: l                                                                                                                                                     |
+|               |   TableScan: labels                                                                                                                                                  |
+|               | ]]                                                                                                                                                                   |
+| physical_plan | SortPreservingMergeExec: [ts@0 ASC NULLS LAST, avg_value@1 ASC NULLS LAST], fetch=5                                                                                  |
 |               |   SortExec: TopK(fetch=5), expr=[ts@0 ASC NULLS LAST, avg_value@1 ASC NULLS LAST], preserve_REDACTED
-|               |     ProjectionExec: expr=[ts@1 as ts, cpu@0 as avg_value, host@2 as host]                                                                                              |
-|               |       CoalesceBatchesExec: target_batch_size=8192                                                                                                                      |
-|               |         HashJoinExec: mode=Partitioned, join_type=Inner, on=[(date_trunc(Utf8("second"),t.ts)@2, date_trunc(Utf8("second"),l.ts)@2)], projection=[cpu@0, ts@1, host@4] |
-|               |           CoalesceBatchesExec: target_batch_size=8192                                                                                                                  |
-|               |             RepartitionExec: REDACTED
-|               |               ProjectionExec: expr=[cpu@0 as cpu, ts@2 as ts, date_trunc(second, ts@2) as date_trunc(Utf8("second"),t.ts)]                                             |
-|               |                 CooperativeExec                                                                                                                                        |
-|               |                   MergeScanExec: REDACTED
-|               |           CoalesceBatchesExec: target_batch_size=8192                                                                                                                  |
-|               |             RepartitionExec: REDACTED
-|               |               ProjectionExec: expr=[ts@0 as ts, host@1 as host, date_trunc(second, ts@0) as date_trunc(Utf8("second"),l.ts)]                                           |
-|               |                 CoalesceBatchesExec: target_batch_size=8192                                                                                                            |
-|               |                   FilterExec: host@1 = host1                                                                                                                           |
-|               |                     ProjectionExec: expr=[ts@0 as ts, host@1 as host]                                                                                                  |
-|               |                       CooperativeExec                                                                                                                                  |
-|               |                         MergeScanExec: REDACTED
-|               |                                                                                                                                                                        |
-+---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+|               |     ProjectionExec: expr=[ts@1 as ts, cpu@0 as avg_value, host@2 as host]                                                                                            |
+|               |       HashJoinExec: mode=Partitioned, join_type=Inner, on=[(date_trunc(Utf8("second"),t.ts)@2, date_trunc(Utf8("second"),l.ts)@2)], projection=[cpu@0, ts@1, host@4] |
+|               |         RepartitionExec: REDACTED
+|               |           ProjectionExec: expr=[cpu@0 as cpu, ts@2 as ts, date_trunc(second, ts@2) as date_trunc(Utf8("second"),t.ts)]                                               |
+|               |             MergeScanExec: REDACTED
+|               |         RepartitionExec: REDACTED
+|               |           ProjectionExec: expr=[ts@0 as ts, host@1 as host, date_trunc(second, ts@0) as date_trunc(Utf8("second"),l.ts)]                                             |
+|               |             FilterExec: host@1 = host1                                                                                                                               |
+|               |               ProjectionExec: expr=[ts@0 as ts, host@1 as host]                                                                                                      |
+|               |                 MergeScanExec: REDACTED
+|               |                                                                                                                                                                      |
++---------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
 -- Error case - TQL ANALYZE should fail
 WITH tql_analyze AS (

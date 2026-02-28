@@ -75,15 +75,21 @@ SELECT MAX(t) FROM timestamp;
 
 SELECT SUM(t) FROM timestamp;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Execution error: Function 'sum' user-defined coercion failed with "Execution error: Sum not supported for Timestamp(ms)" No function matches the given name and argument types 'sum(Timestamp(ms))'. You might need to add explicit type casts.
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Execution error: Function 'sum' failed to match any signature, errors: Error during planning: Function 'sum' requires TypeSignatureClass::Decimal, but received Timestamp(ms) (DataType: Timestamp(ms)).,Error during planning: Function 'sum' requires TypeSignatureClass::Native(LogicalType(Native(UInt64), UInt64)), but received Timestamp(ms) (DataType: Timestamp(ms)).,Error during planning: Function 'sum' requires TypeSignatureClass::Native(LogicalType(Native(Int64), Int64)), but received Timestamp(ms) (DataType: Timestamp(ms)).,Error during planning: Function 'sum' requires TypeSignatureClass::Native(LogicalType(Native(Float64), Float64)), but received Timestamp(ms) (DataType: Timestamp(ms)).,Error during planning: Function 'sum' requires TypeSignatureClass::Duration, but received Timestamp(ms) (DataType: Timestamp(ms)). No function matches the given name and argument types 'sum(Timestamp(ms))'. You might need to add explicit type casts.
 	Candidate functions:
-	sum(UserDefined)
+	sum(Coercion(TypeSignatureClass::Decimal))
+	sum(Coercion(TypeSignatureClass::Native(LogicalType(Native(UInt64), UInt64)), implicit_coercion=ImplicitCoercion([Native(LogicalType(Native(UInt8), UInt8)), Native(LogicalType(Native(UInt16), UInt16)), Native(LogicalType(Native(UInt32), UInt32))], default_type=UInt64))
+	sum(Coercion(TypeSignatureClass::Native(LogicalType(Native(Int64), Int64)), implicit_coercion=ImplicitCoercion([Native(LogicalType(Native(Int8), Int8)), Native(LogicalType(Native(Int16), Int16)), Native(LogicalType(Native(Int32), Int32))], default_type=Int64))
+	sum(Coercion(TypeSignatureClass::Native(LogicalType(Native(Float64), Float64)), implicit_coercion=ImplicitCoercion([Float], default_type=Float64))
+	sum(Coercion(TypeSignatureClass::Duration))
 
 SELECT AVG(t) FROM timestamp;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Execution error: Function 'avg' user-defined coercion failed with "Error during planning: Avg does not support inputs of type Timestamp(ms)." No function matches the given name and argument types 'avg(Timestamp(ms))'. You might need to add explicit type casts.
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Execution error: Function 'avg' failed to match any signature, errors: Error during planning: Function 'avg' requires TypeSignatureClass::Decimal, but received Timestamp(ms) (DataType: Timestamp(ms)).,Error during planning: Function 'avg' requires TypeSignatureClass::Duration, but received Timestamp(ms) (DataType: Timestamp(ms)).,Error during planning: Function 'avg' requires TypeSignatureClass::Native(LogicalType(Native(Float64), Float64)), but received Timestamp(ms) (DataType: Timestamp(ms)). No function matches the given name and argument types 'avg(Timestamp(ms))'. You might need to add explicit type casts.
 	Candidate functions:
-	avg(UserDefined)
+	avg(Coercion(TypeSignatureClass::Decimal))
+	avg(Coercion(TypeSignatureClass::Duration))
+	avg(Coercion(TypeSignatureClass::Native(LogicalType(Native(Float64), Float64)), implicit_coercion=ImplicitCoercion([Integer, Float], default_type=Float64))
 
 SELECT t+t FROM timestamp;
 

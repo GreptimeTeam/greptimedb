@@ -19,7 +19,6 @@ use std::time::Duration;
 use arrow_schema::DataType;
 use async_recursion::async_recursion;
 use catalog::table_source::DfTableSourceProvider;
-use chrono::Utc;
 use common_time::interval::{MS_PER_DAY, NANOS_PER_MILLI};
 use common_time::timestamp::TimeUnit;
 use common_time::{IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth, Timestamp, Timezone};
@@ -28,7 +27,6 @@ use datafusion::prelude::Column;
 use datafusion::scalar::ScalarValue;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, TreeNodeRewriter};
 use datafusion_common::{DFSchema, DataFusionError, Result as DFResult};
-use datafusion_expr::execution_props::ExecutionProps;
 use datafusion_expr::expr::WildcardOptions;
 use datafusion_expr::simplify::SimplifyContext;
 use datafusion_expr::{
@@ -146,8 +144,7 @@ fn evaluate_expr_to_millisecond(args: &[Expr], i: usize, interval_only: bool) ->
     if interval_only && !interval_only_in_expr(expr) {
         return Err(dispose_parse_error(Some(expr)));
     }
-    let execution_props = ExecutionProps::new().with_query_execution_start_time(Utc::now());
-    let info = SimplifyContext::new(&execution_props).with_schema(Arc::new(DFSchema::empty()));
+    let info = SimplifyContext::default().with_current_time();
     let simplify_expr = ExprSimplifier::new(info).simplify(expr.clone())?;
     match simplify_expr {
         Expr::Literal(ScalarValue::TimestampNanosecond(ts_nanos, _), _)

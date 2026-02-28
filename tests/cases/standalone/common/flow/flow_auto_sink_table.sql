@@ -1,5 +1,5 @@
 CREATE TABLE numbers_input_basic (
-    number INT,
+    "number" INT,
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(number),
     TIME INDEX(ts)
@@ -34,7 +34,7 @@ DROP TABLE numbers_input_basic;
 DROP TABLE out_num_cnt_basic;
 
 CREATE TABLE numbers_input_basic (
-    number INT,
+    "number" INT,
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(number),
     TIME INDEX(ts)

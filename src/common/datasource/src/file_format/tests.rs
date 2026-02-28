@@ -46,7 +46,10 @@ struct Test<'a> {
 impl Test<'_> {
     async fn run(self, store: &ObjectStore) {
         let store = Arc::new(object_store_opendal::OpendalStore::new(store.clone()));
-        let file_opener = self.file_source.create_file_opener(store, &self.config, 0);
+        let file_opener = self
+            .file_source
+            .create_file_opener(store, &self.config, 0)
+            .unwrap();
 
         let result = FileStream::new(
             &self.config,

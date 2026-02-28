@@ -10,7 +10,7 @@ workspace = true
 [dependencies]
 arrow.workspace = true
 arrow-schema.workspace = true
-async-compression = { version = "0.3", features = [
+async-compression = { version = "0.4", features = [
     "bzip2",
     "gzip",
     "xz",

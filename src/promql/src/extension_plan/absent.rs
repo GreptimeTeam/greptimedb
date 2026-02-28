@@ -238,12 +238,12 @@ impl Absent {
 
     pub fn to_execution_plan(&self, exec_input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
         let output_schema = Arc::new(self.output_schema.as_arrow().clone());
-        let properties = PlanProperties::new(
+        let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(output_schema.clone()),
             Partitioning::UnknownPartitioning(1),
             EmissionType::Incremental,
             Boundedness::Bounded,
-        );
+        ));
         Arc::new(AbsentExec {
             start: self.start,
             end: self.end,
@@ -323,7 +323,7 @@ pub struct AbsentExec {
     fake_labels: Vec<(String, String)>,
     output_schema: SchemaRef,
     input: Arc<dyn ExecutionPlan>,
-    properties: PlanProperties,
+    properties: Arc<PlanProperties>,
     metric: ExecutionPlanMetricsSet,
 }
 
@@ -336,7 +336,7 @@ impl ExecutionPlan for AbsentExec {
         self.output_schema.clone()
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
     }
 
@@ -624,12 +624,12 @@ mod tests {
             fake_labels: vec![],
             output_schema: output_schema.clone(),
             input: Arc::new(memory_exec),
-            properties: PlanProperties::new(
+            properties: Arc::new(PlanProperties::new(
                 EquivalenceProperties::new(output_schema.clone()),
                 Partitioning::UnknownPartitioning(1),
                 EmissionType::Incremental,
                 Boundedness::Bounded,
-            ),
+            )),
             metric: ExecutionPlanMetricsSet::new(),
         };
 
@@ -692,12 +692,12 @@ mod tests {
             fake_labels: vec![],
             output_schema: output_schema.clone(),
             input: Arc::new(memory_exec),
-            properties: PlanProperties::new(
+            properties: Arc::new(PlanProperties::new(
                 EquivalenceProperties::new(output_schema.clone()),
                 Partitioning::UnknownPartitioning(1),
                 EmissionType::Incremental,
                 Boundedness::Bounded,
-            ),
+            )),
             metric: ExecutionPlanMetricsSet::new(),
         };
 

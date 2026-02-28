@@ -1,9 +1,9 @@
 -- Migrated from DuckDB test: test/sql/join/ NULL handling tests
 -- Tests join behavior with NULL values
 
-CREATE TABLE table_with_nulls("id" INTEGER, "value" VARCHAR, category INTEGER, ts TIMESTAMP TIME INDEX);
+CREATE TABLE table_with_nulls("id" INTEGER, "value" VARCHAR, "category" INTEGER, ts TIMESTAMP TIME INDEX);
 
-CREATE TABLE lookup_table(category INTEGER, cat_name VARCHAR, priority INTEGER, ts TIMESTAMP TIME INDEX);
+CREATE TABLE lookup_table("category" INTEGER, cat_name VARCHAR, priority INTEGER, ts TIMESTAMP TIME INDEX);
 
 INSERT INTO table_with_nulls VALUES
 (1, 'item1', 1, 1000), (2, 'item2', NULL, 2000), (3, 'item3', 2, 3000),

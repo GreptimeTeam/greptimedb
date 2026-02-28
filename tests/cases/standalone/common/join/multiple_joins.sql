@@ -5,7 +5,7 @@ CREATE TABLE customers_multi("id" INTEGER, "name" VARCHAR, city VARCHAR, ts TIME
 
 CREATE TABLE orders_multi("id" INTEGER, customer_id INTEGER, product_id INTEGER, amount DOUBLE, ts TIMESTAMP TIME INDEX);
 
-CREATE TABLE products_multi("id" INTEGER, "name" VARCHAR, category VARCHAR, price DOUBLE, ts TIMESTAMP TIME INDEX);
+CREATE TABLE products_multi("id" INTEGER, "name" VARCHAR, "category" VARCHAR, price DOUBLE, ts TIMESTAMP TIME INDEX);
 
 INSERT INTO customers_multi VALUES (1, 'Alice', 'NYC', 1000), (2, 'Bob', 'LA', 2000), (3, 'Carol', 'Chicago', 3000);
 

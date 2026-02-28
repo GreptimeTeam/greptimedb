@@ -121,10 +121,8 @@ TQL EXPLAIN (
 |               | ]]                                                                                                                                                                                                                              |
 | physical_plan | HistogramFoldExec: le=@0, field=@4, quantile=0.5                                                                                                                                                                                |
 |               |   SortExec: expr=[tag4@1 ASC NULLS LAST, tag5@2 ASC NULLS LAST, ts@3 ASC NULLS LAST, CAST(le@0 AS Float64) ASC NULLS LAST], preserve_partitioning=[true]                                                                        |
-|               |     CoalesceBatchesExec: target_batch_size=8192                                                                                                                                                                                 |
-|               |       RepartitionExec: REDACTED
-|               |         CooperativeExec                                                                                                                                                                                                         |
-|               |           MergeScanExec: REDACTED
+|               |     RepartitionExec: REDACTED
+|               |       MergeScanExec: REDACTED
 |               |                                                                                                                                                                                                                                 |
 +---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
