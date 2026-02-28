@@ -1886,6 +1886,59 @@ SELECT * FROM tql;
     }
 
     #[test]
+    fn test_parse_create_flow_with_tql_cte_non_select_star_is_unsupported() {
+        let sql = r#"
+CREATE FLOW f
+SINK TO s
+AS
+WITH tql(ts, val) AS (
+    TQL EVAL (now() - '1m'::interval, now(), '5s') metric
+)
+SELECT ts FROM tql;
+"#;
+
+        let err =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap_err();
+        assert!(err.to_string().contains("simplest TQL CTE"), "err: {err}");
+    }
+
+    #[test]
+    fn test_parse_create_flow_with_tql_cte_filter_is_unsupported() {
+        let sql = r#"
+CREATE FLOW f
+SINK TO s
+AS
+WITH tql(ts, val) AS (
+    TQL EVAL (now() - '1m'::interval, now(), '5s') metric
+)
+SELECT * FROM tql WHERE ts > 0;
+"#;
+
+        let err =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap_err();
+        assert!(err.to_string().contains("simplest TQL CTE"), "err: {err}");
+    }
+
+    #[test]
+    fn test_parse_create_flow_with_mixed_sql_tql_cte_is_unsupported() {
+        let sql = r#"
+CREATE FLOW f
+SINK TO s
+AS
+WITH s1 AS (SELECT 1),
+     tql(ts, val) AS (TQL EVAL (now() - '1m'::interval, now(), '5s') metric)
+SELECT * FROM tql;
+"#;
+
+        let err =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap_err();
+        assert!(err.to_string().contains("simplest TQL CTE"), "err: {err}");
+    }
+
+    #[test]
     fn test_create_flow_no_month() {
         let sql = r"
 CREATE FLOW `task_2`

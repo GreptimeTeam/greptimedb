@@ -74,49 +74,115 @@ pub fn is_tql(dialect: &dyn Dialect, sql: &str) -> Result<bool> {
 }
 
 pub(crate) fn is_simple_tql_cte_query(query: &Query) -> bool {
-    use sqlparser::ast::{SetExpr, TableFactor};
-
     use crate::parser::ParserContext;
 
     let Some(hybrid_cte) = &query.hybrid_cte else {
         return false;
     };
 
-    // Keep this deliberately strict: only recognize the simplest CTE shape where
-    // the main query is a single SELECT from exactly one TQL CTE.
-    if hybrid_cte.cte_tables.len() != 1 {
+    if !has_only_hybrid_tql_cte(query) {
         return false;
     }
-    let cte = &hybrid_cte.cte_tables[0];
-    if !matches!(cte.content, CteContent::Tql(_)) {
+
+    let Some(cte) = hybrid_cte.cte_tables.first() else {
         return false;
+    };
+    if hybrid_cte.cte_tables.len() != 1 || !matches!(cte.content, CteContent::Tql(_)) {
+        return false;
+    }
+
+    let Some(reference) = extract_simple_select_star_reference(query) else {
+        return false;
+    };
+
+    let reference = ParserContext::canonicalize_identifier(reference).value;
+    let cte_name = ParserContext::canonicalize_identifier(cte.name.clone()).value;
+    reference == cte_name
+}
+
+fn has_only_hybrid_tql_cte(query: &Query) -> bool {
+    query
+        .inner
+        .with
+        .as_ref()
+        .is_none_or(|with| with.cte_tables.is_empty())
+}
+
+fn extract_simple_select_star_reference(query: &Query) -> Option<sqlparser::ast::Ident> {
+    use sqlparser::ast::{SetExpr, TableFactor};
+
+    if !is_plain_query_root(&query.inner) {
+        return None;
     }
 
     let SetExpr::Select(select) = &*query.inner.body else {
-        return false;
+        return None;
     };
-    if select.from.len() != 1 {
-        return false;
+    if !is_plain_select(select) || !is_plain_wildcard_projection(select.projection.as_slice()) {
+        return None;
     }
-    let table_with_joins = &select.from[0];
+
+    let [table_with_joins] = select.from.as_slice() else {
+        return None;
+    };
     if !table_with_joins.joins.is_empty() {
-        return false;
+        return None;
     }
+
     let TableFactor::Table { name, .. } = &table_with_joins.relation else {
-        return false;
+        return None;
     };
-
-    // CTE reference should be a bare table name.
     if name.0.len() != 1 {
-        return false;
+        return None;
     }
-    let Some(ident) = name.0[0].as_ident() else {
-        return false;
-    };
 
-    let reference = ParserContext::canonicalize_identifier(ident.clone()).value;
-    let cte_name = ParserContext::canonicalize_identifier(cte.name.clone()).value;
-    reference == cte_name
+    name.0[0].as_ident().cloned()
+}
+
+fn is_plain_query_root(query: &sqlparser::ast::Query) -> bool {
+    query.order_by.is_none()
+        && query.limit_clause.is_none()
+        && query.fetch.is_none()
+        && query.locks.is_empty()
+        && query.for_clause.is_none()
+        && query.settings.is_none()
+        && query.format_clause.is_none()
+        && query.pipe_operators.is_empty()
+}
+
+fn is_plain_select(select: &sqlparser::ast::Select) -> bool {
+    use sqlparser::ast::GroupByExpr;
+
+    select.distinct.is_none()
+        && select.top.is_none()
+        && select.exclude.is_none()
+        && select.into.is_none()
+        && select.lateral_views.is_empty()
+        && select.prewhere.is_none()
+        && select.selection.is_none()
+        && matches!(select.group_by, GroupByExpr::Expressions(ref exprs, _) if exprs.is_empty())
+        && select.cluster_by.is_empty()
+        && select.distribute_by.is_empty()
+        && select.sort_by.is_empty()
+        && select.having.is_none()
+        && select.named_window.is_empty()
+        && select.qualify.is_none()
+        && select.value_table_mode.is_none()
+        && select.connect_by.is_none()
+}
+
+fn is_plain_wildcard_projection(projection: &[sqlparser::ast::SelectItem]) -> bool {
+    use sqlparser::ast::SelectItem;
+
+    matches!(
+        projection,
+        [SelectItem::Wildcard(options)]
+            if options.opt_ilike.is_none()
+                && options.opt_exclude.is_none()
+                && options.opt_except.is_none()
+                && options.opt_replace.is_none()
+                && options.opt_rename.is_none()
+    )
 }
 
 /// Convert a parser expression to a scalar value. This function will try the
@@ -393,6 +459,30 @@ WITH cte AS (SELECT 1)
 SELECT * FROM cte
 "#;
         assert!(!is_tql(&dialect, sql_cte).unwrap());
+
+        let extra_sql_cte = r#"
+WITH sql_cte AS (SELECT 1), tql_cte(ts, val) AS (
+    TQL EVAL (0, 15, '5s') metric
+)
+SELECT * FROM tql_cte
+"#;
+        assert!(!is_tql(&dialect, extra_sql_cte).unwrap());
+
+        let not_select_star = r#"
+WITH tql_cte(ts, val) AS (
+    TQL EVAL (0, 15, '5s') metric
+)
+SELECT ts FROM tql_cte
+"#;
+        assert!(!is_tql(&dialect, not_select_star).unwrap());
+
+        let with_filter = r#"
+WITH tql_cte(ts, val) AS (
+    TQL EVAL (0, 15, '5s') metric
+)
+SELECT * FROM tql_cte WHERE ts > 0
+"#;
+        assert!(!is_tql(&dialect, with_filter).unwrap());
     }
 
     /// Keep this test to make sure we are using datafusion's `ExprSimplifier` correctly.

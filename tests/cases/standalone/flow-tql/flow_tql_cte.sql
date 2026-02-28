@@ -33,6 +33,25 @@ WITH "TQL"(ts, the_value) AS (
 )
 SELECT * FROM TQL;
 
+CREATE FLOW calc_cte_non_star SINK TO metric_cte_non_star_sink EVAL INTERVAL '1m' AS
+WITH tql(ts, the_value) AS (
+  TQL EVAL (now() - now(), now() - (now() - '15s'::interval), '5s') metric_cte
+)
+SELECT ts FROM tql;
+
+CREATE FLOW calc_cte_filter SINK TO metric_cte_filter_sink EVAL INTERVAL '1m' AS
+WITH tql(ts, the_value) AS (
+  TQL EVAL (now() - now(), now() - (now() - '15s'::interval), '5s') metric_cte
+)
+SELECT * FROM tql WHERE ts > 0::timestamp;
+
+CREATE FLOW calc_cte_mixed SINK TO metric_cte_mixed_sink EVAL INTERVAL '1m' AS
+WITH s1 AS (SELECT 1),
+     tql(ts, the_value) AS (
+       TQL EVAL (now() - now(), now() - (now() - '15s'::interval), '5s') metric_cte
+     )
+SELECT * FROM tql;
+
 CREATE FLOW calc_cte_case SINK TO metric_cte_join_sink EVAL INTERVAL '1m' AS
 WITH "TQL"(ts, the_value) AS (
   TQL EVAL (now() - now(), now() - (now() - '15s'::interval), '5s') metric_cte
