@@ -27,7 +27,7 @@ use sqlparser_derive::{Visit, VisitMut};
 
 use crate::dialect::GreptimeDbDialect;
 use crate::error::{self, Result};
-use crate::parser::{ParseOptions, ParserContext};
+use crate::parser::ParserContext;
 use crate::parsers::tql_parser;
 use crate::statements::query::Query;
 use crate::statements::statement::Statement;
@@ -97,6 +97,10 @@ impl fmt::Display for HybridCteWith {
 impl ParserContext<'_> {
     /// Parse a WITH clause that may contain TQL CTEs or SQL CTEs.
     pub(crate) fn parse_with_tql(&mut self) -> Result<Statement> {
+        self.parse_with_tql_with_now(false)
+    }
+
+    pub(crate) fn parse_with_tql_with_now(&mut self, require_now_expr: bool) -> Result<Statement> {
         // Consume the WITH token
         self.parser
             .expect_keyword(Keyword::WITH)
@@ -110,7 +114,7 @@ impl ParserContext<'_> {
         let mut sql_cte_tables = Vec::new();
 
         loop {
-            let cte = self.parse_hybrid_cte()?;
+            let cte = self.parse_hybrid_cte(require_now_expr)?;
             match cte.content {
                 CteContent::Sql(body) => sql_cte_tables.push(Cte {
                     alias: TableAlias {
@@ -160,7 +164,7 @@ impl ParserContext<'_> {
     }
 
     /// Parse a single CTE that can be either SQL or TQL
-    fn parse_hybrid_cte(&mut self) -> Result<HybridCte> {
+    fn parse_hybrid_cte(&mut self, require_now_expr: bool) -> Result<HybridCte> {
         // Parse CTE name
         let name = self.parser.parse_identifier().context(error::SyntaxSnafu)?;
         let name = Self::canonicalize_identifier(name);
@@ -181,7 +185,7 @@ impl ParserContext<'_> {
             .expect_token(&Token::LParen)
             .context(error::SyntaxSnafu)?;
 
-        let content = self.parse_cte_content()?;
+        let content = self.parse_cte_content(require_now_expr)?;
 
         self.parser
             .expect_token(&Token::RParen)
@@ -195,14 +199,14 @@ impl ParserContext<'_> {
     }
 
     /// Determine if CTE contains TQL or SQL and parse accordingly
-    fn parse_cte_content(&mut self) -> Result<CteContent> {
+    fn parse_cte_content(&mut self, require_now_expr: bool) -> Result<CteContent> {
         // Check if the next token is TQL
         if let Token::Word(w) = &self.parser.peek_token().token
             && w.keyword == Keyword::NoKeyword
             && w.quote_style.is_none()
             && w.value.to_uppercase() == tql_parser::TQL
         {
-            let tql = self.parse_tql_content_in_cte()?;
+            let tql = self.parse_tql_content_in_cte(require_now_expr)?;
             return Ok(CteContent::Tql(tql));
         }
 
@@ -218,7 +222,7 @@ impl ParserContext<'_> {
     /// can handle it normally.
     ///
     /// Only `TQL EVAL` is supported inside CTEs.
-    fn parse_tql_content_in_cte(&mut self) -> Result<Tql> {
+    fn parse_tql_content_in_cte(&mut self, require_now_expr: bool) -> Result<Tql> {
         // Consume and get the position of the TQL keyword
         let tql_token = self.parser.next_token();
         if tql_token.token == Token::EOF {
@@ -270,21 +274,10 @@ impl ParserContext<'_> {
         let tql_string = &self.sql[start_index..end_index];
         let tql_string = tql_string.trim();
 
-        // Parse the TQL string using the standard TQL parser
-        let mut stmts = ParserContext::create_with_dialect(
-            tql_string,
-            &GreptimeDbDialect {},
-            ParseOptions::default(),
-        )?;
+        let mut parser_ctx = ParserContext::new(&GreptimeDbDialect {}, tql_string)?;
+        let statement = parser_ctx.parse_tql(require_now_expr)?;
 
-        if stmts.len() != 1 {
-            return Err(error::InvalidSqlSnafu {
-                msg: "Expected a single TQL statement inside CTE".to_string(),
-            }
-            .build());
-        }
-
-        match stmts.remove(0) {
+        match statement {
             Statement::Tql(Tql::Eval(eval)) => Ok(Tql::Eval(eval)),
             Statement::Tql(_) => Err(error::InvalidSqlSnafu {
                 msg: "Only TQL EVAL is supported in CTEs".to_string(),

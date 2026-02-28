@@ -35,8 +35,7 @@ use query::QueryEngineRef;
 use query::query_engine::DefaultSerializer;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt, ensure};
-use sql::parser::{ParseOptions, ParserContext};
-use sql::statements::statement::Statement;
+use sql::parsers::utils::is_tql;
 use store_api::mito_engine_options::MERGE_MODE_KEY;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::table::adapter::DfTableProviderAdapter;
@@ -84,22 +83,14 @@ pub struct TaskConfig {
 }
 
 fn determine_query_type(query: &str, query_ctx: &QueryContextRef) -> Result<QueryType, Error> {
-    let stmts =
-        ParserContext::create_with_dialect(query, query_ctx.sql_dialect(), ParseOptions::default())
-            .map_err(BoxedError::new)
-            .context(ExternalSnafu)?;
-
-    ensure!(
-        stmts.len() == 1,
-        InvalidQuerySnafu {
-            reason: format!("Expect only one statement, found {}", stmts.len())
-        }
-    );
-    let stmt = &stmts[0];
-    match stmt {
-        Statement::Tql(_) => Ok(QueryType::Tql),
-        _ => Ok(QueryType::Sql),
-    }
+    let is_tql = is_tql(query_ctx.sql_dialect(), query)
+        .map_err(BoxedError::new)
+        .context(ExternalSnafu)?;
+    Ok(if is_tql {
+        QueryType::Tql
+    } else {
+        QueryType::Sql
+    })
 }
 
 fn is_merge_mode_last_non_null(options: &HashMap<String, String>) -> bool {
