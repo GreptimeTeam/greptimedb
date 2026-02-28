@@ -2107,6 +2107,7 @@ dependencies = [
 name = "cmd"
 version = "1.0.0-rc.1"
 dependencies = [
+ "api",
  "async-trait",
  "auth",
  "base64 0.22.1",
