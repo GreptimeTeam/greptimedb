@@ -51,7 +51,7 @@ use crate::metrics::{
     GC_ORPHANED_INDEX_FILES, GC_RUNS_TOTAL, GC_SKIPPED_UNPARSABLE_FILES,
 };
 use crate::region::{MitoRegionRef, RegionRoleState};
-use crate::sst::file::{RegionFileId, RegionIndexId, delete_files, delete_index};
+use crate::sst::file::{RegionFileId, RegionIndexId, delete_files, delete_indexes};
 use crate::sst::location::{self};
 
 #[cfg(test)]
@@ -547,17 +547,17 @@ impl LocalGcWorker {
             GC_DELETE_FILE_CNT.inc_by(deleted_count);
         }
 
-        for index_id in index_ids {
-            match delete_index(index_id, &self.access_layer, &self.cache_manager).await {
-                Ok(()) => {
-                    GC_FILES_DELETED_TOTAL.with_label_values(&["index"]).inc();
-                    GC_DELETE_FILE_CNT.inc();
-                }
-                Err(err) => {
+        if !index_ids.is_empty() {
+            let deleted_count = index_ids.len() as u64;
+            delete_indexes(&index_ids, &self.access_layer, &self.cache_manager)
+                .await
+                .inspect_err(|_| {
                     GC_ERRORS_TOTAL.with_label_values(&["delete_failed"]).inc();
-                    return Err(err);
-                }
-            }
+                })?;
+            GC_FILES_DELETED_TOTAL
+                .with_label_values(&["index"])
+                .inc_by(deleted_count);
+            GC_DELETE_FILE_CNT.inc_by(deleted_count);
         }
 
         Ok(())

@@ -33,7 +33,7 @@ use crate::cache::CacheManagerRef;
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::cache::write_cache::SstUploadRequest;
 use crate::config::{BloomFilterConfig, FulltextIndexConfig, IndexConfig, InvertedIndexConfig};
-use crate::error::{CleanDirSnafu, DeleteIndexSnafu, DeleteSstSnafu, OpenDalSnafu, Result};
+use crate::error::{CleanDirSnafu, DeleteIndexSnafu, OpenDalSnafu, Result};
 use crate::metrics::{COMPACTION_STAGE_ELAPSED, FLUSH_ELAPSED};
 use crate::read::{FlatSource, Source};
 use crate::region::options::IndexOptions;
@@ -210,29 +210,6 @@ impl AccessLayer {
         let path_provider =
             RegionFilePathFactory::new(self.table_dir().to_string(), self.path_type());
         self.puffin_manager_factory.build(store, path_provider)
-    }
-
-    /// Deletes a SST file (and its index file if it has one) with given file id.
-    pub(crate) async fn delete_sst(
-        &self,
-        region_file_id: &RegionFileId,
-        index_file_id: &RegionIndexId,
-    ) -> Result<()> {
-        let path = location::sst_file_path(&self.table_dir, *region_file_id, self.path_type);
-        self.object_store
-            .delete(&path)
-            .await
-            .context(DeleteSstSnafu {
-                file_id: region_file_id.file_id(),
-            })?;
-
-        // Delete all versions of the index file.
-        for version in 0..=index_file_id.version {
-            let index_id = RegionIndexId::new(*region_file_id, version);
-            self.delete_index(index_id).await?;
-        }
-
-        Ok(())
     }
 
     pub(crate) async fn delete_index(
