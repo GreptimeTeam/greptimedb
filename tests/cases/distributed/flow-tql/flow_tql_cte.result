@@ -191,3 +191,4 @@ Affected Rows: 0
 DROP TABLE metric_cte_join_sink;
 
 Affected Rows: 0
+
