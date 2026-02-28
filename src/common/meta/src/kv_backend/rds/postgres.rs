@@ -404,6 +404,22 @@ impl ExecutorFactory<PgClient> for PgExecutorFactory {
 /// It uses [deadpool_postgres::Pool] as the connection pool for [RdsStore].
 pub type PgStore = RdsStore<PgClient, PgExecutorFactory, PgSqlTemplateSet>;
 
+/// Returns `true` if the PostgreSQL connection URL indicates a Unix socket connection.
+///
+/// Uses [`tokio_postgres::Config`] to properly parse the connection string (both
+/// key-value and URI formats) and check whether any host is a Unix socket path.
+pub fn is_pg_unix_socket(url: &str) -> bool {
+    use tokio_postgres::config::Host;
+
+    let Ok(config) = url.parse::<tokio_postgres::Config>() else {
+        return false;
+    };
+    config
+        .get_hosts()
+        .iter()
+        .any(|h| matches!(h, Host::Unix(_)))
+}
+
 /// Creates a PostgreSQL TLS connector based on the provided configuration.
 ///
 /// This function creates a rustls-based TLS connector for PostgreSQL connections,
@@ -824,7 +840,20 @@ impl PgStore {
         cfg.url = Some(url.to_string());
 
         let pool = match tls_config {
-            Some(tls_config) if tls_config.mode != TlsMode::Disable => {
+            Some(tls_config) if tls_config.mode == TlsMode::Disable => cfg
+                .create_pool(Some(Runtime::Tokio1), NoTls)
+                .context(CreatePostgresPoolSnafu)?,
+            Some(tls_config) if is_pg_unix_socket(url) => {
+                // Unix sockets don't support TLS; they are inherently secure
+                // via filesystem permissions.
+                common_telemetry::warn!(
+                    "Connecting via Unix socket, TLS mode {:?} is not applicable, skipping TLS",
+                    tls_config.mode
+                );
+                cfg.create_pool(Some(Runtime::Tokio1), NoTls)
+                    .context(CreatePostgresPoolSnafu)?
+            }
+            Some(tls_config) => {
                 match create_postgres_tls_connector(&tls_config) {
                     Ok(tls_connector) => cfg
                         .create_pool(Some(Runtime::Tokio1), tls_connector)
@@ -1475,5 +1504,32 @@ mod tests {
         let _ = client
             .execute(&format!("DROP TABLE IF EXISTS \"{}\"", table_name), &[])
             .await;
+    }
+
+    #[test]
+    fn test_is_pg_unix_socket() {
+        // Unix socket patterns (key-value format)
+        assert!(is_pg_unix_socket("host=/var/run/postgresql dbname=mydb"));
+        assert!(is_pg_unix_socket("host=/tmp user=postgres dbname=test"));
+
+        // Unix socket patterns (URI format with URL-encoded path)
+        assert!(is_pg_unix_socket(
+            "postgresql:///mydb?host=%2Fvar%2Frun%2Fpostgresql"
+        ));
+        assert!(is_pg_unix_socket("postgresql:///mydb?host=%2ftmp"));
+
+        // Quoted host paths
+        assert!(is_pg_unix_socket("host='/var/run/postgresql'"));
+        assert!(is_pg_unix_socket("host='/tmp' user=postgres"));
+
+        // TCP patterns (not Unix sockets)
+        assert!(!is_pg_unix_socket("host=localhost dbname=mydb"));
+        assert!(!is_pg_unix_socket("host=192.168.1.1 port=5432 dbname=mydb"));
+        assert!(!is_pg_unix_socket("postgresql://user:pass@localhost/mydb"));
+
+        // Should not false-positive on "host=" appearing in non-host context
+        assert!(!is_pg_unix_socket(
+            "postgresql://remote-host:5432/db?application_name=myhost=/tmp"
+        ));
     }
 }
