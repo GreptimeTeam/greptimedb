@@ -93,19 +93,30 @@ async fn test_gc_regions_failure_handling() {
     let report = scheduler.handle_tick().await.unwrap();
 
     // Validate the report shows the failure handling
-    assert_eq!(
-        report.per_datanode_reports.len(),
-        1,
-        "Should process 1 datanode despite failure"
-    );
-    assert_eq!(
-        report.failed_datanodes.len(),
-        0,
-        "Should have 0 failed datanodes (failure handled via need_retry_regions)"
-    );
+    // Check the report shows the failure handling
+    let datanode_report = match &report {
+        crate::gc::scheduler::GcJobReport::PerDatanode {
+            per_datanode_reports,
+            failed_datanodes,
+        } => {
+            assert_eq!(
+                per_datanode_reports.len(),
+                1,
+                "Should process 1 datanode despite failure"
+            );
+            assert_eq!(
+                failed_datanodes.len(),
+                0,
+                "Should have 0 failed datanodes (failure handled via need_retry_regions)"
+            );
+            per_datanode_reports.values().next().unwrap()
+        }
+        crate::gc::scheduler::GcJobReport::Combined { .. } => {
+            panic!("expected per-datanode report");
+        }
+    };
 
     // Check that the region is in need_retry_regions due to the failure
-    let datanode_report = report.per_datanode_reports.values().next().unwrap();
     assert_eq!(
         datanode_report.need_retry_regions.len(),
         1,
@@ -180,19 +191,25 @@ async fn test_get_file_references_failure() {
 
     // Validate the report shows the expected results
     // In the new implementation, even if get_file_references fails, we still create a datanode report
-    assert_eq!(
-        report.per_datanode_reports.len(),
-        1,
-        "Should process 1 datanode"
-    );
-    assert_eq!(
-        report.failed_datanodes.len(),
-        0,
-        "Should have 0 failed datanodes (failure handled gracefully)"
-    );
+    let datanode_report = match &report {
+        crate::gc::scheduler::GcJobReport::PerDatanode {
+            per_datanode_reports,
+            failed_datanodes,
+        } => {
+            assert_eq!(per_datanode_reports.len(), 1, "Should process 1 datanode");
+            assert_eq!(
+                failed_datanodes.len(),
+                0,
+                "Should have 0 failed datanodes (failure handled gracefully)"
+            );
+            per_datanode_reports.values().next().unwrap()
+        }
+        crate::gc::scheduler::GcJobReport::Combined { .. } => {
+            panic!("expected per-datanode report");
+        }
+    };
 
     // The region should be processed but may have empty results due to file refs failure
-    let datanode_report = report.per_datanode_reports.values().next().unwrap();
     // The current implementation still processes the region even with file refs failure
     // and creates an empty entry in deleted_files
     assert!(

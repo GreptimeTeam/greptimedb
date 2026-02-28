@@ -78,6 +78,30 @@ pub struct RemoveRegionFollowerRequest {
     pub peer_id: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct GcRegionsRequest {
+    pub region_ids: Vec<u64>,
+    pub full_file_listing: bool,
+    pub timeout: Duration,
+}
+
+#[derive(Debug, Clone)]
+pub struct GcTableRequest {
+    pub catalog_name: String,
+    pub schema_name: String,
+    pub table_name: String,
+    pub full_file_listing: bool,
+    pub timeout: Duration,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GcResponse {
+    pub processed_regions: u64,
+    pub need_retry_regions: Vec<u64>,
+    pub deleted_files: u64,
+    pub deleted_indexes: u64,
+}
+
 /// Cast the protobuf [`ProcedureId`] to common [`ProcedureId`].
 pub fn pb_pid_to_pid(pid: &PbProcedureId) -> Result<ProcedureId> {
     ProcedureId::parse_str(&String::from_utf8_lossy(&pid.key)).with_context(|_| {

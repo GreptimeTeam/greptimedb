@@ -89,6 +89,16 @@ impl<'a> DroppedRegionCollector<'a> {
         &self,
         table_reparts: &[(TableId, TableRepartValue)],
     ) -> Result<DroppedRegionAssignment> {
+        self.collect_and_assign_with_cooldown(table_reparts, true)
+            .await
+    }
+
+    /// Collect and assign dropped regions for GC with optional cooldown filtering.
+    pub async fn collect_and_assign_with_cooldown(
+        &self,
+        table_reparts: &[(TableId, TableRepartValue)],
+        apply_cooldown: bool,
+    ) -> Result<DroppedRegionAssignment> {
         // get active region ids for all tables involved in repartitioning
         let active_region_ids: HashSet<RegionId> = {
             let table_ids = table_reparts
@@ -113,7 +123,11 @@ impl<'a> DroppedRegionCollector<'a> {
             return Ok(DroppedRegionAssignment::default());
         }
 
-        let dropped_regions = self.filter_by_cooldown(dropped_regions).await;
+        let dropped_regions = if apply_cooldown {
+            self.filter_by_cooldown(dropped_regions).await
+        } else {
+            dropped_regions
+        };
 
         if dropped_regions.is_empty() {
             return Ok(DroppedRegionAssignment::default());

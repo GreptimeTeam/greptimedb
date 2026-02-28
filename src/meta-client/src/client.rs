@@ -47,9 +47,9 @@ use common_meta::range_stream::PaginationStream;
 use common_meta::rpc::KeyValue;
 use common_meta::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use common_meta::rpc::procedure::{
-    AddRegionFollowerRequest, AddTableFollowerRequest, ManageRegionFollowerRequest,
-    MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
-    RemoveRegionFollowerRequest, RemoveTableFollowerRequest,
+    AddRegionFollowerRequest, AddTableFollowerRequest, GcRegionsRequest, GcResponse,
+    GcTableRequest, ManageRegionFollowerRequest, MigrateRegionRequest, MigrateRegionResponse,
+    ProcedureStateResponse, RemoveRegionFollowerRequest, RemoveTableFollowerRequest,
 };
 use common_meta::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
@@ -377,6 +377,28 @@ impl ProcedureExecutor for MetaClient {
             .context(meta_error::ExternalSnafu)
     }
 
+    async fn gc_regions(
+        &self,
+        _ctx: &ExecutorContext,
+        request: GcRegionsRequest,
+    ) -> MetaResult<GcResponse> {
+        self.gc_regions(request)
+            .await
+            .map_err(BoxedError::new)
+            .context(meta_error::ExternalSnafu)
+    }
+
+    async fn gc_table(
+        &self,
+        _ctx: &ExecutorContext,
+        request: GcTableRequest,
+    ) -> MetaResult<GcResponse> {
+        self.gc_table(request)
+            .await
+            .map_err(BoxedError::new)
+            .context(meta_error::ExternalSnafu)
+    }
+
     async fn list_procedures(&self, _ctx: &ExecutorContext) -> MetaResult<ProcedureDetailResponse> {
         self.procedure_client()
             .map_err(BoxedError::new)
@@ -686,6 +708,16 @@ impl MetaClient {
     /// Reconcile the procedure state.
     pub async fn reconcile(&self, request: ReconcileRequest) -> Result<ReconcileResponse> {
         self.procedure_client()?.reconcile(request).await
+    }
+
+    /// Manually trigger GC for specific regions.
+    pub async fn gc_regions(&self, request: GcRegionsRequest) -> Result<GcResponse> {
+        self.procedure_client()?.gc_regions(request).await
+    }
+
+    /// Manually trigger GC for a table (all its regions).
+    pub async fn gc_table(&self, request: GcTableRequest) -> Result<GcResponse> {
+        self.procedure_client()?.gc_table(request).await
     }
 
     /// Submit a DDL task
