@@ -189,6 +189,7 @@ impl GcScheduler {
                         common_telemetry::tracing::info_span!("meta_gc_tick", trigger = "manual");
                     match self
                         .handle_manual_gc(region_ids, full_file_listing, timeout)
+                        .instrument(span)
                         .await
                     {
                         Ok(report) => {
