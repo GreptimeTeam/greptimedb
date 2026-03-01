@@ -56,7 +56,7 @@ runs:
       uses: ./.github/actions/build-greptime-binary
       with:
         base-image: ubuntu
-        features: servers/dashboard
+        features: servers/dashboard,common-version/refresh_build_info
         cargo-profile: ${{ inputs.cargo-profile }}
         artifacts-dir: greptime-linux-${{ inputs.arch }}-${{ inputs.version }}
         version: ${{ inputs.version }}
@@ -75,7 +75,7 @@ runs:
       if: ${{ inputs.arch == 'amd64' && inputs.dev-mode == 'false' }} # Builds greptime for centos if the host machine is amd64.
       with:
         base-image: centos
-        features: servers/dashboard
+        features: servers/dashboard,common-version/refresh_build_info
         cargo-profile: ${{ inputs.cargo-profile }}
         artifacts-dir: greptime-linux-${{ inputs.arch }}-centos-${{ inputs.version }}
         version: ${{ inputs.version }}

@@ -219,10 +219,10 @@ jobs:
         include:
           - os: ${{ needs.allocate-runners.outputs.macos-runner }}
             arch: aarch64-apple-darwin
-            features: servers/dashboard
+            features: servers/dashboard,common-version/refresh_build_info
             artifacts-dir-prefix: greptime-darwin-arm64
           - os: ${{ needs.allocate-runners.outputs.macos-runner }}
-            features: servers/dashboard
+            features: servers/dashboard,common-version/refresh_build_info
             arch: x86_64-apple-darwin
             artifacts-dir-prefix: greptime-darwin-amd64
     runs-on: ${{ matrix.os }}
@@ -261,7 +261,7 @@ jobs:
         include:
           - os: ${{ needs.allocate-runners.outputs.windows-runner }}
             arch: x86_64-pc-windows-msvc
-            features: servers/dashboard
+            features: servers/dashboard,common-version/refresh_build_info
             artifacts-dir-prefix: greptime-windows-amd64
     runs-on: ${{ matrix.os }}
     outputs:

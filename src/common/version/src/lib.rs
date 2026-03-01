@@ -95,6 +95,7 @@ impl Display for OwnedBuildInfo {
     }
 }
 
+#[cfg(feature = "refresh_build_info")]
 pub const fn build_info() -> BuildInfo {
     BuildInfo {
         branch: build::BRANCH,
@@ -106,6 +107,21 @@ pub const fn build_info() -> BuildInfo {
         rustc: build::RUST_VERSION,
         target: build::BUILD_TARGET,
         version: env!("GREPTIME_PRODUCT_VERSION"),
+    }
+}
+
+#[cfg(not(feature = "refresh_build_info"))]
+pub const fn build_info() -> BuildInfo {
+    BuildInfo {
+        branch: build::BRANCH,
+        commit: build::COMMIT_HASH,
+        commit_short: build::SHORT_COMMIT,
+        clean: build::GIT_CLEAN,
+        source_time: "UNKNOWN",
+        build_time: "UNKNOWN",
+        rustc: build::RUST_VERSION,
+        target: build::BUILD_TARGET,
+        version: "UNKNOWN",
     }
 }
 
