@@ -21,15 +21,19 @@ use cargo_manifest::Manifest;
 use shadow_rs::{BuildPattern, CARGO_METADATA, CARGO_TREE, ShadowBuilder};
 
 fn main() -> shadow_rs::SdResult<()> {
-    println!(
-        "cargo:rustc-env=SOURCE_TIMESTAMP={}",
-        if let Ok(t) = get_source_time() {
-            format_timestamp(t)
-        } else {
-            "".to_string()
-        }
-    );
-    build_data::set_BUILD_TIMESTAMP();
+    if env::var("CARGO_FEATURE_REFRESH_BUILD_INFO").is_ok() {
+        println!(
+            "cargo:rustc-env=SOURCE_TIMESTAMP={}",
+            if let Ok(t) = get_source_time() {
+                format_timestamp(t)
+            } else {
+                "".to_string()
+            }
+        );
+        build_data::set_BUILD_TIMESTAMP();
+    } else {
+        return Ok(());
+    }
 
     // The "CARGO_WORKSPACE_DIR" is set manually (not by Rust itself) in Cargo config file, to
     // solve the problem where the "CARGO_MANIFEST_DIR" is not what we want when this repo is
