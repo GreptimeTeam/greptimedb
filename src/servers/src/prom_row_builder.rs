@@ -13,14 +13,12 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::string::ToString;
 
 use api::prom_store::remote::Sample;
 use api::v1::helper::{field_column_schema, time_index_column_schema};
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnSchema, Row, RowInsertRequest, Rows, SemanticType, Value};
 use common_query::prelude::{greptime_timestamp, greptime_value};
-use datafusion::parquet::data_type::AsBytes;
 use pipeline::{ContextOpt, ContextReq};
 use prost::DecodeError;
 
@@ -155,7 +153,7 @@ impl TableBuilder {
                 row[*e].value_data = tag_value;
                 continue;
             }
-            let tag_name = prom_validation_mode.decode_string(*raw_tag_name)?;
+            let tag_name = prom_validation_mode.decode_string(raw_tag_name)?;
             self.schema.push(ColumnSchema {
                 column_name: tag_name.clone(),
                 datatype: ColumnDataType::String as i32,

@@ -165,24 +165,24 @@ impl PromTimeSeries {
 
                 match label.name {
                     METRIC_NAME_LABEL_BYTES => {
-                        self.table_name = prom_validation_mode.decode_string(&label.value)?;
+                        self.table_name = prom_validation_mode.decode_string(label.value)?;
                         self.labels.truncate(self.labels.len() - 1); // remove last label
                     }
                     #[allow(deprecated)]
                     crate::prom_store::SCHEMA_LABEL_BYTES => {
-                        self.schema = Some(prom_validation_mode.decode_string(&label.value)?);
+                        self.schema = Some(prom_validation_mode.decode_string(label.value)?);
                         self.labels.truncate(self.labels.len() - 1); // remove last label
                     }
                     DATABASE_LABEL_BYTES | DATABASE_LABEL_ALT_BYTES => {
                         // Only set schema from __database__ if __schema__ hasn't been set yet
                         if self.schema.is_none() {
-                            self.schema = Some(prom_validation_mode.decode_string(&label.value)?);
+                            self.schema = Some(prom_validation_mode.decode_string(label.value)?);
                         }
                         self.labels.truncate(self.labels.len() - 1); // remove last label
                     }
                     PHYSICAL_TABLE_LABEL_BYTES | PHYSICAL_TABLE_LABEL_ALT_BYTES => {
                         self.physical_table =
-                            Some(prom_validation_mode.decode_string(&label.value)?);
+                            Some(prom_validation_mode.decode_string(label.value)?);
                         self.labels.truncate(self.labels.len() - 1); // remove last label
                     }
                     _ => {}
@@ -360,8 +360,8 @@ impl PromSeriesProcessor {
         let mut vec_pipeline_map = Vec::new();
         let mut pipeline_map = BTreeMap::new();
         for l in series.labels.iter() {
-            let name = prom_validation_mode.decode_string(&l.name)?;
-            let value = prom_validation_mode.decode_string(&l.value)?;
+            let name = prom_validation_mode.decode_string(l.name)?;
+            let value = prom_validation_mode.decode_string(l.value)?;
             pipeline_map.insert(KeyString::from(name), VrlValue::Bytes(value.into()));
         }
 
