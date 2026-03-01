@@ -12217,6 +12217,7 @@ dependencies = [
  "serde_json",
  "session",
  "simd-json",
+ "simdutf8",
  "snafu 0.8.6",
  "snap",
  "socket2 0.5.10",
