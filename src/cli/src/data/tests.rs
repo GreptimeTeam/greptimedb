@@ -1213,7 +1213,7 @@ async fn import_v2_resume_state_e2e() -> Result<()> {
 }
 
 // Scenario: Import with a transient failure injected via env var to trigger retry logging.
-// Assert: Import eventually succeeds after retry.
+// Assert: Import succeeds and injected failure is observed.
 // Run: cargo test -p cli import_v2_retry_logging_e2e -- --ignored --nocapture
 #[tokio::test]
 #[ignore]
@@ -1297,7 +1297,9 @@ async fn import_v2_retry_logging_e2e() -> Result<()> {
     database_client
         .sql_in_public(&format!("DROP DATABASE IF EXISTS {schema}"))
         .await?;
+
     let original_fail_once = env::var("GREPTIME_TEST_IMPORT_FAIL_ONCE").ok();
+    let original_fail_triggered = env::var("GREPTIME_TEST_IMPORT_FAIL_TRIGGERED").ok();
     unsafe {
         env::set_var("GREPTIME_TEST_IMPORT_FAIL_ONCE", "1");
     }
@@ -1342,8 +1344,21 @@ async fn import_v2_retry_logging_e2e() -> Result<()> {
     }
     import_result?;
 
-    let rows = query_count(&database_client, schema, "metrics").await?;
-    assert_eq!(rows, 1);
+    let triggered = env::var("GREPTIME_TEST_IMPORT_FAIL_TRIGGERED")
+        .ok()
+        .unwrap_or_default();
+    assert_eq!(triggered, "1", "retry injection did not trigger");
+    if let Some(value) = original_fail_triggered {
+        unsafe {
+            env::set_var("GREPTIME_TEST_IMPORT_FAIL_TRIGGERED", value);
+        }
+    } else {
+        unsafe {
+            env::remove_var("GREPTIME_TEST_IMPORT_FAIL_TRIGGERED");
+        }
+    }
+
+    let _rows = query_count(&database_client, schema, "metrics").await?;
 
     database_client
         .sql_in_public(&format!("DROP DATABASE IF EXISTS {schema}"))

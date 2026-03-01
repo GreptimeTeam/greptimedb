@@ -15,6 +15,8 @@
 use std::result::Result as StdResult;
 use std::sync::Arc;
 #[cfg(test)]
+use std::env;
+#[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use common_telemetry::{error, info};
@@ -49,6 +51,9 @@ fn take_injected_failure() -> Option<Error> {
     }
     if IMPORT_FAIL_ONCE.swap(true, Ordering::SeqCst) {
         return None;
+    }
+    unsafe {
+        env::set_var("GREPTIME_TEST_IMPORT_FAIL_TRIGGERED", "1");
     }
     Some(Error::StateOperation {
         operation: "import retry test".into(),
