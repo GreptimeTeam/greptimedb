@@ -212,8 +212,6 @@ mod tests {
     use api::prom_store::remote::Sample;
     use api::v1::Value;
     use api::v1::value::ValueData;
-    use arrow::datatypes::ToByteSlice;
-    use bytes::Bytes;
     use prost::DecodeError;
 
     use crate::http::PromValidationMode;
@@ -225,12 +223,12 @@ mod tests {
         let _ = builder.add_labels_and_samples(
             &[
                 PromLabel {
-                    name: Bytes::from("tag0"),
-                    value: Bytes::from("v0"),
+                    name: b"tag0",
+                    value: b"v0",
                 },
                 PromLabel {
-                    name: Bytes::from("tag1"),
-                    value: Bytes::from("v1"),
+                    name: b"tag1",
+                    value: b"v1",
                 },
             ],
             &[Sample {
@@ -243,12 +241,12 @@ mod tests {
         let _ = builder.add_labels_and_samples(
             &[
                 PromLabel {
-                    name: Bytes::from("tag0"),
-                    value: Bytes::from("v0"),
+                    name: b"tag0",
+                    value: b"v0",
                 },
                 PromLabel {
-                    name: Bytes::from("tag2"),
-                    value: Bytes::from("v2"),
+                    name: b"tag2",
+                    value: b"v2",
                 },
             ],
             &[Sample {
@@ -304,8 +302,8 @@ mod tests {
 
         let res = builder.add_labels_and_samples(
             &[PromLabel {
-                name: Bytes::from("tag0"),
-                value: invalid_utf8_bytes.to_byte_slice().into(),
+                name: b"tag0",
+                value: invalid_utf8_bytes,
             }],
             &[Sample {
                 value: 0.1,
