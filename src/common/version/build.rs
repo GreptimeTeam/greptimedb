@@ -21,15 +21,23 @@ use cargo_manifest::Manifest;
 use shadow_rs::{BuildPattern, CARGO_METADATA, CARGO_TREE, ShadowBuilder};
 
 fn main() -> shadow_rs::SdResult<()> {
-    println!(
-        "cargo:rustc-env=SOURCE_TIMESTAMP={}",
-        if let Ok(t) = get_source_time() {
-            format_timestamp(t)
-        } else {
-            "".to_string()
-        }
-    );
-    build_data::set_BUILD_TIMESTAMP();
+    // Only refresh timestamps when the `refresh-build-info` feature is enabled to avoid
+    // breaking incremental compilation. CI release builds should enable this feature.
+    let refresh = env::var("CARGO_FEATURE_REFRESH_BUILD_INFO").is_ok();
+    if refresh {
+        println!(
+            "cargo:rustc-env=SOURCE_TIMESTAMP={}",
+            if let Ok(t) = get_source_time() {
+                format_timestamp(t)
+            } else {
+                "".to_string()
+            }
+        );
+        build_data::set_BUILD_TIMESTAMP();
+    } else {
+        println!("cargo:rustc-env=SOURCE_TIMESTAMP=");
+        println!("cargo:rustc-env=BUILD_TIMESTAMP=");
+    }
 
     // The "CARGO_WORKSPACE_DIR" is set manually (not by Rust itself) in Cargo config file, to
     // solve the problem where the "CARGO_MANIFEST_DIR" is not what we want when this repo is
@@ -54,6 +62,17 @@ fn main() -> shadow_rs::SdResult<()> {
     }
 
     let out_path = env::var("OUT_DIR")?;
+    let shadow_file = PathBuf::from(&out_path).join("shadow.rs");
+
+    // When not refreshing build info and the shadow.rs already exists, skip regenerating
+    // it entirely. shadow_rs always writes new BUILD_TIME* values which would change
+    // the file and invalidate incremental compilation even when nothing meaningful changed.
+    if !refresh && shadow_file.exists() {
+        // Emit rerun-if-changed for build.rs only so the build script doesn't re-run
+        // on every build.
+        println!("cargo:rerun-if-changed=build.rs");
+        return Ok(());
+    }
 
     let _ = ShadowBuilder::builder()
         .build_pattern(BuildPattern::Lazy)
