@@ -59,8 +59,8 @@ use common_meta::rpc::store::{
 };
 use common_options::plugin_options::PluginOptionsDeserializer;
 use common_telemetry::info;
-use futures::TryStreamExt;
 use config::Client as ConfigClient;
+use futures::TryStreamExt;
 use heartbeat::{Client as HeartbeatClient, HeartbeatConfig};
 use procedure::Client as ProcedureClient;
 use serde::de::DeserializeOwned;

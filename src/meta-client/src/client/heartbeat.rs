@@ -171,7 +171,6 @@ impl Client {
         inner.ask_leader().await?;
         inner.heartbeat().await
     }
-
 }
 
 #[derive(Debug)]
