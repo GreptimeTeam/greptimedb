@@ -45,7 +45,7 @@ use crate::error::{
 use crate::read::Batch;
 use crate::read::compat::CompatBatch;
 use crate::read::flat_projection::CompactionProjectionMapper;
-use crate::read::last_row::RowGroupLastRowCachedReader;
+use crate::read::last_row::{FlatRowGroupLastRowCachedReader, RowGroupLastRowCachedReader};
 use crate::read::prune::{FlatPruneReader, PruneReader};
 use crate::sst::file::FileHandle;
 use crate::sst::parquet::flat_format::{
@@ -237,6 +237,7 @@ impl FileRange {
     /// Creates a flat reader that returns RecordBatch.
     pub(crate) async fn flat_reader(
         &self,
+        selector: Option<TimeSeriesRowSelector>,
         fetch_metrics: Option<&ParquetFetchMetrics>,
     ) -> Result<Option<FlatPruneReader>> {
         if !self.in_dynamic_filter_range() {
@@ -252,15 +253,47 @@ impl FileRange {
             )
             .await?;
 
+        let use_last_row_reader = if selector
+            .map(|s| s == TimeSeriesRowSelector::LastRow)
+            .unwrap_or(false)
+        {
+            // Only use LastRowReader if row group does not contain DELETE
+            // and all rows are selected.
+            let put_only = !self
+                .context
+                .contains_delete(self.row_group_idx)
+                .inspect_err(|e| {
+                    error!(e; "Failed to decode min value of op_type, fallback to FlatRowGroupReader");
+                })
+                .unwrap_or(true);
+            put_only && self.select_all()
+        } else {
+            false
+        };
+
         // Compute skip_fields once for this row group
         let skip_fields = self.context.should_skip_fields(self.row_group_idx);
 
-        let flat_row_group_reader = FlatRowGroupReader::new(self.context.clone(), parquet_reader);
-        let flat_prune_reader = FlatPruneReader::new_with_row_group_reader(
-            self.context.clone(),
-            flat_row_group_reader,
-            skip_fields,
-        );
+        let flat_prune_reader = if use_last_row_reader {
+            let flat_row_group_reader =
+                FlatRowGroupReader::new(self.context.clone(), parquet_reader);
+            let reader = FlatRowGroupLastRowCachedReader::new(
+                self.file_handle().file_id().file_id(),
+                self.row_group_idx,
+                self.context.reader_builder.cache_strategy().clone(),
+                self.context.read_format().projection_indices(),
+                flat_row_group_reader,
+            );
+            FlatPruneReader::new_with_last_row_reader(self.context.clone(), reader, skip_fields)
+        } else {
+            let flat_row_group_reader =
+                FlatRowGroupReader::new(self.context.clone(), parquet_reader);
+            FlatPruneReader::new_with_row_group_reader(
+                self.context.clone(),
+                flat_row_group_reader,
+                skip_fields,
+            )
+        };
 
         Ok(Some(flat_prune_reader))
     }

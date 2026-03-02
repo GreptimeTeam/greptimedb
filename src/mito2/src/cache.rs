@@ -28,6 +28,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
 use index::bloom_filter_index::{BloomFilterIndexCache, BloomFilterIndexCacheRef};
@@ -45,6 +46,7 @@ use crate::cache::index::inverted_index::{InvertedIndexCache, InvertedIndexCache
 #[cfg(feature = "vector_index")]
 use crate::cache::index::vector_index::{VectorIndexCache, VectorIndexCacheRef};
 use crate::cache::write_cache::WriteCacheRef;
+use crate::memtable::record_batch_estimated_size;
 use crate::metrics::{CACHE_BYTES, CACHE_EVICTION, CACHE_HIT, CACHE_MISS};
 use crate::read::Batch;
 use crate::sst::file::{RegionFileId, RegionIndexId};
@@ -833,24 +835,47 @@ pub struct SelectorResultKey {
     pub selector: TimeSeriesRowSelector,
 }
 
+/// Result stored in the selector result cache.
+pub enum SelectorResult {
+    /// Batches in the primary key format.
+    PrimaryKey(Vec<Batch>),
+    /// Record batches in the flat format.
+    Flat(Vec<RecordBatch>),
+}
+
 /// Cached result for time series row selector.
 pub struct SelectorResultValue {
     /// Batches of rows selected by the selector.
-    pub result: Vec<Batch>,
+    pub result: SelectorResult,
     /// Projection of rows.
     pub projection: Vec<usize>,
 }
 
 impl SelectorResultValue {
-    /// Creates a new selector result value.
+    /// Creates a new selector result value with primary key format.
     pub fn new(result: Vec<Batch>, projection: Vec<usize>) -> SelectorResultValue {
-        SelectorResultValue { result, projection }
+        SelectorResultValue {
+            result: SelectorResult::PrimaryKey(result),
+            projection,
+        }
+    }
+
+    /// Creates a new selector result value with flat format.
+    pub fn new_flat(result: Vec<RecordBatch>, projection: Vec<usize>) -> SelectorResultValue {
+        SelectorResultValue {
+            result: SelectorResult::Flat(result),
+            projection,
+        }
     }
 
     /// Returns memory used by the value (estimated).
     fn estimated_size(&self) -> usize {
-        // We only consider heap size of all batches.
-        self.result.iter().map(|batch| batch.memory_size()).sum()
+        match &self.result {
+            SelectorResult::PrimaryKey(batches) => {
+                batches.iter().map(|batch| batch.memory_size()).sum()
+            }
+            SelectorResult::Flat(batches) => batches.iter().map(record_batch_estimated_size).sum(),
+        }
     }
 }
 

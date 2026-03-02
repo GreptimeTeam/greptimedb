@@ -24,7 +24,7 @@ use snafu::ResultExt;
 
 use crate::error::{RecordBatchSnafu, Result};
 use crate::memtable::BoxedBatchIterator;
-use crate::read::last_row::RowGroupLastRowCachedReader;
+use crate::read::last_row::{FlatRowGroupLastRowCachedReader, RowGroupLastRowCachedReader};
 use crate::read::{Batch, BatchReader};
 use crate::sst::file::FileTimeRange;
 use crate::sst::parquet::file_range::FileRangeContextRef;
@@ -248,12 +248,14 @@ impl Iterator for PruneTimeIterator {
 
 pub enum FlatSource {
     RowGroup(FlatRowGroupReader),
+    LastRow(FlatRowGroupLastRowCachedReader),
 }
 
 impl FlatSource {
     fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
         match self {
             FlatSource::RowGroup(r) => r.next_batch(),
+            FlatSource::LastRow(r) => r.next_batch(),
         }
     }
 }
@@ -282,10 +284,28 @@ impl FlatPruneReader {
         }
     }
 
+    pub(crate) fn new_with_last_row_reader(
+        ctx: FileRangeContextRef,
+        reader: FlatRowGroupLastRowCachedReader,
+        skip_fields: bool,
+    ) -> Self {
+        Self {
+            context: ctx,
+            source: FlatSource::LastRow(reader),
+            metrics: Default::default(),
+            skip_fields,
+        }
+    }
+
     /// Merge metrics with the inner reader and return the merged metrics.
     pub(crate) fn metrics(&self) -> ReaderMetrics {
-        // FlatRowGroupReader doesn't collect metrics, so just return our own
-        self.metrics.clone()
+        let mut metrics = self.metrics.clone();
+        if let FlatSource::LastRow(r) = &self.source
+            && let Some(inner_metrics) = r.metrics()
+        {
+            metrics.merge_from(inner_metrics);
+        }
+        metrics
     }
 
     pub(crate) fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
