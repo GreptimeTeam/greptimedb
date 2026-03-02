@@ -376,6 +376,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to serialize config"))]
+    SerializeConfig {
+        #[snafu(source)]
+        error: serde_json::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to parse number: {}", err_msg))]
     ParseNum {
         err_msg: String,
@@ -1143,6 +1151,7 @@ impl ErrorExt for Error {
             | Error::ConnectEtcd { .. }
             | Error::FileIo { .. }
             | Error::TcpBind { .. }
+            | Error::SerializeConfig { .. }
             | Error::SerializeToJson { .. }
             | Error::DeserializeFromJson { .. }
             | Error::NoLeader { .. }
