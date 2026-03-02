@@ -17,19 +17,22 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use datatypes::arrow::array::BinaryArray;
+use datatypes::arrow::array::{BinaryArray, UInt64Array};
+use datatypes::arrow::compute::take_record_batch;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::vectors::UInt32Vector;
+use snafu::ResultExt;
 use store_api::storage::{FileId, TimeSeriesRowSelector};
 
 use crate::cache::{
     CacheStrategy, SelectorResult, SelectorResultKey, SelectorResultValue,
     selector_result_cache_hit, selector_result_cache_miss,
 };
-use crate::error::Result;
+use crate::error::{ComputeArrowSnafu, Result};
+use crate::memtable::partition_tree::data::timestamp_array_to_i64_slice;
 use crate::read::{Batch, BatchReader, BoxedBatchReader};
-use crate::sst::parquet::flat_format::primary_key_column_index;
-use crate::sst::parquet::format::PrimaryKeyArray;
+use crate::sst::parquet::flat_format::{primary_key_column_index, time_index_column_index};
+use crate::sst::parquet::format::{PrimaryKeyArray, primary_key_offsets};
 use crate::sst::parquet::reader::{FlatRowGroupReader, ReaderMetrics, RowGroupReader};
 
 /// Reader to keep the last row for each time series.
@@ -416,22 +419,16 @@ impl FlatRowGroupLastRowReader {
     }
 
     fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
-        // First, drain any pending results from the selector.
-        if let Some(yielded) = self.selector.take_yielded() {
-            self.yielded_batches.push(yielded.clone());
-            return Ok(Some(yielded));
-        }
-
         while let Some(batch) = self.reader.next_batch()? {
             self.metrics.num_rows += batch.num_rows();
             self.metrics.num_batches += 1;
-            if let Some(yielded) = self.selector.on_next(batch) {
+            if let Some(yielded) = self.selector.on_next(batch)? {
                 self.yielded_batches.push(yielded.clone());
                 return Ok(Some(yielded));
             }
         }
 
-        let last_batch = self.selector.finish();
+        let last_batch = self.selector.finish()?;
         if let Some(ref last) = last_batch {
             self.yielded_batches.push(last.clone());
         }
@@ -453,106 +450,141 @@ impl FlatRowGroupLastRowReader {
     }
 }
 
-/// Selects the last-timestamp row per primary key from flat `RecordBatch`.
+/// Selects the last-timestamp rows per primary key from flat `RecordBatch`.
 ///
 /// Assumes that input batches are sorted by primary key then by timestamp,
 /// and contain only PUT operations (no DELETEs).
 #[derive(Default)]
 pub(crate) struct FlatLastTimestampSelector {
-    /// Pending batch from a previous `on_next()` that needs to be yielded.
-    pending_yield: Option<RecordBatch>,
-    /// The last batch we saw - we hold onto it in case the next batch continues the same key.
+    /// Row indices of last-timestamp rows from completed keys within `last_batch`.
+    indices: Vec<u64>,
+    /// The batch that `indices` and `last_key_start`/`last_key_len` refer to.
     last_batch: Option<RecordBatch>,
+    /// Start offset within `last_batch` for the last (incomplete) primary key range.
+    last_key_start: usize,
+    /// Length of the last (incomplete) primary key range within `last_batch`.
+    last_key_len: usize,
 }
 
 impl FlatLastTimestampSelector {
-    /// Takes a pending yielded batch, if any.
-    fn take_yielded(&mut self) -> Option<RecordBatch> {
-        self.pending_yield.take()
-    }
-
-    /// Processes the next batch. Returns the first completed key result if available.
-    /// Additional results may be available via `take_yielded()`.
-    pub(crate) fn on_next(&mut self, batch: RecordBatch) -> Option<RecordBatch> {
+    /// Processes the next batch. Returns a `RecordBatch` containing all completed
+    /// key results from the *previous* batch (flushed before processing the new one).
+    pub(crate) fn on_next(&mut self, batch: RecordBatch) -> Result<Option<RecordBatch>> {
         if batch.num_rows() == 0 {
-            return None;
+            return Ok(None);
         }
 
         let num_columns = batch.num_columns();
         let pk_col_idx = primary_key_column_index(num_columns);
+        let ts_col_idx = time_index_column_index(num_columns);
 
-        // Split the batch by primary key boundaries.
-        let key_ranges = split_by_key(&batch, pk_col_idx);
-
-        if key_ranges.len() == 1 {
-            // The entire batch has one key.
-            if let Some(last) = &self.last_batch {
-                let last_key = primary_key_bytes_at(last, pk_col_idx, last.num_rows() - 1);
-                let curr_key = primary_key_bytes_at(&batch, pk_col_idx, 0);
-                if last_key == curr_key {
-                    // Same key, just update last_batch.
-                    self.last_batch = Some(batch);
-                    return None;
-                }
-                // Different key - yield last row from previous batch.
-                let yielded = last_timestamp_row(last);
-                self.last_batch = Some(batch);
-                return Some(yielded);
-            }
-            // No previous batch.
-            self.last_batch = Some(batch);
-            return None;
+        let pk_array = batch
+            .column(pk_col_idx)
+            .as_any()
+            .downcast_ref::<PrimaryKeyArray>()
+            .expect("primary key column must be a dictionary array");
+        let offsets = primary_key_offsets(pk_array)?;
+        if offsets.is_empty() {
+            return Ok(None);
         }
 
-        // Multiple keys in the batch.
-        // Handle the first range - it may continue the previous key.
-        let first_range = &key_ranges[0];
-        let first_result = if let Some(last) = self.last_batch.take() {
-            let last_key = primary_key_bytes_at(&last, pk_col_idx, last.num_rows() - 1);
-            let curr_key = primary_key_bytes_at(&batch, pk_col_idx, first_range.start);
-            if last_key == curr_key {
-                // Same key as previous batch - yield last row from the first range
-                // (which extends the previous key).
-                let sub_batch = batch.slice(first_range.start, first_range.end - first_range.start);
-                last_timestamp_row(&sub_batch)
-            } else {
-                // Different key - yield last row from previous batch, and also from first range.
-                let sub_batch = batch.slice(first_range.start, first_range.end - first_range.start);
-                self.pending_yield = Some(last_timestamp_row(&sub_batch));
-                last_timestamp_row(&last)
-            }
-        } else {
-            // No previous batch - yield last row from first range.
-            let sub_batch = batch.slice(first_range.start, first_range.end - first_range.start);
-            last_timestamp_row(&sub_batch)
-        };
+        // Handle the first sub-range: compare against the previous batch's held key.
+        let first_start = offsets[0];
+        let first_len = offsets[1] - first_start;
 
-        // Handle middle ranges (all complete keys).
-        for range in &key_ranges[1..key_ranges.len() - 1] {
-            let sub_batch = batch.slice(range.start, range.end - range.start);
-            let row = last_timestamp_row(&sub_batch);
-            if self.pending_yield.is_none() {
-                self.pending_yield = Some(row);
+        if let Some(last) = &self.last_batch {
+            let last_key = primary_key_bytes_at(last, pk_col_idx, self.last_key_start);
+            let curr_key = primary_key_bytes_at(&batch, pk_col_idx, first_start);
+            if last_key != curr_key {
+                // Different key — the previous held range is complete.
+                collect_last_timestamp_indices(
+                    &mut self.indices,
+                    last,
+                    ts_col_idx,
+                    self.last_key_start,
+                    self.last_key_len,
+                );
             }
         }
+        self.last_key_start = first_start;
+        self.last_key_len = first_len;
 
-        // The last range becomes the new pending batch.
-        let last_range = &key_ranges[key_ranges.len() - 1];
-        let last_sub = batch.slice(last_range.start, last_range.end - last_range.start);
-        self.last_batch = Some(last_sub);
+        // Flush pending indices from the previous batch.
+        let flushed = self.flush()?;
 
-        Some(first_result)
+        // Switch to the new batch. From here on, all indices refer to this batch.
+        self.last_batch = Some(batch);
+
+        // Process remaining sub-ranges (all within the new batch).
+        for i in 1..offsets.len() - 1 {
+            let range_start = offsets[i];
+            let range_len = offsets[i + 1] - range_start;
+
+            // All ranges after the first are within the same batch, and each
+            // boundary means a different key from the previous range.
+            collect_last_timestamp_indices(
+                &mut self.indices,
+                self.last_batch.as_ref().unwrap(),
+                ts_col_idx,
+                self.last_key_start,
+                self.last_key_len,
+            );
+            self.last_key_start = range_start;
+            self.last_key_len = range_len;
+        }
+
+        Ok(flushed)
     }
 
-    /// Finishes the selector and returns the pending batch if any.
-    pub(crate) fn finish(&mut self) -> Option<RecordBatch> {
-        debug_assert!(self.pending_yield.is_none());
-        if let Some(last) = self.last_batch.take()
-            && last.num_rows() > 0
-        {
-            return Some(last_timestamp_row(&last));
+    /// Finishes the selector and returns remaining results.
+    pub(crate) fn finish(&mut self) -> Result<Option<RecordBatch>> {
+        if let Some(last) = &self.last_batch {
+            let ts_col_idx = time_index_column_index(last.num_columns());
+            collect_last_timestamp_indices(
+                &mut self.indices,
+                last,
+                ts_col_idx,
+                self.last_key_start,
+                self.last_key_len,
+            );
         }
-        None
+        self.flush()
+    }
+
+    /// Flushes pending indices into a `RecordBatch` via `take`.
+    fn flush(&mut self) -> Result<Option<RecordBatch>> {
+        if self.indices.is_empty() {
+            return Ok(None);
+        }
+
+        let last = self
+            .last_batch
+            .as_ref()
+            .expect("indices are non-empty so last_batch must exist");
+
+        let take_indices = UInt64Array::from(std::mem::take(&mut self.indices));
+        let result = take_record_batch(last, &take_indices).context(ComputeArrowSnafu)?;
+
+        Ok(Some(result))
+    }
+}
+
+/// Collects indices of last-timestamp rows from a key range into `indices`.
+fn collect_last_timestamp_indices(
+    indices: &mut Vec<u64>,
+    batch: &RecordBatch,
+    ts_col_idx: usize,
+    last_key_start: usize,
+    last_key_len: usize,
+) {
+    let range_end = last_key_start + last_key_len;
+    debug_assert!(range_end <= batch.num_rows());
+    debug_assert!(last_key_len > 0);
+
+    let ts_values = timestamp_array_to_i64_slice(batch.column(ts_col_idx));
+    let start = last_timestamp_start(ts_values, last_key_start, range_end);
+    for idx in start..range_end {
+        indices.push(idx as u64);
     }
 }
 
@@ -572,38 +604,30 @@ fn primary_key_bytes_at(batch: &RecordBatch, pk_col_idx: usize, index: usize) ->
     binary_values.value(key as usize)
 }
 
-/// Splits a batch into ranges of contiguous same-key rows.
-fn split_by_key(batch: &RecordBatch, pk_col_idx: usize) -> Vec<std::ops::Range<usize>> {
-    let num_rows = batch.num_rows();
-    if num_rows == 0 {
-        return vec![];
-    }
+/// Finds the start index of rows sharing the last (maximum) timestamp
+/// within the range `[range_start, range_end)`.
+fn last_timestamp_start(ts_values: &[i64], range_start: usize, range_end: usize) -> usize {
+    debug_assert!(range_start < range_end);
 
-    let mut ranges = Vec::new();
-    let mut start = 0;
-    for i in 1..num_rows {
-        if primary_key_bytes_at(batch, pk_col_idx, i)
-            != primary_key_bytes_at(batch, pk_col_idx, start)
-        {
-            ranges.push(start..i);
-            start = i;
-        }
+    let last_ts = ts_values[range_end - 1];
+    let mut start = range_end - 1;
+    while start > range_start && ts_values[start - 1] == last_ts {
+        start -= 1;
     }
-    ranges.push(start..num_rows);
-    ranges
-}
-
-/// Returns the row with the maximum timestamp in the batch.
-/// Assumes the batch is sorted by timestamp and has at least one row.
-fn last_timestamp_row(batch: &RecordBatch) -> RecordBatch {
-    debug_assert!(batch.num_rows() > 0);
-    // Since the batch is sorted by timestamp, the last row has the max timestamp.
-    batch.slice(batch.num_rows() - 1, 1)
+    start
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use api::v1::OpType;
+    use datatypes::arrow::array::{
+        ArrayRef, BinaryDictionaryBuilder, Int64Array, TimestampMillisecondArray, UInt8Array,
+        UInt64Array,
+    };
+    use datatypes::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit, UInt32Type};
+    use datatypes::arrow::record_batch::RecordBatch;
 
     use super::*;
     use crate::test_util::{VecBatchReader, check_reader_result, new_batch};
@@ -673,187 +697,205 @@ mod tests {
         .await;
     }
 
-    mod flat_selector_tests {
-        use std::sync::Arc;
+    /// Helper to build a flat format RecordBatch for testing.
+    fn new_flat_batch(primary_keys: &[&[u8]], timestamps: &[i64], fields: &[i64]) -> RecordBatch {
+        let num_rows = timestamps.len();
+        assert_eq!(primary_keys.len(), num_rows);
+        assert_eq!(fields.len(), num_rows);
 
-        use datatypes::arrow::array::{
-            ArrayRef, BinaryDictionaryBuilder, Int64Array, TimestampMillisecondArray, UInt8Array,
-            UInt64Array,
-        };
-        use datatypes::arrow::datatypes::{
-            DataType, Field, Schema, SchemaRef, TimeUnit, UInt32Type,
-        };
-        use datatypes::arrow::record_batch::RecordBatch;
-
-        use super::super::FlatLastTimestampSelector;
-
-        /// Helper to build a flat format RecordBatch for testing.
-        fn new_flat_batch(
-            primary_keys: &[&[u8]],
-            timestamps: &[i64],
-            fields: &[i64],
-        ) -> RecordBatch {
-            let num_rows = timestamps.len();
-            assert_eq!(primary_keys.len(), num_rows);
-            assert_eq!(fields.len(), num_rows);
-
-            let columns: Vec<ArrayRef> = vec![
-                // field0 column
-                Arc::new(Int64Array::from_iter_values(fields.iter().copied())),
-                // ts column (time index)
-                Arc::new(TimestampMillisecondArray::from_iter_values(
-                    timestamps.iter().copied(),
-                )),
-                // __primary_key column (dictionary(uint32, binary))
-                {
-                    let mut builder = BinaryDictionaryBuilder::<UInt32Type>::new();
-                    for &pk in primary_keys {
-                        builder.append(pk).unwrap();
-                    }
-                    Arc::new(builder.finish())
-                },
-                // __sequence column
-                Arc::new(UInt64Array::from_iter_values(vec![1u64; num_rows])),
-                // __op_type column
-                Arc::new(UInt8Array::from_iter_values(vec![1u8; num_rows])),
-            ];
-
-            RecordBatch::try_new(test_flat_schema(), columns).unwrap()
-        }
-
-        fn test_flat_schema() -> SchemaRef {
-            let fields = vec![
-                Field::new("field0", DataType::Int64, false),
-                Field::new(
-                    "ts",
-                    DataType::Timestamp(TimeUnit::Millisecond, None),
-                    false,
-                ),
-                Field::new(
-                    "__primary_key",
-                    DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Binary)),
-                    false,
-                ),
-                Field::new("__sequence", DataType::UInt64, false),
-                Field::new("__op_type", DataType::UInt8, false),
-            ];
-            Arc::new(Schema::new(fields))
-        }
-
-        /// Collects all results from the selector.
-        fn collect_results(
-            selector: &mut FlatLastTimestampSelector,
-            batches: Vec<RecordBatch>,
-        ) -> Vec<RecordBatch> {
-            let mut results = Vec::new();
-            for batch in batches {
-                if let Some(r) = selector.on_next(batch) {
-                    results.push(r);
-                    while let Some(pending) = selector.take_yielded() {
-                        results.push(pending);
-                    }
+        let columns: Vec<ArrayRef> = vec![
+            // field0 column
+            Arc::new(Int64Array::from_iter_values(fields.iter().copied())),
+            // ts column (time index)
+            Arc::new(TimestampMillisecondArray::from_iter_values(
+                timestamps.iter().copied(),
+            )),
+            // __primary_key column (dictionary(uint32, binary))
+            {
+                let mut builder = BinaryDictionaryBuilder::<UInt32Type>::new();
+                for &pk in primary_keys {
+                    builder.append(pk).unwrap();
                 }
+                Arc::new(builder.finish())
+            },
+            // __sequence column
+            Arc::new(UInt64Array::from_iter_values(vec![1u64; num_rows])),
+            // __op_type column
+            Arc::new(UInt8Array::from_iter_values(vec![1u8; num_rows])),
+        ];
+
+        RecordBatch::try_new(test_flat_schema(), columns).unwrap()
+    }
+
+    fn test_flat_schema() -> SchemaRef {
+        let fields = vec![
+            Field::new("field0", DataType::Int64, false),
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new(
+                "__primary_key",
+                DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Binary)),
+                false,
+            ),
+            Field::new("__sequence", DataType::UInt64, false),
+            Field::new("__op_type", DataType::UInt8, false),
+        ];
+        Arc::new(Schema::new(fields))
+    }
+
+    /// Collects all rows from the selector across all result batches.
+    fn collect_flat_results(
+        selector: &mut FlatLastTimestampSelector,
+        batches: Vec<RecordBatch>,
+    ) -> Vec<(Vec<u8>, i64)> {
+        let mut results = Vec::new();
+        for batch in batches {
+            if let Some(r) = selector.on_next(batch).unwrap() {
+                extract_flat_rows(&r, &mut results);
             }
-            if let Some(r) = selector.finish() {
-                results.push(r);
-            }
+        }
+        if let Some(r) = selector.finish().unwrap() {
+            extract_flat_rows(&r, &mut results);
+        }
+        results
+    }
+
+    /// Extracts (primary_key, timestamp) pairs from a result batch.
+    fn extract_flat_rows(batch: &RecordBatch, out: &mut Vec<(Vec<u8>, i64)>) {
+        let ts_col = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap();
+        let pk_col = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<PrimaryKeyArray>()
+            .unwrap();
+        let binary_values = pk_col
+            .values()
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap();
+
+        for i in 0..batch.num_rows() {
+            let key_idx = pk_col.keys().value(i);
+            let pk = binary_values.value(key_idx as usize).to_vec();
+            let ts = ts_col.value(i);
+            out.push((pk, ts));
+        }
+    }
+
+    #[test]
+    fn test_flat_single_batch_one_key() {
+        let mut selector = FlatLastTimestampSelector::default();
+        let batch = new_flat_batch(&[b"k1", b"k1", b"k1"], &[1, 2, 3], &[10, 20, 30]);
+        let results = collect_flat_results(&mut selector, vec![batch]);
+        assert_eq!(vec![(b"k1".to_vec(), 3)], results);
+    }
+
+    #[test]
+    fn test_flat_single_batch_multiple_keys() {
+        let mut selector = FlatLastTimestampSelector::default();
+        let batch = new_flat_batch(
+            &[b"k1", b"k1", b"k2", b"k2", b"k3"],
+            &[1, 2, 3, 4, 5],
+            &[10, 20, 30, 40, 50],
+        );
+        let results = collect_flat_results(&mut selector, vec![batch]);
+        assert_eq!(
+            vec![
+                (b"k1".to_vec(), 2),
+                (b"k2".to_vec(), 4),
+                (b"k3".to_vec(), 5),
+            ],
             results
-        }
+        );
+    }
 
-        fn assert_batch_eq(batch: &RecordBatch, expected_pk: &[u8], expected_ts: i64) {
-            assert_eq!(1, batch.num_rows(), "Expected single row batch");
-            let ts_col = batch
-                .column(1)
-                .as_any()
-                .downcast_ref::<TimestampMillisecondArray>()
-                .unwrap();
-            assert_eq!(expected_ts, ts_col.value(0));
+    #[test]
+    fn test_flat_multiple_batches_same_key() {
+        let mut selector = FlatLastTimestampSelector::default();
+        let batches = vec![
+            new_flat_batch(&[b"k1", b"k1"], &[1, 2], &[10, 20]),
+            new_flat_batch(&[b"k1", b"k1"], &[3, 4], &[30, 40]),
+        ];
+        let results = collect_flat_results(&mut selector, batches);
+        assert_eq!(vec![(b"k1".to_vec(), 4)], results);
+    }
 
-            let pk_col = batch
-                .column(2)
-                .as_any()
-                .downcast_ref::<super::super::PrimaryKeyArray>()
-                .unwrap();
-            let key_idx = pk_col.keys().value(0);
-            let binary_values = pk_col
-                .values()
-                .as_any()
-                .downcast_ref::<super::super::BinaryArray>()
-                .unwrap();
-            assert_eq!(expected_pk, binary_values.value(key_idx as usize));
-        }
+    #[test]
+    fn test_flat_multiple_batches_different_keys() {
+        let mut selector = FlatLastTimestampSelector::default();
+        let batches = vec![
+            new_flat_batch(&[b"k1", b"k1"], &[1, 2], &[10, 20]),
+            new_flat_batch(&[b"k2", b"k2"], &[3, 4], &[30, 40]),
+        ];
+        let results = collect_flat_results(&mut selector, batches);
+        assert_eq!(vec![(b"k1".to_vec(), 2), (b"k2".to_vec(), 4)], results);
+    }
 
-        #[test]
-        fn test_single_batch_one_key() {
-            let mut selector = FlatLastTimestampSelector::default();
-            let batch = new_flat_batch(&[b"k1", b"k1", b"k1"], &[1, 2, 3], &[10, 20, 30]);
-            let results = collect_results(&mut selector, vec![batch]);
-            assert_eq!(1, results.len());
-            assert_batch_eq(&results[0], b"k1", 3);
-        }
+    #[test]
+    fn test_flat_single_row() {
+        let mut selector = FlatLastTimestampSelector::default();
+        let batch = new_flat_batch(&[b"k1"], &[42], &[100]);
+        let results = collect_flat_results(&mut selector, vec![batch]);
+        assert_eq!(vec![(b"k1".to_vec(), 42)], results);
+    }
 
-        #[test]
-        fn test_single_batch_multiple_keys() {
-            let mut selector = FlatLastTimestampSelector::default();
-            let batch = new_flat_batch(
-                &[b"k1", b"k1", b"k2", b"k2", b"k3"],
-                &[1, 2, 3, 4, 5],
-                &[10, 20, 30, 40, 50],
-            );
-            let results = collect_results(&mut selector, vec![batch]);
-            assert_eq!(3, results.len());
-            assert_batch_eq(&results[0], b"k1", 2);
-            assert_batch_eq(&results[1], b"k2", 4);
-            assert_batch_eq(&results[2], b"k3", 5);
-        }
+    #[test]
+    fn test_flat_key_spans_batches() {
+        let mut selector = FlatLastTimestampSelector::default();
+        let batches = vec![
+            new_flat_batch(&[b"k1", b"k1"], &[1, 2], &[10, 20]),
+            new_flat_batch(&[b"k1", b"k2"], &[3, 4], &[30, 40]),
+            new_flat_batch(&[b"k2", b"k3"], &[5, 6], &[50, 60]),
+        ];
+        let results = collect_flat_results(&mut selector, batches);
+        assert_eq!(
+            vec![
+                (b"k1".to_vec(), 3),
+                (b"k2".to_vec(), 5),
+                (b"k3".to_vec(), 6),
+            ],
+            results
+        );
+    }
 
-        #[test]
-        fn test_multiple_batches_same_key() {
-            let mut selector = FlatLastTimestampSelector::default();
-            let batches = vec![
-                new_flat_batch(&[b"k1", b"k1"], &[1, 2], &[10, 20]),
-                new_flat_batch(&[b"k1", b"k1"], &[3, 4], &[30, 40]),
-            ];
-            let results = collect_results(&mut selector, batches);
-            assert_eq!(1, results.len());
-            assert_batch_eq(&results[0], b"k1", 4);
-        }
+    #[test]
+    fn test_flat_duplicate_last_timestamps() {
+        let mut selector = FlatLastTimestampSelector::default();
+        // k1 has two rows with the same last timestamp (3).
+        let batch = new_flat_batch(
+            &[b"k1", b"k1", b"k1", b"k2"],
+            &[1, 3, 3, 5],
+            &[10, 20, 30, 40],
+        );
+        let results = collect_flat_results(&mut selector, vec![batch]);
+        assert_eq!(
+            vec![
+                (b"k1".to_vec(), 3),
+                (b"k1".to_vec(), 3),
+                (b"k2".to_vec(), 5),
+            ],
+            results
+        );
+    }
 
-        #[test]
-        fn test_multiple_batches_different_keys() {
-            let mut selector = FlatLastTimestampSelector::default();
-            let batches = vec![
-                new_flat_batch(&[b"k1", b"k1"], &[1, 2], &[10, 20]),
-                new_flat_batch(&[b"k2", b"k2"], &[3, 4], &[30, 40]),
-            ];
-            let results = collect_results(&mut selector, batches);
-            assert_eq!(2, results.len());
-            assert_batch_eq(&results[0], b"k1", 2);
-            assert_batch_eq(&results[1], b"k2", 4);
-        }
-
-        #[test]
-        fn test_single_row() {
-            let mut selector = FlatLastTimestampSelector::default();
-            let batch = new_flat_batch(&[b"k1"], &[42], &[100]);
-            let results = collect_results(&mut selector, vec![batch]);
-            assert_eq!(1, results.len());
-            assert_batch_eq(&results[0], b"k1", 42);
-        }
-
-        #[test]
-        fn test_key_spans_batches() {
-            let mut selector = FlatLastTimestampSelector::default();
-            let batches = vec![
-                new_flat_batch(&[b"k1", b"k1"], &[1, 2], &[10, 20]),
-                new_flat_batch(&[b"k1", b"k2"], &[3, 4], &[30, 40]),
-                new_flat_batch(&[b"k2", b"k3"], &[5, 6], &[50, 60]),
-            ];
-            let results = collect_results(&mut selector, batches);
-            assert_eq!(3, results.len());
-            assert_batch_eq(&results[0], b"k1", 3);
-            assert_batch_eq(&results[1], b"k2", 5);
-            assert_batch_eq(&results[2], b"k3", 6);
-        }
+    #[test]
+    fn test_flat_duplicate_last_timestamps_across_batches() {
+        let mut selector = FlatLastTimestampSelector::default();
+        // k1's last timestamp (3) spans two batches.
+        let batches = vec![
+            new_flat_batch(&[b"k1", b"k1"], &[1, 3], &[10, 20]),
+            new_flat_batch(&[b"k1", b"k2"], &[3, 5], &[30, 40]),
+        ];
+        let results = collect_flat_results(&mut selector, batches);
+        // The held batch is replaced, so we only get the last-timestamp rows
+        // from the final batch for k1 (the row with ts=3 from batch 2).
+        assert_eq!(vec![(b"k1".to_vec(), 3), (b"k2".to_vec(), 5)], results);
     }
 }

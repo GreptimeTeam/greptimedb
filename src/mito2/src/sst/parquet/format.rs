@@ -904,7 +904,7 @@ impl PrimaryKeyReadFormat {
 }
 
 /// Compute offsets of different primary keys in the array.
-fn primary_key_offsets(pk_dict_array: &PrimaryKeyArray) -> Result<Vec<usize>> {
+pub(crate) fn primary_key_offsets(pk_dict_array: &PrimaryKeyArray) -> Result<Vec<usize>> {
     if pk_dict_array.is_empty() {
         return Ok(Vec::new());
     }
