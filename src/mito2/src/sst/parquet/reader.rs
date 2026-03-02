@@ -1177,11 +1177,16 @@ impl ParquetReaderBuilder {
 
         if let Some(index_result_cache) = index_result_cache
             && let Some(predicate_key) = cached_minmax_key.as_ref()
-            && let Some(result) = index_result_cache.get(predicate_key, file_id)
         {
-            let num_row_groups = parquet_meta.num_row_groups();
-            metrics.rg_minmax_filtered += num_row_groups.saturating_sub(result.row_group_count());
-            return (*result).clone();
+            if let Some(result) = index_result_cache.get(predicate_key, file_id) {
+                metrics.minmax_cache_hit += 1;
+                let num_row_groups = parquet_meta.num_row_groups();
+                metrics.rg_minmax_filtered +=
+                    num_row_groups.saturating_sub(result.row_group_count());
+                return (*result).clone();
+            }
+
+            metrics.minmax_cache_miss += 1;
         }
 
         let region_meta = read_format.metadata();
@@ -1334,6 +1339,10 @@ pub(crate) struct ReaderFilterMetrics {
     pub(crate) bloom_filter_cache_hit: usize,
     /// Number of index result cache misses for bloom filter index.
     pub(crate) bloom_filter_cache_miss: usize,
+    /// Number of index result cache hits for minmax pruning.
+    pub(crate) minmax_cache_hit: usize,
+    /// Number of index result cache misses for minmax pruning.
+    pub(crate) minmax_cache_miss: usize,
 
     /// Optional metrics for inverted index applier.
     pub(crate) inverted_index_apply_metrics: Option<InvertedIndexApplyMetrics>,
@@ -1374,6 +1383,8 @@ impl ReaderFilterMetrics {
         self.inverted_index_cache_miss += other.inverted_index_cache_miss;
         self.bloom_filter_cache_hit += other.bloom_filter_cache_hit;
         self.bloom_filter_cache_miss += other.bloom_filter_cache_miss;
+        self.minmax_cache_hit += other.minmax_cache_hit;
+        self.minmax_cache_miss += other.minmax_cache_miss;
 
         self.pruner_cache_hit += other.pruner_cache_hit;
         self.pruner_cache_miss += other.pruner_cache_miss;

@@ -258,8 +258,10 @@ pub struct MinMaxKey {
 
 impl MinMaxKey {
     pub fn new(exprs: Arc<Vec<String>>, schema_version: u64, skip_fields: bool) -> Self {
-        let mem_usage =
-            exprs.iter().map(|s| s.len()).sum::<usize>() + size_of::<u64>() + size_of::<bool>();
+        let mem_usage = size_of::<Self>()
+            + size_of::<Vec<String>>()
+            + exprs.len() * size_of::<String>()
+            + exprs.iter().map(|s| s.len()).sum::<usize>();
         Self {
             exprs,
             schema_version,
