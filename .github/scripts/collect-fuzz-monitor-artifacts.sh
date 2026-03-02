@@ -65,6 +65,17 @@ export_show_create_table() {
   printf '%s' "${output}" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["output"][0]["records"]["rows"][0][1])' >"${output_file}"
 }
 
+export_table_to_parquet() {
+  local table="$1"
+  exec_sql "public" "COPY ${table} TO '${GT_MONITOR_SERVER_EXPORT_DIR}/${table}.parquet' WITH (FORMAT='parquet');"
+}
+
+copy_table_parquet_from_pod() {
+  local table="$1"
+  log "copy ${table}.parquet from pod"
+  kubectl cp "${GT_FUZZ_NS}/${MONITOR_POD}:${GT_MONITOR_SERVER_EXPORT_DIR}/${table}.parquet" "${GT_MONITOR_ARTIFACT_DIR}/${table}.parquet" >>"${COPY_LOG}" 2>&1
+}
+
 mkdir -p "${GT_MONITOR_ARTIFACT_DIR}"
 rm -rf "${GT_MONITOR_ARTIFACT_DIR:?}/"*
 
@@ -98,16 +109,18 @@ done
 log "ensure export dir exists in pod ${MONITOR_POD}"
 kubectl exec -n "${GT_FUZZ_NS}" "${MONITOR_POD}" -- mkdir -p "${GT_MONITOR_SERVER_EXPORT_DIR}" >>"${COPY_LOG}" 2>&1
 
-export_show_create_table "_gt_logs"
-export_show_create_table "opentelemetry_traces"
+TABLES_TO_EXPORT=(
+  "_gt_logs"
+  "opentelemetry_traces"
+  "opentelemetry_traces_operations"
+  "opentelemetry_traces_services"
+)
 
-exec_sql "public" "COPY _gt_logs TO '${GT_MONITOR_SERVER_EXPORT_DIR}/_gt_logs.parquet' WITH (FORMAT='parquet');"
-exec_sql "public" "COPY opentelemetry_traces TO '${GT_MONITOR_SERVER_EXPORT_DIR}/opentelemetry_traces.parquet' WITH (FORMAT='parquet');"
-
-log "copy _gt_logs.parquet from pod"
-kubectl cp "${GT_FUZZ_NS}/${MONITOR_POD}:${GT_MONITOR_SERVER_EXPORT_DIR}/_gt_logs.parquet" "${GT_MONITOR_ARTIFACT_DIR}/_gt_logs.parquet" >>"${COPY_LOG}" 2>&1
-log "copy opentelemetry_traces.parquet from pod"
-kubectl cp "${GT_FUZZ_NS}/${MONITOR_POD}:${GT_MONITOR_SERVER_EXPORT_DIR}/opentelemetry_traces.parquet" "${GT_MONITOR_ARTIFACT_DIR}/opentelemetry_traces.parquet" >>"${COPY_LOG}" 2>&1
+for table in "${TABLES_TO_EXPORT[@]}"; do
+  export_show_create_table "${table}"
+  export_table_to_parquet "${table}"
+  copy_table_parquet_from_pod "${table}"
+done
 
 ls -la "${GT_MONITOR_ARTIFACT_DIR}" >>"${STATE_LOG}" 2>&1
 
