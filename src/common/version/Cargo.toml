@@ -9,7 +9,6 @@ workspace = true
 
 [features]
 codec = ["dep:serde"]
-refresh-build-info = []
 
 [dependencies]
 const_format.workspace = true

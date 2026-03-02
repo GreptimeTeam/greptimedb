@@ -21,9 +21,17 @@ use cargo_manifest::Manifest;
 use shadow_rs::{BuildPattern, CARGO_METADATA, CARGO_TREE, ShadowBuilder};
 
 fn main() -> shadow_rs::SdResult<()> {
-    // Only refresh timestamps when the `refresh-build-info` feature is enabled to avoid
-    // breaking incremental compilation. CI release builds should enable this feature.
-    let refresh = env::var("CARGO_FEATURE_REFRESH_BUILD_INFO").is_ok();
+    // Refresh timestamps by default in release builds. In non-release builds (debug, bench,
+    // etc.), skip refreshing to preserve incremental compilation.
+    // Set DISABLE_BUILD_INFO=1 to force-disable refreshing even in release builds.
+    let profile = env::var("PROFILE").unwrap_or_default();
+    let disabled = env::var("DISABLE_BUILD_INFO")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let refresh = profile == "release" && !disabled;
+
+    println!("cargo:rerun-if-env-changed=DISABLE_BUILD_INFO");
+
     if refresh {
         println!(
             "cargo:rustc-env=SOURCE_TIMESTAMP={}",
@@ -68,8 +76,6 @@ fn main() -> shadow_rs::SdResult<()> {
     // it entirely. shadow_rs always writes new BUILD_TIME* values which would change
     // the file and invalidate incremental compilation even when nothing meaningful changed.
     if !refresh && shadow_file.exists() {
-        // Emit rerun-if-changed for build.rs only so the build script doesn't re-run
-        // on every build.
         println!("cargo:rerun-if-changed=build.rs");
         return Ok(());
     }
