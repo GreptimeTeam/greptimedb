@@ -643,9 +643,9 @@ dependencies = [
 
 [[package]]
 name = "arrow-pg"
-version = "0.12.1"
+version = "0.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "648178d89ddfc58dec82298e8b419ad201a6807190cf92b324ea2b17a9a668d9"
+checksum = "87077429e1f81c2a024d0a62eaec0bbc101913c0ba7ce676bf90d21a4dbc79f0"
 dependencies = [
  "arrow 57.3.0",
  "arrow-schema 57.3.0",
@@ -4036,8 +4036,9 @@ dependencies = [
 
 [[package]]
 name = "datafusion-pg-catalog"
-version = "0.15.0"
-source = "git+https://github.com/GreptimeTeam/datafusion-postgres.git?rev=284cb351c02210dc60162b0ec70a71d35f33803d#284cb351c02210dc60162b0ec70a71d35f33803d"
+version = "0.15.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69e170232116b48e2445e29127bd4834a694d68256c338749d7362421509e889"
 dependencies = [
  "async-trait",
  "datafusion",
