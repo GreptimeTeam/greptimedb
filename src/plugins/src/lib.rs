@@ -17,7 +17,7 @@ pub mod datanode;
 pub mod flownode;
 pub mod frontend;
 mod meta_srv;
-mod options;
+pub mod options;
 pub mod standalone;
 
 pub use cli::SubCommand;
