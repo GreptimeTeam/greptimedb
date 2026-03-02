@@ -88,6 +88,11 @@ jobs:
         with:
           python-version: '3.8'
 
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
       - name: Setup Go 1.24
         uses: actions/setup-go@v5
         with:
