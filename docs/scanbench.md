@@ -27,6 +27,7 @@ cargo build -p cmd --bin greptime
   [--force-flat-format] \
   [--enable-wal] \
   [--pprof-file <FLAMEGRAPH_SVG>] \
+  [--pprof-after-warmup] \
   [--verbose]
 ```
 
@@ -51,6 +52,7 @@ cargo build -p cmd --bin greptime
 - `--force-flat-format`: Force reading the region in flat format. Default: disabled.
 - `--enable-wal`: Enable WAL replay when opening the region. Default: disabled. When enabled, scanbench uses the log store configured in the `[wal]` section of the config TOML (raft-engine or Kafka). When disabled or when no WAL is configured, a `NoopLogStore` is used.
 - `--pprof-file`: Output flamegraph path (Unix only).
+- `--pprof-after-warmup`: Start profiling after the first iteration, using it as a warmup. Requires `--pprof-file`. Default: disabled.
 - `--verbose` / `-v`: Enable verbose output.
 
 ## Scan Config JSON

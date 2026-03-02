@@ -109,6 +109,10 @@ pub struct ScanbenchCommand {
     /// Enable WAL replay when opening the region.
     #[clap(long, default_value_t = false)]
     enable_wal: bool,
+
+    /// Start pprof after the first iteration (use first iteration as warmup).
+    #[clap(long, default_value_t = false)]
+    pprof_after_warmup: bool,
 }
 
 /// JSON config for scan request parameters.
@@ -584,9 +588,9 @@ impl ScanbenchCommand {
             self.force_flat_format,
         );
 
-        // Start profiling if pprof_file is specified
+        // Start profiling if pprof_file is specified (unless pprof_after_warmup is set)
         #[cfg(unix)]
-        let profiler_guard = if self.pprof_file.is_some() {
+        let mut profiler_guard = if self.pprof_file.is_some() && !self.pprof_after_warmup {
             println!("{} Starting profiling...", "⚡".yellow());
             Some(
                 pprof::ProfilerGuardBuilder::default()
@@ -738,6 +742,32 @@ impl ScanbenchCommand {
                 format_bytes(total_array_mem_size),
                 format_bytes(total_estimated_size),
             );
+
+            // Start profiling after the first iteration (warmup) if pprof_after_warmup is set
+            #[cfg(unix)]
+            if iteration == 0
+                && self.pprof_after_warmup
+                && self.pprof_file.is_some()
+                && profiler_guard.is_none()
+            {
+                println!(
+                    "{} Starting profiling after warmup iteration...",
+                    "⚡".yellow()
+                );
+                profiler_guard = Some(
+                    pprof::ProfilerGuardBuilder::default()
+                        .frequency(99)
+                        .blocklist(&["libc", "libgcc", "pthread", "vdso"])
+                        .build()
+                        .map_err(|e| {
+                            BoxedError::new(PlainError::new(
+                                format!("Failed to start profiler: {e}"),
+                                StatusCode::Unexpected,
+                            ))
+                        })
+                        .context(error::BuildCliSnafu)?,
+                );
+            }
         }
 
         // Stop profiling and generate flamegraph if enabled
