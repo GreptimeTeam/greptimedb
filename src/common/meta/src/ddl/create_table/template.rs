@@ -92,11 +92,6 @@ pub fn build_template_from_raw_table_info_for_physical_table(
         &table_info.meta.primary_key_indices,
         &name_to_ids,
     )?;
-    let primary_key_ids = column_metadatas
-        .iter()
-        .filter(|c| c.semantic_type == SemanticType::Tag)
-        .map(|c| c.column_id)
-        .collect::<Vec<_>>();
     let column_defs = column_metadatas
         .iter()
         .map(|c| {
@@ -114,13 +109,20 @@ pub fn build_template_from_raw_table_info_for_physical_table(
             Ok(region_column_def)
         })
         .collect::<Result<Vec<_>>>()?;
+    // Preserve the order of primary key indices as defined in the original table info.
+    let primary_key = table_info
+        .meta
+        .primary_key_indices
+        .iter()
+        .map(|idx| column_metadatas[*idx].column_id)
+        .collect();
 
     let options = HashMap::from(&table_info.meta.options);
     let template = CreateRequest {
         region_id: 0,
         engine: table_info.meta.engine.clone(),
         column_defs,
-        primary_key: primary_key_ids,
+        primary_key,
         path: String::new(),
         options,
         partition: None,
@@ -263,6 +265,7 @@ mod tests {
     use store_api::storage::{RegionId, RegionNumber};
 
     use super::*;
+    use crate::key::test_utils;
 
     #[test]
     fn test_build_one_sets_partition_expr_per_region() {
@@ -290,5 +293,15 @@ mod tests {
             &partition_exprs,
         );
         assert_eq!(r0.partition.as_ref().unwrap().expression, expr_a);
+    }
+
+    #[test]
+    fn test_build_template_for_physical_table_primary_key_matches_indices() {
+        let mut table_info = test_utils::new_test_table_info(42);
+        table_info.meta.primary_key_indices = vec![0, 2];
+        table_info.meta.column_ids = vec![10, 20, 30];
+
+        let template = build_template_from_raw_table_info_for_physical_table(&table_info).unwrap();
+        assert_eq!(template.primary_key, vec![10, 30]);
     }
 }
