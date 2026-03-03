@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use object_store::ObjectStore;
 use object_store::services::Azblob;
-use object_store::util::DefaultLoggingInterceptor;
+use object_store::util::{with_instrument_layers, with_retry_layers};
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
@@ -53,19 +53,13 @@ pub fn build_azblob_backend(
         builder = builder.sas_token(sas_token);
     }
 
-    Ok(ObjectStore::new(builder)
+    let object_store = ObjectStore::new(builder)
         .context(error::BuildBackendSnafu)?
-        .layer(
-            object_store::layers::RetryLayer::new()
-                .with_jitter()
-                .with_notify(object_store::util::PrintDetailedError),
-        )
-        .layer(object_store::layers::LoggingLayer::new(
-            DefaultLoggingInterceptor,
-        ))
-        .layer(object_store::layers::TracingLayer)
-        .layer(object_store::layers::build_prometheus_metrics_layer(true))
-        .finish())
+        .finish();
+    Ok(with_instrument_layers(
+        with_retry_layers(object_store),
+        true,
+    ))
 }
 
 #[cfg(test)]
