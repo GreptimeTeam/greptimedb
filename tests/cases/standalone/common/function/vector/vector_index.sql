@@ -197,7 +197,7 @@ DROP TABLE vectors_mixed;
 
 CREATE TABLE vectors_filter (
     vec_id INT,
-    category STRING,
+    "category" STRING,
     ts TIMESTAMP TIME INDEX,
     embedding VECTOR(4) NOT NULL VECTOR INDEX WITH (metric = 'l2sq'),
     PRIMARY KEY (vec_id)

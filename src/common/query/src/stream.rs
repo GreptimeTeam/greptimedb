@@ -32,7 +32,7 @@ pub struct StreamScanAdapter {
     stream: Mutex<Option<SendableRecordBatchStream>>,
     schema: SchemaRef,
     arrow_schema: ArrowSchemaRef,
-    properties: PlanProperties,
+    properties: Arc<PlanProperties>,
     output_ordering: Option<Vec<PhysicalSortExpr>>,
 }
 
@@ -49,12 +49,12 @@ impl StreamScanAdapter {
     pub fn new(stream: SendableRecordBatchStream) -> Self {
         let schema = stream.schema();
         let arrow_schema = schema.arrow_schema().clone();
-        let properties = PlanProperties::new(
+        let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(arrow_schema.clone()),
             Partitioning::UnknownPartitioning(1),
             EmissionType::Incremental,
             Boundedness::Bounded,
-        );
+        ));
 
         Self {
             stream: Mutex::new(Some(stream)),
@@ -91,7 +91,7 @@ impl ExecutionPlan for StreamScanAdapter {
         self.arrow_schema.clone()
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
     }
 

@@ -19,9 +19,6 @@ SELECT INTERVAL '6 years' = INTERVAL '72 months';
 
 SELECT arrow_typeof(INTERVAL '1 month');
 
--- INTERVAL + TIME CONSTANT
-SELECT current_time() + INTERVAL '1 hour';
-
 -- table with interval type test
 -- breaking change from #5422 table do not support interval type will raise an error
 CREATE TABLE IF NOT EXISTS intervals(

@@ -256,7 +256,8 @@ impl Helper {
             | ScalarValue::Utf8View(_)
             | ScalarValue::BinaryView(_)
             | ScalarValue::Map(_)
-            | ScalarValue::Date64(_) => {
+            | ScalarValue::Date64(_)
+            | ScalarValue::RunEndEncoded(_, _, _) => {
                 return error::ConversionSnafu {
                     from: format!("Unsupported scalar value: {value}"),
                 }

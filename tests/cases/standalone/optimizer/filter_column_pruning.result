@@ -57,7 +57,6 @@ EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host = 'ho
 |_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[cpu_usage@1 as cpu_usage, ts@0 as ts] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts", "cpu_usage"], "filters": ["host = Utf8(\"host1\")"], "flat_format": REDACTED, "REDACTED
 |_|_|_|
 |_|_| Total rows: 3_|
@@ -94,7 +93,6 @@ EXPLAIN ANALYZE VERBOSE SELECT mem_usage, cpu_usage FROM filter_prune_test WHERE
 |_|_|_WindowedSortExec: expr=ts@2 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_PartSortExec: expr=ts@2 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[mem_usage@2 as mem_usage, cpu_usage@1 as cpu_usage, ts@0 as ts] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts", "cpu_usage", "mem_usage"], "filters": ["host = Utf8(\"host1\")", "region = Utf8(\"us-east\")"], "flat_format": REDACTED, "REDACTED
 |_|_|_|
 |_|_| Total rows: 2_|
@@ -133,9 +131,7 @@ EXPLAIN ANALYZE VERBOSE SELECT host, `region` FROM filter_prune_test WHERE cpu_u
 |_|_|_WindowedSortExec: expr=ts@2 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_PartSortExec: expr=ts@2 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[host@1 as host, region@2 as region, ts@0 as ts] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: cpu_usage@3 > 20, projection=[ts@0, host@1, region@2] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts", "host", "region", "cpu_usage"], "filters": ["cpu_usage > Float64(20)"], "flat_format": REDACTED, "REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
@@ -174,7 +170,6 @@ EXPLAIN ANALYZE VERBOSE SELECT host, cpu_usage FROM filter_prune_test WHERE ts >
 |_|_|_WindowedSortExec: expr=ts@2 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_PartSortExec: expr=ts@2 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[host@1 as host, cpu_usage@2 as cpu_usage, ts@0 as ts] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts", "host", "cpu_usage"], "filters": ["ts > TimestampMillisecond(2000, None)"], "flat_format": REDACTED, "REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
@@ -211,9 +206,7 @@ EXPLAIN ANALYZE VERBOSE SELECT mem_usage FROM filter_prune_test WHERE host = 'ho
 |_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[mem_usage@1 as mem_usage, ts@0 as ts] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: cpu_usage@1 > 10, projection=[ts@0, mem_usage@2] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts", "cpu_usage", "mem_usage"], "filters": ["host = Utf8(\"host1\")", "cpu_usage > Float64(10)", "region = Utf8(\"us-east\")"], "flat_format": REDACTED, "REDACTED
 |_|_|_|
 |_|_| Total rows: 2_|
@@ -248,7 +241,6 @@ EXPLAIN ANALYZE VERBOSE SELECT SUM(cpu_usage) as total_cpu FROM filter_prune_tes
 |_|_|_AggregateExec: mode=Final, gby=[], aggr=[sum(filter_prune_test.cpu_usage)] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[sum(filter_prune_test.cpu_usage)] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["cpu_usage"], "filters": ["host = Utf8(\"host1\")"], "flat_format": REDACTED, "REDACTED
 |_|_|_|
 |_|_| Total rows: 1_|
@@ -285,12 +277,9 @@ EXPLAIN ANALYZE VERBOSE SELECT `region`, AVG(cpu_usage) as avg_cpu FROM filter_p
 |_|_|_SortExec: expr=[region@0 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
 |_|_|_ProjectionExec: expr=[region@0 as region, avg(filter_prune_test.cpu_usage)@1 as avg_cpu] REDACTED
 |_|_|_AggregateExec: mode=FinalPartitioned, gby=[region@0 as region], aggr=[avg(filter_prune_test.cpu_usage)] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_RepartitionExec: REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[region@0 as region], aggr=[avg(filter_prune_test.cpu_usage)] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: mem_usage@2 > 25, projection=[region@0, cpu_usage@1] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["region", "cpu_usage", "mem_usage"], "filters": ["mem_usage > Float64(25)"], "flat_format": REDACTED, "REDACTED
 |_|_|_|
 |_|_| Total rows: 3_|
@@ -330,7 +319,6 @@ EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host IN ('
 |_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[cpu_usage@1 as cpu_usage, ts@0 as ts] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts", "cpu_usage"], "filters": ["host = Utf8(\"host1\") OR host = Utf8(\"host2\")"], "flat_format": REDACTED, "REDACTED
 |_|_|_|
 |_|_| Total rows: 5_|
@@ -368,9 +356,7 @@ EXPLAIN ANALYZE VERBOSE SELECT host FROM filter_prune_test WHERE cpu_usage BETWE
 |_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[host@1 as host, ts@0 as ts] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: cpu_usage@2 >= 15 AND cpu_usage@2 <= 30, projection=[ts@0, host@1] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts", "host", "cpu_usage"], "filters": ["cpu_usage >= Float64(15)", "cpu_usage <= Float64(30)"], "flat_format": REDACTED, "REDACTED
 |_|_|_|
 |_|_| Total rows: 3_|
@@ -410,9 +396,7 @@ EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host LIKE 
 |_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[cpu_usage@1 as cpu_usage, ts@0 as ts] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: host@1 LIKE host% AND region@2 LIKE us-%, projection=[ts@0, cpu_usage@3] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts", "host", "region", "cpu_usage"], "filters": ["host LIKE Utf8(\"host%\")", "region LIKE Utf8(\"us-%\")"], "flat_format": REDACTED, "REDACTED
 |_|_|_|
 |_|_| Total rows: 5_|
@@ -451,9 +435,7 @@ EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host = 'ho
 |_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[cpu_usage@1 as cpu_usage, ts@0 as ts] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: host@1 = host1 OR region@2 = eu-west, projection=[ts@0, cpu_usage@3] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts", "host", "region", "cpu_usage"], "filters": ["host = Utf8(\"host1\") OR region = Utf8(\"eu-west\")"], "flat_format": REDACTED, "REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
@@ -490,7 +472,6 @@ EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM (SELECT * FROM filter_prune_test W
 |_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[cpu_usage@1 as cpu_usage, ts@0 as ts] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts", "cpu_usage"], "filters": ["region = Utf8(\"us-east\")", "host = Utf8(\"host1\")"], "flat_format": REDACTED, "REDACTED
 |_|_|_|
 |_|_| Total rows: 2_|
@@ -538,7 +519,6 @@ EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host = 'ho
 |_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[cpu_usage@1 as cpu_usage, ts@0 as ts] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "cpu_usage"], "filters": ["host = Utf8(\"host1\")"], \"file\":REDACTED
 |_|_|_|
 |_|_| Total rows: 3_|
@@ -576,7 +556,6 @@ EXPLAIN ANALYZE VERBOSE SELECT mem_usage, cpu_usage FROM filter_prune_test WHERE
 |_|_|_WindowedSortExec: expr=ts@2 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_PartSortExec: expr=ts@2 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[mem_usage@2 as mem_usage, cpu_usage@1 as cpu_usage, ts@0 as ts] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "cpu_usage", "mem_usage"], "filters": ["host = Utf8(\"host1\")", "region = Utf8(\"us-east\")"], \"file\":REDACTED
 |_|_|_|
 |_|_| Total rows: 2_|
@@ -616,9 +595,7 @@ EXPLAIN ANALYZE VERBOSE SELECT host, `region` FROM filter_prune_test WHERE cpu_u
 |_|_|_WindowedSortExec: expr=ts@2 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_PartSortExec: expr=ts@2 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[host@1 as host, region@2 as region, ts@0 as ts] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: cpu_usage@3 > 20, projection=[ts@0, host@1, region@2] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "host", "region", "cpu_usage"], "filters": ["cpu_usage > Float64(20)"], \"file\":REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
@@ -658,7 +635,6 @@ EXPLAIN ANALYZE VERBOSE SELECT host, cpu_usage FROM filter_prune_test WHERE ts >
 |_|_|_WindowedSortExec: expr=ts@2 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_PartSortExec: expr=ts@2 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[host@1 as host, cpu_usage@2 as cpu_usage, ts@0 as ts] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "host", "cpu_usage"], "filters": ["ts > TimestampMillisecond(2000, None)"], \"file\":REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
@@ -696,9 +672,7 @@ EXPLAIN ANALYZE VERBOSE SELECT mem_usage FROM filter_prune_test WHERE host = 'ho
 |_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[mem_usage@1 as mem_usage, ts@0 as ts] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: cpu_usage@1 > 10, projection=[ts@0, mem_usage@2] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "cpu_usage", "mem_usage"], "filters": ["host = Utf8(\"host1\")", "cpu_usage > Float64(10)", "region = Utf8(\"us-east\")"], \"file\":REDACTED
 |_|_|_|
 |_|_| Total rows: 2_|
@@ -734,7 +708,6 @@ EXPLAIN ANALYZE VERBOSE SELECT SUM(cpu_usage) as total_cpu FROM filter_prune_tes
 |_|_|_AggregateExec: mode=Final, gby=[], aggr=[sum(filter_prune_test.cpu_usage)] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[sum(filter_prune_test.cpu_usage)] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["cpu_usage"], "filters": ["host = Utf8(\"host1\")"], \"file\":REDACTED
 |_|_|_|
 |_|_| Total rows: 1_|
@@ -772,12 +745,9 @@ EXPLAIN ANALYZE VERBOSE SELECT `region`, AVG(cpu_usage) as avg_cpu FROM filter_p
 |_|_|_SortExec: expr=[region@0 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
 |_|_|_ProjectionExec: expr=[region@0 as region, avg(filter_prune_test.cpu_usage)@1 as avg_cpu] REDACTED
 |_|_|_AggregateExec: mode=FinalPartitioned, gby=[region@0 as region], aggr=[avg(filter_prune_test.cpu_usage)] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_RepartitionExec: REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[region@0 as region], aggr=[avg(filter_prune_test.cpu_usage)] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: mem_usage@2 > 25, projection=[region@0, cpu_usage@1] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["region", "cpu_usage", "mem_usage"], "filters": ["mem_usage > Float64(25)"], \"file\":REDACTED
 |_|_|_|
 |_|_| Total rows: 3_|
@@ -818,7 +788,6 @@ EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host IN ('
 |_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[cpu_usage@1 as cpu_usage, ts@0 as ts] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "cpu_usage"], "filters": ["host = Utf8(\"host1\") OR host = Utf8(\"host2\")"], \"file\":REDACTED
 |_|_|_|
 |_|_| Total rows: 5_|
@@ -857,9 +826,7 @@ EXPLAIN ANALYZE VERBOSE SELECT host FROM filter_prune_test WHERE cpu_usage BETWE
 |_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[host@1 as host, ts@0 as ts] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: cpu_usage@2 >= 15 AND cpu_usage@2 <= 30, projection=[ts@0, host@1] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "host", "cpu_usage"], "filters": ["cpu_usage >= Float64(15)", "cpu_usage <= Float64(30)"], \"file\":REDACTED
 |_|_|_|
 |_|_| Total rows: 3_|
@@ -900,9 +867,7 @@ EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host LIKE 
 |_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[cpu_usage@1 as cpu_usage, ts@0 as ts] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: host@1 LIKE host% AND region@2 LIKE us-%, projection=[ts@0, cpu_usage@3] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "host", "region", "cpu_usage"], "filters": ["host LIKE Utf8(\"host%\")", "region LIKE Utf8(\"us-%\")"], \"file\":REDACTED
 |_|_|_|
 |_|_| Total rows: 5_|
@@ -942,9 +907,7 @@ EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host = 'ho
 |_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[cpu_usage@1 as cpu_usage, ts@0 as ts] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: host@1 = host1 OR region@2 = eu-west, projection=[ts@0, cpu_usage@3] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "host", "region", "cpu_usage"], "filters": ["host = Utf8(\"host1\") OR region = Utf8(\"eu-west\")"], \"file\":REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
@@ -982,7 +945,6 @@ EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM (SELECT * FROM filter_prune_test W
 |_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[cpu_usage@1 as cpu_usage, ts@0 as ts] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "cpu_usage"], "filters": ["region = Utf8(\"us-east\")", "host = Utf8(\"host1\")"], \"file\":REDACTED
 |_|_|_|
 |_|_| Total rows: 2_|
@@ -1072,7 +1034,6 @@ EXPLAIN ANALYZE VERBOSE SELECT field1 FROM filter_prune_files WHERE tag_key = 'a
 |_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[field1@1 as field1, ts@0 as ts] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":3, "mem_ranges":1, "files":2, "file_ranges":2}, "projection": ["ts", "field1"], "filters": ["tag_key = Utf8(\"a\")"], \"file\":REDACTED
 |_|_|_|
 |_|_| Total rows: 2_|
@@ -1113,9 +1074,7 @@ EXPLAIN ANALYZE VERBOSE SELECT field1 FROM filter_prune_files WHERE field2 > 5.0
 |_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[field1@1 as field1, ts@0 as ts] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: field2@2 > 5, projection=[ts@0, field1@1] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":3, "mem_ranges":1, "files":2, "file_ranges":2}, "projection": ["ts", "field1", "field2"], "filters": ["field2 > Float64(5)"], \"file\":REDACTED
 |_|_|_|
 |_|_| Total rows: 5_|
@@ -1153,9 +1112,7 @@ EXPLAIN ANALYZE VERBOSE SELECT field3 FROM filter_prune_files WHERE tag_key = 'b
 |_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[field3@1 as field3, ts@0 as ts] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: field2@1 > 7, projection=[ts@0, field3@2] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":3, "mem_ranges":1, "files":2, "file_ranges":2}, "projection": ["ts", "field2", "field3"], "filters": ["tag_key = Utf8(\"b\")", "field2 > Float64(7)"], \"file\":REDACTED
 |_|_|_|
 |_|_| Total rows: 2_|

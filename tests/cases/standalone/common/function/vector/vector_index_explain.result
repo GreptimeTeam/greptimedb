@@ -56,7 +56,6 @@ LIMIT 2;
 | 1_| 0_|_ProjectionExec: expr=[vec_id@0 as vec_id] metrics=REDACTED_|
 |_|_|_SortPreservingMergeExec: [vec_l2sq_distance(embedding@1, [1.0, 0.0]) ASC NULLS LAST, vec_id@0 ASC NULLS LAST], fetch=2 metrics=REDACTED_|
 |_|_|_SortExec: TopK(fetch=2), expr=[vec_l2sq_distance(embedding@1, [1.0, 0.0]) ASC NULLS LAST, vec_id@0 ASC NULLS LAST], preserve_partitioning=[true] metrics=REDACTED_|
-|_|_|_CooperativeExec metrics=REDACTED_|
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["vec_id", "embedding"], "vector_index_k": 2, "files": [{"file_id":"REDACTED","time_range_start":"REDACTED","time_range_end":"REDACTED","rows":4,"size":REDACTED,"index_size":893}], "flat_format":REDACTED, "metrics_per_partition": REDACTED metrics=REDACTED |
 |_|_|_|
 |_|_| Total rows: REDACTED_|
@@ -136,17 +135,12 @@ LIMIT 1;
 | 0_| 0_|_ProjectionExec: expr=[vec_id@0 as vec_id] metrics=REDACTED_|
 |_|_|_SortPreservingMergeExec: [vec_l2sq_distance(embedding@1, [1.0, 0.0]) ASC NULLS LAST, vec_id@0 ASC NULLS LAST], fetch=1 metrics=REDACTED_|
 |_|_|_SortExec: TopK(fetch=1), expr=[vec_l2sq_distance(embedding@1, [1.0, 0.0]) ASC NULLS LAST, vec_id@0 ASC NULLS LAST], preserve_partitioning=[true] metrics=REDACTED_|
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 metrics=REDACTED_|
 |_|_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(vec_id@0, vec_id@0)], projection=[vec_id@0, embedding@1] metrics=REDACTED_|
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 metrics=REDACTED_|
 |_|_|_RepartitionExec: partitioning=Hash([vec_id@0],REDACTED
 |_|_|_ProjectionExec: expr=[vec_id@0 as vec_id, embedding@2 as embedding] metrics=REDACTED_|
-|_|_|_CooperativeExec metrics=REDACTED_|
 |_|_|_MergeScanExec: REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 metrics=REDACTED_|
 |_|_|_RepartitionExec: partitioning=Hash([vec_id@0],REDACTED
 |_|_|_ProjectionExec: expr=[vec_id@0 as vec_id] metrics=REDACTED_|
-|_|_|_CooperativeExec metrics=REDACTED_|
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_CooperativeExec metrics=REDACTED_|
@@ -223,7 +217,6 @@ LIMIT 2;
 | 1_| 0_|_ProjectionExec: expr=[vec_id@0 as vec_id] metrics=REDACTED_|
 |_|_|_SortPreservingMergeExec: [vec_cos_distance(embedding@1, [1.0, 0.0]) ASC NULLS LAST, vec_id@0 ASC NULLS LAST], fetch=2 metrics=REDACTED_|
 |_|_|_SortExec: TopK(fetch=2), expr=[vec_cos_distance(embedding@1, [1.0, 0.0]) ASC NULLS LAST, vec_id@0 ASC NULLS LAST], preserve_partitioning=[true] metrics=REDACTED_|
-|_|_|_CooperativeExec metrics=REDACTED_|
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["vec_id", "embedding"], "vector_index_k": 2, "files": [{"file_id":"REDACTED","time_range_start":"REDACTED","time_range_end":"REDACTED","rows":4,"size":REDACTED,"index_size":895}], "flat_format":REDACTED, "metrics_per_partition": REDACTED metrics=REDACTED |
 |_|_|_|
 |_|_| Total rows: REDACTED_|
@@ -258,7 +251,6 @@ LIMIT 2;
 | 1_| 0_|_ProjectionExec: expr=[vec_id@0 as vec_id] metrics=REDACTED_|
 |_|_|_SortPreservingMergeExec: [vec_dot_product(embedding@1, [1.0, 0.0]) DESC, vec_id@0 ASC NULLS LAST], fetch=2 metrics=REDACTED_|
 |_|_|_SortExec: TopK(fetch=2), expr=[vec_dot_product(embedding@1, [1.0, 0.0]) DESC, vec_id@0 ASC NULLS LAST], preserve_partitioning=[true] metrics=REDACTED_|
-|_|_|_CooperativeExec metrics=REDACTED_|
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["vec_id", "embedding"], "vector_index_k": 2, "files": [{"file_id":"REDACTED","time_range_start":"REDACTED","time_range_end":"REDACTED","rows":4,"size":REDACTED,"index_size":895}], "flat_format":REDACTED, "metrics_per_partition": REDACTED metrics=REDACTED |
 |_|_|_|
 |_|_| Total rows: REDACTED_|

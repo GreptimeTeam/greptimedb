@@ -550,15 +550,10 @@ fn find_primary_keys(
     let columns_pk = columns
         .iter()
         .filter_map(|x| {
-            if x.options().iter().any(|o| {
-                matches!(
-                    o.option,
-                    ColumnOption::Unique {
-                        is_primary: true,
-                        ..
-                    }
-                )
-            }) {
+            if x.options()
+                .iter()
+                .any(|o| matches!(o.option, ColumnOption::PrimaryKey(_)))
+            {
                 Some(x.name().value.clone())
             } else {
                 None
