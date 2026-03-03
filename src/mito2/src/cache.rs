@@ -398,6 +398,19 @@ impl CacheManager {
         }
     }
 
+    /// Returns the total weighted size of the in-memory SST meta cache.
+    pub(crate) fn sst_meta_cache_weighted_size(&self) -> u64 {
+        self.sst_meta_cache
+            .as_ref()
+            .map(|cache| cache.weighted_size())
+            .unwrap_or(0)
+    }
+
+    /// Returns true if the in-memory SST meta cache is enabled.
+    pub(crate) fn sst_meta_cache_enabled(&self) -> bool {
+        self.sst_meta_cache.is_some()
+    }
+
     /// Gets a vector with repeated value for specific `key`.
     pub fn get_repeated_vector(
         &self,
