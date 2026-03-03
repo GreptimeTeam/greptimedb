@@ -85,7 +85,7 @@ impl FieldValidator for Option<SecretString> {
 macro_rules! wrap_with_clap_prefix {
     (
         $new_name:ident, $prefix:literal, $enable_flag:literal, $base:ty, {
-            $( $( #[doc = $doc:expr] )? $( #[alias = $alias:literal] )? $field:ident : $type:ty $( = $default:expr )? ),* $(,)?
+            $( $( #[doc = $doc:expr] )? $( #[alias = $alias:literal] )? $( #[hide = $hide:literal] )? $field:ident : $type:ty $( = $default:expr )? ),* $(,)?
         }
     ) => {
         paste!{
@@ -94,6 +94,7 @@ macro_rules! wrap_with_clap_prefix {
                 $(
                     $( #[doc = $doc] )?
                     $( #[clap(alias = $alias)] )?
+                    $( #[clap(hide = $hide)] )?
                     #[clap(long, requires = $enable_flag $(, default_value_t = $default )? )]
                     pub [<$prefix $field>]: $type,
                 )*
@@ -320,6 +321,7 @@ wrap_with_clap_prefix! {
         #[doc = "The scope of the object store."]
         scope: String = Default::default(),
         #[doc = "The credential path of the object store."]
+        #[hide = true]
         credential_path: Option<SecretString>,
         #[doc = "The credential of the object store."]
         credential: Option<SecretString>,

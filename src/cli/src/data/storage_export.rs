@@ -231,11 +231,6 @@ impl StorageExport for GcsBackend {
 
         let mut connection_options = Vec::new();
 
-        let credential_path = expose_optional_secret(&self.config.gcs_credential_path);
-        if !credential_path.is_empty() {
-            connection_options.push(format!("CREDENTIAL_PATH='{}'", credential_path));
-        }
-
         let credential = expose_optional_secret(&self.config.gcs_credential);
         if !credential.is_empty() {
             connection_options.push(format!("CREDENTIAL='{}'", credential));
@@ -266,10 +261,7 @@ impl StorageExport for GcsBackend {
     fn mask_sensitive_info(&self, sql: &str) -> String {
         mask_secrets(
             sql.to_string(),
-            &[
-                expose_optional_secret(&self.config.gcs_credential_path),
-                expose_optional_secret(&self.config.gcs_credential),
-            ],
+            &[expose_optional_secret(&self.config.gcs_credential)],
         )
     }
 }
