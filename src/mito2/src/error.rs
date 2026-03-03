@@ -456,15 +456,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to delete SST file, file id: {}", file_id))]
-    DeleteSst {
-        file_id: FileId,
-        #[snafu(source)]
-        error: object_store::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display(
         "Failed to batch delete SST files, region id: {}, file ids: {:?}",
         region_id,
@@ -1344,7 +1335,7 @@ impl ErrorExt for Error {
             PrimaryKeyLengthMismatch { .. } => StatusCode::InvalidArguments,
             InvalidSender { .. } => StatusCode::InvalidArguments,
             InvalidSchedulerState { .. } => StatusCode::InvalidArguments,
-            DeleteSst { .. } | DeleteSsts { .. } | DeleteIndex { .. } | DeleteIndexes { .. } => {
+            DeleteSsts { .. } | DeleteIndex { .. } | DeleteIndexes { .. } => {
                 StatusCode::StorageUnavailable
             }
             FlushRegion { source, .. } | BuildIndexAsync { source, .. } => source.status_code(),
