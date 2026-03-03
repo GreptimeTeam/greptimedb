@@ -100,13 +100,13 @@ rust.unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
 # See for more detaiils: https://github.com/rust-lang/cargo/issues/11329
 ahash = { version = "0.8", features = ["compile-time-rng"] }
 aquamarine = "0.6"
-arrow = { version = "57.2", features = ["prettyprint"] }
-arrow-array = { version = "57.2", default-features = false, features = ["chrono-tz"] }
-arrow-buffer = "57.2"
-arrow-cast = "57.2"
-arrow-flight = "57.2"
-arrow-ipc = { version = "57.2", default-features = false, features = ["lz4", "zstd"] }
-arrow-schema = { version = "57.2", features = ["serde"] }
+arrow = { version = "57.3", features = ["prettyprint"] }
+arrow-array = { version = "57.3", default-features = false, features = ["chrono-tz"] }
+arrow-buffer = "57.3"
+arrow-cast = "57.3"
+arrow-flight = "57.3"
+arrow-ipc = { version = "57.3", default-features = false, features = ["lz4", "zstd"] }
+arrow-schema = { version = "57.3", features = ["serde"] }
 async-stream = "0.3"
 async-trait = "0.1"
 # Remember to update axum-extra, axum-macros when updating axum
@@ -187,7 +187,7 @@ otel-arrow-rust = { git = "https://github.com/GreptimeTeam/otel-arrow", rev = "5
     "server",
 ] }
 parking_lot = "0.12"
-parquet = { version = "57.2", default-features = false, features = ["arrow", "async", "object_store"] }
+parquet = { version = "57.3", default-features = false, features = ["arrow", "async", "object_store"] }
 paste = "1.0"
 pin-project = "1.0"
 pretty_assertions = "1.4.0"
