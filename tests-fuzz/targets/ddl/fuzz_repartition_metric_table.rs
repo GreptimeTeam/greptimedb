@@ -15,16 +15,19 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
-use common_telemetry::info;
-use common_time::util::current_time_millis;
+use common_telemetry::{info, warn};
+use common_time::Timestamp;
 use libfuzzer_sys::fuzz_target;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaChaRng;
 use snafu::ResultExt;
 use snafu::ensure;
-use sqlx::{Executor, MySql, Pool};
+use sqlx::{MySql, Pool};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Duration;
+use std::time::Instant;
 use tests_fuzz::context::{TableContext, TableContextRef};
 use tests_fuzz::error::{self, Result};
 use tests_fuzz::fake::{
@@ -41,7 +44,7 @@ use tests_fuzz::generator::repartition_expr::{
 };
 use tests_fuzz::ir::{
     CreateTableExpr, Ident, InsertIntoExpr, RepartitionExpr, generate_random_value,
-    generate_unique_timestamp_for_mysql,
+    generate_unique_timestamp_for_mysql_with_clock,
 };
 use tests_fuzz::translator::DslTranslator;
 use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
@@ -54,6 +57,7 @@ use tests_fuzz::utils::{
 };
 use tests_fuzz::validator::row::count_values;
 
+#[derive(Clone)]
 struct FuzzContext {
     greptime: Pool<MySql>,
 }
@@ -111,13 +115,15 @@ fn generate_insert_expr<R: Rng + 'static>(
     rows: usize,
     rng: &mut R,
     table_ctx: TableContextRef,
+    clock: Arc<Mutex<Timestamp>>,
 ) -> Result<InsertIntoExpr> {
+    let ts_value_generator = generate_unique_timestamp_for_mysql_with_clock(clock);
     InsertExprGeneratorBuilder::default()
         .omit_column_list(false)
         .table_ctx(table_ctx)
         .rows(rows)
         .value_generator(Box::new(generate_random_value))
-        .ts_value_generator(generate_unique_timestamp_for_mysql(current_time_millis()))
+        .ts_value_generator(ts_value_generator)
         .build()
         .unwrap()
         .generate(rng)
@@ -186,48 +192,85 @@ async fn create_metric_tables<R: Rng + 'static>(
     Ok((physical_table_ctx, logical_tables))
 }
 
-async fn insert_rows<R: Rng + 'static>(
-    ctx: &FuzzContext,
-    rng: &mut R,
-    rows: usize,
-    logical_tables: &HashMap<Ident, TableContextRef>,
-) -> Result<HashMap<Ident, InsertIntoExpr>> {
-    let mut inserts = HashMap::with_capacity(logical_tables.len());
-    for table_ctx in logical_tables.values() {
-        let insert_expr = generate_insert_expr(rows, rng, table_ctx.clone())?;
-        let translator = InsertIntoExprTranslator;
-        let sql = translator.translate(&insert_expr)?;
-        let result = ctx
-            .greptime
-            .execute(sql.as_str())
+async fn execute_insert_with_retry(ctx: &FuzzContext, sql: &str) -> Result<()> {
+    let mut delay = Duration::from_millis(100);
+    let mut attempt = 0;
+    let max_attempts = 10;
+    loop {
+        match sqlx::query(sql)
+            .persistent(false)
+            .execute(&ctx.greptime)
             .await
-            .context(error::ExecuteQuerySnafu { sql: &sql })?;
-        ensure!(
-            result.rows_affected() == rows as u64,
-            error::AssertSnafu {
-                reason: format!(
-                    "expected rows affected: {}, actual: {}",
-                    rows,
-                    result.rows_affected(),
-                )
+        {
+            Ok(_) => return Ok(()),
+            Err(err) => {
+                tokio::time::sleep(delay).await;
+                delay = std::cmp::min(delay * 2, Duration::from_secs(1));
+                attempt += 1;
+                warn!("Execute insert with retry: {sql}, attempt: {attempt}, error: {err:?}");
+                if attempt >= max_attempts {
+                    return Err(err).context(error::ExecuteQuerySnafu { sql });
+                }
             }
-        );
-        inserts.insert(table_ctx.name.clone(), insert_expr);
+        }
     }
+}
 
-    Ok(inserts)
+struct SharedState {
+    clock: Arc<Mutex<Timestamp>>,
+    inserted_rows: HashMap<String, u64>,
+    running: bool,
+}
+
+async fn write_loop<R: Rng + 'static>(
+    mut rng: R,
+    ctx: FuzzContext,
+    logical_tables: HashMap<Ident, TableContextRef>,
+    shared_state: Arc<Mutex<SharedState>>,
+) -> Result<()> {
+    info!("Start write loop");
+    loop {
+        let (running, clock) = {
+            let state = shared_state.lock().unwrap();
+            (state.running, state.clock.clone())
+        };
+        if !running {
+            break;
+        }
+
+        for table_ctx in logical_tables.values() {
+            let rows = rng.random_range(1..=3);
+            let insert_expr = generate_insert_expr(rows, &mut rng, table_ctx.clone(), clock.clone())?;
+            let translator = InsertIntoExprTranslator;
+            let sql = translator.translate(&insert_expr)?;
+            let inserted = insert_expr.values_list.len() as u64;
+
+            let now = Instant::now();
+            execute_insert_with_retry(&ctx, &sql).await?;
+            info!("Execute insert sql: {sql}, elapsed: {:?}", now.elapsed());
+
+            let mut state = shared_state.lock().unwrap();
+            *state
+                .inserted_rows
+                .entry(table_ctx.name.to_string())
+                .or_insert(0) += inserted;
+        }
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    info!("Write loop ended");
+    Ok(())
 }
 
 async fn validate_rows(
     ctx: &FuzzContext,
     logical_tables: &HashMap<Ident, TableContextRef>,
-    inserts: &HashMap<Ident, InsertIntoExpr>,
+    inserted_rows: &HashMap<String, u64>,
 ) -> Result<()> {
-    for (name, table_ctx) in logical_tables {
-        let insert_expr = inserts.get(name).unwrap();
+    for table_ctx in logical_tables.values() {
         let count_sql = format!("SELECT COUNT(1) AS count FROM {}", table_ctx.name);
         let count = count_values(&ctx.greptime, &count_sql).await?;
-        let expected = insert_expr.values_list.len();
+        let expected = *inserted_rows.get(&table_ctx.name.to_string()).unwrap_or(&0) as usize;
         assert_eq!(count.count as usize, expected);
 
         let distinct_count_sql = format!(
@@ -315,10 +358,28 @@ impl Arbitrary<'_> for FuzzInput {
 async fn execute_repartition_metric_table(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
     info!("input: {input:?}");
     let mut rng = ChaChaRng::seed_from_u64(input.seed);
+    let clock = Arc::new(Mutex::new(Timestamp::current_millis()));
 
     let (mut physical_table_ctx, logical_tables) =
         create_metric_tables(&ctx, &mut rng, input.partitions, input.tables).await?;
-    let inserts = insert_rows(&ctx, &mut rng, input.actions, &logical_tables).await?;
+
+    let mut inserted_rows = HashMap::with_capacity(logical_tables.len());
+    for table_ctx in logical_tables.values() {
+        inserted_rows.insert(table_ctx.name.to_string(), 0);
+    }
+    let shared_state = Arc::new(Mutex::new(SharedState {
+        clock,
+        inserted_rows,
+        running: true,
+    }));
+    let writer_rng = ChaChaRng::seed_from_u64(input.seed ^ 0xA5A5_A5A5_A5A5_A5A5);
+    let writer_task = tokio::spawn(write_loop(
+        writer_rng,
+        ctx.clone(),
+        logical_tables.clone(),
+        shared_state.clone(),
+    ));
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     for i in 0..input.actions {
         let partition_num = physical_table_ctx.partition.as_ref().unwrap().exprs.len();
@@ -357,7 +418,11 @@ async fn execute_repartition_metric_table(ctx: FuzzContext, input: FuzzInput) ->
         )?;
     }
 
-    validate_rows(&ctx, &logical_tables, &inserts).await?;
+    shared_state.lock().unwrap().running = false;
+    writer_task.await.unwrap().unwrap();
+    let inserted_rows = shared_state.lock().unwrap().inserted_rows.clone();
+
+    validate_rows(&ctx, &logical_tables, &inserted_rows).await?;
     cleanup_tables(&ctx, &physical_table_ctx, &logical_tables).await?;
 
     ctx.close().await;
