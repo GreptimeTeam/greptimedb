@@ -135,7 +135,7 @@ async fn trigger_full_gc(ticker: &GcTickerRef) {
         })
         .await
         .unwrap();
-    let _ = rx.await.unwrap();
+    let _ = rx.await.unwrap().unwrap();
 }
 
 fn query_partitions_sql(table_name: &str) -> String {

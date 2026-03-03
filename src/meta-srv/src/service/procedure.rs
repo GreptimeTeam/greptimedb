@@ -376,7 +376,7 @@ impl Metasrv {
                 violated: "GC job channel closed unexpectedly".to_string(),
             }
             .build()
-        })?;
+        })??;
 
         let report = gc_job_report_to_gc_report(job_report);
 
