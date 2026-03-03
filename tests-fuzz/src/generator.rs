@@ -27,7 +27,7 @@ use rand::Rng;
 
 use crate::error::Error;
 use crate::ir::create_expr::ColumnOption;
-use crate::ir::{AlterTableExpr, CreateTableExpr, Ident};
+use crate::ir::{AlterTableExpr, Column, CreateTableExpr, Ident, RowValue};
 
 pub type CreateTableExprGenerator<R> =
     Box<dyn Generator<CreateTableExpr, R, Error = Error> + Sync + Send>;
@@ -43,6 +43,8 @@ pub type ValueGenerator<R> =
     Box<dyn Fn(&mut R, &ConcreteDataType, Option<&dyn Random<Ident, R>>) -> Value>;
 
 pub type TsValueGenerator<R> = Box<dyn Fn(&mut R, TimestampType) -> Value>;
+
+pub type ValueOverride<R> = Box<dyn Fn(&Column, &mut R) -> Option<RowValue>>;
 
 pub trait Generator<T, R: Rng> {
     type Error: Sync + Send + fmt::Debug;
