@@ -67,13 +67,17 @@ struct FuzzInput {
     tables: usize,
 }
 
-fn generate_create_physical_table_expr<R: Rng + 'static>(rng: &mut R) -> Result<CreateTableExpr> {
+fn generate_create_physical_table_expr<R: Rng + 'static>(
+    partitions: usize,
+    rng: &mut R,
+) -> Result<CreateTableExpr> {
     CreatePhysicalTableExprGeneratorBuilder::default()
         .name_generator(Box::new(MappedGenerator::new(
             WordGenerator,
             merge_two_word_map_fn(random_capitalize_map, uppercase_and_keyword_backtick_map),
         )))
         .if_not_exists(rng.random_bool(0.5))
+        .partition(partitions)
         .build()
         .unwrap()
         .generate(rng)
@@ -81,6 +85,7 @@ fn generate_create_physical_table_expr<R: Rng + 'static>(rng: &mut R) -> Result<
 
 fn generate_create_logical_table_expr<R: Rng + 'static>(
     physical_table_ctx: TableContextRef,
+    include_partition_column: bool,
     rng: &mut R,
 ) -> Result<CreateTableExpr> {
     CreateLogicalTableExprGeneratorBuilder::default()
@@ -91,6 +96,7 @@ fn generate_create_logical_table_expr<R: Rng + 'static>(
         .physical_table_ctx(physical_table_ctx)
         .labels(rng.random_range(1..=5))
         .if_not_exists(rng.random_bool(0.5))
+        .include_partition_column(include_partition_column)
         .build()
         .unwrap()
         .generate(rng)
@@ -118,8 +124,7 @@ async fn create_metric_tables<R: Rng + 'static>(
     partitions: usize,
     table_count: usize,
 ) -> Result<(TableContextRef, HashMap<Ident, TableContextRef>)> {
-    info!("create metric tables with partitions hint: {partitions}");
-    let create_physical_expr = generate_create_physical_table_expr(rng)?;
+    let create_physical_expr = generate_create_physical_table_expr(partitions, rng)?;
     let translator = CreateTableExprTranslator;
     let create_physical_sql = translator.translate(&create_physical_expr)?;
     let result = sqlx::query(&create_physical_sql)
@@ -130,6 +135,12 @@ async fn create_metric_tables<R: Rng + 'static>(
         })?;
     info!("Create physical table: {create_physical_sql}, result: {result:?}");
     let physical_table_ctx = Arc::new(TableContext::from(&create_physical_expr));
+    ensure!(
+        physical_table_ctx.partition.is_some(),
+        error::AssertSnafu {
+            reason: "Physical metric table must have partition".to_string()
+        }
+    );
 
     let mut logical_tables = HashMap::with_capacity(table_count);
     let max_attempts = table_count * 3;
@@ -138,8 +149,12 @@ async fn create_metric_tables<R: Rng + 'static>(
             break;
         }
 
-        let create_logical_expr =
-            generate_create_logical_table_expr(physical_table_ctx.clone(), rng)?;
+        let include_partition_column = rng.random_bool(0.5);
+        let create_logical_expr = generate_create_logical_table_expr(
+            physical_table_ctx.clone(),
+            include_partition_column,
+            rng,
+        )?;
         if logical_tables.contains_key(&create_logical_expr.table_name) {
             continue;
         }
