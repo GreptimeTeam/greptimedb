@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod azblob;
 pub mod fs;
+pub mod gcs;
 pub mod oss;
 pub mod s3;
 
@@ -24,7 +26,9 @@ use regex::Regex;
 use snafu::{OptionExt, ResultExt};
 use url::{ParseError, Url};
 
+use self::azblob::build_azblob_backend;
 use self::fs::build_fs_backend;
+use self::gcs::build_gcs_backend;
 use self::s3::build_s3_backend;
 use crate::error::{self, Result};
 use crate::object_store::oss::build_oss_backend;
@@ -33,6 +37,8 @@ use crate::util::find_dir_and_filename;
 pub const FS_SCHEMA: &str = "FS";
 pub const S3_SCHEMA: &str = "S3";
 pub const OSS_SCHEMA: &str = "OSS";
+pub const GCS_SCHEMA: &str = "GCS";
+pub const AZBLOB_SCHEMA: &str = "AZBLOB";
 
 /// Returns `(schema, Option<host>, path)`
 pub fn parse_url(url: &str) -> Result<(String, Option<String>, String)> {
@@ -73,6 +79,18 @@ pub fn build_backend(url: &str, connection: &HashMap<String, String>) -> Result<
                 url: url.to_string(),
             })?;
             Ok(build_oss_backend(&host, &root, connection)?)
+        }
+        GCS_SCHEMA => {
+            let host = host.context(error::EmptyHostPathSnafu {
+                url: url.to_string(),
+            })?;
+            Ok(build_gcs_backend(&host, &root, connection)?)
+        }
+        AZBLOB_SCHEMA => {
+            let host = host.context(error::EmptyHostPathSnafu {
+                url: url.to_string(),
+            })?;
+            Ok(build_azblob_backend(&host, &root, connection)?)
         }
         FS_SCHEMA => Ok(build_fs_backend(&root)?),
 
