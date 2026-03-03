@@ -112,6 +112,7 @@ serde.workspace = true
 serde_json.workspace = true
 session.workspace = true
 simd-json.workspace = true
+simdutf8 = "0.1"
 snafu.workspace = true
 snap = "1"
 socket2 = "0.5"

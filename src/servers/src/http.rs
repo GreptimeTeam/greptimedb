@@ -192,6 +192,16 @@ impl PromValidationMode {
         };
         Ok(result)
     }
+
+    pub(crate) fn validate_bytes(&self, bytes: &[u8]) -> std::result::Result<(), DecodeError> {
+        match self {
+            PromValidationMode::Strict => {
+                simdutf8::basic::from_utf8(bytes).map_err(|_| DecodeError::new("invalid utf-8"))?;
+                Ok(())
+            }
+            PromValidationMode::Lossy | PromValidationMode::Unchecked => Ok(()),
+        }
+    }
 }
 
 impl Default for HttpOptions {
