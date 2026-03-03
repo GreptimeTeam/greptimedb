@@ -20,7 +20,7 @@ use snafu::ensure;
 
 use crate::context::TableContext;
 use crate::error::{self, Result};
-use crate::ir::{Ident, generate_random_value};
+use crate::ir::{generate_random_value, string_value, Ident};
 
 /// A partitioning scheme that divides a single column into multiple ranges based on provided bounds.
 ///
@@ -245,6 +245,10 @@ pub fn generate_unique_bound<R: Rng + 'static>(
     datatype: &ConcreteDataType,
     bounds: &[Value],
 ) -> Result<Value> {
+    if matches!(datatype, ConcreteDataType::String(_)) {
+        return string_value::generate_unique_partition_bound(rng, bounds);
+    }
+
     for _ in 0..16 {
         let candidate = generate_random_value(rng, datatype, None);
         if !bounds.contains(&candidate) {
