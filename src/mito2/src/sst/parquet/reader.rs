@@ -31,6 +31,7 @@ use datatypes::arrow::error::ArrowError;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::DataType;
+use datatypes::schema::ext::ArrowSchemaExt;
 use mito_codec::row_converter::build_primary_key_codec;
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, RowSelection};
@@ -412,7 +413,11 @@ impl ParquetReaderBuilder {
         let projection_mask = ProjectionMask::roots(parquet_schema_desc, indices.iter().copied());
 
         // Computes the field levels.
-        let hint = Some(read_format.arrow_schema().fields());
+        let hint = if read_format.arrow_schema().has_json_extension_field() {
+            None
+        } else {
+            Some(read_format.arrow_schema().fields())
+        };
         let field_levels =
             parquet_to_arrow_field_levels(parquet_schema_desc, projection_mask.clone(), hint)
                 .context(ReadDataPartSnafu)?;

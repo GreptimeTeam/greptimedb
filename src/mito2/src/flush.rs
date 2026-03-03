@@ -22,6 +22,7 @@ use std::time::Instant;
 
 use common_telemetry::{debug, error, info};
 use datatypes::arrow::datatypes::SchemaRef;
+use datatypes::schema::ext::ArrowSchemaExt;
 use either::Either;
 use partition::expr::PartitionExpr;
 use smallvec::{SmallVec, smallvec};
@@ -40,6 +41,7 @@ use crate::error::{
     RegionTruncatedSnafu, Result,
 };
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
+use crate::memtable;
 use crate::memtable::bulk::ENCODE_ROW_THRESHOLD;
 use crate::memtable::{
     BoxedRecordBatchIterator, EncodedRange, IterBuilder, MemtableRanges, RangesOptions,
@@ -587,6 +589,7 @@ impl RegionFlushTask {
             &version.metadata,
             &FlatSchemaOptions::from_encoding(version.metadata.primary_key_encoding),
         );
+        let batch_schema = maybe_merge_json_fields(batch_schema, &mem_ranges);
         let flat_sources = memtable_flat_sources(
             batch_schema,
             mem_ranges,
@@ -760,6 +763,16 @@ async fn memtable_source(mem_ranges: MemtableRanges, options: &RegionOptions) ->
 struct FlatSources {
     sources: SmallVec<[(FlatSource, SequenceNumber); 4]>,
     encoded: SmallVec<[(EncodedRange, SequenceNumber); 4]>,
+}
+
+fn maybe_merge_json_fields(base: SchemaRef, mem_ranges: &MemtableRanges) -> SchemaRef {
+    if !base.has_json_extension_field() {
+        return base;
+    }
+    let Some(schema) = mem_ranges.schema() else {
+        return base;
+    };
+    memtable::merge_json_extension_fields(&base, &[schema])
 }
 
 /// Returns the max sequence and [FlatSource] for the given memtable.

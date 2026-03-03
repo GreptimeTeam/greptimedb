@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod json2_get;
 pub mod json_get;
 mod json_is;
 mod json_path_exists;
@@ -24,6 +25,7 @@ use json_is::{
     JsonIsArray, JsonIsBool, JsonIsFloat, JsonIsInt, JsonIsNull, JsonIsObject, JsonIsString,
 };
 use json_to_string::JsonToStringFunction;
+use json2_get::Json2GetFunction;
 use parse_json::ParseJsonFunction;
 
 use crate::function_registry::FunctionRegistry;
@@ -42,6 +44,7 @@ impl JsonFunction {
         registry.register_scalar(JsonGetBool::default());
         registry.register_scalar(JsonGetObject::default());
         registry.register_scalar(JsonGetWithType::default());
+        registry.register_scalar(Json2GetFunction::default());
 
         registry.register_scalar(JsonIsNull::default());
         registry.register_scalar(JsonIsInt::default());

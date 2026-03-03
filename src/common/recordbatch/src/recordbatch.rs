@@ -395,6 +395,11 @@ pub fn align_json_array(json_array: &ArrayRef, schema_type: &ArrowDataType) -> R
                     &array_columns[j],
                     schema_field.data_type(),
                 )?);
+            } else if schema_field.data_type() != array_field.data_type() {
+                aligned.push(
+                    compute::cast(&array_columns[j], schema_field.data_type())
+                        .context(ArrowComputeSnafu)?,
+                );
             } else {
                 aligned.push(array_columns[j].clone());
             }
