@@ -181,6 +181,17 @@ pub enum PromValidationMode {
 ///
 /// Since the allowed characters are pure ASCII, valid label names are
 /// also valid UTF-8 by definition.
+const IS_VALID_LABEL_REST: [bool; 256] = {
+    let mut table = [false; 256];
+    let mut i = 0;
+    while i < 256 {
+        let b = i as u8;
+        table[i] = b.is_ascii_alphanumeric() || b == b'_';
+        i += 1;
+    }
+    table
+};
+
 #[inline]
 pub fn validate_label_name(name: &[u8]) -> bool {
     if name.is_empty() {
@@ -190,9 +201,31 @@ pub fn validate_label_name(name: &[u8]) -> bool {
     if !(first.is_ascii_alphabetic() || first == b'_') {
         return false;
     }
-    name[1..]
-        .iter()
-        .all(|&b| b.is_ascii_alphanumeric() || b == b'_')
+
+    let mut rest = &name[1..];
+    while rest.len() >= 8 {
+        let res = IS_VALID_LABEL_REST[rest[0] as usize] as u8
+            & IS_VALID_LABEL_REST[rest[1] as usize] as u8
+            & IS_VALID_LABEL_REST[rest[2] as usize] as u8
+            & IS_VALID_LABEL_REST[rest[3] as usize] as u8
+            & IS_VALID_LABEL_REST[rest[4] as usize] as u8
+            & IS_VALID_LABEL_REST[rest[5] as usize] as u8
+            & IS_VALID_LABEL_REST[rest[6] as usize] as u8
+            & IS_VALID_LABEL_REST[rest[7] as usize] as u8;
+
+        if res == 0 {
+            return false;
+        }
+        rest = &rest[8..];
+    }
+
+    for &b in rest {
+        if !IS_VALID_LABEL_REST[b as usize] {
+            return false;
+        }
+    }
+
+    true
 }
 
 impl PromValidationMode {
