@@ -1933,6 +1933,324 @@ async fn test_execute_copy_from_oss(instance: Arc<dyn MockInstance>) {
 }
 
 #[apply(both_instances_cases)]
+async fn test_execute_copy_to_gcs(instance: Arc<dyn MockInstance>) {
+    if let (Ok(bucket), Ok(scope), Ok(credential)) = (
+        env::var("GT_GCS_BUCKET"),
+        env::var("GT_GCS_SCOPE"),
+        env::var("GT_GCS_CREDENTIAL"),
+    ) && !bucket.is_empty()
+    {
+        let endpoint = env::var("GT_GCS_ENDPOINT").unwrap_or_default();
+        let instance = instance.frontend();
+
+        assert!(matches!(
+            execute_sql(
+                &instance,
+                "create table demo(host string, cpu double, memory double, ts timestamp time index);",
+            )
+            .await
+            .data,
+            OutputData::AffectedRows(0)
+        ));
+
+        let output = execute_sql(
+            &instance,
+            r#"insert into demo(host, cpu, memory, ts) values
+                            ('host1', 66.6, 1024, 1655276557000),
+                            ('host2', 88.8,  333.3, 1655276558000)
+                            "#,
+        )
+        .await
+        .data;
+        assert!(matches!(output, OutputData::AffectedRows(2)));
+
+        let root = uuid::Uuid::new_v4().to_string();
+        let mut connection = format!("SCOPE='{}',CREDENTIAL='{}'", scope, credential);
+        if !endpoint.is_empty() {
+            connection = format!("{},ENDPOINT='{}'", connection, endpoint);
+        }
+
+        let copy_to_stmt = format!(
+            "Copy demo TO 'gcs://{}/{}/export/demo.parquet' CONNECTION ({})",
+            bucket, root, connection
+        );
+
+        let output = execute_sql(&instance, &copy_to_stmt).await.data;
+        assert!(matches!(output, OutputData::AffectedRows(2)));
+    }
+}
+
+#[apply(both_instances_cases)]
+async fn test_execute_copy_from_gcs(instance: Arc<dyn MockInstance>) {
+    use common_telemetry::info;
+
+    common_telemetry::init_default_ut_logging();
+    if let (Ok(bucket), Ok(scope), Ok(credential)) = (
+        env::var("GT_GCS_BUCKET"),
+        env::var("GT_GCS_SCOPE"),
+        env::var("GT_GCS_CREDENTIAL"),
+    ) && !bucket.is_empty()
+    {
+        let endpoint = env::var("GT_GCS_ENDPOINT").unwrap_or_default();
+        let instance = instance.frontend();
+
+        assert!(matches!(
+            execute_sql(
+                &instance,
+                "create table demo(host string, cpu double, memory double, ts timestamp time index);",
+            )
+            .await
+            .data,
+            OutputData::AffectedRows(0)
+        ));
+
+        let output = execute_sql(
+            &instance,
+            r#"insert into demo(host, cpu, memory, ts) values
+                            ('host1', 66.6, 1024, 1655276557000),
+                            ('host2', 88.8,  333.3, 1655276558000)
+                            "#,
+        )
+        .await
+        .data;
+        assert!(matches!(output, OutputData::AffectedRows(2)));
+
+        let root = uuid::Uuid::new_v4().to_string();
+        let mut connection = format!("SCOPE='{}',CREDENTIAL='{}'", scope, credential);
+        if !endpoint.is_empty() {
+            connection = format!("{},ENDPOINT='{}'", connection, endpoint);
+        }
+
+        let copy_to_stmt = format!(
+            "Copy demo TO 'gcs://{}/{}/export/demo.parquet' CONNECTION ({})",
+            bucket, root, connection
+        );
+
+        let output = execute_sql(&instance, &copy_to_stmt).await.data;
+        assert!(matches!(output, OutputData::AffectedRows(2)));
+
+        struct Test<'a> {
+            sql: &'a str,
+            table_name: &'a str,
+        }
+        let tests = [
+            Test {
+                sql: &format!(
+                    "Copy with_filename FROM 'gcs://{}/{}/export/demo.parquet'",
+                    bucket, root
+                ),
+                table_name: "with_filename",
+            },
+            Test {
+                sql: &format!("Copy with_path FROM 'gcs://{}/{}/export/'", bucket, root),
+                table_name: "with_path",
+            },
+            Test {
+                sql: &format!(
+                    "Copy with_pattern FROM 'gcs://{}/{}/export/' WITH (PATTERN = 'demo.*')",
+                    bucket, root
+                ),
+                table_name: "with_pattern",
+            },
+        ];
+
+        for test in tests {
+            assert!(matches!(
+                execute_sql(
+                    &instance,
+                    &format!(
+                        "create table {}(host string, cpu double, memory double, ts timestamp time index);",
+                        test.table_name
+                    ),
+                )
+                .await
+                .data,
+                OutputData::AffectedRows(0)
+            ));
+
+            let sql = format!("{} CONNECTION ({})", test.sql, connection);
+            info!("Running sql: {}", sql);
+
+            let output = execute_sql(&instance, &sql).await.data;
+            assert!(matches!(output, OutputData::AffectedRows(2)));
+
+            let output = execute_sql(
+                &instance,
+                &format!("select * from {} order by ts", test.table_name),
+            )
+            .await
+            .data;
+            let expected = "\
++-------+------+--------+---------------------+
+| host  | cpu  | memory | ts                  |
++-------+------+--------+---------------------+
+| host1 | 66.6 | 1024.0 | 2022-06-15T07:02:37 |
+| host2 | 88.8 | 333.3  | 2022-06-15T07:02:38 |
++-------+------+--------+---------------------+";
+            check_output_stream(output, expected).await;
+        }
+    }
+}
+
+#[apply(both_instances_cases)]
+async fn test_execute_copy_to_azblob(instance: Arc<dyn MockInstance>) {
+    if let (Ok(container), Ok(account_name), Ok(account_key), Ok(endpoint)) = (
+        env::var("GT_AZBLOB_CONTAINER"),
+        env::var("GT_AZBLOB_ACCOUNT_NAME"),
+        env::var("GT_AZBLOB_ACCOUNT_KEY"),
+        env::var("GT_AZBLOB_ENDPOINT"),
+    ) && !container.is_empty()
+    {
+        let instance = instance.frontend();
+
+        assert!(matches!(
+            execute_sql(
+                &instance,
+                "create table demo(host string, cpu double, memory double, ts timestamp time index);",
+            )
+            .await
+            .data,
+            OutputData::AffectedRows(0)
+        ));
+
+        let output = execute_sql(
+            &instance,
+            r#"insert into demo(host, cpu, memory, ts) values
+                            ('host1', 66.6, 1024, 1655276557000),
+                            ('host2', 88.8,  333.3, 1655276558000)
+                            "#,
+        )
+        .await
+        .data;
+        assert!(matches!(output, OutputData::AffectedRows(2)));
+
+        let root = uuid::Uuid::new_v4().to_string();
+
+        let copy_to_stmt = format!(
+            "Copy demo TO 'azblob://{}/{}/export/demo.parquet' CONNECTION (ACCOUNT_NAME='{}',ACCOUNT_KEY='{}',ENDPOINT='{}')",
+            container, root, account_name, account_key, endpoint
+        );
+
+        let output = execute_sql(&instance, &copy_to_stmt).await.data;
+        assert!(matches!(output, OutputData::AffectedRows(2)));
+    }
+}
+
+#[apply(both_instances_cases)]
+async fn test_execute_copy_from_azblob(instance: Arc<dyn MockInstance>) {
+    use common_telemetry::info;
+
+    common_telemetry::init_default_ut_logging();
+    if let (Ok(container), Ok(account_name), Ok(account_key), Ok(endpoint)) = (
+        env::var("GT_AZBLOB_CONTAINER"),
+        env::var("GT_AZBLOB_ACCOUNT_NAME"),
+        env::var("GT_AZBLOB_ACCOUNT_KEY"),
+        env::var("GT_AZBLOB_ENDPOINT"),
+    ) && !container.is_empty()
+    {
+        let instance = instance.frontend();
+
+        assert!(matches!(
+            execute_sql(
+                &instance,
+                "create table demo(host string, cpu double, memory double, ts timestamp time index);",
+            )
+            .await
+            .data,
+            OutputData::AffectedRows(0)
+        ));
+
+        let output = execute_sql(
+            &instance,
+            r#"insert into demo(host, cpu, memory, ts) values
+                            ('host1', 66.6, 1024, 1655276557000),
+                            ('host2', 88.8,  333.3, 1655276558000)
+                            "#,
+        )
+        .await
+        .data;
+        assert!(matches!(output, OutputData::AffectedRows(2)));
+
+        let root = uuid::Uuid::new_v4().to_string();
+
+        let copy_to_stmt = format!(
+            "Copy demo TO 'azblob://{}/{}/export/demo.parquet' CONNECTION (ACCOUNT_NAME='{}',ACCOUNT_KEY='{}',ENDPOINT='{}')",
+            container, root, account_name, account_key, endpoint
+        );
+
+        let output = execute_sql(&instance, &copy_to_stmt).await.data;
+        assert!(matches!(output, OutputData::AffectedRows(2)));
+
+        struct Test<'a> {
+            sql: &'a str,
+            table_name: &'a str,
+        }
+        let tests = [
+            Test {
+                sql: &format!(
+                    "Copy with_filename FROM 'azblob://{}/{}/export/demo.parquet'",
+                    container, root
+                ),
+                table_name: "with_filename",
+            },
+            Test {
+                sql: &format!(
+                    "Copy with_path FROM 'azblob://{}/{}/export/'",
+                    container, root
+                ),
+                table_name: "with_path",
+            },
+            Test {
+                sql: &format!(
+                    "Copy with_pattern FROM 'azblob://{}/{}/export/' WITH (PATTERN = 'demo.*')",
+                    container, root
+                ),
+                table_name: "with_pattern",
+            },
+        ];
+
+        for test in tests {
+            assert!(matches!(
+                execute_sql(
+                    &instance,
+                    &format!(
+                        "create table {}(host string, cpu double, memory double, ts timestamp time index);",
+                        test.table_name
+                    ),
+                )
+                .await
+                .data,
+                OutputData::AffectedRows(0)
+            ));
+
+            let sql = format!(
+                "{} CONNECTION (ACCOUNT_NAME='{}',ACCOUNT_KEY='{}',ENDPOINT='{}')",
+                test.sql, account_name, account_key, endpoint
+            );
+            info!("Running sql: {}", sql);
+
+            let output = execute_sql(&instance, &sql).await.data;
+            assert!(matches!(output, OutputData::AffectedRows(2)));
+
+            let output = execute_sql(
+                &instance,
+                &format!("select * from {} order by ts", test.table_name),
+            )
+            .await
+            .data;
+            let expected = "\
++-------+------+--------+---------------------+
+| host  | cpu  | memory | ts                  |
++-------+------+--------+---------------------+
+| host1 | 66.6 | 1024.0 | 2022-06-15T07:02:37 |
+| host2 | 88.8 | 333.3  | 2022-06-15T07:02:38 |
++-------+------+--------+---------------------+";
+            check_output_stream(output, expected).await;
+        }
+    }
+}
+
+#[apply(both_instances_cases)]
 async fn test_execute_copy_from_orc_with_cast(instance: Arc<dyn MockInstance>) {
     common_telemetry::init_default_ut_logging();
     let instance = instance.frontend();
