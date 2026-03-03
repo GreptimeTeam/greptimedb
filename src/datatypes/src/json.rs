@@ -19,6 +19,7 @@
 //! The struct will carry all the fields of the Json object. We will not flatten any json object in this implementation.
 //!
 
+pub mod requirement;
 pub mod value;
 
 use std::collections::{BTreeMap, HashSet};
@@ -26,13 +27,14 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value as Json};
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{OptionExt, ResultExt};
 
 use crate::error::{self, InvalidJsonSnafu, Result, SerializeSnafu};
 use crate::json::value::{JsonValue, JsonVariant};
 use crate::types::json_type::{JsonNativeType, JsonNumberType, JsonObjectType};
-use crate::types::{StructField, StructType};
+use crate::types::{JsonType, StructField, StructType};
 use crate::value::{ListValue, StructValue, Value};
+use crate::vectors::json::builder2::align_json_value_with_type;
 
 /// The configuration of JSON encoding
 ///
@@ -305,32 +307,46 @@ fn encode_json_array_with_context<'a>(
 ) -> Result<JsonValue> {
     let json_array_len = json_array.len();
     let mut items = Vec::with_capacity(json_array_len);
-    let mut element_type = item_type.cloned();
 
     for (index, value) in json_array.into_iter().enumerate() {
         let array_context = context.with_key(&index.to_string());
-        let item_value =
-            encode_json_value_with_context(value, element_type.as_ref(), &array_context)?;
-        let item_type = item_value.json_type().native_type().clone();
-        items.push(item_value.into_variant());
+        let item_value = encode_json_value_with_context(value, None, &array_context)?;
+        items.push(item_value);
+    }
 
-        // Determine the common type for the list
-        if let Some(current_type) = &element_type {
-            // It's valid for json array to have different types of items, for example,
-            // ["a string", 1]. However, the `JsonValue` will be converted to Arrow list array,
-            // which requires all items have exactly same type. So we forbid the different types
-            // case here. Besides, it's not common for items in a json array to differ. So I think
-            // we are good here.
-            ensure!(
-                item_type == *current_type,
-                error::InvalidJsonSnafu {
-                    value: "all items in json array must have the same type"
-                }
-            );
-        } else {
-            element_type = Some(item_type);
+    // In specification, it's valid for a JSON array to have different types of items, for example,
+    // ["a string", 1]. However, in implementation, the `JsonValue` will be converted to Arrow list
+    // array, which requires all items have exactly the same type. So we merge out the maybe
+    // different item types to a unified type, and align all the item values to it.
+
+    let provided_item_type = item_type.map(|x| JsonType::new_native(x.clone()));
+    let merged_item_type = if let Some((first, rests)) = items.split_first() {
+        let mut merged = first.json_type().clone();
+        for rest in rests.iter().map(|x| x.json_type()) {
+            merged.merge_with_lifting(rest)?;
+        }
+        Some(merged)
+    } else {
+        None
+    };
+    let unified_item_type = match (provided_item_type, merged_item_type) {
+        (Some(mut x), Some(y)) => {
+            x.merge_with_lifting(&y)?;
+            Some(x)
+        }
+        (Some(x), None) | (None, Some(x)) => Some(x),
+        (None, None) => None,
+    };
+    if let Some(unified_item_type) = unified_item_type {
+        for item in &mut items {
+            let aligned = align_json_value_with_type(&unified_item_type, item);
+            *item = aligned.into_owned();
         }
     }
+    let items = items
+        .into_iter()
+        .map(|x| x.into_variant())
+        .collect::<Vec<_>>();
 
     Ok(JsonValue::new(JsonVariant::Array(items)))
 }

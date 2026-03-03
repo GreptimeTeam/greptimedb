@@ -377,32 +377,35 @@ impl ColumnExtensions {
             None
         };
 
-        options
+        let format = options
             .get(JSON_OPT_FORMAT)
-            .map(|format| match format {
-                JSON_FORMAT_FULL_STRUCTURED => Ok(JsonStructureSettings::Structured(fields)),
-                JSON_FORMAT_PARTIAL => {
-                    let fields = fields.map(|fields| {
-                        let mut fields = Arc::unwrap_or_clone(fields.fields());
-                        fields.push(datatypes::types::StructField::new(
-                            JsonStructureSettings::RAW_FIELD.to_string(),
-                            ConcreteDataType::string_datatype(),
-                            true,
-                        ));
-                        StructType::new(Arc::new(fields))
-                    });
-                    Ok(JsonStructureSettings::PartialUnstructuredByKey {
-                        fields,
-                        unstructured_keys,
-                    })
+            .unwrap_or(JSON_FORMAT_FULL_STRUCTURED);
+        let settings = match format {
+            JSON_FORMAT_FULL_STRUCTURED => JsonStructureSettings::Structured(fields),
+            JSON_FORMAT_PARTIAL => {
+                let fields = fields.map(|fields| {
+                    let mut fields = Arc::unwrap_or_clone(fields.fields());
+                    fields.push(datatypes::types::StructField::new(
+                        JsonStructureSettings::RAW_FIELD.to_string(),
+                        ConcreteDataType::string_datatype(),
+                        true,
+                    ));
+                    StructType::new(Arc::new(fields))
+                });
+                JsonStructureSettings::PartialUnstructuredByKey {
+                    fields,
+                    unstructured_keys,
                 }
-                JSON_FORMAT_RAW => Ok(JsonStructureSettings::UnstructuredRaw),
-                _ => InvalidSqlSnafu {
+            }
+            JSON_FORMAT_RAW => JsonStructureSettings::UnstructuredRaw,
+            _ => {
+                return InvalidSqlSnafu {
                     msg: format!("unknown JSON datatype 'format': {format}"),
                 }
-                .fail(),
-            })
-            .transpose()
+                .fail();
+            }
+        };
+        Ok(Some(settings))
     }
 
     pub fn set_json_structure_settings(&mut self, settings: JsonStructureSettings) {

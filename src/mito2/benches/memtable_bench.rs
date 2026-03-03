@@ -229,6 +229,7 @@ fn bulk_part_converter(c: &mut Criterion) {
                     &FlatSchemaOptions {
                         raw_pk_columns: false,
                         string_pk_use_dict: false,
+                        ..Default::default()
                     },
                 );
                 let mut converter = BulkPartConverter::new(&metadata, schema, rows, codec, false);
@@ -255,6 +256,7 @@ fn bulk_part_converter(c: &mut Criterion) {
                         &FlatSchemaOptions {
                             raw_pk_columns: true,
                             string_pk_use_dict: true,
+                            ..Default::default()
                         },
                     );
                     let mut converter =

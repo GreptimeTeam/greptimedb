@@ -682,7 +682,7 @@ mod tests {
         let rb = adapter.into_iter().next().unwrap().unwrap();
 
         let mapper = FlatProjectionMapper::new(&metadata, [0, 3].into_iter()).unwrap();
-        assert_eq!(rb.schema(), mapper.input_arrow_schema(false));
+        assert_eq!(rb.schema(), mapper.input_arrow_schema(false, None));
         // tag_0 + field_1 + ts + 3 internal columns.
         assert_eq!(6, rb.num_columns());
         assert_eq!(3, rb.num_rows());

@@ -7,7 +7,7 @@ autotests = false
 
 [[test]]
 name = "main"
-path = "tests/main.rs"
+path = "tests/it/main.rs"
 
 [features]
 dashboard = ["servers/dashboard"]

@@ -38,6 +38,7 @@ use datafusion_sql::parser::Statement as DfStatement;
 use session::context::QueryContextRef;
 use snafu::{Location, ResultExt};
 
+use crate::datafusion::json2_expr_planner::Json2ExprPlanner;
 use crate::error::{CatalogSnafu, Result};
 use crate::query_engine::{DefaultPlanDecoder, QueryEngineState};
 
@@ -87,6 +88,9 @@ impl DfContextProviderAdapter {
             .map(|format| (format.get_ext().to_lowercase(), format))
             .collect();
 
+        let mut expr_planners = SessionStateDefaults::default_expr_planners();
+        expr_planners.insert(0, Arc::new(Json2ExprPlanner));
+
         Ok(Self {
             engine_state,
             session_state,
@@ -94,7 +98,7 @@ impl DfContextProviderAdapter {
             table_provider,
             query_ctx,
             file_formats,
-            expr_planners: SessionStateDefaults::default_expr_planners(),
+            expr_planners,
         })
     }
 }

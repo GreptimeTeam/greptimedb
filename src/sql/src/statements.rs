@@ -153,7 +153,16 @@ pub fn column_to_schema(
 
     column_schema.set_inverted_index(column.extensions.inverted_index_options.is_some());
 
-    if matches!(column.data_type(), SqlDataType::JSON) {
+    let is_json2_column = if let SqlDataType::Custom(object_name, _) = column.data_type() {
+        object_name
+            .0
+            .first()
+            .map(|x| x.to_string_unquoted().eq_ignore_ascii_case("JSON2"))
+            .unwrap_or_default()
+    } else {
+        false
+    };
+    if is_json2_column || matches!(column.data_type(), SqlDataType::JSON) {
         let settings = column
             .extensions
             .build_json_structure_settings()?
@@ -290,22 +299,25 @@ pub fn sql_data_type_to_concrete_data_type(
             };
             Ok(ConcreteDataType::Json(JsonType::new(format)))
         }
-        // Vector type
-        SqlDataType::Custom(name, d)
-            if name.0.as_slice().len() == 1
-                && name.0.as_slice()[0]
-                    .to_string_unquoted()
-                    .to_ascii_uppercase()
-                    == VECTOR_TYPE_NAME
-                && d.len() == 1 =>
-        {
-            let dim = d[0].parse().map_err(|e| {
-                error::ParseSqlValueSnafu {
-                    msg: format!("Failed to parse vector dimension: {}", e),
+        // Vector type and JSON2 type
+        SqlDataType::Custom(name, d) if name.0.len() == 1 => {
+            let name = name.0[0].to_string_unquoted().to_ascii_uppercase();
+            match name.as_str() {
+                VECTOR_TYPE_NAME if d.len() == 1 => {
+                    let dim = d[0].parse().map_err(|e| {
+                        error::ParseSqlValueSnafu {
+                            msg: format!(r#"Failed to parse vector dimension "{}": {}"#, d[0], e),
+                        }
+                        .build()
+                    })?;
+                    Ok(ConcreteDataType::vector_datatype(dim))
                 }
-                .build()
-            })?;
-            Ok(ConcreteDataType::vector_datatype(dim))
+                "JSON2" => Ok(ConcreteDataType::Json(JsonType::new(JsonFormat::Json2))),
+                _ => error::SqlTypeNotSupportedSnafu {
+                    t: data_type.clone(),
+                }
+                .fail(),
+            }
         }
         _ => error::SqlTypeNotSupportedSnafu {
             t: data_type.clone(),

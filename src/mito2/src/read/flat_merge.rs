@@ -26,12 +26,14 @@ use datatypes::arrow::datatypes::{ArrowNativeType, BinaryType, DataType, SchemaR
 use datatypes::arrow::error::ArrowError;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::arrow_array::BinaryArray;
+use datatypes::extension::json::is_json_extension_type;
 use datatypes::timestamp::timestamp_array_to_primitive;
+use datatypes::vectors::json::array::JsonArray;
 use futures::{Stream, TryStreamExt};
 use snafu::ResultExt;
 use store_api::storage::SequenceNumber;
 
-use crate::error::{ComputeArrowSnafu, Result};
+use crate::error::{ComputeArrowSnafu, DataTypeMismatchSnafu, Result};
 use crate::memtable::BoxedRecordBatchIterator;
 use crate::metrics::READ_STAGE_ELAPSED;
 use crate::read::BoxedRecordBatchStream;
@@ -258,14 +260,29 @@ impl BatchBuilder {
 
         check_interleave_overflow(&self.batches, &self.schema, &self.indices)?;
 
-        let columns = (0..self.schema.fields.len())
-            .map(|column_idx| {
-                let arrays: Vec<_> = self
+        let columns = self
+            .schema
+            .fields()
+            .iter()
+            .enumerate()
+            .map(|(column_idx, field)| {
+                let arrays = self
                     .batches
                     .iter()
-                    .map(|(_, batch)| batch.column(column_idx).as_ref())
-                    .collect();
-                interleave(&arrays, &self.indices).context(ComputeArrowSnafu)
+                    .map(|(_, batch)| {
+                        let column = batch.column(column_idx);
+                        let column = if is_json_extension_type(field) {
+                            JsonArray::from(column)
+                                .try_align(field.data_type())
+                                .context(DataTypeMismatchSnafu)?
+                        } else {
+                            column.clone()
+                        };
+                        Ok(column)
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let aligned = arrays.iter().map(|x| x.as_ref()).collect::<Vec<_>>();
+                interleave(&aligned, &self.indices).context(ComputeArrowSnafu)
             })
             .collect::<Result<Vec<_>>>()?;
 

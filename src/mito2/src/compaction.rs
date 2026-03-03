@@ -29,6 +29,7 @@ use std::time::Instant;
 
 use api::v1::region::compact_request;
 use api::v1::region::compact_request::Options;
+use arrow_schema::SchemaRef;
 use common_base::Plugins;
 use common_memory_manager::OnExhaustedPolicy;
 use common_meta::key::SchemaMetadataManagerRef;
@@ -38,6 +39,7 @@ use common_time::timestamp::TimeUnit;
 use common_time::{TimeToLive, Timestamp};
 use datafusion_common::ScalarValue;
 use datafusion_expr::Expr;
+use datatypes::schema::ext::ArrowSchemaExt;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
@@ -57,6 +59,7 @@ use crate::error::{
     RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu, RemoteCompactionSnafu, Result,
     TimeRangePredicateOverflowSnafu, TimeoutSnafu,
 };
+use crate::memtable::merge_json_extension_fields;
 use crate::metrics::{COMPACTION_STAGE_ELAPSED, INFLIGHT_COMPACTION_COUNT};
 use crate::read::BoxedRecordBatchStream;
 use crate::read::projection::ProjectionMapper;
@@ -839,12 +842,29 @@ struct CompactionSstReaderBuilder<'a> {
 
 impl CompactionSstReaderBuilder<'_> {
     /// Builds [BoxedRecordBatchStream] that reads all SST files and yields batches in flat format for compaction.
-    async fn build_flat_sst_reader(self) -> Result<BoxedRecordBatchStream> {
+    async fn build_flat_sst_reader(self) -> Result<(Option<SchemaRef>, BoxedRecordBatchStream)> {
         let scan_input = self.build_scan_input()?.with_compaction(true);
 
-        SeqScan::new(scan_input)
-            .build_flat_reader_for_compaction()
-            .await
+        let json_concretized_schema = if scan_input
+            .mapper
+            .output_schema()
+            .arrow_schema()
+            .has_json_extension_field()
+        {
+            let parquet_schemas = scan_input.collect_parquet_record_batch_schemas().await?;
+            if let Some((base, others)) = parquet_schemas.split_first() {
+                Some(merge_json_extension_fields(base, others))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let reader = SeqScan::new(scan_input)
+            .build_flat_reader_for_compaction(json_concretized_schema.clone())
+            .await?;
+        Ok((json_concretized_schema, reader))
     }
 
     fn build_scan_input(self) -> Result<ScanInput> {

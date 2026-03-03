@@ -352,7 +352,7 @@ impl DefaultCompactor {
             time_range: output.output_time_range,
             merge_mode,
         };
-        let reader = builder.build_flat_sst_reader().await?;
+        let (schema, reader) = builder.build_flat_sst_reader().await?;
         let source = FlatSource::Stream(reader);
         let mut metrics = Metrics::new(WriteType::Compaction);
         let region_metadata = compaction_region.region_metadata.clone();
@@ -363,6 +363,7 @@ impl DefaultCompactor {
                     op_type: OperationType::Compact,
                     metadata: region_metadata.clone(),
                     source,
+                    schema,
                     cache_manager: compaction_region.cache_manager.clone(),
                     storage,
                     max_sequence: max_sequence.map(NonZero::get),
