@@ -72,6 +72,7 @@ enum FlatBatchConverter {
 }
 
 impl FlatBatchConverter {
+    #[expect(unused)]
     fn arrow_schema(&self) -> &SchemaRef {
         match self {
             FlatBatchConverter::Flat(f) => f.arrow_schema(),
@@ -406,7 +407,7 @@ where
         let arrow_batch = converter.convert_batch(&record_batch)?;
 
         let start = Instant::now();
-        self.maybe_init_writer(converter.arrow_schema(), opts)
+        self.maybe_init_writer(arrow_batch.schema_ref(), opts)
             .await?
             .write(&arrow_batch)
             .await

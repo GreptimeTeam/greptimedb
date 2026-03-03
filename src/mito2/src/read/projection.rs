@@ -40,6 +40,7 @@ use crate::read::flat_projection::FlatProjectionMapper;
 pub(crate) const MAX_VECTOR_LENGTH_TO_CACHE: usize = 16384;
 
 /// Wrapper enum for different projection mapper implementations.
+#[derive(Clone)]
 pub enum ProjectionMapper {
     /// Projection mapper for primary key format.
     PrimaryKey(PrimaryKeyProjectionMapper),
@@ -148,6 +149,12 @@ impl ProjectionMapper {
         }
     }
 
+    pub(crate) fn with_flat_output_schema(&mut self, output_schema: SchemaRef) {
+        if let ProjectionMapper::Flat(m) = self {
+            m.with_output_schema(output_schema)
+        }
+    }
+
     /// Returns an empty [RecordBatch].
     // TODO(yingwen): This is unused now. Use it after we finishing the flat format.
     pub fn empty_record_batch(&self) -> RecordBatch {
@@ -159,6 +166,7 @@ impl ProjectionMapper {
 }
 
 /// Handles projection and converts a projected [Batch] to a projected [RecordBatch].
+#[derive(Clone)]
 pub struct PrimaryKeyProjectionMapper {
     /// Metadata of the region.
     metadata: RegionMetadataRef,

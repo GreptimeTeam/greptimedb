@@ -19,6 +19,7 @@
 //! The struct will carry all the fields of the Json object. We will not flatten any json object in this implementation.
 //!
 
+pub mod requirement;
 pub mod value;
 
 use std::collections::{BTreeMap, HashSet};
