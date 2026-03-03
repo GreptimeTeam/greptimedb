@@ -24,9 +24,10 @@ use arrow_schema::{DataType, FieldRef};
 use serde_json::Value;
 use snafu::{OptionExt, ResultExt, ensure};
 
-use crate::arrow_array::{StringArray, binary_array_value, string_array_value};
+use crate::arrow_array::{MutableBinaryArray, StringArray, binary_array_value, string_array_value};
 use crate::error::{
     AlignJsonArraySnafu, ArrowComputeSnafu, DeserializeSnafu, InvalidJsonSnafu, Result,
+    SerializeSnafu,
 };
 
 pub struct JsonArray<'a> {
@@ -195,7 +196,39 @@ impl JsonArray<'_> {
         Ok(Arc::new(json_array))
     }
 
+    fn try_decode_variant(&self) -> Result<ArrayRef> {
+        let json_values = (0..self.inner.len())
+            .map(|i| self.try_get_value(i))
+            .collect::<Result<Vec<_>>>()?;
+
+        let serialized_values = json_values
+            .iter()
+            .map(|value| {
+                (!value.is_null())
+                    .then(|| serde_json::to_vec(value))
+                    .transpose()
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context(SerializeSnafu)?;
+        let total_bytes = serialized_values.iter().flatten().map(Vec::len).sum();
+
+        let mut builder = MutableBinaryArray::with_capacity(self.inner.len(), total_bytes);
+        for serialized_value in serialized_values {
+            if let Some(bytes) = serialized_value {
+                builder.append_value(bytes);
+            } else {
+                builder.append_null();
+            }
+        }
+
+        Ok(Arc::new(builder.finish()))
+    }
+
     fn try_cast(&self, to_type: &DataType) -> Result<ArrayRef> {
+        if matches!(to_type, DataType::Binary) {
+            return self.try_decode_variant();
+        }
+
         if compute::can_cast_types(self.inner.data_type(), to_type) {
             return compute::cast(&self.inner, to_type).context(ArrowComputeSnafu);
         }

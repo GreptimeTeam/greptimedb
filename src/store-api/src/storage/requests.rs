@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 
 use common_error::ext::BoxedError;
 use common_recordbatch::OrderOption;
 use datafusion_expr::expr::Expr;
 // Re-export vector types from datatypes to avoid duplication
+use datatypes::data_type::ConcreteDataType;
 pub use datatypes::schema::{VectorDistanceMetric, VectorIndexEngineType};
 use strum::Display;
 
@@ -128,6 +130,8 @@ pub struct ScanRequest {
     /// Optional hint for KNN vector search. When set, the scan should use
     /// vector index to find the k nearest neighbors.
     pub vector_search: Option<VectorSearchRequest>,
+    /// Optional target types for query-driven JSON2 concretization.
+    pub json2_column_types: HashMap<String, ConcreteDataType>,
 }
 
 impl ScanRequest {
@@ -225,6 +229,14 @@ impl Display for ScanRequest {
                 vector_search.column_id,
                 vector_search.k,
                 vector_search.metric
+            )?;
+        }
+        if !self.json2_column_types.is_empty() {
+            write!(
+                f,
+                "{}json2_column_types: {:?}",
+                delimiter.as_str(),
+                self.json2_column_types
             )?;
         }
         write!(f, " }}")

@@ -49,7 +49,7 @@ use store_api::storage::{ColumnId, SequenceNumber};
 
 use crate::error::{
     ComputeArrowSnafu, DecodeSnafu, InvalidParquetSnafu, InvalidRecordBatchSnafu,
-    NewRecordBatchSnafu, Result,
+    NewRecordBatchSnafu, RecordBatchSnafu, Result,
 };
 use crate::sst::parquet::format::{
     FIXED_POS_COLUMN_NUM, FormatProjection, INTERNAL_COLUMN_NUM, PrimaryKeyArray,
@@ -69,8 +69,7 @@ pub(crate) struct FlatWriteFormat {
 
 impl FlatWriteFormat {
     /// Creates a new helper.
-    pub(crate) fn new(metadata: RegionMetadataRef, options: &FlatSchemaOptions) -> FlatWriteFormat {
-        let arrow_schema = to_flat_sst_arrow_schema(&metadata, options);
+    pub(crate) fn new(arrow_schema: SchemaRef) -> FlatWriteFormat {
         FlatWriteFormat {
             arrow_schema,
             override_sequence: None,
@@ -104,7 +103,12 @@ impl FlatWriteFormat {
         let sequence_array = Arc::new(UInt64Array::from(vec![override_sequence; batch.num_rows()]));
         columns[sequence_column_index(batch.num_columns())] = sequence_array;
 
-        RecordBatch::try_new(batch.schema(), columns).context(NewRecordBatchSnafu)
+        let columns = common_recordbatch::recordbatch::maybe_align_json_array_with_schema(
+            &self.arrow_schema,
+            columns,
+        )
+        .context(RecordBatchSnafu)?;
+        RecordBatch::try_new(self.arrow_schema.clone(), columns).context(NewRecordBatchSnafu)
     }
 }
 

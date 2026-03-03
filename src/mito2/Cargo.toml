@@ -16,6 +16,7 @@ workspace = true
 [dependencies]
 api.workspace = true
 aquamarine.workspace = true
+arrow-schema.workspace = true
 async-channel = "1.9"
 common-stat.workspace = true
 async-stream.workspace = true

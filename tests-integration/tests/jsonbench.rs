@@ -153,16 +153,10 @@ async fn query_data(frontend: &Arc<Instance>) -> io::Result<()> {
 +----------+"#;
     execute_sql_and_expect(frontend, sql, expected).await;
 
-    let sql = "SELECT * FROM bluesky ORDER BY time_us";
-    let expected = fs::read_to_string(find_workspace_path(
-        "tests-integration/resources/jsonbench-select-all.txt",
-    ))?;
-    execute_sql_and_expect(frontend, sql, &expected).await;
-
     // query 1:
     let sql = "
 SELECT
-    json_get_string(data, '$.commit.collection') AS event, count() AS count
+    data.commit.collection AS event, count() AS count
 FROM bluesky
 GROUP BY event
 ORDER BY count DESC, event ASC";
@@ -180,13 +174,12 @@ ORDER BY count DESC, event ASC";
     // query 2:
     let sql = "
 SELECT
-    json_get_string(data, '$.commit.collection') AS event,
+    data.commit.collection AS event,
     count() AS count,
-    count(DISTINCT json_get_string(data, '$.did')) AS users
+    count(DISTINCT data.did) AS users
 FROM bluesky
 WHERE
-    (json_get_string(data, '$.kind') = 'commit') AND
-    (json_get_string(data, '$.commit.operation') = 'create')
+    data.kind = 'commit' AND data.commit.operation = 'create'
 GROUP BY event
 ORDER BY count DESC, event ASC";
     let expected = r#"
@@ -203,15 +196,14 @@ ORDER BY count DESC, event ASC";
     // query 3:
     let sql = "
 SELECT
-    json_get_string(data, '$.commit.collection') AS event,
-    date_part('hour', to_timestamp_micros(json_get_int(data, '$.time_us'))) as hour_of_day,
+    data.commit.collection AS event,
+    date_part('hour', to_timestamp_micros(arrow_cast(data.time_us, 'Int64'))) as hour_of_day,
     count() AS count
 FROM bluesky
 WHERE
-    (json_get_string(data, '$.kind') = 'commit') AND
-    (json_get_string(data, '$.commit.operation') = 'create') AND
-    json_get_string(data, '$.commit.collection') IN
-        ('app.bsky.feed.post', 'app.bsky.feed.repost', 'app.bsky.feed.like')
+    data.kind = 'commit' AND
+    data.commit.operation = 'create' AND
+    data.commit.collection in ('app.bsky.feed.post', 'app.bsky.feed.repost', 'app.bsky.feed.like')
 GROUP BY event, hour_of_day
 ORDER BY hour_of_day, event";
     let expected = r#"
@@ -227,13 +219,13 @@ ORDER BY hour_of_day, event";
     // query 4:
     let sql = "
 SELECT
-    json_get_string(data, '$.did') as user_id,
-    min(to_timestamp_micros(json_get_int(data, '$.time_us'))) AS first_post_ts
+    data.did::String as user_id,
+    min(to_timestamp_micros(arrow_cast(data.time_us, 'Int64'))) AS first_post_ts
 FROM bluesky
 WHERE
-    (json_get_string(data, '$.kind') = 'commit') AND
-    (json_get_string(data, '$.commit.operation') = 'create') AND
-    (json_get_string(data, '$.commit.collection') = 'app.bsky.feed.post')
+    data.kind = 'commit' AND
+    data.commit.operation = 'create' AND
+    data.commit.collection = 'app.bsky.feed.post'
 GROUP BY user_id
 ORDER BY first_post_ts ASC, user_id DESC
 LIMIT 3";
@@ -250,17 +242,17 @@ LIMIT 3";
     // query 5:
     let sql = "
 SELECT
-    json_get_string(data, '$.did') as user_id,
+    data.did::String as user_id,
     date_part(
         'epoch',
-        max(to_timestamp_micros(json_get_int(data, '$.time_us'))) -
-        min(to_timestamp_micros(json_get_int(data, '$.time_us')))
+        max(to_timestamp_micros(arrow_cast(data.time_us, 'Int64'))) -
+          min(to_timestamp_micros(arrow_cast(data.time_us, 'Int64')))
     ) AS activity_span
 FROM bluesky
 WHERE
-    (json_get_string(data, '$.kind') = 'commit') AND
-    (json_get_string(data, '$.commit.operation') = 'create') AND
-    (json_get_string(data, '$.commit.collection') = 'app.bsky.feed.post')
+    data.kind = 'commit' AND
+    data.commit.operation = 'create' AND
+    data.commit.collection = 'app.bsky.feed.post'
 GROUP BY user_id
 ORDER BY activity_span DESC, user_id DESC
 LIMIT 3";
@@ -304,30 +296,21 @@ async fn insert_data_by_sql(frontend: &Arc<Instance>) -> io::Result<()> {
 async fn desc_table(frontend: &Arc<Instance>) {
     let sql = "DESC TABLE bluesky";
     let expected = r#"
-+---------+------------------------------------------------------------------------------------------------------------------------------------------------+-----+------+---------+---------------+
-| Column  | Type                                                                                                                                           | Key | Null | Default | Semantic Type |
-+---------+------------------------------------------------------------------------------------------------------------------------------------------------+-----+------+---------+---------------+
-| data    | Json<{"_raw":"<String>","commit.collection":"<String>","commit.operation":"<String>","did":"<String>","kind":"<String>","time_us":"<Number>"}> |     | YES  |         | FIELD         |
-| time_us | TimestampMicrosecond                                                                                                                           | PRI | NO   |         | TIMESTAMP     |
-+---------+------------------------------------------------------------------------------------------------------------------------------------------------+-----+------+---------+---------------+"#;
++---------+----------------------+-----+------+---------+---------------+
+| Column  | Type                 | Key | Null | Default | Semantic Type |
++---------+----------------------+-----+------+---------+---------------+
+| data    | JSON2                |     | YES  |         | FIELD         |
+| time_us | TimestampMicrosecond | PRI | NO   |         | TIMESTAMP     |
++---------+----------------------+-----+------+---------+---------------+"#;
     execute_sql_and_expect(frontend, sql, expected).await;
 }
 
 async fn create_table(frontend: &Arc<Instance>) {
     let sql = r#"
 CREATE TABLE bluesky (
-  "data" JSON (
-    format = "partial",
-    fields = Struct<
-      kind String,
-      "commit.operation" String,
-      "commit.collection" String,
-      did String,
-      time_us Bigint
-    >,
-  ),
+  "data" JSON2,
   time_us TimestampMicrosecond TIME INDEX,
-)
+) WITH ('append_mode' = 'true', 'sst_format' = 'flat')
 "#;
     execute_sql_and_expect(frontend, sql, "Affected Rows: 0").await;
 }

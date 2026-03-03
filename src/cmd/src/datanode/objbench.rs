@@ -26,7 +26,7 @@ use mito2::access_layer::{
 };
 use mito2::cache::{CacheManager, CacheManagerRef};
 use mito2::config::{FulltextIndexConfig, MitoConfig, Mode};
-use mito2::read::FlatSource;
+use mito2::read::{FlatSource, RecordBatchSource};
 use mito2::sst::FormatType;
 use mito2::sst::file::{FileHandle, FileMeta};
 use mito2::sst::file_purger::{FilePurger, FilePurgerRef};
@@ -244,10 +244,14 @@ impl ObjbenchCommand {
             ..Default::default()
         };
 
+        let source = RecordBatchSource::new(
+            region_meta.schema.arrow_schema().clone(),
+            FlatSource::Stream(reader_stream),
+        );
         let write_req = SstWriteRequest {
             op_type: OperationType::Flush,
             metadata: region_meta,
-            source: FlatSource::Stream(reader_stream),
+            source,
             cache_manager,
             storage: None,
             max_sequence: None,

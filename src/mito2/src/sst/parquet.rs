@@ -141,7 +141,7 @@ mod tests {
     use crate::cache::test_util::assert_parquet_metadata_equal;
     use crate::cache::{CacheManager, CacheStrategy, PageKey};
     use crate::config::IndexConfig;
-    use crate::read::FlatSource;
+    use crate::read::RecordBatchSource;
     use crate::region::options::{IndexOptions, InvertedIndexOptions};
     use crate::sst::file::{FileHandle, FileMeta, RegionFileId, RegionIndexId};
     use crate::sst::file_purger::NoopFilePurger;
@@ -594,7 +594,7 @@ mod tests {
 
         let writer_props = props_builder.build();
 
-        let write_format = FlatWriteFormat::new(metadata, &FlatSchemaOptions::default());
+        let write_format = FlatWriteFormat::new(metadata.schema.arrow_schema().clone());
         let fields: Vec<_> = write_format
             .arrow_schema()
             .fields()
@@ -1239,7 +1239,7 @@ mod tests {
         metadata: Arc<RegionMetadata>,
         indexer_builder: IndexerBuilderImpl,
         file_path: RegionFilePathFactory,
-        flat_source: FlatSource,
+        source: RecordBatchSource,
         write_opts: &WriteOptions,
     ) -> SstInfo {
         let mut metrics = Metrics::new(WriteType::Flush);
@@ -1254,7 +1254,7 @@ mod tests {
         .await;
 
         writer
-            .write_all_flat(flat_source, None, write_opts)
+            .write_all_flat(source, None, write_opts)
             .await
             .unwrap()
             .remove(0)

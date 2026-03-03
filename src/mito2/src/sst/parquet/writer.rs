@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::Instant;
 
+use arrow_schema::Schema;
 use common_telemetry::debug;
 use common_time::Timestamp;
 use datatypes::arrow::array::{
@@ -31,6 +32,8 @@ use datatypes::arrow::array::{
 use datatypes::arrow::compute::{max, min};
 use datatypes::arrow::datatypes::{DataType, SchemaRef, TimeUnit};
 use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::extension::json::is_json_extension_type;
+use datatypes::schema::ext::ArrowSchemaExt;
 use object_store::{FuturesAsyncWriter, ObjectStore};
 use parquet::arrow::AsyncArrowWriter;
 use parquet::basic::{Compression, Encoding, ZstdLevel};
@@ -50,7 +53,7 @@ use crate::config::{IndexBuildMode, IndexConfig};
 use crate::error::{
     InvalidMetadataSnafu, OpenDalSnafu, Result, UnexpectedSnafu, WriteParquetSnafu,
 };
-use crate::read::FlatSource;
+use crate::read::RecordBatchSource;
 use crate::sst::file::RegionFileId;
 use crate::sst::index::{IndexOutput, Indexer, IndexerBuilder};
 use crate::sst::parquet::flat_format::{FlatWriteFormat, time_index_column_index};
@@ -58,6 +61,7 @@ use crate::sst::parquet::format::PrimaryKeyWriteFormat;
 use crate::sst::parquet::{PARQUET_METADATA_KEY, SstInfo, WriteOptions};
 use crate::sst::{
     DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY, FlatSchemaOptions, SeriesEstimator,
+    to_flat_sst_arrow_schema,
 };
 
 /// Converts a flat RecordBatch for writing to parquet.
@@ -267,16 +271,29 @@ where
     /// Returns the [SstInfo] if the SST is written.
     pub async fn write_all_flat(
         &mut self,
-        source: FlatSource,
+        source: RecordBatchSource,
         override_sequence: Option<SequenceNumber>,
         opts: &WriteOptions,
     ) -> Result<SstInfoArray> {
+        let options = FlatSchemaOptions::from_encoding(self.metadata.primary_key_encoding);
+
+        let mut schema = to_flat_sst_arrow_schema(&self.metadata, &options);
+        if schema.has_json_extension_field() {
+            let mut fields = Vec::with_capacity(schema.fields().len());
+            for field in schema.fields() {
+                if is_json_extension_type(field)
+                    && let Some((_, override_field)) = source.schema().fields().find(field.name())
+                {
+                    fields.push(override_field.clone());
+                } else {
+                    fields.push(field.clone());
+                }
+            }
+            schema = Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()));
+        }
+
         let converter = FlatBatchConverter::Flat(
-            FlatWriteFormat::new(
-                self.metadata.clone(),
-                &FlatSchemaOptions::from_encoding(self.metadata.primary_key_encoding),
-            )
-            .with_override_sequence(override_sequence),
+            FlatWriteFormat::new(schema).with_override_sequence(override_sequence),
         );
         let res = self.write_all_flat_inner(source, &converter, opts).await;
         if res.is_err() {
@@ -293,7 +310,7 @@ where
     /// Returns the [SstInfo] if the SST is written.
     pub async fn write_all_flat_as_primary_key(
         &mut self,
-        source: FlatSource,
+        source: RecordBatchSource,
         override_sequence: Option<SequenceNumber>,
         opts: &WriteOptions,
     ) -> Result<SstInfoArray> {
@@ -315,7 +332,7 @@ where
 
     async fn write_all_flat_inner(
         &mut self,
-        mut source: FlatSource,
+        mut source: RecordBatchSource,
         converter: &FlatBatchConverter,
         opts: &WriteOptions,
     ) -> Result<SstInfoArray> {
@@ -386,7 +403,7 @@ where
 
     async fn write_next_flat_batch(
         &mut self,
-        source: &mut FlatSource,
+        source: &mut RecordBatchSource,
         converter: &FlatBatchConverter,
         opts: &WriteOptions,
     ) -> Result<Option<RecordBatch>> {

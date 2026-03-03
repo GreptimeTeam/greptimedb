@@ -8168,6 +8168,7 @@ version = "1.0.0"
 dependencies = [
  "api",
  "aquamarine",
+ "arrow-schema 57.3.0",
  "async-channel 1.9.0",
  "async-stream",
  "async-trait",

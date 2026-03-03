@@ -62,6 +62,7 @@ use crate::optimizer::ExtensionAnalyzerRule;
 use crate::optimizer::constant_term::MatchesConstantTermOptimizer;
 use crate::optimizer::count_nest_aggr::CountNestAggrRule;
 use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
+use crate::optimizer::json2_scan_hint::Json2ScanHintRule;
 use crate::optimizer::parallelize_scan::ParallelizeScan;
 use crate::optimizer::pass_distribution::PassDistribution;
 use crate::optimizer::remove_duplicate::RemoveDuplicate;
@@ -174,6 +175,7 @@ impl QueryEngineState {
 
         let mut optimizer = Optimizer::new();
         optimizer.rules.push(Arc::new(ScanHintRule));
+        optimizer.rules.push(Arc::new(Json2ScanHintRule));
 
         // add physical optimizer
         let mut physical_optimizer = PhysicalOptimizer::new();

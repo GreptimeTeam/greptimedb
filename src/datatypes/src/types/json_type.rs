@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt::{Debug, Display, Formatter};
 use std::str::FromStr;
@@ -313,8 +314,34 @@ fn merge(this: &JsonNativeType, that: &JsonNativeType) -> JsonNativeType {
             JsonNativeType::Object(merge_object(this, that))
         }
         (JsonNativeType::Null, x) | (x, JsonNativeType::Null) => x.clone(),
+
+        (JsonNativeType::Number(x), JsonNativeType::Number(y)) => {
+            JsonNativeType::Number(match (x, y) {
+                (x, y) if x == y => *x,
+                (JsonNumberType::F64, _) | (_, JsonNumberType::F64) => JsonNumberType::F64,
+                _ => JsonNumberType::I64,
+            })
+        }
+
         _ => JsonNativeType::Variant,
     }
+}
+
+pub fn merge_as_json_type<'a>(
+    left: &'a ArrowDataType,
+    right: &ArrowDataType,
+) -> Cow<'a, ArrowDataType> {
+    if left == right {
+        return Cow::Borrowed(left);
+    }
+
+    let mut left = JsonType::from(left);
+    let right = JsonType::from(right);
+    Cow::Owned(if left.merge(&right).is_ok() {
+        left.as_arrow_type()
+    } else {
+        ArrowDataType::Utf8
+    })
 }
 
 impl From<&ArrowDataType> for JsonType {
@@ -748,18 +775,15 @@ mod tests {
             Ok(r#""<Bool>""#),
         )?;
 
-        // Identical number categories should stay as Number.
         test(
             "1",
             &mut JsonType::new_json2(JsonNativeType::i64()),
             Ok(r#""<Number>""#),
         )?;
-
-        // Conflicting number categories should be lifted to Variant.
         test(
             "1.5",
             &mut JsonType::new_json2(JsonNativeType::i64()),
-            Ok(r#""<Variant>""#),
+            Ok(r#""<Number>""#),
         )?;
 
         // Object merge should preserve existing fields and append missing fields.

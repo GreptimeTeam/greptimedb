@@ -816,6 +816,10 @@ impl IterBuilder for BulkRangeIterBuilder {
     fn encoded_range(&self) -> Option<EncodedRange> {
         None
     }
+
+    fn record_batch_schema(&self) -> Option<SchemaRef> {
+        Some(self.part.batch.schema())
+    }
 }
 
 impl IterBuilder for MultiBulkRangeIterBuilder {
@@ -847,6 +851,10 @@ impl IterBuilder for MultiBulkRangeIterBuilder {
 
     fn encoded_range(&self) -> Option<EncodedRange> {
         None
+    }
+
+    fn record_batch_schema(&self) -> Option<SchemaRef> {
+        self.part.record_batch_schema()
     }
 }
 

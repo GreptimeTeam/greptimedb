@@ -1094,7 +1094,7 @@ mod tests {
     #[test]
     fn test_flat_to_sst_arrow_schema() {
         let metadata = build_test_region_metadata();
-        let format = FlatWriteFormat::new(metadata, &FlatSchemaOptions::default());
+        let format = FlatWriteFormat::new(metadata.schema.arrow_schema().clone());
         assert_eq!(&build_test_flat_sst_schema(), format.arrow_schema());
     }
 
@@ -1114,7 +1114,7 @@ mod tests {
     #[test]
     fn test_flat_convert_batch() {
         let metadata = build_test_region_metadata();
-        let format = FlatWriteFormat::new(metadata, &FlatSchemaOptions::default());
+        let format = FlatWriteFormat::new(metadata.schema.arrow_schema().clone());
 
         let num_rows = 4;
         let columns: Vec<ArrayRef> = input_columns_for_flat_batch(num_rows);
@@ -1128,7 +1128,7 @@ mod tests {
     #[test]
     fn test_flat_convert_with_override_sequence() {
         let metadata = build_test_region_metadata();
-        let format = FlatWriteFormat::new(metadata, &FlatSchemaOptions::default())
+        let format = FlatWriteFormat::new(metadata.schema.arrow_schema().clone())
             .with_override_sequence(Some(415411));
 
         let num_rows = 4;
