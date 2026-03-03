@@ -14,20 +14,18 @@
 
 #![no_main]
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
 use arbitrary::{Arbitrary, Unstructured};
 use common_telemetry::{info, warn};
 use common_time::Timestamp;
 use libfuzzer_sys::fuzz_target;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaChaRng;
-use snafu::ResultExt;
-use snafu::ensure;
+use snafu::{ResultExt, ensure};
 use sqlx::{MySql, Pool};
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::time::Duration;
-use std::time::Instant;
 use tests_fuzz::context::{TableContext, TableContextRef};
 use tests_fuzz::error::{self, Result};
 use tests_fuzz::fake::{
@@ -52,8 +50,7 @@ use tests_fuzz::translator::mysql::insert_expr::InsertIntoExprTranslator;
 use tests_fuzz::translator::mysql::repartition_expr::RepartitionExprTranslator;
 use tests_fuzz::utils::{
     Connections, get_fuzz_override, get_gt_fuzz_input_max_alter_actions,
-    get_gt_fuzz_input_max_tables,
-    init_greptime_connections_via_env,
+    get_gt_fuzz_input_max_tables, init_greptime_connections_via_env,
 };
 use tests_fuzz::validator::row::count_values;
 
@@ -240,7 +237,8 @@ async fn write_loop<R: Rng + 'static>(
 
         for table_ctx in logical_tables.values() {
             let rows = rng.random_range(1..=3);
-            let insert_expr = generate_insert_expr(rows, &mut rng, table_ctx.clone(), clock.clone())?;
+            let insert_expr =
+                generate_insert_expr(rows, &mut rng, table_ctx.clone(), clock.clone())?;
             let translator = InsertIntoExprTranslator;
             let sql = translator.translate(&insert_expr)?;
             let inserted = insert_expr.values_list.len() as u64;
@@ -271,6 +269,10 @@ async fn validate_rows(
         let count_sql = format!("SELECT COUNT(1) AS count FROM {}", table_ctx.name);
         let count = count_values(&ctx.greptime, &count_sql).await?;
         let expected = *inserted_rows.get(&table_ctx.name.to_string()).unwrap_or(&0) as usize;
+        info!(
+            "Validate rows for table: {}, expected: {}, actual: {}",
+            table_ctx.name, expected, count.count
+        );
         assert_eq!(count.count as usize, expected);
 
         let distinct_count_sql = format!(
@@ -343,8 +345,8 @@ impl Arbitrary<'_> for FuzzInput {
         let tables = get_fuzz_override::<usize>("TABLES")
             .unwrap_or_else(|| rng.random_range(1..=std::cmp::max(1, max_tables)));
         let max_actions = get_gt_fuzz_input_max_alter_actions();
-        let actions = get_fuzz_override::<usize>("ACTIONS")
-            .unwrap_or_else(|| rng.random_range(1..max_actions));
+        let actions =
+            get_fuzz_override::<usize>("ACTIONS").unwrap_or_else(|| rng.random_range(1..32));
 
         Ok(FuzzInput {
             seed,
@@ -384,10 +386,11 @@ async fn execute_repartition_metric_table(ctx: FuzzContext, input: FuzzInput) ->
     for i in 0..input.actions {
         let partition_num = physical_table_ctx.partition.as_ref().unwrap().exprs.len();
         info!(
-            "partition_num: {partition_num}, action: {}/{}, table: {}",
+            "partition_num: {partition_num}, action: {}/{}, table: {}, logical table num: {}",
             i + 1,
             input.actions,
-            physical_table_ctx.name
+            physical_table_ctx.name,
+            logical_tables.len()
         );
 
         let repartition_expr = repartition_operation(&physical_table_ctx, &mut rng)?;

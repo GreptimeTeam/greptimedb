@@ -20,6 +20,7 @@ pub(crate) mod insert_expr;
 pub(crate) mod partition_expr;
 pub(crate) mod repartition_expr;
 pub(crate) mod select_expr;
+pub(crate) mod string_value;
 
 use core::fmt;
 use std::collections::HashMap;
@@ -37,8 +38,8 @@ use derive_builder::Builder;
 pub use insert_expr::InsertIntoExpr;
 use lazy_static::lazy_static;
 pub use partition_expr::SimplePartitions;
-use rand::Rng;
 use rand::seq::{IndexedRandom, SliceRandom};
+use rand::Rng;
 pub use repartition_expr::RepartitionExpr;
 use serde::{Deserialize, Serialize};
 
@@ -126,20 +127,7 @@ pub fn generate_partition_bounds(datatype: &ConcreteDataType, bounds: usize) -> 
         ConcreteDataType::Int64(_) => generate_values!(i64, bounds),
         ConcreteDataType::Float32(_) => generate_values!(f32, bounds),
         ConcreteDataType::Float64(_) => generate_values!(f64, bounds),
-        ConcreteDataType::String(_) => {
-            let base = b'A';
-            let range = b'z' - b'A';
-            let step = range / (bounds as u8 + 1);
-            (1..=bounds)
-                .map(|i| {
-                    Value::from(
-                        char::from(base + step * i as u8)
-                            .escape_default()
-                            .to_string(),
-                    )
-                })
-                .collect()
-        }
+        ConcreteDataType::String(_) => string_value::generate_partition_bounds(bounds),
         _ => unimplemented!("unsupported type: {datatype}"),
     }
 }
@@ -157,10 +145,7 @@ pub fn generate_random_value<R: Rng>(
         ConcreteDataType::Int64(_) => Value::from(rng.random::<i64>()),
         ConcreteDataType::Float32(_) => Value::from(rng.random::<f32>()),
         ConcreteDataType::Float64(_) => Value::from(rng.random::<f64>()),
-        ConcreteDataType::String(_) => match random_str {
-            Some(random) => Value::from(random.generate(rng).value),
-            None => Value::from(rng.random::<char>().to_string()),
-        },
+        ConcreteDataType::String(_) => string_value::generate_data_string_value(rng, random_str),
         ConcreteDataType::Date(_) => generate_random_date(rng),
 
         _ => unimplemented!("unsupported type: {datatype}"),
@@ -341,21 +326,7 @@ pub fn generate_partition_value<R: Rng + 'static>(
             }
         }
         datatypes::data_type::ConcreteDataType::String(_) => {
-            let upper = match first {
-                datatypes::value::Value::String(v) => v.as_utf8(),
-                _ => "",
-            };
-            if bound_idx == 0 {
-                if upper <= "A" {
-                    datatypes::value::Value::from("")
-                } else {
-                    datatypes::value::Value::from("A")
-                }
-            } else if bound_idx < bounds.len() {
-                bounds[bound_idx - 1].clone()
-            } else {
-                last.clone()
-            }
+            string_value::generate_partition_value(bounds, bound_idx)
         }
         _ => unimplemented!("unsupported partition column type: {column_type}"),
     }
