@@ -360,7 +360,7 @@ impl PromSeriesProcessor {
         let mut vec_pipeline_map = Vec::new();
         let mut pipeline_map = BTreeMap::new();
         for l in series.labels.iter() {
-            let name = prom_validation_mode.decode_string(l.name)?;
+            let name = prom_validation_mode.decode_label_name(l.name)?;
             let value = prom_validation_mode.decode_string(l.value)?;
             pipeline_map.insert(KeyString::from(name), VrlValue::Bytes(value.into()));
         }

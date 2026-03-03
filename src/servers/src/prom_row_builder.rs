@@ -142,7 +142,7 @@ impl TableBuilder {
         let mut row = vec![Value { value_data: None }; self.col_indexes.len()];
 
         for PromLabel { name, value } in labels {
-            prom_validation_mode.validate_bytes(name)?;
+            prom_validation_mode.validate_utf8(name)?;
             let raw_tag_name = name;
             let tag_value = Some(ValueData::StringValue(
                 prom_validation_mode.decode_string(value)?,
