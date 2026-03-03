@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 
 use common_error::ext::BoxedError;
 use common_recordbatch::OrderOption;
 use datafusion_expr::expr::Expr;
 // Re-export vector types from datatypes to avoid duplication
+use datatypes::data_type::ConcreteDataType;
 pub use datatypes::schema::{VectorDistanceMetric, VectorIndexEngineType};
 use strum::Display;
 
@@ -130,6 +132,8 @@ pub struct ScanRequest {
     pub vector_search: Option<VectorSearchRequest>,
     /// Whether to force reading region data in flat format.
     pub force_flat_format: bool,
+    /// Optional target types for query-driven JSON2 concretization.
+    pub json2_column_types: HashMap<String, ConcreteDataType>,
 }
 
 impl Display for ScanRequest {
@@ -226,6 +230,14 @@ impl Display for ScanRequest {
                 "{}force_flat_format: {}",
                 delimiter.as_str(),
                 self.force_flat_format
+            )?;
+        }
+        if !self.json2_column_types.is_empty() {
+            write!(
+                f,
+                "{}json2_column_types: {:?}",
+                delimiter.as_str(),
+                self.json2_column_types
             )?;
         }
         write!(f, " }}")

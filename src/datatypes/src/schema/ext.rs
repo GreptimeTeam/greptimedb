@@ -12,6 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod array;
-pub(crate) mod builder;
-pub(crate) mod builder2;
+use crate::extension::json;
+
+pub trait ArrowSchemaExt {
+    fn has_json_extension_field(&self) -> bool;
+}
+
+impl ArrowSchemaExt for arrow_schema::Schema {
+    fn has_json_extension_field(&self) -> bool {
+        self.fields().iter().any(json::is_json_extension_type)
+    }
+}

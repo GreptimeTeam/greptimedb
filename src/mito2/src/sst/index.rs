@@ -1382,6 +1382,7 @@ mod tests {
             bloom_filter_index_config: Default::default(),
             #[cfg(feature = "vector_index")]
             vector_index_config: Default::default(),
+            schema: None,
         };
         let mut metrics = Metrics::new(WriteType::Flush);
         env.access_layer

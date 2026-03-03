@@ -456,8 +456,7 @@ impl ParquetReaderBuilder {
             .unwrap_or_else(|| region_meta.schema.clone());
 
         // Create ArrowReaderMetadata for async stream building.
-        let arrow_reader_options =
-            ArrowReaderOptions::new().with_schema(read_format.arrow_schema().clone());
+        let arrow_reader_options = ArrowReaderOptions::new();
         let arrow_metadata =
             ArrowReaderMetadata::try_new(parquet_meta.clone(), arrow_reader_options)
                 .context(ReadDataPartSnafu)?;

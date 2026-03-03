@@ -248,6 +248,7 @@ impl ObjbenchCommand {
             op_type: OperationType::Flush,
             metadata: region_meta,
             source: FlatSource::Stream(reader_stream),
+            schema: None,
             cache_manager,
             storage: None,
             max_sequence: None,

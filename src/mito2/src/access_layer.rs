@@ -15,6 +15,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use arrow_schema::SchemaRef;
 use async_stream::try_stream;
 use common_time::Timestamp;
 use futures::{Stream, TryStreamExt};
@@ -403,7 +404,12 @@ impl AccessLayer {
                 }
                 FormatType::Flat => {
                     writer
-                        .write_all_flat(request.source, request.max_sequence, write_opts)
+                        .write_all_flat(
+                            request.source,
+                            request.schema,
+                            request.max_sequence,
+                            write_opts,
+                        )
                         .await?
                 }
             }
@@ -526,6 +532,8 @@ pub struct SstWriteRequest {
     pub op_type: OperationType,
     pub metadata: RegionMetadataRef,
     pub source: FlatSource,
+    // FIXME(LFC): this schema is actually the "merged json2 datatype in `source` parquets", rename it
+    pub schema: Option<SchemaRef>,
     pub cache_manager: CacheManagerRef,
     #[allow(dead_code)]
     pub storage: Option<String>,
