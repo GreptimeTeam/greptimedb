@@ -538,17 +538,30 @@ impl FlatLastTimestampSelector {
 
     /// Finishes the selector and returns remaining results.
     pub(crate) fn finish(&mut self) -> Result<Option<RecordBatch>> {
-        if let Some(last) = &self.last_batch {
-            let ts_col_idx = time_index_column_index(last.num_columns());
-            collect_last_timestamp_indices(
-                &mut self.indices,
-                last,
-                ts_col_idx,
-                self.last_key_start,
-                self.last_key_len,
-            );
+        let Some(last) = self.last_batch.take() else {
+            return Ok(None);
+        };
+
+        let ts_col_idx = time_index_column_index(last.num_columns());
+        collect_last_timestamp_indices(
+            &mut self.indices,
+            &last,
+            ts_col_idx,
+            self.last_key_start,
+            self.last_key_len,
+        );
+
+        self.last_key_start = 0;
+        self.last_key_len = 0;
+
+        if self.indices.is_empty() {
+            return Ok(None);
         }
-        self.flush()
+
+        let take_indices = UInt64Array::from(std::mem::take(&mut self.indices));
+        let result = take_record_batch(&last, &take_indices).context(ComputeArrowSnafu)?;
+
+        Ok(Some(result))
     }
 
     /// Flushes pending indices into a `RecordBatch` via `take`.
@@ -897,5 +910,21 @@ mod tests {
         // The held batch is replaced, so we only get the last-timestamp rows
         // from the final batch for k1 (the row with ts=3 from batch 2).
         assert_eq!(vec![(b"k1".to_vec(), 3), (b"k2".to_vec(), 5)], results);
+    }
+
+    #[test]
+    fn test_flat_finish_is_one_shot() {
+        let mut selector = FlatLastTimestampSelector::default();
+        let batch = new_flat_batch(&[b"k1", b"k1", b"k2"], &[1, 2, 3], &[10, 20, 30]);
+
+        // Seed the selector with one batch, then simulate EOF by calling finish().
+        assert!(selector.on_next(batch).unwrap().is_none());
+
+        let first_finish = selector.finish().unwrap();
+        assert!(first_finish.is_some());
+
+        // A second finish after EOF should not yield any more rows.
+        let second_finish = selector.finish().unwrap();
+        assert!(second_finish.is_none());
     }
 }
