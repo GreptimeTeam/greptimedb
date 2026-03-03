@@ -106,6 +106,7 @@ pprof = { version = "0.14", features = [
 tikv-jemallocator = "0.6"
 
 [dev-dependencies]
+api.workspace = true
 client = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
 common-version.workspace = true
