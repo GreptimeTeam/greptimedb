@@ -26,6 +26,8 @@ INSERT INTO customers VALUES
 -- Test: Hash join where probe side uses TopK
 -- This combines both dynamic filter sources: TopK generates filter on amount,
 -- and hash join generates filter on customer_id
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 EXPLAIN SELECT top_orders."id", top_orders.amount, c."name", c.tier
 FROM (
   SELECT "id", customer_id, amount, ts
@@ -40,6 +42,7 @@ WHERE c.tier IN ('gold', 'bronze');
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 EXPLAIN ANALYZE SELECT top_orders."id", top_orders.amount, c."name", c.tier
 FROM (
   SELECT "id", customer_id, amount, ts
@@ -90,6 +93,8 @@ INSERT INTO customers VALUES
 -- Test: TopK where sorting side uses Hash Join
 -- Hash join produces customer info, then TopK sorts the joined results
 -- This tests that TopK dynamic filter works on hash join output
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 EXPLAIN SELECT "id", customer_id, "name", tier, amount
 FROM (
   SELECT o."id", o.customer_id, c."name", c.tier, o.amount
@@ -104,6 +109,7 @@ LIMIT 4;
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 EXPLAIN ANALYZE SELECT "id", customer_id, "name", tier, amount
 FROM (
   SELECT o."id", o.customer_id, c."name", c.tier, o.amount
@@ -131,7 +137,7 @@ DROP TABLE customers;
 -- Test 3.3: Multiple Dynamic Filters
 CREATE TABLE orders ("id" INT, customer_id INT, product_id INT, amount DOUBLE, ts TIMESTAMP TIME INDEX);
 CREATE TABLE customers (customer_id INT, "name" STRING, tier STRING, ts TIMESTAMP TIME INDEX);
-CREATE TABLE products (product_id INT, "name" STRING, category STRING, ts TIMESTAMP TIME INDEX);
+CREATE TABLE products (product_id INT, "name" STRING, "category" STRING, ts TIMESTAMP TIME INDEX);
 
 -- Insert test data
 INSERT INTO orders VALUES
@@ -159,32 +165,35 @@ INSERT INTO products VALUES
 -- Test: Multiple hash joins producing dynamic filters
 -- This creates a chain: orders JOIN customers JOIN products
 -- Both hash joins can produce dynamic filters
-EXPLAIN SELECT o."id", o.amount, c."name", c.tier, p."name" as product_name, p.category
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN SELECT o."id", o.amount, c."name", c.tier, p."name" as product_name, p."category"
 FROM orders o
 JOIN customers c ON o.customer_id = c.customer_id
 JOIN products p ON o.product_id = p.product_id
 WHERE c.tier IN ('gold', 'silver')
-  AND p.category = 'electronics';
+  AND p."category" = 'electronics';
 
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
-EXPLAIN ANALYZE SELECT o."id", o.amount, c."name", c.tier, p."name" as product_name, p.category
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+EXPLAIN ANALYZE SELECT o."id", o.amount, c."name", c.tier, p."name" as product_name, p."category"
 FROM orders o
 JOIN customers c ON o.customer_id = c.customer_id
 JOIN products p ON o.product_id = p.product_id
 WHERE c.tier IN ('gold', 'silver')
-  AND p.category = 'electronics';
+  AND p."category" = 'electronics';
 
 -- Verify correctness
 -- SQLNESS SORT_RESULT
-SELECT o."id", o.amount, c."name", c.tier, p."name" as product_name, p.category
+SELECT o."id", o.amount, c."name", c.tier, p."name" as product_name, p."category"
 FROM orders o
 JOIN customers c ON o.customer_id = c.customer_id
 JOIN products p ON o.product_id = p.product_id
 WHERE c.tier IN ('gold', 'silver')
-  AND p.category = 'electronics';
+  AND p."category" = 'electronics';
 
 DROP TABLE orders;
 DROP TABLE customers;

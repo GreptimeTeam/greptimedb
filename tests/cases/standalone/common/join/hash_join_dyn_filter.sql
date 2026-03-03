@@ -19,6 +19,8 @@ INSERT INTO customers VALUES
 -- Test: Basic hash join should produce dynamic filter
 -- The hash join will build hash table from customers (small table)
 -- and probe with orders (larger table), potentially using dynamic filter
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
 EXPLAIN SELECT o."id", o.amount, c."name", c.tier
 FROM orders o
 JOIN customers c ON o.customer_id = c.customer_id
@@ -28,6 +30,7 @@ WHERE c.tier = 'gold';
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 EXPLAIN ANALYZE SELECT o."id", o.amount, c."name", c.tier
 FROM orders o
 JOIN customers c ON o.customer_id = c.customer_id
@@ -61,6 +64,8 @@ INSERT INTO customers VALUES
 
 -- Test: Hash join with projection alias
 -- The alias on customer_id tests that dynamic filter correctly handles column references
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
 EXPLAIN SELECT o."id", o.amount, c."name", c.tier
 FROM (SELECT "id", customer_id as cid, amount, ts FROM orders) o
 JOIN customers c ON o.cid = c.customer_id
@@ -70,6 +75,7 @@ WHERE c.tier IN ('gold', 'silver');
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 EXPLAIN ANALYZE SELECT o."id", o.amount, c."name", c.tier
 FROM (SELECT "id", customer_id as cid, amount, ts FROM orders) o
 JOIN customers c ON o.cid = c.customer_id

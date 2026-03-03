@@ -17,6 +17,9 @@ INSERT INTO orders VALUES
 
 -- Test: Basic TopK query - get top 3 orders by amount
 -- TopK (Sort + Limit) should generate dynamic filter on amount
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
 EXPLAIN SELECT "id", customer_id, amount
 FROM orders
 ORDER BY amount DESC
@@ -26,6 +29,7 @@ LIMIT 3;
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 EXPLAIN ANALYZE SELECT "id", customer_id, amount
 FROM orders
 ORDER BY amount DESC
@@ -56,6 +60,9 @@ INSERT INTO orders VALUES
 
 -- Test: TopK with projection alias
 -- The alias on amount tests that dynamic filter correctly handles column references after projection
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
 EXPLAIN SELECT "id", customer_id, total_amount
 FROM (SELECT "id", customer_id, amount as total_amount, ts FROM orders)
 ORDER BY total_amount DESC
@@ -65,6 +72,7 @@ LIMIT 3;
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 EXPLAIN ANALYZE SELECT "id", customer_id, total_amount
 FROM (SELECT "id", customer_id, amount as total_amount, ts FROM orders)
 ORDER BY total_amount DESC
