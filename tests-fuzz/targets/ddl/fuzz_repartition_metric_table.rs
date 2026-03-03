@@ -36,12 +36,17 @@ use tests_fuzz::generator::create_expr::{
     CreateLogicalTableExprGeneratorBuilder, CreatePhysicalTableExprGeneratorBuilder,
 };
 use tests_fuzz::generator::insert_expr::InsertExprGeneratorBuilder;
+use tests_fuzz::generator::repartition_expr::{
+    MergePartitionExprGeneratorBuilder, SplitPartitionExprGeneratorBuilder,
+};
 use tests_fuzz::ir::{
-    CreateTableExpr, Ident, InsertIntoExpr, generate_random_value, generate_unique_timestamp_for_mysql,
+    CreateTableExpr, Ident, InsertIntoExpr, RepartitionExpr, generate_random_value,
+    generate_unique_timestamp_for_mysql,
 };
 use tests_fuzz::translator::DslTranslator;
 use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
 use tests_fuzz::translator::mysql::insert_expr::InsertIntoExprTranslator;
+use tests_fuzz::translator::mysql::repartition_expr::RepartitionExprTranslator;
 use tests_fuzz::utils::{
     Connections, get_fuzz_override, get_gt_fuzz_input_max_alter_actions,
     get_gt_fuzz_input_max_tables,
@@ -263,6 +268,28 @@ async fn cleanup_tables(
     Ok(())
 }
 
+fn repartition_operation<R: Rng + 'static>(
+    table_ctx: &TableContextRef,
+    rng: &mut R,
+) -> Result<RepartitionExpr> {
+    let split = rng.random_bool(0.5);
+    if table_ctx.partition.as_ref().unwrap().exprs.len() <= 2 || split {
+        let expr = SplitPartitionExprGeneratorBuilder::default()
+            .table_ctx(table_ctx.clone())
+            .build()
+            .unwrap()
+            .generate(rng)?;
+        Ok(RepartitionExpr::Split(expr))
+    } else {
+        let expr = MergePartitionExprGeneratorBuilder::default()
+            .table_ctx(table_ctx.clone())
+            .build()
+            .unwrap()
+            .generate(rng)?;
+        Ok(RepartitionExpr::Merge(expr))
+    }
+}
+
 impl Arbitrary<'_> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
         let seed = get_fuzz_override::<u64>("SEED").unwrap_or(u.int_in_range(u64::MIN..=u64::MAX)?);
@@ -289,9 +316,47 @@ async fn execute_repartition_metric_table(ctx: FuzzContext, input: FuzzInput) ->
     info!("input: {input:?}");
     let mut rng = ChaChaRng::seed_from_u64(input.seed);
 
-    let (physical_table_ctx, logical_tables) =
+    let (mut physical_table_ctx, logical_tables) =
         create_metric_tables(&ctx, &mut rng, input.partitions, input.tables).await?;
     let inserts = insert_rows(&ctx, &mut rng, input.actions, &logical_tables).await?;
+
+    for i in 0..input.actions {
+        let partition_num = physical_table_ctx.partition.as_ref().unwrap().exprs.len();
+        info!(
+            "partition_num: {partition_num}, action: {}/{}, table: {}",
+            i + 1,
+            input.actions,
+            physical_table_ctx.name
+        );
+
+        let repartition_expr = repartition_operation(&physical_table_ctx, &mut rng)?;
+        let translator = RepartitionExprTranslator;
+        let sql = translator.translate(&repartition_expr)?;
+        info!("Repartition sql: {sql}");
+        let result = sqlx::query(&sql)
+            .execute(&ctx.greptime)
+            .await
+            .context(error::ExecuteQuerySnafu { sql: &sql })?;
+        info!("Repartition result: {result:?}");
+
+        physical_table_ctx = Arc::new(
+            Arc::unwrap_or_clone(physical_table_ctx)
+                .repartition(repartition_expr)
+                .unwrap(),
+        );
+
+        let partition_entries = tests_fuzz::validator::partition::fetch_partitions_info_schema(
+            &ctx.greptime,
+            "public".into(),
+            &physical_table_ctx.name,
+        )
+        .await?;
+        tests_fuzz::validator::partition::assert_partitions(
+            physical_table_ctx.partition.as_ref().unwrap(),
+            &partition_entries,
+        )?;
+    }
+
     validate_rows(&ctx, &logical_tables, &inserts).await?;
     cleanup_tables(&ctx, &physical_table_ctx, &logical_tables).await?;
 
