@@ -25,7 +25,7 @@ use libfuzzer_sys::fuzz_target;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaChaRng;
 use snafu::ResultExt;
-use sqlx::{MySql, Pool};
+use sqlx::{Executor, MySql, Pool};
 use tests_fuzz::context::{TableContext, TableContextRef};
 use tests_fuzz::error::{self, Result};
 use tests_fuzz::fake::{
@@ -133,8 +133,7 @@ fn build_insert_expr<R: Rng + 'static>(
         .required_columns(vec![partitions.column_name.clone()])
         .value_overrides(Some(Box::new(move |column, rng| {
             if column.name.value == moved_partitions.column_name.value {
-                let bound_idx =
-                    counter_clone.fetch_add(1, Ordering::Relaxed) % moved_partitions.bounds.len();
+                let bound_idx = counter_clone.fetch_add(1, Ordering::Relaxed) % partition_len;
 
                 return Some(RowValue::Value(generate_partition_value(
                     rng,
@@ -156,9 +155,10 @@ async fn execute_insert_with_retry(ctx: &FuzzContext, sql: &str) -> Result<()> {
     let mut attempt = 0;
     let max_attempts = 10;
     loop {
-        match sqlx::query(sql)
-            .persistent(false)
-            .execute(&ctx.greptime)
+        match ctx
+            .greptime
+            // unprepared query, see <https://github.com/GreptimeTeam/greptimedb/issues/3500>
+            .execute(sql)
             .await
         {
             Ok(_) => {

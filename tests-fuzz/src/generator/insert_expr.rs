@@ -92,10 +92,10 @@ impl<R: Rng + 'static> Generator<InsertIntoExpr, R> for InsertExprGenerator<R> {
                     continue;
                 }
 
-                // if column.has_default_value() && rng.random_bool(0.2) {
-                //     row.push(RowValue::Default);
-                //     continue;
-                // }
+                if column.has_default_value() && rng.random_bool(0.2) {
+                    row.push(RowValue::Default);
+                    continue;
+                }
                 if column.is_time_index() {
                     row.push(RowValue::Value((self.ts_value_generator)(
                         rng,
