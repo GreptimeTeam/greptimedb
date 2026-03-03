@@ -301,28 +301,39 @@ impl PartitionExpr {
             self.op,
             RestrictedOp::Lt | RestrictedOp::LtEq | RestrictedOp::Gt | RestrictedOp::GtEq
         ) {
+            // make sure null first for consistent logical expression when null is involved.
+            // As in src/datatypes/src/value.rs, Value::Null is considered less than any other value.
             if matches!(self.lhs.as_ref(), Operand::Column(_)) {
                 let column_expr = self.lhs.try_as_logical_expr()?;
                 let other_expr = self.rhs.try_as_logical_expr()?;
                 let base = match self.op {
-                    RestrictedOp::Lt => column_expr.clone().lt(other_expr),
-                    RestrictedOp::LtEq => column_expr.clone().lt_eq(other_expr),
+                    RestrictedOp::Lt => {
+                        column_expr.clone().lt(other_expr).or(column_expr.is_null())
+                    }
+                    RestrictedOp::LtEq => column_expr
+                        .clone()
+                        .lt_eq(other_expr)
+                        .or(column_expr.is_null()),
                     RestrictedOp::Gt => column_expr.clone().gt(other_expr),
                     RestrictedOp::GtEq => column_expr.clone().gt_eq(other_expr),
                     _ => unreachable!(),
                 };
-                return Ok(datafusion_expr::or(base, column_expr.is_null()));
+                return Ok(base);
             } else if matches!(self.rhs.as_ref(), Operand::Column(_)) {
                 let other_expr = self.lhs.try_as_logical_expr()?;
                 let column_expr = self.rhs.try_as_logical_expr()?;
                 let base = match self.op {
                     RestrictedOp::Lt => other_expr.lt(column_expr.clone()),
                     RestrictedOp::LtEq => other_expr.lt_eq(column_expr.clone()),
-                    RestrictedOp::Gt => other_expr.gt(column_expr.clone()),
-                    RestrictedOp::GtEq => other_expr.gt_eq(column_expr.clone()),
+                    RestrictedOp::Gt => {
+                        other_expr.gt(column_expr.clone()).or(column_expr.is_null())
+                    }
+                    RestrictedOp::GtEq => other_expr
+                        .gt_eq(column_expr.clone())
+                        .or(column_expr.is_null()),
                     _ => unreachable!(),
                 };
-                return Ok(datafusion_expr::or(base, column_expr.is_null()));
+                return Ok(base);
             }
         }
 
