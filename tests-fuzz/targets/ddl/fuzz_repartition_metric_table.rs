@@ -29,6 +29,7 @@ use sqlx::{MySql, Pool};
 use tests_fuzz::context::{TableContext, TableContextRef};
 use tests_fuzz::error::{self, Result};
 use tests_fuzz::fake::{
+    ConstGenerator,
     MappedGenerator, WordGenerator, merge_two_word_map_fn, random_capitalize_map,
     uppercase_and_keyword_backtick_map,
 };
@@ -78,10 +79,9 @@ fn generate_create_physical_table_expr<R: Rng + 'static>(
     rng: &mut R,
 ) -> Result<CreateTableExpr> {
     CreatePhysicalTableExprGeneratorBuilder::default()
-        .name_generator(Box::new(MappedGenerator::new(
-            WordGenerator,
-            merge_two_word_map_fn(random_capitalize_map, uppercase_and_keyword_backtick_map),
-        )))
+        .name_generator(Box::new(ConstGenerator::new(Ident::new(
+            "fuzz_repartition_metric_physical",
+        ))))
         .if_not_exists(rng.random_bool(0.5))
         .partition(partitions)
         .build()
@@ -345,8 +345,8 @@ impl Arbitrary<'_> for FuzzInput {
         let tables = get_fuzz_override::<usize>("TABLES")
             .unwrap_or_else(|| rng.random_range(1..=std::cmp::max(1, max_tables)));
         let max_actions = get_gt_fuzz_input_max_alter_actions();
-        let actions =
-            get_fuzz_override::<usize>("ACTIONS").unwrap_or_else(|| rng.random_range(1..32));
+        let actions = get_fuzz_override::<usize>("ACTIONS")
+            .unwrap_or_else(|| rng.random_range(1..max_actions));
 
         Ok(FuzzInput {
             seed,
