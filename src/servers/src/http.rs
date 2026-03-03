@@ -176,8 +176,29 @@ pub enum PromValidationMode {
     Unchecked,
 }
 
+/// Returns `true` if the given byte slice is a valid Prometheus label name,
+/// i.e., it matches `[a-zA-Z_][a-zA-Z0-9_]*`.
+///
+/// Since the allowed characters are pure ASCII, valid label names are
+/// also valid UTF-8 by definition.
+#[inline]
+pub fn validate_label_name(name: &[u8]) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let first = name[0];
+    if !(first.is_ascii_alphabetic() || first == b'_') {
+        return false;
+    }
+    name[1..]
+        .iter()
+        .all(|&b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
 impl PromValidationMode {
     /// Decodes provided bytes to [String] with optional UTF-8 validation.
+    ///
+    /// Use this for label **values** and other general string fields.
     pub fn decode_string(&self, bytes: &[u8]) -> std::result::Result<String, DecodeError> {
         let result = match self {
             PromValidationMode::Strict => match String::from_utf8(bytes.to_vec()) {
@@ -193,13 +214,44 @@ impl PromValidationMode {
         Ok(result)
     }
 
-    pub(crate) fn validate_bytes(&self, bytes: &[u8]) -> std::result::Result<(), DecodeError> {
+    pub(crate) fn validate_utf8(&self, bytes: &[u8]) -> std::result::Result<(), DecodeError> {
         match self {
             PromValidationMode::Strict => {
                 simdutf8::basic::from_utf8(bytes).map_err(|_| DecodeError::new("invalid utf-8"))?;
                 Ok(())
             }
             PromValidationMode::Lossy | PromValidationMode::Unchecked => Ok(()),
+        }
+    }
+
+    /// Decodes provided bytes to a label name [String] with Prometheus label name validation.
+    ///
+    /// In `Strict` mode, the label name must match `[a-zA-Z_][a-zA-Z0-9_]*` per the
+    /// [Prometheus data model](https://prometheus.io/docs/concepts/data_model/#metric-names-and-labels).
+    /// The check is performed directly on the raw bytes — since the allowed character set is
+    /// pure ASCII, a passing check also guarantees valid UTF-8, so we can skip a separate
+    /// UTF-8 validation and use [`String::from_utf8_unchecked`].
+    ///
+    /// In `Lossy` and `Unchecked` modes, only UTF-8 handling is applied (no label name check).
+    pub fn decode_label_name(&self, bytes: &[u8]) -> std::result::Result<String, DecodeError> {
+        match self {
+            PromValidationMode::Strict => {
+                if !validate_label_name(bytes) {
+                    debug!(
+                        "Invalid Prometheus label name: {:?}, must match [a-zA-Z_][a-zA-Z0-9_]*",
+                        bytes
+                    );
+                    return Err(DecodeError::new(format!(
+                        "invalid prometheus label name: '{}', must match [a-zA-Z_][a-zA-Z0-9_]*",
+                        String::from_utf8_lossy(bytes)
+                    )));
+                }
+                // SAFETY: `is_valid_prom_label_name_bytes` only passes ASCII bytes,
+                // which are always valid UTF-8.
+                Ok(unsafe { String::from_utf8_unchecked(bytes.to_vec()) })
+            }
+            // For non-strict modes, fall back to the general string decoder.
+            _ => self.decode_string(bytes),
         }
     }
 }
@@ -1758,5 +1810,81 @@ mod test {
         assert_eq!(ResponseFormat::Json.as_str(), "json");
         assert_eq!(ResponseFormat::Null.as_str(), "null");
         assert_eq!(ResponseFormat::default().as_str(), "greptimedb_v1");
+    }
+
+    #[test]
+    fn test_decode_label_name_strict() {
+        let strict = PromValidationMode::Strict;
+
+        // Valid Prometheus label names
+        assert!(strict.decode_label_name(b"__name__").is_ok());
+        assert!(strict.decode_label_name(b"job").is_ok());
+        assert!(strict.decode_label_name(b"instance").is_ok());
+        assert!(strict.decode_label_name(b"_private").is_ok());
+        assert!(strict.decode_label_name(b"label_with_underscores").is_ok());
+        assert!(strict.decode_label_name(b"abc123").is_ok());
+        assert!(strict.decode_label_name(b"A").is_ok());
+        assert!(strict.decode_label_name(b"_").is_ok());
+
+        // Invalid: starts with digit
+        assert!(strict.decode_label_name(b"0abc").is_err());
+        assert!(strict.decode_label_name(b"123").is_err());
+
+        // Invalid: contains special characters
+        assert!(strict.decode_label_name(b"label-name").is_err());
+        assert!(strict.decode_label_name(b"label.name").is_err());
+        assert!(strict.decode_label_name(b"label name").is_err());
+        assert!(strict.decode_label_name(b"label/name").is_err());
+
+        // Invalid: empty
+        assert!(strict.decode_label_name(b"").is_err());
+
+        // Invalid: non-ASCII UTF-8
+        assert!(strict.decode_label_name("ラベル".as_bytes()).is_err());
+
+        // Invalid UTF-8 bytes should fail
+        assert!(strict.decode_label_name(&[0xff, 0xfe]).is_err());
+    }
+
+    #[test]
+    fn test_decode_label_name_lossy() {
+        let lossy = PromValidationMode::Lossy;
+
+        // Lossy mode does not enforce the regex, only handles UTF-8
+        assert!(lossy.decode_label_name(b"__name__").is_ok());
+        assert!(lossy.decode_label_name(b"label-name").is_ok());
+        assert!(lossy.decode_label_name(b"0abc").is_ok());
+
+        // Even invalid UTF-8 succeeds in lossy mode (replacement chars)
+        assert!(lossy.decode_label_name(&[0xff, 0xfe]).is_ok());
+    }
+
+    #[test]
+    fn test_decode_label_name_unchecked() {
+        let unchecked = PromValidationMode::Unchecked;
+
+        // Unchecked mode does not enforce the regex
+        assert!(unchecked.decode_label_name(b"__name__").is_ok());
+        assert!(unchecked.decode_label_name(b"label-name").is_ok());
+        assert!(unchecked.decode_label_name(b"0abc").is_ok());
+    }
+
+    #[test]
+    fn test_is_valid_prom_label_name_bytes() {
+        use super::validate_label_name;
+
+        assert!(validate_label_name(b"__name__"));
+        assert!(validate_label_name(b"job"));
+        assert!(validate_label_name(b"_"));
+        assert!(validate_label_name(b"A"));
+        assert!(validate_label_name(b"abc123"));
+        assert!(validate_label_name(b"_leading_underscore"));
+
+        assert!(!validate_label_name(b""));
+        assert!(!validate_label_name(b"0starts_with_digit"));
+        assert!(!validate_label_name(b"has-dash"));
+        assert!(!validate_label_name(b"has.dot"));
+        assert!(!validate_label_name(b"has space"));
+        assert!(!validate_label_name(&[0xff, 0xfe]));
     }
 }
