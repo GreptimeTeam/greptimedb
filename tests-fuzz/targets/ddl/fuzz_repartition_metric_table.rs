@@ -14,7 +14,7 @@
 
 #![no_main]
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -130,7 +130,7 @@ async fn create_metric_tables<R: Rng + 'static>(
     rng: &mut R,
     partitions: usize,
     table_count: usize,
-) -> Result<(TableContextRef, HashMap<Ident, TableContextRef>)> {
+) -> Result<(TableContextRef, BTreeMap<Ident, TableContextRef>)> {
     let create_physical_expr = generate_create_physical_table_expr(partitions, rng)?;
     let translator = CreateTableExprTranslator;
     let create_physical_sql = translator.translate(&create_physical_expr)?;
@@ -149,7 +149,7 @@ async fn create_metric_tables<R: Rng + 'static>(
         }
     );
 
-    let mut logical_tables = HashMap::with_capacity(table_count);
+    let mut logical_tables = BTreeMap::new();
     let max_attempts = table_count * 3;
     for _ in 0..max_attempts {
         if logical_tables.len() >= table_count {
@@ -221,7 +221,7 @@ struct SharedState {
 async fn write_loop<R: Rng + 'static>(
     mut rng: R,
     ctx: FuzzContext,
-    logical_tables: HashMap<Ident, TableContextRef>,
+    logical_tables: BTreeMap<Ident, TableContextRef>,
     shared_state: Arc<Mutex<SharedState>>,
 ) -> Result<()> {
     info!("Start write loop");
@@ -261,7 +261,7 @@ async fn write_loop<R: Rng + 'static>(
 
 async fn validate_rows(
     ctx: &FuzzContext,
-    logical_tables: &HashMap<Ident, TableContextRef>,
+    logical_tables: &BTreeMap<Ident, TableContextRef>,
     inserted_rows: &HashMap<String, u64>,
 ) -> Result<()> {
     for table_ctx in logical_tables.values() {
@@ -288,7 +288,7 @@ async fn validate_rows(
 async fn cleanup_tables(
     ctx: &FuzzContext,
     physical_table_ctx: &TableContextRef,
-    logical_tables: &HashMap<Ident, TableContextRef>,
+    logical_tables: &BTreeMap<Ident, TableContextRef>,
 ) -> Result<()> {
     for table_ctx in logical_tables.values() {
         let drop_logical_sql = format!("DROP TABLE {}", table_ctx.name);
