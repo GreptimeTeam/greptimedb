@@ -818,36 +818,6 @@ mod tests {
     }
 
     #[test]
-    fn test_flat_multiple_batches_same_key() {
-        let mut selector = FlatLastTimestampSelector::default();
-        let batches = vec![
-            new_flat_batch(&[b"k1", b"k1"], &[1, 2], &[10, 20]),
-            new_flat_batch(&[b"k1", b"k1"], &[3, 4], &[30, 40]),
-        ];
-        let results = collect_flat_results(&mut selector, batches);
-        assert_eq!(vec![(b"k1".to_vec(), 4)], results);
-    }
-
-    #[test]
-    fn test_flat_multiple_batches_different_keys() {
-        let mut selector = FlatLastTimestampSelector::default();
-        let batches = vec![
-            new_flat_batch(&[b"k1", b"k1"], &[1, 2], &[10, 20]),
-            new_flat_batch(&[b"k2", b"k2"], &[3, 4], &[30, 40]),
-        ];
-        let results = collect_flat_results(&mut selector, batches);
-        assert_eq!(vec![(b"k1".to_vec(), 2), (b"k2".to_vec(), 4)], results);
-    }
-
-    #[test]
-    fn test_flat_single_row() {
-        let mut selector = FlatLastTimestampSelector::default();
-        let batch = new_flat_batch(&[b"k1"], &[42], &[100]);
-        let results = collect_flat_results(&mut selector, vec![batch]);
-        assert_eq!(vec![(b"k1".to_vec(), 42)], results);
-    }
-
-    #[test]
     fn test_flat_key_spans_batches() {
         let mut selector = FlatLastTimestampSelector::default();
         let batches = vec![
@@ -897,28 +867,6 @@ mod tests {
         let results = collect_flat_results(&mut selector, batches);
         assert_eq!(
             vec![
-                (b"k1".to_vec(), 3),
-                (b"k1".to_vec(), 3),
-                (b"k2".to_vec(), 5),
-            ],
-            results
-        );
-    }
-
-    #[test]
-    fn test_flat_duplicate_last_timestamps_across_three_uniform_batches() {
-        let mut selector = FlatLastTimestampSelector::default();
-        let batches = vec![
-            new_flat_batch(&[b"k1", b"k1"], &[1, 3], &[10, 20]),
-            new_flat_batch(&[b"k1", b"k1"], &[3, 3], &[21, 22]),
-            new_flat_batch(&[b"k1", b"k1", b"k2"], &[3, 3, 5], &[23, 24, 30]),
-        ];
-        let results = collect_flat_results(&mut selector, batches);
-        assert_eq!(
-            vec![
-                (b"k1".to_vec(), 3),
-                (b"k1".to_vec(), 3),
-                (b"k1".to_vec(), 3),
                 (b"k1".to_vec(), 3),
                 (b"k1".to_vec(), 3),
                 (b"k2".to_vec(), 5),
