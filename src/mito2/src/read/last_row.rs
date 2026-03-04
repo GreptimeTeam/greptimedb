@@ -18,19 +18,17 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use datatypes::arrow::array::{Array, BinaryArray, DictionaryArray, UInt32Array, UInt64Array};
-use datatypes::arrow::compute::take_record_batch;
+use datatypes::arrow::array::{Array, BinaryArray, DictionaryArray, UInt32Array};
 use datatypes::arrow::datatypes::UInt32Type;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::vectors::UInt32Vector;
-use snafu::ResultExt;
 use store_api::storage::{FileId, TimeSeriesRowSelector};
 
 use crate::cache::{
     CacheStrategy, SelectorResult, SelectorResultKey, SelectorResultValue,
     selector_result_cache_hit, selector_result_cache_miss,
 };
-use crate::error::{ComputeArrowSnafu, Result};
+use crate::error::Result;
 use crate::memtable::partition_tree::data::timestamp_array_to_i64_slice;
 use crate::read::{Batch, BatchReader, BoxedBatchReader};
 use crate::sst::parquet::flat_format::{primary_key_column_index, time_index_column_index};
@@ -471,16 +469,25 @@ impl FlatRowGroupLastRowReader {
 /// and contain only PUT operations (no DELETEs).
 #[derive(Default)]
 pub(crate) struct FlatLastTimestampSelector {
-    /// Row indices of last-timestamp rows from completed keys within `last_batch`.
-    indices: Vec<u64>,
-    /// The batch that `indices` and `last_key_start`/`last_key_len` refer to.
-    last_batch: Option<RecordBatch>,
-    /// Start offset within `last_batch` for the last (incomplete) primary key range.
-    last_key_start: usize,
-    /// Length of the last (incomplete) primary key range within `last_batch`.
-    last_key_len: usize,
-    /// Pending rows for the same key and timestamp across multiple batches.
-    pending_batches: Vec<RecordBatch>,
+    /// State for the currently in-progress primary key.
+    current_key: Option<LastKeyState>,
+}
+
+#[derive(Debug)]
+struct LastKeyState {
+    key: Vec<u8>,
+    last_timestamp: i64,
+    slices: Vec<RecordBatch>,
+}
+
+impl LastKeyState {
+    fn new(key: Vec<u8>, last_timestamp: i64, first_slice: RecordBatch) -> Self {
+        Self {
+            key,
+            last_timestamp,
+            slices: vec![first_slice],
+        }
+    }
 }
 
 impl FlatLastTimestampSelector {
@@ -498,16 +505,6 @@ impl FlatLastTimestampSelector {
         let pk_col_idx = primary_key_column_index(num_columns);
         let ts_col_idx = time_index_column_index(num_columns);
 
-        let Some(batch) =
-            self.handle_pending_batches(batch, pk_col_idx, ts_col_idx, output_buffer)?
-        else {
-            return Ok(());
-        };
-        debug_assert!(
-            self.pending_batches.is_empty(),
-            "pending_batches must be empty when handle_pending_batches returns Some"
-        );
-
         let pk_array = batch
             .column(pk_col_idx)
             .as_any()
@@ -519,293 +516,56 @@ impl FlatLastTimestampSelector {
         }
 
         let ts_values = timestamp_array_to_i64_slice(batch.column(ts_col_idx));
-        let first_start = offsets[0];
-        let first_len = offsets[1] - first_start;
-        let curr_key = primary_key_bytes_at(&batch, pk_col_idx, first_start);
-        let curr_first_ts = ts_values[first_start];
-
-        if let Some(last) = &self.last_batch {
-            let last_key = primary_key_bytes_at(last, pk_col_idx, self.last_key_start);
-            let last_ts = self.last_range_last_timestamp(last, ts_col_idx);
-            if last_key == curr_key {
-                if last_ts == curr_first_ts
-                    && is_single_key_single_timestamp_batch(&batch, pk_col_idx, ts_col_idx)
-                {
-                    self.pending_batches.push(batch);
-                    return Ok(());
-                }
-            } else {
-                // Different key — the previous held range is complete.
-                collect_last_timestamp_indices(
-                    &mut self.indices,
-                    last,
-                    ts_col_idx,
-                    self.last_key_start,
-                    self.last_key_len,
-                );
-            }
-        }
-        self.last_key_start = first_start;
-        self.last_key_len = first_len;
-
-        // Flush pending indices from the previous batch.
-        self.push_flushed(output_buffer)?;
-
-        // Switch to the new batch. From here on, all indices refer to this batch.
-        self.last_batch = Some(batch);
-
-        // Process remaining sub-ranges (all within the new batch).
-        for i in 1..offsets.len() - 1 {
+        for i in 0..offsets.len() - 1 {
             let range_start = offsets[i];
-            let range_len = offsets[i + 1] - range_start;
+            let range_end = offsets[i + 1];
+            let range_key = primary_key_bytes_at(&batch, pk_col_idx, range_start);
+            let range_last_ts = ts_values[range_end - 1];
+            let range_last_ts_start = last_timestamp_start(ts_values, range_start, range_end);
+            let range_slice = batch.slice(range_last_ts_start, range_end - range_last_ts_start);
 
-            // All ranges after the first are within the same batch, and each
-            // boundary means a different key from the previous range.
-            collect_last_timestamp_indices(
-                &mut self.indices,
-                self.last_batch.as_ref().unwrap(),
-                ts_col_idx,
-                self.last_key_start,
-                self.last_key_len,
-            );
-            self.last_key_start = range_start;
-            self.last_key_len = range_len;
+            match self.current_key.as_mut() {
+                Some(state) if state.key.as_slice() == range_key => {
+                    if range_last_ts > state.last_timestamp {
+                        state.last_timestamp = range_last_ts;
+                        state.slices.clear();
+                        state.slices.push(range_slice);
+                    } else if range_last_ts == state.last_timestamp {
+                        state.slices.push(range_slice);
+                    }
+                }
+                Some(_) => {
+                    self.flush_current_key(output_buffer);
+                    self.current_key = Some(LastKeyState::new(
+                        range_key.to_vec(),
+                        range_last_ts,
+                        range_slice,
+                    ));
+                }
+                None => {
+                    self.current_key = Some(LastKeyState::new(
+                        range_key.to_vec(),
+                        range_last_ts,
+                        range_slice,
+                    ));
+                }
+            }
         }
 
         Ok(())
-    }
-
-    /// Resolves pending state and returns a batch for normal processing if any.
-    fn handle_pending_batches(
-        &mut self,
-        batch: RecordBatch,
-        pk_col_idx: usize,
-        ts_col_idx: usize,
-        output_buffer: &mut VecDeque<RecordBatch>,
-    ) -> Result<Option<RecordBatch>> {
-        if self.pending_batches.is_empty() {
-            return Ok(Some(batch));
-        }
-
-        let pk_array = batch
-            .column(pk_col_idx)
-            .as_any()
-            .downcast_ref::<PrimaryKeyArray>()
-            .unwrap();
-        let offsets = primary_key_offsets(pk_array)?;
-        if offsets.is_empty() {
-            return Ok(None);
-        }
-
-        let first_start = offsets[0];
-        let first_end = offsets[1];
-        let ts_values = timestamp_array_to_i64_slice(batch.column(ts_col_idx));
-        let curr_key = primary_key_bytes_at(&batch, pk_col_idx, first_start);
-        let curr_first_ts = ts_values[first_start];
-        let curr_first_range_last_ts = ts_values[first_end - 1];
-        // Safety: pending_batches is not empty.
-        let pending_key =
-            primary_key_bytes_at(self.pending_batches.last().unwrap(), pk_col_idx, 0).to_vec();
-        // Safety: pending_batches must have last_batch.
-        let pending_ts =
-            self.last_range_last_timestamp(self.last_batch.as_ref().unwrap(), ts_col_idx);
-
-        if curr_key != pending_key {
-            self.flush_and_emit_pending(ts_col_idx, output_buffer)?;
-            return Ok(Some(batch));
-        }
-
-        if curr_first_range_last_ts > pending_ts {
-            // A newer timestamp in current batch supersedes pending rows.
-            self.pending_batches.clear();
-            return Ok(Some(batch));
-        }
-
-        if curr_first_ts == pending_ts {
-            if is_single_key_single_timestamp_batch(&batch, pk_col_idx, ts_col_idx) {
-                self.pending_batches.push(batch);
-                return Ok(None);
-            }
-
-            // Same key + timestamp at first range but batch continues with next key.
-            let overlap = batch.slice(first_start, first_end - first_start);
-            self.pending_batches.push(overlap);
-            self.flush_and_emit_pending(ts_col_idx, output_buffer)?;
-            let remaining = batch.slice(first_end, batch.num_rows() - first_end);
-            return Ok(Some(remaining));
-        }
-
-        // If we continue with normal processing, pending rows must not remain.
-        self.pending_batches.clear();
-        Ok(Some(batch))
     }
 
     /// Finishes the selector and appends remaining results into `output_buffer`.
     pub(crate) fn finish(&mut self, output_buffer: &mut VecDeque<RecordBatch>) -> Result<()> {
-        self.push_flushed(output_buffer)?;
+        self.flush_current_key(output_buffer);
+        Ok(())
+    }
 
-        if !self.pending_batches.is_empty() {
-            // Safety: pending_batches must have last_batch.
-            let ts_col_idx =
-                time_index_column_index(self.last_batch.as_ref().unwrap().num_columns());
-            self.emit_pending_and_reset(ts_col_idx, output_buffer)?;
-            return Ok(());
-        }
-
-        let Some(last) = self.last_batch.take() else {
-            return Ok(());
+    fn flush_current_key(&mut self, output_buffer: &mut VecDeque<RecordBatch>) {
+        let Some(state) = self.current_key.take() else {
+            return;
         };
-
-        let ts_col_idx = time_index_column_index(last.num_columns());
-        collect_last_timestamp_indices(
-            &mut self.indices,
-            &last,
-            ts_col_idx,
-            self.last_key_start,
-            self.last_key_len,
-        );
-
-        self.last_key_start = 0;
-        self.last_key_len = 0;
-
-        if self.indices.is_empty() {
-            return Ok(());
-        }
-
-        let take_indices = UInt64Array::from(std::mem::take(&mut self.indices));
-        let result = take_record_batch(&last, &take_indices).context(ComputeArrowSnafu)?;
-        output_buffer.push_back(result);
-
-        Ok(())
-    }
-
-    /// Flushes pending indices into a `RecordBatch` via `take`.
-    fn flush(&mut self) -> Result<Option<RecordBatch>> {
-        if self.indices.is_empty() {
-            return Ok(None);
-        }
-
-        let last = self
-            .last_batch
-            .as_ref()
-            .expect("indices are non-empty so last_batch must exist");
-
-        let take_indices = UInt64Array::from(std::mem::take(&mut self.indices));
-        let result = take_record_batch(last, &take_indices).context(ComputeArrowSnafu)?;
-
-        Ok(Some(result))
-    }
-
-    fn push_flushed(&mut self, output_buffer: &mut VecDeque<RecordBatch>) -> Result<()> {
-        if let Some(flushed) = self.flush()? {
-            output_buffer.push_back(flushed);
-        }
-        Ok(())
-    }
-
-    fn last_range_last_timestamp(&self, batch: &RecordBatch, ts_col_idx: usize) -> i64 {
-        let ts_values = timestamp_array_to_i64_slice(batch.column(ts_col_idx));
-        ts_values[self.last_key_start + self.last_key_len - 1]
-    }
-
-    /// Emits pending rows: last timestamp rows from `last_batch` tail range, then buffered batches.
-    fn emit_pending(
-        &mut self,
-        ts_col_idx: usize,
-        output_buffer: &mut VecDeque<RecordBatch>,
-    ) -> Result<()> {
-        if self.pending_batches.is_empty() {
-            return Ok(());
-        }
-
-        let last = self
-            .last_batch
-            .as_ref()
-            .expect("pending_batches must have last_batch");
-        let pending_from_last =
-            take_last_timestamp_rows(last, ts_col_idx, self.last_key_start, self.last_key_len)?;
-        output_buffer.push_back(pending_from_last);
-        for batch in self.pending_batches.drain(..) {
-            output_buffer.push_back(batch);
-        }
-
-        Ok(())
-    }
-
-    fn emit_pending_and_reset(
-        &mut self,
-        ts_col_idx: usize,
-        output_buffer: &mut VecDeque<RecordBatch>,
-    ) -> Result<()> {
-        self.emit_pending(ts_col_idx, output_buffer)?;
-        self.last_batch = None;
-        self.last_key_start = 0;
-        self.last_key_len = 0;
-        self.indices.clear();
-        Ok(())
-    }
-
-    fn flush_and_emit_pending(
-        &mut self,
-        ts_col_idx: usize,
-        output_buffer: &mut VecDeque<RecordBatch>,
-    ) -> Result<()> {
-        self.push_flushed(output_buffer)?;
-        self.emit_pending_and_reset(ts_col_idx, output_buffer)?;
-        Ok(())
-    }
-}
-
-fn take_last_timestamp_rows(
-    batch: &RecordBatch,
-    ts_col_idx: usize,
-    key_start: usize,
-    key_len: usize,
-) -> Result<RecordBatch> {
-    let ts_values = timestamp_array_to_i64_slice(batch.column(ts_col_idx));
-    let range_end = key_start + key_len;
-    let start = last_timestamp_start(ts_values, key_start, range_end);
-    Ok(batch.slice(start, range_end - start))
-}
-
-fn is_single_key_single_timestamp_batch(
-    batch: &RecordBatch,
-    pk_col_idx: usize,
-    ts_col_idx: usize,
-) -> bool {
-    if batch.num_rows() == 0 {
-        return false;
-    }
-
-    let last_row = batch.num_rows() - 1;
-    // Input is sorted by primary key and timestamp, so checking first/last rows
-    // is sufficient to verify the whole batch has one key and one timestamp.
-    if primary_key_bytes_at(batch, pk_col_idx, 0)
-        != primary_key_bytes_at(batch, pk_col_idx, last_row)
-    {
-        return false;
-    }
-
-    let ts_values = timestamp_array_to_i64_slice(batch.column(ts_col_idx));
-    ts_values[0] == ts_values[last_row]
-}
-
-/// Collects indices of last-timestamp rows from a key range into `indices`.
-fn collect_last_timestamp_indices(
-    indices: &mut Vec<u64>,
-    batch: &RecordBatch,
-    ts_col_idx: usize,
-    last_key_start: usize,
-    last_key_len: usize,
-) {
-    let range_end = last_key_start + last_key_len;
-    debug_assert!(range_end <= batch.num_rows());
-    debug_assert!(last_key_len > 0);
-
-    let ts_values = timestamp_array_to_i64_slice(batch.column(ts_col_idx));
-    let start = last_timestamp_start(ts_values, last_key_start, range_end);
-    for idx in start..range_end {
-        indices.push(idx as u64);
+        output_buffer.extend(state.slices);
     }
 }
 
@@ -1169,9 +929,14 @@ mod tests {
             new_flat_batch(&[b"k1", b"k2"], &[3, 5], &[30, 40]),
         ];
         let results = collect_flat_results(&mut selector, batches);
-        // The held batch is replaced, so we only get the last-timestamp rows
-        // from the final batch for k1 (the row with ts=3 from batch 2).
-        assert_eq!(vec![(b"k1".to_vec(), 3), (b"k2".to_vec(), 5)], results);
+        assert_eq!(
+            vec![
+                (b"k1".to_vec(), 3),
+                (b"k1".to_vec(), 3),
+                (b"k2".to_vec(), 5),
+            ],
+            results
+        );
     }
 
     #[test]
@@ -1214,10 +979,15 @@ mod tests {
         let batch = new_flat_batch(&[b"k1", b"k1", b"k2"], &[1, 2, 3], &[10, 20, 30]);
         let mut output_buffer = VecDeque::new();
 
-        // Seed the selector with one batch, then simulate EOF by calling finish().
+        // Feed one batch: completed keys can be emitted before EOF.
         selector.on_next(batch, &mut output_buffer).unwrap();
-        assert!(output_buffer.is_empty());
+        let mut pre_finish = Vec::new();
+        while let Some(r) = output_buffer.pop_front() {
+            extract_flat_rows(&r, &mut pre_finish);
+        }
+        assert_eq!(vec![(b"k1".to_vec(), 2)], pre_finish);
 
+        // Simulate EOF by calling finish().
         selector.finish(&mut output_buffer).unwrap();
         assert!(!output_buffer.is_empty());
         while output_buffer.pop_front().is_some() {}
