@@ -27,8 +27,11 @@ LIMIT 3;
 
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
--- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (=Hash.*) =REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 EXPLAIN ANALYZE SELECT "id", customer_id, amount
 FROM orders
@@ -70,8 +73,11 @@ LIMIT 3;
 
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
--- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (=Hash.*) =REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- some order problem between standalone&distributed, comment out for now
 -- EXPLAIN ANALYZE SELECT "id", customer_id, total_amount

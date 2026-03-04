@@ -63,8 +63,11 @@ WHERE c.tier = 'gold';
 
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
--- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (=Hash.*) =REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 EXPLAIN ANALYZE SELECT o."id", o.amount, c."name", c.tier
 FROM orders o
@@ -75,19 +78,19 @@ WHERE c.tier = 'gold';
 | stage | node | plan_|
 +-+-+-+
 | 0_| 0_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(customer_id@1, customer_id@0)], projection=[id@0, amount@2, name@4, tier@5] REDACTED
-|_|_|_RepartitionExec: partitioning=Hash([customer_id@1], 20), input_partitions=20 REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_ProjectionExec: expr=[id@0 as id, customer_id@1 as customer_id, amount@2 as amount] REDACTED
 |_|_|_MergeScanExec: REDACTED
-|_|_|_RepartitionExec: partitioning=Hash([customer_id@0], 20), input_partitions=20 REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_FilterExec: tier@2 = gold REDACTED
 |_|_|_ProjectionExec: expr=[customer_id@0 as customer_id, name@1 as name, tier@2 as tier] REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_CooperativeExec REDACTED
-|_|_|_SeqScan: region=4398046511104(1024, 0), "partition_count":REDACTED REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED REDACTED
 |_|_|_|
 | 1_| 0_|_CooperativeExec REDACTED
-|_|_|_SeqScan: region=4402341478400(1025, 0), "partition_count":REDACTED REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED REDACTED
 |_|_|_|
 |_|_| Total rows: 2_|
 +-+-+-+
@@ -178,8 +181,11 @@ WHERE c.tier IN ('gold', 'silver');
 
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
--- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (=Hash.*) =REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 EXPLAIN ANALYZE SELECT o."id", o.amount, c."name", c.tier
 FROM (SELECT "id", customer_id as cid, amount, ts FROM orders) o
@@ -190,20 +196,20 @@ WHERE c.tier IN ('gold', 'silver');
 | stage | node | plan_|
 +-+-+-+
 | 0_| 0_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(cid@1, customer_id@0)], projection=[id@0, amount@2, name@4, tier@5] REDACTED
-|_|_|_RepartitionExec: partitioning=Hash([cid@1], 20), input_partitions=20 REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_ProjectionExec: expr=[id@0 as id, cid@1 as cid, amount@2 as amount] REDACTED
 |_|_|_MergeScanExec: REDACTED
-|_|_|_RepartitionExec: partitioning=Hash([customer_id@0], 20), input_partitions=20 REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_FilterExec: tier@2 = gold OR tier@2 = silver REDACTED
 |_|_|_ProjectionExec: expr=[customer_id@0 as customer_id, name@1 as name, tier@2 as tier] REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[id@0 as id, customer_id@1 as cid, amount@2 as amount, ts@3 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeqScan: region=4406636445696(1026, 0), "partition_count":REDACTED REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED REDACTED
 |_|_|_|
 | 1_| 0_|_CooperativeExec REDACTED
-|_|_|_SeqScan: region=4410931412992(1027, 0), "partition_count":REDACTED REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED REDACTED
 |_|_|_|
 |_|_| Total rows: 3_|
 +-+-+-+

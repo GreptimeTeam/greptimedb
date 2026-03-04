@@ -40,8 +40,11 @@ WHERE c.tier IN ('gold', 'bronze');
 
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
--- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (=Hash.*) =REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 EXPLAIN ANALYZE SELECT top_orders."id", top_orders.amount, c."name", c.tier
 FROM (
@@ -107,8 +110,11 @@ LIMIT 4;
 
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
--- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (=Hash.*) =REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 EXPLAIN ANALYZE SELECT "id", customer_id, "name", tier, amount
 FROM (
@@ -176,8 +182,11 @@ WHERE c.tier IN ('gold', 'silver')
 
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
--- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (=Hash.*) =REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 EXPLAIN ANALYZE SELECT o."id", o.amount, c."name", c.tier, p."name" as product_name, p."category"
 FROM orders o

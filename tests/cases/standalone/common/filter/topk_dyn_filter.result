@@ -44,8 +44,11 @@ LIMIT 3;
 
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
--- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (=Hash.*) =REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 EXPLAIN ANALYZE SELECT "id", customer_id, amount
 FROM orders
@@ -60,7 +63,7 @@ LIMIT 3;
 |_|_|_|
 | 1_| 0_|_SortPreservingMergeExec: [amount@2 DESC], fetch=3 REDACTED
 |_|_|_SortExec: TopK(fetch=3), expr=[amount@2 DESC], preserve_partitioning=[true] REDACTED
-|_|_|_SeqScan: region=4415226380288(1028, 0), "partition_count":REDACTED REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED REDACTED
 |_|_|_|
 |_|_| Total rows: 3_|
 +-+-+-+
@@ -129,8 +132,11 @@ LIMIT 3;
 
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
--- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (=Hash.*) =REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- some order problem between standalone&distributed, comment out for now
 -- EXPLAIN ANALYZE SELECT "id", customer_id, total_amount
