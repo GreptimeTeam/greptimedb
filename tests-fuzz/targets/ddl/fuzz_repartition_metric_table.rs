@@ -51,9 +51,8 @@ use tests_fuzz::translator::mysql::insert_expr::InsertIntoExprTranslator;
 use tests_fuzz::translator::mysql::repartition_expr::RepartitionExprTranslator;
 use tests_fuzz::utils::csv_dump_writer::{CsvDumpMetadata, CsvDumpSession};
 use tests_fuzz::utils::{
-    Connections, get_fuzz_override, get_gt_fuzz_dump_table_csv,
-    get_gt_fuzz_input_max_alter_actions, get_gt_fuzz_input_max_tables,
-    init_greptime_connections_via_env,
+    Connections, get_fuzz_override, get_gt_fuzz_input_max_alter_actions,
+    get_gt_fuzz_input_max_tables, init_greptime_connections_via_env,
 };
 use tests_fuzz::validator::row::count_values;
 
@@ -381,17 +380,14 @@ async fn execute_repartition_metric_table(ctx: FuzzContext, input: FuzzInput) ->
     for table_ctx in logical_tables.values() {
         inserted_rows.insert(table_ctx.name.to_string(), 0);
     }
-    let csv_dump_session = if get_gt_fuzz_dump_table_csv() {
-        Some(CsvDumpSession::new(CsvDumpMetadata::new(
-            "fuzz_repartition_metric_table",
-            input.seed,
-            input.actions,
-            input.partitions,
-            input.tables,
-        ))?)
-    } else {
-        None
-    };
+    let csv_dump_session = Some(CsvDumpSession::new(CsvDumpMetadata::new(
+        "fuzz_repartition_metric_table",
+        input.seed,
+        input.actions,
+        input.partitions,
+        input.tables,
+    ))?);
+
     let shared_state = Arc::new(Mutex::new(SharedState {
         clock,
         inserted_rows,
