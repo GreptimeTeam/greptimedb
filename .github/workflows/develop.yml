@@ -319,7 +319,13 @@ jobs:
         include:
           - target: "fuzz_repartition_table"
             mode:
-              name: "Local WAL Repartition GC"
+              name: "Local WAL mito table repartition"
+              minio: true
+              kafka: false
+              values: "with-minio-repartition-gc.yaml"
+          - target: "fuzz_repartition_metric_table"
+            mode:
+              name: "Local WAL metric table repartition"
               minio: true
               kafka: false
               values: "with-minio-repartition-gc.yaml"
