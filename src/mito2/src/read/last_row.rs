@@ -14,23 +14,24 @@
 
 //! Utilities to read the last row of each time series.
 
-use std::collections::VecDeque;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use datatypes::arrow::array::{Array, BinaryArray, DictionaryArray, UInt32Array};
+use datatypes::arrow::compute::concat_batches;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::vectors::UInt32Vector;
+use snafu::ResultExt;
 use store_api::storage::{FileId, TimeSeriesRowSelector};
 
 use crate::cache::{
     CacheStrategy, SelectorResult, SelectorResultKey, SelectorResultValue,
     selector_result_cache_hit, selector_result_cache_miss,
 };
-use crate::error::Result;
+use crate::error::{ComputeArrowSnafu, Result};
 use crate::memtable::partition_tree::data::timestamp_array_to_i64_slice;
-use crate::memtable::record_batch_estimated_size;
 use crate::read::{Batch, BatchReader, BoxedBatchReader};
+use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 use crate::sst::parquet::flat_format::{primary_key_column_index, time_index_column_index};
 use crate::sst::parquet::format::{PrimaryKeyArray, primary_key_offsets};
 use crate::sst::parquet::reader::{FlatRowGroupReader, ReaderMetrics, RowGroupReader};
@@ -389,6 +390,55 @@ impl FlatLastRowCacheReader {
     }
 }
 
+/// Buffer that accumulates small `RecordBatch`es and tracks total row count.
+struct BatchBuffer {
+    batches: Vec<RecordBatch>,
+    num_rows: usize,
+}
+
+impl BatchBuffer {
+    fn new() -> Self {
+        Self {
+            batches: Vec::new(),
+            num_rows: 0,
+        }
+    }
+
+    /// Pushes a batch into the buffer.
+    fn push(&mut self, batch: RecordBatch) {
+        self.num_rows += batch.num_rows();
+        self.batches.push(batch);
+    }
+
+    /// Returns true if total buffered rows reaches `DEFAULT_READ_BATCH_SIZE`.
+    fn is_full(&self) -> bool {
+        self.num_rows >= DEFAULT_READ_BATCH_SIZE
+    }
+
+    /// Extends the buffer from a slice of batches.
+    fn extend_from_slice(&mut self, batches: &[RecordBatch]) {
+        for batch in batches {
+            self.num_rows += batch.num_rows();
+        }
+        self.batches.extend_from_slice(batches);
+    }
+
+    /// Returns true if the buffer has no batches.
+    fn is_empty(&self) -> bool {
+        self.batches.is_empty()
+    }
+
+    /// Concatenates all buffered batches into one, resets the buffer, and returns the result.
+    fn concat(&mut self) -> Result<RecordBatch> {
+        debug_assert!(!self.batches.is_empty());
+        let schema = self.batches[0].schema();
+        let merged = concat_batches(&schema, &self.batches).context(ComputeArrowSnafu)?;
+        self.batches.clear();
+        self.num_rows = 0;
+        Ok(merged)
+    }
+}
+
 /// Reads last rows from a flat format row group and caches the results.
 pub(crate) struct FlatRowGroupLastRowReader {
     key: SelectorResultKey,
@@ -398,7 +448,8 @@ pub(crate) struct FlatRowGroupLastRowReader {
     cache_strategy: CacheStrategy,
     projection: Vec<usize>,
     metrics: ReaderMetrics,
-    output_buffer: VecDeque<RecordBatch>,
+    /// Accumulates small selector-output batches before concatenating.
+    pending: BatchBuffer,
 }
 
 impl FlatRowGroupLastRowReader {
@@ -416,30 +467,41 @@ impl FlatRowGroupLastRowReader {
             cache_strategy,
             projection,
             metrics: ReaderMetrics::default(),
-            output_buffer: VecDeque::new(),
+            pending: BatchBuffer::new(),
         }
     }
 
+    /// Concatenates pending batches and records the result in `yielded_batches`.
+    fn flush_pending(&mut self) -> Result<Option<RecordBatch>> {
+        if self.pending.is_empty() {
+            return Ok(None);
+        }
+        let merged = self.pending.concat()?;
+        self.yielded_batches.push(merged.clone());
+        Ok(Some(merged))
+    }
+
     fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
-        if let Some(yielded) = self.output_buffer.pop_front() {
-            self.yielded_batches.push(yielded.clone());
-            return Ok(Some(yielded));
+        if self.pending.is_full() {
+            return self.flush_pending();
         }
 
         while let Some(batch) = self.reader.next_batch()? {
             self.metrics.num_rows += batch.num_rows();
             self.metrics.num_batches += 1;
-            self.selector.on_next(batch, &mut self.output_buffer)?;
-            if let Some(yielded) = self.output_buffer.pop_front() {
-                self.yielded_batches.push(yielded.clone());
-                return Ok(Some(yielded));
+            self.selector.on_next(batch, &mut self.pending)?;
+            if self.pending.is_full() {
+                return self.flush_pending();
             }
         }
 
-        self.selector.finish(&mut self.output_buffer)?;
-        if let Some(last) = self.output_buffer.pop_front() {
-            self.yielded_batches.push(last.clone());
-            return Ok(Some(last));
+        // Reader exhausted — flush remaining selector state.
+        self.selector.finish(&mut self.pending)?;
+        if !self.pending.is_empty() {
+            let result = self.flush_pending();
+            // All last rows in row group are yielded, update cache.
+            self.maybe_update_cache();
+            return result;
         }
 
         // All last rows in row group are yielded, update cache.
@@ -452,23 +514,10 @@ impl FlatRowGroupLastRowReader {
             return;
         }
         let batches = std::mem::take(&mut self.yielded_batches);
-        let rows_num: usize = batches.iter().map(RecordBatch::num_rows).sum();
-        let value_size: usize = batches.iter().map(record_batch_estimated_size).sum();
-        common_telemetry::info!(
-            "FlatRowGroupLastRowReader::maybe_update_cache batches_num: {}, rows_num: {}, value_size: {}, batches: {:?}",
-            batches.len(),
-            rows_num,
-            value_size,
-            batches
-        );
         let value = Arc::new(SelectorResultValue::new_flat(
             batches,
             self.projection.clone(),
         ));
-        common_telemetry::info!(
-            "FlatRowGroupLastRowReader::maybe_update_cache put_selector_result value_size: {}",
-            value_size
-        );
         self.cache_strategy.put_selector_result(self.key, value);
     }
 }
@@ -505,7 +554,7 @@ impl FlatLastTimestampSelector {
     pub(crate) fn on_next(
         &mut self,
         batch: RecordBatch,
-        output_buffer: &mut VecDeque<RecordBatch>,
+        output_buffer: &mut BatchBuffer,
     ) -> Result<()> {
         if batch.num_rows() == 0 {
             return Ok(());
@@ -566,21 +615,16 @@ impl FlatLastTimestampSelector {
     }
 
     /// Finishes the selector and appends remaining results into `output_buffer`.
-    pub(crate) fn finish(&mut self, output_buffer: &mut VecDeque<RecordBatch>) -> Result<()> {
+    pub(crate) fn finish(&mut self, output_buffer: &mut BatchBuffer) -> Result<()> {
         self.flush_current_key(output_buffer);
         Ok(())
     }
 
-    fn flush_current_key(&mut self, output_buffer: &mut VecDeque<RecordBatch>) {
+    fn flush_current_key(&mut self, output_buffer: &mut BatchBuffer) {
         let Some(state) = self.current_key.take() else {
             return;
         };
-        output_buffer.extend(
-            state
-                .slices
-                .into_iter()
-                .map(|slice| rebuild_pk_dictionary_for_key(slice, &state.key)),
-        );
+        output_buffer.extend_from_slice(&state.slices);
     }
 }
 
@@ -763,16 +807,16 @@ mod tests {
         selector: &mut FlatLastTimestampSelector,
         batches: Vec<RecordBatch>,
     ) -> Vec<(Vec<u8>, i64)> {
-        let mut output_buffer = VecDeque::new();
+        let mut output_buffer = Vec::new();
         let mut results = Vec::new();
         for batch in batches {
             selector.on_next(batch, &mut output_buffer).unwrap();
-            while let Some(r) = output_buffer.pop_front() {
+            for r in output_buffer.drain(..) {
                 extract_flat_rows(&r, &mut results);
             }
         }
         selector.finish(&mut output_buffer).unwrap();
-        while let Some(r) = output_buffer.pop_front() {
+        for r in output_buffer.drain(..) {
             extract_flat_rows(&r, &mut results);
         }
         results
@@ -905,12 +949,12 @@ mod tests {
     fn test_flat_finish_is_one_shot() {
         let mut selector = FlatLastTimestampSelector::default();
         let batch = new_flat_batch(&[b"k1", b"k1", b"k2"], &[1, 2, 3], &[10, 20, 30]);
-        let mut output_buffer = VecDeque::new();
+        let mut output_buffer = Vec::new();
 
         // Feed one batch: completed keys can be emitted before EOF.
         selector.on_next(batch, &mut output_buffer).unwrap();
         let mut pre_finish = Vec::new();
-        while let Some(r) = output_buffer.pop_front() {
+        for r in output_buffer.drain(..) {
             extract_flat_rows(&r, &mut pre_finish);
         }
         assert_eq!(vec![(b"k1".to_vec(), 2)], pre_finish);
@@ -918,7 +962,7 @@ mod tests {
         // Simulate EOF by calling finish().
         selector.finish(&mut output_buffer).unwrap();
         assert!(!output_buffer.is_empty());
-        while output_buffer.pop_front().is_some() {}
+        output_buffer.clear();
 
         // A second finish after EOF should not yield any more rows.
         selector.finish(&mut output_buffer).unwrap();
@@ -944,12 +988,12 @@ mod tests {
             &[10, 20, 30, 40],
         );
 
-        let mut output_buffer = VecDeque::new();
+        let mut output_buffer = Vec::new();
         selector.on_next(batch, &mut output_buffer).unwrap();
         selector.finish(&mut output_buffer).unwrap();
 
-        while let Some(output) = output_buffer.pop_front() {
-            assert_eq!(1, pk_dict_values_len(&output));
+        for output in &output_buffer {
+            assert_eq!(1, pk_dict_values_len(output));
         }
     }
 }
