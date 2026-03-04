@@ -1672,8 +1672,6 @@ async fn test_execute_copy_to_s3(instance: Arc<dyn MockInstance>) {
 
 #[apply(both_instances_cases)]
 async fn test_execute_copy_from_s3(instance: Arc<dyn MockInstance>) {
-    use common_telemetry::info;
-
     common_telemetry::init_default_ut_logging();
     if let Ok(bucket) = env::var("GT_S3_BUCKET")
         && !bucket.is_empty()
@@ -1755,8 +1753,6 @@ async fn test_execute_copy_from_s3(instance: Arc<dyn MockInstance>) {
                 "{} CONNECTION (ACCESS_KEY_ID='{}',SECRET_ACCESS_KEY='{}',REGION='{}')",
                 test.sql, key_id, key, region,
             );
-            info!("Running sql: {}", sql);
-
             let output = execute_sql(&instance, &sql).await.data;
             assert!(matches!(output, OutputData::AffectedRows(2)));
 
@@ -1824,8 +1820,6 @@ async fn test_execute_copy_to_oss(instance: Arc<dyn MockInstance>) {
 
 #[apply(both_instances_cases)]
 async fn test_execute_copy_from_oss(instance: Arc<dyn MockInstance>) {
-    use common_telemetry::info;
-
     common_telemetry::init_default_ut_logging();
     if let Ok(bucket) = env::var("GT_OSS_BUCKET")
         && !bucket.is_empty()
@@ -1909,8 +1903,6 @@ async fn test_execute_copy_from_oss(instance: Arc<dyn MockInstance>) {
                 "{} CONNECTION (ACCESS_KEY_ID='{}',ACCESS_KEY_SECRET='{}',ENDPOINT='{}')",
                 test.sql, key_id, key, endpoint,
             );
-            info!("Running sql: {}", sql);
-
             let output = execute_sql(&instance, &sql).await.data;
             assert!(matches!(output, OutputData::AffectedRows(2)));
 
@@ -1982,8 +1974,6 @@ async fn test_execute_copy_to_gcs(instance: Arc<dyn MockInstance>) {
 
 #[apply(both_instances_cases)]
 async fn test_execute_copy_from_gcs(instance: Arc<dyn MockInstance>) {
-    use common_telemetry::info;
-
     common_telemetry::init_default_ut_logging();
     if let (Ok(bucket), Ok(scope), Ok(credential)) = (
         env::var("GT_GCS_BUCKET"),
@@ -2069,8 +2059,6 @@ async fn test_execute_copy_from_gcs(instance: Arc<dyn MockInstance>) {
             ));
 
             let sql = format!("{} CONNECTION ({})", test.sql, connection);
-            info!("Running sql: {}", sql);
-
             let output = execute_sql(&instance, &sql).await.data;
             assert!(matches!(output, OutputData::AffectedRows(2)));
 
@@ -2138,8 +2126,6 @@ async fn test_execute_copy_to_azblob(instance: Arc<dyn MockInstance>) {
 
 #[apply(both_instances_cases)]
 async fn test_execute_copy_from_azblob(instance: Arc<dyn MockInstance>) {
-    use common_telemetry::info;
-
     common_telemetry::init_default_ut_logging();
     if let (Ok(container), Ok(account_name), Ok(account_key), Ok(endpoint)) = (
         env::var("GT_AZBLOB_CONTAINER"),
@@ -2227,8 +2213,6 @@ async fn test_execute_copy_from_azblob(instance: Arc<dyn MockInstance>) {
                 "{} CONNECTION (ACCOUNT_NAME='{}',ACCOUNT_KEY='{}',ENDPOINT='{}')",
                 test.sql, account_name, account_key, endpoint
             );
-            info!("Running sql: {}", sql);
-
             let output = execute_sql(&instance, &sql).await.data;
             assert!(matches!(output, OutputData::AffectedRows(2)));
 
