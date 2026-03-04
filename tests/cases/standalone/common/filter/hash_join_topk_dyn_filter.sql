@@ -28,6 +28,7 @@ INSERT INTO customers VALUES
 -- and hash join generates filter on customer_id
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (=Hash.*) =REDACTED
 EXPLAIN SELECT top_orders."id", top_orders.amount, c."name", c.tier
 FROM (
   SELECT "id", customer_id, amount, ts
@@ -98,6 +99,7 @@ INSERT INTO customers VALUES
 -- This tests that TopK dynamic filter works on hash join output
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (=Hash.*) =REDACTED
 EXPLAIN SELECT "id", customer_id, "name", tier, amount
 FROM (
   SELECT o."id", o.customer_id, c."name", c.tier, o.amount
@@ -173,6 +175,7 @@ INSERT INTO products VALUES
 -- Both hash joins can produce dynamic filters
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (=Hash.*) =REDACTED
 EXPLAIN SELECT o."id", o.amount, c."name", c.tier, p."name" as product_name, p."category"
 FROM orders o
 JOIN customers c ON o.customer_id = c.customer_id

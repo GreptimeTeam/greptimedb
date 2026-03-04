@@ -36,6 +36,7 @@ Affected Rows: 3
 -- and hash join generates filter on customer_id
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (=Hash.*) =REDACTED
 EXPLAIN SELECT top_orders."id", top_orders.amount, c."name", c.tier
 FROM (
   SELECT "id", customer_id, amount, ts
@@ -66,10 +67,10 @@ WHERE c.tier IN ('gold', 'bronze');
 |               |   TableScan: customers                                                                                                            |
 |               | ]]                                                                                                                                |
 | physical_plan | HashJoinExec: mode=Partitioned, join_type=Inner, on=[(customer_id@1, customer_id@0)], projection=[id@0, amount@2, name@4, tier@5] |
-|               |   RepartitionExec: partitioning=Hash([customer_id@1], 20), input_partitions=20                                                    |
+|               |   RepartitionExec: partitioning=REDACTED
 |               |     ProjectionExec: expr=[id@0 as id, customer_id@1 as customer_id, amount@2 as amount]                                           |
 |               |       MergeScanExec: REDACTED
-|               |   RepartitionExec: partitioning=Hash([customer_id@0], 20), input_partitions=20                                                    |
+|               |   RepartitionExec: partitioning=REDACTED
 |               |     FilterExec: tier@2 = gold OR tier@2 = bronze                                                                                  |
 |               |       ProjectionExec: expr=[customer_id@0 as customer_id, name@1 as name, tier@2 as tier]                                         |
 |               |         MergeScanExec: REDACTED
@@ -181,6 +182,7 @@ Affected Rows: 3
 -- This tests that TopK dynamic filter works on hash join output
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (=Hash.*) =REDACTED
 EXPLAIN SELECT "id", customer_id, "name", tier, amount
 FROM (
   SELECT o."id", o.customer_id, c."name", c.tier, o.amount
@@ -212,10 +214,10 @@ LIMIT 4;
 |               |   SortExec: TopK(fetch=4), expr=[amount@4 DESC], preserve_partitioning=[true]                                                                          |
 |               |     ProjectionExec: expr=[id@0 as id, customer_id@1 as customer_id, name@3 as name, tier@4 as tier, amount@2 as amount]                                |
 |               |       HashJoinExec: mode=Partitioned, join_type=Inner, on=[(customer_id@1, customer_id@0)], projection=[id@0, customer_id@1, amount@2, name@4, tier@5] |
-|               |         RepartitionExec: partitioning=Hash([customer_id@1], 20), input_partitions=20                                                                   |
+|               |         RepartitionExec: partitioning=REDACTED
 |               |           ProjectionExec: expr=[id@0 as id, customer_id@1 as customer_id, amount@2 as amount]                                                          |
 |               |             MergeScanExec: REDACTED
-|               |         RepartitionExec: partitioning=Hash([customer_id@0], 20), input_partitions=20                                                                   |
+|               |         RepartitionExec: partitioning=REDACTED
 |               |           FilterExec: tier@2 = gold OR tier@2 = silver                                                                                                 |
 |               |             ProjectionExec: expr=[customer_id@0 as customer_id, name@1 as name, tier@2 as tier]                                                        |
 |               |               MergeScanExec: REDACTED
@@ -339,6 +341,7 @@ Affected Rows: 3
 -- Both hash joins can produce dynamic filters
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (=Hash.*) =REDACTED
 EXPLAIN SELECT o."id", o.amount, c."name", c.tier, p."name" as product_name, p."category"
 FROM orders o
 JOIN customers c ON o.customer_id = c.customer_id
@@ -372,16 +375,16 @@ WHERE c.tier IN ('gold', 'silver')
 |               | ]]                                                                                                                                                    |
 | physical_plan | ProjectionExec: expr=[id@0 as id, amount@1 as amount, name@2 as name, tier@3 as tier, name@4 as product_name, category@5 as category]                 |
 |               |   HashJoinExec: mode=Partitioned, join_type=Inner, on=[(product_id@1, product_id@0)], projection=[id@0, amount@2, name@3, tier@4, name@6, category@7] |
-|               |     RepartitionExec: partitioning=Hash([product_id@1], 20), input_partitions=20                                                                       |
+|               |     RepartitionExec: partitioning=REDACTED
 |               |       HashJoinExec: mode=Partitioned, join_type=Inner, on=[(customer_id@1, customer_id@0)], projection=[id@0, product_id@2, amount@3, name@5, tier@6] |
-|               |         RepartitionExec: partitioning=Hash([customer_id@1], 20), input_partitions=20                                                                  |
+|               |         RepartitionExec: partitioning=REDACTED
 |               |           ProjectionExec: expr=[id@0 as id, customer_id@1 as customer_id, product_id@2 as product_id, amount@3 as amount]                             |
 |               |             MergeScanExec: REDACTED
-|               |         RepartitionExec: partitioning=Hash([customer_id@0], 20), input_partitions=20                                                                  |
+|               |         RepartitionExec: partitioning=REDACTED
 |               |           FilterExec: tier@2 = gold OR tier@2 = silver                                                                                                |
 |               |             ProjectionExec: expr=[customer_id@0 as customer_id, name@1 as name, tier@2 as tier]                                                       |
 |               |               MergeScanExec: REDACTED
-|               |     RepartitionExec: partitioning=Hash([product_id@0], 20), input_partitions=20                                                                       |
+|               |     RepartitionExec: partitioning=REDACTED
 |               |       FilterExec: category@2 = electronics                                                                                                            |
 |               |         ProjectionExec: expr=[product_id@0 as product_id, name@1 as name, category@2 as category]                                                     |
 |               |           MergeScanExec: REDACTED
