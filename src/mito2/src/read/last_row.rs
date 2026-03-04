@@ -462,7 +462,7 @@ impl FlatRowGroupLastRowReader {
 /// Selects the last-timestamp rows per primary key from flat `RecordBatch`.
 ///
 /// Assumes that input batches are sorted by primary key then by timestamp,
-/// and contain only PUT operations (no DELETEs).
+/// and contain only PUT operations (no DELETE).
 #[derive(Default)]
 pub(crate) struct FlatLastTimestampSelector {
     /// State for the currently in-progress primary key.
