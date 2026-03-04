@@ -947,4 +947,44 @@ mod tests {
         }
         assert_eq!(rows, 2);
     }
+
+    #[test]
+    fn test_build_record_batch_iter_from_memtable() {
+        let memtable = new_test_memtable(false, MergeMode::LastRow);
+
+        let kvs = build_key_values(
+            &memtable.region_metadata,
+            0,
+            &[(1, 1.0, "a".to_string()), (2, 2.0, "b".to_string())],
+            OpType::Put,
+        );
+        memtable.write(&kvs).unwrap();
+
+        let read_column_ids: Vec<ColumnId> = memtable
+            .region_metadata
+            .column_metadatas
+            .iter()
+            .map(|c| c.column_id)
+            .collect();
+        let ranges = memtable
+            .ranges(Some(&read_column_ids), RangesOptions::default())
+            .unwrap();
+        assert!(!ranges.ranges.is_empty());
+
+        let mut total_rows = 0;
+        for range in ranges.ranges.into_values() {
+            let mut iter = range.build_record_batch_iter(None).unwrap();
+            while let Some(rb) = iter.next().transpose().unwrap() {
+                total_rows += rb.num_rows();
+                let schema = rb.schema();
+                let column_names: Vec<_> =
+                    schema.fields().iter().map(|f| f.name().as_str()).collect();
+                assert_eq!(
+                    column_names,
+                    vec!["f1", "f2", "ts", "__primary_key", "__sequence", "__op_type"]
+                );
+            }
+        }
+        assert_eq!(2, total_rows);
+    }
 }

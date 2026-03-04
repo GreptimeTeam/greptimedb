@@ -1969,8 +1969,22 @@ mod tests {
         let mut iter = range.build_record_batch_iter(None).unwrap();
         let rb = iter.next().transpose().unwrap().unwrap();
         assert_eq!(10, rb.num_rows());
-        // k0, k1, ts, v0, v1 = 5 projected columns + internal columns (__primary_key, __sequence, __op_type)
-        assert_eq!(8, rb.num_columns());
+        // k0, k1 (pk columns), v0, v1 (field columns), ts, __primary_key, __sequence, __op_type
+        let schema = rb.schema();
+        let column_names: Vec<_> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(
+            column_names,
+            vec![
+                "k0",
+                "k1",
+                "v0",
+                "v1",
+                "ts",
+                "__primary_key",
+                "__sequence",
+                "__op_type",
+            ]
+        );
         assert!(iter.next().is_none());
     }
 }
