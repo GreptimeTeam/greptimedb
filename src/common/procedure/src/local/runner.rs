@@ -19,7 +19,7 @@ use std::time::Duration;
 use backon::{BackoffBuilder, ExponentialBuilder};
 use common_event_recorder::EventRecorderRef;
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
-use common_telemetry::{debug, error, info, tracing};
+use common_telemetry::{debug, error, info, tracing, warn};
 use rand::Rng;
 use snafu::ResultExt;
 use tokio::time;
@@ -444,6 +444,52 @@ impl Runner {
             return;
         }
 
+        // Detect potential deadlock: if the child procedure shares any lock key with
+        // the parent, the child will block forever trying to acquire a lock already
+        // held by the parent (which is waiting for the child to finish).
+        {
+            use std::collections::HashSet;
+            let parent_keys: HashSet<String> = self
+                .meta
+                .lock_key
+                .keys_to_lock()
+                .map(|k| k.as_string().clone())
+                .collect();
+            let child_keys: Vec<String> = procedure
+                .lock_key()
+                .keys_to_lock()
+                .map(|k| k.as_string().clone())
+                .collect();
+            let conflicting: Vec<&String> = child_keys
+                .iter()
+                .filter(|k| parent_keys.contains(*k))
+                .collect();
+            if !conflicting.is_empty() {
+                warn!(
+                    "Potential deadlock detected: Subprocedure {}-{} submitted by {}-{} \
+                     shares lock key(s) {:?} with its parent. \
+                     The child will block on lock acquisition while the parent waits for \
+                     the child to complete. Ensure parent and child procedures do not \
+                     share the same lock keys.",
+                    procedure.type_name(),
+                    procedure_id,
+                    self.procedure.type_name(),
+                    self.meta.id,
+                    conflicting,
+                );
+                debug_assert!(
+                    false,
+                    "Subprocedure {}-{} shares lock key(s) {:?} with parent {}-{}; \
+                     this will cause a deadlock.",
+                    procedure.type_name(),
+                    procedure_id,
+                    conflicting,
+                    self.procedure.type_name(),
+                    self.meta.id,
+                );
+            }
+        }		
+		
         let step = 0;
 
         let meta = Arc::new(ProcedureMeta::new(
