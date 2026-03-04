@@ -54,7 +54,7 @@ macro_rules! return_none_if_utf8 {
 }
 
 /// Reference-counted pointer to a list of logical exprs and a list of dynamic filter physical exprs.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Predicate {
     /// logical exprs
     exprs: Arc<Vec<Expr>>,
@@ -73,6 +73,10 @@ impl Predicate {
             exprs: Arc::new(exprs),
             dyn_filters: Arc::new(ArcSwap::new(Arc::new(vec![]))),
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.exprs.is_empty() && self.dyn_filters.load().is_empty()
     }
 
     /// Sets the dynamic filter physical exprs.

@@ -361,7 +361,7 @@ impl RegionScanner for SeriesScan {
             .input
             .predicate_group()
             .predicate_without_region();
-        predicate.map(|p| !p.exprs().is_empty()).unwrap_or(false)
+        predicate.is_some()
     }
 
     fn update_predicate_with_dyn_filter(

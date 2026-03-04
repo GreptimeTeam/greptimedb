@@ -1633,9 +1633,9 @@ impl StreamContext {
 pub struct PredicateGroup {
     time_filters: Option<Arc<Vec<SimpleFilterEvaluator>>>,
     /// Predicate that includes request filters and region partition expr (if any).
-    predicate_all: Option<Predicate>,
+    predicate_all: Predicate,
     /// Predicate that only includes request filters.
-    predicate_without_region: Option<Predicate>,
+    predicate_without_region: Predicate,
     /// Region partition expression restored from metadata.
     region_partition_expr: Option<PartitionExpr>,
 }
@@ -1677,16 +1677,8 @@ impl PredicateGroup {
             Some(Arc::new(time_filters))
         };
 
-        let predicate_all = if combined_exprs.is_empty() {
-            None
-        } else {
-            Some(Predicate::new(combined_exprs))
-        };
-        let predicate_without_region = if exprs.is_empty() {
-            None
-        } else {
-            Some(Predicate::new(exprs.to_vec()))
-        };
+        let predicate_all = Predicate::new(combined_exprs);
+        let predicate_without_region = Predicate::new(exprs.to_vec());
 
         Ok(Self {
             time_filters,
@@ -1703,23 +1695,26 @@ impl PredicateGroup {
 
     /// Returns predicate of all exprs (including region partition expr if present).
     pub(crate) fn predicate(&self) -> Option<&Predicate> {
-        self.predicate_all.as_ref()
+        if self.predicate_all.is_empty() {
+            None
+        } else {
+            Some(&self.predicate_all)
+        }
     }
 
     /// Returns predicate that excludes region partition expr.
     pub(crate) fn predicate_without_region(&self) -> Option<&Predicate> {
-        self.predicate_without_region.as_ref()
+        if self.predicate_without_region.is_empty() {
+            None
+        } else {
+            Some(&self.predicate_without_region)
+        }
     }
 
     /// Updates dynamic filters in the predicates.
     pub(crate) fn update_dyn_filters(&self, dyn_filters: Vec<Arc<DynamicFilterPhysicalExpr>>) {
-        if let Some(predicate) = &self.predicate_all {
-            predicate.set_dyn_filters(dyn_filters.clone());
-        }
-
-        if let Some(predicate) = &self.predicate_without_region {
-            predicate.set_dyn_filters(dyn_filters.clone());
-        }
+        self.predicate_all.set_dyn_filters(dyn_filters.clone());
+        self.predicate_without_region.set_dyn_filters(dyn_filters);
     }
 
     /// Returns the region partition expr from metadata, if any.
@@ -1754,6 +1749,7 @@ impl PredicateGroup {
 mod tests {
     use std::sync::Arc;
 
+    use datafusion::physical_plan::expressions::lit as physical_lit;
     use datafusion_expr::{col, lit};
     use store_api::storage::ScanRequest;
 
@@ -1913,5 +1909,24 @@ mod tests {
             CacheStrategy::Disabled,
         );
         assert!(scan_region.use_flat_format());
+    }
+
+    #[test]
+    fn test_update_dyn_filters_with_empty_base_predicates() {
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let predicate_group = PredicateGroup::new(metadata.as_ref(), &[]).unwrap();
+        assert!(predicate_group.predicate().is_none());
+        assert!(predicate_group.predicate_without_region().is_none());
+
+        let dyn_filter = Arc::new(DynamicFilterPhysicalExpr::new(vec![], physical_lit(false)));
+        predicate_group.update_dyn_filters(vec![dyn_filter]);
+
+        let predicate_all = predicate_group.predicate().unwrap();
+        assert!(predicate_all.exprs().is_empty());
+        assert_eq!(1, predicate_all.dyn_filters().len());
+
+        let predicate_without_region = predicate_group.predicate_without_region().unwrap();
+        assert!(predicate_without_region.exprs().is_empty());
+        assert_eq!(1, predicate_without_region.dyn_filters().len());
     }
 }
