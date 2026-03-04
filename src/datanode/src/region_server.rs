@@ -1409,10 +1409,17 @@ impl RegionServerInner {
             return Ok(());
         };
 
-        for region in new_opened_regions {
+        for region in &new_opened_regions {
             self.region_map
-                .insert(region, RegionEngineWithStatus::Ready(engine.clone()));
-            info!("Logical region {} is registered!", region);
+                .insert(*region, RegionEngineWithStatus::Ready(engine.clone()));
+        }
+        if !new_opened_regions.is_empty() {
+            info!(
+                region_id = %region_id,
+                logical_region_count = new_opened_regions.len(),
+                logical_regions = ?new_opened_regions,
+                "Logical regions are registered"
+            );
         }
 
         Ok(())
@@ -1531,10 +1538,17 @@ impl RegionServerInner {
             .await
             .context(FindLogicalRegionsSnafu { physical_region_id })?;
 
-        for region in logical_regions {
+        for region in &logical_regions {
             self.region_map
-                .insert(region, RegionEngineWithStatus::Ready(engine.clone()));
-            info!("Logical region {} is registered!", region);
+                .insert(*region, RegionEngineWithStatus::Ready(engine.clone()));
+        }
+        if !logical_regions.is_empty() {
+            info!(
+                physical_region_id = %physical_region_id,
+                logical_region_count = logical_regions.len(),
+                logical_regions = ?logical_regions,
+                "Logical regions are registered"
+            );
         }
         Ok(())
     }
