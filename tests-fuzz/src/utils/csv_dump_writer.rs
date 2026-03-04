@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions, create_dir_all, remove_dir_all};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -75,6 +75,7 @@ pub struct CsvDumpSession {
     records: Vec<CsvRecords>,
     buffered_bytes: usize,
     written_tables: HashSet<String>,
+    full_headers_by_table: HashMap<String, Vec<String>>,
 }
 
 impl CsvDumpSession {
@@ -101,11 +102,15 @@ impl CsvDumpSession {
             records: Vec::new(),
             buffered_bytes: 0,
             written_tables: HashSet::new(),
+            full_headers_by_table: HashMap::new(),
         })
     }
 
-    /// Appends one table CSV records batch.
-    pub fn append(&mut self, records: CsvRecords) -> Result<()> {
+    /// Appends one table CSV records batch with full table headers.
+    pub fn append(&mut self, records: CsvRecords, full_headers: Vec<String>) -> Result<()> {
+        self.full_headers_by_table
+            .entry(records.table_name.clone())
+            .or_insert(full_headers);
         self.buffered_bytes += estimate_csv_records_size(&records);
         self.records.push(records);
         if self.buffered_bytes >= self.max_buffer_bytes {
@@ -126,7 +131,12 @@ impl CsvDumpSession {
 
     fn flush_buffered_records(&mut self) -> Result<()> {
         for batch in &self.records {
-            write_batch_csv(&self.run_dir, batch, &mut self.written_tables)?;
+            write_batch_csv(
+                &self.run_dir,
+                batch,
+                &mut self.written_tables,
+                &self.full_headers_by_table,
+            )?;
         }
         self.records.clear();
         self.buffered_bytes = 0;
@@ -159,7 +169,12 @@ fn write_batch_csv(
     run_dir: &Path,
     batch: &CsvRecords,
     written_tables: &mut HashSet<String>,
+    full_headers_by_table: &HashMap<String, Vec<String>>,
 ) -> Result<()> {
+    let output_headers = full_headers_by_table
+        .get(&batch.table_name)
+        .cloned()
+        .unwrap_or_else(|| batch.headers.clone());
     let file_name = format!("{}.table-data.csv", sanitize_file_name(&batch.table_name));
     let path = run_dir.join(file_name);
     let mut file = OpenOptions::new()
@@ -171,7 +186,7 @@ fn write_batch_csv(
         })?;
 
     if written_tables.insert(batch.table_name.clone()) {
-        file.write_all(join_line(&batch.headers).as_bytes())
+        file.write_all(join_line(&output_headers).as_bytes())
             .context(error::WriteFileSnafu {
                 path: path.to_string_lossy().to_string(),
             })?;
@@ -180,8 +195,25 @@ fn write_batch_csv(
         })?;
     }
 
+    let header_index = batch
+        .headers
+        .iter()
+        .enumerate()
+        .map(|(idx, header)| (header.as_str(), idx))
+        .collect::<HashMap<_, _>>();
+
     for record in &batch.records {
-        file.write_all(join_line(&record.values).as_bytes())
+        let aligned_values = output_headers
+            .iter()
+            .map(|header| {
+                header_index
+                    .get(header.as_str())
+                    .and_then(|idx| record.values.get(*idx))
+                    .cloned()
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>();
+        file.write_all(join_line(&aligned_values).as_bytes())
             .context(error::WriteFileSnafu {
                 path: path.to_string_lossy().to_string(),
             })?;
@@ -262,13 +294,16 @@ mod tests {
         )
         .unwrap();
         session
-            .append(CsvRecords {
-                table_name: "metric-a".to_string(),
-                headers: vec!["host".to_string(), "value".to_string()],
-                records: vec![CsvRecord {
-                    values: vec!["web-1".to_string(), "10".to_string()],
-                }],
-            })
+            .append(
+                CsvRecords {
+                    table_name: "metric-a".to_string(),
+                    headers: vec!["host".to_string(), "value".to_string()],
+                    records: vec![CsvRecord {
+                        values: vec!["web-1".to_string(), "10".to_string()],
+                    }],
+                },
+                vec!["host".to_string(), "value".to_string()],
+            )
             .unwrap();
         session.flush_all().unwrap();
 
@@ -283,16 +318,47 @@ mod tests {
             CsvDumpSession::new_with_buffer_limit(CsvDumpMetadata::new("fuzz_case", 5, 2, 3, 4), 1)
                 .unwrap();
         session
-            .append(CsvRecords {
-                table_name: "metric-b".to_string(),
-                headers: vec!["host".to_string()],
-                records: vec![CsvRecord {
-                    values: vec!["web-2".to_string()],
-                }],
-            })
+            .append(
+                CsvRecords {
+                    table_name: "metric-b".to_string(),
+                    headers: vec!["host".to_string()],
+                    records: vec![CsvRecord {
+                        values: vec!["web-2".to_string()],
+                    }],
+                },
+                vec!["host".to_string()],
+            )
             .unwrap();
 
         assert!(session.run_dir.join("metric-b.table-data.csv").exists());
         assert_eq!(session.buffered_bytes, 0);
+    }
+
+    #[test]
+    fn test_flush_with_partial_headers_uses_full_headers() {
+        let mut session = CsvDumpSession::new_with_buffer_limit(
+            CsvDumpMetadata::new("fuzz_case", 7, 2, 3, 4),
+            1024,
+        )
+        .unwrap();
+        session
+            .append(
+                CsvRecords {
+                    table_name: "metric-c".to_string(),
+                    headers: vec!["host".to_string(), "value".to_string()],
+                    records: vec![CsvRecord {
+                        values: vec!["web-3".to_string(), "12".to_string()],
+                    }],
+                },
+                vec!["host".to_string(), "idc".to_string(), "value".to_string()],
+            )
+            .unwrap();
+        session.flush_all().unwrap();
+
+        let file =
+            std::fs::read_to_string(session.run_dir.join("metric-c.table-data.csv")).unwrap();
+        let mut lines = file.lines();
+        assert_eq!(lines.next().unwrap(), "host,idc,value");
+        assert_eq!(lines.next().unwrap(), "web-3,,12");
     }
 }

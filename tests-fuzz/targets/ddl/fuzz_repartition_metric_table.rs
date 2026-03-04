@@ -246,6 +246,11 @@ async fn write_loop<R: Rng + 'static>(
             let sql = translator.translate(&insert_expr)?;
             let inserted = insert_expr.values_list.len() as u64;
             let csv_records = InsertExprToCsvRecordsTranslator.translate(&insert_expr)?;
+            let full_headers = table_ctx
+                .columns
+                .iter()
+                .map(|column| column.name.to_string())
+                .collect::<Vec<_>>();
 
             let now = Instant::now();
             execute_insert_with_retry(&ctx, &sql).await?;
@@ -253,7 +258,7 @@ async fn write_loop<R: Rng + 'static>(
 
             let mut state = shared_state.lock().unwrap();
             if let Some(csv_dump_session) = state.csv_dump_session.as_mut() {
-                csv_dump_session.append(csv_records)?;
+                csv_dump_session.append(csv_records, full_headers)?;
             }
             *state
                 .inserted_rows
