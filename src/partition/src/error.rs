@@ -213,6 +213,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to convert partition expr value to ScalarValue: {:?}", value))]
+    ConvertPartitionExprValue {
+        value: Value,
+        #[snafu(implicit)]
+        location: Location,
+        source: datatypes::error::Error,
+    },
+
     #[snafu(display("Duplicate expr: {:?}", expr))]
     DuplicateExpr {
         expr: PartitionExpr,
@@ -268,6 +276,7 @@ impl ErrorExt for Error {
             Error::ToDFSchema { .. } => StatusCode::Internal,
             Error::CreatePhysicalExpr { .. } => StatusCode::Internal,
             Error::UnsupportedPartitionExprValue { .. } => StatusCode::InvalidArguments,
+            Error::ConvertPartitionExprValue { .. } => StatusCode::InvalidArguments,
         }
     }
 

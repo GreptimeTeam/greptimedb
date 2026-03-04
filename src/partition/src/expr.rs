@@ -83,7 +83,8 @@ impl Operand {
                     Value::Date(v) => ScalarValue::Date32(Some(v.val())),
                     Value::Null => ScalarValue::Null,
                     Value::Timestamp(t) => timestamp_to_scalar_value(t.unit(), Some(t.value())),
-                    Value::Time(t) => time_to_scalar_value(*t.unit(), Some(t.value())).unwrap(),
+                    Value::Time(t) => time_to_scalar_value(*t.unit(), Some(t.value()))
+                        .context(error::ConvertPartitionExprValueSnafu { value: v.clone() })?,
                     Value::IntervalYearMonth(v) => ScalarValue::IntervalYearMonth(Some(v.to_i32())),
                     Value::IntervalDayTime(v) => ScalarValue::IntervalDayTime(Some((*v).into())),
                     Value::IntervalMonthDayNano(v) => {
@@ -301,8 +302,9 @@ impl PartitionExpr {
             self.op,
             RestrictedOp::Lt | RestrictedOp::LtEq | RestrictedOp::Gt | RestrictedOp::GtEq
         ) {
-            // make sure null first for consistent logical expression when null is involved.
-            // As in src/datatypes/src/value.rs, Value::Null is considered less than any other value.
+            // Keep filtering semantics aligned with direct PartitionExpr evaluation (null-first ordering).
+            // In DataFusion SQL semantics, range comparisons with NULL yield NULL, so we inject
+            // `OR col IS NULL` on the null-first side of the comparison.
             if matches!(self.lhs.as_ref(), Operand::Column(_)) {
                 let column_expr = self.lhs.try_as_logical_expr()?;
                 let other_expr = self.rhs.try_as_logical_expr()?;
@@ -637,6 +639,134 @@ mod tests {
                 .unwrap()
                 .to_string(),
             "a >= Int64(10)"
+        );
+
+        let and_expr = PartitionExpr::new(
+            Operand::Expr(PartitionExpr::new(
+                Operand::Column("a".to_string()),
+                RestrictedOp::LtEq,
+                Operand::Value(Value::Int64(10)),
+            )),
+            RestrictedOp::And,
+            Operand::Expr(PartitionExpr::new(
+                Operand::Column("b".to_string()),
+                RestrictedOp::Gt,
+                Operand::Value(Value::Int64(5)),
+            )),
+        );
+        assert_eq!(
+            and_expr.try_as_logical_expr().unwrap().to_string(),
+            "(a <= Int64(10) OR a IS NULL) AND b > Int64(5)"
+        );
+
+        let and_expr = PartitionExpr::new(
+            Operand::Expr(PartitionExpr::new(
+                Operand::Column("a".to_string()),
+                RestrictedOp::LtEq,
+                Operand::Value(Value::Int64(10)),
+            )),
+            RestrictedOp::And,
+            Operand::Expr(PartitionExpr::new(
+                Operand::Column("a".to_string()),
+                RestrictedOp::Gt,
+                Operand::Value(Value::Int64(5)),
+            )),
+        );
+        assert_eq!(
+            and_expr.try_as_logical_expr().unwrap().to_string(),
+            "(a <= Int64(10) OR a IS NULL) AND a > Int64(5)"
+        );
+
+        let and_expr_strict_lower = PartitionExpr::new(
+            Operand::Expr(PartitionExpr::new(
+                Operand::Column("a".to_string()),
+                RestrictedOp::Lt,
+                Operand::Value(Value::Int64(10)),
+            )),
+            RestrictedOp::And,
+            Operand::Expr(PartitionExpr::new(
+                Operand::Column("a".to_string()),
+                RestrictedOp::GtEq,
+                Operand::Value(Value::Int64(5)),
+            )),
+        );
+        assert_eq!(
+            and_expr_strict_lower
+                .try_as_logical_expr()
+                .unwrap()
+                .to_string(),
+            "(a < Int64(10) OR a IS NULL) AND a >= Int64(5)"
+        );
+
+        let and_expr_rhs_column = PartitionExpr::new(
+            Operand::Expr(PartitionExpr::new(
+                Operand::Value(Value::Int64(10)),
+                RestrictedOp::GtEq,
+                Operand::Column("a".to_string()),
+            )),
+            RestrictedOp::And,
+            Operand::Expr(PartitionExpr::new(
+                Operand::Value(Value::Int64(5)),
+                RestrictedOp::Lt,
+                Operand::Column("a".to_string()),
+            )),
+        );
+        assert_eq!(
+            and_expr_rhs_column
+                .try_as_logical_expr()
+                .unwrap()
+                .to_string(),
+            "(a <= Int64(10) OR a IS NULL) AND a > Int64(5)"
+        );
+
+        let or_expr_same_column = PartitionExpr::new(
+            Operand::Expr(PartitionExpr::new(
+                Operand::Column("a".to_string()),
+                RestrictedOp::LtEq,
+                Operand::Value(Value::Int64(10)),
+            )),
+            RestrictedOp::Or,
+            Operand::Expr(PartitionExpr::new(
+                Operand::Column("a".to_string()),
+                RestrictedOp::Gt,
+                Operand::Value(Value::Int64(5)),
+            )),
+        );
+        assert_eq!(
+            or_expr_same_column
+                .try_as_logical_expr()
+                .unwrap()
+                .to_string(),
+            "a <= Int64(10) OR a IS NULL OR a > Int64(5)"
+        );
+    }
+
+    #[test]
+    fn test_try_as_logical_expr_rhs_column_without_canonicalize() {
+        let gt_expr_rhs_column = PartitionExpr {
+            lhs: Box::new(Operand::Value(Value::Int64(10))),
+            op: RestrictedOp::Gt,
+            rhs: Box::new(Operand::Column("a".to_string())),
+        };
+        assert_eq!(
+            gt_expr_rhs_column
+                .try_as_logical_expr()
+                .unwrap()
+                .to_string(),
+            "Int64(10) > a OR a IS NULL"
+        );
+
+        let gteq_expr_rhs_column = PartitionExpr {
+            lhs: Box::new(Operand::Value(Value::Int64(10))),
+            op: RestrictedOp::GtEq,
+            rhs: Box::new(Operand::Column("a".to_string())),
+        };
+        assert_eq!(
+            gteq_expr_rhs_column
+                .try_as_logical_expr()
+                .unwrap()
+                .to_string(),
+            "Int64(10) >= a OR a IS NULL"
         );
     }
 
