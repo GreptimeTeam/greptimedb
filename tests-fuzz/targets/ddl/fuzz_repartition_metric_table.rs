@@ -29,8 +29,7 @@ use sqlx::{MySql, Pool};
 use tests_fuzz::context::{TableContext, TableContextRef};
 use tests_fuzz::error::{self, Result};
 use tests_fuzz::fake::{
-    ConstGenerator,
-    MappedGenerator, WordGenerator, merge_two_word_map_fn, random_capitalize_map,
+    ConstGenerator, MappedGenerator, WordGenerator, merge_two_word_map_fn, random_capitalize_map,
     uppercase_and_keyword_backtick_map,
 };
 use tests_fuzz::generator::Generator;
@@ -266,13 +265,13 @@ async fn validate_rows(
     inserted_rows: &HashMap<String, u64>,
 ) -> Result<()> {
     for table_ctx in logical_tables.values() {
-        let count_sql = format!("SELECT COUNT(1) AS count FROM {}", table_ctx.name);
-        let count = count_values(&ctx.greptime, &count_sql).await?;
         let expected = *inserted_rows.get(&table_ctx.name.to_string()).unwrap_or(&0) as usize;
         info!(
-            "Validate rows for table: {}, expected: {}, actual: {}",
-            table_ctx.name, expected, count.count
+            "Validate rows for table: {}, expected: {}",
+            table_ctx.name, expected
         );
+        let count_sql = format!("SELECT COUNT(1) AS count FROM {}", table_ctx.name);
+        let count = count_values(&ctx.greptime, &count_sql).await?;
         assert_eq!(count.count as usize, expected);
 
         let distinct_count_sql = format!(
