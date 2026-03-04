@@ -563,7 +563,7 @@ mod tests {
                 .try_as_logical_expr()
                 .unwrap()
                 .to_string(),
-            "a > Int64(10) OR a IS NULL"
+            "a > Int64(10)"
         );
 
         // Test Gt with column on LHS
@@ -574,7 +574,7 @@ mod tests {
         );
         assert_eq!(
             gt_expr.try_as_logical_expr().unwrap().to_string(),
-            "a > Int64(10) OR a IS NULL"
+            "a > Int64(10)"
         );
 
         // Test Gt with column on RHS
@@ -599,7 +599,7 @@ mod tests {
         );
         assert_eq!(
             gteq_expr.try_as_logical_expr().unwrap().to_string(),
-            "a >= Int64(10) OR a IS NULL"
+            "a >= Int64(10)"
         );
 
         // Test LtEq with column on LHS
@@ -611,6 +611,32 @@ mod tests {
         assert_eq!(
             lteq_expr.try_as_logical_expr().unwrap().to_string(),
             "a <= Int64(10) OR a IS NULL"
+        );
+
+        let gteq_expr_rhs_column = PartitionExpr::new(
+            Operand::Value(Value::Int64(10)),
+            RestrictedOp::GtEq,
+            Operand::Column("a".to_string()),
+        );
+        assert_eq!(
+            gteq_expr_rhs_column
+                .try_as_logical_expr()
+                .unwrap()
+                .to_string(),
+            "a <= Int64(10) OR a IS NULL"
+        );
+
+        let lteq_expr_rhs_column = PartitionExpr::new(
+            Operand::Value(Value::Int64(10)),
+            RestrictedOp::LtEq,
+            Operand::Column("a".to_string()),
+        );
+        assert_eq!(
+            lteq_expr_rhs_column
+                .try_as_logical_expr()
+                .unwrap()
+                .to_string(),
+            "a >= Int64(10)"
         );
     }
 
