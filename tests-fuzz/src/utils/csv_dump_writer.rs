@@ -18,6 +18,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use common_telemetry::{info, warn};
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
@@ -94,6 +95,12 @@ impl CsvDumpSession {
             path: run_dir.to_string_lossy().to_string(),
         })?;
         write_seed_meta(&run_dir, &metadata)?;
+        info!(
+            "Create csv dump session, target: {}, run_dir: {}, max_buffer_bytes: {}",
+            metadata.target,
+            run_dir.display(),
+            max_buffer_bytes
+        );
 
         Ok(Self {
             metadata,
@@ -126,10 +133,29 @@ impl CsvDumpSession {
 
     /// Removes session directory after successful validation.
     pub fn cleanup_on_success(&self) -> std::io::Result<()> {
-        remove_dir_all(&self.run_dir)
+        match remove_dir_all(&self.run_dir) {
+            Ok(_) => {
+                info!(
+                    "Cleanup csv dump directory on success: {}",
+                    self.run_dir.display()
+                );
+                Ok(())
+            }
+            Err(err) => {
+                warn!(
+                    "Cleanup csv dump directory failed: {}, error: {:?}",
+                    self.run_dir.display(),
+                    err
+                );
+                Err(err)
+            }
+        }
     }
 
     fn flush_buffered_records(&mut self) -> Result<()> {
+        if self.records.is_empty() {
+            return Ok(());
+        }
         for batch in &self.records {
             write_batch_csv(
                 &self.run_dir,
