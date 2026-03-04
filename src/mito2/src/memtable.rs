@@ -739,45 +739,9 @@ mod tests {
     use std::sync::Arc;
 
     use common_base::readable_size::ReadableSize;
-    use datatypes::value::Value;
-    use datatypes::vectors::{
-        Int64Vector, TimestampMillisecondVector, UInt8Vector, UInt64Vector, VectorRef,
-    };
-    use mito_codec::row_converter::CompositeValues;
 
     use super::*;
     use crate::flush::{WriteBufferManager, WriteBufferManagerImpl};
-    use crate::read::BatchColumn;
-    use crate::test_util::memtable_util::metadata_for_test;
-
-    struct MockBatchIterBuilder {
-        batch: Batch,
-    }
-
-    impl IterBuilder for MockBatchIterBuilder {
-        fn build(&self, _metrics: Option<MemScanMetrics>) -> Result<BoxedBatchIterator> {
-            Ok(Box::new(vec![Ok(self.batch.clone())].into_iter()))
-        }
-    }
-
-    fn new_test_batch() -> Batch {
-        let mut batch = Batch::new(
-            vec![],
-            Arc::new(TimestampMillisecondVector::from_vec(vec![1000, 2000])) as VectorRef,
-            Arc::new(UInt64Vector::from_vec(vec![10, 11])),
-            Arc::new(UInt8Vector::from_vec(vec![0, 0])),
-            vec![BatchColumn {
-                column_id: 3,
-                data: Arc::new(Int64Vector::from_vec(vec![1, 2])),
-            }],
-        )
-        .unwrap();
-        batch.set_pk_values(CompositeValues::Dense(vec![
-            (0, Value::from("k0")),
-            (1, Value::from(1_u32)),
-        ]));
-        batch
-    }
 
     #[test]
     fn test_deserialize_memtable_config() {
@@ -848,39 +812,5 @@ fork_dictionary_bytes = "512MiB"
 
         assert_eq!(0, manager.memory_usage());
         assert_eq!(0, manager.mutable_usage());
-    }
-
-    #[test]
-    fn test_build_record_batch_iter_fallback_adapter() {
-        let metadata = metadata_for_test();
-        let builder = Box::new(MockBatchIterBuilder {
-            batch: new_test_batch(),
-        });
-        let adapter_context = BatchToRecordBatchContext::new(metadata.clone(), vec![0, 1, 2, 3]);
-        let context = Arc::new(MemtableRangeContext::new_with_batch_to_record_batch(
-            1,
-            builder,
-            PredicateGroup::default(),
-            Some(adapter_context),
-        ));
-        let range = MemtableRange::new(context, MemtableStats::default());
-
-        let mut iter = range.build_record_batch_iter(None).unwrap();
-        let rb = iter.next().transpose().unwrap().unwrap();
-        assert_eq!(2, rb.num_rows());
-        assert!(rb.num_columns() >= 4);
-    }
-
-    #[test]
-    fn test_build_record_batch_iter_without_adapter_context() {
-        let context = Arc::new(MemtableRangeContext::new(
-            1,
-            Box::new(MockBatchIterBuilder {
-                batch: new_test_batch(),
-            }),
-            PredicateGroup::default(),
-        ));
-        let range = MemtableRange::new(context, MemtableStats::default());
-        assert!(range.build_record_batch_iter(None).is_err());
     }
 }

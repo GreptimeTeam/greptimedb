@@ -307,8 +307,7 @@ impl Memtable for TimeSeriesMemtable {
     ) -> Result<MemtableRanges> {
         let predicate = options.predicate;
         let sequence = options.sequence;
-        let read_column_ids =
-            read_column_ids_from_projection(&self.region_metadata, projection);
+        let read_column_ids = read_column_ids_from_projection(&self.region_metadata, projection);
         let projection = if let Some(projection) = projection {
             projection.iter().copied().collect()
         } else {
@@ -1946,5 +1945,32 @@ mod tests {
         }
         assert_eq!(total_series, series_count);
         assert_eq!(total_series * rows_per_series, row_count);
+    }
+
+    #[test]
+    fn test_build_record_batch_iter_from_memtable() {
+        let schema = schema_for_test();
+        let memtable = TimeSeriesMemtable::new(schema.clone(), 1, None, true, MergeMode::LastRow);
+
+        let kvs = build_key_values(&schema, "test".to_string(), 1, 10);
+        memtable.write(&kvs).unwrap();
+
+        let read_column_ids: Vec<ColumnId> = schema
+            .column_metadatas
+            .iter()
+            .map(|c| c.column_id)
+            .collect();
+        let ranges = memtable
+            .ranges(Some(&read_column_ids), RangesOptions::default())
+            .unwrap();
+        assert_eq!(1, ranges.ranges.len());
+
+        let range = ranges.ranges.into_values().next().unwrap();
+        let mut iter = range.build_record_batch_iter(None).unwrap();
+        let rb = iter.next().transpose().unwrap().unwrap();
+        assert_eq!(10, rb.num_rows());
+        // k0, k1, ts, v0, v1 = 5 projected columns + internal columns (__primary_key, __sequence, __op_type)
+        assert_eq!(8, rb.num_columns());
+        assert!(iter.next().is_none());
     }
 }
