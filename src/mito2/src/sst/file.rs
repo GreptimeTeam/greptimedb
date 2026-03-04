@@ -570,10 +570,12 @@ pub async fn delete_files(
             region_file_id,
             path_type,
         ));
-        for version in 0..=*index_version {
-            let index_id = RegionIndexId::new(region_file_id, version);
-            paths.push(location::index_file_path(table_dir, index_id, path_type));
-        }
+        push_index_paths(
+            &mut paths,
+            table_dir,
+            &path_type,
+            (0..=*index_version).map(|version| RegionIndexId::new(region_file_id, version)),
+        );
     }
 
     let mut deleter = access_layer
@@ -639,9 +641,7 @@ pub async fn delete_indexes(
     let table_dir = access_layer.table_dir();
     let path_type = access_layer.path_type();
     let mut paths = Vec::with_capacity(index_ids.len());
-    for index_id in index_ids {
-        paths.push(location::index_file_path(table_dir, *index_id, path_type));
-    }
+    push_index_paths(&mut paths, table_dir, &path_type, index_ids.iter().copied());
 
     match access_layer.object_store().deleter().await {
         Ok(mut deleter) => {
@@ -690,6 +690,17 @@ pub async fn delete_indexes(
     }
 
     Ok(())
+}
+
+fn push_index_paths<I>(paths: &mut Vec<String>, table_dir: &str, path_type: &PathType, index_ids: I)
+where
+    I: IntoIterator<Item = RegionIndexId>,
+{
+    paths.extend(
+        index_ids
+            .into_iter()
+            .map(|index_id| location::index_file_path(table_dir, index_id, *path_type)),
+    );
 }
 
 async fn delete_index_and_purge(
