@@ -149,20 +149,6 @@ where
     env::var(&key).ok().and_then(|v| v.parse().ok())
 }
 
-/// Returns whether CSV dump is enabled.
-pub fn get_gt_fuzz_dump_table_csv() -> bool {
-    let _ = dotenv::dotenv();
-    env::var(GT_FUZZ_DUMP_TABLE_CSV)
-        .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
-}
-
 /// Returns CSV dump base directory.
 pub fn get_gt_fuzz_dump_dir() -> String {
     let _ = dotenv::dotenv();
