@@ -15,6 +15,8 @@
 pub mod cluster_info;
 pub mod config;
 pub mod crd;
+/// CSV dump writer utilities for fuzz tests.
+pub mod csv_dump_writer;
 pub mod health;
 pub mod migration;
 pub mod partition;
@@ -126,6 +128,12 @@ pub const GT_FUZZ_INPUT_MAX_COLUMNS: &str = "GT_FUZZ_INPUT_MAX_COLUMNS";
 pub const GT_FUZZ_INPUT_MAX_ALTER_ACTIONS: &str = "GT_FUZZ_INPUT_MAX_ALTER_ACTIONS";
 pub const GT_FUZZ_INPUT_MAX_INSERT_ACTIONS: &str = "GT_FUZZ_INPUT_MAX_INSERT_ACTIONS";
 pub const FUZZ_OVERRIDE_PREFIX: &str = "GT_FUZZ_OVERRIDE_";
+/// Enables CSV dump generation for fuzz runs.
+pub const GT_FUZZ_DUMP_TABLE_CSV: &str = "GT_FUZZ_DUMP_TABLE_CSV";
+/// Base directory for CSV dump sessions.
+pub const GT_FUZZ_DUMP_DIR: &str = "GT_FUZZ_DUMP_DIR";
+/// Directory suffix used by one CSV dump session.
+pub const GT_FUZZ_DUMP_SUFFIX: &str = "GT_FUZZ_DUMP_SUFFIX";
 
 /// Reads an override value for a fuzz parameter from env `GT_FUZZ_OVERRIDE_<NAME>`.
 pub fn get_fuzz_override<T>(name: &str) -> Option<T>
@@ -135,6 +143,32 @@ where
     let _ = dotenv::dotenv();
     let key = format!("{}{}", FUZZ_OVERRIDE_PREFIX, name.to_ascii_uppercase());
     env::var(&key).ok().and_then(|v| v.parse().ok())
+}
+
+/// Returns whether CSV dump is enabled.
+pub fn get_gt_fuzz_dump_table_csv() -> bool {
+    let _ = dotenv::dotenv();
+    env::var(GT_FUZZ_DUMP_TABLE_CSV)
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+/// Returns CSV dump base directory.
+pub fn get_gt_fuzz_dump_dir() -> String {
+    let _ = dotenv::dotenv();
+    env::var(GT_FUZZ_DUMP_DIR).unwrap_or_else(|_| "/tmp/greptime-fuzz-dumps".to_string())
+}
+
+/// Returns CSV dump directory suffix.
+pub fn get_gt_fuzz_dump_suffix() -> String {
+    let _ = dotenv::dotenv();
+    env::var(GT_FUZZ_DUMP_SUFFIX).unwrap_or_else(|_| ".repartition-metric-csv".to_string())
 }
 
 macro_rules! make_get_from_env_helper {
