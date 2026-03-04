@@ -1572,11 +1572,20 @@ impl StreamContext {
                         .collect();
                     write!(f, ", \"projection\": {:?}", names)?;
                 }
-                if let Some(predicate) = &self.input.predicate.predicate()
-                    && !predicate.exprs().is_empty()
-                {
-                    let exprs: Vec<_> = predicate.exprs().iter().map(|e| e.to_string()).collect();
-                    write!(f, ", \"filters\": {:?}", exprs)?;
+                if let Some(predicate) = &self.input.predicate.predicate() {
+                    if !predicate.exprs().is_empty() {
+                        let exprs: Vec<_> =
+                            predicate.exprs().iter().map(|e| e.to_string()).collect();
+                        write!(f, ", \"filters\": {:?}", exprs)?;
+                    }
+                    if !predicate.dyn_filters().is_empty() {
+                        let dyn_filters: Vec<_> = predicate
+                            .dyn_filters()
+                            .iter()
+                            .map(|f| format!("{}", f))
+                            .collect();
+                        write!(f, ", \"dyn_filters\": {:?}", dyn_filters)?;
+                    }
                 }
                 #[cfg(feature = "vector_index")]
                 if let Some(vector_index_k) = self.input.vector_index_k {

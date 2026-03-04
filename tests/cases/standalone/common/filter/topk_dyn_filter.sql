@@ -25,15 +25,22 @@ FROM orders
 ORDER BY amount DESC
 LIMIT 3;
 
+-- SQLNESS REPLACE ("metrics_per_partition":\s*.*metrics=) "metrics_per_partition": REDACTED metrics=
+-- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
+-- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE Hash\(\[vec_id@0\],.* Hash([vec_id@0],REDACTED
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
--- SQLNESS REPLACE (metrics.*) REDACTED
--- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
--- SQLNESS REPLACE (=Hash.*) =REDACTED
+-- SQLNESS REPLACE "(file_id|time_range_start|time_range_end)":"[^"]+" "$1":"REDACTED"
+-- SQLNESS REPLACE ("[a-z_]+":"[0-9\.]+(ns|us|µs|ms|s)") "DURATION": REDACTED
+-- SQLNESS REPLACE "(size|flat_format)":\s*(\d+|true|false) "$1":REDACTED
+-- SQLNESS REPLACE ,\s*filter=.*?metrics=  metrics=
+-- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
-EXPLAIN ANALYZE SELECT "id", customer_id, amount
+EXPLAIN ANALYZE VERBOSE SELECT "id", customer_id, amount
 FROM orders
 ORDER BY amount DESC
 LIMIT 3;

@@ -26,15 +26,22 @@ FROM orders o
 JOIN customers c ON o.customer_id = c.customer_id
 WHERE c.tier = 'gold';
 
+-- SQLNESS REPLACE ("metrics_per_partition":\s*.*metrics=) "metrics_per_partition": REDACTED metrics=
+-- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
+-- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE Hash\(\[vec_id@0\],.* Hash([vec_id@0],REDACTED
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
--- SQLNESS REPLACE (metrics.*) REDACTED
--- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
--- SQLNESS REPLACE (=Hash.*) =REDACTED
+-- SQLNESS REPLACE "(file_id|time_range_start|time_range_end)":"[^"]+" "$1":"REDACTED"
+-- SQLNESS REPLACE ("[a-z_]+":"[0-9\.]+(ns|us|µs|ms|s)") "DURATION": REDACTED
+-- SQLNESS REPLACE "(size|flat_format)":\s*(\d+|true|false) "$1":REDACTED
+-- SQLNESS REPLACE ,\s*filter=.*?metrics=  metrics=
+-- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
-EXPLAIN ANALYZE SELECT o."id", o.amount, c."name", c.tier
+EXPLAIN ANALYZE VERBOSE SELECT o."id", o.amount, c."name", c.tier
 FROM orders o
 JOIN customers c ON o.customer_id = c.customer_id
 WHERE c.tier = 'gold';
@@ -74,15 +81,22 @@ FROM (SELECT "id", customer_id as cid, amount, ts FROM orders) o
 JOIN customers c ON o.cid = c.customer_id
 WHERE c.tier IN ('gold', 'silver');
 
+-- SQLNESS REPLACE ("metrics_per_partition":\s*.*metrics=) "metrics_per_partition": REDACTED metrics=
+-- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
+-- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE Hash\(\[vec_id@0\],.* Hash([vec_id@0],REDACTED
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
--- SQLNESS REPLACE (metrics.*) REDACTED
--- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
--- SQLNESS REPLACE (=Hash.*) =REDACTED
+-- SQLNESS REPLACE "(file_id|time_range_start|time_range_end)":"[^"]+" "$1":"REDACTED"
+-- SQLNESS REPLACE ("[a-z_]+":"[0-9\.]+(ns|us|µs|ms|s)") "DURATION": REDACTED
+-- SQLNESS REPLACE "(size|flat_format)":\s*(\d+|true|false) "$1":REDACTED
+-- SQLNESS REPLACE ,\s*filter=.*?metrics=  metrics=
+-- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
-EXPLAIN ANALYZE SELECT o."id", o.amount, c."name", c.tier
+EXPLAIN ANALYZE VERBOSE SELECT o."id", o.amount, c."name", c.tier
 FROM (SELECT "id", customer_id as cid, amount, ts FROM orders) o
 JOIN customers c ON o.cid = c.customer_id
 WHERE c.tier IN ('gold', 'silver');

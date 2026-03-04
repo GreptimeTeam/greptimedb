@@ -39,15 +39,22 @@ FROM (
 JOIN customers c ON top_orders.customer_id = c.customer_id
 WHERE c.tier IN ('gold', 'bronze');
 
+-- SQLNESS REPLACE ("metrics_per_partition":\s*.*metrics=) "metrics_per_partition": REDACTED metrics=
+-- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
+-- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE Hash\(\[vec_id@0\],.* Hash([vec_id@0],REDACTED
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
--- SQLNESS REPLACE (metrics.*) REDACTED
--- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
--- SQLNESS REPLACE (=Hash.*) =REDACTED
+-- SQLNESS REPLACE "(file_id|time_range_start|time_range_end)":"[^"]+" "$1":"REDACTED"
+-- SQLNESS REPLACE ("[a-z_]+":"[0-9\.]+(ns|us|µs|ms|s)") "DURATION": REDACTED
+-- SQLNESS REPLACE "(size|flat_format)":\s*(\d+|true|false) "$1":REDACTED
+-- SQLNESS REPLACE ,\s*filter=.*?metrics=  metrics=
+-- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
-EXPLAIN ANALYZE SELECT top_orders."id", top_orders.amount, c."name", c.tier
+EXPLAIN ANALYZE VERBOSE SELECT top_orders."id", top_orders.amount, c."name", c.tier
 FROM (
   SELECT "id", customer_id, amount, ts
   FROM orders
@@ -110,15 +117,22 @@ FROM (
 ORDER BY amount DESC
 LIMIT 4;
 
+-- SQLNESS REPLACE ("metrics_per_partition":\s*.*metrics=) "metrics_per_partition": REDACTED metrics=
+-- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
+-- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE Hash\(\[vec_id@0\],.* Hash([vec_id@0],REDACTED
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
--- SQLNESS REPLACE (metrics.*) REDACTED
--- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
--- SQLNESS REPLACE (=Hash.*) =REDACTED
+-- SQLNESS REPLACE "(file_id|time_range_start|time_range_end)":"[^"]+" "$1":"REDACTED"
+-- SQLNESS REPLACE ("[a-z_]+":"[0-9\.]+(ns|us|µs|ms|s)") "DURATION": REDACTED
+-- SQLNESS REPLACE "(size|flat_format)":\s*(\d+|true|false) "$1":REDACTED
+-- SQLNESS REPLACE ,\s*filter=.*?metrics=  metrics=
+-- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
-EXPLAIN ANALYZE SELECT "id", customer_id, "name", tier, amount
+EXPLAIN ANALYZE VERBOSE SELECT "id", customer_id, "name", tier, amount
 FROM (
   SELECT o."id", o.customer_id, c."name", c.tier, o.amount
   FROM orders o
@@ -183,15 +197,22 @@ JOIN products p ON o.product_id = p.product_id
 WHERE c.tier IN ('gold', 'silver')
   AND p."category" = 'electronics';
 
+-- SQLNESS REPLACE ("metrics_per_partition":\s*.*metrics=) "metrics_per_partition": REDACTED metrics=
+-- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
+-- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE Hash\(\[vec_id@0\],.* Hash([vec_id@0],REDACTED
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
--- SQLNESS REPLACE (metrics.*) REDACTED
--- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
--- SQLNESS REPLACE (=Hash.*) =REDACTED
+-- SQLNESS REPLACE "(file_id|time_range_start|time_range_end)":"[^"]+" "$1":"REDACTED"
+-- SQLNESS REPLACE ("[a-z_]+":"[0-9\.]+(ns|us|µs|ms|s)") "DURATION": REDACTED
+-- SQLNESS REPLACE "(size|flat_format)":\s*(\d+|true|false) "$1":REDACTED
+-- SQLNESS REPLACE ,\s*filter=.*?metrics=  metrics=
+-- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
-EXPLAIN ANALYZE SELECT o."id", o.amount, c."name", c.tier, p."name" as product_name, p."category"
+EXPLAIN ANALYZE VERBOSE SELECT o."id", o.amount, c."name", c.tier, p."name" as product_name, p."category"
 FROM orders o
 JOIN customers c ON o.customer_id = c.customer_id
 JOIN products p ON o.product_id = p.product_id
