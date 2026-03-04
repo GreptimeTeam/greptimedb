@@ -19,7 +19,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use datatypes::arrow::array::{Array, BinaryArray, DictionaryArray, UInt32Array};
-use datatypes::arrow::datatypes::UInt32Type;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::vectors::UInt32Vector;
 use store_api::storage::{FileId, TimeSeriesRowSelector};
@@ -451,10 +450,7 @@ impl FlatRowGroupLastRowReader {
         if self.yielded_batches.is_empty() {
             return;
         }
-        let batches = std::mem::take(&mut self.yielded_batches)
-            .into_iter()
-            .map(compact_pk_dictionary)
-            .collect();
+        let batches = std::mem::take(&mut self.yielded_batches);
         let value = Arc::new(SelectorResultValue::new_flat(
             batches,
             self.projection.clone(),
@@ -565,7 +561,12 @@ impl FlatLastTimestampSelector {
         let Some(state) = self.current_key.take() else {
             return;
         };
-        output_buffer.extend(state.slices);
+        output_buffer.extend(
+            state
+                .slices
+                .into_iter()
+                .map(|slice| rebuild_pk_dictionary_for_key(slice, &state.key)),
+        );
     }
 }
 
@@ -598,55 +599,20 @@ fn last_timestamp_start(ts_values: &[i64], range_start: usize, range_end: usize)
     start
 }
 
-/// Compacts the `__primary_key` dictionary column in a record batch by removing
-/// unreferenced values. This reduces memory usage when caching batches whose
-/// dictionary values array contains entries not referenced by any key.
+/// Rebuilds `__primary_key` dictionary to contain only one value: `key`.
 ///
-/// Only compacts when the values array has more than 4 entries to avoid
-/// unnecessary work for small dictionaries.
-fn compact_pk_dictionary(batch: RecordBatch) -> RecordBatch {
+/// The selector flushes one primary key at a time, so all rows in `batch` belong
+/// to the same key and can share a compact dictionary.
+fn rebuild_pk_dictionary_for_key(batch: RecordBatch, key: &[u8]) -> RecordBatch {
     let pk_idx = primary_key_column_index(batch.num_columns());
-    let pk_col = match batch
-        .column(pk_idx)
-        .as_any()
-        .downcast_ref::<DictionaryArray<UInt32Type>>()
-    {
-        Some(dict) if dict.values().len() > 4 => dict,
-        _ => return batch,
-    };
-
-    let old_values = pk_col
-        .values()
-        .as_any()
-        .downcast_ref::<BinaryArray>()
-        .expect("primary key dictionary values must be BinaryArray");
-    let keys = pk_col.keys();
-
-    // Single linear pass: since keys are sorted/grouped, we track when the key changes.
-    let mut remap = vec![0u32; old_values.len()];
-    let mut new_values: Vec<&[u8]> = Vec::new();
-    let mut prev_key: Option<u32> = None;
-
-    for key in keys.iter().flatten() {
-        if prev_key != Some(key) {
-            let new_index = new_values.len() as u32;
-            new_values.push(old_values.value(key as usize));
-            remap[key as usize] = new_index;
-            prev_key = Some(key);
-        }
-    }
-
-    if new_values.len() == old_values.len() {
-        return batch; // all values are in use
-    }
-
-    let new_keys = UInt32Array::from_iter(keys.iter().map(|k| k.map(|v| remap[v as usize])));
-    let new_values_array = BinaryArray::from_iter_values(new_values);
+    let num_rows = batch.num_rows();
+    let new_keys = UInt32Array::from_iter_values(std::iter::repeat_n(0u32, num_rows));
+    let new_values_array = BinaryArray::from_iter_values([key]);
     let new_dict = DictionaryArray::new(new_keys, Arc::new(new_values_array));
 
     let mut columns: Vec<_> = batch.columns().to_vec();
     columns[pk_idx] = Arc::new(new_dict);
-    RecordBatch::try_new(batch.schema(), columns).expect("schema should match after compaction")
+    RecordBatch::try_new(batch.schema(), columns).expect("schema should match after pk rebuild")
 }
 
 #[cfg(test)]
@@ -997,37 +963,6 @@ mod tests {
         assert!(output_buffer.is_empty());
     }
 
-    /// Builds a flat RecordBatch with an explicit dictionary whose values array
-    /// contains entries not referenced by any key (simulating a sliced batch).
-    /// `all_values` is the full dictionary values array; `key_indices` maps each
-    /// row to an index in `all_values`.
-    fn new_flat_batch_with_dict(
-        all_values: &[&[u8]],
-        key_indices: &[u32],
-        timestamps: &[i64],
-        fields: &[i64],
-    ) -> RecordBatch {
-        let num_rows = key_indices.len();
-        assert_eq!(timestamps.len(), num_rows);
-        assert_eq!(fields.len(), num_rows);
-
-        let keys = UInt32Array::from_iter_values(key_indices.iter().copied());
-        let values = BinaryArray::from_iter_values(all_values.iter().copied());
-        let dict = DictionaryArray::new(keys, Arc::new(values));
-
-        let columns: Vec<ArrayRef> = vec![
-            Arc::new(Int64Array::from_iter_values(fields.iter().copied())),
-            Arc::new(TimestampMillisecondArray::from_iter_values(
-                timestamps.iter().copied(),
-            )),
-            Arc::new(dict),
-            Arc::new(UInt64Array::from_iter_values(vec![1u64; num_rows])),
-            Arc::new(UInt8Array::from_iter_values(vec![1u8; num_rows])),
-        ];
-
-        RecordBatch::try_new(test_flat_schema(), columns).unwrap()
-    }
-
     /// Helper: returns the number of entries in the dictionary values array.
     fn pk_dict_values_len(batch: &RecordBatch) -> usize {
         let pk_col = batch
@@ -1039,79 +974,20 @@ mod tests {
     }
 
     #[test]
-    fn test_compact_pk_dictionary_removes_unreferenced() {
-        // Dictionary has 6 values but only indices 1 and 4 are referenced.
-        let all_values: Vec<&[u8]> = vec![b"a", b"b", b"c", b"d", b"e", b"f"];
-        let batch = new_flat_batch_with_dict(&all_values, &[1, 1, 4], &[10, 20, 30], &[1, 2, 3]);
-        assert_eq!(6, pk_dict_values_len(&batch));
-
-        let compacted = compact_pk_dictionary(batch);
-        // Only 2 referenced values should remain.
-        assert_eq!(2, pk_dict_values_len(&compacted));
-        assert_eq!(3, compacted.num_rows());
-
-        // Verify data is still correct by reading back pk bytes.
-        let mut rows = Vec::new();
-        extract_flat_rows(&compacted, &mut rows);
-        assert_eq!(
-            vec![
-                (b"b".to_vec(), 10),
-                (b"b".to_vec(), 20),
-                (b"e".to_vec(), 30),
-            ],
-            rows
+    fn test_flat_flush_rebuilds_single_key_dictionary() {
+        let mut selector = FlatLastTimestampSelector::default();
+        let batch = new_flat_batch(
+            &[b"k1", b"k1", b"k2", b"k2"],
+            &[1, 2, 3, 4],
+            &[10, 20, 30, 40],
         );
-    }
 
-    #[test]
-    fn test_compact_pk_dictionary_skips_small() {
-        // Dictionary has 4 values — should not be compacted (threshold is >4).
-        let all_values: Vec<&[u8]> = vec![b"a", b"b", b"c", b"d"];
-        let batch = new_flat_batch_with_dict(&all_values, &[0, 3], &[10, 20], &[1, 2]);
-        assert_eq!(4, pk_dict_values_len(&batch));
+        let mut output_buffer = VecDeque::new();
+        selector.on_next(batch, &mut output_buffer).unwrap();
+        selector.finish(&mut output_buffer).unwrap();
 
-        let compacted = compact_pk_dictionary(batch);
-        // Unchanged — still 4 values.
-        assert_eq!(4, pk_dict_values_len(&compacted));
-    }
-
-    #[test]
-    fn test_compact_pk_dictionary_all_referenced() {
-        // All 5 values are referenced — nothing to compact.
-        let all_values: Vec<&[u8]> = vec![b"a", b"b", b"c", b"d", b"e"];
-        let batch =
-            new_flat_batch_with_dict(&all_values, &[0, 1, 2, 3, 4], &[1, 2, 3, 4, 5], &[1; 5]);
-        assert_eq!(5, pk_dict_values_len(&batch));
-
-        let compacted = compact_pk_dictionary(batch);
-        assert_eq!(5, pk_dict_values_len(&compacted));
-
-        let mut rows = Vec::new();
-        extract_flat_rows(&compacted, &mut rows);
-        assert_eq!(5, rows.len());
-        assert_eq!(b"a".to_vec(), rows[0].0);
-        assert_eq!(b"e".to_vec(), rows[4].0);
-    }
-
-    #[test]
-    fn test_compact_pk_dictionary_preserves_schema() {
-        let all_values: Vec<&[u8]> = vec![b"a", b"b", b"c", b"d", b"e", b"f"];
-        let batch = new_flat_batch_with_dict(&all_values, &[2, 5], &[10, 20], &[1, 2]);
-        let original_schema = batch.schema();
-
-        let compacted = compact_pk_dictionary(batch);
-        assert_eq!(original_schema, compacted.schema());
-        assert_eq!(2, pk_dict_values_len(&compacted));
-    }
-
-    #[test]
-    fn test_compact_pk_dictionary_auto_deduped_batch() {
-        // A batch built via BinaryDictionaryBuilder already has a minimal dictionary.
-        // compact_pk_dictionary should be a no-op (values <= 4 or all referenced).
-        let batch = new_flat_batch(&[b"k1", b"k1", b"k2"], &[1, 2, 3], &[10, 20, 30]);
-        let values_before = pk_dict_values_len(&batch);
-
-        let compacted = compact_pk_dictionary(batch);
-        assert_eq!(values_before, pk_dict_values_len(&compacted));
+        while let Some(output) = output_buffer.pop_front() {
+            assert_eq!(1, pk_dict_values_len(&output));
+        }
     }
 }
