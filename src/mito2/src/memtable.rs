@@ -564,11 +564,30 @@ pub trait IterBuilder: Send + Sync {
 
 pub type BoxedIterBuilder = Box<dyn IterBuilder>;
 
+/// Computes the column IDs to read based on the projection.
+///
+/// If `projection` is `Some`, returns those column IDs. If `None`, returns all column IDs
+/// from the metadata.
+pub fn read_column_ids_from_projection(
+    metadata: &RegionMetadataRef,
+    projection: Option<&[ColumnId]>,
+) -> Vec<ColumnId> {
+    if let Some(projection) = projection {
+        projection.to_vec()
+    } else {
+        metadata
+            .column_metadatas
+            .iter()
+            .map(|c| c.column_id)
+            .collect()
+    }
+}
+
 /// Context to adapt batch iterators to record batch iterators for flat scan.
 pub struct BatchToRecordBatchContext {
     metadata: RegionMetadataRef,
-    read_column_ids: Vec<ColumnId>,
     codec: Arc<dyn PrimaryKeyCodec>,
+    format_projection: FormatProjection,
 }
 
 impl BatchToRecordBatchContext {
@@ -579,29 +598,25 @@ impl BatchToRecordBatchContext {
         }
 
         let codec = build_primary_key_codec(&metadata);
+        let id_to_index = sst_column_id_indices(&metadata);
+        let format_projection = FormatProjection::compute_format_projection(
+            &id_to_index,
+            metadata.column_metadatas.len() + INTERNAL_COLUMN_NUM,
+            read_column_ids.iter().copied(),
+        );
         Self {
             metadata,
-            read_column_ids,
             codec,
+            format_projection,
         }
     }
 
-    fn format_projection(&self) -> FormatProjection {
-        let id_to_index = sst_column_id_indices(&self.metadata);
-        FormatProjection::compute_format_projection(
-            &id_to_index,
-            self.metadata.column_metadatas.len() + INTERNAL_COLUMN_NUM,
-            self.read_column_ids.iter().copied(),
-        )
-    }
-
     fn adapt_iter(&self, iter: BoxedBatchIterator) -> BoxedRecordBatchIterator {
-        let format_projection = self.format_projection();
         Box::new(BatchToRecordBatchAdapter::new(
             iter,
             self.metadata.clone(),
             self.codec.clone(),
-            &format_projection,
+            &self.format_projection,
         ))
     }
 }

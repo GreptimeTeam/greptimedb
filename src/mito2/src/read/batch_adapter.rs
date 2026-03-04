@@ -74,24 +74,25 @@ impl BatchToRecordBatchAdapter {
             .primary_key
             .iter()
             .enumerate()
-            .filter_map(|(pk_index, &column_id)| {
+            .filter(|(_, column_id)| {
                 format_projection
                     .column_id_to_projected_index
-                    .contains_key(&column_id)
-                    .then(|| {
-                        let column_index = metadata
-                            .column_index_by_id(column_id)
-                            .expect("primary key column must exist in metadata");
-                        let data_type = metadata.column_metadatas[column_index]
-                            .column_schema
-                            .data_type
-                            .clone();
-                        ProjectedPkColumn {
-                            column_id,
-                            pk_index,
-                            data_type,
-                        }
-                    })
+                    .contains_key(column_id)
+            })
+            .map(|(pk_index, column_id)| {
+                let column_id = *column_id;
+                let column_index = metadata
+                    .column_index_by_id(column_id)
+                    .expect("primary key column must exist in metadata");
+                let data_type = metadata.column_metadatas[column_index]
+                    .column_schema
+                    .data_type
+                    .clone();
+                ProjectedPkColumn {
+                    column_id,
+                    pk_index,
+                    data_type,
+                }
             })
             .collect();
         let batch_schema = flat_projected_columns(&metadata, format_projection);
