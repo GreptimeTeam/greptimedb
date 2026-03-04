@@ -445,32 +445,53 @@ impl Runner {
         }
 
         // Detect potential deadlock: if the child procedure shares any lock key with
-        // the parent, the child will block forever trying to acquire a lock already
-        // held by the parent (which is waiting for the child to finish).
+        // the parent in a way that would block, the child will wait forever to acquire
+        // a lock already held by the parent (which is waiting for the child to finish).
         {
-            use std::collections::HashSet;
-            let parent_keys: HashSet<String> = self
-                .meta
-                .lock_key
-                .keys_to_lock()
-                .map(|k| k.as_string().clone())
-                .collect();
-            let child_keys: Vec<String> = procedure
+            use std::collections::HashMap;
+
+            // Map from key string slice (&str) to a boolean indicating if the parent holds it EXCLUSIVELY.
+            // Using &str avoids ANY string allocation on the happy path (zero-cost check).
+            let mut parent_keys = HashMap::new();
+            for key in self.meta.lock_key.keys_to_lock() {
+                match key {
+                    StringKey::Exclusive(k) => {
+                        parent_keys.insert(k.as_str(), true);
+                    }
+                    StringKey::Share(k) => {
+                        // Only record as Share (false) if it wasn't already marked Exclusive
+                        parent_keys.entry(k.as_str()).or_insert(false);
+                    }
+                }
+            }
+
+            // Evaluate child locks against the parent's held locks using the compatibility matrix
+            let conflicting: Vec<String> = procedure
                 .lock_key()
                 .keys_to_lock()
-                .map(|k| k.as_string().clone())
+                .filter_map(|child_key| match child_key {
+                    // Child requests any lock on a key the parent holds exclusively -> deadlock
+                    StringKey::Exclusive(k) | StringKey::Share(k)
+                        if parent_keys.get(k.as_str()) == Some(&true) =>
+                    {
+                        Some(k.clone())
+                    }
+                    // Child requests exclusive lock on a key the parent holds shared -> deadlock
+                    StringKey::Exclusive(k) if parent_keys.get(k.as_str()) == Some(&false) => {
+                        Some(k.clone())
+                    }
+                    // Share + Share is compatible, or key not held by parent -> OK
+                    _ => None,
+                })
                 .collect();
-            let conflicting: Vec<&String> = child_keys
-                .iter()
-                .filter(|k| parent_keys.contains(*k))
-                .collect();
+
             if !conflicting.is_empty() {
                 warn!(
                     "Potential deadlock detected: Subprocedure {}-{} submitted by {}-{} \
-                     shares lock key(s) {:?} with its parent. \
+                     shares conflicting lock key(s) {:?} with its parent. \
                      The child will block on lock acquisition while the parent waits for \
                      the child to complete. Ensure parent and child procedures do not \
-                     share the same lock keys.",
+                     share incompatible lock keys.",
                     procedure.type_name(),
                     procedure_id,
                     self.procedure.type_name(),
@@ -479,7 +500,7 @@ impl Runner {
                 );
                 debug_assert!(
                     false,
-                    "Subprocedure {}-{} shares lock key(s) {:?} with parent {}-{}; \
+                    "Subprocedure {}-{} shares conflicting lock key(s) {:?} with parent {}-{}; \
                      this will cause a deadlock.",
                     procedure.type_name(),
                     procedure_id,
@@ -488,8 +509,8 @@ impl Runner {
                     self.meta.id,
                 );
             }
-        }		
-		
+        }
+
         let step = 0;
 
         let meta = Arc::new(ProcedureMeta::new(
