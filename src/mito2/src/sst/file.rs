@@ -591,7 +591,7 @@ pub async fn delete_files(
         .await
         .context(DeleteSstsSnafu {
             region_id,
-            file_ids: file_ids.iter().map(|f| f.0).collect_vec(),
+            file_ids: attempted_files.clone(),
         })?;
     deleter.close().await.context(DeleteSstsSnafu {
         region_id,
