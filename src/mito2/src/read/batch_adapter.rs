@@ -35,15 +35,6 @@ use crate::sst::parquet::format::FormatProjection;
 
 /// Adapts a [`BoxedBatchIterator`] into an `Iterator<Item = Result<RecordBatch>>`
 /// producing flat-format record batches.
-///
-/// Each [`Batch`] contains rows for a single primary key. The adapter decodes
-/// the primary key, expands tag columns as constant-value arrays, and assembles
-/// all columns in the flat format order:
-///
-/// ```text
-/// [projected primary key columns] [projected field columns] [time index]
-/// [__primary_key] [__sequence] [__op_type]
-/// ```
 pub struct BatchToRecordBatchAdapter {
     iter: BoxedBatchIterator,
     codec: Arc<dyn PrimaryKeyCodec>,
@@ -110,7 +101,6 @@ impl BatchToRecordBatchAdapter {
     fn convert_batch(&self, batch: &Batch) -> Result<RecordBatch> {
         let num_rows = batch.num_rows();
 
-        // 1. Decode primary key values.
         let pk_values = if let Some(vals) = batch.pk_values() {
             vals.clone()
         } else {
@@ -119,10 +109,7 @@ impl BatchToRecordBatchAdapter {
                 .context(DecodeSnafu)?
         };
 
-        // 2. Build columns in flat format order.
         let mut columns: Vec<ArrayRef> = Vec::with_capacity(self.output_schema.fields().len());
-
-        // 2a. Projected primary key (tag) columns.
         for pk_column in &self.projected_pk {
             if pk_column.data_type.is_string() {
                 let value = get_pk_value(&pk_values, pk_column.column_id, pk_column.pk_index);
@@ -137,27 +124,23 @@ impl BatchToRecordBatchAdapter {
                 columns.push(array);
             }
         }
-
-        // 2b. Projected field columns — already projected and in order.
         for batch_col in batch.fields() {
             columns.push(batch_col.data.to_arrow_array());
         }
 
-        // 2c. Time index column.
         columns.push(batch.timestamps().to_arrow_array());
 
-        // 2d. Internal columns.
-        // __primary_key: DictionaryArray<UInt32, Binary> with single entry.
+        // __primary_key
         let pk_bytes = batch.primary_key();
         let values = Arc::new(BinaryArray::from_iter_values([pk_bytes]));
         let keys = UInt32Array::from(vec![0u32; num_rows]);
         let pk_dict: ArrayRef = Arc::new(DictionaryArray::new(keys, values));
         columns.push(pk_dict);
 
-        // __sequence: UInt64Array.
+        // __sequence.
         columns.push(batch.sequences().to_arrow_array());
 
-        // __op_type: UInt8Array.
+        // __op_type.
         columns.push(batch.op_types().to_arrow_array());
 
         RecordBatch::try_new(self.output_schema.clone(), columns).context(NewRecordBatchSnafu)
