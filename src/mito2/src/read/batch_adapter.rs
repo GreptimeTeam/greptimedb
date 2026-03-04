@@ -16,10 +16,12 @@
 //! of flat-format Arrow [`RecordBatch`]es, allowing memtable iterators that only
 //! produce [`Batch`] to feed into the flat read pipeline.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
+use api::v1::SemanticType;
 use datatypes::arrow::array::{ArrayRef, BinaryArray, DictionaryArray, UInt32Array};
-use datatypes::arrow::datatypes::SchemaRef;
+use datatypes::arrow::datatypes::{Field, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::{ConcreteDataType, DataType, Vector};
 use mito_codec::row_converter::{CompositeValues, PrimaryKeyCodec};
@@ -30,8 +32,7 @@ use store_api::storage::ColumnId;
 use crate::error::{DecodeSnafu, NewRecordBatchSnafu, Result};
 use crate::memtable::BoxedBatchIterator;
 use crate::read::Batch;
-use crate::read::flat_projection::{compute_input_arrow_schema, flat_projected_columns};
-use crate::sst::parquet::format::FormatProjection;
+use crate::sst::{internal_fields, tag_maybe_to_dictionary_field};
 
 /// Adapts a [`BoxedBatchIterator`] into an `Iterator<Item = Result<RecordBatch>>`
 /// producing flat-format record batches.
@@ -54,40 +55,27 @@ impl BatchToRecordBatchAdapter {
     /// - `iter`: the source batch iterator producing primary-key-format batches.
     /// - `metadata`: region metadata describing the schema.
     /// - `codec`: codec for decoding the encoded primary key bytes.
-    /// - `format_projection`: projection information in flat format.
+    /// - `read_column_ids`: projected column ids to read.
     pub(crate) fn new(
         iter: BoxedBatchIterator,
         metadata: RegionMetadataRef,
         codec: Arc<dyn PrimaryKeyCodec>,
-        format_projection: &FormatProjection,
+        read_column_ids: &[ColumnId],
     ) -> Self {
+        let read_column_id_set: HashSet<_> = read_column_ids.iter().copied().collect();
         let projected_pk = metadata
-            .primary_key
-            .iter()
+            .primary_key_columns()
             .enumerate()
-            .filter(|(_, column_id)| {
-                format_projection
-                    .column_id_to_projected_index
-                    .contains_key(column_id)
-            })
-            .map(|(pk_index, column_id)| {
-                let column_id = *column_id;
-                let column_index = metadata
-                    .column_index_by_id(column_id)
-                    .expect("primary key column must exist in metadata");
-                let data_type = metadata.column_metadatas[column_index]
-                    .column_schema
-                    .data_type
-                    .clone();
+            .filter(|(_, column_metadata)| read_column_id_set.contains(&column_metadata.column_id))
+            .map(|(pk_index, column_metadata)| {
                 ProjectedPkColumn {
-                    column_id,
+                    column_id: column_metadata.column_id,
                     pk_index,
-                    data_type,
+                    data_type: column_metadata.column_schema.data_type.clone(),
                 }
             })
             .collect();
-        let batch_schema = flat_projected_columns(&metadata, format_projection);
-        let output_schema = compute_input_arrow_schema(&metadata, &batch_schema);
+        let output_schema = compute_output_arrow_schema(&metadata, &read_column_id_set);
 
         Self {
             iter,
@@ -210,6 +198,53 @@ fn build_string_tag_dict_array(
     Arc::new(DictionaryArray::new(keys, values))
 }
 
+fn compute_output_arrow_schema(
+    metadata: &RegionMetadataRef,
+    read_column_id_set: &HashSet<ColumnId>,
+) -> SchemaRef {
+    let mut fields = Vec::new();
+
+    for column_metadata in metadata.primary_key_columns() {
+        if !read_column_id_set.contains(&column_metadata.column_id) {
+            continue;
+        }
+        let field = Arc::new(Field::new(
+            &column_metadata.column_schema.name,
+            column_metadata.column_schema.data_type.as_arrow_type(),
+            column_metadata.column_schema.is_nullable(),
+        ));
+        let field = if column_metadata.semantic_type == SemanticType::Tag {
+            tag_maybe_to_dictionary_field(&column_metadata.column_schema.data_type, &field)
+        } else {
+            field
+        };
+        fields.push(field);
+    }
+
+    for column_metadata in metadata.field_columns() {
+        if !read_column_id_set.contains(&column_metadata.column_id) {
+            continue;
+        }
+        let field = Arc::new(Field::new(
+            &column_metadata.column_schema.name,
+            column_metadata.column_schema.data_type.as_arrow_type(),
+            column_metadata.column_schema.is_nullable(),
+        ));
+        fields.push(field);
+    }
+
+    let time_index = metadata.time_index_column();
+    let time_index_field = Arc::new(Field::new(
+        &time_index.column_schema.name,
+        time_index.column_schema.data_type.as_arrow_type(),
+        time_index.column_schema.is_nullable(),
+    ));
+    fields.push(time_index_field);
+    fields.extend(internal_fields().iter().cloned());
+
+    Arc::new(datatypes::arrow::datatypes::Schema::new(fields))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -221,27 +256,13 @@ mod tests {
     use datatypes::schema::ColumnSchema;
     use mito_codec::row_converter::{PrimaryKeyCodec, build_primary_key_codec};
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
-    use store_api::storage::{ColumnId, RegionId};
+    use store_api::storage::RegionId;
 
     use super::*;
     use crate::read::flat_projection::FlatProjectionMapper;
-    use crate::sst::parquet::flat_format::sst_column_id_indices;
-    use crate::sst::parquet::format::FormatProjection;
     use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
     use crate::test_util::new_batch_builder;
     use crate::test_util::sst_util::{new_primary_key, sst_region_metadata};
-
-    fn new_format_projection(
-        metadata: &RegionMetadataRef,
-        read_column_ids: impl Iterator<Item = ColumnId>,
-    ) -> FormatProjection {
-        let id_to_index = sst_column_id_indices(metadata);
-        FormatProjection::compute_format_projection(
-            &id_to_index,
-            metadata.column_metadatas.len() + 3,
-            read_column_ids,
-        )
-    }
 
     /// Helper to build the adapter from batches and metadata.
     fn build_adapter(
@@ -249,20 +270,13 @@ mod tests {
         metadata: &RegionMetadataRef,
         codec: &Arc<dyn PrimaryKeyCodec>,
     ) -> BatchToRecordBatchAdapter {
-        let format_projection = new_format_projection(
-            metadata,
-            metadata
-                .column_metadatas
-                .iter()
-                .map(|column| column.column_id),
-        );
+        let read_column_ids = metadata
+            .column_metadatas
+            .iter()
+            .map(|column| column.column_id)
+            .collect::<Vec<_>>();
         let iter: BoxedBatchIterator = Box::new(batches.into_iter().map(Ok));
-        BatchToRecordBatchAdapter::new(
-            iter,
-            Arc::clone(metadata),
-            Arc::clone(codec),
-            &format_projection,
-        )
+        BatchToRecordBatchAdapter::new(iter, Arc::clone(metadata), Arc::clone(codec), &read_column_ids)
     }
 
     #[test]
@@ -639,7 +653,7 @@ mod tests {
         let codec = build_primary_key_codec(&metadata);
 
         // Project tag_0 and field_1; skip tag_1 and field_0.
-        let format_projection = new_format_projection(&metadata, [0, 3].into_iter());
+        let read_column_ids = vec![0, 3];
 
         let pk = new_primary_key(&["host-1", "region-a"]);
         let batch = new_batch_builder(
@@ -654,8 +668,7 @@ mod tests {
         .unwrap();
 
         let iter: BoxedBatchIterator = Box::new(vec![Ok(batch)].into_iter());
-        let adapter =
-            BatchToRecordBatchAdapter::new(iter, metadata.clone(), codec, &format_projection);
+        let adapter = BatchToRecordBatchAdapter::new(iter, metadata.clone(), codec, &read_column_ids);
         let rb = adapter.into_iter().next().unwrap().unwrap();
 
         let mapper = FlatProjectionMapper::new(&metadata, [0, 3].into_iter()).unwrap();

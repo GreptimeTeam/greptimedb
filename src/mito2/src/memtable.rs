@@ -47,8 +47,6 @@ use crate::sst::FormatType;
 use crate::sst::file::FileTimeRange;
 use crate::sst::parquet::SstInfo;
 use crate::sst::parquet::file_range::PreFilterMode;
-use crate::sst::parquet::flat_format::sst_column_id_indices;
-use crate::sst::parquet::format::{FormatProjection, INTERNAL_COLUMN_NUM};
 
 mod builder;
 pub mod bulk;
@@ -587,7 +585,7 @@ pub fn read_column_ids_from_projection(
 pub struct BatchToRecordBatchContext {
     metadata: RegionMetadataRef,
     codec: Arc<dyn PrimaryKeyCodec>,
-    format_projection: FormatProjection,
+    read_column_ids: Vec<ColumnId>,
 }
 
 impl BatchToRecordBatchContext {
@@ -598,16 +596,10 @@ impl BatchToRecordBatchContext {
         }
 
         let codec = build_primary_key_codec(&metadata);
-        let id_to_index = sst_column_id_indices(&metadata);
-        let format_projection = FormatProjection::compute_format_projection(
-            &id_to_index,
-            metadata.column_metadatas.len() + INTERNAL_COLUMN_NUM,
-            read_column_ids.iter().copied(),
-        );
         Self {
             metadata,
             codec,
-            format_projection,
+            read_column_ids,
         }
     }
 
@@ -616,7 +608,7 @@ impl BatchToRecordBatchContext {
             iter,
             self.metadata.clone(),
             self.codec.clone(),
-            &self.format_projection,
+            &self.read_column_ids,
         ))
     }
 }
