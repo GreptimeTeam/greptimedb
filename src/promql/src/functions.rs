@@ -15,8 +15,8 @@
 mod aggr_over_time;
 mod changes;
 mod deriv;
+mod double_exponential_smoothing;
 mod extrapolate_rate;
-mod holt_winters;
 mod idelta;
 mod predict_linear;
 mod quantile;
@@ -35,8 +35,8 @@ use datafusion::arrow::array::{ArrayRef, Float64Array, TimestampMillisecondArray
 use datafusion::error::DataFusionError;
 use datafusion::physical_plan::ColumnarValue;
 pub use deriv::Deriv;
+pub use double_exponential_smoothing::DoubleExponentialSmoothing;
 pub use extrapolate_rate::{Delta, Increase, Rate};
-pub use holt_winters::HoltWinters;
 pub use idelta::IDelta;
 pub use predict_linear::PredictLinear;
 pub use quantile::QuantileOverTime;
