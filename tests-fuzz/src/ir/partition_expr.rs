@@ -20,7 +20,7 @@ use snafu::ensure;
 
 use crate::context::TableContext;
 use crate::error::{self, Result};
-use crate::ir::{generate_random_value, string_value, Ident};
+use crate::ir::{Ident, generate_random_value, string_value};
 
 /// A partitioning scheme that divides a single column into multiple ranges based on provided bounds.
 ///

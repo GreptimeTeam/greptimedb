@@ -38,8 +38,8 @@ use derive_builder::Builder;
 pub use insert_expr::InsertIntoExpr;
 use lazy_static::lazy_static;
 pub use partition_expr::SimplePartitions;
-use rand::seq::{IndexedRandom, SliceRandom};
 use rand::Rng;
+use rand::seq::{IndexedRandom, SliceRandom};
 pub use repartition_expr::RepartitionExpr;
 use serde::{Deserialize, Serialize};
 

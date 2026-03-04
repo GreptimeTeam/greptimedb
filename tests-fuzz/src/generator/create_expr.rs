@@ -544,10 +544,12 @@ mod tests {
             .generate(&mut rng)
             .unwrap();
 
-        assert!(logical_table_expr
-            .columns
-            .iter()
-            .all(|column| !partition_columns.contains(&column.name)));
+        assert!(
+            logical_table_expr
+                .columns
+                .iter()
+                .all(|column| !partition_columns.contains(&column.name))
+        );
     }
 
     #[test]
