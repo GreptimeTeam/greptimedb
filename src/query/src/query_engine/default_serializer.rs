@@ -164,7 +164,9 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
         let _ = session_state.register_udf(Arc::new(StdvarOverTime::scalar_udf()));
         let _ = session_state.register_udf(Arc::new(QuantileOverTime::scalar_udf()));
         let _ = session_state.register_udf(Arc::new(PredictLinear::scalar_udf()));
-        let _ = session_state.register_udf(Arc::new(DoubleExponentialSmoothing::scalar_udf()));
+        let double_exponential_smoothing_udf =
+            DoubleExponentialSmoothing::scalar_udf().with_aliases(["prom_holt_winters"]);
+        let _ = session_state.register_udf(Arc::new(double_exponential_smoothing_udf));
 
         let logical_plan = DFLogicalSubstraitConvertor
             .decode(message, session_state)
