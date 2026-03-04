@@ -461,6 +461,14 @@ jobs:
           path: /tmp/fuzz-monitor-dumps
           if-no-files-found: warn
           retention-days: 3
+      - name: Upload CSV dumps
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-tests-csv-dumps-${{ matrix.mode.name }}-${{ matrix.target }}
+          path: /tmp/greptime-fuzz-dumps
+          if-no-files-found: warn
+          retention-days: 3
       - name: Delete cluster
         if: success()
         shell: bash
