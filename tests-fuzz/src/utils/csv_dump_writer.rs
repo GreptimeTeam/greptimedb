@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashSet;
-use std::fs::{File, OpenOptions, create_dir_all};
+use std::fs::{File, OpenOptions, create_dir_all, remove_dir_all};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -117,6 +117,11 @@ impl CsvDumpSession {
     /// Flushes all appended batches to CSV files.
     pub fn flush_all(&mut self) -> Result<()> {
         self.flush_buffered_records()
+    }
+
+    /// Removes session directory after successful validation.
+    pub fn cleanup_on_success(&self) -> std::io::Result<()> {
+        remove_dir_all(&self.run_dir)
     }
 
     fn flush_buffered_records(&mut self) -> Result<()> {
