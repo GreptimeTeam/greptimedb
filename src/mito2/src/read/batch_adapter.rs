@@ -67,12 +67,10 @@ impl BatchToRecordBatchAdapter {
             .primary_key_columns()
             .enumerate()
             .filter(|(_, column_metadata)| read_column_id_set.contains(&column_metadata.column_id))
-            .map(|(pk_index, column_metadata)| {
-                ProjectedPkColumn {
-                    column_id: column_metadata.column_id,
-                    pk_index,
-                    data_type: column_metadata.column_schema.data_type.clone(),
-                }
+            .map(|(pk_index, column_metadata)| ProjectedPkColumn {
+                column_id: column_metadata.column_id,
+                pk_index,
+                data_type: column_metadata.column_schema.data_type.clone(),
             })
             .collect();
         let output_schema = compute_output_arrow_schema(&metadata, &read_column_id_set);
@@ -276,7 +274,12 @@ mod tests {
             .map(|column| column.column_id)
             .collect::<Vec<_>>();
         let iter: BoxedBatchIterator = Box::new(batches.into_iter().map(Ok));
-        BatchToRecordBatchAdapter::new(iter, Arc::clone(metadata), Arc::clone(codec), &read_column_ids)
+        BatchToRecordBatchAdapter::new(
+            iter,
+            Arc::clone(metadata),
+            Arc::clone(codec),
+            &read_column_ids,
+        )
     }
 
     #[test]
@@ -668,7 +671,8 @@ mod tests {
         .unwrap();
 
         let iter: BoxedBatchIterator = Box::new(vec![Ok(batch)].into_iter());
-        let adapter = BatchToRecordBatchAdapter::new(iter, metadata.clone(), codec, &read_column_ids);
+        let adapter =
+            BatchToRecordBatchAdapter::new(iter, metadata.clone(), codec, &read_column_ids);
         let rb = adapter.into_iter().next().unwrap().unwrap();
 
         let mapper = FlatProjectionMapper::new(&metadata, [0, 3].into_iter()).unwrap();

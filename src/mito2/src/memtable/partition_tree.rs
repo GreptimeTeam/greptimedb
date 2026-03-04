@@ -194,8 +194,7 @@ impl Memtable for PartitionTreeMemtable {
     ) -> Result<MemtableRanges> {
         let predicate = options.predicate;
         let sequence = options.sequence;
-        let read_column_ids =
-            read_column_ids_from_projection(&self.tree.metadata, projection);
+        let read_column_ids = read_column_ids_from_projection(&self.tree.metadata, projection);
         let projection = projection.map(|ids| ids.to_vec());
         let builder = Box::new(PartitionTreeIterBuilder {
             tree: self.tree.clone(),

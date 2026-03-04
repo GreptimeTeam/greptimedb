@@ -237,8 +237,7 @@ impl Memtable for SimpleBulkMemtable {
         let predicate = options.predicate;
         let sequence = options.sequence;
         let start_time = Instant::now();
-        let read_column_ids =
-            read_column_ids_from_projection(&self.region_metadata, projection);
+        let read_column_ids = read_column_ids_from_projection(&self.region_metadata, projection);
         let projection = Arc::new(self.build_projection(projection));
 
         // Use the memtable's overall time range and max sequence for all ranges
