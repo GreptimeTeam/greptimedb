@@ -442,19 +442,43 @@ async fn execute_repartition_metric_table(ctx: FuzzContext, input: FuzzInput) ->
 
     shared_state.lock().unwrap().running = false;
     writer_task.await.unwrap().unwrap();
-    let inserted_rows = {
+    let (inserted_rows, mut csv_dump_session) = {
         let mut state = shared_state.lock().unwrap();
         if let Some(csv_dump_session) = state.csv_dump_session.as_mut() {
             csv_dump_session.flush_all()?;
         }
-        state.inserted_rows.clone()
+        (state.inserted_rows.clone(), state.csv_dump_session.take())
     };
 
-    validate_rows(&ctx, &logical_tables, &inserted_rows).await?;
-    cleanup_tables(&ctx, &physical_table_ctx, &logical_tables).await?;
+    let run_result = async {
+        validate_rows(&ctx, &logical_tables, &inserted_rows).await?;
+        cleanup_tables(&ctx, &physical_table_ctx, &logical_tables).await?;
+        Ok(())
+    }
+    .await;
+
+    if let Some(csv_dump_session) = csv_dump_session.take() {
+        match &run_result {
+            Ok(_) => {
+                if let Err(err) = csv_dump_session.cleanup_on_success() {
+                    warn!(
+                        "Cleanup csv dump directory failed, path: {}, error: {:?}",
+                        csv_dump_session.run_dir.display(),
+                        err
+                    );
+                }
+            }
+            Err(_) => {
+                warn!(
+                    "Keep csv dump directory for failure analysis, path: {}",
+                    csv_dump_session.run_dir.display()
+                );
+            }
+        }
+    }
 
     ctx.close().await;
-    Ok(())
+    run_result
 }
 
 fuzz_target!(|input: FuzzInput| {
