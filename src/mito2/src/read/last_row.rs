@@ -29,6 +29,7 @@ use crate::cache::{
 };
 use crate::error::Result;
 use crate::memtable::partition_tree::data::timestamp_array_to_i64_slice;
+use crate::memtable::record_batch_estimated_size;
 use crate::read::{Batch, BatchReader, BoxedBatchReader};
 use crate::sst::parquet::flat_format::{primary_key_column_index, time_index_column_index};
 use crate::sst::parquet::format::{PrimaryKeyArray, primary_key_offsets};
@@ -451,10 +452,23 @@ impl FlatRowGroupLastRowReader {
             return;
         }
         let batches = std::mem::take(&mut self.yielded_batches);
+        let rows_num: usize = batches.iter().map(RecordBatch::num_rows).sum();
+        let value_size: usize = batches.iter().map(record_batch_estimated_size).sum();
+        common_telemetry::info!(
+            "FlatRowGroupLastRowReader::maybe_update_cache batches_num: {}, rows_num: {}, value_size: {}, batches: {:?}",
+            batches.len(),
+            rows_num,
+            value_size,
+            batches
+        );
         let value = Arc::new(SelectorResultValue::new_flat(
             batches,
             self.projection.clone(),
         ));
+        common_telemetry::info!(
+            "FlatRowGroupLastRowReader::maybe_update_cache put_selector_result value_size: {}",
+            value_size
+        );
         self.cache_strategy.put_selector_result(self.key, value);
     }
 }
