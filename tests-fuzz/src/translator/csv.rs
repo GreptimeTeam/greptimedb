@@ -66,7 +66,8 @@ impl InsertExprToCsvRecordsTranslator {
     fn format_row_value(value: &RowValue) -> String {
         match value {
             RowValue::Value(datatypes::value::Value::Null) => String::new(),
-            _ => value.to_string(),
+            RowValue::Value(v) => v.to_string(),
+            RowValue::Default => "DEFAULT".to_string(),
         }
     }
 }
@@ -114,7 +115,7 @@ mod tests {
         assert_eq!(output.table_name, "metric_a");
         assert_eq!(output.headers, vec!["host", "value"]);
         assert_eq!(output.records.len(), 2);
-        assert_eq!(output.records[0].values, vec!["'web-1'", "15"]);
+        assert_eq!(output.records[0].values, vec!["web-1", "15"]);
         assert_eq!(output.records[1].values, vec!["", "DEFAULT"]);
     }
 }
