@@ -266,20 +266,20 @@ async fn validate_rows(
 ) -> Result<()> {
     for table_ctx in logical_tables.values() {
         let expected = *inserted_rows.get(&table_ctx.name.to_string()).unwrap_or(&0) as usize;
-        info!(
-            "Validate rows for table: {}, expected: {}",
-            table_ctx.name, expected
-        );
         let count_sql = format!("SELECT COUNT(1) AS count FROM {}", table_ctx.name);
         let count = count_values(&ctx.greptime, &count_sql).await?;
-        assert_eq!(count.count as usize, expected);
-
         let distinct_count_sql = format!(
             "SELECT COUNT(DISTINCT {}) AS count FROM {}",
             table_ctx.timestamp_column().unwrap().name,
             table_ctx.name
         );
         let distinct_count = count_values(&ctx.greptime, &distinct_count_sql).await?;
+        info!(
+            "Validate rows for table: {}, expected: {}, count: {}, distinct_count: {}",
+            table_ctx.name, expected, count.count as usize, distinct_count.count as usize
+        );
+        assert_eq!(count.count as usize, expected);
+
         assert_eq!(distinct_count.count as usize, expected);
     }
     Ok(())
