@@ -27,7 +27,9 @@ pub mod process;
 pub mod wait;
 
 use std::env;
+use std::str::FromStr;
 
+use common_base::readable_size::ReadableSize;
 use common_telemetry::info;
 use common_telemetry::tracing::log::LevelFilter;
 use paste::paste;
@@ -134,6 +136,8 @@ pub const GT_FUZZ_DUMP_TABLE_CSV: &str = "GT_FUZZ_DUMP_TABLE_CSV";
 pub const GT_FUZZ_DUMP_DIR: &str = "GT_FUZZ_DUMP_DIR";
 /// Directory suffix used by one CSV dump session.
 pub const GT_FUZZ_DUMP_SUFFIX: &str = "GT_FUZZ_DUMP_SUFFIX";
+/// Max in-memory CSV buffer size before auto flush.
+pub const GT_FUZZ_DUMP_BUFFER_MAX_BYTES: &str = "GT_FUZZ_DUMP_BUFFER_MAX_BYTES";
 
 /// Reads an override value for a fuzz parameter from env `GT_FUZZ_OVERRIDE_<NAME>`.
 pub fn get_fuzz_override<T>(name: &str) -> Option<T>
@@ -169,6 +173,21 @@ pub fn get_gt_fuzz_dump_dir() -> String {
 pub fn get_gt_fuzz_dump_suffix() -> String {
     let _ = dotenv::dotenv();
     env::var(GT_FUZZ_DUMP_SUFFIX).unwrap_or_else(|_| ".repartition-metric-csv".to_string())
+}
+
+/// Returns max CSV in-memory buffer size.
+pub fn get_gt_fuzz_dump_buffer_max_bytes() -> usize {
+    let _ = dotenv::dotenv();
+    env::var(GT_FUZZ_DUMP_BUFFER_MAX_BYTES)
+        .ok()
+        .and_then(|value| {
+            value.parse::<usize>().ok().or_else(|| {
+                ReadableSize::from_str(&value)
+                    .ok()
+                    .map(|size| size.as_bytes() as usize)
+            })
+        })
+        .unwrap_or(8 * 1024 * 1024)
 }
 
 macro_rules! make_get_from_env_helper {
