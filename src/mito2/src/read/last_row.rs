@@ -17,7 +17,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use datatypes::arrow::array::{Array, BinaryArray, DictionaryArray, UInt32Array};
+use datatypes::arrow::array::{Array, BinaryArray};
 use datatypes::arrow::compute::concat_batches;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::vectors::UInt32Vector;
@@ -391,7 +391,7 @@ impl FlatLastRowCacheReader {
 }
 
 /// Buffer that accumulates small `RecordBatch`es and tracks total row count.
-struct BatchBuffer {
+pub(crate) struct BatchBuffer {
     batches: Vec<RecordBatch>,
     num_rows: usize,
 }
@@ -402,12 +402,6 @@ impl BatchBuffer {
             batches: Vec::new(),
             num_rows: 0,
         }
-    }
-
-    /// Pushes a batch into the buffer.
-    fn push(&mut self, batch: RecordBatch) {
-        self.num_rows += batch.num_rows();
-        self.batches.push(batch);
     }
 
     /// Returns true if total buffered rows reaches `DEFAULT_READ_BATCH_SIZE`.
@@ -657,22 +651,6 @@ fn last_timestamp_start(ts_values: &[i64], range_start: usize, range_end: usize)
     start
 }
 
-/// Rebuilds `__primary_key` dictionary to contain only one value: `key`.
-///
-/// The selector flushes one primary key at a time, so all rows in `batch` belong
-/// to the same key and can share a compact dictionary.
-fn rebuild_pk_dictionary_for_key(batch: RecordBatch, key: &[u8]) -> RecordBatch {
-    let pk_idx = primary_key_column_index(batch.num_columns());
-    let num_rows = batch.num_rows();
-    let new_keys = UInt32Array::from_iter_values(std::iter::repeat_n(0u32, num_rows));
-    let new_values_array = BinaryArray::from_iter_values([key]);
-    let new_dict = DictionaryArray::new(new_keys, Arc::new(new_values_array));
-
-    let mut columns: Vec<_> = batch.columns().to_vec();
-    columns[pk_idx] = Arc::new(new_dict);
-    RecordBatch::try_new(batch.schema(), columns).expect("schema should match after pk rebuild")
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -807,16 +785,17 @@ mod tests {
         selector: &mut FlatLastTimestampSelector,
         batches: Vec<RecordBatch>,
     ) -> Vec<(Vec<u8>, i64)> {
-        let mut output_buffer = Vec::new();
+        let mut output_buffer = BatchBuffer::new();
         let mut results = Vec::new();
         for batch in batches {
             selector.on_next(batch, &mut output_buffer).unwrap();
-            for r in output_buffer.drain(..) {
+            for r in output_buffer.batches.drain(..) {
                 extract_flat_rows(&r, &mut results);
             }
+            output_buffer.num_rows = 0;
         }
         selector.finish(&mut output_buffer).unwrap();
-        for r in output_buffer.drain(..) {
+        for r in output_buffer.batches.drain(..) {
             extract_flat_rows(&r, &mut results);
         }
         results
@@ -949,51 +928,25 @@ mod tests {
     fn test_flat_finish_is_one_shot() {
         let mut selector = FlatLastTimestampSelector::default();
         let batch = new_flat_batch(&[b"k1", b"k1", b"k2"], &[1, 2, 3], &[10, 20, 30]);
-        let mut output_buffer = Vec::new();
+        let mut output_buffer = BatchBuffer::new();
 
         // Feed one batch: completed keys can be emitted before EOF.
         selector.on_next(batch, &mut output_buffer).unwrap();
         let mut pre_finish = Vec::new();
-        for r in output_buffer.drain(..) {
+        for r in output_buffer.batches.drain(..) {
             extract_flat_rows(&r, &mut pre_finish);
         }
+        output_buffer.num_rows = 0;
         assert_eq!(vec![(b"k1".to_vec(), 2)], pre_finish);
 
         // Simulate EOF by calling finish().
         selector.finish(&mut output_buffer).unwrap();
         assert!(!output_buffer.is_empty());
-        output_buffer.clear();
+        output_buffer.batches.clear();
+        output_buffer.num_rows = 0;
 
         // A second finish after EOF should not yield any more rows.
         selector.finish(&mut output_buffer).unwrap();
         assert!(output_buffer.is_empty());
-    }
-
-    /// Helper: returns the number of entries in the dictionary values array.
-    fn pk_dict_values_len(batch: &RecordBatch) -> usize {
-        let pk_col = batch
-            .column(2)
-            .as_any()
-            .downcast_ref::<PrimaryKeyArray>()
-            .unwrap();
-        pk_col.values().len()
-    }
-
-    #[test]
-    fn test_flat_flush_rebuilds_single_key_dictionary() {
-        let mut selector = FlatLastTimestampSelector::default();
-        let batch = new_flat_batch(
-            &[b"k1", b"k1", b"k2", b"k2"],
-            &[1, 2, 3, 4],
-            &[10, 20, 30, 40],
-        );
-
-        let mut output_buffer = Vec::new();
-        selector.on_next(batch, &mut output_buffer).unwrap();
-        selector.finish(&mut output_buffer).unwrap();
-
-        for output in &output_buffer {
-            assert_eq!(1, pk_dict_values_len(output));
-        }
     }
 }
