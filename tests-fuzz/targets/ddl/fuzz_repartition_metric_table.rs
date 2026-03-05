@@ -255,6 +255,26 @@ fn touch_writer_control_skeleton() {
     let _stop = WriterControl::Stop;
 }
 
+fn handle_writer_control(control: WriterControl, paused: &mut bool) -> bool {
+    match control {
+        WriterControl::Barrier { epoch, ack } => {
+            info!("Writer received barrier control, epoch: {epoch}");
+            *paused = true;
+            let _ = ack.send(());
+            false
+        }
+        WriterControl::Resume { epoch } => {
+            info!("Writer received resume control, epoch: {epoch}");
+            *paused = false;
+            false
+        }
+        WriterControl::Stop => {
+            info!("Writer received stop control");
+            true
+        }
+    }
+}
+
 async fn write_loop<R: Rng + 'static>(
     mut rng: R,
     ctx: FuzzContext,
@@ -263,21 +283,24 @@ async fn write_loop<R: Rng + 'static>(
     mut control_rx: mpsc::UnboundedReceiver<WriterControl>,
 ) -> Result<()> {
     info!("Start write loop");
+    let mut paused = false;
     loop {
         while let Ok(control) = control_rx.try_recv() {
-            match control {
-                WriterControl::Barrier { epoch, ack } => {
-                    info!("Writer received barrier control, epoch: {epoch}");
-                    let _ = ack.send(());
-                }
-                WriterControl::Resume { epoch } => {
-                    info!("Writer received resume control, epoch: {epoch}");
-                }
-                WriterControl::Stop => {
-                    info!("Writer received stop control");
-                    return Ok(());
-                }
+            if handle_writer_control(control, &mut paused) {
+                return Ok(());
             }
+        }
+
+        if paused {
+            match control_rx.recv().await {
+                Some(control) => {
+                    if handle_writer_control(control, &mut paused) {
+                        return Ok(());
+                    }
+                }
+                None => return Ok(()),
+            }
+            continue;
         }
 
         let (running, clock) = {
@@ -478,7 +501,7 @@ async fn execute_repartition_metric_table(ctx: FuzzContext, input: FuzzInput) ->
         running: true,
     }));
     let writer_rng = ChaChaRng::seed_from_u64(input.seed ^ 0xA5A5_A5A5_A5A5_A5A5);
-    let (_control_tx, control_rx) = mpsc::unbounded_channel::<WriterControl>();
+    let (control_tx, control_rx) = mpsc::unbounded_channel::<WriterControl>();
     let writer_task = tokio::spawn(write_loop(
         writer_rng,
         ctx.clone(),
@@ -555,6 +578,7 @@ async fn execute_repartition_metric_table(ctx: FuzzContext, input: FuzzInput) ->
         }
     }
 
+    let _ = control_tx.send(WriterControl::Stop);
     shared_state.lock().unwrap().running = false;
     writer_task.await.unwrap().unwrap();
     let (inserted_rows, mut csv_dump_session, mut sql_dump_session) = {
