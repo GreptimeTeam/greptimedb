@@ -696,12 +696,13 @@ impl MemtableRange {
         self.context.builder.build(None)
     }
 
-    /// Builds a record batch iterator to read all rows in range.
+    /// Builds a record batch iterator to read rows in range.
     ///
-    /// This method doesn't take the optional time range because a bulk part is immutable
-    /// so we don't need to filter rows out of the time range.
+    /// For mutable memtables (adapter path), applies time-range pruning to ensure rows
+    /// outside the time range are filtered, matching the behavior of `build_prune_iter`.
     pub fn build_record_batch_iter(
         &self,
+        time_range: Option<FileTimeRange>,
         metrics: Option<MemScanMetrics>,
     ) -> Result<BoxedRecordBatchIterator> {
         if self.context.builder.is_record_batch() {
@@ -710,6 +711,12 @@ impl MemtableRange {
 
         if let Some(context) = self.context.batch_to_record_batch.as_ref() {
             let iter = self.context.builder.build(metrics)?;
+            let iter: BoxedBatchIterator = if let Some(time_range) = time_range {
+                let time_filters = self.context.predicate.time_filters();
+                Box::new(PruneTimeIterator::new(iter, time_range, time_filters))
+            } else {
+                iter
+            };
             return Ok(context.adapt_iter(iter));
         }
 

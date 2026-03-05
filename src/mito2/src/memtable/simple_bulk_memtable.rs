@@ -973,7 +973,7 @@ mod tests {
 
         let mut total_rows = 0;
         for range in ranges.ranges.into_values() {
-            let mut iter = range.build_record_batch_iter(None).unwrap();
+            let mut iter = range.build_record_batch_iter(None, None).unwrap();
             while let Some(rb) = iter.next().transpose().unwrap() {
                 total_rows += rb.num_rows();
                 let schema = rb.schema();

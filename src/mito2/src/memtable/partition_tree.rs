@@ -970,7 +970,7 @@ mod tests {
 
         let mut total_rows = 0;
         for range in ranges.ranges.into_values() {
-            let mut iter = range.build_record_batch_iter(None).unwrap();
+            let mut iter = range.build_record_batch_iter(None, None).unwrap();
             while let Some(rb) = iter.next().transpose().unwrap() {
                 total_rows += rb.num_rows();
                 let schema = rb.schema();
@@ -992,5 +992,63 @@ mod tests {
             }
         }
         assert_eq!(3, total_rows);
+    }
+
+    #[test]
+    fn test_build_record_batch_iter_with_time_range() {
+        let metadata = Arc::new(memtable_util::metadata_with_primary_key(vec![1, 0], true));
+        let codec = Arc::new(DensePrimaryKeyCodec::new(&metadata));
+        let memtable = PartitionTreeMemtable::new(
+            1,
+            codec,
+            metadata.clone(),
+            None,
+            &PartitionTreeConfig::default(),
+        );
+
+        let kvs = memtable_util::build_key_values(
+            &metadata,
+            "hello".to_string(),
+            42,
+            &[1, 2, 3, 4, 5],
+            0,
+        );
+        memtable.write(&kvs).unwrap();
+
+        let read_column_ids: Vec<ColumnId> = metadata
+            .column_metadatas
+            .iter()
+            .map(|c| c.column_id)
+            .collect();
+        let ranges = memtable
+            .ranges(Some(&read_column_ids), RangesOptions::default())
+            .unwrap();
+        assert!(!ranges.ranges.is_empty());
+
+        let time_range = (Timestamp::new_millisecond(2), Timestamp::new_millisecond(4));
+
+        let mut total_rows = 0;
+        let mut all_timestamps = Vec::new();
+        for range in ranges.ranges.into_values() {
+            let mut iter = range
+                .build_record_batch_iter(Some(time_range), None)
+                .unwrap();
+            while let Some(rb) = iter.next().transpose().unwrap() {
+                total_rows += rb.num_rows();
+                // ts column is at index 4 (after __table_id, k0, v0, v1)
+                let ts_col = rb
+                    .column_by_name("ts")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<datatypes::arrow::array::TimestampMillisecondArray>()
+                    .unwrap();
+                for i in 0..ts_col.len() {
+                    all_timestamps.push(ts_col.value(i));
+                }
+            }
+        }
+        assert_eq!(3, total_rows);
+        all_timestamps.sort();
+        assert_eq!(vec![2, 3, 4], all_timestamps);
     }
 }

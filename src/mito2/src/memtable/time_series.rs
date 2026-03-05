@@ -1966,7 +1966,7 @@ mod tests {
         assert_eq!(1, ranges.ranges.len());
 
         let range = ranges.ranges.into_values().next().unwrap();
-        let mut iter = range.build_record_batch_iter(None).unwrap();
+        let mut iter = range.build_record_batch_iter(None, None).unwrap();
         let rb = iter.next().transpose().unwrap().unwrap();
         assert_eq!(10, rb.num_rows());
         // k0, k1 (pk columns), v0, v1 (field columns), ts, __primary_key, __sequence, __op_type
@@ -1986,5 +1986,49 @@ mod tests {
             ]
         );
         assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn test_build_record_batch_iter_with_time_range() {
+        let schema = schema_for_test();
+        let memtable = TimeSeriesMemtable::new(schema.clone(), 1, None, true, MergeMode::LastRow);
+
+        let kvs = build_key_values(&schema, "test".to_string(), 1, 10);
+        memtable.write(&kvs).unwrap();
+
+        let read_column_ids: Vec<ColumnId> = schema
+            .column_metadatas
+            .iter()
+            .map(|c| c.column_id)
+            .collect();
+        let ranges = memtable
+            .ranges(Some(&read_column_ids), RangesOptions::default())
+            .unwrap();
+        assert_eq!(1, ranges.ranges.len());
+
+        let time_range = (Timestamp::new_millisecond(3), Timestamp::new_millisecond(7));
+
+        let range = ranges.ranges.into_values().next().unwrap();
+        let mut iter = range
+            .build_record_batch_iter(Some(time_range), None)
+            .unwrap();
+
+        let mut total_rows = 0;
+        let mut all_timestamps = Vec::new();
+        while let Some(rb) = iter.next().transpose().unwrap() {
+            total_rows += rb.num_rows();
+            let ts_col = rb
+                .column_by_name("ts")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<datatypes::arrow::array::TimestampMillisecondArray>()
+                .unwrap();
+            for i in 0..ts_col.len() {
+                all_timestamps.push(ts_col.value(i));
+            }
+        }
+        assert_eq!(5, total_rows);
+        all_timestamps.sort();
+        assert_eq!(vec![3, 4, 5, 6, 7], all_timestamps);
     }
 }

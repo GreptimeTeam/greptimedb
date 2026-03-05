@@ -193,7 +193,7 @@ fn filter_1_host(c: &mut Criterion) {
                 .unwrap();
 
             for (_range_id, range) in ranges.ranges.iter() {
-                let iter = range.build_record_batch_iter(None).unwrap();
+                let iter = range.build_record_batch_iter(None, None).unwrap();
                 for batch in iter {
                     let _batch = batch.unwrap();
                 }
