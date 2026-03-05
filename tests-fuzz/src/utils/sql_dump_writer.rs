@@ -206,14 +206,20 @@ mod tests {
 
         let mut session = SqlDumpSession::new_with_buffer_limit(run_dir.clone(), 1024).unwrap();
         session
-            .broadcast_event(["metric-a", "metric-b"], "repartition action_idx=3")
+            .broadcast_event(
+                ["metric-a", "metric-b"],
+                "repartition action_idx=3",
+                "ALTER TABLE t REPARTITION",
+            )
             .unwrap();
         session.flush_all().unwrap();
 
         let content_a = std::fs::read_to_string(run_dir.join("metric-a.trace.sql")).unwrap();
         let content_b = std::fs::read_to_string(run_dir.join("metric-b.trace.sql")).unwrap();
         assert!(content_a.contains("-- event=repartition action_idx=3"));
+        assert!(content_a.contains("ALTER TABLE t REPARTITION;"));
         assert!(content_b.contains("-- event=repartition action_idx=3"));
+        assert!(content_b.contains("ALTER TABLE t REPARTITION;"));
     }
 
     #[test]
