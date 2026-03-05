@@ -22,7 +22,7 @@ use common_query::prelude::{greptime_timestamp, greptime_value};
 use pipeline::{ContextOpt, ContextReq};
 use prost::DecodeError;
 
-use crate::http::PromValidationMode;
+use crate::http::{PromValidationMode, validate_label_name};
 use crate::proto::PromLabel;
 use crate::repeated_field::Clear;
 
@@ -142,7 +142,12 @@ impl TableBuilder {
         let mut row = vec![Value { value_data: None }; self.col_indexes.len()];
 
         for PromLabel { name, value } in labels {
-            prom_validation_mode.validate_utf8(name)?;
+            if !validate_label_name(name) {
+                return Err(DecodeError::new(format!(
+                    "Invalid label name: `{}`",
+                    String::from_utf8_lossy(name)
+                )));
+            }
             let raw_tag_name = name;
             let tag_value = Some(ValueData::StringValue(
                 prom_validation_mode.decode_string(value)?,
@@ -153,14 +158,15 @@ impl TableBuilder {
                 row[*e].value_data = tag_value;
                 continue;
             }
-            let tag_name = prom_validation_mode.decode_string(raw_tag_name)?;
+            let tag_name = prom_validation_mode.decode_label_name(raw_tag_name)?;
             self.schema.push(ColumnSchema {
-                column_name: tag_name.clone(),
+                column_name: tag_name.to_string(),
                 datatype: ColumnDataType::String as i32,
                 semantic_type: SemanticType::Tag as i32,
                 ..Default::default()
             });
-            self.col_indexes.insert(tag_name.into_bytes(), tag_num);
+            self.col_indexes
+                .insert(tag_name.as_bytes().to_vec(), tag_num);
 
             row.push(Value {
                 value_data: tag_value,

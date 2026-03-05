@@ -247,45 +247,28 @@ impl PromValidationMode {
         Ok(result)
     }
 
-    pub(crate) fn validate_utf8(&self, bytes: &[u8]) -> std::result::Result<(), DecodeError> {
-        match self {
-            PromValidationMode::Strict => {
-                simdutf8::basic::from_utf8(bytes).map_err(|_| DecodeError::new("invalid utf-8"))?;
-                Ok(())
-            }
-            PromValidationMode::Lossy | PromValidationMode::Unchecked => Ok(()),
+    /// Decodes provided bytes to a label name [`&str`] with Prometheus label name validation.
+    ///
+    /// The check is always performed regardless of [`PromValidationMode`], as required by
+    /// the [Prometheus data model](https://prometheus.io/docs/concepts/data_model/#metric-names-and-labels).
+    pub fn decode_label_name<'a>(
+        &self,
+        bytes: &'a [u8],
+    ) -> std::result::Result<&'a str, DecodeError> {
+        if !validate_label_name(bytes) {
+            debug!(
+                "Invalid Prometheus label name: {:?}, must match [a-zA-Z_][a-zA-Z0-9_]*",
+                bytes
+            );
+            return Err(DecodeError::new(format!(
+                "invalid prometheus label name: '{}', must match [a-zA-Z_][a-zA-Z0-9_]*",
+                String::from_utf8_lossy(bytes)
+            )));
         }
-    }
 
-    /// Decodes provided bytes to a label name [String] with Prometheus label name validation.
-    ///
-    /// In `Strict` mode, the label name must match `[a-zA-Z_][a-zA-Z0-9_]*` per the
-    /// [Prometheus data model](https://prometheus.io/docs/concepts/data_model/#metric-names-and-labels).
-    /// The check is performed directly on the raw bytes — since the allowed character set is
-    /// pure ASCII, a passing check also guarantees valid UTF-8, so we can skip a separate
-    /// UTF-8 validation and use [`String::from_utf8_unchecked`].
-    ///
-    /// In `Lossy` and `Unchecked` modes, only UTF-8 handling is applied (no label name check).
-    pub fn decode_label_name(&self, bytes: &[u8]) -> std::result::Result<String, DecodeError> {
-        match self {
-            PromValidationMode::Strict => {
-                if !validate_label_name(bytes) {
-                    debug!(
-                        "Invalid Prometheus label name: {:?}, must match [a-zA-Z_][a-zA-Z0-9_]*",
-                        bytes
-                    );
-                    return Err(DecodeError::new(format!(
-                        "invalid prometheus label name: '{}', must match [a-zA-Z_][a-zA-Z0-9_]*",
-                        String::from_utf8_lossy(bytes)
-                    )));
-                }
-                // SAFETY: `is_valid_prom_label_name_bytes` only passes ASCII bytes,
-                // which are always valid UTF-8.
-                Ok(unsafe { String::from_utf8_unchecked(bytes.to_vec()) })
-            }
-            // For non-strict modes, fall back to the general string decoder.
-            _ => self.decode_string(bytes),
-        }
+        // SAFETY: `validate_label_name` only allows ASCII bytes,
+        // and ASCII is always valid UTF-8.
+        Ok(unsafe { std::str::from_utf8_unchecked(bytes) })
     }
 }
 
@@ -1883,23 +1866,23 @@ mod test {
     fn test_decode_label_name_lossy() {
         let lossy = PromValidationMode::Lossy;
 
-        // Lossy mode does not enforce the regex, only handles UTF-8
+        // Label name validation is always enforced.
         assert!(lossy.decode_label_name(b"__name__").is_ok());
-        assert!(lossy.decode_label_name(b"label-name").is_ok());
-        assert!(lossy.decode_label_name(b"0abc").is_ok());
+        assert!(lossy.decode_label_name(b"label-name").is_err());
+        assert!(lossy.decode_label_name(b"0abc").is_err());
 
-        // Even invalid UTF-8 succeeds in lossy mode (replacement chars)
-        assert!(lossy.decode_label_name(&[0xff, 0xfe]).is_ok());
+        // Invalid UTF-8 bytes fail the label-name byte check.
+        assert!(lossy.decode_label_name(&[0xff, 0xfe]).is_err());
     }
 
     #[test]
     fn test_decode_label_name_unchecked() {
         let unchecked = PromValidationMode::Unchecked;
 
-        // Unchecked mode does not enforce the regex
+        // Label name validation is always enforced.
         assert!(unchecked.decode_label_name(b"__name__").is_ok());
-        assert!(unchecked.decode_label_name(b"label-name").is_ok());
-        assert!(unchecked.decode_label_name(b"0abc").is_ok());
+        assert!(unchecked.decode_label_name(b"label-name").is_err());
+        assert!(unchecked.decode_label_name(b"0abc").is_err());
     }
 
     #[test]
