@@ -59,6 +59,8 @@ use tests_fuzz::utils::{
 use tests_fuzz::validator::row::count_values;
 use tokio::sync::{mpsc, oneshot};
 
+const BARRIER_ACK_TIMEOUT_SECS: u64 = 10;
+
 #[derive(Clone)]
 struct FuzzContext {
     greptime: Pool<MySql>,
@@ -576,6 +578,25 @@ async fn execute_repartition_metric_table(ctx: FuzzContext, input: FuzzInput) ->
                 sql_dump_session.broadcast_event(logical_table_names.iter(), &event, &sql)?;
             }
         }
+
+        let (ack_tx, ack_rx) = oneshot::channel();
+        control_tx
+            .send(WriterControl::Barrier {
+                epoch: i + 1,
+                ack: ack_tx,
+            })
+            .expect("barrier control send must succeed");
+        tokio::time::timeout(Duration::from_secs(BARRIER_ACK_TIMEOUT_SECS), ack_rx)
+            .await
+            .expect("barrier ack timeout")
+            .expect("barrier ack dropped");
+
+        let inserted_rows_snapshot = shared_state.lock().unwrap().inserted_rows.clone();
+        validate_rows(&ctx, &logical_tables, &inserted_rows_snapshot).await?;
+
+        control_tx
+            .send(WriterControl::Resume { epoch: i + 1 })
+            .expect("resume control send must succeed");
     }
 
     let _ = control_tx.send(WriterControl::Stop);
