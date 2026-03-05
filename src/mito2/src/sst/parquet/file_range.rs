@@ -23,7 +23,7 @@ use api::v1::{OpType, SemanticType};
 use common_telemetry::error;
 use datafusion::physical_plan::PhysicalExpr;
 use datafusion::physical_plan::expressions::DynamicFilterPhysicalExpr;
-use datatypes::arrow::array::{ArrayRef, BooleanArray};
+use datatypes::arrow::array::{Array as _, ArrayRef, BooleanArray};
 use datatypes::arrow::buffer::BooleanBuffer;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
@@ -739,7 +739,12 @@ impl RangeBase {
                     reason: "Failed to downcast to BooleanArray".to_string(),
                 })?;
 
-        Ok(boolean_array.values().clone())
+        let mut mask = boolean_array.values().clone();
+        if let Some(nulls) = boolean_array.nulls() {
+            mask = mask.bitand(nulls.inner());
+        }
+
+        Ok(mask)
     }
 
     /// Builds a `RecordBatch` from the input `Batch` matching the given schema.

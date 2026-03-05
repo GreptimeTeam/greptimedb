@@ -316,8 +316,14 @@ impl PartitionExpr {
                         .clone()
                         .lt_eq(other_expr)
                         .or(column_expr.is_null()),
-                    RestrictedOp::Gt => column_expr.clone().gt(other_expr),
-                    RestrictedOp::GtEq => column_expr.clone().gt_eq(other_expr),
+                    RestrictedOp::Gt => column_expr
+                        .clone()
+                        .gt(other_expr)
+                        .and(column_expr.is_not_null()),
+                    RestrictedOp::GtEq => column_expr
+                        .clone()
+                        .gt_eq(other_expr)
+                        .and(column_expr.is_not_null()),
                     _ => unreachable!(),
                 };
                 return Ok(base);
@@ -325,8 +331,12 @@ impl PartitionExpr {
                 let other_expr = self.lhs.try_as_logical_expr()?;
                 let column_expr = self.rhs.try_as_logical_expr()?;
                 let base = match self.op {
-                    RestrictedOp::Lt => other_expr.lt(column_expr.clone()),
-                    RestrictedOp::LtEq => other_expr.lt_eq(column_expr.clone()),
+                    RestrictedOp::Lt => other_expr
+                        .lt(column_expr.clone())
+                        .and(column_expr.is_not_null()),
+                    RestrictedOp::LtEq => other_expr
+                        .lt_eq(column_expr.clone())
+                        .and(column_expr.is_not_null()),
                     RestrictedOp::Gt => {
                         other_expr.gt(column_expr.clone()).or(column_expr.is_null())
                     }
@@ -565,7 +575,7 @@ mod tests {
                 .try_as_logical_expr()
                 .unwrap()
                 .to_string(),
-            "a > Int64(10)"
+            "a > Int64(10) AND a IS NOT NULL"
         );
 
         // Test Gt with column on LHS
@@ -576,7 +586,7 @@ mod tests {
         );
         assert_eq!(
             gt_expr.try_as_logical_expr().unwrap().to_string(),
-            "a > Int64(10)"
+            "a > Int64(10) AND a IS NOT NULL"
         );
 
         // Test Gt with column on RHS
@@ -601,7 +611,7 @@ mod tests {
         );
         assert_eq!(
             gteq_expr.try_as_logical_expr().unwrap().to_string(),
-            "a >= Int64(10)"
+            "a >= Int64(10) AND a IS NOT NULL"
         );
 
         // Test LtEq with column on LHS
@@ -638,7 +648,7 @@ mod tests {
                 .try_as_logical_expr()
                 .unwrap()
                 .to_string(),
-            "a >= Int64(10)"
+            "a >= Int64(10) AND a IS NOT NULL"
         );
 
         let and_expr = PartitionExpr::new(
@@ -656,7 +666,7 @@ mod tests {
         );
         assert_eq!(
             and_expr.try_as_logical_expr().unwrap().to_string(),
-            "(a <= Int64(10) OR a IS NULL) AND b > Int64(5)"
+            "(a <= Int64(10) OR a IS NULL) AND b > Int64(5) AND b IS NOT NULL"
         );
 
         let and_expr = PartitionExpr::new(
@@ -674,7 +684,7 @@ mod tests {
         );
         assert_eq!(
             and_expr.try_as_logical_expr().unwrap().to_string(),
-            "(a <= Int64(10) OR a IS NULL) AND a > Int64(5)"
+            "(a <= Int64(10) OR a IS NULL) AND a > Int64(5) AND a IS NOT NULL"
         );
 
         let and_expr_strict_lower = PartitionExpr::new(
@@ -695,7 +705,7 @@ mod tests {
                 .try_as_logical_expr()
                 .unwrap()
                 .to_string(),
-            "(a < Int64(10) OR a IS NULL) AND a >= Int64(5)"
+            "(a < Int64(10) OR a IS NULL) AND a >= Int64(5) AND a IS NOT NULL"
         );
 
         let and_expr_rhs_column = PartitionExpr::new(
@@ -716,7 +726,7 @@ mod tests {
                 .try_as_logical_expr()
                 .unwrap()
                 .to_string(),
-            "(a <= Int64(10) OR a IS NULL) AND a > Int64(5)"
+            "(a <= Int64(10) OR a IS NULL) AND a > Int64(5) AND a IS NOT NULL"
         );
 
         let or_expr_same_column = PartitionExpr::new(
@@ -737,7 +747,7 @@ mod tests {
                 .try_as_logical_expr()
                 .unwrap()
                 .to_string(),
-            "a <= Int64(10) OR a IS NULL OR a > Int64(5)"
+            "a <= Int64(10) OR a IS NULL OR a > Int64(5) AND a IS NOT NULL"
         );
     }
 
