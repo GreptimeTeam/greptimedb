@@ -16,9 +16,9 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions, create_dir_all, remove_dir_all};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use common_telemetry::{info, warn};
+use common_time::util::current_time_millis;
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
@@ -59,7 +59,7 @@ impl CsvDumpMetadata {
             actions,
             partitions,
             tables,
-            started_at_unix_ms: current_unix_millis(),
+            started_at_unix_ms: current_time_millis(),
         }
     }
 }
@@ -298,13 +298,6 @@ fn build_run_dir(metadata: &CsvDumpMetadata) -> PathBuf {
         metadata.target, metadata.seed, metadata.actions, metadata.started_at_unix_ms, suffix
     );
     base.join(name)
-}
-
-fn current_unix_millis() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as i64)
-        .unwrap_or(0)
 }
 
 #[cfg(test)]

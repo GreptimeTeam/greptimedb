@@ -24,6 +24,8 @@ pub mod pod_failure;
 pub mod procedure;
 #[cfg(feature = "unstable")]
 pub mod process;
+/// SQL dump writer utilities for fuzz tests.
+pub mod sql_dump_writer;
 pub mod wait;
 
 use std::env;
