@@ -248,7 +248,7 @@ async fn write_loop<R: Rng + 'static>(
             let full_headers = table_ctx
                 .columns
                 .iter()
-                .map(|column| column.name.value.to_string())
+                .map(|column| column.name.value.clone())
                 .collect::<Vec<_>>();
 
             let now = Instant::now();
