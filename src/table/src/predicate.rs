@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use common_telemetry::{error, warn};
+use common_telemetry::{debug, warn};
 use common_time::Timestamp;
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
@@ -167,7 +167,8 @@ impl Predicate {
                     }
                 },
                 Err(e) => {
-                    error!(e; "Failed to create predicate for expr");
+                    // since dynamic filter exprs could be complex, it's possible that `PruningPredicate::try_new` fails to prove anything from it. In that case, we just log it and skip pruning with this expr.
+                    debug!("Failed to create predicate for expr: {e:?}");
                 }
             }
         }
