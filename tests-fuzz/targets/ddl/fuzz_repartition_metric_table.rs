@@ -138,6 +138,7 @@ async fn create_metric_tables<R: Rng + 'static>(
     TableContextRef,
     BTreeMap<Ident, TableContextRef>,
     HashMap<String, String>,
+    String,
 )> {
     let create_physical_expr = generate_create_physical_table_expr(partitions, rng)?;
     let translator = CreateTableExprTranslator;
@@ -195,7 +196,12 @@ async fn create_metric_tables<R: Rng + 'static>(
         }
     );
 
-    Ok((physical_table_ctx, logical_tables, create_logical_sqls))
+    Ok((
+        physical_table_ctx,
+        logical_tables,
+        create_logical_sqls,
+        create_physical_sql,
+    ))
 }
 
 async fn execute_insert_with_retry(ctx: &FuzzContext, sql: &str) -> Result<()> {
@@ -391,7 +397,7 @@ async fn execute_repartition_metric_table(ctx: FuzzContext, input: FuzzInput) ->
     let mut rng = ChaChaRng::seed_from_u64(input.seed);
     let clock = Arc::new(Mutex::new(Timestamp::current_millis()));
 
-    let (mut physical_table_ctx, logical_tables, create_logical_sqls) =
+    let (mut physical_table_ctx, logical_tables, create_logical_sqls, create_physical_sql) =
         create_metric_tables(&ctx, &mut rng, input.partitions, input.tables).await?;
 
     let mut inserted_rows = HashMap::with_capacity(logical_tables.len());
@@ -412,6 +418,11 @@ async fn execute_repartition_metric_table(ctx: FuzzContext, input: FuzzInput) ->
         .collect::<Vec<_>>();
 
     let mut sql_dump_session = sql_dump_session;
+    sql_dump_session.append_sql(
+        &physical_table_ctx.name.to_string(),
+        &create_physical_sql,
+        Some("kind=create_physical_table"),
+    )?;
     for table_name in &logical_table_names {
         if let Some(create_sql) = create_logical_sqls.get(table_name) {
             sql_dump_session.append_sql(
@@ -481,6 +492,18 @@ async fn execute_repartition_metric_table(ctx: FuzzContext, input: FuzzInput) ->
         {
             let mut state = shared_state.lock().unwrap();
             if let Some(sql_dump_session) = state.sql_dump_session.as_mut() {
+                let repartition_comment = format!(
+                    "kind=repartition table={} action_idx={} started_at_ms={} elapsed_ms={}",
+                    physical_table_ctx.name,
+                    i + 1,
+                    started_at_ms,
+                    elapsed.as_millis()
+                );
+                sql_dump_session.append_sql(
+                    &physical_table_ctx.name.to_string(),
+                    &sql,
+                    Some(&repartition_comment),
+                )?;
                 let event = format!(
                     "repartition action_idx={} started_at_ms={} elapsed_ms={} sql={}",
                     i + 1,
