@@ -23,7 +23,7 @@ use pipeline::{ContextOpt, ContextReq};
 use prost::DecodeError;
 
 use crate::http::{PromValidationMode, validate_label_name};
-use crate::proto::PromLabel;
+use crate::proto::{PromLabel, RawBytes};
 use crate::repeated_field::Clear;
 
 // Prometheus remote write context
@@ -100,7 +100,7 @@ pub struct TableBuilder {
     /// Rows written.
     rows: Vec<Row>,
     /// Indices of columns inside `schema`.
-    col_indexes: HashMap<Vec<u8>, usize>,
+    col_indexes: HashMap<RawBytes, usize>,
 }
 
 impl Default for TableBuilder {
@@ -112,8 +112,8 @@ impl Default for TableBuilder {
 impl TableBuilder {
     pub(crate) fn with_capacity(cols: usize, rows: usize) -> Self {
         let mut col_indexes = HashMap::with_capacity_and_hasher(cols, Default::default());
-        col_indexes.insert(greptime_timestamp().as_bytes().to_owned(), 0);
-        col_indexes.insert(greptime_value().as_bytes().to_owned(), 1);
+        col_indexes.insert(greptime_timestamp().as_bytes(), 0);
+        col_indexes.insert(greptime_value().as_bytes(), 1);
 
         let mut schema = Vec::with_capacity(cols);
         schema.push(time_index_column_schema(
@@ -160,13 +160,12 @@ impl TableBuilder {
             }
             let tag_name = prom_validation_mode.decode_label_name(raw_tag_name)?;
             self.schema.push(ColumnSchema {
-                column_name: tag_name.to_string(),
+                column_name: tag_name.to_owned(),
                 datatype: ColumnDataType::String as i32,
                 semantic_type: SemanticType::Tag as i32,
                 ..Default::default()
             });
-            self.col_indexes
-                .insert(tag_name.as_bytes().to_vec(), tag_num);
+            self.col_indexes.insert(raw_tag_name, tag_num);
 
             row.push(Value {
                 value_data: tag_value,
