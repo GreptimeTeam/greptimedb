@@ -66,7 +66,7 @@ impl SqlDumpSession {
         I: IntoIterator<Item = T>,
         T: AsRef<str>,
     {
-        let event_entry = format!("-- event={}", event);
+        let event_entry = format_comment(&format!("event={event}"));
         for table in tables {
             self.push_entry(table.as_ref(), event_entry.clone())?;
         }
@@ -128,10 +128,18 @@ impl SqlDumpSession {
 fn format_sql_entry(sql: &str, comment: Option<&str>) -> String {
     let normalized_sql = normalize_sql(sql);
     if let Some(comment) = comment {
-        format!("-- {comment}\n{normalized_sql}")
+        format!("{}\n{normalized_sql}", format_comment(comment))
     } else {
         normalized_sql
     }
+}
+
+fn format_comment(comment: &str) -> String {
+    comment
+        .lines()
+        .map(|line| format!("-- {line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn normalize_sql(sql: &str) -> String {
@@ -204,8 +212,32 @@ mod tests {
 
         let content_a = std::fs::read_to_string(run_dir.join("metric-a.trace.sql")).unwrap();
         let content_b = std::fs::read_to_string(run_dir.join("metric-b.trace.sql")).unwrap();
-        assert!(content_a.contains("-- event=repartition action_idx=3 ts="));
-        assert!(content_b.contains("-- event=repartition action_idx=3 ts="));
+        assert!(content_a.contains("-- event=repartition action_idx=3"));
+        assert!(content_b.contains("-- event=repartition action_idx=3"));
+    }
+
+    #[test]
+    fn test_multiline_comment_is_prefixed_per_line() {
+        let run_dir = std::env::temp_dir().join(format!(
+            "tests-fuzz-sql-dump-comment-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        ));
+
+        let mut session = SqlDumpSession::new_with_buffer_limit(run_dir.clone(), 1024).unwrap();
+        session
+            .append_sql(
+                "metric-a",
+                "INSERT INTO t VALUES(1)",
+                Some("kind=insert\nstarted_at_ms=1 elapsed_ms=2"),
+            )
+            .unwrap();
+        session.flush_all().unwrap();
+
+        let content = std::fs::read_to_string(run_dir.join("metric-a.trace.sql")).unwrap();
+        assert!(content.contains("-- kind=insert\n-- started_at_ms=1 elapsed_ms=2"));
     }
 
     #[test]

@@ -134,7 +134,11 @@ async fn create_metric_tables<R: Rng + 'static>(
     rng: &mut R,
     partitions: usize,
     table_count: usize,
-) -> Result<(TableContextRef, BTreeMap<Ident, TableContextRef>)> {
+) -> Result<(
+    TableContextRef,
+    BTreeMap<Ident, TableContextRef>,
+    HashMap<String, String>,
+)> {
     let create_physical_expr = generate_create_physical_table_expr(partitions, rng)?;
     let translator = CreateTableExprTranslator;
     let create_physical_sql = translator.translate(&create_physical_expr)?;
@@ -154,6 +158,7 @@ async fn create_metric_tables<R: Rng + 'static>(
     );
 
     let mut logical_tables = BTreeMap::new();
+    let mut create_logical_sqls = HashMap::new();
     let max_attempts = table_count * 3;
     for _ in 0..max_attempts {
         if logical_tables.len() >= table_count {
@@ -179,6 +184,7 @@ async fn create_metric_tables<R: Rng + 'static>(
             })?;
         info!("Create logical table: {create_logical_sql}, result: {result:?}");
         let logical_ctx = Arc::new(TableContext::from(&create_logical_expr));
+        create_logical_sqls.insert(logical_ctx.name.to_string(), create_logical_sql);
         logical_tables.insert(logical_ctx.name.clone(), logical_ctx);
     }
 
@@ -189,7 +195,7 @@ async fn create_metric_tables<R: Rng + 'static>(
         }
     );
 
-    Ok((physical_table_ctx, logical_tables))
+    Ok((physical_table_ctx, logical_tables, create_logical_sqls))
 }
 
 async fn execute_insert_with_retry(ctx: &FuzzContext, sql: &str) -> Result<()> {
@@ -385,7 +391,7 @@ async fn execute_repartition_metric_table(ctx: FuzzContext, input: FuzzInput) ->
     let mut rng = ChaChaRng::seed_from_u64(input.seed);
     let clock = Arc::new(Mutex::new(Timestamp::current_millis()));
 
-    let (mut physical_table_ctx, logical_tables) =
+    let (mut physical_table_ctx, logical_tables, create_logical_sqls) =
         create_metric_tables(&ctx, &mut rng, input.partitions, input.tables).await?;
 
     let mut inserted_rows = HashMap::with_capacity(logical_tables.len());
@@ -404,6 +410,17 @@ async fn execute_repartition_metric_table(ctx: FuzzContext, input: FuzzInput) ->
         .values()
         .map(|table_ctx| table_ctx.name.to_string())
         .collect::<Vec<_>>();
+
+    let mut sql_dump_session = sql_dump_session;
+    for table_name in &logical_table_names {
+        if let Some(create_sql) = create_logical_sqls.get(table_name) {
+            sql_dump_session.append_sql(
+                table_name,
+                create_sql,
+                Some("kind=create_logical_table"),
+            )?;
+        }
+    }
 
     let shared_state = Arc::new(Mutex::new(SharedState {
         clock,
