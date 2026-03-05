@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 use arbitrary::{Arbitrary, Unstructured};
 use common_telemetry::{info, warn};
 use common_time::Timestamp;
+use common_time::util::current_time_millis;
 use libfuzzer_sys::fuzz_target;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaChaRng;
@@ -50,6 +51,7 @@ use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
 use tests_fuzz::translator::mysql::insert_expr::InsertIntoExprTranslator;
 use tests_fuzz::translator::mysql::repartition_expr::RepartitionExprTranslator;
 use tests_fuzz::utils::csv_dump_writer::{CsvDumpMetadata, CsvDumpSession};
+use tests_fuzz::utils::sql_dump_writer::SqlDumpSession;
 use tests_fuzz::utils::{
     Connections, get_fuzz_override, get_gt_fuzz_input_max_alter_actions,
     get_gt_fuzz_input_max_tables, init_greptime_connections_via_env,
@@ -218,6 +220,7 @@ struct SharedState {
     clock: Arc<Mutex<Timestamp>>,
     inserted_rows: HashMap<String, u64>,
     csv_dump_session: Option<CsvDumpSession>,
+    sql_dump_session: Option<SqlDumpSession>,
     running: bool,
 }
 
@@ -245,24 +248,33 @@ async fn write_loop<R: Rng + 'static>(
             let sql = translator.translate(&insert_expr)?;
             let inserted = insert_expr.values_list.len() as u64;
             let csv_records = InsertExprToCsvRecordsTranslator.translate(&insert_expr)?;
+            let table_name = table_ctx.name.to_string();
             let full_headers = table_ctx
                 .columns
                 .iter()
                 .map(|column| column.name.value.clone())
                 .collect::<Vec<_>>();
 
+            let started_at_ms = current_time_millis();
             let now = Instant::now();
             execute_insert_with_retry(&ctx, &sql).await?;
-            info!("Execute insert sql: {sql}, elapsed: {:?}", now.elapsed());
+            let elapsed = now.elapsed();
+            info!("Execute insert sql: {sql}, elapsed: {elapsed:?}");
 
             let mut state = shared_state.lock().unwrap();
             if let Some(csv_dump_session) = state.csv_dump_session.as_mut() {
                 csv_dump_session.append(csv_records, full_headers)?;
             }
-            *state
-                .inserted_rows
-                .entry(table_ctx.name.to_string())
-                .or_insert(0) += inserted;
+            if let Some(sql_dump_session) = state.sql_dump_session.as_mut() {
+                let comment = format!(
+                    "kind=insert table={} started_at_ms={} elapsed_ms={}",
+                    table_name,
+                    started_at_ms,
+                    elapsed.as_millis()
+                );
+                sql_dump_session.append_sql(&table_name, &sql, Some(&comment))?;
+            }
+            *state.inserted_rows.entry(table_name).or_insert(0) += inserted;
         }
 
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -380,18 +392,24 @@ async fn execute_repartition_metric_table(ctx: FuzzContext, input: FuzzInput) ->
     for table_ctx in logical_tables.values() {
         inserted_rows.insert(table_ctx.name.to_string(), 0);
     }
-    let csv_dump_session = Some(CsvDumpSession::new(CsvDumpMetadata::new(
+    let csv_dump_session = CsvDumpSession::new(CsvDumpMetadata::new(
         "fuzz_repartition_metric_table",
         input.seed,
         input.actions,
         input.partitions,
         input.tables,
-    ))?);
+    ))?;
+    let sql_dump_session = SqlDumpSession::new(csv_dump_session.run_dir.clone())?;
+    let logical_table_names = logical_tables
+        .values()
+        .map(|table_ctx| table_ctx.name.to_string())
+        .collect::<Vec<_>>();
 
     let shared_state = Arc::new(Mutex::new(SharedState {
         clock,
         inserted_rows,
-        csv_dump_session,
+        csv_dump_session: Some(csv_dump_session),
+        sql_dump_session: Some(sql_dump_session),
         running: true,
     }));
     let writer_rng = ChaChaRng::seed_from_u64(input.seed ^ 0xA5A5_A5A5_A5A5_A5A5);
@@ -417,11 +435,14 @@ async fn execute_repartition_metric_table(ctx: FuzzContext, input: FuzzInput) ->
         let translator = RepartitionExprTranslator;
         let sql = translator.translate(&repartition_expr)?;
         info!("Repartition sql: {sql}");
+        let started_at_ms = current_time_millis();
+        let now = Instant::now();
         let result = sqlx::query(&sql)
             .execute(&ctx.greptime)
             .await
             .context(error::ExecuteQuerySnafu { sql: &sql })?;
-        info!("Repartition result: {result:?}");
+        let elapsed = now.elapsed();
+        info!("Repartition result: {result:?}, elapsed: {elapsed:?}");
 
         physical_table_ctx = Arc::new(
             Arc::unwrap_or_clone(physical_table_ctx)
@@ -439,16 +460,37 @@ async fn execute_repartition_metric_table(ctx: FuzzContext, input: FuzzInput) ->
             physical_table_ctx.partition.as_ref().unwrap(),
             &partition_entries,
         )?;
+
+        {
+            let mut state = shared_state.lock().unwrap();
+            if let Some(sql_dump_session) = state.sql_dump_session.as_mut() {
+                let event = format!(
+                    "repartition action_idx={} started_at_ms={} elapsed_ms={} sql={}",
+                    i + 1,
+                    started_at_ms,
+                    elapsed.as_millis(),
+                    sql
+                );
+                sql_dump_session.broadcast_event(logical_table_names.iter(), &event)?;
+            }
+        }
     }
 
     shared_state.lock().unwrap().running = false;
     writer_task.await.unwrap().unwrap();
-    let (inserted_rows, mut csv_dump_session) = {
+    let (inserted_rows, mut csv_dump_session, mut sql_dump_session) = {
         let mut state = shared_state.lock().unwrap();
         if let Some(csv_dump_session) = state.csv_dump_session.as_mut() {
             csv_dump_session.flush_all()?;
         }
-        (state.inserted_rows.clone(), state.csv_dump_session.take())
+        if let Some(sql_dump_session) = state.sql_dump_session.as_mut() {
+            sql_dump_session.flush_all()?;
+        }
+        (
+            state.inserted_rows.clone(),
+            state.csv_dump_session.take(),
+            state.sql_dump_session.take(),
+        )
     };
 
     let run_result = async {
@@ -476,6 +518,14 @@ async fn execute_repartition_metric_table(ctx: FuzzContext, input: FuzzInput) ->
                 );
             }
         }
+    }
+    if let Some(sql_dump_session) = sql_dump_session.take()
+        && run_result.is_err()
+    {
+        warn!(
+            "Keep sql dump directory for failure analysis, path: {}",
+            sql_dump_session.run_dir.display()
+        );
     }
 
     ctx.close().await;

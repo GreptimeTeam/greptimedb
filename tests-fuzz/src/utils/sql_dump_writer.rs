@@ -17,7 +17,6 @@ use std::fs::{OpenOptions, create_dir_all};
 use std::io::Write;
 use std::path::PathBuf;
 
-use common_time::util::current_time_millis;
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
@@ -55,8 +54,8 @@ impl SqlDumpSession {
     }
 
     /// Appends one SQL statement for a logical table.
-    pub fn append_sql(&mut self, table: &str, sql: &str) -> Result<()> {
-        let entry = normalize_sql(sql);
+    pub fn append_sql(&mut self, table: &str, sql: &str, comment: Option<&str>) -> Result<()> {
+        let entry = format_sql_entry(sql, comment);
         self.push_entry(table, entry)?;
         Ok(())
     }
@@ -67,7 +66,7 @@ impl SqlDumpSession {
         I: IntoIterator<Item = T>,
         T: AsRef<str>,
     {
-        let event_entry = format!("-- event={} ts={}", event, current_time_millis());
+        let event_entry = format!("-- event={}", event);
         for table in tables {
             self.push_entry(table.as_ref(), event_entry.clone())?;
         }
@@ -126,6 +125,15 @@ impl SqlDumpSession {
     }
 }
 
+fn format_sql_entry(sql: &str, comment: Option<&str>) -> String {
+    let normalized_sql = normalize_sql(sql);
+    if let Some(comment) = comment {
+        format!("-- {comment}\n{normalized_sql}")
+    } else {
+        normalized_sql
+    }
+}
+
 fn normalize_sql(sql: &str) -> String {
     let trimmed = sql.trim_end();
     if trimmed.ends_with(';') {
@@ -165,11 +173,16 @@ mod tests {
 
         let mut session = SqlDumpSession::new_with_buffer_limit(run_dir.clone(), 1024).unwrap();
         session
-            .append_sql("metric-a", "INSERT INTO t VALUES(1)")
+            .append_sql(
+                "metric-a",
+                "INSERT INTO t VALUES(1)",
+                Some("kind=insert elapsed_ms=10"),
+            )
             .unwrap();
         session.flush_all().unwrap();
 
         let content = std::fs::read_to_string(run_dir.join("metric-a.trace.sql")).unwrap();
+        assert!(content.contains("-- kind=insert elapsed_ms=10"));
         assert!(content.contains("INSERT INTO t VALUES(1);"));
     }
 
@@ -207,7 +220,7 @@ mod tests {
 
         let mut session = SqlDumpSession::new_with_buffer_limit(run_dir.clone(), 1).unwrap();
         session
-            .append_sql("metric-a", "INSERT INTO t VALUES(1)")
+            .append_sql("metric-a", "INSERT INTO t VALUES(1)", None)
             .unwrap();
 
         assert!(run_dir.join("metric-a.trace.sql").exists());
