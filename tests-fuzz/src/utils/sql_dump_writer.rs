@@ -61,14 +61,14 @@ impl SqlDumpSession {
     }
 
     /// Broadcasts one comment event to all table trace files.
-    pub fn broadcast_event<I, T>(&mut self, tables: I, event: &str) -> Result<()>
+    pub fn broadcast_event<I, T>(&mut self, tables: I, event: &str, sql: &str) -> Result<()>
     where
         I: IntoIterator<Item = T>,
         T: AsRef<str>,
     {
-        let event_entry = format_comment(&format!("event={event}"));
+        let entry = format_sql_entry(sql, Some(event));
         for table in tables {
-            self.push_entry(table.as_ref(), event_entry.clone())?;
+            self.push_entry(table.as_ref(), entry.clone())?;
         }
         Ok(())
     }
