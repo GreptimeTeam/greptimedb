@@ -31,6 +31,7 @@ use crate::handlers::ProcedureServiceHandlerRef;
 use crate::helper::cast_u64;
 
 const DEFAULT_GC_TIMEOUT: Duration = Duration::from_secs(60);
+const DEFAULT_FULL_FILE_LISTING: bool = false;
 
 #[admin_fn(
     name = GcRegionsFunction,
@@ -43,30 +44,12 @@ pub(crate) async fn gc_regions(
     _ctx: &QueryContextRef,
     params: &[ValueRef<'_>],
 ) -> Result<Value> {
-    ensure!(
-        !params.is_empty(),
-        InvalidFuncArgsSnafu {
-            err_msg: "The length of the args is not correct, expect at least 1 region id, have 0"
-                .to_string(),
-        }
-    );
-
-    let mut region_ids = Vec::with_capacity(params.len());
-    for param in params {
-        let Some(region_id) = cast_u64(param)? else {
-            return UnsupportedInputDataTypeSnafu {
-                function: "gc_regions",
-                datatypes: params.iter().map(|v| v.data_type()).collect::<Vec<_>>(),
-            }
-            .fail();
-        };
-        region_ids.push(region_id);
-    }
+    let (region_ids, full_file_listing) = parse_gc_regions_params(params)?;
 
     let resp = procedure_service_handler
         .gc_regions(GcRegionsRequest {
             region_ids,
-            full_file_listing: false,
+            full_file_listing,
             timeout: DEFAULT_GC_TIMEOUT,
         })
         .await?;
@@ -85,11 +68,68 @@ pub(crate) async fn gc_table(
     query_ctx: &QueryContextRef,
     params: &[ValueRef<'_>],
 ) -> Result<Value> {
+    let (catalog_name, schema_name, table_name, full_file_listing) =
+        parse_gc_table_params(params, query_ctx)?;
+
+    let resp = procedure_service_handler
+        .gc_table(GcTableRequest {
+            catalog_name,
+            schema_name,
+            table_name,
+            full_file_listing,
+            timeout: DEFAULT_GC_TIMEOUT,
+        })
+        .await?;
+
+    Ok(Value::from(resp.processed_regions))
+}
+
+fn parse_gc_regions_params(params: &[ValueRef<'_>]) -> Result<(Vec<u64>, bool)> {
     ensure!(
-        params.len() == 1,
+        !params.is_empty(),
+        InvalidFuncArgsSnafu {
+            err_msg: "The length of the args is not correct, expect at least 1 region id, have 0"
+                .to_string(),
+        }
+    );
+
+    let (full_file_listing, region_params) = match params.last() {
+        Some(ValueRef::Boolean(value)) => (*value, &params[..params.len() - 1]),
+        _ => (DEFAULT_FULL_FILE_LISTING, params),
+    };
+
+    ensure!(
+        !region_params.is_empty(),
+        InvalidFuncArgsSnafu {
+            err_msg: "The length of the args is not correct, expect at least 1 region id"
+                .to_string(),
+        }
+    );
+
+    let mut region_ids = Vec::with_capacity(region_params.len());
+    for param in region_params {
+        let Some(region_id) = cast_u64(param)? else {
+            return UnsupportedInputDataTypeSnafu {
+                function: "gc_regions",
+                datatypes: params.iter().map(|v| v.data_type()).collect::<Vec<_>>(),
+            }
+            .fail();
+        };
+        region_ids.push(region_id);
+    }
+
+    Ok((region_ids, full_file_listing))
+}
+
+fn parse_gc_table_params(
+    params: &[ValueRef<'_>],
+    query_ctx: &QueryContextRef,
+) -> Result<(String, String, String, bool)> {
+    ensure!(
+        matches!(params.len(), 1 | 2),
         InvalidFuncArgsSnafu {
             err_msg: format!(
-                "The length of the args is not correct, expect 1, have: {}",
+                "The length of the args is not correct, expect 1 or 2, have: {}",
                 params.len()
             ),
         }
@@ -103,37 +143,78 @@ pub(crate) async fn gc_table(
         .fail();
     };
 
+    let full_file_listing = if params.len() == 2 {
+        let ValueRef::Boolean(value) = params[1] else {
+            return UnsupportedInputDataTypeSnafu {
+                function: "gc_table",
+                datatypes: params.iter().map(|v| v.data_type()).collect::<Vec<_>>(),
+            }
+            .fail();
+        };
+        value
+    } else {
+        DEFAULT_FULL_FILE_LISTING
+    };
+
     let (catalog_name, schema_name, table_name) =
         session::table_name::table_name_to_full_name(table_name, query_ctx)
             .map_err(BoxedError::new)
             .context(TableMutationSnafu)?;
 
-    let resp = procedure_service_handler
-        .gc_table(GcTableRequest {
-            catalog_name,
-            schema_name,
-            table_name,
-            full_file_listing: false,
-            timeout: DEFAULT_GC_TIMEOUT,
-        })
-        .await?;
-
-    Ok(Value::from(resp.processed_regions))
+    Ok((catalog_name, schema_name, table_name, full_file_listing))
 }
 
 fn gc_regions_signature() -> Signature {
-    Signature::variadic(
-        ConcreteDataType::numerics()
-            .into_iter()
-            .map(|dt| dt.as_arrow_type())
-            .collect(),
-        Volatility::Immutable,
-    )
+    Signature::variadic_any(Volatility::Immutable)
 }
 
 fn gc_table_signature() -> Signature {
     Signature::one_of(
-        vec![TypeSignature::Uniform(1, vec![ArrowDataType::Utf8])],
+        vec![
+            TypeSignature::Uniform(1, vec![ArrowDataType::Utf8]),
+            TypeSignature::Exact(vec![ArrowDataType::Utf8, ArrowDataType::Boolean]),
+        ],
         Volatility::Immutable,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use session::context::QueryContext;
+
+    use super::*;
+
+    #[test]
+    fn test_parse_gc_regions_params_with_full_file_listing() {
+        let params = vec![
+            ValueRef::UInt64(1),
+            ValueRef::UInt64(2),
+            ValueRef::Boolean(true),
+        ];
+        let (region_ids, full_file_listing) = parse_gc_regions_params(&params).unwrap();
+
+        assert_eq!(region_ids, vec![1, 2]);
+        assert!(full_file_listing);
+    }
+
+    #[test]
+    fn test_parse_gc_regions_params_default_full_file_listing() {
+        let params = vec![ValueRef::UInt64(1), ValueRef::UInt32(2)];
+        let (region_ids, full_file_listing) = parse_gc_regions_params(&params).unwrap();
+
+        assert_eq!(region_ids, vec![1, 2]);
+        assert!(!full_file_listing);
+    }
+
+    #[test]
+    fn test_parse_gc_table_params_with_full_file_listing() {
+        let params = vec![ValueRef::String("public.t"), ValueRef::Boolean(true)];
+        let (catalog, schema, table, full_file_listing) =
+            parse_gc_table_params(&params, &QueryContext::arc()).unwrap();
+
+        assert_eq!(catalog, "greptime");
+        assert_eq!(schema, "public");
+        assert_eq!(table, "t");
+        assert!(full_file_listing);
+    }
 }

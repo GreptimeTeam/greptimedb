@@ -276,6 +276,7 @@ impl Inner {
     }
 
     async fn gc_regions(&self, request: MetaGcRegionsRequest) -> Result<MetaGcResponse> {
+        let timeout = request.timeout;
         let req = GcRegionsRequest {
             header: Some(RequestHeader {
                 protocol_version: 0,
@@ -285,7 +286,7 @@ impl Inner {
             }),
             region_ids: request.region_ids,
             full_file_listing: request.full_file_listing,
-            timeout_secs: request.timeout.as_secs() as u32,
+            timeout_secs: timeout.as_secs() as u32,
         };
 
         let resp: GcRegionsResponse = self
@@ -293,7 +294,7 @@ impl Inner {
                 "gc_regions",
                 move |mut client| {
                     let mut req = Request::new(req.clone());
-                    req.set_timeout(self.timeout);
+                    req.set_timeout(timeout);
                     async move { client.gc_regions(req).await.map(|res| res.into_inner()) }
                 },
                 |resp: &GcRegionsResponse| &resp.header,
@@ -310,6 +311,7 @@ impl Inner {
     }
 
     async fn gc_table(&self, request: MetaGcTableRequest) -> Result<MetaGcResponse> {
+        let timeout = request.timeout;
         let req = GcTableRequest {
             header: Some(RequestHeader {
                 protocol_version: 0,
@@ -321,7 +323,7 @@ impl Inner {
             schema_name: request.schema_name,
             table_name: request.table_name,
             full_file_listing: request.full_file_listing,
-            timeout_secs: request.timeout.as_secs() as u32,
+            timeout_secs: timeout.as_secs() as u32,
         };
 
         let resp: GcTableResponse = self
@@ -329,7 +331,7 @@ impl Inner {
                 "gc_table",
                 move |mut client| {
                     let mut req = Request::new(req.clone());
-                    req.set_timeout(self.timeout);
+                    req.set_timeout(timeout);
                     async move { client.gc_table(req).await.map(|res| res.into_inner()) }
                 },
                 |resp: &GcTableResponse| &resp.header,

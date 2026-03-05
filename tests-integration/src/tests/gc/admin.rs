@@ -14,8 +14,6 @@
 
 //! Integration tests for `ADMIN GC_TABLE` and `ADMIN GC_REGIONS` functions.
 
-use std::time::Duration;
-
 use client::OutputData;
 use common_meta::key::table_repart::TableRepartValue;
 use common_recordbatch::RecordBatches;
@@ -92,9 +90,6 @@ async fn test_admin_gc_table(store_type: &StorageType) {
     // Step 3: Trigger compaction to create garbage SST files
     let compact_sql = "ADMIN COMPACT_TABLE('test_admin_gc_table')";
     execute_sql(&instance, compact_sql).await;
-
-    // Wait for compaction to complete
-    tokio::time::sleep(Duration::from_secs(2)).await;
 
     // List SST files after compaction (should have both old and new files)
     let sst_files_after_compaction = list_sst_files(&test_context).await;
@@ -215,9 +210,6 @@ async fn test_admin_gc_regions(store_type: &StorageType) {
     // Step 3: Trigger compaction to create garbage SST files
     let compact_sql = "ADMIN COMPACT_TABLE('test_admin_gc_regions')";
     execute_sql(&instance, compact_sql).await;
-
-    // Wait for compaction to complete
-    tokio::time::sleep(Duration::from_secs(2)).await;
 
     // List SST files after compaction (should have both old and new files)
     let sst_files_after_compaction = list_sst_files(&test_context).await;
@@ -370,7 +362,6 @@ async fn test_admin_gc_missing_cases(store_type: &StorageType) {
     let sst_before_compaction = list_sst_files(&test_context).await;
     let compact_sql = format!("ADMIN COMPACT_TABLE('{multi_region_table}')");
     execute_sql(&instance, &compact_sql).await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
     let sst_after_compaction = list_sst_files(&test_context).await;
     assert!(sst_after_compaction.len() >= sst_before_compaction.len());
     let region_ids = fetch_region_ids(&instance, multi_region_table).await;
