@@ -57,6 +57,7 @@ use tests_fuzz::utils::{
     get_gt_fuzz_input_max_tables, init_greptime_connections_via_env,
 };
 use tests_fuzz::validator::row::count_values;
+use tokio::sync::{mpsc, oneshot};
 
 #[derive(Clone)]
 struct FuzzContext {
@@ -236,14 +237,49 @@ struct SharedState {
     running: bool,
 }
 
+enum WriterControl {
+    Barrier {
+        epoch: usize,
+        ack: oneshot::Sender<()>,
+    },
+    Resume {
+        epoch: usize,
+    },
+    Stop,
+}
+
+fn touch_writer_control_skeleton() {
+    let (ack, _ack_rx) = oneshot::channel();
+    let _barrier = WriterControl::Barrier { epoch: 0, ack };
+    let _resume = WriterControl::Resume { epoch: 0 };
+    let _stop = WriterControl::Stop;
+}
+
 async fn write_loop<R: Rng + 'static>(
     mut rng: R,
     ctx: FuzzContext,
     logical_tables: BTreeMap<Ident, TableContextRef>,
     shared_state: Arc<Mutex<SharedState>>,
+    mut control_rx: mpsc::UnboundedReceiver<WriterControl>,
 ) -> Result<()> {
     info!("Start write loop");
     loop {
+        while let Ok(control) = control_rx.try_recv() {
+            match control {
+                WriterControl::Barrier { epoch, ack } => {
+                    info!("Writer received barrier control, epoch: {epoch}");
+                    let _ = ack.send(());
+                }
+                WriterControl::Resume { epoch } => {
+                    info!("Writer received resume control, epoch: {epoch}");
+                }
+                WriterControl::Stop => {
+                    info!("Writer received stop control");
+                    return Ok(());
+                }
+            }
+        }
+
         let (running, clock) = {
             let state = shared_state.lock().unwrap();
             (state.running, state.clock.clone())
@@ -393,6 +429,7 @@ impl Arbitrary<'_> for FuzzInput {
 }
 
 async fn execute_repartition_metric_table(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
+    touch_writer_control_skeleton();
     info!("input: {input:?}");
     let mut rng = ChaChaRng::seed_from_u64(input.seed);
     let clock = Arc::new(Mutex::new(Timestamp::current_millis()));
@@ -441,11 +478,13 @@ async fn execute_repartition_metric_table(ctx: FuzzContext, input: FuzzInput) ->
         running: true,
     }));
     let writer_rng = ChaChaRng::seed_from_u64(input.seed ^ 0xA5A5_A5A5_A5A5_A5A5);
+    let (_control_tx, control_rx) = mpsc::unbounded_channel::<WriterControl>();
     let writer_task = tokio::spawn(write_loop(
         writer_rng,
         ctx.clone(),
         logical_tables.clone(),
         shared_state.clone(),
+        control_rx,
     ));
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -511,7 +550,7 @@ async fn execute_repartition_metric_table(ctx: FuzzContext, input: FuzzInput) ->
                     elapsed.as_millis(),
                     sql
                 );
-                sql_dump_session.broadcast_event(logical_table_names.iter(), &event)?;
+                sql_dump_session.broadcast_event(logical_table_names.iter(), &event, &sql)?;
             }
         }
     }
