@@ -66,3 +66,23 @@ GT_FUZZ_OVERRIDE_SEED=6666 GT_FUZZ_OVERRIDE_ACTIONS=175 cargo fuzz run fuzz_targ
 ```
 
 For more details, visit [cargo fuzz](https://rust-fuzz.github.io/book/cargo-fuzz/tutorial.html) or run the command `cargo fuzz --help`.
+
+## Repartition Metric Dump Artifacts
+
+For `fuzz_repartition_metric_table`, dump artifacts are written under one run directory.
+
+- Table data snapshots: `<logical_table>.table-data.csv`
+- SQL traces per logical table: `<logical_table>.trace.sql`
+- Seed metadata: `seed.meta`
+
+SQL trace behavior:
+
+- Insert SQL is appended after successful execution with comment fields including
+  `started_at_ms` and `elapsed_ms`.
+- Repartition events are broadcast to all logical table trace files with comment fields including
+  `action_idx`, `started_at_ms`, `elapsed_ms`, and SQL text.
+
+Run directory lifecycle:
+
+- On success, the run directory is cleaned up.
+- On failure, the run directory is retained for CI/local diffing.
