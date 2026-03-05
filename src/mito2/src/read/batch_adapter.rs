@@ -16,6 +16,7 @@
 //! of flat-format Arrow [`RecordBatch`]es, allowing memtable iterators that only
 //! produce [`Batch`] to feed into the flat read pipeline.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -88,11 +89,13 @@ impl BatchToRecordBatchAdapter {
         let num_rows = batch.num_rows();
 
         let pk_values = if let Some(vals) = batch.pk_values() {
-            vals.clone()
+            Cow::Borrowed(vals)
         } else {
-            self.codec
-                .decode(batch.primary_key())
-                .context(DecodeSnafu)?
+            Cow::Owned(
+                self.codec
+                    .decode(batch.primary_key())
+                    .context(DecodeSnafu)?,
+            )
         };
 
         let mut columns: Vec<ArrayRef> = Vec::with_capacity(self.output_schema.fields().len());
