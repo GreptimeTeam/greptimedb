@@ -225,6 +225,7 @@ mod tests {
     use crate::http::PromValidationMode;
     use crate::prom_row_builder::TableBuilder;
     use crate::proto::PromLabel;
+
     #[test]
     fn test_table_builder() {
         let mut builder = TableBuilder::default();

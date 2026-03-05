@@ -241,7 +241,7 @@ pub fn decode_remote_write_request(
     let mut request = PROM_WRITE_REQUEST_POOL.pull(PromWriteRequest::default);
 
     request
-        .merge(buf, prom_validation_mode, processor)
+        .decode(buf, prom_validation_mode, processor)
         .context(error::DecodePromRemoteRequestSnafu)?;
     Ok(std::mem::take(&mut request.table_data))
 }

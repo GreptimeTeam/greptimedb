@@ -237,6 +237,7 @@ impl PromTimeSeries {
 
 #[derive(Default, Debug)]
 pub struct PromWriteRequest {
+    raw_data: Bytes,
     pub(crate) table_data: TablesBuilder,
     series: PromTimeSeries,
 }
@@ -244,6 +245,7 @@ pub struct PromWriteRequest {
 impl Clear for PromWriteRequest {
     fn clear(&mut self) {
         self.table_data.clear();
+        self.raw_data = Bytes::new();
     }
 }
 
@@ -252,14 +254,15 @@ impl PromWriteRequest {
         self.table_data.as_insert_requests()
     }
 
-    // todo(hl): maybe use &[u8] can reduce the overhead introduced with Bytes.
-    pub fn merge(
+    /// Decode the buf.
+    pub fn decode(
         &mut self,
         mut buf: Bytes,
         prom_validation_mode: PromValidationMode,
         processor: &mut PromSeriesProcessor,
     ) -> Result<(), DecodeError> {
         const STRUCT_NAME: &str = "PromWriteRequest";
+        self.raw_data = buf.clone();
         while buf.has_remaining() {
             let (tag, wire_type) = decode_key(&mut buf)?;
             assert_eq!(WireType::LengthDelimited, wire_type);
@@ -470,7 +473,7 @@ mod tests {
         let mut p = PromSeriesProcessor::default_processor();
         prom_write_request.clear();
         prom_write_request
-            .merge(data.clone(), PromValidationMode::Strict, &mut p)
+            .decode(data.clone(), PromValidationMode::Strict, &mut p)
             .unwrap();
 
         let req = prom_write_request.as_row_insert_requests();

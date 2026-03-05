@@ -56,7 +56,7 @@ fn bench_decode_prom_request(c: &mut Criterion) {
             |b, &mode| {
                 b.iter(|| {
                     let data = data.clone();
-                    prom_request.merge(data, mode, &mut p).unwrap();
+                    prom_request.decode(data, mode, &mut p).unwrap();
                     prom_request.as_row_insert_requests();
                 });
             },
