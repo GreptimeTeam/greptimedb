@@ -382,6 +382,19 @@ async fn validate_rows(
     Ok(())
 }
 
+fn flush_dump_sessions_and_snapshot(
+    shared_state: &Arc<Mutex<SharedState>>,
+) -> Result<HashMap<String, u64>> {
+    let mut state = shared_state.lock().unwrap();
+    if let Some(csv_dump_session) = state.csv_dump_session.as_mut() {
+        csv_dump_session.flush_all()?;
+    }
+    if let Some(sql_dump_session) = state.sql_dump_session.as_mut() {
+        sql_dump_session.flush_all()?;
+    }
+    Ok(state.inserted_rows.clone())
+}
+
 async fn cleanup_tables(
     ctx: &FuzzContext,
     physical_table_ctx: &TableContextRef,
@@ -591,7 +604,8 @@ async fn execute_repartition_metric_table(ctx: FuzzContext, input: FuzzInput) ->
             .expect("barrier ack timeout")
             .expect("barrier ack dropped");
 
-        let inserted_rows_snapshot = shared_state.lock().unwrap().inserted_rows.clone();
+        let inserted_rows_snapshot = flush_dump_sessions_and_snapshot(&shared_state)?;
+        info!("validate rows, epoch: {}", i + 1);
         validate_rows(&ctx, &logical_tables, &inserted_rows_snapshot).await?;
 
         control_tx
@@ -602,19 +616,10 @@ async fn execute_repartition_metric_table(ctx: FuzzContext, input: FuzzInput) ->
     let _ = control_tx.send(WriterControl::Stop);
     shared_state.lock().unwrap().running = false;
     writer_task.await.unwrap().unwrap();
-    let (inserted_rows, mut csv_dump_session, mut sql_dump_session) = {
+    let inserted_rows = flush_dump_sessions_and_snapshot(&shared_state)?;
+    let (mut csv_dump_session, mut sql_dump_session) = {
         let mut state = shared_state.lock().unwrap();
-        if let Some(csv_dump_session) = state.csv_dump_session.as_mut() {
-            csv_dump_session.flush_all()?;
-        }
-        if let Some(sql_dump_session) = state.sql_dump_session.as_mut() {
-            sql_dump_session.flush_all()?;
-        }
-        (
-            state.inserted_rows.clone(),
-            state.csv_dump_session.take(),
-            state.sql_dump_session.take(),
-        )
+        (state.csv_dump_session.take(), state.sql_dump_session.take())
     };
 
     let run_result = async {
