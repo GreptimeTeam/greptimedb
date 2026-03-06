@@ -18,11 +18,12 @@ use api::prom_store::remote::Sample;
 use api::v1::helper::{field_column_schema, time_index_column_schema};
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnSchema, Row, RowInsertRequest, Rows, SemanticType, Value};
+use bytes::Bytes;
 use common_query::prelude::{greptime_timestamp, greptime_value};
 use pipeline::{ContextOpt, ContextReq};
 use prost::DecodeError;
 
-use crate::http::PromValidationMode;
+use crate::http::{PromValidationMode, validate_label_name};
 use crate::proto::PromLabel;
 use crate::repeated_field::Clear;
 
@@ -35,18 +36,21 @@ pub struct PromCtx {
 
 /// [TablesBuilder] serves as an intermediate container to build [RowInsertRequests].
 #[derive(Default, Debug)]
-pub struct TablesBuilder {
+pub struct TablesBuilder<'a> {
     // schema -> table -> table_builder
-    pub tables: HashMap<PromCtx, HashMap<String, TableBuilder>>,
+    pub tables: HashMap<PromCtx, HashMap<String, TableBuilder<'a>>>,
+    /// Raw request data.
+    raw_data: Bytes,
 }
 
-impl Clear for TablesBuilder {
+impl<'a> Clear for TablesBuilder<'a> {
     fn clear(&mut self) {
         self.tables.clear();
+        self.raw_data = Bytes::new();
     }
 }
 
-impl TablesBuilder {
+impl<'a> TablesBuilder<'a> {
     /// Gets table builder with given table name. Creates an empty [TableBuilder] if not exist.
     pub(crate) fn get_or_create_table_builder(
         &mut self,
@@ -54,7 +58,7 @@ impl TablesBuilder {
         table_name: String,
         label_num: usize,
         row_num: usize,
-    ) -> &mut TableBuilder {
+    ) -> &mut TableBuilder<'a> {
         self.tables
             .entry(prom_ctx)
             .or_default()
@@ -90,30 +94,34 @@ impl TablesBuilder {
                 req
             })
     }
+
+    pub(crate) fn set_raw_data(&mut self, buf: Bytes) {
+        self.raw_data = buf;
+    }
 }
 
 /// Builder for one table.
 #[derive(Debug)]
-pub struct TableBuilder {
+pub struct TableBuilder<'a> {
     /// Column schemas.
     schema: Vec<ColumnSchema>,
     /// Rows written.
     rows: Vec<Row>,
     /// Indices of columns inside `schema`.
-    col_indexes: HashMap<Vec<u8>, usize>,
+    col_indexes: HashMap<&'a [u8], usize>,
 }
 
-impl Default for TableBuilder {
+impl<'a> Default for TableBuilder<'a> {
     fn default() -> Self {
         Self::with_capacity(2, 0)
     }
 }
 
-impl TableBuilder {
+impl<'a> TableBuilder<'a> {
     pub(crate) fn with_capacity(cols: usize, rows: usize) -> Self {
         let mut col_indexes = HashMap::with_capacity_and_hasher(cols, Default::default());
-        col_indexes.insert(greptime_timestamp().as_bytes().to_owned(), 0);
-        col_indexes.insert(greptime_value().as_bytes().to_owned(), 1);
+        col_indexes.insert(greptime_timestamp().as_bytes(), 0);
+        col_indexes.insert(greptime_value().as_bytes(), 1);
 
         let mut schema = Vec::with_capacity(cols);
         schema.push(time_index_column_schema(
@@ -142,25 +150,32 @@ impl TableBuilder {
         let mut row = vec![Value { value_data: None }; self.col_indexes.len()];
 
         for PromLabel { name, value } in labels {
-            prom_validation_mode.validate_bytes(name)?;
-            let raw_tag_name = name;
+            if !validate_label_name(name) {
+                return Err(DecodeError::new(format!(
+                    "Invalid label name: `{}`",
+                    String::from_utf8_lossy(name)
+                )));
+            }
+            let raw_tag_name = *name;
             let tag_value = Some(ValueData::StringValue(
                 prom_validation_mode.decode_string(value)?,
             ));
             let tag_num = self.col_indexes.len();
 
-            if let Some(e) = self.col_indexes.get_mut(*raw_tag_name) {
+            if let Some(e) = self.col_indexes.get_mut(raw_tag_name) {
                 row[*e].value_data = tag_value;
                 continue;
             }
-            let tag_name = prom_validation_mode.decode_string(raw_tag_name)?;
+
+            // Safety: we've validated the label name is valid in line 152.
+            let tag_name = unsafe { std::str::from_utf8_unchecked(raw_tag_name) };
             self.schema.push(ColumnSchema {
-                column_name: tag_name.clone(),
+                column_name: tag_name.to_owned(),
                 datatype: ColumnDataType::String as i32,
                 semantic_type: SemanticType::Tag as i32,
                 ..Default::default()
             });
-            self.col_indexes.insert(tag_name.into_bytes(), tag_num);
+            self.col_indexes.insert(raw_tag_name, tag_num);
 
             row.push(Value {
                 value_data: tag_value,
@@ -220,6 +235,7 @@ mod tests {
     use crate::http::PromValidationMode;
     use crate::prom_row_builder::TableBuilder;
     use crate::proto::PromLabel;
+
     #[test]
     fn test_table_builder() {
         let mut builder = TableBuilder::default();

@@ -206,9 +206,9 @@ impl PromTimeSeries {
         }
     }
 
-    fn add_to_table_data(
+    fn add_to_table_data<'a>(
         &mut self,
-        table_builders: &mut TablesBuilder,
+        table_builders: &mut TablesBuilder<'a>,
         prom_validation_mode: PromValidationMode,
     ) -> Result<(), DecodeError> {
         let label_num = self.labels.len();
@@ -236,30 +236,32 @@ impl PromTimeSeries {
 }
 
 #[derive(Default, Debug)]
-pub struct PromWriteRequest {
-    pub(crate) table_data: TablesBuilder,
+pub struct PromWriteRequest<'a> {
+    pub(crate) table_data: TablesBuilder<'a>,
     series: PromTimeSeries,
 }
 
-impl Clear for PromWriteRequest {
+impl<'a> Clear for PromWriteRequest<'a> {
     fn clear(&mut self) {
         self.table_data.clear();
     }
 }
 
-impl PromWriteRequest {
+impl<'a> PromWriteRequest<'a> {
     pub fn as_row_insert_requests(&mut self) -> ContextReq {
         self.table_data.as_insert_requests()
     }
 
-    // todo(hl): maybe use &[u8] can reduce the overhead introduced with Bytes.
-    pub fn merge(
+    /// Decode the buf.
+    pub fn decode(
         &mut self,
         mut buf: Bytes,
         prom_validation_mode: PromValidationMode,
         processor: &mut PromSeriesProcessor,
     ) -> Result<(), DecodeError> {
         const STRUCT_NAME: &str = "PromWriteRequest";
+        // Keep a reference to the underlying buffer so the decoded raw bytes won't be dangling.
+        self.table_data.set_raw_data(buf.clone());
         while buf.has_remaining() {
             let (tag, wire_type) = decode_key(&mut buf)?;
             assert_eq!(WireType::LengthDelimited, wire_type);
@@ -360,7 +362,7 @@ impl PromSeriesProcessor {
         let mut vec_pipeline_map = Vec::new();
         let mut pipeline_map = BTreeMap::new();
         for l in series.labels.iter() {
-            let name = prom_validation_mode.decode_string(l.name)?;
+            let name = prom_validation_mode.decode_label_name(l.name)?;
             let value = prom_validation_mode.decode_string(l.value)?;
             pipeline_map.insert(KeyString::from(name), VrlValue::Bytes(value.into()));
         }
@@ -470,7 +472,7 @@ mod tests {
         let mut p = PromSeriesProcessor::default_processor();
         prom_write_request.clear();
         prom_write_request
-            .merge(data.clone(), PromValidationMode::Strict, &mut p)
+            .decode(data.clone(), PromValidationMode::Strict, &mut p)
             .unwrap();
 
         let req = prom_write_request.as_row_insert_requests();

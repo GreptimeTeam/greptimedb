@@ -45,7 +45,7 @@ use crate::query_handler::{PipelineHandlerRef, PromStoreProtocolHandlerRef, Prom
 
 pub const PHYSICAL_TABLE_PARAM: &str = "physical_table";
 lazy_static! {
-    static ref PROM_WRITE_REQUEST_POOL: Pool<PromWriteRequest> =
+    static ref PROM_WRITE_REQUEST_POOL: Pool<PromWriteRequest<'static>> =
         Pool::new(256, PromWriteRequest::default);
 }
 
@@ -222,7 +222,7 @@ pub fn decode_remote_write_request(
     body: Bytes,
     prom_validation_mode: PromValidationMode,
     processor: &mut PromSeriesProcessor,
-) -> Result<TablesBuilder> {
+) -> Result<TablesBuilder<'static>> {
     let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_DECODE_ELAPSED.start_timer();
 
     // due to vmagent's limitation, there is a chance that vmagent is
@@ -241,7 +241,7 @@ pub fn decode_remote_write_request(
     let mut request = PROM_WRITE_REQUEST_POOL.pull(PromWriteRequest::default);
 
     request
-        .merge(buf, prom_validation_mode, processor)
+        .decode(buf, prom_validation_mode, processor)
         .context(error::DecodePromRemoteRequestSnafu)?;
     Ok(std::mem::take(&mut request.table_data))
 }
