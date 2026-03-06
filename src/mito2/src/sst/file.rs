@@ -554,31 +554,27 @@ pub async fn delete_files(
             cache.remove_parquet_meta_data(RegionFileId::new(region_id, *file_id));
         }
     }
-    let mut deleted_files = Vec::with_capacity(file_ids.len());
+    let mut attempted_files = Vec::with_capacity(file_ids.len());
+    let mut index_ids = Vec::new();
 
     for (file_id, index_version) in file_ids {
         let region_file_id = RegionFileId::new(region_id, *file_id);
-        match access_layer
-            .delete_sst(
-                &region_file_id,
-                &RegionIndexId::new(region_file_id, *index_version),
-            )
-            .await
-        {
-            Ok(_) => {
-                deleted_files.push(*file_id);
-            }
-            Err(e) => {
-                error!(e; "Failed to delete sst and index file for {}", region_file_id);
-            }
-        }
+        attempted_files.push(*file_id);
+        index_ids.extend(
+            (0..=*index_version).map(|version| RegionIndexId::new(region_file_id, version)),
+        );
     }
 
+    access_layer
+        .delete_ssts(region_id, &attempted_files)
+        .await?;
+    access_layer.delete_indexes(&index_ids).await?;
+
     debug!(
-        "Deleted {} files for region {}: {:?}",
-        deleted_files.len(),
+        "Attempted to delete {} files for region {}: {:?}",
+        attempted_files.len(),
         region_id,
-        deleted_files
+        attempted_files
     );
 
     for (file_id, index_version) in file_ids {
@@ -600,19 +596,69 @@ pub async fn delete_index(
     access_layer: &AccessLayerRef,
     cache_manager: &Option<CacheManagerRef>,
 ) -> crate::error::Result<()> {
-    access_layer.delete_index(region_index_id).await?;
+    delete_index_and_purge(region_index_id, access_layer, cache_manager).await?;
 
+    Ok(())
+}
+
+pub async fn delete_indexes(
+    index_ids: &[RegionIndexId],
+    access_layer: &AccessLayerRef,
+    cache_manager: &Option<CacheManagerRef>,
+) -> crate::error::Result<()> {
+    if index_ids.is_empty() {
+        return Ok(());
+    }
+
+    if let Err(e) = access_layer.delete_indexes(index_ids).await {
+        error!(e; "Failed to batch delete index files");
+
+        for index_id in index_ids {
+            delete_index_and_purge(*index_id, access_layer, cache_manager).await?;
+        }
+
+        return Ok(());
+    }
+
+    purge_indexes(index_ids, access_layer, cache_manager).await;
+
+    Ok(())
+}
+
+async fn delete_index_and_purge(
+    index_id: RegionIndexId,
+    access_layer: &AccessLayerRef,
+    cache_manager: &Option<CacheManagerRef>,
+) -> crate::error::Result<()> {
+    access_layer.delete_index(index_id).await?;
     purge_index_cache_stager(
-        region_index_id.region_id(),
+        index_id.region_id(),
         true,
         access_layer,
         cache_manager,
-        region_index_id.file_id(),
-        region_index_id.version,
+        index_id.file_id(),
+        index_id.version,
     )
     .await;
-
     Ok(())
+}
+
+async fn purge_indexes(
+    index_ids: &[RegionIndexId],
+    access_layer: &AccessLayerRef,
+    cache_manager: &Option<CacheManagerRef>,
+) {
+    for index_id in index_ids {
+        purge_index_cache_stager(
+            index_id.region_id(),
+            true,
+            access_layer,
+            cache_manager,
+            index_id.file_id(),
+            index_id.version,
+        )
+        .await;
+    }
 }
 
 async fn purge_index_cache_stager(

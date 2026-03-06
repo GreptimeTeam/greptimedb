@@ -456,9 +456,14 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to delete SST file, file id: {}", file_id))]
-    DeleteSst {
-        file_id: FileId,
+    #[snafu(display(
+        "Failed to batch delete SST files, region id: {}, file ids: {:?}",
+        region_id,
+        file_ids
+    ))]
+    DeleteSsts {
+        region_id: RegionId,
+        file_ids: Vec<FileId>,
         #[snafu(source)]
         error: object_store::Error,
         #[snafu(implicit)]
@@ -468,6 +473,15 @@ pub enum Error {
     #[snafu(display("Failed to delete index file, file id: {}", file_id))]
     DeleteIndex {
         file_id: FileId,
+        #[snafu(source)]
+        error: object_store::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to batch delete index files, file ids: {:?}", file_ids))]
+    DeleteIndexes {
+        file_ids: Vec<FileId>,
         #[snafu(source)]
         error: object_store::Error,
         #[snafu(implicit)]
@@ -1321,7 +1335,9 @@ impl ErrorExt for Error {
             PrimaryKeyLengthMismatch { .. } => StatusCode::InvalidArguments,
             InvalidSender { .. } => StatusCode::InvalidArguments,
             InvalidSchedulerState { .. } => StatusCode::InvalidArguments,
-            DeleteSst { .. } | DeleteIndex { .. } => StatusCode::StorageUnavailable,
+            DeleteSsts { .. } | DeleteIndex { .. } | DeleteIndexes { .. } => {
+                StatusCode::StorageUnavailable
+            }
             FlushRegion { source, .. } | BuildIndexAsync { source, .. } => source.status_code(),
             RegionDropped { .. } => StatusCode::Cancelled,
             RegionClosed { .. } => StatusCode::Cancelled,
