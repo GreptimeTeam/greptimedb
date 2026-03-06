@@ -166,7 +166,7 @@ fn is_plain_select(select: &sqlparser::ast::Select) -> bool {
         && select.named_window.is_empty()
         && select.qualify.is_none()
         && select.value_table_mode.is_none()
-        && select.connect_by.is_none()
+        && select.connect_by.is_empty()
 }
 
 fn is_plain_wildcard_projection(projection: &[sqlparser::ast::SelectItem]) -> bool {
