@@ -399,7 +399,8 @@ impl ScanRegion {
 
     /// Returns true if the region use flat format.
     fn use_flat_format(&self) -> bool {
-        self.version.options.sst_format.unwrap_or_default() == FormatType::Flat
+        self.request.force_flat_format
+            || self.version.options.sst_format.unwrap_or_default() == FormatType::Flat
     }
 
     /// Creates a scan input.
@@ -1576,6 +1577,10 @@ impl StreamContext {
                     let exprs: Vec<_> = predicate.exprs().iter().map(|e| e.to_string()).collect();
                     write!(f, ", \"filters\": {:?}", exprs)?;
                 }
+                #[cfg(feature = "vector_index")]
+                if let Some(vector_index_k) = self.input.vector_index_k {
+                    write!(f, ", \"vector_index_k\": {}", vector_index_k)?;
+                }
                 if !self.input.files.is_empty() {
                     write!(f, ", \"files\": ")?;
                     f.debug_list()
@@ -1716,7 +1721,9 @@ mod tests {
 
     use super::*;
     use crate::memtable::time_partition::TimePartitions;
+    use crate::region::options::RegionOptions;
     use crate::region::version::VersionBuilder;
+    use crate::sst::FormatType;
     use crate::test_util::memtable_util::{EmptyMemtableBuilder, metadata_with_primary_key};
     use crate::test_util::scheduler_util::SchedulerEnv;
 
@@ -1728,6 +1735,27 @@ mod tests {
             None,
         ));
         Arc::new(VersionBuilder::new(metadata, mutable).build())
+    }
+
+    fn new_version_with_sst_format(
+        metadata: RegionMetadataRef,
+        sst_format: Option<FormatType>,
+    ) -> VersionRef {
+        let mutable = Arc::new(TimePartitions::new(
+            metadata.clone(),
+            Arc::new(EmptyMemtableBuilder::default()),
+            0,
+            None,
+        ));
+        let options = RegionOptions {
+            sst_format,
+            ..Default::default()
+        };
+        Arc::new(
+            VersionBuilder::new(metadata, mutable)
+                .options(options)
+                .build(),
+        )
     }
 
     #[tokio::test]
@@ -1808,5 +1836,44 @@ mod tests {
             .unwrap();
         // Projection order preserved, extra columns appended in schema order.
         assert_eq!(vec![4, 1, 3], read_ids);
+    }
+
+    #[tokio::test]
+    async fn test_use_flat_format_honors_request_override() {
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let env = SchedulerEnv::new().await;
+
+        let primary_key_version =
+            new_version_with_sst_format(metadata.clone(), Some(FormatType::PrimaryKey));
+        let request = ScanRequest::default();
+        let scan_region = ScanRegion::new(
+            primary_key_version.clone(),
+            env.access_layer.clone(),
+            request,
+            CacheStrategy::Disabled,
+        );
+        assert!(!scan_region.use_flat_format());
+
+        let request = ScanRequest {
+            force_flat_format: true,
+            ..Default::default()
+        };
+        let scan_region = ScanRegion::new(
+            primary_key_version,
+            env.access_layer.clone(),
+            request,
+            CacheStrategy::Disabled,
+        );
+        assert!(scan_region.use_flat_format());
+
+        let flat_version = new_version_with_sst_format(metadata, Some(FormatType::Flat));
+        let request = ScanRequest::default();
+        let scan_region = ScanRegion::new(
+            flat_version,
+            env.access_layer.clone(),
+            request,
+            CacheStrategy::Disabled,
+        );
+        assert!(scan_region.use_flat_format());
     }
 }

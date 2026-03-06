@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::time::Duration;
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use store_api::region_engine::SyncRegionFromRequest;
 use store_api::storage::{FileRefsManifest, GcReport, RegionId, RegionNumber};
 use strum::Display;
@@ -518,16 +518,94 @@ impl Display for GcRegionsReply {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EnterStagingRegion {
     pub region_id: RegionId,
-    pub partition_expr: String,
+    #[serde(
+        alias = "partition_expr",
+        deserialize_with = "deserialize_enter_staging_partition_directive",
+        serialize_with = "serialize_enter_staging_partition_directive"
+    )]
+    pub partition_directive: StagingPartitionDirective,
 }
 
 impl Display for EnterStagingRegion {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "EnterStagingRegion(region_id={}, partition_expr={})",
-            self.region_id, self.partition_expr
+            "EnterStagingRegion(region_id={}, partition_directive={})",
+            self.region_id, self.partition_directive
         )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StagingPartitionDirective {
+    UpdatePartitionExpr(String),
+    RejectAllWrites,
+}
+
+impl StagingPartitionDirective {
+    /// Returns the partition expression carried by this directive, if any.
+    pub fn as_partition_expr(&self) -> Option<&str> {
+        match self {
+            Self::UpdatePartitionExpr(expr) => Some(expr),
+            Self::RejectAllWrites => None,
+        }
+    }
+}
+
+impl Display for StagingPartitionDirective {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UpdatePartitionExpr(expr) => write!(f, "UpdatePartitionExpr({})", expr),
+            Self::RejectAllWrites => write!(f, "RejectAllWrites"),
+        }
+    }
+}
+
+fn serialize_enter_staging_partition_directive<S>(
+    rule: &StagingPartitionDirective,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match rule {
+        StagingPartitionDirective::UpdatePartitionExpr(expr) => serializer.serialize_str(expr),
+        StagingPartitionDirective::RejectAllWrites => {
+            #[derive(Serialize)]
+            struct RejectAllWritesSer<'a> {
+                r#type: &'a str,
+            }
+
+            RejectAllWritesSer {
+                r#type: "reject_all_writes",
+            }
+            .serialize(serializer)
+        }
+    }
+}
+
+fn deserialize_enter_staging_partition_directive<'de, D>(
+    deserializer: D,
+) -> std::result::Result<StagingPartitionDirective, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Compat {
+        Legacy(String),
+        TypeTagged { r#type: String },
+    }
+
+    match Compat::deserialize(deserializer)? {
+        Compat::Legacy(expr) => Ok(StagingPartitionDirective::UpdatePartitionExpr(expr)),
+        Compat::TypeTagged { r#type } if r#type == "reject_all_writes" => {
+            Ok(StagingPartitionDirective::RejectAllWrites)
+        }
+        Compat::TypeTagged { r#type } => Err(serde::de::Error::custom(format!(
+            "Unknown enter staging partition directive type: {}",
+            r#type
+        ))),
     }
 }
 
@@ -795,7 +873,7 @@ where
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct EnterStagingRegionReply {
     pub region_id: RegionId,
-    /// Returns true if the region is under the new region rule.
+    /// Returns true if the region has entered staging with the target directive.
     pub ready: bool,
     /// Indicates whether the region exists.
     pub exists: bool,
@@ -1206,6 +1284,31 @@ mod tests {
                 error: None,
             }));
         assert_eq!(upgrade_region_instruction_reply, upgrade_region_reply);
+    }
+
+    #[test]
+    fn test_enter_staging_partition_rule_compatibility() {
+        let legacy = r#"{"region_id":4398046511105,"partition_expr":"{\"Expr\":{\"lhs\":{\"Column\":\"x\"},\"op\":\"GtEq\",\"rhs\":{\"Value\":{\"Int32\":0}}}}"}"#;
+        let enter: EnterStagingRegion = serde_json::from_str(legacy).unwrap();
+        assert_eq!(enter.region_id, RegionId::new(1024, 1));
+        assert_eq!(
+            enter.partition_directive,
+            StagingPartitionDirective::UpdatePartitionExpr(
+                "{\"Expr\":{\"lhs\":{\"Column\":\"x\"},\"op\":\"GtEq\",\"rhs\":{\"Value\":{\"Int32\":0}}}}"
+                    .to_string()
+            )
+        );
+
+        let serialized = serde_json::to_string(&enter).unwrap();
+        assert!(serialized.contains("\"partition_directive\":\""));
+        assert!(!serialized.contains("partition_expr"));
+
+        let reject = r#"{"region_id":4398046511105,"partition_expr":{"type":"reject_all_writes"}}"#;
+        let enter: EnterStagingRegion = serde_json::from_str(reject).unwrap();
+        assert_eq!(
+            enter.partition_directive,
+            StagingPartitionDirective::RejectAllWrites
+        );
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -81,7 +81,7 @@ pub struct WindowedSortExec {
     input: Arc<dyn ExecutionPlan>,
     /// Execution metrics
     metrics: ExecutionPlanMetricsSet,
-    properties: PlanProperties,
+    properties: Arc<PlanProperties>,
 }
 
 /// Checks that partition ranges are sorted correctly for the given sort direction.
@@ -130,12 +130,12 @@ impl WindowedSortExec {
         eq_properties.reorder(vec![expression.clone()])?;
 
         let properties = input.properties();
-        let properties = PlanProperties::new(
+        let properties = Arc::new(PlanProperties::new(
             eq_properties,
             input.output_partitioning().clone(),
             properties.emission_type,
             properties.boundedness,
-        );
+        ));
 
         let mut all_avail_working_range = Vec::with_capacity(ranges.len());
         for r in &ranges {
@@ -202,7 +202,7 @@ impl ExecutionPlan for WindowedSortExec {
         self.input.schema()
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
     }
 

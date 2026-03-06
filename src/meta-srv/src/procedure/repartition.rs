@@ -464,6 +464,10 @@ impl Procedure for RepartitionProcedure {
         Self::TYPE_NAME
     }
 
+    #[tracing::instrument(skip_all, fields(
+        state = %self.state.name(),
+        table_id = %self.context.persistent_ctx.table_id
+    ))]
     async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
         let state = &mut self.state;
         let state_name = state.name();

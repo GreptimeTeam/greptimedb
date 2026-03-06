@@ -88,13 +88,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                             error!(err; "Failed to set region {region_id} to leader");
                         }
                     }
-                    sender.send(Ok(0));
                     catchup_regions.remove_region(region_id);
+                    sender.send(Ok(0));
                 }
                 Err(err) => {
                     error!(err; "Failed to catchup region {region_id}");
-                    sender.send(Err(err));
                     catchup_regions.remove_region(region_id);
+                    sender.send(Err(err));
                 }
             }
         });

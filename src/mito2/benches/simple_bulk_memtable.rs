@@ -12,11 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::hint::black_box;
 use std::sync::Arc;
 
 use api::v1::value::ValueData;
 use api::v1::{Mutation, OpType, Row, Rows, SemanticType};
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use mito2::memtable::simple_bulk_memtable::SimpleBulkMemtable;

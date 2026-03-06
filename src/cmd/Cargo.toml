@@ -18,7 +18,7 @@ default = [
 ]
 enterprise = ["common-meta/enterprise", "frontend/enterprise", "meta-srv/enterprise"]
 tokio-console = ["common-telemetry/tokio-console"]
-vector_index = ["mito2/vector_index"]
+vector_index = ["mito2/vector_index", "query/vector_index"]
 
 [lints]
 workspace = true
@@ -30,6 +30,9 @@ base64.workspace = true
 cache.workspace = true
 catalog.workspace = true
 chrono.workspace = true
+datafusion-physical-plan.workspace = true
+datafusion.workspace = true
+datafusion-common.workspace = true
 either = "1.15"
 clap.workspace = true
 cli.workspace = true
@@ -63,12 +66,12 @@ futures.workspace = true
 human-panic = "2.0"
 humantime.workspace = true
 lazy_static.workspace = true
+log-store.workspace = true
 meta-client.workspace = true
 meta-srv.workspace = true
 metric-engine.workspace = true
 mito2.workspace = true
 moka.workspace = true
-nu-ansi-term = "0.46"
 object-store.workspace = true
 parquet = { workspace = true, features = ["object_store"] }
 plugins.workspace = true
@@ -92,6 +95,7 @@ tokio.workspace = true
 toml.workspace = true
 tonic.workspace = true
 tracing-appender.workspace = true
+sqlparser.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 pprof = { version = "0.14", features = [
@@ -102,6 +106,7 @@ pprof = { version = "0.14", features = [
 tikv-jemallocator = "0.6"
 
 [dev-dependencies]
+api.workspace = true
 client = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
 common-version.workspace = true

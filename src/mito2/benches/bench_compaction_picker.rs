@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use std::hint::black_box;
+
+use criterion::{Criterion, criterion_group, criterion_main};
 use mito2::compaction::run::{
     Item, Ranged, SortedRun, find_overlapping_items, find_sorted_runs, merge_seq_files, reduce_runs,
 };

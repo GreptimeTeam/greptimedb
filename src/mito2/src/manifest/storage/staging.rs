@@ -60,6 +60,16 @@ impl StagingBlobStorage {
         Self { object_store, path }
     }
 
+    /// Returns the path.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Returns the object store.
+    pub fn object_store(&self) -> &ObjectStore {
+        &self.object_store
+    }
+
     /// Put the bytes to the blob storage.
     pub async fn put(&self, path: &str, bytes: Vec<u8>) -> Result<()> {
         let path = format!("{}{}", self.path, path);
@@ -185,9 +195,16 @@ impl StagingStorage {
             .await
             .context(OpenDalSnafu)?;
 
+        self.blob_storage
+            .object_store()
+            .remove_all(self.blob_storage.path())
+            .await
+            .context(OpenDalSnafu)?;
+
         debug!(
-            "Cleared all staging manifest files from {}",
-            self.delta_storage.path()
+            "Cleared all staging manifest files from {}, blob directory: {}",
+            self.delta_storage.path(),
+            self.blob_storage.path()
         );
 
         Ok(())
@@ -203,7 +220,13 @@ impl StagingStorage {
 
 #[cfg(test)]
 mod tests {
-    use crate::manifest::storage::staging::{staging_blob_path, staging_manifest_path};
+    use common_datasource::compression::CompressionType;
+    use common_test_util::temp_dir::create_temp_dir;
+    use futures::TryStreamExt;
+    use object_store::services::Fs;
+    use object_store::{ErrorKind, ObjectStore};
+
+    use super::{StagingStorage, staging_blob_path, staging_manifest_path};
 
     #[test]
     fn test_staging_path() {
@@ -217,5 +240,45 @@ mod tests {
         let path = "/data/table/region_0001/manifest/";
         let expected = "/data/table/region_0001/staging/blob/";
         assert_eq!(staging_blob_path(path), expected);
+    }
+
+    async fn count_entries(object_store: &ObjectStore, path: &str) -> usize {
+        match object_store.lister_with(path).await {
+            Ok(lister) => lister.try_collect::<Vec<_>>().await.unwrap().len(),
+            Err(err) if err.kind() == ErrorKind::NotFound => 0,
+            Err(err) => panic!("failed to list {path}: {err}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_staging_clear_removes_blobs() {
+        common_telemetry::init_default_ut_logging();
+
+        let tmp_dir = create_temp_dir("test_staging_storage_clear");
+        let builder = Fs::default().root(&tmp_dir.path().to_string_lossy());
+        let object_store = ObjectStore::new(builder).unwrap().finish();
+        let manifest_path = "/data/table/region_0001/manifest/";
+        let mut storage = StagingStorage::new(
+            manifest_path.to_string(),
+            object_store.clone(),
+            CompressionType::Uncompressed,
+        );
+        let manifest_dir = staging_manifest_path(manifest_path);
+        let blob_dir = staging_blob_path(manifest_path);
+
+        storage.save(0, b"manifest").await.unwrap();
+        storage
+            .blob_storage()
+            .put("region_0002_manifest", b"blob".to_vec())
+            .await
+            .unwrap();
+
+        assert!(count_entries(&object_store, &manifest_dir).await > 0);
+        assert!(count_entries(&object_store, &blob_dir).await > 0);
+
+        storage.clear().await.unwrap();
+
+        assert_eq!(count_entries(&object_store, &manifest_dir).await, 0);
+        assert_eq!(count_entries(&object_store, &blob_dir).await, 0);
     }
 }

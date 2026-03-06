@@ -457,9 +457,8 @@ impl StartCommand {
 
         // set the ref to query for the local flow state
         {
-            let flow_streaming_engine = flownode.flow_engine().streaming_engine();
             information_extension
-                .set_flow_streaming_engine(flow_streaming_engine)
+                .set_flow_engine(flownode.flow_engine())
                 .await;
         }
 

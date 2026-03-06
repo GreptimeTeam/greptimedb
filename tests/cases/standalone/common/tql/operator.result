@@ -28,42 +28,42 @@ insert into trignan values (0, 'NaN'::double);
 
 Affected Rows: 1
 
--- eval instant at 5m trigy atan2 trigx
+-- eval instant at 1m trigy atan2 trigx
 --     trigy{} 0.4636476090008061
-tql eval (300, 300, '1s') trigy atan2 trigx;
+tql eval (60, 60, '1s') trigy atan2 trigx;
 
 +---------------------+----------------------------+
 | ts                  | atan2(trigy.val,trigx.val) |
 +---------------------+----------------------------+
-| 1970-01-01T00:05:00 | 0.4636476090008061         |
+| 1970-01-01T00:01:00 | 0.4636476090008061         |
 +---------------------+----------------------------+
 
--- eval instant at 5m trigy atan2 trigNaN
+-- eval instant at 1m trigy atan2 trigNaN
 --     trigy{} NaN
 -- This query doesn't have result because `trignan` is NaN and will be filtered out.
-tql eval (300, 300, '1s') trigy atan2 trignan;
+tql eval (60, 60, '1s') trigy atan2 trignan;
 
 ++
 ++
 
--- eval instant at 5m 10 atan2 20
+-- eval instant at 1m 10 atan2 20
 --     0.4636476090008061
-tql eval (300, 300, '1s') 10 atan2 20;
+tql eval (60, 60, '1s') 10 atan2 20;
 
 +---------------------+--------------------+
 | time                | value              |
 +---------------------+--------------------+
-| 1970-01-01T00:05:00 | 0.4636476090008061 |
+| 1970-01-01T00:01:00 | 0.4636476090008061 |
 +---------------------+--------------------+
 
--- eval instant at 5m 10 atan2 NaN
+-- eval instant at 1m 10 atan2 NaN
 --     NaN
-tql eval (300, 300, '1s') 10 atan2 NaN;
+tql eval (60, 60, '1s') 10 atan2 NaN;
 
 +---------------------+-------+
 | time                | value |
 +---------------------+-------+
-| 1970-01-01T00:05:00 | NaN   |
+| 1970-01-01T00:01:00 | NaN   |
 +---------------------+-------+
 
 drop table trigx;

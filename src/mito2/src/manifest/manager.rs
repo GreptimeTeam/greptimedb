@@ -194,6 +194,7 @@ impl RegionManifestManager {
             RegionChange {
                 metadata: metadata.clone(),
                 sst_format,
+                append_mode: None,
             },
         );
         let manifest = manifest_builder.try_build()?;
@@ -207,6 +208,7 @@ impl RegionManifestManager {
         let mut actions = vec![RegionMetaAction::Change(RegionChange {
             metadata,
             sst_format,
+            append_mode: None,
         })];
         if flushed_entry_id > 0 {
             actions.push(RegionMetaAction::Edit(RegionEdit {
@@ -299,6 +301,9 @@ impl RegionManifestManager {
                 match action {
                     RegionMetaAction::Change(action) => {
                         manifest_builder.apply_change(manifest_version, action);
+                    }
+                    RegionMetaAction::PartitionExprChange(action) => {
+                        manifest_builder.apply_partition_expr_change(manifest_version, action);
                     }
                     RegionMetaAction::Edit(action) => {
                         manifest_builder.apply_edit(manifest_version, action);
@@ -442,6 +447,9 @@ impl RegionManifestManager {
                     RegionMetaAction::Change(action) => {
                         manifest_builder.apply_change(manifest_version, action);
                     }
+                    RegionMetaAction::PartitionExprChange(action) => {
+                        manifest_builder.apply_partition_expr_change(manifest_version, action);
+                    }
                     RegionMetaAction::Edit(action) => {
                         manifest_builder.apply_edit(manifest_version, action);
                     }
@@ -547,6 +555,9 @@ impl RegionManifestManager {
             match action {
                 RegionMetaAction::Change(action) => {
                     manifest_builder.apply_change(version, action);
+                }
+                RegionMetaAction::PartitionExprChange(action) => {
+                    manifest_builder.apply_partition_expr_change(version, action);
                 }
                 RegionMetaAction::Edit(action) => {
                     manifest_builder.apply_edit(version, action);
@@ -838,7 +849,7 @@ mod test {
         let expr_json =
             r#"{"Expr":{"lhs":{"Column":"a"},"op":"GtEq","rhs":{"Value":{"UInt32":10}}}}"#;
         let mut metadata = basic_region_metadata();
-        metadata.partition_expr = Some(expr_json.to_string());
+        metadata.set_partition_expr(Some(expr_json.to_string()));
         let metadata = Arc::new(metadata);
         let mut manager = env
             .create_manifest_manager(CompressionType::Uncompressed, 10, Some(metadata.clone()))
@@ -884,6 +895,7 @@ mod test {
             RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange {
                 metadata: new_metadata.clone(),
                 sst_format: FormatType::PrimaryKey,
+                append_mode: None,
             }));
 
         let current_version = manager.update(action_list, false).await.unwrap();
@@ -947,6 +959,7 @@ mod test {
             RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange {
                 metadata: new_metadata.clone(),
                 sst_format: FormatType::PrimaryKey,
+                append_mode: None,
             }));
 
         let current_version = manager.update(action_list, false).await.unwrap();
@@ -996,6 +1009,6 @@ mod test {
 
         // get manifest size again
         let manifest_size = manager.manifest_usage();
-        assert_eq!(manifest_size, 1378);
+        assert_eq!(manifest_size, 1397);
     }
 }

@@ -19,13 +19,16 @@ use std::time::{Duration, Instant};
 use api::v1::meta::MailboxMessage;
 use common_meta::instruction::{
     EnterStagingRegionReply, EnterStagingRegionsReply, Instruction, InstructionReply,
+    StagingPartitionDirective,
 };
 use common_meta::peer::Peer;
 use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::info;
+use common_telemetry::tracing_context::TracingContext;
 use futures::future::{join_all, try_join_all};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
+use store_api::storage::RegionId;
 
 use crate::error::{self, Error, Result};
 use crate::handler::HeartbeatMailbox;
@@ -33,7 +36,7 @@ use crate::procedure::repartition::group::remap_manifest::RemapManifest;
 use crate::procedure::repartition::group::utils::{
     HandleMultipleResult, group_region_routes_by_peer, handle_multiple_results,
 };
-use crate::procedure::repartition::group::{Context, GroupPrepareResult, State};
+use crate::procedure::repartition::group::{Context, GroupId, GroupPrepareResult, State};
 use crate::procedure::repartition::plan::RegionDescriptor;
 use crate::procedure::utils::{self, ErrorStrategy};
 use crate::service::mailbox::{Channel, MailboxRef};
@@ -71,8 +74,10 @@ impl State for EnterStagingRegion {
 
 impl EnterStagingRegion {
     fn build_enter_staging_instructions(
+        group_id: GroupId,
         prepare_result: &GroupPrepareResult,
         targets: &[RegionDescriptor],
+        pending_deallocate_region_ids: &[RegionId],
     ) -> Result<HashMap<Peer, Vec<common_meta::instruction::EnterStagingRegion>>> {
         let target_partition_expr_by_region = targets
             .iter()
@@ -96,10 +101,31 @@ impl EnterStagingRegion {
                 .map(|region_id| common_meta::instruction::EnterStagingRegion {
                     region_id,
                     // Safety: the target_routes is constructed from the targets, so the region_id is always present in the map.
-                    partition_expr: target_partition_expr_by_region[&region_id].clone(),
+                    partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                        target_partition_expr_by_region[&region_id].clone(),
+                    ),
                 })
                 .collect();
             instructions.insert(peer.clone(), enter_staging_regions);
+        }
+        // For pending deallocate regions, set the partition rule to RejectAllWrites.
+        for region_id in pending_deallocate_region_ids {
+            let peer = prepare_result
+                .source_routes
+                .iter()
+                .find(|route| route.region.id == *region_id)
+                .map(|route| route.leader_peer.as_ref().unwrap())
+                .context(error::RepartitionSourceRegionMissingSnafu {
+                    group_id,
+                    region_id: *region_id,
+                })?;
+            instructions
+                .entry(peer.clone())
+                .or_insert_with(Vec::new)
+                .push(common_meta::instruction::EnterStagingRegion {
+                    region_id: *region_id,
+                    partition_directive: StagingPartitionDirective::RejectAllWrites,
+                });
         }
 
         Ok(instructions)
@@ -111,7 +137,12 @@ impl EnterStagingRegion {
         // Safety: the group prepare result is set in the RepartitionStart state.
         let prepare_result = ctx.persistent_ctx.group_prepare_result.as_ref().unwrap();
         let targets = &ctx.persistent_ctx.targets;
-        let instructions = Self::build_enter_staging_instructions(prepare_result, targets)?;
+        let instructions = Self::build_enter_staging_instructions(
+            group_id,
+            prepare_result,
+            targets,
+            &ctx.persistent_ctx.pending_deallocate_region_ids,
+        )?;
         let target_region_count = targets.len();
         let peer_count = instructions.len();
         let operation_timeout =
@@ -217,6 +248,7 @@ impl EnterStagingRegion {
     ) -> Result<()> {
         let ch = Channel::Datanode(peer.id);
         let instruction = Instruction::EnterStagingRegions(enter_staging_regions.to_vec());
+        let tracing_ctx = TracingContext::from_current_span();
         let message = MailboxMessage::json_message(
             &format!(
                 "Enter staging regions: {:?}",
@@ -229,6 +261,7 @@ impl EnterStagingRegion {
             &format!("Datanode-{}@{}", peer.id, peer.addr),
             common_time::util::current_time_millis(),
             &instruction,
+            Some(tracing_ctx.to_w3c()),
         )
         .with_context(|_| error::SerializeToJsonSnafu {
             input: instruction.to_string(),
@@ -403,9 +436,11 @@ mod tests {
     use std::assert_matches::assert_matches;
     use std::time::Duration;
 
+    use common_meta::instruction::StagingPartitionDirective;
     use common_meta::peer::Peer;
     use common_meta::rpc::router::{Region, RegionRoute};
     use store_api::storage::RegionId;
+    use uuid::Uuid;
 
     use crate::error::{self, Error};
     use crate::procedure::repartition::group::GroupPrepareResult;
@@ -453,9 +488,13 @@ mod tests {
             central_region_datanode: Peer::empty(1),
         };
         let targets = test_targets();
-        let instructions =
-            EnterStagingRegion::build_enter_staging_instructions(&prepare_result, &targets)
-                .unwrap();
+        let instructions = EnterStagingRegion::build_enter_staging_instructions(
+            Uuid::new_v4(),
+            &prepare_result,
+            &targets,
+            &[],
+        )
+        .unwrap();
 
         assert_eq!(instructions.len(), 2);
         let instruction_1 = instructions.get(&Peer::empty(1)).unwrap().clone();
@@ -463,7 +502,9 @@ mod tests {
             instruction_1,
             vec![common_meta::instruction::EnterStagingRegion {
                 region_id: RegionId::new(table_id, 1),
-                partition_expr: range_expr("x", 0, 10).as_json_str().unwrap(),
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                    range_expr("x", 0, 10).as_json_str().unwrap(),
+                ),
             }]
         );
         let instruction_2 = instructions.get(&Peer::empty(2)).unwrap().clone();
@@ -471,7 +512,9 @@ mod tests {
             instruction_2,
             vec![common_meta::instruction::EnterStagingRegion {
                 region_id: RegionId::new(table_id, 2),
-                partition_expr: range_expr("x", 10, 20).as_json_str().unwrap(),
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                    range_expr("x", 10, 20).as_json_str().unwrap(),
+                ),
             }]
         );
     }
@@ -483,7 +526,9 @@ mod tests {
         let peer = Peer::empty(1);
         let enter_staging_regions = vec![common_meta::instruction::EnterStagingRegion {
             region_id: RegionId::new(1024, 1),
-            partition_expr: range_expr("x", 0, 10).as_json_str().unwrap(),
+            partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                range_expr("x", 0, 10).as_json_str().unwrap(),
+            ),
         }];
         let timeout = Duration::from_secs(10);
 
@@ -512,7 +557,9 @@ mod tests {
         let peer = Peer::empty(1);
         let enter_staging_regions = vec![common_meta::instruction::EnterStagingRegion {
             region_id: RegionId::new(1024, 1),
-            partition_expr: range_expr("x", 0, 10).as_json_str().unwrap(),
+            partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                range_expr("x", 0, 10).as_json_str().unwrap(),
+            ),
         }];
         let timeout = Duration::from_secs(10);
 
@@ -543,7 +590,9 @@ mod tests {
         let peer = Peer::empty(1);
         let enter_staging_regions = vec![common_meta::instruction::EnterStagingRegion {
             region_id: RegionId::new(1024, 1),
-            partition_expr: range_expr("x", 0, 10).as_json_str().unwrap(),
+            partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                range_expr("x", 0, 10).as_json_str().unwrap(),
+            ),
         }];
         let timeout = Duration::from_secs(10);
 
@@ -579,7 +628,9 @@ mod tests {
         let peer = Peer::empty(1);
         let enter_staging_regions = vec![common_meta::instruction::EnterStagingRegion {
             region_id: RegionId::new(1024, 1),
-            partition_expr: range_expr("x", 0, 10).as_json_str().unwrap(),
+            partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                range_expr("x", 0, 10).as_json_str().unwrap(),
+            ),
         }];
         let timeout = Duration::from_secs(10);
 

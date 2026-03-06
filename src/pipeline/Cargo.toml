@@ -65,7 +65,7 @@ yaml-rust = "0.4"
 
 [dev-dependencies]
 catalog = { workspace = true, features = ["testing"] }
-criterion = { version = "0.4", features = ["html_reports"] }
+criterion = { workspace = true, features = ["html_reports"] }
 rayon = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 session = { workspace = true, features = ["testing"] }

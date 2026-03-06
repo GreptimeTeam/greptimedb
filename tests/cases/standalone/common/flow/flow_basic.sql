@@ -1,5 +1,5 @@
 CREATE TABLE numbers_input_basic (
-    number INT,
+    "number" INT,
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(number),
     TIME INDEX(ts)
@@ -69,7 +69,7 @@ DROP TABLE out_num_cnt_basic;
 
 -- test count(*) rewrite
 CREATE TABLE input_basic (
-    number INT,
+    "number" INT,
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(number),
     TIME INDEX(ts)
@@ -116,7 +116,7 @@ DROP TABLE input_basic;
 
 -- test distinct
 CREATE TABLE distinct_basic (
-    number INT,
+    "number" INT,
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(number),
     TIME INDEX(ts)
@@ -497,7 +497,7 @@ DROP TABLE temp_alerts;
 CREATE TABLE ngx_access_log (
     client STRING,
     stat INT,
-    size INT,
+    "size" INT,
     access_time TIMESTAMP TIME INDEX
 )WITH(
     append_mode = 'true'
@@ -784,7 +784,7 @@ DROP TABLE android_log_abnormal;
 DROP TABLE android_log;
 
 CREATE TABLE numbers_input_basic (
-    number INT,
+    "number" INT,
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(number),
     TIME INDEX(ts)

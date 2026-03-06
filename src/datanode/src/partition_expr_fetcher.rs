@@ -75,7 +75,6 @@ mod tests {
                 id: region_id,
                 name: "r".to_string(),
                 attrs: Default::default(),
-                partition: None,
                 partition_expr: expr_json.to_string(),
             },
             ..Default::default()

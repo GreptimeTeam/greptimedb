@@ -27,7 +27,7 @@ snafu.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
-criterion = "0.7.0"
+criterion.workspace = true
 tokio.workspace = true
 
 [[bench]]

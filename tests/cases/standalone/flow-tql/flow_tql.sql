@@ -9,6 +9,8 @@ CREATE TABLE http_requests (
 CREATE FLOW calc_reqs SINK TO cnt_reqs EVAL INTERVAL '1m' AS
 TQL EVAL (now() - '1m'::interval, now(), '5s') count_values("status_code", http_requests);
 
+SELECT source_table_names FROM information_schema.flows WHERE flow_name = 'calc_reqs';
+
 SHOW CREATE TABLE cnt_reqs;
 
 -- test if sink table is tql queryable
@@ -176,6 +178,16 @@ INSERT INTO TABLE http_requests_total VALUES
 ADMIN FLUSH_FLOW('calc_rate');
 
 SELECT count(*)>0 FROM rate_reqs;
+
+CREATE FLOW calc_rate_by_matcher
+SINK TO rate_reqs_by_matcher
+EVAL INTERVAL '1m' AS
+TQL EVAL (now() - '1m'::interval, now(), '30s') rate({__name__="http_requests_total",job="my_service"}[1m]);
+
+SELECT source_table_names FROM information_schema.flows WHERE flow_name = 'calc_rate_by_matcher';
+
+DROP FLOW calc_rate_by_matcher;
+DROP TABLE rate_reqs_by_matcher;
 
 DROP FLOW calc_rate;
 DROP TABLE http_requests_total;

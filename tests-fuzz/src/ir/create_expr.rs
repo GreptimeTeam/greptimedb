@@ -72,7 +72,7 @@ pub struct CreateTableExpr {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PartitionDef {
-    pub columns: Vec<String>,
+    pub columns: Vec<Ident>,
     pub exprs: Vec<PartitionExpr>,
 }
 

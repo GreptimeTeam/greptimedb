@@ -13,6 +13,14 @@ TQL EVAL (now() - '1m'::interval, now(), '5s') count_values("status_code", http_
 
 Affected Rows: 0
 
+SELECT source_table_names FROM information_schema.flows WHERE flow_name = 'calc_reqs';
+
++-------------------------------+
+| source_table_names            |
++-------------------------------+
+| greptime.public.http_requests |
++-------------------------------+
+
 SHOW CREATE TABLE cnt_reqs;
 
 +----------+---------------------------------------------------+
@@ -379,6 +387,29 @@ SELECT count(*)>0 FROM rate_reqs;
 +---------------------+
 | true                |
 +---------------------+
+
+CREATE FLOW calc_rate_by_matcher
+SINK TO rate_reqs_by_matcher
+EVAL INTERVAL '1m' AS
+TQL EVAL (now() - '1m'::interval, now(), '30s') rate({__name__="http_requests_total",job="my_service"}[1m]);
+
+Affected Rows: 0
+
+SELECT source_table_names FROM information_schema.flows WHERE flow_name = 'calc_rate_by_matcher';
+
++-------------------------------------+
+| source_table_names                  |
++-------------------------------------+
+| greptime.public.http_requests_total |
++-------------------------------------+
+
+DROP FLOW calc_rate_by_matcher;
+
+Affected Rows: 0
+
+DROP TABLE rate_reqs_by_matcher;
+
+Affected Rows: 0
 
 DROP FLOW calc_rate;
 

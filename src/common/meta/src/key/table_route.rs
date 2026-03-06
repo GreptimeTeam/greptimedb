@@ -289,6 +289,10 @@ impl MetadataValue for TableRouteValue {
 }
 
 impl PhysicalTableRouteValue {
+    /// Returns the version of the table route.
+    pub fn version(&self) -> u64 {
+        self.version
+    }
     pub fn new(region_routes: Vec<RegionRoute>) -> Self {
         let max_region_number = region_routes
             .iter()
@@ -937,7 +941,6 @@ mod tests {
                     region: Region {
                         id: RegionId::new(0, 1),
                         name: "r1".to_string(),
-                        partition: None,
                         attrs: Default::default(),
                         partition_expr: Default::default(),
                     },
@@ -948,12 +951,12 @@ mod tests {
                     follower_peers: vec![],
                     leader_state: None,
                     leader_down_since: None,
+                    write_route_policy: None,
                 },
                 RegionRoute {
                     region: Region {
                         id: RegionId::new(0, 1),
                         name: "r1".to_string(),
-                        partition: None,
                         attrs: Default::default(),
                         partition_expr: Default::default(),
                     },
@@ -964,6 +967,7 @@ mod tests {
                     follower_peers: vec![],
                     leader_state: None,
                     leader_down_since: None,
+                    write_route_policy: None,
                 },
             ],
             max_region_number: 1,

@@ -561,6 +561,20 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Partition expr version mismatch for region {}: request {}, expected {}",
+        region_id,
+        request_version,
+        expected_version
+    ))]
+    PartitionExprVersionMismatch {
+        region_id: RegionId,
+        request_version: u64,
+        expected_version: u64,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid options"))]
     JsonOptions {
         #[snafu(source)]
@@ -1197,6 +1211,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to prune file"))]
+    PruneFile {
+        source: Arc<Error>,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -1251,6 +1272,7 @@ impl ErrorExt for Error {
             | InvalidScanIndex { .. }
             | InvalidMeta { .. }
             | InvalidRequest { .. }
+            | PartitionExprVersionMismatch { .. }
             | FillDefault { .. }
             | ConvertColumnDataType { .. }
             | ColumnNotFound { .. }
@@ -1380,6 +1402,8 @@ impl ErrorExt for Error {
             InconsistentTimestampLength { .. } => StatusCode::InvalidArguments,
 
             TooManyFilesToRead { .. } | TooManyGcJobs { .. } => StatusCode::RateLimited,
+
+            PruneFile { source, .. } => source.status_code(),
         }
     }
 

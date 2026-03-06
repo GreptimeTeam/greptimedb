@@ -5,9 +5,11 @@ implemented `SqlQueryHandler`:
 
 ```rust
 impl SqlQueryHandler for Instance {
-    type Error = Error;
-
-    async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
+    async fn do_query(
+        &self,
+        query: &str,
+        query_ctx: QueryContextRef,
+    ) -> Vec<servers::error::Result<Output>> {
         // ...
     }
 }

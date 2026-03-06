@@ -18,8 +18,11 @@ use common_error::ext::BoxedError;
 use store_api::storage::{VectorIndexEngine, VectorSearchMatches};
 use usearch::{Index, IndexOptions, ScalarKind};
 
-use crate::error::{Result, VectorIndexBuildSnafu};
-use crate::sst::index::vector_index::creator::VectorIndexConfig;
+use crate::vector::distance_metric_to_usearch;
+use crate::vector::engine::VectorIndexConfig;
+use crate::vector::error::{EngineSnafu, Result};
+
+type EngineResult<T> = std::result::Result<T, BoxedError>;
 
 /// USearch-based vector index engine using HNSW algorithm.
 pub struct UsearchEngine {
@@ -31,7 +34,7 @@ impl UsearchEngine {
     pub fn create(config: &VectorIndexConfig) -> Result<Self> {
         let options = IndexOptions {
             dimensions: config.dim,
-            metric: config.metric,
+            metric: distance_metric_to_usearch(config.distance_metric),
             quantization: ScalarKind::F32,
             connectivity: config.connectivity,
             expansion_add: config.expansion_add,
@@ -40,7 +43,7 @@ impl UsearchEngine {
         };
 
         let index = Index::new(&options).map_err(|e| {
-            VectorIndexBuildSnafu {
+            EngineSnafu {
                 reason: format!("Failed to create USearch index: {}", e),
             }
             .build()
@@ -54,7 +57,7 @@ impl UsearchEngine {
     pub fn load(config: &VectorIndexConfig, data: &[u8]) -> Result<Self> {
         let options = IndexOptions {
             dimensions: config.dim,
-            metric: config.metric,
+            metric: distance_metric_to_usearch(config.distance_metric),
             quantization: ScalarKind::F32,
             // These will be loaded from serialized data
             connectivity: 0,
@@ -64,14 +67,14 @@ impl UsearchEngine {
         };
 
         let index = Index::new(&options).map_err(|e| {
-            VectorIndexBuildSnafu {
+            EngineSnafu {
                 reason: format!("Failed to create USearch index for loading: {}", e),
             }
             .build()
         })?;
 
         index.load_from_buffer(data).map_err(|e| {
-            VectorIndexBuildSnafu {
+            EngineSnafu {
                 reason: format!("Failed to load USearch index from buffer: {}", e),
             }
             .build()
@@ -79,42 +82,33 @@ impl UsearchEngine {
 
         Ok(Self { index })
     }
+
+    /// Helper to create a BoxedError from a reason string.
+    fn boxed_engine_error(reason: String) -> BoxedError {
+        BoxedError::new(EngineSnafu { reason }.build())
+    }
 }
 
 impl VectorIndexEngine for UsearchEngine {
-    fn add(&mut self, key: u64, vector: &[f32]) -> Result<(), BoxedError> {
+    fn add(&mut self, key: u64, vector: &[f32]) -> EngineResult<()> {
         // Reserve capacity if needed
         if self.index.size() >= self.index.capacity() {
             let new_capacity = std::cmp::max(1, self.index.capacity() * 2);
             self.index.reserve(new_capacity).map_err(|e| {
-                BoxedError::new(
-                    VectorIndexBuildSnafu {
-                        reason: format!("Failed to reserve capacity: {}", e),
-                    }
-                    .build(),
-                )
+                Self::boxed_engine_error(format!("Failed to reserve capacity: {}", e))
             })?;
         }
 
-        self.index.add(key, vector).map_err(|e| {
-            BoxedError::new(
-                VectorIndexBuildSnafu {
-                    reason: format!("Failed to add vector: {}", e),
-                }
-                .build(),
-            )
-        })
+        self.index
+            .add(key, vector)
+            .map_err(|e| Self::boxed_engine_error(format!("Failed to add vector: {}", e)))
     }
 
-    fn search(&self, query: &[f32], k: usize) -> Result<VectorSearchMatches, BoxedError> {
-        let matches = self.index.search(query, k).map_err(|e| {
-            BoxedError::new(
-                VectorIndexBuildSnafu {
-                    reason: format!("Failed to search: {}", e),
-                }
-                .build(),
-            )
-        })?;
+    fn search(&self, query: &[f32], k: usize) -> EngineResult<VectorSearchMatches> {
+        let matches = self
+            .index
+            .search(query, k)
+            .map_err(|e| Self::boxed_engine_error(format!("Failed to search: {}", e)))?;
 
         Ok(VectorSearchMatches {
             keys: matches.keys,
@@ -126,26 +120,16 @@ impl VectorIndexEngine for UsearchEngine {
         self.index.serialized_length()
     }
 
-    fn save_to_buffer(&self, buffer: &mut [u8]) -> Result<(), BoxedError> {
-        self.index.save_to_buffer(buffer).map_err(|e| {
-            BoxedError::new(
-                VectorIndexBuildSnafu {
-                    reason: format!("Failed to save to buffer: {}", e),
-                }
-                .build(),
-            )
-        })
+    fn save_to_buffer(&self, buffer: &mut [u8]) -> EngineResult<()> {
+        self.index
+            .save_to_buffer(buffer)
+            .map_err(|e| Self::boxed_engine_error(format!("Failed to save to buffer: {}", e)))
     }
 
-    fn reserve(&mut self, capacity: usize) -> Result<(), BoxedError> {
-        self.index.reserve(capacity).map_err(|e| {
-            BoxedError::new(
-                VectorIndexBuildSnafu {
-                    reason: format!("Failed to reserve: {}", e),
-                }
-                .build(),
-            )
-        })
+    fn reserve(&mut self, capacity: usize) -> EngineResult<()> {
+        self.index
+            .reserve(capacity)
+            .map_err(|e| Self::boxed_engine_error(format!("Failed to reserve: {}", e)))
     }
 
     fn size(&self) -> usize {
@@ -163,17 +147,15 @@ impl VectorIndexEngine for UsearchEngine {
 
 #[cfg(test)]
 mod tests {
-    use index::vector::VectorDistanceMetric;
     use store_api::storage::VectorIndexEngineType;
-    use usearch::MetricKind;
 
     use super::*;
+    use crate::vector::VectorDistanceMetric;
 
     fn test_config() -> VectorIndexConfig {
         VectorIndexConfig {
             engine: VectorIndexEngineType::Usearch,
             dim: 4,
-            metric: MetricKind::L2sq,
             distance_metric: VectorDistanceMetric::L2sq,
             connectivity: 16,
             expansion_add: 128,

@@ -40,7 +40,8 @@ use crate::metrics::{
 };
 use crate::read::dedup::{DedupMetrics, DedupMetricsReport};
 use crate::read::merge::{MergeMetrics, MergeMetricsReport};
-use crate::read::range::{RangeBuilderList, RangeMeta, RowGroupIndex};
+use crate::read::pruner::PartitionPruner;
+use crate::read::range::{RangeMeta, RowGroupIndex};
 use crate::read::scan_region::StreamContext;
 use crate::read::{Batch, BoxedBatchStream, BoxedRecordBatchStream, ScannerMetrics, Source};
 use crate::sst::file::{FileTimeRange, RegionFileId};
@@ -165,6 +166,8 @@ pub(crate) struct ScanMetricsSet {
     rows_bloom_filtered: usize,
     /// Number of rows filtered by vector index.
     rows_vector_filtered: usize,
+    /// Number of rows selected by vector index.
+    rows_vector_selected: usize,
     /// Number of rows filtered by precise filter.
     rows_precise_filtered: usize,
     /// Number of index result cache hits for fulltext index.
@@ -179,6 +182,12 @@ pub(crate) struct ScanMetricsSet {
     bloom_filter_cache_hit: usize,
     /// Number of index result cache misses for bloom filter index.
     bloom_filter_cache_miss: usize,
+    /// Number of pruner builder cache hits.
+    pruner_cache_hit: usize,
+    /// Number of pruner builder cache misses.
+    pruner_cache_miss: usize,
+    /// Duration spent waiting for pruner to build file ranges.
+    pruner_prune_cost: Duration,
     /// Number of record batches read from SST.
     num_sst_record_batches: usize,
     /// Number of batches decoded from SST.
@@ -291,6 +300,7 @@ impl fmt::Debug for ScanMetricsSet {
             rows_inverted_filtered,
             rows_bloom_filtered,
             rows_vector_filtered,
+            rows_vector_selected,
             rows_precise_filtered,
             fulltext_index_cache_hit,
             fulltext_index_cache_miss,
@@ -298,6 +308,9 @@ impl fmt::Debug for ScanMetricsSet {
             inverted_index_cache_miss,
             bloom_filter_cache_hit,
             bloom_filter_cache_miss,
+            pruner_cache_hit,
+            pruner_cache_miss,
+            pruner_prune_cost,
             num_sst_record_batches,
             num_sst_batches,
             num_sst_rows,
@@ -384,6 +397,9 @@ impl fmt::Debug for ScanMetricsSet {
         if *rows_vector_filtered > 0 {
             write!(f, ", \"rows_vector_filtered\":{rows_vector_filtered}")?;
         }
+        if *rows_vector_selected > 0 {
+            write!(f, ", \"rows_vector_selected\":{rows_vector_selected}")?;
+        }
         if *rows_precise_filtered > 0 {
             write!(f, ", \"rows_precise_filtered\":{rows_precise_filtered}")?;
         }
@@ -416,6 +432,15 @@ impl fmt::Debug for ScanMetricsSet {
         }
         if *bloom_filter_cache_miss > 0 {
             write!(f, ", \"bloom_filter_cache_miss\":{bloom_filter_cache_miss}")?;
+        }
+        if *pruner_cache_hit > 0 {
+            write!(f, ", \"pruner_cache_hit\":{pruner_cache_hit}")?;
+        }
+        if *pruner_cache_miss > 0 {
+            write!(f, ", \"pruner_cache_miss\":{pruner_cache_miss}")?;
+        }
+        if !pruner_prune_cost.is_zero() {
+            write!(f, ", \"pruner_prune_cost\":\"{pruner_prune_cost:?}\"")?;
         }
 
         // Write non-zero distributor metrics
@@ -511,6 +536,12 @@ impl fmt::Debug for ScanMetricsSet {
                 let total_cost =
                     metrics.build_part_cost + metrics.build_reader_cost + metrics.scan_cost;
 
+                // If the file has been pruned by a pruner, the build part cost may be zero.
+                // If we didn't read any ranges from it, we don't output the file.
+                if total_cost.is_zero() && metrics.num_ranges == 0 {
+                    continue;
+                }
+
                 if heap.len() < 10 {
                     // Haven't reached 10 yet, just push
                     heap.push(CompareCostReverse {
@@ -600,6 +631,7 @@ impl ScanMetricsSet {
                     rows_inverted_filtered,
                     rows_bloom_filtered,
                     rows_vector_filtered,
+                    rows_vector_selected,
                     rows_precise_filtered,
                     fulltext_index_cache_hit,
                     fulltext_index_cache_miss,
@@ -607,6 +639,9 @@ impl ScanMetricsSet {
                     inverted_index_cache_miss,
                     bloom_filter_cache_hit,
                     bloom_filter_cache_miss,
+                    pruner_cache_hit,
+                    pruner_cache_miss,
+                    pruner_prune_cost,
                     inverted_index_apply_metrics,
                     bloom_filter_apply_metrics,
                     fulltext_index_apply_metrics,
@@ -636,6 +671,7 @@ impl ScanMetricsSet {
         self.rows_inverted_filtered += *rows_inverted_filtered;
         self.rows_bloom_filtered += *rows_bloom_filtered;
         self.rows_vector_filtered += *rows_vector_filtered;
+        self.rows_vector_selected += *rows_vector_selected;
         self.rows_precise_filtered += *rows_precise_filtered;
 
         self.fulltext_index_cache_hit += *fulltext_index_cache_hit;
@@ -644,6 +680,9 @@ impl ScanMetricsSet {
         self.inverted_index_cache_miss += *inverted_index_cache_miss;
         self.bloom_filter_cache_hit += *bloom_filter_cache_hit;
         self.bloom_filter_cache_miss += *bloom_filter_cache_miss;
+        self.pruner_cache_hit += *pruner_cache_hit;
+        self.pruner_cache_miss += *pruner_cache_miss;
+        self.pruner_prune_cost += *pruner_prune_cost;
 
         self.num_sst_record_batches += *num_record_batches;
         self.num_sst_batches += *num_batches;
@@ -1243,14 +1282,14 @@ pub(crate) async fn scan_file_ranges(
     part_metrics: PartitionMetrics,
     index: RowGroupIndex,
     read_type: &'static str,
-    range_builder: Arc<RangeBuilderList>,
+    partition_pruner: Arc<PartitionPruner>,
 ) -> Result<impl Stream<Item = Result<Batch>>> {
     let mut reader_metrics = ReaderMetrics {
         filter_metrics: new_filter_metrics(part_metrics.explain_verbose()),
         ..Default::default()
     };
-    let ranges = range_builder
-        .build_file_ranges(&stream_ctx.input, index, &mut reader_metrics)
+    let ranges = partition_pruner
+        .build_file_ranges(index, &part_metrics, &mut reader_metrics)
         .await?;
     part_metrics.inc_num_file_ranges(ranges.len());
     part_metrics.merge_reader_metrics(&reader_metrics, None);
@@ -1296,14 +1335,14 @@ pub(crate) async fn scan_flat_file_ranges(
     part_metrics: PartitionMetrics,
     index: RowGroupIndex,
     read_type: &'static str,
-    range_builder: Arc<RangeBuilderList>,
+    partition_pruner: Arc<PartitionPruner>,
 ) -> Result<impl Stream<Item = Result<RecordBatch>>> {
     let mut reader_metrics = ReaderMetrics {
         filter_metrics: new_filter_metrics(part_metrics.explain_verbose()),
         ..Default::default()
     };
-    let ranges = range_builder
-        .build_file_ranges(&stream_ctx.input, index, &mut reader_metrics)
+    let ranges = partition_pruner
+        .build_file_ranges(index, &part_metrics, &mut reader_metrics)
         .await?;
     part_metrics.inc_num_file_ranges(ranges.len());
     part_metrics.merge_reader_metrics(&reader_metrics, None);
@@ -1435,7 +1474,16 @@ pub fn build_flat_file_range_scan_stream(
                     })
                 })
                 .transpose()?;
+
+            let mapper = range.compaction_projection_mapper();
             while let Some(record_batch) = reader.next_batch()? {
+                let record_batch = if let Some(mapper) = mapper {
+                    let batch = mapper.project(record_batch)?;
+                    batch
+                } else {
+                    record_batch
+                };
+
                 if let Some(flat_compat) = may_compat {
                     let batch = flat_compat.compat(record_batch)?;
                     yield batch;
@@ -1510,19 +1558,45 @@ pub(crate) async fn maybe_scan_other_ranges(
     }
 }
 
+/// Build the stream of scanning the extension range in flat format denoted by the [`RowGroupIndex`].
+#[cfg(feature = "enterprise")]
+pub(crate) async fn scan_flat_extension_range(
+    context: Arc<StreamContext>,
+    index: RowGroupIndex,
+    partition_metrics: PartitionMetrics,
+) -> Result<BoxedRecordBatchStream> {
+    use snafu::ResultExt;
+
+    let range = context.input.extension_range(index.index);
+    let reader = range.flat_reader(context.as_ref());
+    let stream = reader
+        .read(context, partition_metrics, index)
+        .await
+        .context(crate::error::ScanExternalRangeSnafu)?;
+    Ok(stream)
+}
+
 pub(crate) async fn maybe_scan_flat_other_ranges(
     context: &Arc<StreamContext>,
     index: RowGroupIndex,
     metrics: &PartitionMetrics,
 ) -> Result<BoxedRecordBatchStream> {
-    let _ = context;
-    let _ = index;
-    let _ = metrics;
-
-    crate::error::UnexpectedSnafu {
-        reason: "no other ranges scannable in flat format",
+    #[cfg(feature = "enterprise")]
+    {
+        scan_flat_extension_range(context.clone(), index, metrics.clone()).await
     }
-    .fail()
+
+    #[cfg(not(feature = "enterprise"))]
+    {
+        let _ = context;
+        let _ = index;
+        let _ = metrics;
+
+        crate::error::UnexpectedSnafu {
+            reason: "no other ranges scannable in flat format",
+        }
+        .fail()
+    }
 }
 
 /// A stream wrapper that splits record batches from an inner stream.

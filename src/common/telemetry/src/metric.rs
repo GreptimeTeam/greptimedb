@@ -55,47 +55,47 @@ pub fn convert_metric_to_write_request(
         if !metric_filter.map(|f| f.filter(&mf)).unwrap_or(true) {
             continue;
         }
-        let mf_type = mf.get_field_type();
-        let mf_name = mf.get_name();
+        let mf_type = mf.type_();
+        let mf_name = mf.name();
         for m in mf.get_metric() {
-            let timestamp = if m.get_timestamp_ms() == 0 {
+            let timestamp = if m.timestamp_ms() == 0 {
                 default_timestamp
             } else {
-                m.get_timestamp_ms()
+                m.timestamp_ms()
             };
             match mf_type {
                 MetricType::COUNTER => timeseries.push(TimeSeries {
-                    labels: convert_label(m.get_label(), mf_name, None),
+                    labels: convert_label(&m.label, mf_name, None),
                     samples: vec![Sample {
-                        value: m.get_counter().get_value(),
+                        value: m.counter.value(),
                         timestamp,
                     }],
                     exemplars: vec![],
                     histograms: vec![],
                 }),
                 MetricType::GAUGE => timeseries.push(TimeSeries {
-                    labels: convert_label(m.get_label(), mf_name, None),
+                    labels: convert_label(&m.label, mf_name, None),
                     samples: vec![Sample {
-                        value: m.get_gauge().get_value(),
+                        value: m.gauge.value(),
                         timestamp,
                     }],
                     exemplars: vec![],
                     histograms: vec![],
                 }),
                 MetricType::HISTOGRAM => {
-                    let h = m.get_histogram();
+                    let h = &m.histogram;
                     let mut inf_seen = false;
                     let metric_name = format!("{}_bucket", mf_name);
-                    for b in h.get_bucket() {
-                        let upper_bound = b.get_upper_bound();
+                    for b in &h.bucket {
+                        let upper_bound = b.upper_bound();
                         timeseries.push(TimeSeries {
                             labels: convert_label(
-                                m.get_label(),
+                                &m.label,
                                 metric_name.as_str(),
                                 Some(("le", upper_bound.to_string())),
                             ),
                             samples: vec![Sample {
-                                value: b.get_cumulative_count() as f64,
+                                value: b.cumulative_count() as f64,
                                 timestamp,
                             }],
                             exemplars: vec![],
@@ -108,12 +108,12 @@ pub fn convert_metric_to_write_request(
                     if !inf_seen {
                         timeseries.push(TimeSeries {
                             labels: convert_label(
-                                m.get_label(),
+                                &m.label,
                                 metric_name.as_str(),
                                 Some(("le", "+Inf".to_string())),
                             ),
                             samples: vec![Sample {
-                                value: h.get_sample_count() as f64,
+                                value: h.sample_count() as f64,
                                 timestamp,
                             }],
                             exemplars: vec![],
@@ -121,13 +121,9 @@ pub fn convert_metric_to_write_request(
                         });
                     }
                     timeseries.push(TimeSeries {
-                        labels: convert_label(
-                            m.get_label(),
-                            format!("{}_sum", mf_name).as_str(),
-                            None,
-                        ),
+                        labels: convert_label(&m.label, format!("{}_sum", mf_name).as_str(), None),
                         samples: vec![Sample {
-                            value: h.get_sample_sum(),
+                            value: h.sample_sum(),
                             timestamp,
                         }],
                         exemplars: vec![],
@@ -135,12 +131,12 @@ pub fn convert_metric_to_write_request(
                     });
                     timeseries.push(TimeSeries {
                         labels: convert_label(
-                            m.get_label(),
+                            &m.label,
                             format!("{}_count", mf_name).as_str(),
                             None,
                         ),
                         samples: vec![Sample {
-                            value: h.get_sample_count() as f64,
+                            value: h.sample_count() as f64,
                             timestamp,
                         }],
                         exemplars: vec![],
@@ -148,16 +144,16 @@ pub fn convert_metric_to_write_request(
                     });
                 }
                 MetricType::SUMMARY => {
-                    let s = m.get_summary();
-                    for q in s.get_quantile() {
+                    let s = &m.summary;
+                    for q in &s.quantile {
                         timeseries.push(TimeSeries {
                             labels: convert_label(
-                                m.get_label(),
+                                &m.label,
                                 mf_name,
-                                Some(("quantile", q.get_quantile().to_string())),
+                                Some(("quantile", q.quantile().to_string())),
                             ),
                             samples: vec![Sample {
-                                value: q.get_value(),
+                                value: q.value(),
                                 timestamp,
                             }],
                             exemplars: vec![],
@@ -165,13 +161,9 @@ pub fn convert_metric_to_write_request(
                         });
                     }
                     timeseries.push(TimeSeries {
-                        labels: convert_label(
-                            m.get_label(),
-                            format!("{}_sum", mf_name).as_str(),
-                            None,
-                        ),
+                        labels: convert_label(&m.label, format!("{}_sum", mf_name).as_str(), None),
                         samples: vec![Sample {
-                            value: s.get_sample_sum(),
+                            value: s.sample_sum(),
                             timestamp,
                         }],
                         exemplars: vec![],
@@ -179,12 +171,12 @@ pub fn convert_metric_to_write_request(
                     });
                     timeseries.push(TimeSeries {
                         labels: convert_label(
-                            m.get_label(),
+                            &m.label,
                             format!("{}_count", mf_name).as_str(),
                             None,
                         ),
                         samples: vec![Sample {
-                            value: s.get_sample_count() as f64,
+                            value: s.sample_count() as f64,
                             timestamp,
                         }],
                         exemplars: vec![],
@@ -212,8 +204,8 @@ fn convert_label(
     let mut labels = Vec::with_capacity(pairs.len() + 1 + if addon.is_some() { 1 } else { 0 });
     for label in pairs {
         labels.push(remote::Label {
-            name: label.get_name().to_string(),
-            value: label.get_value().to_string(),
+            name: label.name().to_string(),
+            value: label.value().to_string(),
         });
     }
     labels.push(remote::Label {
@@ -352,11 +344,11 @@ TimeSeries { labels: [Label { name: "__name__", value: "test_histogram_count" },
         quantile2.set_quantile(100.0);
         quantile2.set_value(5.0);
 
-        summary.set_quantile(vec![quantile1, quantile2].into());
+        summary.set_quantile(vec![quantile1, quantile2]);
 
         let mut metric = Metric::default();
         metric.set_summary(summary);
-        metric_family.set_metric(vec![metric].into());
+        metric_family.set_metric(vec![metric]);
 
         let write_quest = convert_metric_to_write_request(vec![metric_family], None, 20);
         let write_quest_str: Vec<_> = write_quest
@@ -388,7 +380,7 @@ TimeSeries { labels: [Label { name: "__name__", value: "test_summary_count" }], 
         mf.append(&mut counter_2.collect());
 
         let filter = MetricFilter::new(Arc::new(|mf: &MetricFamily| {
-            !mf.get_name().starts_with("filter")
+            !mf.name().starts_with("filter")
         }));
         let write_quest1 = convert_metric_to_write_request(mf.clone(), None, 0);
         let write_quest2 = convert_metric_to_write_request(mf, Some(&filter), 0);

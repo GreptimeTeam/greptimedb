@@ -35,7 +35,7 @@ SHOW CREATE FLOW find_approx_rate;
 | Flow             | Create Flow                                                                                                                             |
 +------------------+-----------------------------------------------------------------------------------------------------------------------------------------+
 | find_approx_rate | CREATE FLOW IF NOT EXISTS find_approx_rate                                                                                              |
-|                  | SINK TO approx_rate                                                                                                                     |
+|                  | SINK TO public.approx_rate                                                                                                              |
 |                  | AS SELECT (max(byte) - min(byte)) / 30.0 AS rate, date_bin(INTERVAL '30 second', ts) AS time_window FROM bytes_log GROUP BY time_window |
 +------------------+-----------------------------------------------------------------------------------------------------------------------------------------+
 

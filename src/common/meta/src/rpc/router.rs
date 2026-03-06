@@ -196,6 +196,7 @@ impl TableRoute {
                 follower_peers,
                 leader_state: None,
                 leader_down_since: None,
+                write_route_policy: None,
             });
         }
 
@@ -258,6 +259,10 @@ pub struct RegionRoute {
     #[serde(default)]
     #[builder(default = "self.default_leader_down_since()")]
     pub leader_down_since: Option<i64>,
+    /// Special write routing behavior for this region.
+    #[builder(setter(into, strip_option), default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write_route_policy: Option<WriteRoutePolicy>,
 }
 
 impl RegionRouteBuilder {
@@ -287,7 +292,40 @@ pub enum LeaderState {
     Staging,
 }
 
+/// The write route policy for the region.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+pub enum WriteRoutePolicy {
+    // The default policy.
+    Normal,
+    /// Ignores all writes for this region.
+    ///
+    /// This policy is typically used during region merge operations, such as repartitioning.
+    /// For example, when merging Region A and Region B into just Region B,
+    /// writes to Region A are ignored, while Region B accepts all writes originating from both regions.
+    IgnoreAllWrites,
+}
+
 impl RegionRoute {
+    /// Returns true if the region should ignore all writes.
+    pub fn is_ignore_all_writes(&self) -> bool {
+        matches!(
+            self.write_route_policy,
+            Some(WriteRoutePolicy::IgnoreAllWrites)
+        )
+    }
+
+    /// Marks this region as ignore-all for writes.
+    pub fn set_ignore_all_writes(&mut self) {
+        self.write_route_policy = Some(WriteRoutePolicy::IgnoreAllWrites);
+    }
+
+    /// Clears ignore-all write policy and falls back to normal routing behavior.
+    pub fn clear_ignore_all_writes(&mut self) {
+        if self.write_route_policy == Some(WriteRoutePolicy::IgnoreAllWrites) {
+            self.write_route_policy = None;
+        }
+    }
+
     /// Returns true if the Leader [`Region`] is downgraded.
     ///
     /// The following cases in which the [`Region`] will be downgraded.
@@ -376,17 +414,55 @@ impl RegionRoutes {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Region {
     pub id: RegionId,
     pub name: String,
     pub attrs: BTreeMap<String, String>,
-
-    /// **Deprecated:** Use `partition_expr` instead.
-    pub partition: Option<LegacyPartition>,
-    /// The partition expression of the region.
-    #[serde(default)]
+    /// The normalized partition expression of the region.
     pub partition_expr: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RegionDe {
+    id: RegionId,
+    name: String,
+    #[serde(default)]
+    attrs: BTreeMap<String, String>,
+    #[serde(default)]
+    partition: Option<LegacyPartition>,
+    #[serde(default)]
+    partition_expr: String,
+}
+
+impl<'de> Deserialize<'de> for Region {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let de = RegionDe::deserialize(deserializer)?;
+        // Compatibility path for legacy serialized routes: prefer the normalized
+        // `partition_expr` field and only fall back to legacy `partition.value_list`.
+        let partition_expr = if de.partition_expr.is_empty() {
+            if let Some(LegacyPartition { value_list, .. }) = &de.partition {
+                value_list
+                    .first()
+                    .map(|expr| String::from_utf8_lossy(expr).to_string())
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            }
+        } else {
+            de.partition_expr
+        };
+
+        Ok(Self {
+            id: de.id,
+            name: de.name,
+            attrs: de.attrs,
+            partition_expr,
+        })
+    }
 }
 
 impl Region {
@@ -400,17 +476,7 @@ impl Region {
 
     /// Gets the partition expression of the region in compatible mode.
     pub fn partition_expr(&self) -> String {
-        if !self.partition_expr.is_empty() {
-            self.partition_expr.clone()
-        } else if let Some(LegacyPartition { value_list, .. }) = &self.partition {
-            if !value_list.is_empty() {
-                String::from_utf8_lossy(&value_list[0]).to_string()
-            } else {
-                "".to_string()
-            }
-        } else {
-            "".to_string()
-        }
+        self.partition_expr.clone()
     }
 }
 
@@ -436,7 +502,6 @@ impl From<PbRegion> for Region {
         Self {
             id: r.id.into(),
             name: r.name,
-            partition: None,
             partition_expr,
             attrs: r.attrs.into_iter().collect::<BTreeMap<_, _>>(),
         }
@@ -519,13 +584,13 @@ mod tests {
                 id: 2.into(),
                 name: "r2".to_string(),
                 attrs: BTreeMap::new(),
-                partition: None,
                 partition_expr: "".to_string(),
             },
             leader_peer: Some(Peer::new(1, "a1")),
             follower_peers: vec![Peer::new(2, "a2"), Peer::new(3, "a3")],
             leader_state: None,
             leader_down_since: None,
+            write_route_policy: None,
         };
 
         assert!(!region_route.is_leader_downgrading());
@@ -542,13 +607,13 @@ mod tests {
                 id: 2.into(),
                 name: "r2".to_string(),
                 attrs: BTreeMap::new(),
-                partition: None,
                 partition_expr: "".to_string(),
             },
             leader_peer: Some(Peer::new(1, "a1")),
             follower_peers: vec![Peer::new(2, "a2"), Peer::new(3, "a3")],
             leader_state: None,
             leader_down_since: None,
+            write_route_policy: None,
         };
 
         let input = r#"{"region":{"id":2,"name":"r2","partition":null,"attrs":{}},"leader_peer":{"id":1,"addr":"a1"},"follower_peers":[{"id":2,"addr":"a2"},{"id":3,"addr":"a3"}]}"#;
@@ -565,13 +630,13 @@ mod tests {
                 id: 2.into(),
                 name: "r2".to_string(),
                 attrs: BTreeMap::new(),
-                partition: None,
                 partition_expr: "".to_string(),
             },
             leader_peer: Some(Peer::new(1, "a1")),
             follower_peers: vec![Peer::new(2, "a2"), Peer::new(3, "a3")],
             leader_state: Some(LeaderState::Downgrading),
             leader_down_since: None,
+            write_route_policy: None,
         };
         let input = r#"{"region":{"id":2,"name":"r2","partition":null,"attrs":{}},"leader_peer":{"id":1,"addr":"a1"},"follower_peers":[{"id":2,"addr":"a2"},{"id":3,"addr":"a3"}],"leader_state":"Downgraded","leader_down_since":null}"#;
         let decoded: RegionRoute = serde_json::from_str(input).unwrap();
@@ -582,13 +647,13 @@ mod tests {
                 id: 2.into(),
                 name: "r2".to_string(),
                 attrs: BTreeMap::new(),
-                partition: None,
                 partition_expr: "".to_string(),
             },
             leader_peer: Some(Peer::new(1, "a1")),
             follower_peers: vec![Peer::new(2, "a2"), Peer::new(3, "a3")],
             leader_state: Some(LeaderState::Downgrading),
             leader_down_since: None,
+            write_route_policy: None,
         };
         let input = r#"{"region":{"id":2,"name":"r2","partition":null,"attrs":{}},"leader_peer":{"id":1,"addr":"a1"},"follower_peers":[{"id":2,"addr":"a2"},{"id":3,"addr":"a3"}],"leader_status":"Downgraded","leader_down_since":null}"#;
         let decoded: RegionRoute = serde_json::from_str(input).unwrap();
@@ -599,13 +664,13 @@ mod tests {
                 id: 2.into(),
                 name: "r2".to_string(),
                 attrs: BTreeMap::new(),
-                partition: None,
                 partition_expr: "".to_string(),
             },
             leader_peer: Some(Peer::new(1, "a1")),
             follower_peers: vec![Peer::new(2, "a2"), Peer::new(3, "a3")],
             leader_state: Some(LeaderState::Downgrading),
             leader_down_since: None,
+            write_route_policy: None,
         };
         let input = r#"{"region":{"id":2,"name":"r2","partition":null,"attrs":{}},"leader_peer":{"id":1,"addr":"a1"},"follower_peers":[{"id":2,"addr":"a2"},{"id":3,"addr":"a3"}],"leader_state":"Downgrading","leader_down_since":null}"#;
         let decoded: RegionRoute = serde_json::from_str(input).unwrap();
@@ -616,17 +681,63 @@ mod tests {
                 id: 2.into(),
                 name: "r2".to_string(),
                 attrs: BTreeMap::new(),
-                partition: None,
                 partition_expr: "".to_string(),
             },
             leader_peer: Some(Peer::new(1, "a1")),
             follower_peers: vec![Peer::new(2, "a2"), Peer::new(3, "a3")],
             leader_state: Some(LeaderState::Downgrading),
             leader_down_since: None,
+            write_route_policy: None,
         };
         let input = r#"{"region":{"id":2,"name":"r2","partition":null,"attrs":{}},"leader_peer":{"id":1,"addr":"a1"},"follower_peers":[{"id":2,"addr":"a2"},{"id":3,"addr":"a3"}],"leader_status":"Downgrading","leader_down_since":null}"#;
         let decoded: RegionRoute = serde_json::from_str(input).unwrap();
         assert_eq!(decoded, region_route);
+    }
+
+    #[test]
+    fn test_region_route_write_route_policy_decode_compatibility() {
+        let input = r#"{"region":{"id":2,"name":"r2","partition":null,"attrs":{}},"leader_peer":{"id":1,"addr":"a1"},"follower_peers":[{"id":2,"addr":"a2"}],"write_route_policy":"IgnoreAllWrites"}"#;
+        let decoded: RegionRoute = serde_json::from_str(input).unwrap();
+
+        assert!(decoded.is_ignore_all_writes());
+    }
+
+    #[test]
+    fn test_region_route_write_route_policy_default_not_serialized() {
+        let region_route = RegionRoute {
+            region: Region {
+                id: 2.into(),
+                name: "r2".to_string(),
+                attrs: BTreeMap::new(),
+                partition_expr: "".to_string(),
+            },
+            leader_peer: Some(Peer::new(1, "a1")),
+            follower_peers: vec![Peer::new(2, "a2"), Peer::new(3, "a3")],
+            leader_state: None,
+            leader_down_since: None,
+            write_route_policy: None,
+        };
+
+        let encoded = serde_json::to_string(&region_route).unwrap();
+        assert!(!encoded.contains("write_route_policy"));
+    }
+
+    #[test]
+    fn test_region_route_write_route_policy_helpers() {
+        let mut region_route = RegionRoute {
+            region: Region::new_test(2.into()),
+            leader_peer: Some(Peer::new(1, "a1")),
+            follower_peers: vec![],
+            leader_state: None,
+            leader_down_since: None,
+            write_route_policy: None,
+        };
+
+        assert!(!region_route.is_ignore_all_writes());
+        region_route.set_ignore_all_writes();
+        assert!(region_route.is_ignore_all_writes());
+        region_route.clear_ignore_all_writes();
+        assert!(!region_route.is_ignore_all_writes());
     }
 
     #[test]
@@ -637,26 +748,26 @@ mod tests {
                     id: RegionId::new(1, 1),
                     name: "r1".to_string(),
                     attrs: BTreeMap::new(),
-                    partition: None,
                     partition_expr: "".to_string(),
                 },
                 leader_peer: Some(Peer::new(1, "a1")),
                 follower_peers: vec![Peer::new(2, "a2"), Peer::new(3, "a3")],
                 leader_state: None,
                 leader_down_since: None,
+                write_route_policy: None,
             },
             RegionRoute {
                 region: Region {
                     id: RegionId::new(1, 2),
                     name: "r2".to_string(),
                     attrs: BTreeMap::new(),
-                    partition: None,
                     partition_expr: "".to_string(),
                 },
                 leader_peer: Some(Peer::new(2, "a2")),
                 follower_peers: vec![Peer::new(1, "a1"), Peer::new(3, "a3")],
                 leader_state: None,
                 leader_down_since: None,
+                write_route_policy: None,
             },
         ];
 
@@ -693,7 +804,6 @@ mod tests {
 
         let r2: Region = r.into();
         assert_eq!(r2.partition_expr(), "");
-        assert!(r2.partition.is_none());
 
         let r3: PbRegion = r2.into();
         assert_eq!(r3.partition.as_ref().unwrap().expression, "");
@@ -712,7 +822,6 @@ mod tests {
 
         let r2: Region = r.into();
         assert_eq!(r2.partition_expr(), "{}");
-        assert!(r2.partition.is_none());
 
         let r3: PbRegion = r2.into();
         assert_eq!(r3.partition.as_ref().unwrap().expression, "{}");
@@ -731,7 +840,6 @@ mod tests {
 
         let r2: Region = r.into();
         assert_eq!(r2.partition_expr(), "a>b");
-        assert!(r2.partition.is_none());
 
         let r3: PbRegion = r2.into();
         assert_eq!(r3.partition.as_ref().unwrap().expression, "a>b");

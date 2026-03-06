@@ -18,7 +18,8 @@ use std::time::Duration;
 
 use backon::{BackoffBuilder, ExponentialBuilder};
 use common_event_recorder::EventRecorderRef;
-use common_telemetry::{debug, error, info};
+use common_telemetry::tracing_context::{FutureExt, TracingContext};
+use common_telemetry::{debug, error, info, tracing};
 use rand::Rng;
 use snafu::ResultExt;
 use tokio::time;
@@ -480,10 +481,20 @@ impl Runner {
 
         // Add the id of the subprocedure to the metadata.
         self.meta.push_child(procedure_id);
+        let parent_id = self.meta.id;
 
+        let tracing_context = TracingContext::from_current_span();
         let _handle = common_runtime::spawn_global(async move {
+            let span = tracing_context.attach(tracing::info_span!(
+                "LocalManager::submit_subprocedure",
+                procedure_name = %runner.meta.type_name,
+                procedure_id = %runner.meta.id,
+                parent_id = %parent_id,
+            ));
             // Run the root procedure.
-            runner.run().await
+            // The task was moved to another runtime for execution.
+            // In order not to interrupt tracing, a span needs to be created to continue tracing the current task.
+            runner.run().trace(span).await
         });
     }
 

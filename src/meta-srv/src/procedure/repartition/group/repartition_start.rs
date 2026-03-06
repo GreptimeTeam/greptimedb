@@ -37,13 +37,13 @@ fn ensure_region_route_expr_match(
     region_route: &RegionRoute,
     region_descriptor: &RegionDescriptor,
 ) -> Result<RegionRoute> {
-    let actual = &region_route.region.partition_expr;
+    let actual = region_route.region.partition_expr();
     let expected = region_descriptor
         .partition_expr
         .as_json_str()
         .context(error::SerializePartitionExprSnafu)?;
     ensure!(
-        actual == &expected,
+        actual == expected,
         error::PartitionExprMismatchSnafu {
             region_id: region_route.region.id,
             expected,
@@ -303,5 +303,52 @@ mod tests {
         )
         .unwrap_err();
         assert_matches!(err, Error::RepartitionTargetRegionMissing { .. });
+    }
+
+    #[test]
+    fn test_ensure_route_present_legacy_partition_expr_source() {
+        let source_region = RegionDescriptor {
+            region_id: RegionId::new(1024, 1),
+            partition_expr: range_expr("x", 0, 100),
+        };
+        let target_region = RegionDescriptor {
+            region_id: RegionId::new(1024, 2),
+            partition_expr: range_expr("x", 0, 10),
+        };
+        let legacy_partition_expr = range_expr("x", 0, 100).as_json_str().unwrap();
+        let legacy_region_json = serde_json::json!({
+            "id": RegionId::new(1024, 1).as_u64(),
+            "name": "",
+            "partition": {
+                "column_list": ["x"],
+                "value_list": [legacy_partition_expr]
+            },
+            "partition_expr": "",
+            "attrs": {}
+        });
+
+        let region_routes = vec![
+            RegionRoute {
+                region: serde_json::from_value(legacy_region_json).unwrap(),
+                leader_peer: Some(Peer::empty(1)),
+                ..Default::default()
+            },
+            RegionRoute {
+                region: Region {
+                    id: RegionId::new(1024, 2),
+                    ..Default::default()
+                },
+                leader_peer: Some(Peer::empty(1)),
+                ..Default::default()
+            },
+        ];
+
+        let result = RepartitionStart::ensure_route_present(
+            Uuid::new_v4(),
+            &region_routes,
+            &[source_region],
+            &[target_region],
+        );
+        assert!(result.is_ok());
     }
 }

@@ -75,7 +75,6 @@ rustls-pemfile = { version = "2.0", optional = true }
 serde.workspace = true
 serde_json.workspace = true
 serde_with.workspace = true
-session.workspace = true
 snafu.workspace = true
 sqlx = { workspace = true, features = [
     "mysql",

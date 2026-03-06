@@ -5,7 +5,7 @@ CREATE TABLE window_data(
   group_id INTEGER,
   seq_num INTEGER, 
   "value" DOUBLE,
-  category VARCHAR,
+  "category" VARCHAR,
   ts TIMESTAMP TIME INDEX
 );
 

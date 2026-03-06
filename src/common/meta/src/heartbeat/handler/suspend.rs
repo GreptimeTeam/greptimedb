@@ -41,7 +41,7 @@ impl HeartbeatResponseHandler for SuspendHandler {
     fn is_acceptable(&self, context: &HeartbeatResponseHandlerContext) -> bool {
         matches!(
             context.incoming_message,
-            Some((_, Instruction::Suspend)) | None
+            Some((_, _, Instruction::Suspend)) | None
         )
     }
 
@@ -52,7 +52,7 @@ impl HeartbeatResponseHandler for SuspendHandler {
                 .is_ok()
         };
 
-        if let Some((_, Instruction::Suspend)) = context.incoming_message.take() {
+        if let Some((_, _, Instruction::Suspend)) = context.incoming_message.take() {
             if flip_state(false) {
                 warn!("Suspend instruction received from meta, entering suspension state");
             }

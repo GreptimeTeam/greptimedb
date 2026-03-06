@@ -626,8 +626,7 @@ impl DdlManager {
                     handle_alter_database_task(self, alter_database_task).await
                 }
                 CreateFlow(create_flow_task) => {
-                    handle_create_flow_task(self, create_flow_task, request.query_context.into())
-                        .await
+                    handle_create_flow_task(self, create_flow_task, request.query_context).await
                 }
                 DropFlow(drop_flow_task) => handle_drop_flow_task(self, drop_flow_task).await,
                 CreateView(create_view_task) => {
@@ -637,17 +636,12 @@ impl DdlManager {
                 CommentOn(comment_on_task) => handle_comment_on_task(self, comment_on_task).await,
                 #[cfg(feature = "enterprise")]
                 CreateTrigger(create_trigger_task) => {
-                    handle_create_trigger_task(
-                        self,
-                        create_trigger_task,
-                        request.query_context.into(),
-                    )
-                    .await
+                    handle_create_trigger_task(self, create_trigger_task, request.query_context)
+                        .await
                 }
                 #[cfg(feature = "enterprise")]
                 DropTrigger(drop_trigger_task) => {
-                    handle_drop_trigger_task(self, drop_trigger_task, request.query_context.into())
-                        .await
+                    handle_drop_trigger_task(self, drop_trigger_task, request.query_context).await
                 }
             }
         }

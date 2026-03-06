@@ -155,7 +155,8 @@ pub(crate) async fn create_external_expr(
     let file_column_schemas = infer_file_table_schema(&object_store, &files, &table_options)
         .await
         .context(InferFileTableSchemaSnafu)?
-        .column_schemas;
+        .column_schemas()
+        .to_vec();
 
     let (time_index, primary_keys, table_column_schemas) = if !create.columns.is_empty() {
         // expanded form
@@ -549,15 +550,10 @@ fn find_primary_keys(
     let columns_pk = columns
         .iter()
         .filter_map(|x| {
-            if x.options().iter().any(|o| {
-                matches!(
-                    o.option,
-                    ColumnOption::Unique {
-                        is_primary: true,
-                        ..
-                    }
-                )
-            }) {
+            if x.options()
+                .iter()
+                .any(|o| matches!(o.option, ColumnOption::PrimaryKey(_)))
+            {
                 Some(x.name().value.clone())
             } else {
                 None
@@ -1115,10 +1111,50 @@ TQL EVAL (now() - '15s'::interval, now(), '5s') count_values("status_code", http
             "greptime.public.cnt_reqs",
             expr.sink_table_name.map(to_dot_sep).unwrap()
         );
-        assert!(expr.source_table_names.is_empty());
+        assert_eq!(1, expr.source_table_names.len());
+        assert_eq!(
+            "greptime.public.http_requests",
+            to_dot_sep(expr.source_table_names[0].clone())
+        );
         assert_eq!(
             r#"TQL EVAL (now() - '15s'::interval, now(), '5s') count_values("status_code", http_requests)"#,
             expr.sql
+        );
+
+        let sql = r#"
+CREATE FLOW calc_reqs SINK TO cnt_reqs AS
+TQL EVAL (now() - '15s'::interval, now(), '5s') count_values("status_code", http_requests{__schema__="greptime_private"});"#;
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+        let Statement::CreateFlow(create_flow) = stmt else {
+            unreachable!()
+        };
+        let expr = to_create_flow_task_expr(create_flow, &QueryContext::arc()).unwrap();
+        assert_eq!(1, expr.source_table_names.len());
+        assert_eq!(
+            "greptime.greptime_private.http_requests",
+            to_dot_sep(expr.source_table_names[0].clone())
+        );
+
+        let sql = r#"
+CREATE FLOW calc_reqs SINK TO cnt_reqs AS
+TQL EVAL (now() - '15s'::interval, now(), '5s') count_values("status_code", http_requests{__database__="greptime_private"});"#;
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+        let Statement::CreateFlow(create_flow) = stmt else {
+            unreachable!()
+        };
+        let expr = to_create_flow_task_expr(create_flow, &QueryContext::arc()).unwrap();
+        assert_eq!(1, expr.source_table_names.len());
+        assert_eq!(
+            "greptime.greptime_private.http_requests",
+            to_dot_sep(expr.source_table_names[0].clone())
         );
     }
 

@@ -341,7 +341,7 @@ impl RegionOpener {
             topic_latest_entry_id: AtomicU64::new(0),
             written_bytes: Arc::new(AtomicU64::new(0)),
             stats: self.stats,
-            staging_partition_expr: Mutex::new(None),
+            staging_partition_info: Mutex::new(None),
         }))
     }
 
@@ -578,8 +578,8 @@ impl RegionOpener {
             topic_latest_entry_id: AtomicU64::new(topic_latest_entry_id),
             written_bytes: Arc::new(AtomicU64::new(0)),
             stats: self.stats.clone(),
-            // TODO(weny): reload the staging partition expr from the manifest.
-            staging_partition_expr: Mutex::new(None),
+            // TODO(weny): reload the staging partition info from the manifest.
+            staging_partition_info: Mutex::new(None),
         };
 
         let region = Arc::new(region);
@@ -618,6 +618,36 @@ pub(crate) fn sanitize_region_options(manifest: &RegionManifest, options: &mut R
             manifest.metadata.region_id,
         );
         options.sst_format = Some(manifest.sst_format);
+    }
+    if let Some(manifest_append_mode) = manifest.append_mode
+        && options.append_mode != manifest_append_mode
+    {
+        common_telemetry::warn!(
+            "Overriding append_mode from {} to {} for region {}",
+            options.append_mode,
+            manifest_append_mode,
+            manifest.metadata.region_id,
+        );
+        options.append_mode = manifest_append_mode;
+    }
+    if options.append_mode && options.merge_mode.take().is_some() {
+        common_telemetry::warn!(
+            "Ignoring merge_mode because append_mode is enabled for region {}",
+            manifest.metadata.region_id,
+        );
+    }
+}
+
+/// Sanitizes open request options before parsing.
+pub(crate) fn sanitize_open_request_options(options: &mut HashMap<String, String>) {
+    let append_mode_enabled = options
+        .get("append_mode")
+        .is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "true" | "1"));
+
+    if append_mode_enabled && options.remove("merge_mode").is_some() {
+        common_telemetry::warn!(
+            "Ignoring merge_mode in open request options because append_mode is enabled"
+        );
     }
 }
 

@@ -38,7 +38,6 @@ use client::RecordBatches;
 use client::error::{ExternalSnafu as ClientExternalSnafu, Result as ClientResult};
 use client::inserter::{InsertOptions, Inserter};
 use common_error::ext::BoxedError;
-use common_meta::cache::TableRouteCacheRef;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::key::flow::{FlowMetadataManager, FlowMetadataManagerRef};
 use common_meta::key::schema_name::SchemaNameKey;
@@ -55,7 +54,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use humantime::format_duration;
 use itertools::Itertools;
-use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
+use partition::manager::PartitionRuleManagerRef;
 use query::QueryEngineRef;
 use query::parser::QueryStatement;
 use session::context::{Channel, QueryContextBuilder, QueryContextRef};
@@ -79,7 +78,8 @@ use table::table_name::TableName;
 use table::table_reference::TableReference;
 
 use self::set::{
-    set_bytea_output, set_datestyle, set_search_path, set_timezone, validate_client_encoding,
+    set_bytea_output, set_datestyle, set_intervalstyle, set_search_path, set_timezone,
+    validate_client_encoding,
 };
 use crate::error::{
     self, CatalogSnafu, ExecLogicalPlanSnafu, ExternalSnafu, InvalidSqlSnafu, NotSupportedSnafu,
@@ -151,7 +151,7 @@ impl StatementExecutor {
         kv_backend: KvBackendRef,
         cache_invalidator: CacheInvalidatorRef,
         inserter: InserterRef,
-        table_route_cache: TableRouteCacheRef,
+        partition_manager: PartitionRuleManagerRef,
         process_manager: Option<ProcessManagerRef>,
     ) -> Self {
         Self {
@@ -161,7 +161,7 @@ impl StatementExecutor {
             table_metadata_manager: Arc::new(TableMetadataManager::new(kv_backend.clone())),
             flow_metadata_manager: Arc::new(FlowMetadataManager::new(kv_backend.clone())),
             view_info_manager: Arc::new(ViewInfoManager::new(kv_backend.clone())),
-            partition_manager: Arc::new(PartitionRuleManager::new(kv_backend, table_route_cache)),
+            partition_manager,
             cache_invalidator,
             inserter,
             process_manager,
@@ -483,6 +483,7 @@ impl StatementExecutor {
             // Not harmful since it only relates to how date is viewed in client app's output.
             // The tracked issue is https://github.com/GreptimeTeam/greptimedb/issues/3442.
             "DATESTYLE" => set_datestyle(set_var.value, query_ctx)?,
+            "INTERVALSTYLE" => set_intervalstyle(set_var.value, query_ctx)?,
 
             // Allow query to fallback when failed to push down.
             "ALLOW_QUERY_FALLBACK" => set_allow_query_fallback(set_var.value, query_ctx)?,

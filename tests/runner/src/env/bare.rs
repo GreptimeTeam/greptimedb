@@ -528,7 +528,7 @@ impl Env {
                 "--bin",
                 "greptime",
                 "--features",
-                "pg_kvbackend,mysql_kvbackend",
+                "pg_kvbackend,mysql_kvbackend,vector_index",
             ])
             .output()
             .expect("Failed to start GreptimeDB");

@@ -355,8 +355,8 @@ async fn test_extended_query() -> Result<()> {
     let rows = client.query(&stmt, &[&1i32]).await.unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].len(), 2);
-    assert_eq!(rows[0].get::<usize, i32>(0usize), 1);
-    assert_eq!(rows[0].get::<&str, i32>("uint32s"), 1);
+    assert_eq!(rows[0].get::<usize, i64>(0usize), 1);
+    assert_eq!(rows[0].get::<&str, i64>("uint32s"), 1);
     assert_eq!(rows[0].get::<usize, i64>(1usize), 2);
     assert_eq!(rows[0].get::<&str, i64>("numbers.uint32s + Int64(1)"), 2);
 

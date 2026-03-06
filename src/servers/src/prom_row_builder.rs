@@ -13,11 +13,9 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::collections::hash_map::Entry;
-use std::string::ToString;
 
 use api::prom_store::remote::Sample;
-use api::v1::helper::{field_column_schema, tag_column_schema, time_index_column_schema};
+use api::v1::helper::{field_column_schema, time_index_column_schema};
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnSchema, Row, RowInsertRequest, Rows, SemanticType, Value};
 use common_query::prelude::{greptime_timestamp, greptime_value};
@@ -102,7 +100,7 @@ pub struct TableBuilder {
     /// Rows written.
     rows: Vec<Row>,
     /// Indices of columns inside `schema`.
-    col_indexes: HashMap<String, usize>,
+    col_indexes: HashMap<Vec<u8>, usize>,
 }
 
 impl Default for TableBuilder {
@@ -114,8 +112,8 @@ impl Default for TableBuilder {
 impl TableBuilder {
     pub(crate) fn with_capacity(cols: usize, rows: usize) -> Self {
         let mut col_indexes = HashMap::with_capacity_and_hasher(cols, Default::default());
-        col_indexes.insert(greptime_timestamp().to_string(), 0);
-        col_indexes.insert(greptime_value().to_string(), 1);
+        col_indexes.insert(greptime_timestamp().as_bytes().to_owned(), 0);
+        col_indexes.insert(greptime_value().as_bytes().to_owned(), 1);
 
         let mut schema = Vec::with_capacity(cols);
         schema.push(time_index_column_schema(
@@ -144,24 +142,29 @@ impl TableBuilder {
         let mut row = vec![Value { value_data: None }; self.col_indexes.len()];
 
         for PromLabel { name, value } in labels {
-            let tag_name = prom_validation_mode.decode_string(name)?;
-            let tag_value = prom_validation_mode.decode_string(value)?;
-            let tag_value = Some(ValueData::StringValue(tag_value));
+            prom_validation_mode.validate_bytes(name)?;
+            let raw_tag_name = name;
+            let tag_value = Some(ValueData::StringValue(
+                prom_validation_mode.decode_string(value)?,
+            ));
             let tag_num = self.col_indexes.len();
 
-            match self.col_indexes.entry(tag_name) {
-                Entry::Occupied(e) => {
-                    row[*e.get()].value_data = tag_value;
-                }
-                Entry::Vacant(e) => {
-                    self.schema
-                        .push(tag_column_schema(e.key(), ColumnDataType::String));
-                    e.insert(tag_num);
-                    row.push(Value {
-                        value_data: tag_value,
-                    });
-                }
+            if let Some(e) = self.col_indexes.get_mut(*raw_tag_name) {
+                row[*e].value_data = tag_value;
+                continue;
             }
+            let tag_name = prom_validation_mode.decode_string(raw_tag_name)?;
+            self.schema.push(ColumnSchema {
+                column_name: tag_name.clone(),
+                datatype: ColumnDataType::String as i32,
+                semantic_type: SemanticType::Tag as i32,
+                ..Default::default()
+            });
+            self.col_indexes.insert(tag_name.into_bytes(), tag_num);
+
+            row.push(Value {
+                value_data: tag_value,
+            });
         }
 
         if samples.len() == 1 {
@@ -212,8 +215,6 @@ mod tests {
     use api::prom_store::remote::Sample;
     use api::v1::Value;
     use api::v1::value::ValueData;
-    use arrow::datatypes::ToByteSlice;
-    use bytes::Bytes;
     use prost::DecodeError;
 
     use crate::http::PromValidationMode;
@@ -225,12 +226,12 @@ mod tests {
         let _ = builder.add_labels_and_samples(
             &[
                 PromLabel {
-                    name: Bytes::from("tag0"),
-                    value: Bytes::from("v0"),
+                    name: b"tag0",
+                    value: b"v0",
                 },
                 PromLabel {
-                    name: Bytes::from("tag1"),
-                    value: Bytes::from("v1"),
+                    name: b"tag1",
+                    value: b"v1",
                 },
             ],
             &[Sample {
@@ -243,12 +244,12 @@ mod tests {
         let _ = builder.add_labels_and_samples(
             &[
                 PromLabel {
-                    name: Bytes::from("tag0"),
-                    value: Bytes::from("v0"),
+                    name: b"tag0",
+                    value: b"v0",
                 },
                 PromLabel {
-                    name: Bytes::from("tag2"),
-                    value: Bytes::from("v2"),
+                    name: b"tag2",
+                    value: b"v2",
                 },
             ],
             &[Sample {
@@ -304,8 +305,8 @@ mod tests {
 
         let res = builder.add_labels_and_samples(
             &[PromLabel {
-                name: Bytes::from("tag0"),
-                value: invalid_utf8_bytes.to_byte_slice().into(),
+                name: b"tag0",
+                value: invalid_utf8_bytes,
             }],
             &[Sample {
                 value: 0.1,

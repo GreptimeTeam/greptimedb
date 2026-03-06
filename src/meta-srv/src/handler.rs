@@ -510,7 +510,6 @@ impl Mailbox for HeartbeatMailbox {
         let deadline = Instant::now() + timeout;
         self.timeouts.insert(message_id, deadline);
         self.timeout_notify.notify_one();
-
         let deregister_signal_receiver = self.pushers.push(pusher_id, msg).await?;
 
         Ok(MailboxReceiver::new(

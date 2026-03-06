@@ -21,15 +21,31 @@ use cargo_manifest::Manifest;
 use shadow_rs::{BuildPattern, CARGO_METADATA, CARGO_TREE, ShadowBuilder};
 
 fn main() -> shadow_rs::SdResult<()> {
-    println!(
-        "cargo:rustc-env=SOURCE_TIMESTAMP={}",
-        if let Ok(t) = get_source_time() {
-            format_timestamp(t)
-        } else {
-            "".to_string()
-        }
-    );
-    build_data::set_BUILD_TIMESTAMP();
+    // Refresh timestamps by default in release builds. In non-release builds (debug, bench,
+    // etc.), skip refreshing to preserve incremental compilation.
+    // Set DISABLE_BUILD_INFO=1 to force-disable refreshing even in release builds.
+    let profile = env::var("PROFILE").unwrap_or_default();
+    let disabled = env::var("DISABLE_BUILD_INFO")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let refresh = profile == "release" && !disabled;
+
+    println!("cargo:rerun-if-env-changed=DISABLE_BUILD_INFO");
+
+    if refresh {
+        println!(
+            "cargo:rustc-env=SOURCE_TIMESTAMP={}",
+            if let Ok(t) = get_source_time() {
+                format_timestamp(t)
+            } else {
+                "".to_string()
+            }
+        );
+        build_data::set_BUILD_TIMESTAMP();
+    } else {
+        println!("cargo:rustc-env=SOURCE_TIMESTAMP=");
+        println!("cargo:rustc-env=BUILD_TIMESTAMP=");
+    }
 
     // The "CARGO_WORKSPACE_DIR" is set manually (not by Rust itself) in Cargo config file, to
     // solve the problem where the "CARGO_MANIFEST_DIR" is not what we want when this repo is
@@ -54,6 +70,15 @@ fn main() -> shadow_rs::SdResult<()> {
     }
 
     let out_path = env::var("OUT_DIR")?;
+    let shadow_file = PathBuf::from(&out_path).join("shadow.rs");
+
+    // When not refreshing build info and the shadow.rs already exists, skip regenerating
+    // it entirely. shadow_rs always writes new BUILD_TIME* values which would change
+    // the file and invalidate incremental compilation even when nothing meaningful changed.
+    if !refresh && shadow_file.exists() {
+        println!("cargo:rerun-if-changed=build.rs");
+        return Ok(());
+    }
 
     let _ = ShadowBuilder::builder()
         .build_pattern(BuildPattern::Lazy)

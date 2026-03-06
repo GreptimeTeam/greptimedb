@@ -36,6 +36,7 @@ iso8601 = "0.6.1"
 itertools.workspace = true
 jsonb.workspace = true
 lazy_static.workspace = true
+promql-parser.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true

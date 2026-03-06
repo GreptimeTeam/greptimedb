@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::cluster_server::ClusterServer;
+use api::v1::meta::config_server::ConfigServer;
 use api::v1::meta::heartbeat_server::HeartbeatServer;
 use api::v1::meta::procedure_service_server::ProcedureServiceServer;
 use api::v1::meta::store_server::StoreServer;
@@ -125,6 +126,7 @@ pub async fn mock(
         let router =
             add_compressed_service!(router, ProcedureServiceServer::from_arc(service.clone()));
         let router = add_compressed_service!(router, ClusterServer::from_arc(service.clone()));
+        let router = add_compressed_service!(router, ConfigServer::from_arc(service.clone()));
         router
             .serve_with_incoming(futures::stream::iter(vec![Ok::<_, std::io::Error>(server)]))
             .await

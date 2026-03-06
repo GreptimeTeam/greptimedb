@@ -70,11 +70,6 @@ impl SimpleBulkMemtable {
         dedup: bool,
         merge_mode: MergeMode,
     ) -> Self {
-        let dedup = if merge_mode == MergeMode::LastNonNull {
-            false
-        } else {
-            dedup
-        };
         let series = RwLock::new(Series::with_capacity(&region_metadata, 1024, 8192));
 
         Self {
@@ -225,7 +220,6 @@ impl Memtable for SimpleBulkMemtable {
         sequence: Option<store_api::storage::SequenceRange>,
     ) -> error::Result<BoxedBatchIterator> {
         let iter = self.create_iter(projection, sequence)?.build(None)?;
-
         if self.merge_mode == MergeMode::LastNonNull {
             let iter = LastNonNullIter::new(iter);
             Ok(Box::new(iter))
@@ -264,12 +258,14 @@ impl Memtable for SimpleBulkMemtable {
         let contexts = values
             .into_par_iter()
             .filter_map(|v| {
-                let filtered = match v
-                    .to_batch(&[], &self.region_metadata, &projection, self.dedup)
-                    .and_then(|mut b| {
-                        b.filter_by_sequence(sequence)?;
-                        Ok(b)
-                    }) {
+                let filtered = match v.to_batch(
+                    &[],
+                    &self.region_metadata,
+                    &projection,
+                    sequence,
+                    self.dedup,
+                    self.merge_mode,
+                ) {
                     Ok(filtered) => filtered,
                     Err(e) => {
                         return Some(Err(e));

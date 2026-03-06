@@ -25,6 +25,8 @@ use futures::stream::FuturesUnordered;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 
+use crate::utils::to_meta_query_context;
+
 /// The operator for flow service which implements [`FlowServiceHandler`].
 pub struct FlowServiceOperator {
     flow_metadata_manager: FlowMetadataManagerRef,
@@ -105,9 +107,7 @@ impl FlowServiceOperator {
                 let flush_req = FlowRequest {
                     header: Some(FlowRequestHeader {
                         tracing_context: TracingContext::from_current_span().to_w3c(),
-                        query_context: Some(
-                            common_meta::rpc::ddl::QueryContext::from(ctx.clone()).into(),
-                        ),
+                        query_context: Some(to_meta_query_context(ctx.clone()).into()),
                     }),
                     body: Some(flow_request::Body::Flush(FlushFlow {
                         flow_id: Some(api::v1::FlowId { id }),

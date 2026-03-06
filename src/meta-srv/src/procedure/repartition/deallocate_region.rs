@@ -133,6 +133,7 @@ impl DeallocateRegion {
                 region_routes,
                 false,
                 true,
+                true,
             )
             .await
             .context(error::DeallocateRegionsSnafu { table_id })?;

@@ -58,9 +58,10 @@ tql eval (3000, 3000, '1s') label_replace(histogram_quantile(0.8, histogram_buck
 
 -- More realistic with rates.
 -- This case doesn't contains value because other point are not inserted.
--- quantile with rate is covered in other cases
+-- Prometheus `v3.9.1` updates the range to 10m to avoid the (t-r) boundary.
+-- Quantile with rate is covered in other cases.
 -- SQLNESS SORT_RESULT 3 1
-tql eval (3000, 3000, '1s') histogram_quantile(0.2, rate(histogram_bucket[5m]));
+tql eval (3000, 3000, '1s') histogram_quantile(0.2, rate(histogram_bucket[10m]));
 
 drop table histogram_bucket;
 

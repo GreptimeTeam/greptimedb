@@ -22,7 +22,7 @@ use datafusion::arrow::array::{Array, Float64Array, TimestampMillisecondArray, U
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::stats::Precision;
-use datafusion::common::{ColumnStatistics, DFSchema, DFSchemaRef};
+use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{EmptyRelation, Expr, LogicalPlan, UserDefinedLogicalNodeCore};
@@ -293,7 +293,7 @@ impl ExecutionPlan for InstantManipulateExec {
         self.input.schema()
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         self.input.properties()
     }
 
@@ -388,10 +388,7 @@ impl ExecutionPlan for InstantManipulateExec {
             num_rows: Precision::Inexact(estimated_row_num.floor() as _),
             total_byte_size: estimated_total_bytes,
             // TODO(ruihang): support this column statistics
-            column_statistics: vec![
-                ColumnStatistics::new_unknown();
-                self.schema().flattened_fields().len()
-            ],
+            column_statistics: Statistics::unknown_column(&self.schema()),
         })
     }
 
@@ -468,8 +465,11 @@ impl Stream for InstantManipulateStream {
 }
 
 impl InstantManipulateStream {
-    // refer to Go version: https://github.com/prometheus/prometheus/blob/e934d0f01158a1d55fa0ebb035346b195fcc1260/promql/engine.go#L1571
-    // and the function `vectorSelectorSingle`
+    // Refer to Prometheus `vectorSelectorSingle` / lookback semantics.
+    //
+    // Prometheus `v3.9.1` uses a start-exclusive lookback window:
+    //   (eval_ts - lookback_delta, eval_ts]
+    // i.e. a sample at exactly `eval_ts - lookback_delta` is considered too old.
     pub fn manipulate(&self, input: RecordBatch) -> DataFusionResult<RecordBatch> {
         let ts_column = input
             .column(self.time_index)
@@ -494,7 +494,15 @@ impl InstantManipulateStream {
         // Optimize iteration range based on actual data bounds
         let first_ts = ts_column.value(0);
         let last_ts = ts_column.value(ts_column.len() - 1);
-        let last_useful = last_ts + self.lookback_delta;
+        // A sample at `t` is eligible for eval time `eval_ts` iff:
+        //   t > eval_ts - lookback_delta  <=>  eval_ts < t + lookback_delta.
+        // Therefore the last eval timestamp for which the last sample is still eligible is:
+        //   last_ts + lookback_delta - 1 (millisecond granularity).
+        let last_useful = if self.lookback_delta > 0 {
+            last_ts + self.lookback_delta - 1
+        } else {
+            last_ts
+        };
 
         let max_start = first_ts.max(self.start);
         let min_end = last_useful.min(self.end);
@@ -534,21 +542,21 @@ impl InstantManipulateStream {
             if cursor == ts_column.len() {
                 cursor -= 1;
                 // short cut this loop
-                if ts_column.value(cursor) + self.lookback_delta < expected_ts {
+                if ts_column.value(cursor) + self.lookback_delta <= expected_ts {
                     break;
                 }
             }
 
             // then examine the value
             let curr_ts = ts_column.value(cursor);
-            if curr_ts + self.lookback_delta < expected_ts {
+            if curr_ts + self.lookback_delta <= expected_ts {
                 continue;
             }
             if curr_ts > expected_ts {
                 // exceeds current expected timestamp, examine the previous value
                 if let Some(prev_cursor) = cursor.checked_sub(1) {
                     let prev_ts = ts_column.value(prev_cursor);
-                    if prev_ts + self.lookback_delta >= expected_ts {
+                    if prev_ts + self.lookback_delta > expected_ts {
                         // only use the point in the time range
                         if let Some(field_column) = &field_column
                             && field_column.value(prev_cursor).is_nan()
@@ -694,17 +702,11 @@ mod test {
             \n| timestamp           | value | path |\
             \n+---------------------+-------+------+\
             \n| 1970-01-01T00:00:00 | 1.0   | foo  |\
-            \n| 1970-01-01T00:00:10 | 1.0   | foo  |\
             \n| 1970-01-01T00:00:30 | 1.0   | foo  |\
-            \n| 1970-01-01T00:00:40 | 1.0   | foo  |\
             \n| 1970-01-01T00:01:00 | 1.0   | foo  |\
-            \n| 1970-01-01T00:01:10 | 1.0   | foo  |\
             \n| 1970-01-01T00:01:30 | 1.0   | foo  |\
-            \n| 1970-01-01T00:01:40 | 1.0   | foo  |\
             \n| 1970-01-01T00:02:00 | 1.0   | foo  |\
-            \n| 1970-01-01T00:02:10 | 1.0   | foo  |\
             \n| 1970-01-01T00:03:00 | 1.0   | foo  |\
-            \n| 1970-01-01T00:03:10 | 1.0   | foo  |\
             \n| 1970-01-01T00:04:00 | 1.0   | foo  |\
             \n| 1970-01-01T00:04:10 | 1.0   | foo  |\
             \n| 1970-01-01T00:04:40 | 1.0   | foo  |\
@@ -725,9 +727,7 @@ mod test {
             \n| 1970-01-01T00:01:00 | 1.0   | foo  |\
             \n| 1970-01-01T00:01:30 | 1.0   | foo  |\
             \n| 1970-01-01T00:02:00 | 1.0   | foo  |\
-            \n| 1970-01-01T00:02:30 | 1.0   | foo  |\
             \n| 1970-01-01T00:03:00 | 1.0   | foo  |\
-            \n| 1970-01-01T00:03:30 | 1.0   | foo  |\
             \n| 1970-01-01T00:04:00 | 1.0   | foo  |\
             \n| 1970-01-01T00:04:30 | 1.0   | foo  |\
             \n| 1970-01-01T00:05:00 | 1.0   | foo  |\
@@ -757,11 +757,9 @@ mod test {
             \n| 1970-01-01T00:02:00 | 1.0   | foo  |\
             \n| 1970-01-01T00:02:10 | 1.0   | foo  |\
             \n| 1970-01-01T00:02:20 | 1.0   | foo  |\
-            \n| 1970-01-01T00:02:30 | 1.0   | foo  |\
             \n| 1970-01-01T00:03:00 | 1.0   | foo  |\
             \n| 1970-01-01T00:03:10 | 1.0   | foo  |\
             \n| 1970-01-01T00:03:20 | 1.0   | foo  |\
-            \n| 1970-01-01T00:03:30 | 1.0   | foo  |\
             \n| 1970-01-01T00:04:00 | 1.0   | foo  |\
             \n| 1970-01-01T00:04:10 | 1.0   | foo  |\
             \n| 1970-01-01T00:04:20 | 1.0   | foo  |\
@@ -858,7 +856,6 @@ mod test {
             \n| timestamp           | value | path |\
             \n+---------------------+-------+------+\
             \n| 1970-01-01T00:00:00 | 1.0   | foo  |\
-            \n| 1970-01-01T00:00:10 | 1.0   | foo  |\
             \n| 1970-01-01T00:00:30 | 1.0   | foo  |\
             \n+---------------------+-------+------+",
         );
@@ -890,7 +887,6 @@ mod test {
             \n+---------------------+-------+------+\
             \n| 1970-01-01T00:03:10 | 1.0   | foo  |\
             \n| 1970-01-01T00:03:20 | 1.0   | foo  |\
-            \n| 1970-01-01T00:03:30 | 1.0   | foo  |\
             \n| 1970-01-01T00:04:00 | 1.0   | foo  |\
             \n| 1970-01-01T00:04:10 | 1.0   | foo  |\
             \n| 1970-01-01T00:04:20 | 1.0   | foo  |\
@@ -910,11 +906,8 @@ mod test {
             \n| timestamp           | value |\
             \n+---------------------+-------+\
             \n| 1970-01-01T00:00:00 | 0.0   |\
-            \n| 1970-01-01T00:00:10 | 0.0   |\
             \n| 1970-01-01T00:01:00 | 6.0   |\
-            \n| 1970-01-01T00:01:10 | 6.0   |\
             \n| 1970-01-01T00:02:00 | 12.0  |\
-            \n| 1970-01-01T00:02:10 | 12.0  |\
             \n+---------------------+-------+",
         );
         do_normalize_test(0, 300_000, 10_000, 10_000, expected, true).await;

@@ -23,7 +23,7 @@ use common_test_util::ports;
 use datafusion_expr::LogicalPlan;
 use query::parser::PromQuery;
 use query::query_engine::DescribeResult;
-use servers::error::{Error, Result};
+use servers::error::Result;
 use servers::http::header::constants::GREPTIME_DB_HEADER_NAME;
 use servers::http::test_helpers::TestClient;
 use servers::http::{HttpOptions, HttpServerBuilder};
@@ -52,8 +52,6 @@ impl InfluxdbLineProtocolHandler for DummyInstance {
 
 #[async_trait]
 impl SqlQueryHandler for DummyInstance {
-    type Error = Error;
-
     async fn do_query(&self, _: &str, _: QueryContextRef) -> Vec<Result<Output>> {
         unimplemented!()
     }
@@ -63,15 +61,11 @@ impl SqlQueryHandler for DummyInstance {
         _stmt: Option<Statement>,
         _plan: LogicalPlan,
         _query_ctx: QueryContextRef,
-    ) -> std::result::Result<Output, Self::Error> {
+    ) -> Result<Output> {
         unimplemented!()
     }
 
-    async fn do_promql_query(
-        &self,
-        _: &PromQuery,
-        _: QueryContextRef,
-    ) -> Vec<std::result::Result<Output, Self::Error>> {
+    async fn do_promql_query(&self, _: &PromQuery, _: QueryContextRef) -> Vec<Result<Output>> {
         unimplemented!()
     }
 

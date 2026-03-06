@@ -37,6 +37,7 @@ datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
 datafusion-functions-aggregate-common.workspace = true
+datafusion-functions-window-common.workspace = true
 datafusion-pg-catalog.workspace = true
 datafusion-physical-expr.workspace = true
 datatypes.workspace = true

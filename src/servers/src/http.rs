@@ -192,6 +192,16 @@ impl PromValidationMode {
         };
         Ok(result)
     }
+
+    pub(crate) fn validate_bytes(&self, bytes: &[u8]) -> std::result::Result<(), DecodeError> {
+        match self {
+            PromValidationMode::Strict => {
+                simdutf8::basic::from_utf8(bytes).map_err(|_| DecodeError::new("invalid utf-8"))?;
+                Ok(())
+            }
+            PromValidationMode::Lossy | PromValidationMode::Unchecked => Ok(()),
+        }
+    }
 }
 
 impl Default for HttpOptions {
@@ -1318,9 +1328,8 @@ mod test {
     use tokio::time::Instant;
 
     use super::*;
-    use crate::error::Error;
     use crate::http::test_helpers::TestClient;
-    use crate::query_handler::sql::{ServerSqlQueryHandlerAdapter, SqlQueryHandler};
+    use crate::query_handler::sql::SqlQueryHandler;
 
     struct DummyInstance {
         _tx: mpsc::Sender<(String, Vec<u8>)>,
@@ -1328,17 +1337,11 @@ mod test {
 
     #[async_trait]
     impl SqlQueryHandler for DummyInstance {
-        type Error = Error;
-
         async fn do_query(&self, _: &str, _: QueryContextRef) -> Vec<Result<Output>> {
             unimplemented!()
         }
 
-        async fn do_promql_query(
-            &self,
-            _: &PromQuery,
-            _: QueryContextRef,
-        ) -> Vec<std::result::Result<Output, Self::Error>> {
+        async fn do_promql_query(&self, _: &PromQuery, _: QueryContextRef) -> Vec<Result<Output>> {
             unimplemented!()
         }
 
@@ -1347,7 +1350,7 @@ mod test {
             _stmt: Option<Statement>,
             _plan: LogicalPlan,
             _query_ctx: QueryContextRef,
-        ) -> std::result::Result<Output, Self::Error> {
+        ) -> Result<Output> {
             unimplemented!()
         }
 
@@ -1378,9 +1381,8 @@ mod test {
 
     fn make_test_app_custom(tx: mpsc::Sender<(String, Vec<u8>)>, options: HttpOptions) -> Router {
         let instance = Arc::new(DummyInstance { _tx: tx });
-        let sql_instance = ServerSqlQueryHandlerAdapter::arc(instance.clone());
         let server = HttpServerBuilder::new(options)
-            .with_sql_handler(sql_instance)
+            .with_sql_handler(instance.clone())
             .build();
         server.build(server.make_app()).unwrap().route(
             "/test/timeout",

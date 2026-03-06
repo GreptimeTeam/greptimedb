@@ -126,6 +126,7 @@ impl State for DropDatabaseExecutor {
                 &self.physical_region_routes,
                 true,
                 false,
+                false,
             )
             .await?;
         info!("Table: {}({}) is dropped", self.table_name, self.table_id);

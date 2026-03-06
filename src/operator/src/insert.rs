@@ -540,6 +540,7 @@ impl Inserter {
 
         let mut create_tables = vec![];
         let mut alter_tables = vec![];
+        let mut need_refresh_table_infos = HashSet::new();
         let mut instant_table_ids = HashSet::new();
 
         for req in &mut requests.inserts {
@@ -549,7 +550,6 @@ impl Inserter {
                     if table_info.is_ttl_instant_table() {
                         instant_table_ids.insert(table_info.table_id());
                     }
-                    table_infos.insert(table_info.table_id(), table.table_info());
                     if let Some(alter_expr) = self.get_alter_table_expr_on_demand(
                         req,
                         &table,
@@ -558,6 +558,13 @@ impl Inserter {
                         is_single_value,
                     )? {
                         alter_tables.push(alter_expr);
+                        need_refresh_table_infos.insert((
+                            catalog.to_string(),
+                            schema.clone(),
+                            req.table_name.clone(),
+                        ));
+                    } else {
+                        table_infos.insert(table_info.table_id(), table.table_info());
                     }
                 }
                 None => {
@@ -694,6 +701,22 @@ impl Inserter {
                         .await?;
                 }
             }
+        }
+
+        // refresh table infos for altered tables
+        for (catalog, schema, table_name) in need_refresh_table_infos {
+            let table = self
+                .get_table(&catalog, &schema, &table_name)
+                .await?
+                .context(TableNotFoundSnafu {
+                    table_name: common_catalog::format_full_table_name(
+                        &catalog,
+                        &schema,
+                        &table_name,
+                    ),
+                })?;
+            let table_info = table.table_info();
+            table_infos.insert(table_info.table_id(), table.table_info());
         }
 
         Ok(CreateAlterTableResult {

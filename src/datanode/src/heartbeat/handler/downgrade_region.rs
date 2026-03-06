@@ -580,7 +580,7 @@ mod tests {
             },
         ]);
         let mut heartbeat_env = HeartbeatResponseTestEnv::new();
-        let mut ctx = heartbeat_env.create_handler_ctx((meta, instruction));
+        let mut ctx = heartbeat_env.create_handler_ctx((meta, Default::default(), instruction));
         let control = heartbeat_handler.handle(&mut ctx).await.unwrap();
         assert_matches!(control, HandleControl::Continue);
 

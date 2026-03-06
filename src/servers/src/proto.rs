@@ -14,7 +14,6 @@
 
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
-use std::ops::Deref;
 use std::slice;
 
 use api::prom_store::remote::Sample;
@@ -42,6 +41,8 @@ use crate::prom_store::{
 use crate::query_handler::PipelineHandlerRef;
 use crate::repeated_field::{Clear, RepeatedField};
 
+pub type RawBytes = &'static [u8];
+
 impl Clear for Sample {
     fn clear(&mut self) {
         self.timestamp = 0;
@@ -51,8 +52,8 @@ impl Clear for Sample {
 
 #[derive(Default, Clone, Debug)]
 pub struct PromLabel {
-    pub name: Bytes,
-    pub value: Bytes,
+    pub name: RawBytes,
+    pub value: RawBytes,
 }
 
 impl Clear for PromLabel {
@@ -92,56 +93,21 @@ impl PromLabel {
     }
 }
 
-#[inline(always)]
-fn copy_to_bytes(data: &mut Bytes, len: usize) -> Bytes {
-    if len == data.remaining() {
-        std::mem::replace(data, Bytes::new())
-    } else {
-        let ret = split_to(data, len);
-        data.advance(len);
-        ret
-    }
-}
-
-/// Similar to `Bytes::split_to`, but directly operates on underlying memory region.
+/// Reads a variable-length encoded bytes field from `src` and assign it to `dst`.
 /// # Safety
-/// This function is safe as long as `data` is backed by a consecutive region of memory,
-/// for example `Vec<u8>` or `&[u8]`, and caller must ensure that `buf` outlives
-/// the `Bytes` returned.
+/// Callers must ensure `src` outlives `dst`.
 #[inline(always)]
-fn split_to(buf: &mut Bytes, end: usize) -> Bytes {
-    let len = buf.len();
-    assert!(
-        end <= len,
-        "range end out of bounds: {:?} <= {:?}",
-        end,
-        len,
-    );
-
-    if end == 0 {
-        return Bytes::new();
-    }
-
-    let ptr = buf.as_ptr();
-    let x = unsafe { slice::from_raw_parts(ptr, end) };
-    // `Bytes::drop` does nothing when it's built via `from_static`.
-    Bytes::from_static(x)
-}
-
-/// Reads a variable-length encoded bytes field from `buf` and assign it to `value`.
-/// # Safety
-/// Callers must ensure `buf` outlives `value`.
-#[inline(always)]
-fn merge_bytes(value: &mut Bytes, buf: &mut Bytes) -> Result<(), DecodeError> {
-    let len = decode_varint(buf)?;
-    if len > buf.remaining() as u64 {
+fn merge_bytes(dst: &mut RawBytes, src: &mut Bytes) -> Result<(), DecodeError> {
+    let len = decode_varint(src)? as usize;
+    if len > src.remaining() {
         return Err(DecodeError::new(format!(
             "buffer underflow, len: {}, remaining: {}",
             len,
-            buf.remaining()
+            src.remaining()
         )));
     }
-    *value = copy_to_bytes(buf, len as usize);
+    *dst = unsafe { slice::from_raw_parts(src.as_ptr(), len) };
+    src.advance(len);
     Ok(())
 }
 
@@ -197,26 +163,26 @@ impl PromTimeSeries {
                     return Err(DecodeError::new("delimited length exceeded"));
                 }
 
-                match label.name.deref() {
+                match label.name {
                     METRIC_NAME_LABEL_BYTES => {
-                        self.table_name = prom_validation_mode.decode_string(&label.value)?;
+                        self.table_name = prom_validation_mode.decode_string(label.value)?;
                         self.labels.truncate(self.labels.len() - 1); // remove last label
                     }
                     #[allow(deprecated)]
                     crate::prom_store::SCHEMA_LABEL_BYTES => {
-                        self.schema = Some(prom_validation_mode.decode_string(&label.value)?);
+                        self.schema = Some(prom_validation_mode.decode_string(label.value)?);
                         self.labels.truncate(self.labels.len() - 1); // remove last label
                     }
                     DATABASE_LABEL_BYTES | DATABASE_LABEL_ALT_BYTES => {
                         // Only set schema from __database__ if __schema__ hasn't been set yet
                         if self.schema.is_none() {
-                            self.schema = Some(prom_validation_mode.decode_string(&label.value)?);
+                            self.schema = Some(prom_validation_mode.decode_string(label.value)?);
                         }
                         self.labels.truncate(self.labels.len() - 1); // remove last label
                     }
                     PHYSICAL_TABLE_LABEL_BYTES | PHYSICAL_TABLE_LABEL_ALT_BYTES => {
                         self.physical_table =
-                            Some(prom_validation_mode.decode_string(&label.value)?);
+                            Some(prom_validation_mode.decode_string(label.value)?);
                         self.labels.truncate(self.labels.len() - 1); // remove last label
                     }
                     _ => {}
@@ -394,8 +360,8 @@ impl PromSeriesProcessor {
         let mut vec_pipeline_map = Vec::new();
         let mut pipeline_map = BTreeMap::new();
         for l in series.labels.iter() {
-            let name = prom_validation_mode.decode_string(&l.name)?;
-            let value = prom_validation_mode.decode_string(&l.value)?;
+            let name = prom_validation_mode.decode_string(l.name)?;
+            let value = prom_validation_mode.decode_string(l.value)?;
             pipeline_map.insert(KeyString::from(name), VrlValue::Bytes(value.into()));
         }
 

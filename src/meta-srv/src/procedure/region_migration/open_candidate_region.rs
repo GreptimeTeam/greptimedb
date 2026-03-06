@@ -22,6 +22,7 @@ use common_meta::instruction::{Instruction, InstructionReply, OpenRegion, Simple
 use common_meta::key::datanode_table::RegionInfo;
 use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::info;
+use common_telemetry::tracing_context::TracingContext;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use tokio::time::Instant;
@@ -137,12 +138,14 @@ impl OpenCandidateRegion {
             }
         }
 
+        let tracing_ctx = TracingContext::from_current_span();
         let msg = MailboxMessage::json_message(
             &format!("Open candidate regions: {:?}", region_ids),
             &format!("Metasrv@{}", ctx.server_addr()),
             &format!("Datanode-{}@{}", candidate.id, candidate.addr),
             common_time::util::current_time_millis(),
             &open_instruction,
+            Some(tracing_ctx.to_w3c()),
         )
         .with_context(|_| error::SerializeToJsonSnafu {
             input: open_instruction.to_string(),
@@ -425,7 +428,7 @@ mod tests {
         let mut env = TestingEnv::new();
 
         // Prepares table
-        let table_info = new_test_table_info(1024).into();
+        let table_info = new_test_table_info(1024);
         let region_routes = vec![RegionRoute {
             region: Region::new_test(region_id),
             leader_peer: Some(Peer::empty(from_peer_id)),

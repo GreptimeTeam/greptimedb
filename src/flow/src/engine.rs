@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 
+use common_meta::key::flow::flow_state::FlowStat;
 use session::context::QueryContext;
 use table::metadata::TableId;
 
@@ -98,4 +99,10 @@ pub trait FlowEngine {
         &self,
         req: api::v1::flow::DirtyWindowRequests,
     ) -> Result<(), Error>;
+}
+
+/// Provides flow runtime statistics for information schema and heartbeat reporting.
+pub trait FlowStatProvider {
+    /// Returns current runtime stats of an engine.
+    async fn flow_stat(&self) -> FlowStat;
 }

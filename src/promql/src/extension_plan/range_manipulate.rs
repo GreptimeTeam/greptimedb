@@ -129,7 +129,7 @@ impl RangeManipulate {
         let mut new_columns = Vec::with_capacity(columns.len() + 1);
         for i in 0..columns.len() {
             let x = input_schema.qualified_field(i);
-            new_columns.push((x.0.cloned(), Arc::new(x.1.clone())));
+            new_columns.push((x.0.cloned(), x.1.clone()));
         }
 
         // process time index column
@@ -170,12 +170,12 @@ impl RangeManipulate {
     pub fn to_execution_plan(&self, exec_input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
         let output_schema: SchemaRef = self.output_schema.inner().clone();
         let properties = exec_input.properties();
-        let properties = PlanProperties::new(
+        let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(output_schema.clone()),
             properties.partitioning.clone(),
             properties.emission_type,
             properties.boundedness,
-        );
+        ));
         Arc::new(RangeManipulateExec {
             start: self.start,
             end: self.end,
@@ -421,7 +421,7 @@ pub struct RangeManipulateExec {
     input: Arc<dyn ExecutionPlan>,
     output_schema: SchemaRef,
     metric: ExecutionPlanMetricsSet,
-    properties: PlanProperties,
+    properties: Arc<PlanProperties>,
 }
 
 impl ExecutionPlan for RangeManipulateExec {
@@ -433,7 +433,7 @@ impl ExecutionPlan for RangeManipulateExec {
         self.output_schema.clone()
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
     }
 
@@ -463,12 +463,12 @@ impl ExecutionPlan for RangeManipulateExec {
         assert!(!children.is_empty());
         let exec_input = children[0].clone();
         let properties = exec_input.properties();
-        let properties = PlanProperties::new(
+        let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(self.output_schema.clone()),
             properties.partitioning.clone(),
             properties.emission_type,
             properties.boundedness,
-        );
+        ));
         Ok(Arc::new(Self {
             start: self.start,
             end: self.end,
@@ -746,7 +746,7 @@ impl RangeManipulateStream {
 
             while cursor < ts_column.len() {
                 let ts = ts_column.value(cursor);
-                if range_start > cursor && ts >= start_ts {
+                if range_start > cursor && ts > start_ts {
                     range_start = cursor;
                     range_start_index = range_start;
                 }
@@ -856,12 +856,12 @@ mod test {
             .as_arrow()
             .clone(),
         );
-        let properties = PlanProperties::new(
+        let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(manipulate_output_schema.clone()),
             Partitioning::UnknownPartitioning(1),
             EmissionType::Incremental,
             Boundedness::Bounded,
-        );
+        ));
         let normalize_exec = Arc::new(RangeManipulateExec {
             start,
             end,
@@ -1009,14 +1009,14 @@ mod test {
                 1970-01-01T00:05:00,\n\
             ]\nRangeArray { \
                 base array: PrimitiveArray<Float64>\n[\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n], \
-                ranges: [Some(0..1), Some(0..2), Some(0..3), Some(0..4), Some(1..5), Some(2..5), Some(3..6), Some(4..6), Some(5..7), Some(5..8), Some(6..10)] \
+                ranges: [Some(0..1), Some(0..2), Some(0..3), Some(1..4), Some(2..5), Some(3..5), Some(4..6), Some(5..6), Some(5..7), Some(6..8), Some(6..10)] \
             }\nRangeArray { \
                 base array: PrimitiveArray<Float64>\n[\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n], \
-                ranges: [Some(0..1), Some(0..2), Some(0..3), Some(0..4), Some(1..5), Some(2..5), Some(3..6), Some(4..6), Some(5..7), Some(5..8), Some(6..10)] \
+                ranges: [Some(0..1), Some(0..2), Some(0..3), Some(1..4), Some(2..5), Some(3..5), Some(4..6), Some(5..6), Some(5..7), Some(6..8), Some(6..10)] \
             }\nStringArray\n[\n  \"foo\",\n  \"foo\",\n  \"foo\",\n  \"foo\",\n  \"foo\",\n  \"foo\",\n  \"foo\",\n  \"foo\",\n  \"foo\",\n  \"foo\",\n  \"foo\",\n]\n\
             RangeArray { \
                 base array: PrimitiveArray<Timestamp(ms)>\n[\n  1970-01-01T00:00:00,\n  1970-01-01T00:00:30,\n  1970-01-01T00:01:00,\n  1970-01-01T00:01:30,\n  1970-01-01T00:02:00,\n  1970-01-01T00:03:00,\n  1970-01-01T00:04:00,\n  1970-01-01T00:04:01,\n  1970-01-01T00:04:31,\n  1970-01-01T00:04:51,\n], \
-                ranges: [Some(0..1), Some(0..2), Some(0..3), Some(0..4), Some(1..5), Some(2..5), Some(3..6), Some(4..6), Some(5..7), Some(5..8), Some(6..10)] \
+                ranges: [Some(0..1), Some(0..2), Some(0..3), Some(1..4), Some(2..5), Some(3..5), Some(4..6), Some(5..6), Some(5..7), Some(6..8), Some(6..10)] \
             }",
         );
         do_normalize_test(0, 310_000, 30_000, 90_000, expected.clone()).await;

@@ -25,7 +25,10 @@ use store_api::codec::PrimaryKeyEncoding;
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
-use crate::error::{InvalidRequestSnafu, RegionStateSnafu, RejectWriteSnafu, Result};
+use crate::error::{
+    InvalidRequestSnafu, PartitionExprVersionMismatchSnafu, RegionStateSnafu, RejectWriteSnafu,
+    Result,
+};
 use crate::metrics;
 use crate::metrics::{
     WRITE_REJECT_TOTAL, WRITE_ROWS_TOTAL, WRITE_STAGE_ELAPSED, WRITE_STALL_TOTAL,
@@ -250,6 +253,13 @@ impl<S> RegionWorkerLoop<S> {
                 match region.state() {
                     RegionRoleState::Leader(RegionLeaderState::Writable)
                     | RegionRoleState::Leader(RegionLeaderState::Staging) => {
+                        if region.reject_all_writes_in_staging() {
+                            sender_req
+                                .sender
+                                .send(RejectWriteSnafu { region_id }.fail());
+                            continue;
+                        }
+
                         let region_ctx = RegionWriteCtx::new(
                             region.region_id,
                             &region.version_control,
@@ -296,6 +306,27 @@ impl<S> RegionWorkerLoop<S> {
 
             // Safety: Now we ensure the region exists.
             let region_ctx = region_ctxs.get_mut(&region_id).unwrap();
+            let Some(region) = self
+                .regions
+                .get_region_or(region_id, &mut sender_req.sender)
+            else {
+                continue;
+            };
+            if region.reject_all_writes_in_staging() {
+                sender_req
+                    .sender
+                    .send(RejectWriteSnafu { region_id }.fail());
+                continue;
+            }
+            let expected_version = region.expected_partition_expr_version();
+            if let Err(e) = check_partition_expr_version(
+                region_id,
+                expected_version,
+                sender_req.request.partition_expr_version,
+            ) {
+                sender_req.sender.send(Err(e));
+                continue;
+            }
 
             if let Err(e) = check_op_type(
                 region_ctx.version().options.append_mode,
@@ -362,7 +393,12 @@ impl<S> RegionWorkerLoop<S> {
                     continue;
                 };
                 match region.state() {
-                    RegionRoleState::Leader(RegionLeaderState::Writable) => {
+                    RegionRoleState::Leader(RegionLeaderState::Writable)
+                    | RegionRoleState::Leader(RegionLeaderState::Staging) => {
+                        if region.reject_all_writes_in_staging() {
+                            bulk_req.sender.send(RejectWriteSnafu { region_id }.fail());
+                            continue;
+                        }
                         let region_ctx = RegionWriteCtx::new(
                             region.region_id,
                             &region.version_control,
@@ -399,6 +435,22 @@ impl<S> RegionWorkerLoop<S> {
 
             // Safety: Now we ensure the region exists.
             let region_ctx = region_ctxs.get_mut(&region_id).unwrap();
+            let Some(region) = self.regions.get_region_or(region_id, &mut bulk_req.sender) else {
+                continue;
+            };
+            if region.reject_all_writes_in_staging() {
+                bulk_req.sender.send(RejectWriteSnafu { region_id }.fail());
+                continue;
+            }
+            let expected_version = region.expected_partition_expr_version();
+            if let Err(e) = check_partition_expr_version(
+                region_id,
+                expected_version,
+                bulk_req.partition_expr_version,
+            ) {
+                bulk_req.sender.send(Err(e));
+                continue;
+            }
 
             // Double-check the request schema
             let need_fill_missing_columns = region_ctx.version().metadata.schema_version
@@ -462,5 +514,25 @@ fn check_op_type(append_mode: bool, request: &WriteRequest) -> Result<()> {
         );
     }
 
+    Ok(())
+}
+
+fn check_partition_expr_version(
+    region_id: RegionId,
+    expected_version: u64,
+    request_version: Option<u64>,
+) -> Result<()> {
+    let request_version = match request_version {
+        None => return Ok(()),
+        Some(value) => value,
+    };
+    if request_version != expected_version {
+        return PartitionExprVersionMismatchSnafu {
+            region_id,
+            request_version,
+            expected_version,
+        }
+        .fail();
+    }
     Ok(())
 }

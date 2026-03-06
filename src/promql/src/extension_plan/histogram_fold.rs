@@ -25,7 +25,7 @@ use datafusion::arrow::compute::{SortOptions, concat_batches};
 use datafusion::arrow::datatypes::{DataType, Float64Type, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::stats::Precision;
-use datafusion::common::{ColumnStatistics, DFSchema, DFSchemaRef, Statistics};
+use datafusion::common::{DFSchema, DFSchemaRef, Statistics};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::TaskContext;
 use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore};
@@ -296,7 +296,7 @@ impl HistogramFold {
         )) as _);
 
         let output_schema: SchemaRef = self.output_schema.inner().clone();
-        let properties = PlanProperties::new(
+        let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(output_schema.clone()),
             Partitioning::Hash(
                 partition_exprs.clone(),
@@ -304,7 +304,7 @@ impl HistogramFold {
             ),
             EmissionType::Incremental,
             Boundedness::Bounded,
-        );
+        ));
         Arc::new(HistogramFoldExec {
             le_column_index,
             field_column_index,
@@ -416,7 +416,7 @@ pub struct HistogramFoldExec {
     partition_exprs: Vec<Arc<dyn PhysicalExpr>>,
     quantile: f64,
     metric: ExecutionPlanMetricsSet,
-    properties: PlanProperties,
+    properties: Arc<PlanProperties>,
 }
 
 impl ExecutionPlan for HistogramFoldExec {
@@ -424,7 +424,7 @@ impl ExecutionPlan for HistogramFoldExec {
         self
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
     }
 
@@ -486,7 +486,7 @@ impl ExecutionPlan for HistogramFoldExec {
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
         assert!(!children.is_empty());
         let new_input = children[0].clone();
-        let properties = PlanProperties::new(
+        let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(self.output_schema.clone()),
             Partitioning::Hash(
                 self.partition_exprs.clone(),
@@ -494,7 +494,7 @@ impl ExecutionPlan for HistogramFoldExec {
             ),
             EmissionType::Incremental,
             Boundedness::Bounded,
-        );
+        ));
         Ok(Arc::new(Self {
             input: new_input,
             metric: self.metric.clone(),
@@ -554,11 +554,7 @@ impl ExecutionPlan for HistogramFoldExec {
         Ok(Statistics {
             num_rows: Precision::Absent,
             total_byte_size: Precision::Absent,
-            column_statistics: vec![
-                ColumnStatistics::new_unknown();
-                // plus one more for the removed column by function `convert_schema`
-                self.schema().flattened_fields().len() + 1
-            ],
+            column_statistics: Statistics::unknown_column(&self.schema()),
         })
     }
 
@@ -1245,7 +1241,7 @@ mod test {
     type PlanPropsResult = (
         Vec<Arc<dyn PhysicalExpr>>,
         Vec<Arc<dyn PhysicalExpr>>,
-        PlanProperties,
+        Arc<PlanProperties>,
     );
 
     fn build_test_plan_properties(
@@ -1286,7 +1282,7 @@ mod test {
             Boundedness::Bounded,
         );
 
-        (tag_columns, partition_exprs, properties)
+        (tag_columns, partition_exprs, Arc::new(properties))
     }
 
     #[tokio::test]

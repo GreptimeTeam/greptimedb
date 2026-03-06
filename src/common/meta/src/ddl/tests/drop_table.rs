@@ -118,6 +118,7 @@ async fn test_on_datanode_drop_regions() {
                     follower_peers: vec![Peer::empty(5)],
                     leader_state: None,
                     leader_down_since: None,
+                    write_route_policy: None,
                 },
                 RegionRoute {
                     region: Region::new_test(RegionId::new(table_id, 2)),
@@ -125,6 +126,7 @@ async fn test_on_datanode_drop_regions() {
                     follower_peers: vec![Peer::empty(4)],
                     leader_state: None,
                     leader_down_since: None,
+                    write_route_policy: None,
                 },
                 RegionRoute {
                     region: Region::new_test(RegionId::new(table_id, 3)),
@@ -132,6 +134,7 @@ async fn test_on_datanode_drop_regions() {
                     follower_peers: vec![],
                     leader_state: None,
                     leader_down_since: None,
+                    write_route_policy: None,
                 },
             ]),
             HashMap::new(),

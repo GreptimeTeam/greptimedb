@@ -26,6 +26,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common_meta::datanode::GcStat;
+use common_telemetry::tracing::Instrument as _;
 use common_telemetry::{debug, error, info, warn};
 use common_time::Timestamp;
 use itertools::Itertools;
@@ -45,7 +46,10 @@ use crate::error::{
     TooManyGcJobsSnafu, UnexpectedSnafu,
 };
 use crate::manifest::action::{RegionManifest, RemovedFile};
-use crate::metrics::{GC_DELETE_FILE_CNT, GC_ORPHANED_INDEX_FILES, GC_SKIPPED_UNPARSABLE_FILES};
+use crate::metrics::{
+    GC_DELETE_FILE_CNT, GC_DURATION_SECONDS, GC_ERRORS_TOTAL, GC_FILES_DELETED_TOTAL,
+    GC_ORPHANED_INDEX_FILES, GC_RUNS_TOTAL, GC_SKIPPED_UNPARSABLE_FILES,
+};
 use crate::region::{MitoRegionRef, RegionRoleState};
 use crate::sst::file::{RegionFileId, RegionIndexId, delete_files, delete_index};
 use crate::sst::location::{self};
@@ -129,8 +133,6 @@ pub struct GcConfig {
     /// Should be long enough to allow long running queries to finish.
     /// If set to None, then unused files will be deleted immediately.
     ///
-    /// TODO(discord9): long running queries should actively write tmp manifest files
-    /// to prevent deletion of files they are using.
     #[serde(with = "humantime_serde")]
     pub lingering_time: Option<Duration>,
     /// Lingering time before deleting unknown files(files with undetermine expel time).
@@ -267,8 +269,15 @@ impl LocalGcWorker {
     /// may cause too many concurrent listing operations.
     ///
     /// TODO(discord9): consider instead running in parallel mode
+    #[common_telemetry::tracing::instrument(
+        skip_all,
+        fields(region_count = self.regions.len(), full_file_listing = self.full_file_listing)
+    )]
     pub async fn run(self) -> Result<GcReport> {
         info!("LocalGcWorker started");
+        let _timer = GC_DURATION_SECONDS
+            .with_label_values(&["total"])
+            .start_timer();
         let now = std::time::Instant::now();
 
         let mut deleted_files = HashMap::new();
@@ -332,12 +341,26 @@ impl LocalGcWorker {
     ///
     /// Note that the files that are still in use or may still be kept for a while are not deleted
     /// to avoid deleting files that are still needed.
+    #[common_telemetry::tracing::instrument(
+        skip_all,
+        fields(
+            region_id = %region_id,
+            full_file_listing = self.full_file_listing,
+            region_present = region.is_some()
+        )
+    )]
     pub async fn do_region_gc(
         &self,
         region_id: RegionId,
         region: Option<MitoRegionRef>,
         tmp_ref_files: &HashSet<FileRef>,
     ) -> Result<Vec<RemovedFile>> {
+        let mode = if self.full_file_listing {
+            "full_listing"
+        } else {
+            "fast"
+        };
+        GC_RUNS_TOTAL.with_label_values(&[mode]).inc();
         debug!(
             "Doing gc for region {}, {}",
             region_id,
@@ -372,6 +395,9 @@ impl LocalGcWorker {
                     region.region_id(),
                     manifest.manifest_version
                 );
+                GC_ERRORS_TOTAL
+                    .with_label_values(&["manifest_mismatch"])
+                    .inc();
                 return Ok(vec![]);
             }
             Some(manifest)
@@ -443,8 +469,8 @@ impl LocalGcWorker {
 
         let unused_file_cnt = deletable_files.len();
 
-        debug!(
-            "gc: for region{}{region_id}: In manifest files: {}, Tmp ref file cnt: {}, recently removed files: {}, Unused files to delete: {}",
+        info!(
+            "gc: for region{}{region_id}: In manifest file cnt: {}, Tmp ref file cnt: {}, recently removed files: {}, Unused files to delete count: {}",
             if region.is_none() {
                 "(region dropped)"
             } else {
@@ -453,7 +479,11 @@ impl LocalGcWorker {
             current_files.map(|c| c.len()).unwrap_or(0),
             tmp_ref_files.len(),
             removed_file_cnt,
-            deletable_files.len()
+            deletable_files.len(),
+        );
+        debug!(
+            "gc: deletable files for region {}: {:?}",
+            region_id, &deletable_files
         );
 
         debug!(
@@ -462,6 +492,9 @@ impl LocalGcWorker {
             region_id
         );
 
+        let _delete_timer = GC_DURATION_SECONDS
+            .with_label_values(&["delete_files"])
+            .start_timer();
         self.delete_files(region_id, &deletable_files).await?;
 
         debug!(
@@ -469,6 +502,9 @@ impl LocalGcWorker {
             unused_file_cnt, region_id
         );
         if let Some(region) = &region {
+            let _update_timer = GC_DURATION_SECONDS
+                .with_label_values(&["update_manifest"])
+                .start_timer();
             self.update_manifest_removed_files(region, deletable_files.clone())
                 .await?;
         }
@@ -476,6 +512,10 @@ impl LocalGcWorker {
         Ok(deletable_files)
     }
 
+    #[common_telemetry::tracing::instrument(
+        skip_all,
+        fields(region_id = %region_id, removed_file_count = removed_files.len())
+    )]
     async fn delete_files(&self, region_id: RegionId, removed_files: &[RemovedFile]) -> Result<()> {
         let mut index_ids = vec![];
         let file_pairs = removed_files
@@ -499,17 +539,35 @@ impl LocalGcWorker {
         )
         .await?;
 
-        for index_id in index_ids {
-            delete_index(index_id, &self.access_layer, &self.cache_manager).await?;
+        if !file_pairs.is_empty() {
+            let deleted_count = file_pairs.len() as u64;
+            GC_FILES_DELETED_TOTAL
+                .with_label_values(&["parquet"])
+                .inc_by(deleted_count);
+            GC_DELETE_FILE_CNT.inc_by(deleted_count);
         }
 
-        // FIXME(discord9): if files are already deleted before calling delete_files, the metric will be inaccurate, no clean way to fix it now
-        GC_DELETE_FILE_CNT.add(removed_files.len() as i64);
+        for index_id in index_ids {
+            match delete_index(index_id, &self.access_layer, &self.cache_manager).await {
+                Ok(()) => {
+                    GC_FILES_DELETED_TOTAL.with_label_values(&["index"]).inc();
+                    GC_DELETE_FILE_CNT.inc();
+                }
+                Err(err) => {
+                    GC_ERRORS_TOTAL.with_label_values(&["delete_failed"]).inc();
+                    return Err(err);
+                }
+            }
+        }
 
         Ok(())
     }
 
     /// Update region manifest for clear the actually deleted files
+    #[common_telemetry::tracing::instrument(
+        skip_all,
+        fields(region_id = %region.region_id(), deleted_file_count = deleted_files.len())
+    )]
     async fn update_manifest_removed_files(
         &self,
         region: &MitoRegionRef,
@@ -585,21 +643,38 @@ impl LocalGcWorker {
     /// List all files in the region directory.
     /// Returns a vector of all file entries found.
     /// This might take a long time if there are many files in the region directory.
+    #[common_telemetry::tracing::instrument(
+        skip_all,
+        fields(region_id = %region_id, file_cnt_hint = file_cnt_hint)
+    )]
     async fn list_from_object_store(
         &self,
         region_id: RegionId,
         file_cnt_hint: usize,
     ) -> Result<Vec<Entry>> {
+        let _timer = GC_DURATION_SECONDS
+            .with_label_values(&["list_files"])
+            .start_timer();
         let start = tokio::time::Instant::now();
         let concurrency = (file_cnt_hint / Self::CONCURRENCY_LIST_PER_FILES)
             .max(1)
             .min(self.opt.max_concurrent_lister_per_gc_job);
 
-        let listers = self.partition_region_files(region_id, concurrency).await?;
+        let listers = self
+            .partition_region_files(region_id, concurrency)
+            .await
+            .inspect_err(|_| {
+                GC_ERRORS_TOTAL.with_label_values(&["list_failed"]).inc();
+            })?;
         let lister_cnt = listers.len();
 
         // Step 2: Concurrently list all files in the region directory
-        let all_entries = self.list_region_files_concurrent(listers).await?;
+        let all_entries = self
+            .list_region_files_concurrent(listers)
+            .await
+            .inspect_err(|_| {
+                GC_ERRORS_TOTAL.with_label_values(&["list_failed"]).inc();
+            })?;
         let cnt = all_entries.len();
         info!(
             "gc: full listing mode cost {} secs using {lister_cnt} lister for {cnt} files in region {}.",
@@ -620,38 +695,41 @@ impl LocalGcWorker {
 
         for (lister, end) in listers {
             let tx = tx.clone();
-            let handle = tokio::spawn(async move {
-                let stream = lister.take_while(|e: &std::result::Result<Entry, _>| match e {
-                    Ok(e) => {
-                        if let Some(end) = &end {
-                            // reach end, stop listing
-                            e.name() < end.as_str()
-                        } else {
-                            // no end, take all entries
+            let handle = tokio::spawn(
+                async move {
+                    let stream = lister.take_while(|e: &std::result::Result<Entry, _>| match e {
+                        Ok(e) => {
+                            if let Some(end) = &end {
+                                // reach end, stop listing
+                                e.name() < end.as_str()
+                            } else {
+                                // no end, take all entries
+                                true
+                            }
+                        }
+                        // entry went wrong, log and skip it
+                        Err(err) => {
+                            warn!("Failed to list entry: {}", err);
                             true
                         }
-                    }
-                    // entry went wrong, log and skip it
-                    Err(err) => {
-                        warn!("Failed to list entry: {}", err);
-                        true
-                    }
-                });
-                let stream = stream
-                    .filter(|e| {
-                        if let Ok(e) = &e {
-                            // notice that we only care about files, skip dirs
-                            e.metadata().is_file()
-                        } else {
-                            // error entry, take for further logging
-                            true
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .await;
-                // ordering of files doesn't matter here, so we can send them directly
-                tx.send(stream).await.expect("Failed to send entries");
-            });
+                    });
+                    let stream = stream
+                        .filter(|e| {
+                            if let Ok(e) = &e {
+                                // notice that we only care about files, skip dirs
+                                e.metadata().is_file()
+                            } else {
+                                // error entry, take for further logging
+                                true
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .await;
+                    // ordering of files doesn't matter here, so we can send them directly
+                    tx.send(stream).await.expect("Failed to send entries");
+                }
+                .instrument(common_telemetry::tracing::info_span!("gc_list_partition")),
+            );
 
             handles.push(handle);
         }

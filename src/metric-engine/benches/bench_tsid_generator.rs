@@ -13,8 +13,9 @@
 // limitations under the License.
 
 use std::hash::Hasher;
+use std::hint::black_box;
 
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use fxhash::FxHasher;
 use mur3::Hasher128;
 

@@ -44,16 +44,16 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to get meta info from cache, error: {}", err_msg))]
-    GetCache {
-        err_msg: String,
+    #[snafu(display("Failed to get partition info"))]
+    GetPartitionInfo {
+        source: common_meta::error::Error,
         #[snafu(implicit)]
         location: Location,
     },
 
-    #[snafu(display("Failed to find table routes for table id {}", table_id))]
-    FindTableRoutes {
-        table_id: TableId,
+    #[snafu(display("Failed to get meta info from cache, error: {}", err_msg))]
+    GetCache {
+        err_msg: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -256,11 +256,10 @@ impl ErrorExt for Error {
             | Error::SerializeJson { .. }
             | Error::DeserializeJson { .. } => StatusCode::Internal,
 
-            Error::Unexpected { .. }
-            | Error::FindTableRoutes { .. }
-            | Error::FindRegionRoutes { .. } => StatusCode::Unexpected,
+            Error::Unexpected { .. } | Error::FindRegionRoutes { .. } => StatusCode::Unexpected,
             Error::TableRouteNotFound { .. } => StatusCode::TableNotFound,
             Error::TableRouteManager { source, .. } => source.status_code(),
+            Error::GetPartitionInfo { source, .. } => source.status_code(),
             Error::UnexpectedLogicalRouteTable { source, .. } => source.status_code(),
             Error::ConvertToVector { source, .. } => source.status_code(),
             Error::EvaluateRecordBatch { .. } => StatusCode::Internal,

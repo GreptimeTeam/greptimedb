@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 
 use common_meta::ddl::create_table::executor::CreateTableExecutor;
 use common_meta::ddl::create_table::template::{
-    CreateRequestBuilder, build_template_from_raw_table_info,
+    CreateRequestBuilder, build_template_from_raw_table_info_for_physical_table,
 };
 use common_meta::lock_key::TableLock;
 use common_meta::node_manager::NodeManagerRef;
@@ -28,7 +28,7 @@ use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{RegionNumber, TableId};
-use table::metadata::RawTableInfo;
+use table::metadata::TableInfo;
 use table::table_reference::TableReference;
 use tokio::time::Instant;
 
@@ -258,7 +258,7 @@ impl AllocateRegion {
 
     async fn allocate_regions(
         node_manager: &NodeManagerRef,
-        raw_table_info: &RawTableInfo,
+        raw_table_info: &TableInfo,
         region_routes: &[RegionRoute],
         wal_options: &HashMap<RegionNumber, String>,
     ) -> Result<()> {
@@ -268,8 +268,15 @@ impl AllocateRegion {
             &raw_table_info.name,
         );
         let table_id = raw_table_info.ident.table_id;
-        let request = build_template_from_raw_table_info(raw_table_info, true)
+        // Repartition allocation targets physical regions, so exclude metric internal columns
+        // and derive primary keys from tag semantics.
+        let request = build_template_from_raw_table_info_for_physical_table(raw_table_info)
             .context(error::BuildCreateRequestSnafu { table_id })?;
+        common_telemetry::debug!(
+            "Allocating regions request, table_id: {}, request: {:?}",
+            table_id,
+            request
+        );
         let builder = CreateRequestBuilder::new(request, None);
         let region_count = region_routes.len();
         let wal_region_count = wal_options.len();

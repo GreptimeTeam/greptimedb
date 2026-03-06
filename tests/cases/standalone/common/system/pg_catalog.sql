@@ -258,3 +258,20 @@ oid
 ,nspname
 FROM pg_namespace
 WHERE oid = pg_my_temp_schema();
+
+-- SQLNESS PROTOCOL POSTGRES
+CREATE table foo
+(
+    ts TIMESTAMP TIME INDEX,
+    log_data TEXT,
+    count_num BIGINT,
+);
+
+-- SQLNESS PROTOCOL POSTGRES
+SELECT attname, atttypid FROM pg_catalog.pg_class AS cls INNER JOIN
+pg_catalog.pg_attribute AS attr ON cls.oid = attr.attrelid INNER JOIN
+pg_catalog.pg_type AS typ ON attr.atttypid = typ.oid WHERE attr.attnum >= 0 AND
+cls.oid = 'foo'::regclass::oid ORDER BY attr.attnum;
+
+-- SQLNESS PROTOCOL POSTGRES
+DROP TABLE foo;

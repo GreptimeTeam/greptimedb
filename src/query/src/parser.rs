@@ -42,6 +42,7 @@ pub const EXPLAIN_NODE_NAME: &str = "EXPLAIN";
 pub const EXPLAIN_VERBOSE_NODE_NAME: &str = "EXPLAIN VERBOSE";
 pub const ANALYZE_NODE_NAME: &str = "ANALYZE";
 pub const ANALYZE_VERBOSE_NODE_NAME: &str = "ANALYZE VERBOSE";
+pub const ALIAS_NODE_NAME: &str = "ALIAS";
 
 #[derive(Debug, Clone)]
 pub enum QueryStatement {
@@ -190,8 +191,21 @@ impl QueryLanguageParser {
             interval: step,
             lookback_delta,
         };
+        if let Some(alias) = &query.alias {
+            let eval_stmt = Self::apply_alias_extension(eval_stmt, alias);
+            return Ok(QueryStatement::Promql(eval_stmt, query.alias.clone()));
+        }
+        Ok(QueryStatement::Promql(eval_stmt, None))
+    }
 
-        Ok(QueryStatement::Promql(eval_stmt, query.alias.clone()))
+    pub(crate) fn apply_alias_extension(mut eval_stmt: EvalStmt, alias: &str) -> EvalStmt {
+        eval_stmt.expr = Extension(NodeExtension {
+            expr: Arc::new(AliasExpr {
+                expr: eval_stmt.expr.clone(),
+                alias: alias.to_string(),
+            }),
+        });
+        eval_stmt
     }
 
     pub fn parse_promql_timestamp(timestamp: &str) -> Result<SystemTime> {
@@ -276,6 +290,36 @@ define_node_ast_extension!(
     Expr,
     EXPLAIN_VERBOSE_NODE_NAME
 );
+#[derive(Debug, Clone)]
+pub struct AliasExpr {
+    pub expr: Expr,
+    pub alias: String,
+}
+impl ExtensionExpr for AliasExpr {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn name(&self) -> &str {
+        ALIAS_NODE_NAME
+    }
+    fn value_type(&self) -> ValueType {
+        self.expr.value_type()
+    }
+    fn children(&self) -> &[Expr] {
+        std::slice::from_ref(&self.expr)
+    }
+}
+#[derive(Debug, Clone)]
+pub struct Alias {
+    pub expr: Arc<AliasExpr>,
+}
+impl Alias {
+    pub fn new(expr: Expr, alias: String) -> Self {
+        Self {
+            expr: Arc::new(AliasExpr { expr, alias }),
+        }
+    }
+}
 
 #[cfg(test)]
 mod test {
@@ -354,10 +398,16 @@ mod test {
         let expected = String::from(
             "\
             Promql(EvalStmt { \
-                expr: VectorSelector(VectorSelector { \
-                    name: Some(\"http_request\"), \
-                    matchers: Matchers { matchers: [], or_matchers: [] }, \
-                    offset: None, at: None }), \
+                expr: Extension(Extension { \
+                    expr: AliasExpr { \
+                        expr: VectorSelector(VectorSelector { \
+                            name: Some(\"http_request\"), \
+                            matchers: Matchers { matchers: [], or_matchers: [] }, \
+                            offset: None, at: None \
+                        }), \
+                        alias: \"my_query\" \
+                    } \
+                }), \
                 start: SystemTime { tv_sec: 1644772440, tv_nsec: 0 }, \
                 end: SystemTime { tv_sec: 1676308440, tv_nsec: 0 }, \
                 interval: 86400s, \
@@ -370,10 +420,16 @@ mod test {
         let expected = String::from(
             "\
             Promql(EvalStmt { \
-                expr: VectorSelector(VectorSelector { \
-                    name: Some(\"http_request\"), \
-                    matchers: Matchers { matchers: [], or_matchers: [] }, \
-                    offset: None, at: None }), \
+                expr: Extension(Extension { \
+                    expr: AliasExpr { \
+                        expr: VectorSelector(VectorSelector { \
+                            name: Some(\"http_request\"), \
+                            matchers: Matchers { matchers: [], or_matchers: [] }, \
+                            offset: None, at: None \
+                        }), \
+                        alias: \"my_query\" \
+                    } \
+                }), \
                 start: SystemTime { intervals: 132892460400000000 }, \
                 end: SystemTime { intervals: 133207820400000000 }, \
                 interval: 86400s, \

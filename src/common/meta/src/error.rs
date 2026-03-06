@@ -201,13 +201,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to convert RawTableInfo into TableInfo"))]
-    ConvertRawTableInfo {
-        #[snafu(implicit)]
-        location: Location,
-        source: datatypes::Error,
-    },
-
     #[snafu(display("Primary key '{key}' not found when creating region request"))]
     PrimaryKeyNotFound {
         key: String,
@@ -874,13 +867,6 @@ pub enum Error {
         source: common_procedure::error::Error,
     },
 
-    #[snafu(display("Failed to parse timezone"))]
-    InvalidTimeZone {
-        #[snafu(implicit)]
-        location: Location,
-        #[snafu(source)]
-        error: common_time::error::Error,
-    },
     #[snafu(display("Invalid file path: {}", file_path))]
     InvalidFilePath {
         #[snafu(implicit)]
@@ -1113,7 +1099,6 @@ impl ErrorExt for Error {
             | BuildTableMeta { .. }
             | TableRouteNotFound { .. }
             | TableRepartNotFound { .. }
-            | ConvertRawTableInfo { .. }
             | RegionOperatingRace { .. }
             | EncodeWalOptions { .. }
             | BuildKafkaClient { .. }
@@ -1148,7 +1133,6 @@ impl ErrorExt for Error {
             | InvalidSetDatabaseOption { .. }
             | InvalidUnsetDatabaseOption { .. }
             | InvalidTopicNamePrefix { .. }
-            | InvalidTimeZone { .. }
             | InvalidFileExtension { .. }
             | InvalidFileName { .. }
             | InvalidFlowRequestBody { .. }

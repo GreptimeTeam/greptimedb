@@ -22,7 +22,7 @@ use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use api::v1::{CreateTableExpr, QueryRequest};
 use client::{Client, Database};
-use common_error::ext::{BoxedError, ErrorExt};
+use common_error::ext::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager, load_client_tls_config};
 use common_meta::cluster::{NodeInfo, NodeInfoKey, Role};
 use common_meta::peer::Peer;
@@ -47,12 +47,9 @@ use crate::error::{
 };
 use crate::{Error, FlowAuthHeader};
 
-/// Just like [`GrpcQueryHandler`] but use BoxedError
+/// Adapter trait for [`GrpcQueryHandler`] that boxes the underlying error into [`BoxedError`].
 ///
-/// basically just a specialized `GrpcQueryHandler<Error=BoxedError>`
-///
-/// this is only useful for flownode to
-/// invoke frontend Instance in standalone mode
+/// This is mainly used by flownode to invoke a frontend instance in standalone mode.
 #[async_trait::async_trait]
 pub trait GrpcQueryHandlerWithBoxedError: Send + Sync + 'static {
     async fn do_query(
@@ -64,9 +61,7 @@ pub trait GrpcQueryHandlerWithBoxedError: Send + Sync + 'static {
 
 /// auto impl
 #[async_trait::async_trait]
-impl<E: ErrorExt + Send + Sync + 'static, T: GrpcQueryHandler<Error = E> + Send + Sync + 'static>
-    GrpcQueryHandlerWithBoxedError for T
-{
+impl<T: GrpcQueryHandler + Send + Sync + 'static> GrpcQueryHandlerWithBoxedError for T {
     async fn do_query(
         &self,
         query: Request,

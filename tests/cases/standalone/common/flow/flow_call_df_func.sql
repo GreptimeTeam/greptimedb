@@ -1,5 +1,5 @@
 CREATE TABLE numbers_input_df_func (
-    number INT,
+    "number" INT,
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(number),
     TIME INDEX(ts)
@@ -45,7 +45,7 @@ DROP TABLE numbers_input_df_func;
 DROP TABLE out_num_cnt_df_func;
 
 CREATE TABLE numbers_input_df_func (
-    number INT,
+    "number" INT,
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(number),
     TIME INDEX(ts)
@@ -90,7 +90,7 @@ DROP TABLE out_num_cnt_df_func;
 
 -- test date_bin
 CREATE TABLE numbers_input_df_func (
-    number INT,
+    "number" INT,
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(number),
     TIME INDEX(ts)
@@ -134,7 +134,7 @@ DROP TABLE out_num_cnt_df_func;
 
 -- test date_trunc
 CREATE TABLE numbers_input_df_func (
-    number INT,
+    "number" INT,
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(number),
     TIME INDEX(ts)

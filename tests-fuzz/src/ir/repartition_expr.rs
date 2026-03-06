@@ -12,13 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Vector index module for HNSW-based approximate nearest neighbor search.
+use partition::expr::PartitionExpr;
+use serde::{Deserialize, Serialize};
 
-pub(crate) mod applier;
-pub(crate) mod creator;
-pub(crate) mod engine;
-pub(crate) mod format;
-pub(crate) mod util;
+use crate::ir::Ident;
 
-/// The blob type identifier for vector index in puffin files.
-pub(crate) const INDEX_BLOB_TYPE: &str = "greptime-vector-index-v1";
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SplitPartitionExpr {
+    pub table_name: Ident,
+    pub target: PartitionExpr,
+    pub into: Vec<PartitionExpr>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergePartitionExpr {
+    pub table_name: Ident,
+    pub targets: Vec<PartitionExpr>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RepartitionExpr {
+    Split(SplitPartitionExpr),
+    Merge(MergePartitionExpr),
+}

@@ -42,20 +42,19 @@ use api::v1::{
 use base64::Engine as _;
 use base64::engine::general_purpose;
 use common_error::ext::BoxedError;
-use common_time::{DatabaseTimeToLive, Timestamp, Timezone};
+use common_time::{DatabaseTimeToLive, Timestamp};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use serde_with::{DefaultOnNull, serde_as};
-use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
-use table::metadata::{RawTableInfo, TableId};
+use table::metadata::{TableId, TableInfo};
 use table::requests::validate_database_option;
 use table::table_name::TableName;
 use table::table_reference::TableReference;
 
 use crate::error::{
     self, ConvertTimeRangesSnafu, ExternalSnafu, InvalidSetDatabaseOptionSnafu,
-    InvalidTimeZoneSnafu, InvalidUnsetDatabaseOptionSnafu, Result,
+    InvalidUnsetDatabaseOptionSnafu, Result,
 };
 use crate::key::FlowId;
 
@@ -103,13 +102,13 @@ impl DdlTask {
     pub fn new_create_table(
         expr: CreateTableExpr,
         partitions: Vec<Partition>,
-        table_info: RawTableInfo,
+        table_info: TableInfo,
     ) -> Self {
         DdlTask::CreateTable(CreateTableTask::new(expr, partitions, table_info))
     }
 
     /// Creates a [`DdlTask`] to create several logical tables.
-    pub fn new_create_logical_tables(table_data: Vec<(CreateTableExpr, RawTableInfo)>) -> Self {
+    pub fn new_create_logical_tables(table_data: Vec<(CreateTableExpr, TableInfo)>) -> Self {
         DdlTask::CreateLogicalTables(
             table_data
                 .into_iter()
@@ -197,7 +196,7 @@ impl DdlTask {
     }
 
     /// Creates a [`DdlTask`] to create a view.
-    pub fn new_create_view(create_view: CreateViewExpr, view_info: RawTableInfo) -> Self {
+    pub fn new_create_view(create_view: CreateViewExpr, view_info: TableInfo) -> Self {
         DdlTask::CreateView(CreateViewTask {
             create_view,
             view_info,
@@ -293,7 +292,7 @@ impl TryFrom<Task> for DdlTask {
 
 #[derive(Clone)]
 pub struct SubmitDdlTaskRequest {
-    pub query_context: QueryContextRef,
+    pub query_context: QueryContext,
     pub wait: bool,
     pub timeout: Duration,
     pub task: DdlTask,
@@ -301,7 +300,7 @@ pub struct SubmitDdlTaskRequest {
 
 impl SubmitDdlTaskRequest {
     /// The default constructor for [`SubmitDdlTaskRequest`].
-    pub fn new(query_context: QueryContextRef, task: DdlTask) -> Self {
+    pub fn new(query_context: QueryContext, task: DdlTask) -> Self {
         Self {
             query_context,
             wait: Self::default_wait(),
@@ -370,7 +369,7 @@ impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
 
         Ok(Self {
             header: None,
-            query_context: Some((*request.query_context).clone().into()),
+            query_context: Some(request.query_context.into()),
             timeout_secs: request.timeout.as_secs() as u32,
             wait: request.wait,
             task: Some(task),
@@ -415,7 +414,7 @@ impl From<SubmitDdlTaskResponse> for PbDdlTaskResponse {
 #[derive(Debug, PartialEq, Clone)]
 pub struct CreateViewTask {
     pub create_view: CreateViewExpr,
-    pub view_info: RawTableInfo,
+    pub view_info: TableInfo,
 }
 
 impl CreateViewTask {
@@ -648,7 +647,7 @@ impl From<DropTableTask> for PbDropTableTask {
 pub struct CreateTableTask {
     pub create_table: CreateTableExpr,
     pub partitions: Vec<Partition>,
-    pub table_info: RawTableInfo,
+    pub table_info: TableInfo,
 }
 
 impl TryFrom<PbCreateTableTask> for CreateTableTask {
@@ -683,7 +682,7 @@ impl CreateTableTask {
     pub fn new(
         expr: CreateTableExpr,
         partitions: Vec<Partition>,
-        table_info: RawTableInfo,
+        table_info: TableInfo,
     ) -> CreateTableTask {
         CreateTableTask {
             create_table: expr,
@@ -717,7 +716,7 @@ impl CreateTableTask {
         self.table_info.ident.table_id = table_id;
     }
 
-    /// Sort the columns in [CreateTableExpr] and [RawTableInfo].
+    /// Sort the columns in [CreateTableExpr] and [TableInfo].
     ///
     /// This function won't do any check or verification. Caller should
     /// ensure this task is valid.
@@ -1426,13 +1425,13 @@ impl From<CommentOnTask> for PbCommentOnTask {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct QueryContext {
-    pub(crate) current_catalog: String,
-    pub(crate) current_schema: String,
-    pub(crate) timezone: String,
-    pub(crate) extensions: HashMap<String, String>,
-    pub(crate) channel: u8,
+    pub current_catalog: String,
+    pub current_schema: String,
+    pub timezone: String,
+    pub extensions: HashMap<String, String>,
+    pub channel: u8,
 }
 
 impl QueryContext {
@@ -1468,11 +1467,11 @@ impl QueryContext {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct FlowQueryContext {
     /// Current catalog name - needed for flow metadata and recovery
-    pub(crate) catalog: String,
+    pub catalog: String,
     /// Current schema name - needed for table resolution during flow execution
-    pub(crate) schema: String,
+    pub schema: String,
     /// Timezone for timestamp operations in the flow
-    pub(crate) timezone: String,
+    pub timezone: String,
 }
 
 impl<'de> Deserialize<'de> for FlowQueryContext {
@@ -1506,28 +1505,15 @@ impl<'de> Deserialize<'de> for FlowQueryContext {
     }
 }
 
-impl From<QueryContextRef> for QueryContext {
-    fn from(query_context: QueryContextRef) -> Self {
-        QueryContext {
-            current_catalog: query_context.current_catalog().to_string(),
-            current_schema: query_context.current_schema().clone(),
-            timezone: query_context.timezone().to_string(),
-            extensions: query_context.extensions(),
-            channel: query_context.channel() as u8,
+impl From<PbQueryContext> for QueryContext {
+    fn from(pb_ctx: PbQueryContext) -> Self {
+        Self {
+            current_catalog: pb_ctx.current_catalog,
+            current_schema: pb_ctx.current_schema,
+            timezone: pb_ctx.timezone,
+            extensions: pb_ctx.extensions,
+            channel: pb_ctx.channel as u8,
         }
-    }
-}
-
-impl TryFrom<QueryContext> for session::context::QueryContext {
-    type Error = error::Error;
-    fn try_from(value: QueryContext) -> std::result::Result<Self, Self::Error> {
-        Ok(QueryContextBuilder::default()
-            .current_catalog(value.current_catalog)
-            .current_schema(value.current_schema)
-            .timezone(Timezone::from_tz_string(&value.timezone).context(InvalidTimeZoneSnafu)?)
-            .extensions(value.extensions)
-            .channel((value.channel as u32).into())
-            .build())
     }
 }
 
@@ -1563,16 +1549,6 @@ impl From<QueryContext> for FlowQueryContext {
     }
 }
 
-impl From<QueryContextRef> for FlowQueryContext {
-    fn from(ctx: QueryContextRef) -> Self {
-        Self {
-            catalog: ctx.current_catalog().to_string(),
-            schema: ctx.current_schema().clone(),
-            timezone: ctx.timezone().to_string(),
-        }
-    }
-}
-
 impl From<FlowQueryContext> for QueryContext {
     fn from(flow_ctx: FlowQueryContext) -> Self {
         Self {
@@ -1597,10 +1573,10 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::{AlterTableExpr, ColumnDef, CreateTableExpr, SemanticType};
-    use datatypes::schema::{ColumnSchema, RawSchema, SchemaBuilder};
+    use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder};
     use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
     use store_api::storage::ConcreteDataType;
-    use table::metadata::{RawTableInfo, RawTableMeta, TableType};
+    use table::metadata::{TableInfo, TableMeta, TableType};
     use table::test_util::table_info::test_table_info;
 
     use super::{AlterTableTask, CreateTableTask, *};
@@ -1609,11 +1585,7 @@ mod tests {
     fn test_basic_ser_de_create_table_task() {
         let schema = SchemaBuilder::default().build().unwrap();
         let table_info = test_table_info(1025, "foo", "bar", "baz", Arc::new(schema));
-        let task = CreateTableTask::new(
-            CreateTableExpr::default(),
-            Vec::new(),
-            RawTableInfo::from(table_info),
-        );
+        let task = CreateTableTask::new(CreateTableExpr::default(), Vec::new(), table_info);
 
         let output = serde_json::to_vec(&task).unwrap();
 
@@ -1636,32 +1608,28 @@ mod tests {
     #[test]
     fn test_sort_columns() {
         // construct RawSchema
-        let raw_schema = RawSchema {
-            column_schemas: vec![
-                ColumnSchema::new(
-                    "column3".to_string(),
-                    ConcreteDataType::string_datatype(),
-                    true,
-                ),
-                ColumnSchema::new(
-                    "column1".to_string(),
-                    ConcreteDataType::timestamp_millisecond_datatype(),
-                    false,
-                )
-                .with_time_index(true),
-                ColumnSchema::new(
-                    "column2".to_string(),
-                    ConcreteDataType::float64_datatype(),
-                    true,
-                ),
-            ],
-            timestamp_index: Some(1),
-            version: 0,
-        };
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "column3".to_string(),
+                ConcreteDataType::string_datatype(),
+                true,
+            ),
+            ColumnSchema::new(
+                "column1".to_string(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new(
+                "column2".to_string(),
+                ConcreteDataType::float64_datatype(),
+                true,
+            ),
+        ]));
 
         // construct RawTableMeta
-        let raw_table_meta = RawTableMeta {
-            schema: raw_schema,
+        let meta = TableMeta {
+            schema,
             primary_key_indices: vec![0],
             value_indices: vec![2],
             engine: METRIC_ENGINE_NAME.to_string(),
@@ -1673,10 +1641,10 @@ mod tests {
             column_ids: Default::default(),
         };
 
-        // construct RawTableInfo
-        let raw_table_info = RawTableInfo {
+        // construct TableInfo
+        let raw_table_info = TableInfo {
             ident: Default::default(),
-            meta: raw_table_meta,
+            meta,
             name: Default::default(),
             desc: Default::default(),
             catalog_name: Default::default(),
@@ -1729,7 +1697,7 @@ mod tests {
 
         // Assert that the table_info is updated correctly
         assert_eq!(
-            create_table_task.table_info.meta.schema.timestamp_index,
+            create_table_task.table_info.meta.schema.timestamp_index(),
             Some(0)
         );
         assert_eq!(
@@ -1780,25 +1748,6 @@ mod tests {
         // Test roundtrip conversion
         let flow_ctx_roundtrip: FlowQueryContext = query_ctx.into();
         assert_eq!(flow_ctx, flow_ctx_roundtrip);
-    }
-
-    #[test]
-    fn test_flow_query_context_conversion_from_query_context_ref() {
-        use common_time::Timezone;
-        use session::context::QueryContextBuilder;
-
-        let session_ctx = QueryContextBuilder::default()
-            .current_catalog("session_catalog".to_string())
-            .current_schema("session_schema".to_string())
-            .timezone(Timezone::from_tz_string("Europe/London").unwrap())
-            .build();
-
-        let session_ctx_ref = Arc::new(session_ctx);
-        let flow_ctx: FlowQueryContext = session_ctx_ref.into();
-
-        assert_eq!(flow_ctx.catalog, "session_catalog");
-        assert_eq!(flow_ctx.schema, "session_schema");
-        assert_eq!(flow_ctx.timezone, "Europe/London");
     }
 
     #[test]

@@ -108,6 +108,21 @@ impl FileDescriptor {
             FileDescriptor::Data { size, .. } => *size,
         }
     }
+
+    fn file_path(&self, region_id: RegionId, table_dir: &str, path_type: PathType) -> String {
+        match *self {
+            FileDescriptor::Index {
+                file_id, version, ..
+            } => location::index_file_path(
+                table_dir,
+                RegionIndexId::new(RegionFileId::new(region_id, file_id), version),
+                path_type,
+            ),
+            FileDescriptor::Data { file_id, .. } => {
+                location::sst_file_path(table_dir, RegionFileId::new(region_id, file_id), path_type)
+            }
+        }
+    }
 }
 
 /// Builds the source and target file paths for a given file descriptor.
@@ -128,34 +143,10 @@ fn build_copy_file_paths(
     table_dir: &str,
     path_type: PathType,
 ) -> (String, String) {
-    match file_descriptor {
-        FileDescriptor::Index {
-            file_id, version, ..
-        } => (
-            location::index_file_path(
-                table_dir,
-                RegionIndexId::new(RegionFileId::new(source_region_id, file_id), version),
-                path_type,
-            ),
-            location::index_file_path(
-                table_dir,
-                RegionIndexId::new(RegionFileId::new(target_region_id, file_id), version),
-                path_type,
-            ),
-        ),
-        FileDescriptor::Data { file_id, .. } => (
-            location::sst_file_path(
-                table_dir,
-                RegionFileId::new(source_region_id, file_id),
-                path_type,
-            ),
-            location::sst_file_path(
-                table_dir,
-                RegionFileId::new(target_region_id, file_id),
-                path_type,
-            ),
-        ),
-    }
+    (
+        file_descriptor.file_path(source_region_id, table_dir, path_type),
+        file_descriptor.file_path(target_region_id, table_dir, path_type),
+    )
 }
 
 fn build_delete_file_path(
@@ -164,20 +155,7 @@ fn build_delete_file_path(
     table_dir: &str,
     path_type: PathType,
 ) -> String {
-    match file_descriptor {
-        FileDescriptor::Index {
-            file_id, version, ..
-        } => location::index_file_path(
-            table_dir,
-            RegionIndexId::new(RegionFileId::new(target_region_id, file_id), version),
-            path_type,
-        ),
-        FileDescriptor::Data { file_id, .. } => location::sst_file_path(
-            table_dir,
-            RegionFileId::new(target_region_id, file_id),
-            path_type,
-        ),
-    }
+    file_descriptor.file_path(target_region_id, table_dir, path_type)
 }
 
 impl RegionFileCopier {
@@ -340,6 +318,30 @@ mod tests {
                 "/table_dir/1_0000000002/index/{}.{}.puffin",
                 file_id, version
             )
+        );
+    }
+
+    #[test]
+    fn test_build_delete_file_path() {
+        common_telemetry::init_default_ut_logging();
+        let file_id = FileId::random();
+        let target_region_id = RegionId::new(1, 2);
+        let table_dir = "/table_dir";
+        let path_type = PathType::Bare;
+
+        let file_descriptor = FileDescriptor::Data { file_id, size: 100 };
+        let path = build_delete_file_path(target_region_id, file_descriptor, table_dir, path_type);
+        assert_eq!(path, format!("/table_dir/1_0000000002/{}.parquet", file_id));
+
+        let file_descriptor = FileDescriptor::Index {
+            file_id,
+            version: 1,
+            size: 100,
+        };
+        let path = build_delete_file_path(target_region_id, file_descriptor, table_dir, path_type);
+        assert_eq!(
+            path,
+            format!("/table_dir/1_0000000002/index/{}.1.puffin", file_id)
         );
     }
 }

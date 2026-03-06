@@ -55,6 +55,24 @@ Copy demo_with_less_columns FROM '${SQLNESS_HOME}/demo/export/csv/demo.csv' WITH
 
 select * from demo_with_less_columns order by ts;
 
+CREATE TABLE csv_null_prefix(note string, ts timestamp time index);
+
+insert into
+    csv_null_prefix(note, ts)
+values
+    (NULL, 1700000000000),
+    (NULL, 1700000001000),
+    (NULL, 1700000002000),
+    ('final', 1700000003000);
+
+Copy csv_null_prefix TO '${SQLNESS_HOME}/demo/export/csv_null_prefix.csv' with (format='csv');
+
+CREATE TABLE csv_null_prefix_import(note string, ts timestamp time index);
+
+Copy csv_null_prefix_import FROM '${SQLNESS_HOME}/demo/export/csv_null_prefix.csv' with (format='csv', schema_infer_max_record=2);
+
+select * from csv_null_prefix_import;
+
 drop table demo;
 
 drop table with_filename;
@@ -68,3 +86,7 @@ drop table with_pattern;
 drop table demo_with_external_column;
 
 drop table demo_with_less_columns;
+
+drop table csv_null_prefix;
+
+drop table csv_null_prefix_import;

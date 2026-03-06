@@ -15,7 +15,7 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use cache::{TABLE_FLOWNODE_SET_CACHE_NAME, TABLE_ROUTE_CACHE_NAME};
+use cache::{PARTITION_INFO_CACHE_NAME, TABLE_FLOWNODE_SET_CACHE_NAME, TABLE_ROUTE_CACHE_NAME};
 use catalog::CatalogManagerRef;
 use catalog::process_manager::ProcessManagerRef;
 use common_base::Plugins;
@@ -38,6 +38,7 @@ use operator::statement::{
     StatementExecutorRef,
 };
 use operator::table::TableMutationOperator;
+use partition::cache::PartitionInfoCacheRef;
 use partition::manager::PartitionRuleManager;
 use pipeline::pipeline_operator::PipelineOperator;
 use query::QueryEngineFactory;
@@ -92,14 +93,21 @@ impl FrontendBuilder {
         options: &FrontendOptions,
         meta_client: meta_client::MetaClientRef,
     ) -> Self {
+        use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
+        use common_meta::cache::LayeredCacheRegistryBuilder;
         use common_meta::kv_backend::memory::MemoryKvBackend;
 
         let kv_backend = Arc::new(MemoryKvBackend::new());
 
+        // Builds cache registry
+        let layered_cache_builder = LayeredCacheRegistryBuilder::default();
+        let fundamental_cache_registry = build_fundamental_cache_registry(kv_backend.clone());
         let layered_cache_registry = Arc::new(
-            common_meta::cache::LayeredCacheRegistryBuilder::default()
-                .add_cache_registry(cache::build_fundamental_cache_registry(kv_backend.clone()))
-                .build(),
+            with_default_composite_cache_registry(
+                layered_cache_builder.add_cache_registry(fundamental_cache_registry),
+            )
+            .unwrap()
+            .build(),
         );
 
         Self::new(
@@ -141,9 +149,16 @@ impl FrontendBuilder {
                 .context(error::CacheRequiredSnafu {
                     name: TABLE_ROUTE_CACHE_NAME,
                 })?;
+        let partition_info_cache: PartitionInfoCacheRef = self
+            .layered_cache_registry
+            .get()
+            .context(error::CacheRequiredSnafu {
+                name: PARTITION_INFO_CACHE_NAME,
+            })?;
         let partition_manager = Arc::new(PartitionRuleManager::new(
             kv_backend.clone(),
             table_route_cache.clone(),
+            partition_info_cache.clone(),
         ));
 
         let local_cache_invalidator = self
@@ -215,7 +230,7 @@ impl FrontendBuilder {
             kv_backend.clone(),
             local_cache_invalidator,
             inserter.clone(),
-            table_route_cache,
+            partition_manager,
             Some(process_manager.clone()),
         );
 

@@ -196,7 +196,7 @@ SHOW CREATE FLOW flow_comment_test;
 | Flow              | Create Flow                                          |
 +-------------------+------------------------------------------------------+
 | flow_comment_test | CREATE FLOW IF NOT EXISTS flow_comment_test          |
-|                   | SINK TO flow_sink_comment_test                       |
+|                   | SINK TO public.flow_sink_comment_test                |
 |                   | COMMENT 'flow level description'                     |
 |                   | AS SELECT desc_str, ts FROM flow_source_comment_test |
 +-------------------+------------------------------------------------------+
@@ -222,7 +222,7 @@ SHOW CREATE FLOW flow_comment_test;
 | Flow              | Create Flow                                          |
 +-------------------+------------------------------------------------------+
 | flow_comment_test | CREATE FLOW IF NOT EXISTS flow_comment_test          |
-|                   | SINK TO flow_sink_comment_test                       |
+|                   | SINK TO public.flow_sink_comment_test                |
 |                   | AS SELECT desc_str, ts FROM flow_source_comment_test |
 +-------------------+------------------------------------------------------+
 

@@ -44,6 +44,7 @@ use crate::error::{
 };
 use crate::read::Batch;
 use crate::read::compat::CompatBatch;
+use crate::read::flat_projection::CompactionProjectionMapper;
 use crate::read::last_row::RowGroupLastRowCachedReader;
 use crate::read::prune::{FlatPruneReader, PruneReader};
 use crate::sst::file::FileHandle;
@@ -269,6 +270,11 @@ impl FileRange {
         self.context.compat_batch()
     }
 
+    /// Returns the helper to project batches.
+    pub(crate) fn compaction_projection_mapper(&self) -> Option<&CompactionProjectionMapper> {
+        self.context.compaction_projection_mapper()
+    }
+
     /// Returns the file handle of the file range.
     pub(crate) fn file_handle(&self) -> &FileHandle {
         self.context.reader_builder.file_handle()
@@ -322,6 +328,11 @@ impl FileRangeContext {
     /// Returns the helper to compat batches.
     pub(crate) fn compat_batch(&self) -> Option<&CompatBatch> {
         self.base.compat_batch.as_ref()
+    }
+
+    /// Returns the helper to project batches.
+    pub(crate) fn compaction_projection_mapper(&self) -> Option<&CompactionProjectionMapper> {
+        self.base.compaction_projection_mapper.as_ref()
     }
 
     /// Sets the `CompatBatch` to the context.
@@ -406,6 +417,8 @@ pub(crate) struct RangeBase {
     pub(crate) codec: Arc<dyn PrimaryKeyCodec>,
     /// Optional helper to compat batches.
     pub(crate) compat_batch: Option<CompatBatch>,
+    /// Optional helper to project batches.
+    pub(crate) compaction_projection_mapper: Option<CompactionProjectionMapper>,
     /// Mode to pre-filter columns.
     pub(crate) pre_filter_mode: PreFilterMode,
     /// Partition filter.
@@ -628,10 +641,12 @@ impl RangeBase {
                 continue;
             }
 
-            // Get the column directly by its projected index
+            // Get the column directly by its projected index.
+            // If the column is missing and it's not a tag/time column, this filter is skipped.
+            // Assumes the projection indices align with the input batch schema.
             let column_idx = flat_format.projected_index_by_id(filter_ctx.column_id());
             if let Some(idx) = column_idx {
-                let column = &input.columns()[idx];
+                let column = &input.columns().get(idx).unwrap();
                 let result = filter.evaluate_array(column).context(RecordBatchSnafu)?;
                 mask = mask.bitand(&result);
             } else if filter_ctx.semantic_type() == SemanticType::Tag {

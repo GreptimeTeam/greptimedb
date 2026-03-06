@@ -33,7 +33,7 @@ use store_api::metric_engine_consts::{
     METRIC_ENGINE_NAME,
 };
 use store_api::storage::consts::ReservedColumnId;
-use table::metadata::{RawTableInfo, TableId};
+use table::metadata::{TableId, TableInfo};
 
 use crate::ddl::create_logical_tables::CreateLogicalTablesProcedure;
 use crate::ddl::test_util::columns::TestColumnDefBuilder;
@@ -46,7 +46,7 @@ use crate::rpc::ddl::CreateTableTask;
 
 pub async fn create_physical_table_metadata(
     ddl_context: &DdlContext,
-    table_info: RawTableInfo,
+    table_info: TableInfo,
     table_route: TableRouteValue,
 ) {
     ddl_context
@@ -240,12 +240,12 @@ pub fn test_column_metadatas(tag_fields: &[&str]) -> Vec<ColumnMetadata> {
 }
 
 /// Asserts the column names.
-pub fn assert_column_name(table_info: &RawTableInfo, expected_column_names: &[&str]) {
+pub fn assert_column_name(table_info: &TableInfo, expected_column_names: &[&str]) {
     assert_eq!(
         table_info
             .meta
             .schema
-            .column_schemas
+            .column_schemas()
             .iter()
             .map(|c| c.name.clone())
             .collect::<Vec<_>>(),
@@ -266,7 +266,7 @@ pub fn assert_column_name_and_id(column_metadatas: &[ColumnMetadata], expected: 
 }
 
 /// Gets the raw table info.
-pub async fn get_raw_table_info(ddl_context: &DdlContext, table_id: TableId) -> RawTableInfo {
+pub async fn get_raw_table_info(ddl_context: &DdlContext, table_id: TableId) -> TableInfo {
     ddl_context
         .table_metadata_manager
         .table_info_manager()

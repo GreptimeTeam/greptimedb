@@ -54,7 +54,7 @@ use common_time::{Timestamp, Timezone};
 use datafusion_common::tree_node::TreeNodeVisitor;
 use datafusion_expr::LogicalPlan;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{ColumnSchema, RawSchema, Schema};
+use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::value::Value;
 use datatypes::vectors::{StringVector, VectorRef};
 use humantime::parse_duration;
@@ -83,7 +83,7 @@ use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::TableRef;
 use table::dist_table::DistTable;
-use table::metadata::{self, RawTableInfo, RawTableMeta, TableId, TableInfo, TableType};
+use table::metadata::{self, TableId, TableInfo, TableMeta, TableType};
 use table::requests::{
     AlterKind, AlterTableRequest, COMMENT_KEY, DDL_TIMEOUT, DDL_WAIT, TableOptions,
 };
@@ -92,7 +92,7 @@ use table::table_reference::TableReference;
 
 use crate::error::{
     self, AlterExprToRequestSnafu, BuildDfLogicalPlanSnafu, CatalogSnafu, ColumnDataTypeSnafu,
-    ColumnNotFoundSnafu, ConvertSchemaSnafu, CreateLogicalTablesSnafu, CreateTableInfoSnafu,
+    ColumnNotFoundSnafu, ConvertSchemaSnafu, CreateLogicalTablesSnafu,
     DeserializePartitionExprSnafu, EmptyDdlExprSnafu, ExternalSnafu, ExtractTableNamesSnafu,
     FlowNotFoundSnafu, InvalidPartitionRuleSnafu, InvalidPartitionSnafu, InvalidSqlSnafu,
     InvalidTableNameSnafu, InvalidViewNameSnafu, InvalidViewStmtSnafu, NotSupportedSnafu,
@@ -104,6 +104,7 @@ use crate::error::{
 use crate::expr_helper::{self, RepartitionRequest};
 use crate::statement::StatementExecutor;
 use crate::statement::show::create_partitions_stmt;
+use crate::utils::to_meta_query_context;
 
 #[derive(Debug, Clone, Copy)]
 struct DdlSubmitOptions {
@@ -206,9 +207,9 @@ impl StatementExecutor {
             .await
             .context(CatalogSnafu)?
             .context(TableNotFoundSnafu { table_name: &table })?;
-        let partitions = self
+        let partition_info = self
             .partition_manager
-            .find_table_partitions(table_ref.table_info().table_id())
+            .find_physical_partition_info(table_ref.table_info().table_id())
             .await
             .context(error::FindTablePartitionRuleSnafu { table_name: table })?;
 
@@ -232,15 +233,16 @@ impl StatementExecutor {
         create_stmt.if_not_exists = false;
 
         let table_info = table_ref.table_info();
-        let partitions =
-            create_partitions_stmt(&table_info, partitions)?.and_then(|mut partitions| {
+        let partitions = create_partitions_stmt(&table_info, &partition_info.partitions)?.and_then(
+            |mut partitions| {
                 if !partitions.column_list.is_empty() {
                     partitions.set_quote(quote_style);
                     Some(partitions)
                 } else {
                     None
                 }
-            });
+            },
+        );
 
         let create_expr = &mut expr_helper::create_to_expr(&create_stmt, &ctx)?;
         self.create_table_inner(create_expr, partitions, ctx).await
@@ -384,8 +386,7 @@ impl StatementExecutor {
 
         table_info.ident.table_id = table_id;
 
-        let table_info: Arc<TableInfo> =
-            Arc::new(table_info.try_into().context(CreateTableInfoSnafu)?);
+        let table_info = Arc::new(table_info);
         create_table.table_id = Some(api::v1::TableId { id: table_id });
 
         let table = DistTable::table(table_info);
@@ -417,7 +418,7 @@ impl StatementExecutor {
             );
         }
 
-        let mut raw_tables_info = create_table_exprs
+        let raw_tables_info = create_table_exprs
             .iter()
             .map(|create| create_table_info(create, vec![]))
             .collect::<Result<Vec<_>>>()?;
@@ -428,7 +429,7 @@ impl StatementExecutor {
             .collect::<Vec<_>>();
 
         let resp = self
-            .create_logical_tables_procedure(tables_data, query_context)
+            .create_logical_tables_procedure(tables_data, query_context.clone())
             .await?;
 
         let table_ids = resp.table_ids;
@@ -444,18 +445,51 @@ impl StatementExecutor {
         );
         info!("Successfully created logical tables: {:?}", table_ids);
 
-        for (i, table_info) in raw_tables_info.iter_mut().enumerate() {
-            table_info.ident.table_id = table_ids[i];
-        }
-        let tables_info = raw_tables_info
-            .into_iter()
-            .map(|x| x.try_into().context(CreateTableInfoSnafu))
-            .collect::<Result<Vec<_>>>()?;
+        // Reacquire table infos from catalog so logical tables inherit the latest partition
+        // metadata (e.g. partition_key_indices) from their physical tables.
+        // And the returned table info also included extra partition columns that are in physical table but not in logical table's create table expr
+        let mut tables_info = Vec::with_capacity(table_ids.len());
+        for (table_id, create_table) in table_ids.iter().zip(create_table_exprs.iter()) {
+            let table = self
+                .catalog_manager
+                .table(
+                    &create_table.catalog_name,
+                    &create_table.schema_name,
+                    &create_table.table_name,
+                    Some(&query_context),
+                )
+                .await
+                .context(CatalogSnafu)?
+                .with_context(|| TableNotFoundSnafu {
+                    table_name: format_full_table_name(
+                        &create_table.catalog_name,
+                        &create_table.schema_name,
+                        &create_table.table_name,
+                    ),
+                })?;
 
-        Ok(tables_info
-            .into_iter()
-            .map(|x| DistTable::table(Arc::new(x)))
-            .collect())
+            let table_info = table.table_info();
+            // Safety check: ensure we are returning the table info that matches the newly created table id.
+            ensure!(
+                table_info.table_id() == *table_id,
+                CreateLogicalTablesSnafu {
+                    reason: format!(
+                        "Table id mismatch after creation, expected {}, got {} for table {}",
+                        table_id,
+                        table_info.table_id(),
+                        format_full_table_name(
+                            &create_table.catalog_name,
+                            &create_table.schema_name,
+                            &create_table.table_name
+                        )
+                    )
+                }
+            );
+
+            tables_info.push(table_info);
+        }
+
+        Ok(tables_info.into_iter().map(DistTable::table).collect())
     }
 
     async fn validate_logical_table_partition_rule(
@@ -491,7 +525,7 @@ impl StatementExecutor {
             })?;
 
         let physical_table_info = physical_table.table_info();
-        let partition_rule = self
+        let (partition_rule, _) = self
             .partition_manager
             .find_table_partition_rule(&physical_table_info)
             .await
@@ -557,7 +591,10 @@ impl StatementExecutor {
         })
         .context(error::InvalidExprSnafu)?;
 
-        let request = SubmitDdlTaskRequest::new(query_context, DdlTask::new_create_trigger(task));
+        let request = SubmitDdlTaskRequest::new(
+            to_meta_query_context(query_context),
+            DdlTask::new_create_trigger(task),
+        );
 
         self.procedure_executor
             .submit_ddl_task(&ExecutorContext::default(), request)
@@ -607,7 +644,10 @@ impl StatementExecutor {
             create_flow: Some(expr),
         })
         .context(error::InvalidExprSnafu)?;
-        let request = SubmitDdlTaskRequest::new(query_context, DdlTask::new_create_flow(task));
+        let request = SubmitDdlTaskRequest::new(
+            to_meta_query_context(query_context),
+            DdlTask::new_create_flow(task),
+        );
 
         self.procedure_executor
             .submit_ddl_task(&ExecutorContext::default(), request)
@@ -887,7 +927,7 @@ impl StatementExecutor {
 
         let view_name = TableName::new(&expr.catalog_name, &expr.schema_name, &expr.view_name);
 
-        let mut view_info = RawTableInfo {
+        let mut view_info = TableInfo {
             ident: metadata::TableIdent {
                 // The view id of distributed table is assigned by Meta, set "0" here as a placeholder.
                 table_id: 0,
@@ -898,12 +938,14 @@ impl StatementExecutor {
             catalog_name: expr.catalog_name.clone(),
             schema_name: expr.schema_name.clone(),
             // The meta doesn't make sense for views, so using a default one.
-            meta: RawTableMeta::default(),
+            meta: TableMeta::empty(),
             table_type: TableType::View,
         };
 
-        let request =
-            SubmitDdlTaskRequest::new(ctx, DdlTask::new_create_view(expr, view_info.clone()));
+        let request = SubmitDdlTaskRequest::new(
+            to_meta_query_context(ctx),
+            DdlTask::new_create_view(expr, view_info.clone()),
+        );
 
         let resp = self
             .procedure_executor
@@ -927,7 +969,7 @@ impl StatementExecutor {
 
         view_info.ident.table_id = view_id;
 
-        let view_info = Arc::new(view_info.try_into().context(CreateTableInfoSnafu)?);
+        let view_info = Arc::new(view_info);
 
         let table = DistTable::table(view_info);
 
@@ -986,7 +1028,10 @@ impl StatementExecutor {
         expr: DropFlowTask,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
-        let request = SubmitDdlTaskRequest::new(query_context, DdlTask::new_drop_flow(expr));
+        let request = SubmitDdlTaskRequest::new(
+            to_meta_query_context(query_context),
+            DdlTask::new_drop_flow(expr),
+        );
 
         self.procedure_executor
             .submit_ddl_task(&ExecutorContext::default(), request)
@@ -1018,7 +1063,10 @@ impl StatementExecutor {
         expr: DropTriggerTask,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
-        let request = SubmitDdlTaskRequest::new(query_context, DdlTask::new_drop_trigger(expr));
+        let request = SubmitDdlTaskRequest::new(
+            to_meta_query_context(query_context),
+            DdlTask::new_drop_trigger(expr),
+        );
 
         self.procedure_executor
             .submit_ddl_task(&ExecutorContext::default(), request)
@@ -1083,7 +1131,10 @@ impl StatementExecutor {
         expr: DropViewTask,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
-        let request = SubmitDdlTaskRequest::new(query_context, DdlTask::new_drop_view(expr));
+        let request = SubmitDdlTaskRequest::new(
+            to_meta_query_context(query_context),
+            DdlTask::new_drop_view(expr),
+        );
 
         self.procedure_executor
             .submit_ddl_task(&ExecutorContext::default(), request)
@@ -1386,11 +1437,20 @@ impl StatementExecutor {
             .map(|expr| convert_one_expr(expr, &column_name_and_type, &timezone))
             .collect::<Result<Vec<_>>>()?;
 
-        let into_partition_exprs = request
+        let mut into_partition_exprs = request
             .into_exprs
             .iter()
             .map(|expr| convert_one_expr(expr, &column_name_and_type, &timezone))
             .collect::<Result<Vec<_>>>()?;
+
+        // `MERGE PARTITION` (and some `REPARTITION`) generates a single `OR` expression from
+        // multiple source partitions; try to simplify it for better readability and stability.
+        if from_partition_exprs.len() > 1
+            && into_partition_exprs.len() == 1
+            && let Some(expr) = into_partition_exprs.pop()
+        {
+            into_partition_exprs.push(partition::simplify::simplify_merged_partition_expr(expr));
+        }
 
         // Parse existing partition expressions from region routes.
         let mut existing_partition_exprs =
@@ -1457,7 +1517,7 @@ impl StatementExecutor {
         let from_partition_exprs_json = serialize_exprs(from_partition_exprs)?;
         let into_partition_exprs_json = serialize_exprs(into_partition_exprs)?;
         let mut req = SubmitDdlTaskRequest::new(
-            query_context.clone(),
+            to_meta_query_context(query_context.clone()),
             DdlTask::new_alter_table(AlterTableExpr {
                 catalog_name: request.catalog_name.clone(),
                 schema_name: request.schema_name.clone(),
@@ -1571,7 +1631,10 @@ impl StatementExecutor {
 
         let (req, invalidate_keys) = if physical_table_id == table_id {
             // This is physical table
-            let req = SubmitDdlTaskRequest::new(query_context, DdlTask::new_alter_table(expr));
+            let req = SubmitDdlTaskRequest::new(
+                to_meta_query_context(query_context),
+                DdlTask::new_alter_table(expr),
+            );
 
             let invalidate_keys = vec![
                 CacheIdent::TableId(table_id),
@@ -1582,7 +1645,7 @@ impl StatementExecutor {
         } else {
             // This is logical table
             let req = SubmitDdlTaskRequest::new(
-                query_context,
+                to_meta_query_context(query_context),
                 DdlTask::new_alter_logical_tables(vec![expr]),
             );
 
@@ -1694,7 +1757,7 @@ impl StatementExecutor {
         &self,
         create_table: CreateTableExpr,
         partitions: Vec<PartitionExpr>,
-        table_info: RawTableInfo,
+        table_info: TableInfo,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let partitions = partitions
@@ -1703,7 +1766,7 @@ impl StatementExecutor {
             .collect::<Result<Vec<_>>>()?;
 
         let request = SubmitDdlTaskRequest::new(
-            query_context,
+            to_meta_query_context(query_context),
             DdlTask::new_create_table(create_table, partitions, table_info),
         );
 
@@ -1715,11 +1778,11 @@ impl StatementExecutor {
 
     async fn create_logical_tables_procedure(
         &self,
-        tables_data: Vec<(CreateTableExpr, RawTableInfo)>,
+        tables_data: Vec<(CreateTableExpr, TableInfo)>,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
-            query_context,
+            to_meta_query_context(query_context),
             DdlTask::new_create_logical_tables(tables_data),
         );
 
@@ -1735,7 +1798,7 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
-            query_context,
+            to_meta_query_context(query_context),
             DdlTask::new_alter_logical_tables(tables_data),
         );
 
@@ -1753,7 +1816,7 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
-            query_context,
+            to_meta_query_context(query_context),
             DdlTask::new_drop_table(
                 table_name.catalog_name.clone(),
                 table_name.schema_name.clone(),
@@ -1777,7 +1840,7 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
-            query_context,
+            to_meta_query_context(query_context),
             DdlTask::new_drop_database(catalog, schema, drop_if_exists),
         );
 
@@ -1792,8 +1855,10 @@ impl StatementExecutor {
         alter_expr: AlterDatabaseExpr,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
-        let request =
-            SubmitDdlTaskRequest::new(query_context, DdlTask::new_alter_database(alter_expr));
+        let request = SubmitDdlTaskRequest::new(
+            to_meta_query_context(query_context),
+            DdlTask::new_alter_database(alter_expr),
+        );
 
         self.procedure_executor
             .submit_ddl_task(&ExecutorContext::default(), request)
@@ -1809,7 +1874,7 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
-            query_context,
+            to_meta_query_context(query_context),
             DdlTask::new_truncate_table(
                 table_name.catalog_name.clone(),
                 table_name.schema_name.clone(),
@@ -1881,7 +1946,7 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
-            query_context,
+            to_meta_query_context(query_context),
             DdlTask::new_create_database(catalog, database, create_if_not_exists, options),
         );
 
@@ -2014,7 +2079,7 @@ pub fn verify_alter(
 pub fn create_table_info(
     create_table: &CreateTableExpr,
     partition_columns: Vec<String>,
-) -> Result<RawTableInfo> {
+) -> Result<TableInfo> {
     let mut column_schemas = Vec::with_capacity(create_table.column_defs.len());
     let mut column_name_to_index_map = HashMap::new();
 
@@ -2029,15 +2094,8 @@ pub fn create_table_info(
         let _ = column_name_to_index_map.insert(column.name.clone(), idx);
     }
 
-    let timestamp_index = column_name_to_index_map
-        .get(&create_table.time_index)
-        .cloned();
-
-    let raw_schema = RawSchema {
-        column_schemas: column_schemas.clone(),
-        timestamp_index,
-        version: 0,
-    };
+    let next_column_id = column_schemas.len() as u32;
+    let schema = Arc::new(Schema::new(column_schemas));
 
     let primary_key_indices = create_table
         .primary_keys
@@ -2063,12 +2121,12 @@ pub fn create_table_info(
     let table_options = TableOptions::try_from_iter(&create_table.table_options)
         .context(UnrecognizedTableOptionSnafu)?;
 
-    let meta = RawTableMeta {
-        schema: raw_schema,
+    let meta = TableMeta {
+        schema,
         primary_key_indices,
         value_indices: vec![],
         engine: create_table.engine.clone(),
-        next_column_id: column_schemas.len() as u32,
+        next_column_id,
         options: table_options,
         created_on: Utc::now(),
         updated_on: Utc::now(),
@@ -2082,7 +2140,7 @@ pub fn create_table_info(
         Some(create_table.desc.clone())
     };
 
-    let table_info = RawTableInfo {
+    let table_info = TableInfo {
         ident: metadata::TableIdent {
             // The table id of distributed table is assigned by Meta, set "0" here as a placeholder.
             table_id: 0,

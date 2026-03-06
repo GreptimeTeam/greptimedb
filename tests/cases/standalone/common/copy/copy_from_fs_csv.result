@@ -146,6 +146,43 @@ select * from demo_with_less_columns order by ts;
 | host3 | 444.4  | 2024-07-27T10:47:43 |
 +-------+--------+---------------------+
 
+CREATE TABLE csv_null_prefix(note string, ts timestamp time index);
+
+Affected Rows: 0
+
+insert into
+    csv_null_prefix(note, ts)
+values
+    (NULL, 1700000000000),
+    (NULL, 1700000001000),
+    (NULL, 1700000002000),
+    ('final', 1700000003000);
+
+Affected Rows: 4
+
+Copy csv_null_prefix TO '${SQLNESS_HOME}/demo/export/csv_null_prefix.csv' with (format='csv');
+
+Affected Rows: 4
+
+CREATE TABLE csv_null_prefix_import(note string, ts timestamp time index);
+
+Affected Rows: 0
+
+Copy csv_null_prefix_import FROM '${SQLNESS_HOME}/demo/export/csv_null_prefix.csv' with (format='csv', schema_infer_max_record=2);
+
+Affected Rows: 4
+
+select * from csv_null_prefix_import;
+
++-------+---------------------+
+| note  | ts                  |
++-------+---------------------+
+|       | 2023-11-14T22:13:20 |
+|       | 2023-11-14T22:13:21 |
+|       | 2023-11-14T22:13:22 |
+| final | 2023-11-14T22:13:23 |
++-------+---------------------+
+
 drop table demo;
 
 Affected Rows: 0
@@ -171,6 +208,14 @@ drop table demo_with_external_column;
 Affected Rows: 0
 
 drop table demo_with_less_columns;
+
+Affected Rows: 0
+
+drop table csv_null_prefix;
+
+Affected Rows: 0
+
+drop table csv_null_prefix_import;
 
 Affected Rows: 0
 

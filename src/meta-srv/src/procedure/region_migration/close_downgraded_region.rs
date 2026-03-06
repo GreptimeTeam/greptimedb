@@ -19,6 +19,7 @@ use common_meta::RegionIdent;
 use common_meta::distributed_time_constants::default_distributed_time_constants;
 use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
 use common_procedure::{Context as ProcedureContext, Status};
+use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{info, warn};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
@@ -91,6 +92,7 @@ impl CloseDowngradedRegion {
         let region_ids = &ctx.persistent_ctx.region_ids;
         let pc = &ctx.persistent_ctx;
         let downgrade_leader_datanode = &pc.from_peer;
+        let tracing_ctx = TracingContext::from_current_span();
         let msg = MailboxMessage::json_message(
             &format!("Close downgraded regions: {:?}", region_ids),
             &format!("Metasrv@{}", ctx.server_addr()),
@@ -100,6 +102,7 @@ impl CloseDowngradedRegion {
             ),
             common_time::util::current_time_millis(),
             &close_instruction,
+            Some(tracing_ctx.to_w3c()),
         )
         .with_context(|_| error::SerializeToJsonSnafu {
             input: close_instruction.to_string(),

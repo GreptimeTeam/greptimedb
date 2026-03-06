@@ -44,7 +44,7 @@ use datafusion::physical_optimizer::optimizer::PhysicalOptimizer;
 use datafusion::physical_optimizer::sanity_checker::SanityCheckPlan;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner};
-use datafusion_expr::{AggregateUDF, LogicalPlan as DfLogicalPlan};
+use datafusion_expr::{AggregateUDF, LogicalPlan as DfLogicalPlan, WindowUDF};
 use datafusion_optimizer::Analyzer;
 use datafusion_optimizer::analyzer::function_rewrite::ApplyFunctionRewrites;
 use datafusion_optimizer::optimizer::Optimizer;
@@ -365,8 +365,16 @@ impl QueryEngineState {
             .insert(name.to_string(), func.clone());
 
         if x.is_some() {
-            warn!("Already registered table function '{name}");
+            warn!("Already registered table function '{name}'");
         }
+    }
+
+    /// Register a window function (UDWF) directly on the DataFusion SessionContext.
+    ///
+    /// This makes the function visible via `session_state.window_functions()`,
+    /// which is used by `DfContextProviderAdapter::get_window_meta`.
+    pub fn register_window_function(&self, func: WindowUDF) {
+        self.df_context.register_udwf(func);
     }
 
     pub fn catalog_manager(&self) -> &CatalogManagerRef {

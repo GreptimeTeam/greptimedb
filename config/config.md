@@ -410,6 +410,9 @@
 | `stats_persistence` | -- | -- | Configuration options for the stats persistence. |
 | `stats_persistence.ttl` | String | `0s` | TTL for the stats table that will be used to store the stats.<br/>Set to `0s` to disable stats persistence.<br/>Default is `0s`.<br/>If you want to enable stats persistence, set the TTL to a value greater than 0.<br/>It is recommended to set a small value, e.g., `3h`. |
 | `stats_persistence.interval` | String | `10m` | The interval to persist the stats. Default is `10m`.<br/>The minimum value is `10m`, if the value is less than `10m`, it will be overridden to `10m`. |
+| `gc` | -- | -- | -- |
+| `gc.enable` | Bool | `false` | Whether GC is enabled. Default to false. Need to be the same with datanode's `mito.gc.enable`<br/>If set to false, no GC will be performed |
+| `gc.gc_cooldown_period` | String | `5m` | Cooldown period between GC operations on the same region. |
 | `logging` | -- | -- | The logging options. |
 | `logging.dir` | String | `./greptimedb_data/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
 | `logging.level` | String | Unset | The log level. Can be `info`/`debug`/`warn`/`error`. |
@@ -581,6 +584,10 @@
 | `region_engine.mito.memtable.index_max_keys_per_shard` | Integer | `8192` | The max number of keys in one shard.<br/>Only available for `partition_tree` memtable. |
 | `region_engine.mito.memtable.data_freeze_threshold` | Integer | `32768` | The max rows of data inside the actively writing buffer in one shard.<br/>Only available for `partition_tree` memtable. |
 | `region_engine.mito.memtable.fork_dictionary_bytes` | String | `1GiB` | Max dictionary bytes.<br/>Only available for `partition_tree` memtable. |
+| `region_engine.mito.gc` | -- | -- | -- |
+| `region_engine.mito.gc.enable` | Bool | `false` | Whether GC is enabled. Need to be the same with metasrv's `gc.enable` or unexpected behavior will occur |
+| `region_engine.mito.gc.lingering_time` | String | `1m` | Lingering time before deleting files.<br/>Should be long enough to allow long running queries to finish.<br/>If set to None, then unused files will be deleted immediately. |
+| `region_engine.mito.gc.unknown_file_lingering_time` | String | `1h` | Lingering time before deleting unknown files(files with undetermine expel time).<br/>expel time is the time when the file is considered as removed, as in removed from the manifest.<br/>This should only occur rarely, as manifest keep tracks in `removed_files` field<br/>unless something goes wrong. |
 | `region_engine.file` | -- | -- | Enable the file engine. |
 | `region_engine.metric` | -- | -- | Metric engine options. |
 | `region_engine.metric.sparse_primary_key_encoding` | Bool | `true` | Whether to use sparse primary key encoding. |
