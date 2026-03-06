@@ -724,8 +724,6 @@ mod tests {
             "test-root",
             "--gcs-scope",
             "test-scope",
-            "--gcs-credential-path",
-            "/path/to/credential",
             "--gcs-credential",
             "test-credential-content",
             "--gcs-endpoint",
@@ -750,7 +748,7 @@ mod tests {
             "test-root",
             "--gcs-scope",
             "test-scope",
-            // No credential_path or credential
+            // No credential
             // No endpoint (optional)
         ]);
 
@@ -1061,8 +1059,6 @@ mod tests {
             "", // Empty root
             "--gcs-scope",
             "test-scope",
-            "--gcs-credential-path",
-            "/path/to/credential",
             "--gcs-credential",
             "test-credential",
             "--gcs-endpoint",
@@ -1219,7 +1215,7 @@ mod tests {
             "test-root",
             "--gcs-scope",
             "test-scope",
-            // No credential_path, credential, or endpoint
+            // No credential, or endpoint
         ]);
 
         let result = cmd.build().await;

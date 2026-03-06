@@ -29,8 +29,8 @@ use datafusion::logical_expr::LogicalPlan;
 use datafusion_expr::UserDefinedLogicalNode;
 use greptime_proto::substrait_extension::MergeScan as PbMergeScan;
 use promql::functions::{
-    AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, HoltWinters, IDelta,
-    Increase, LastOverTime, MaxOverTime, MinOverTime, PredictLinear, PresentOverTime,
+    AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, DoubleExponentialSmoothing,
+    IDelta, Increase, LastOverTime, MaxOverTime, MinOverTime, PredictLinear, PresentOverTime,
     QuantileOverTime, Rate, Resets, Round, StddevOverTime, StdvarOverTime, SumOverTime,
     quantile_udaf,
 };
@@ -164,7 +164,9 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
         let _ = session_state.register_udf(Arc::new(StdvarOverTime::scalar_udf()));
         let _ = session_state.register_udf(Arc::new(QuantileOverTime::scalar_udf()));
         let _ = session_state.register_udf(Arc::new(PredictLinear::scalar_udf()));
-        let _ = session_state.register_udf(Arc::new(HoltWinters::scalar_udf()));
+        let double_exponential_smoothing_udf =
+            DoubleExponentialSmoothing::scalar_udf().with_aliases(["prom_holt_winters"]);
+        let _ = session_state.register_udf(Arc::new(double_exponential_smoothing_udf));
 
         let logical_plan = DFLogicalSubstraitConvertor
             .decode(message, session_state)

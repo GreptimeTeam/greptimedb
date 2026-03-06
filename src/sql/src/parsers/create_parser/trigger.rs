@@ -1,7 +1,6 @@
 use std::time::Duration;
 
 use snafu::{OptionExt, ResultExt, ensure};
-use sqlparser::ast::Query;
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::Parser;
 use sqlparser::tokenizer::Token;
@@ -16,6 +15,7 @@ use crate::statements::create::SqlOrTql;
 use crate::statements::create::trigger::{
     AlertManagerWebhook, ChannelType, CreateTrigger, DurationExpr, NotifyChannel, TriggerOn,
 };
+use crate::statements::query::Query;
 use crate::statements::statement::Statement;
 use crate::util::{location_to_index, parse_option_string};
 
@@ -259,7 +259,8 @@ impl<'a> ParserContext<'a> {
         );
         let raw_sql = &self.sql[start_index..end_index];
 
-        Ok((*sql_query, raw_sql.trim().to_string()))
+        let query = (*sql_query).try_into()?;
+        Ok((query, raw_sql.trim().to_string()))
     }
 
     pub(crate) fn parse_trigger_for(

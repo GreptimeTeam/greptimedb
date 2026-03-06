@@ -27,7 +27,7 @@ use datatypes::types::StructType;
 use itertools::Itertools;
 use serde::Serialize;
 use snafu::{OptionExt, ResultExt};
-use sqlparser::ast::{ColumnOptionDef, DataType, Expr, Query};
+use sqlparser::ast::{ColumnOptionDef, DataType, Expr};
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::ast::{ColumnDef, Ident, ObjectName, Value as SqlValue};
@@ -35,6 +35,7 @@ use crate::error::{
     InvalidFlowQuerySnafu, InvalidJsonStructureSettingSnafu, InvalidSqlSnafu, Result,
     SetFulltextOptionSnafu, SetSkippingIndexOptionSnafu,
 };
+use crate::statements::query::Query as GtQuery;
 use crate::statements::statement::Statement;
 use crate::statements::tql::Tql;
 use crate::statements::{OptionMap, sql_data_type_to_concrete_data_type};
@@ -618,7 +619,7 @@ pub struct CreateFlow {
 /// Either a sql query or a tql query
 #[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize)]
 pub enum SqlOrTql {
-    Sql(Query, String),
+    Sql(GtQuery, String),
     Tql(Tql, String),
 }
 
@@ -637,9 +638,7 @@ impl SqlOrTql {
         original_query: &str,
     ) -> std::result::Result<Self, crate::error::Error> {
         match value {
-            Statement::Query(query) => {
-                Ok(Self::Sql((*query).try_into()?, original_query.to_string()))
-            }
+            Statement::Query(query) => Ok(Self::Sql(*query, original_query.to_string())),
             Statement::Tql(tql) => Ok(Self::Tql(tql, original_query.to_string())),
             _ => InvalidFlowQuerySnafu {
                 reason: format!("Expect either sql query or promql query, found {:?}", value),

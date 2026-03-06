@@ -4935,10 +4935,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "fast-float"
-version = "0.2.0"
+name = "fast-float2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "95765f67b4b18863968b4a1bd5bb576f732b29a4a28c7cd84c09fa3e2875f33c"
+checksum = "f8eb564c5c7423d25c886fb561d1e4ee69f72354d16918afa32c08811f6b6a55"
 
 [[package]]
 name = "fastbloom"
@@ -6846,11 +6846,12 @@ dependencies = [
 
 [[package]]
 name = "jsonb"
-version = "0.4.3"
-source = "git+https://github.com/databendlabs/jsonb.git?rev=8c8d2fc294a39f3ff08909d60f718639cfba3875#8c8d2fc294a39f3ff08909d60f718639cfba3875"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "acd7dc2490b13d09367f5dc4bf202a5d70958dd5b9b2758e2708ee062752a824"
 dependencies = [
  "byteorder",
- "fast-float",
+ "fast-float2",
  "itoa",
  "nom 7.1.3",
  "ordered-float 4.6.0",
@@ -6928,9 +6929,9 @@ dependencies = [
 
 [[package]]
 name = "keccak"
-version = "0.1.5"
+version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ecc2af9a1119c51f12a14607e783cb977bde58bc069ff0c3da1095e635d70654"
+checksum = "cb26cec98cce3a3d96cbb7bced3c4b16e3d13f27ec56dbd62cbc8f39cfb9d653"
 dependencies = [
  "cpufeatures 0.2.17",
 ]
@@ -10254,9 +10255,9 @@ dependencies = [
 
 [[package]]
 name = "promql-parser"
-version = "0.7.1"
+version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c3c2199b84e1253aade469e92ae16cd8dbe1de031c66a00f4f5cdd650290a86"
+checksum = "f514ab521bb2b4ce26aca29bf133498b2a2651b785d03a262bbf5772329c279f"
 dependencies = [
  "cfgrammar",
  "chrono",
