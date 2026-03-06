@@ -30,7 +30,9 @@ use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 
-use crate::error::{DecodeSnafu, NewRecordBatchSnafu, Result};
+use crate::error::{
+    DataTypeMismatchSnafu, DecodeSnafu, EvalPartitionFilterSnafu, NewRecordBatchSnafu, Result,
+};
 use crate::memtable::BoxedBatchIterator;
 use crate::read::Batch;
 use crate::sst::{internal_fields, tag_maybe_to_dictionary_field};
@@ -109,7 +111,7 @@ impl BatchToRecordBatchAdapter {
                 ));
             } else {
                 let value = get_pk_value(&pk_values, pk_column.column_id, pk_column.pk_index);
-                let array = build_constant_array(value, &pk_column.data_type, num_rows);
+                let array = build_repeated_value_array(value, &pk_column.data_type, num_rows)?;
                 columns.push(array);
             }
         }
@@ -172,17 +174,18 @@ fn get_pk_value(
     }
 }
 
-/// Builds a constant-value Arrow array of `num_rows` copies of `value`.
-fn build_constant_array(
+/// Builds an Arrow array of `num_rows` copies of `value`.
+fn build_repeated_value_array(
     value: &datatypes::value::Value,
     data_type: &ConcreteDataType,
     num_rows: usize,
-) -> ArrayRef {
-    let mut builder = data_type.create_mutable_vector(num_rows);
-    for _ in 0..num_rows {
-        builder.push_value_ref(&value.as_value_ref());
-    }
-    builder.to_vector().to_arrow_array()
+) -> Result<ArrayRef> {
+    let scalar = value
+        .try_to_scalar_value(data_type)
+        .context(DataTypeMismatchSnafu)?;
+    scalar
+        .to_array_of_size(num_rows)
+        .context(EvalPartitionFilterSnafu)
 }
 
 /// Builds a dictionary-encoded string tag array with one dictionary value.
