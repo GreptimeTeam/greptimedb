@@ -33,7 +33,10 @@ use sqlparser_derive::{Visit, VisitMut};
 
 use crate::ast::ObjectNamePartExt;
 use crate::error::{InvalidExprAsOptionValueSnafu, InvalidSqlSnafu, Result};
+use crate::parser::ParserContext;
+use crate::parsers::with_tql_parser::CteContent;
 use crate::statements::create::SqlOrTql;
+use crate::statements::query::Query;
 use crate::statements::tql::Tql;
 
 const SCHEMA_MATCHER: &str = "__schema__";
@@ -191,11 +194,55 @@ pub fn extract_tables_from_query(query: &SqlOrTql) -> impl Iterator<Item = Objec
     let mut names = HashSet::new();
 
     match query {
-        SqlOrTql::Sql(query, _) => extract_tables_from_set_expr(&query.body, &mut names),
+        SqlOrTql::Sql(query, _) => {
+            extract_tables_from_set_expr(&query.inner.body, &mut names);
+            extract_tables_from_hybrid_cte_query(query, &mut names);
+        }
         SqlOrTql::Tql(tql, _) => extract_tables_from_tql(tql, &mut names),
     }
 
     names.into_iter()
+}
+
+fn extract_tables_from_hybrid_cte_query(query: &Query, sql_names: &mut HashSet<ObjectName>) {
+    let mut tql_names = HashSet::new();
+    let mut cte_names: HashSet<String> = HashSet::new();
+    if let Some(hybrid_cte) = &query.hybrid_cte {
+        for cte in &hybrid_cte.cte_tables {
+            cte_names.insert(ParserContext::canonicalize_identifier(cte.name.clone()).value);
+            if let CteContent::Tql(tql) = &cte.content {
+                extract_tables_from_tql(tql, &mut tql_names);
+            }
+        }
+    }
+
+    if let Some(with) = &query.inner.with {
+        for cte in &with.cte_tables {
+            cte_names.insert(ParserContext::canonicalize_identifier(cte.alias.name.clone()).value);
+        }
+    }
+
+    remove_cte_names(sql_names, &cte_names);
+
+    sql_names.extend(tql_names);
+}
+
+fn remove_cte_names(names: &mut HashSet<ObjectName>, cte_names: &HashSet<String>) {
+    if cte_names.is_empty() {
+        return;
+    }
+
+    names.retain(|name| {
+        if name.0.len() != 1 {
+            return true;
+        }
+        let Some(ident) = name.0[0].as_ident() else {
+            return true;
+        };
+
+        let canonical = ParserContext::canonicalize_identifier(ident.clone()).value;
+        !cte_names.contains(&canonical)
+    });
 }
 
 fn extract_tables_from_tql(tql: &Tql, names: &mut HashSet<ObjectName>) {
