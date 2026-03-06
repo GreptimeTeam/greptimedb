@@ -141,6 +141,29 @@ impl PrimaryKeyWriteFormat {
 
         RecordBatch::try_new(self.arrow_schema.clone(), columns).context(NewRecordBatchSnafu)
     }
+
+    /// Convert a flat `RecordBatch` to primary-key format, retaining only
+    /// field columns, time index, and internal columns.
+    ///
+    /// `num_fields` is the number of field columns. The method strips
+    /// leading tag columns: `num_tag_columns = batch.num_columns() - num_fields - FIXED_POS_COLUMN_NUM`.
+    pub(crate) fn convert_flat_batch(
+        &self,
+        batch: &RecordBatch,
+        num_fields: usize,
+    ) -> Result<RecordBatch> {
+        let num_tag_columns = batch.num_columns() - num_fields - FIXED_POS_COLUMN_NUM;
+        let mut columns: Vec<ArrayRef> = batch.columns()[num_tag_columns..].to_vec();
+
+        if let Some(override_sequence) = self.override_sequence {
+            let num_cols = columns.len();
+            // sequence is at num_cols - 2 (before op_type)
+            columns[num_cols - 2] =
+                Arc::new(UInt64Array::from(vec![override_sequence; batch.num_rows()]));
+        }
+
+        RecordBatch::try_new(self.arrow_schema.clone(), columns).context(NewRecordBatchSnafu)
+    }
 }
 
 /// Helper to read parquet formats.
