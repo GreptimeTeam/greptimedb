@@ -23,7 +23,7 @@ use common_query::prelude::{greptime_timestamp, greptime_value};
 use pipeline::{ContextOpt, ContextReq};
 use prost::DecodeError;
 
-use crate::http::{validate_label_name, PromValidationMode};
+use crate::http::{PromValidationMode, validate_label_name};
 use crate::proto::PromLabel;
 use crate::repeated_field::Clear;
 
@@ -228,8 +228,8 @@ impl<'a> TableBuilder<'a> {
 #[cfg(test)]
 mod tests {
     use api::prom_store::remote::Sample;
-    use api::v1::value::ValueData;
     use api::v1::Value;
+    use api::v1::value::ValueData;
     use prost::DecodeError;
 
     use crate::http::PromValidationMode;
