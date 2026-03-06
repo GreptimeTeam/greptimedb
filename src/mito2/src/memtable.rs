@@ -622,7 +622,7 @@ pub struct MemtableRangeContext {
     /// All filters.
     predicate: PredicateGroup,
     /// Optional context to adapt batch iterators for flat scans.
-    batch_to_record_batch: Option<BatchToRecordBatchContext>,
+    batch_to_record_batch: Option<Arc<BatchToRecordBatchContext>>,
 }
 
 pub type MemtableRangeContextRef = Arc<MemtableRangeContext>;
@@ -638,7 +638,7 @@ impl MemtableRangeContext {
         id: MemtableId,
         builder: BoxedIterBuilder,
         predicate: PredicateGroup,
-        batch_to_record_batch: Option<BatchToRecordBatchContext>,
+        batch_to_record_batch: Option<Arc<BatchToRecordBatchContext>>,
     ) -> Self {
         Self {
             id,

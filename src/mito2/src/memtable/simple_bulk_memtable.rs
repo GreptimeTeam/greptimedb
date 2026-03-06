@@ -257,6 +257,11 @@ impl Memtable for SimpleBulkMemtable {
         };
 
         let values = self.series.read().unwrap().read_to_values();
+        let batch_to_record_batch = Arc::new(BatchToRecordBatchContext::new(
+            self.region_metadata.clone(),
+            read_column_ids.clone(),
+        ));
+
         let contexts = values
             .into_par_iter()
             .filter_map(|v| {
@@ -304,10 +309,7 @@ impl Memtable for SimpleBulkMemtable {
                             self.id,
                             Box::new(builder),
                             predicate.clone(),
-                            Some(BatchToRecordBatchContext::new(
-                                self.region_metadata.clone(),
-                                read_column_ids.clone(),
-                            )),
+                            Some(batch_to_record_batch.clone()),
                         )),
                     )
                 })

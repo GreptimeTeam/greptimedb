@@ -324,8 +324,10 @@ impl Memtable for TimeSeriesMemtable {
             merge_mode: self.merge_mode,
             sequence,
         });
-        let adapter_context =
-            BatchToRecordBatchContext::new(self.region_metadata.clone(), read_column_ids);
+        let adapter_context = Arc::new(BatchToRecordBatchContext::new(
+            self.region_metadata.clone(),
+            read_column_ids,
+        ));
         let context = Arc::new(MemtableRangeContext::new_with_batch_to_record_batch(
             self.id,
             builder,
