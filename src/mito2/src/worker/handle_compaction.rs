@@ -124,6 +124,13 @@ impl<S> RegionWorkerLoop<S> {
 
     /// Schedule compaction for the region if necessary.
     pub(crate) async fn schedule_compaction(&mut self, region: &MitoRegionRef) {
+        if region.is_staging() || region.is_enter_staging() {
+            info!(
+                "Region {} is staging or entering staging, skip compaction",
+                region.region_id
+            );
+            return;
+        }
         let now = self.time_provider.current_time_millis();
         if now - region.last_compaction_millis()
             >= self.config.min_compaction_interval.as_millis() as i64

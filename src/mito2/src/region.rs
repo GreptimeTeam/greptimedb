@@ -300,9 +300,14 @@ impl MitoRegion {
     }
 
     /// Returns whether the region is in staging mode.
-    #[allow(dead_code)]
     pub(crate) fn is_staging(&self) -> bool {
         self.manifest_ctx.state.load() == RegionRoleState::Leader(RegionLeaderState::Staging)
+    }
+
+    /// Returns whether the region is entering staging mode.
+    pub(crate) fn is_enter_staging(&self) -> bool {
+        self.manifest_ctx.state.load()
+            == RegionRoleState::Leader(RegionLeaderState::EnteringStaging)
     }
 
     pub fn region_id(&self) -> RegionId {
