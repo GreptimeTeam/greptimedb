@@ -67,7 +67,9 @@ replacing Prometheus, Loki, and Elasticsearch</h2>
 
 ## Introduction
 
-**GreptimeDB** is an open-source observability database that handles metrics, logs, and traces in one engine. Use it as the single OpenTelemetry backend — replacing Prometheus, Loki, and Elasticsearch with one database built on object storage. Query with SQL and PromQL, scale without pain, cut costs up to 50x.
+**GreptimeDB** is an open-source observability database built for [Observability 2.0](https://docs.greptime.com/user-guide/concepts/observability-2/) — treating metrics, logs, and traces as one unified data model (wide events) instead of three separate pillars.
+
+Use it as the single OpenTelemetry backend — replacing Prometheus, Loki, and Elasticsearch with one database built on object storage. Query with SQL and PromQL, scale without pain, cut costs up to 50x.
 
 ## Features
 
@@ -82,9 +84,12 @@ replacing Prometheus, Loki, and Elasticsearch</h2>
   * Replacing Prometheus + Loki + Elasticsearch with one database
   * Scaling past Prometheus — high cardinality, long-term storage, no Thanos/Mimir overhead
   * Cutting observability costs with object storage (up to 50x savings on traces, 30% on logs)
+  * AI/LLM observability — store and analyze high-volume conversation data, agent traces, and token metrics via [OpenTelemetry GenAI conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/)
   * Edge-to-cloud observability with unified APIs on resource-constrained devices
 
-Learn more in [Why GreptimeDB](https://docs.greptime.com/user-guide/concepts/why-greptimedb) and [Observability 2.0 and the Database for It](https://greptime.com/blogs/2025-04-25-greptimedb-observability2-new-database).
+> **Why Observability 2.0?** The three-pillar model (separate databases for metrics, logs, traces) creates data silos and operational complexity. GreptimeDB treats all observability data as timestamped wide events in a single columnar engine — enabling cross-signal SQL JOINs, eliminating redundant infrastructure, and naturally supporting emerging workloads like AI agent observability. Read more: [Observability 2.0 and the Database for It](https://greptime.com/blogs/2025-04-25-greptimedb-observability2-new-database).
+
+Learn more in [Why GreptimeDB](https://docs.greptime.com/user-guide/concepts/why-greptimedb).
 
 ## How GreptimeDB Compares
 
@@ -164,7 +169,7 @@ cargo run -- standalone start
 - **Kubernetes**: [GreptimeDB Operator](https://github.com/GrepTimeTeam/greptimedb-operator)
 - **Helm Charts**: [Greptime Helm Charts](https://github.com/GreptimeTeam/helm-charts)
 - **Dashboard**: [Web UI](https://github.com/GreptimeTeam/dashboard)
-- **gRPC Ingester**: [Go](https://github.com/GreptimeTeam/greptimedb-ingester-go), [Java](https://github.com/GreptimeTeam/greptimedb-ingester-java), [C++](https://github.com/GreptimeTeam/greptimedb-ingester-cpp), [Erlang](https://github.com/GreptimeTeam/greptimedb-ingester-erl), [Rust](https://github.com/GreptimeTeam/greptimedb-ingester-rust)
+- **gRPC Ingester**: [Go](https://github.com/GreptimeTeam/greptimedb-ingester-go), [Java](https://github.com/GreptimeTeam/greptimedb-ingester-java), [C++](https://github.com/GreptimeTeam/greptimedb-ingester-cpp), [Erlang](https://github.com/GreptimeTeam/greptimedb-ingester-erl), [Rust](https://github.com/GreptimeTeam/greptimedb-ingester-rust), [.NET](https://github.com/GreptimeTeam/greptimedb-ingester-dotnet)
 - **Grafana Data Source**: [GreptimeDB Grafana data source plugin](https://github.com/GreptimeTeam/greptimedb-grafana-datasource)
 - **Grafana Dashboard**: [Official Dashboard for monitoring](https://github.com/GreptimeTeam/greptimedb/blob/main/grafana/README.md)
 
