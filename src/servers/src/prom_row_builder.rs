@@ -23,8 +23,8 @@ use common_query::prelude::{greptime_timestamp, greptime_value};
 use pipeline::{ContextOpt, ContextReq};
 use prost::DecodeError;
 
-use crate::http::{PromValidationMode, validate_label_name};
-use crate::proto::{PromLabel, RawBytes};
+use crate::http::{validate_label_name, PromValidationMode};
+use crate::proto::PromLabel;
 use crate::repeated_field::Clear;
 
 // Prometheus remote write context
@@ -36,21 +36,21 @@ pub struct PromCtx {
 
 /// [TablesBuilder] serves as an intermediate container to build [RowInsertRequests].
 #[derive(Default, Debug)]
-pub struct TablesBuilder {
+pub struct TablesBuilder<'a> {
     // schema -> table -> table_builder
-    pub tables: HashMap<PromCtx, HashMap<String, TableBuilder>>,
+    pub tables: HashMap<PromCtx, HashMap<String, TableBuilder<'a>>>,
     /// Raw request data.
     raw_data: Bytes,
 }
 
-impl Clear for TablesBuilder {
+impl<'a> Clear for TablesBuilder<'a> {
     fn clear(&mut self) {
         self.tables.clear();
         self.raw_data = Bytes::new();
     }
 }
 
-impl TablesBuilder {
+impl<'a> TablesBuilder<'a> {
     /// Gets table builder with given table name. Creates an empty [TableBuilder] if not exist.
     pub(crate) fn get_or_create_table_builder(
         &mut self,
@@ -58,7 +58,7 @@ impl TablesBuilder {
         table_name: String,
         label_num: usize,
         row_num: usize,
-    ) -> &mut TableBuilder {
+    ) -> &mut TableBuilder<'a> {
         self.tables
             .entry(prom_ctx)
             .or_default()
@@ -102,22 +102,22 @@ impl TablesBuilder {
 
 /// Builder for one table.
 #[derive(Debug)]
-pub struct TableBuilder {
+pub struct TableBuilder<'a> {
     /// Column schemas.
     schema: Vec<ColumnSchema>,
     /// Rows written.
     rows: Vec<Row>,
     /// Indices of columns inside `schema`.
-    col_indexes: HashMap<RawBytes, usize>,
+    col_indexes: HashMap<&'a [u8], usize>,
 }
 
-impl Default for TableBuilder {
+impl<'a> Default for TableBuilder<'a> {
     fn default() -> Self {
         Self::with_capacity(2, 0)
     }
 }
 
-impl TableBuilder {
+impl<'a> TableBuilder<'a> {
     pub(crate) fn with_capacity(cols: usize, rows: usize) -> Self {
         let mut col_indexes = HashMap::with_capacity_and_hasher(cols, Default::default());
         col_indexes.insert(greptime_timestamp().as_bytes(), 0);
@@ -156,13 +156,13 @@ impl TableBuilder {
                     String::from_utf8_lossy(name)
                 )));
             }
-            let raw_tag_name = name;
+            let raw_tag_name = *name;
             let tag_value = Some(ValueData::StringValue(
                 prom_validation_mode.decode_string(value)?,
             ));
             let tag_num = self.col_indexes.len();
 
-            if let Some(e) = self.col_indexes.get_mut(*raw_tag_name) {
+            if let Some(e) = self.col_indexes.get_mut(raw_tag_name) {
                 row[*e].value_data = tag_value;
                 continue;
             }
@@ -228,8 +228,8 @@ impl TableBuilder {
 #[cfg(test)]
 mod tests {
     use api::prom_store::remote::Sample;
-    use api::v1::Value;
     use api::v1::value::ValueData;
+    use api::v1::Value;
     use prost::DecodeError;
 
     use crate::http::PromValidationMode;

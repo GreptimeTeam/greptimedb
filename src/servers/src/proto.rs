@@ -206,9 +206,9 @@ impl PromTimeSeries {
         }
     }
 
-    fn add_to_table_data(
+    fn add_to_table_data<'a>(
         &mut self,
-        table_builders: &mut TablesBuilder,
+        table_builders: &mut TablesBuilder<'a>,
         prom_validation_mode: PromValidationMode,
     ) -> Result<(), DecodeError> {
         let label_num = self.labels.len();
@@ -236,18 +236,18 @@ impl PromTimeSeries {
 }
 
 #[derive(Default, Debug)]
-pub struct PromWriteRequest {
-    pub(crate) table_data: TablesBuilder,
+pub struct PromWriteRequest<'a> {
+    pub(crate) table_data: TablesBuilder<'a>,
     series: PromTimeSeries,
 }
 
-impl Clear for PromWriteRequest {
+impl<'a> Clear for PromWriteRequest<'a> {
     fn clear(&mut self) {
         self.table_data.clear();
     }
 }
 
-impl PromWriteRequest {
+impl<'a> PromWriteRequest<'a> {
     pub fn as_row_insert_requests(&mut self) -> ContextReq {
         self.table_data.as_insert_requests()
     }
