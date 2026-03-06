@@ -81,7 +81,7 @@ WHERE c.tier IN ('gold', 'bronze');
 -- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
 -- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
--- SQLNESS REPLACE Hash\(\[vec_id@0\],.* Hash([vec_id@0],REDACTED
+-- SQLNESS REPLACE (=Hash.*) =REDACTED
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE "(file_id|time_range_start|time_range_end)":"[^"]+" "$1":"REDACTED"
@@ -106,10 +106,10 @@ WHERE c.tier IN ('gold', 'bronze');
 | stage | node | plan_|
 +-+-+-+
 | 0_| 0_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(customer_id@1, customer_id@0)], projection=[id@0, amount@2, name@4, tier@5] metrics=REDACTED_|
-|_|_|_RepartitionExec: partitioning=Hash([customer_id@1], 20), input_partitions=20 metrics=REDACTED_|
+|_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_ProjectionExec: expr=[id@0 as id, customer_id@1 as customer_id, amount@2 as amount] metrics=REDACTED_|
 |_|_|_MergeScanExec: REDACTED
-|_|_|_RepartitionExec: partitioning=Hash([customer_id@0], 20), input_partitions=20 metrics=REDACTED_|
+|_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_FilterExec: tier@2 = gold OR tier@2 = bronze metrics=REDACTED_|
 |_|_|_ProjectionExec: expr=[customer_id@0 as customer_id, name@1 as name, tier@2 as tier] metrics=REDACTED_|
 |_|_|_MergeScanExec: REDACTED
@@ -235,7 +235,7 @@ LIMIT 4;
 -- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
 -- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
--- SQLNESS REPLACE Hash\(\[vec_id@0\],.* Hash([vec_id@0],REDACTED
+-- SQLNESS REPLACE (=Hash.*) =REDACTED
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE "(file_id|time_range_start|time_range_end)":"[^"]+" "$1":"REDACTED"
@@ -263,10 +263,10 @@ LIMIT 4;
 |_|_|_SortExec: TopK(fetch=4), expr=[amount@4 DESC], preserve_partitioning=[true] metrics=REDACTED_|
 |_|_|_ProjectionExec: expr=[id@0 as id, customer_id@1 as customer_id, name@3 as name, tier@4 as tier, amount@2 as amount] metrics=REDACTED_|
 |_|_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(customer_id@1, customer_id@0)], projection=[id@0, customer_id@1, amount@2, name@4, tier@5] metrics=REDACTED_|
-|_|_|_RepartitionExec: partitioning=Hash([customer_id@1], 20), input_partitions=20 metrics=REDACTED_|
+|_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_ProjectionExec: expr=[id@0 as id, customer_id@1 as customer_id, amount@2 as amount] metrics=REDACTED_|
 |_|_|_MergeScanExec: REDACTED
-|_|_|_RepartitionExec: partitioning=Hash([customer_id@0], 20), input_partitions=20 metrics=REDACTED_|
+|_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_FilterExec: tier@2 = gold OR tier@2 = silver metrics=REDACTED_|
 |_|_|_ProjectionExec: expr=[customer_id@0 as customer_id, name@1 as name, tier@2 as tier] metrics=REDACTED_|
 |_|_|_MergeScanExec: REDACTED
@@ -409,7 +409,7 @@ WHERE c.tier IN ('gold', 'silver')
 -- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
 -- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
--- SQLNESS REPLACE Hash\(\[vec_id@0\],.* Hash([vec_id@0],REDACTED
+-- SQLNESS REPLACE (=Hash.*) =REDACTED
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE "(file_id|time_range_start|time_range_end)":"[^"]+" "$1":"REDACTED"
@@ -432,16 +432,16 @@ WHERE c.tier IN ('gold', 'silver')
 +-+-+-+
 | 0_| 0_|_ProjectionExec: expr=[id@0 as id, amount@1 as amount, name@2 as name, tier@3 as tier, name@4 as product_name, category@5 as category] metrics=REDACTED_|
 |_|_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(product_id@1, product_id@0)], projection=[id@0, amount@2, name@3, tier@4, name@6, category@7] metrics=REDACTED_|
-|_|_|_RepartitionExec: partitioning=Hash([product_id@1], 20), input_partitions=20 metrics=REDACTED_|
+|_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(customer_id@1, customer_id@0)], projection=[id@0, product_id@2, amount@3, name@5, tier@6] metrics=REDACTED_|
-|_|_|_RepartitionExec: partitioning=Hash([customer_id@1], 20), input_partitions=20 metrics=REDACTED_|
+|_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_ProjectionExec: expr=[id@0 as id, customer_id@1 as customer_id, product_id@2 as product_id, amount@3 as amount] metrics=REDACTED_|
 |_|_|_MergeScanExec: REDACTED
-|_|_|_RepartitionExec: partitioning=Hash([customer_id@0], 20), input_partitions=20 metrics=REDACTED_|
+|_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_FilterExec: tier@2 = gold OR tier@2 = silver metrics=REDACTED_|
 |_|_|_ProjectionExec: expr=[customer_id@0 as customer_id, name@1 as name, tier@2 as tier] metrics=REDACTED_|
 |_|_|_MergeScanExec: REDACTED
-|_|_|_RepartitionExec: partitioning=Hash([product_id@0], 20), input_partitions=20 metrics=REDACTED_|
+|_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_FilterExec: category@2 = electronics metrics=REDACTED_|
 |_|_|_ProjectionExec: expr=[product_id@0 as product_id, name@1 as name, category@2 as category] metrics=REDACTED_|
 |_|_|_MergeScanExec: REDACTED

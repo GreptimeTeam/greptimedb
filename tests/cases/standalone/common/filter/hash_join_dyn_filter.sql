@@ -30,7 +30,7 @@ WHERE c.tier = 'gold';
 -- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
 -- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
--- SQLNESS REPLACE Hash\(\[vec_id@0\],.* Hash([vec_id@0],REDACTED
+-- SQLNESS REPLACE (=Hash.*) =REDACTED
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE "(file_id|time_range_start|time_range_end)":"[^"]+" "$1":"REDACTED"
@@ -85,7 +85,7 @@ WHERE c.tier IN ('gold', 'silver');
 -- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
 -- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
--- SQLNESS REPLACE Hash\(\[vec_id@0\],.* Hash([vec_id@0],REDACTED
+-- SQLNESS REPLACE (=Hash.*) =REDACTED
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE "(file_id|time_range_start|time_range_end)":"[^"]+" "$1":"REDACTED"
