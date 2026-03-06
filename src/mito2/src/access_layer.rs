@@ -398,7 +398,9 @@ impl AccessLayer {
                         .await?
                 }
                 Either::Right(flat_source) => {
-                    writer.write_all_flat(flat_source, write_opts).await?
+                    writer
+                        .write_all_flat(flat_source, request.max_sequence, write_opts)
+                        .await?
                 }
             }
         };
