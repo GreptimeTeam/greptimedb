@@ -23,11 +23,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, error};
 use common_time::Timestamp;
-use itertools::Itertools;
 use partition::expr::PartitionExpr;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
-use snafu::ResultExt as _;
 use store_api::metadata::ColumnMetadata;
 use store_api::region_request::PathType;
 use store_api::storage::{ColumnId, FileId, IndexVersion, RegionId};
@@ -35,7 +33,6 @@ use store_api::storage::{ColumnId, FileId, IndexVersion, RegionId};
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
 use crate::cache::file_cache::{FileType, IndexKey};
-use crate::error::{DeleteIndexesSnafu, DeleteSstsSnafu};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::location;
 
@@ -558,45 +555,20 @@ pub async fn delete_files(
         }
     }
     let mut attempted_files = Vec::with_capacity(file_ids.len());
-    let table_dir = access_layer.table_dir();
-    let path_type = access_layer.path_type();
-    let mut paths = Vec::with_capacity(file_ids.len() * 2);
+    let mut index_ids = Vec::new();
 
     for (file_id, index_version) in file_ids {
         let region_file_id = RegionFileId::new(region_id, *file_id);
         attempted_files.push(*file_id);
-        paths.push(location::sst_file_path(
-            table_dir,
-            region_file_id,
-            path_type,
-        ));
-        push_index_paths(
-            &mut paths,
-            table_dir,
-            &path_type,
+        index_ids.extend(
             (0..=*index_version).map(|version| RegionIndexId::new(region_file_id, version)),
         );
     }
 
-    let mut deleter = access_layer
-        .object_store()
-        .deleter()
-        .await
-        .with_context(|_| DeleteSstsSnafu {
-            region_id,
-            file_ids: attempted_files.clone(),
-        })?;
-    deleter
-        .delete_iter(paths.iter().map(String::as_str))
-        .await
-        .with_context(|_| DeleteSstsSnafu {
-            region_id,
-            file_ids: attempted_files.clone(),
-        })?;
-    deleter.close().await.with_context(|_| DeleteSstsSnafu {
-        region_id,
-        file_ids: attempted_files.clone(),
-    })?;
+    access_layer
+        .delete_ssts(region_id, &attempted_files)
+        .await?;
+    access_layer.delete_indexes(&index_ids).await?;
 
     debug!(
         "Attempted to delete {} files for region {}: {:?}",
@@ -638,69 +610,19 @@ pub async fn delete_indexes(
         return Ok(());
     }
 
-    let table_dir = access_layer.table_dir();
-    let path_type = access_layer.path_type();
-    let mut paths = Vec::with_capacity(index_ids.len());
-    push_index_paths(&mut paths, table_dir, &path_type, index_ids.iter().copied());
+    if let Err(e) = access_layer.delete_indexes(index_ids).await {
+        error!(e; "Failed to batch delete index files");
 
-    match access_layer.object_store().deleter().await {
-        Ok(mut deleter) => {
-            let file_ids = index_ids
-                .iter()
-                .map(|index_id| index_id.file_id())
-                .collect_vec();
-            if let Err(e) = deleter
-                .delete_iter(paths.iter().map(String::as_str))
-                .await
-                .context(DeleteIndexesSnafu {
-                    file_ids: file_ids.clone(),
-                })
-            {
-                error!(e; "Failed to batch delete index files");
-
-                for index_id in index_ids {
-                    delete_index_and_purge(*index_id, access_layer, cache_manager).await?;
-                }
-
-                if let Err(e) = deleter
-                    .close()
-                    .await
-                    .context(DeleteIndexesSnafu { file_ids })
-                {
-                    error!(e; "Failed to close object store deleter after fallback index deletion");
-                }
-
-                return Ok(());
-            } else {
-                deleter
-                    .close()
-                    .await
-                    .context(DeleteIndexesSnafu { file_ids })?;
-
-                purge_indexes(index_ids, access_layer, cache_manager).await;
-            }
+        for index_id in index_ids {
+            delete_index_and_purge(*index_id, access_layer, cache_manager).await?;
         }
-        Err(e) => {
-            error!(e; "Failed to create object store deleter for index files");
 
-            for index_id in index_ids {
-                delete_index_and_purge(*index_id, access_layer, cache_manager).await?;
-            }
-        }
+        return Ok(());
     }
 
-    Ok(())
-}
+    purge_indexes(index_ids, access_layer, cache_manager).await;
 
-fn push_index_paths<I>(paths: &mut Vec<String>, table_dir: &str, path_type: &PathType, index_ids: I)
-where
-    I: IntoIterator<Item = RegionIndexId>,
-{
-    paths.extend(
-        index_ids
-            .into_iter()
-            .map(|index_id| location::index_file_path(table_dir, index_id, *path_type)),
-    );
+    Ok(())
 }
 
 async fn delete_index_and_purge(

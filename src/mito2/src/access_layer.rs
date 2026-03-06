@@ -33,7 +33,9 @@ use crate::cache::CacheManagerRef;
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::cache::write_cache::SstUploadRequest;
 use crate::config::{BloomFilterConfig, FulltextIndexConfig, IndexConfig, InvertedIndexConfig};
-use crate::error::{CleanDirSnafu, DeleteIndexSnafu, OpenDalSnafu, Result};
+use crate::error::{
+    CleanDirSnafu, DeleteIndexSnafu, DeleteIndexesSnafu, DeleteSstsSnafu, OpenDalSnafu, Result,
+};
 use crate::metrics::{COMPACTION_STAGE_ELAPSED, FLUSH_ELAPSED};
 use crate::read::{FlatSource, Source};
 use crate::region::options::IndexOptions;
@@ -227,6 +229,88 @@ impl AccessLayer {
             .context(DeleteIndexSnafu {
                 file_id: index_file_id.file_id(),
             })?;
+        Ok(())
+    }
+
+    pub(crate) async fn delete_ssts(
+        &self,
+        region_id: RegionId,
+        file_ids: &[FileId],
+    ) -> Result<(), crate::error::Error> {
+        if file_ids.is_empty() {
+            return Ok(());
+        }
+
+        let attempted_files = file_ids.to_vec();
+        let paths: Vec<_> = file_ids
+            .iter()
+            .map(|file_id| {
+                location::sst_file_path(
+                    &self.table_dir,
+                    RegionFileId::new(region_id, *file_id),
+                    self.path_type,
+                )
+            })
+            .collect();
+
+        let mut deleter = self
+            .object_store
+            .deleter()
+            .await
+            .with_context(|_| DeleteSstsSnafu {
+                region_id,
+                file_ids: attempted_files.clone(),
+            })?;
+        deleter
+            .delete_iter(paths.iter().map(String::as_str))
+            .await
+            .with_context(|_| DeleteSstsSnafu {
+                region_id,
+                file_ids: attempted_files.clone(),
+            })?;
+        deleter.close().await.with_context(|_| DeleteSstsSnafu {
+            region_id,
+            file_ids: attempted_files,
+        })?;
+
+        Ok(())
+    }
+
+    pub(crate) async fn delete_indexes(
+        &self,
+        index_ids: &[RegionIndexId],
+    ) -> Result<(), crate::error::Error> {
+        if index_ids.is_empty() {
+            return Ok(());
+        }
+
+        let file_ids: Vec<_> = index_ids
+            .iter()
+            .map(|index_id| index_id.file_id())
+            .collect();
+        let paths: Vec<_> = index_ids
+            .iter()
+            .map(|index_id| location::index_file_path(&self.table_dir, *index_id, self.path_type))
+            .collect();
+
+        let mut deleter = self
+            .object_store
+            .deleter()
+            .await
+            .context(DeleteIndexesSnafu {
+                file_ids: file_ids.clone(),
+            })?;
+        deleter
+            .delete_iter(paths.iter().map(String::as_str))
+            .await
+            .context(DeleteIndexesSnafu {
+                file_ids: file_ids.clone(),
+            })?;
+        deleter
+            .close()
+            .await
+            .context(DeleteIndexesSnafu { file_ids })?;
+
         Ok(())
     }
 
