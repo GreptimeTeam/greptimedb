@@ -582,18 +582,18 @@ pub async fn delete_files(
         .object_store()
         .deleter()
         .await
-        .context(DeleteSstsSnafu {
+        .with_context(|_| DeleteSstsSnafu {
             region_id,
             file_ids: attempted_files.clone(),
         })?;
     deleter
         .delete_iter(paths.iter().map(String::as_str))
         .await
-        .context(DeleteSstsSnafu {
+        .with_context(|_| DeleteSstsSnafu {
             region_id,
             file_ids: attempted_files.clone(),
         })?;
-    deleter.close().await.context(DeleteSstsSnafu {
+    deleter.close().await.with_context(|_| DeleteSstsSnafu {
         region_id,
         file_ids: attempted_files.clone(),
     })?;
