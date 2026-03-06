@@ -12,23 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use common_meta::DatanodeId;
 use common_meta::key::TableMetadataManagerRef;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::tracing::Instrument as _;
 use common_telemetry::{error, info};
-use store_api::storage::GcReport;
+use store_api::storage::{GcReport, RegionId};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{Mutex, oneshot};
 
 use crate::cluster::MetaPeerClientRef;
 use crate::define_ticker;
 use crate::error::{Error, Result};
+use crate::gc::Region2Peers;
 use crate::gc::ctx::{DefaultGcSchedulerCtx, SchedulerCtx};
+use crate::gc::dropped::DroppedRegionCollector;
 use crate::gc::options::{GcSchedulerOptions, TICKER_INTERVAL};
 use crate::gc::tracker::RegionGcTracker;
 use crate::metrics::{
@@ -37,10 +39,46 @@ use crate::metrics::{
 use crate::service::mailbox::MailboxRef;
 
 /// Report for a GC job.
-#[derive(Debug, Default)]
-pub struct GcJobReport {
-    pub per_datanode_reports: HashMap<DatanodeId, GcReport>,
-    pub failed_datanodes: HashMap<DatanodeId, Vec<Error>>,
+#[derive(Debug)]
+pub enum GcJobReport {
+    PerDatanode {
+        per_datanode_reports: HashMap<DatanodeId, GcReport>,
+        failed_datanodes: HashMap<DatanodeId, Vec<Error>>,
+    },
+    Combined {
+        report: GcReport,
+    },
+}
+
+impl Default for GcJobReport {
+    fn default() -> Self {
+        Self::PerDatanode {
+            per_datanode_reports: HashMap::new(),
+            failed_datanodes: HashMap::new(),
+        }
+    }
+}
+
+impl GcJobReport {
+    pub fn combined(report: GcReport) -> Self {
+        Self::Combined { report }
+    }
+
+    pub fn merge_to_report(self) -> GcReport {
+        match self {
+            GcJobReport::Combined { report } => report,
+            GcJobReport::PerDatanode {
+                per_datanode_reports,
+                ..
+            } => {
+                let mut combined = GcReport::default();
+                for (_datanode_id, report) in per_datanode_reports {
+                    combined.merge(report);
+                }
+                combined
+            }
+        }
+    }
 }
 
 /// [`Event`] represents various types of events that can be processed by the gc ticker.
@@ -48,10 +86,20 @@ pub struct GcJobReport {
 /// Variants:
 /// - `Tick`: This event is used to trigger gc periodically.
 /// - `Manually`: This event is used to trigger a manual gc run and provides a channel
-///   to send back the [`GcJobReport`] for that run.
+///   to send back the result for that run.
+///   Optional parameters allow specifying target regions and GC behavior.
 pub enum Event {
     Tick,
-    Manually(oneshot::Sender<GcJobReport>),
+    Manually {
+        /// Channel sender to return the GC job report or error
+        sender: oneshot::Sender<Result<GcJobReport>>,
+        /// Optional specific region IDs to GC. If None, scheduler will select candidates automatically.
+        region_ids: Option<Vec<RegionId>>,
+        /// Optional override for full file listing. If None, uses scheduler config.
+        full_file_listing: Option<bool>,
+        /// Optional override for timeout. If None, uses scheduler config.
+        timeout: Option<Duration>,
+    },
 }
 
 #[allow(unused)]
@@ -130,19 +178,23 @@ impl GcScheduler {
                         error!(e; "Failed to handle gc tick");
                     }
                 }
-                Event::Manually(sender) => {
+                Event::Manually {
+                    sender,
+                    region_ids,
+                    full_file_listing,
+                    timeout,
+                } => {
                     info!("Received manually gc request");
                     let span =
                         common_telemetry::tracing::info_span!("meta_gc_tick", trigger = "manual");
-                    match self.handle_tick().instrument(span).await {
-                        Ok(report) => {
-                            // ignore error
-                            let _ = sender.send(report);
-                        }
-                        Err(e) => {
-                            error!(e; "Failed to handle gc tick");
-                        }
-                    };
+                    let result = self
+                        .handle_manual_gc(region_ids, full_file_listing, timeout)
+                        .instrument(span)
+                        .await;
+                    if let Err(e) = &result {
+                        error!(e; "Failed to handle manual gc");
+                    }
+                    let _ = sender.send(result);
                 }
             }
         }
@@ -161,5 +213,163 @@ impl GcScheduler {
         info!("Finished gc trigger");
 
         Ok(report)
+    }
+
+    /// Handles a manual GC request with optional specific parameters.
+    ///
+    /// If `region_ids` is specified, GC will be performed only on those regions.
+    /// Otherwise, falls back to automatic candidate selection.
+    pub(crate) async fn handle_manual_gc(
+        &self,
+        region_ids: Option<Vec<RegionId>>,
+        full_file_listing: Option<bool>,
+        timeout: Option<Duration>,
+    ) -> Result<GcJobReport> {
+        info!("Start to handle manual gc request");
+
+        // No specific regions, use default tick behavior
+        let Some(regions) = region_ids else {
+            let report = self.trigger_gc().await?;
+            info!("Finished manual gc request");
+            return Ok(report);
+        };
+
+        // Empty regions list, return empty report
+        if regions.is_empty() {
+            info!("Finished manual gc request");
+            return Ok(GcJobReport::combined(GcReport::default()));
+        }
+
+        let full_listing = full_file_listing.unwrap_or(false);
+        let gc_timeout = timeout.unwrap_or(self.config.mailbox_timeout);
+
+        let region_set: HashSet<RegionId> = regions.iter().copied().collect();
+        let table_reparts = self.ctx.get_table_reparts().await?;
+        let dropped_collector =
+            DroppedRegionCollector::new(self.ctx.as_ref(), &self.config, &self.region_gc_tracker);
+        let dropped_assignment = dropped_collector
+            .collect_and_assign_with_cooldown(&table_reparts, false)
+            .await?;
+
+        let mut dropped_region_set = HashSet::new();
+        let mut dropped_routes_override = Region2Peers::new();
+        for overrides in dropped_assignment.region_routes_override.into_values() {
+            for (region_id, route) in overrides {
+                if region_set.contains(&region_id) {
+                    dropped_region_set.insert(region_id);
+                    dropped_routes_override.insert(region_id, route);
+                }
+            }
+        }
+
+        let (dropped_regions, active_regions): (Vec<_>, Vec<_>) = regions
+            .into_iter()
+            .partition(|region_id| dropped_region_set.contains(region_id));
+
+        let mut combined_report = GcReport::default();
+
+        if !active_regions.is_empty() {
+            let report = self
+                .ctx
+                .gc_regions(
+                    &active_regions,
+                    full_listing,
+                    gc_timeout,
+                    Region2Peers::new(),
+                )
+                .await?;
+            combined_report.merge(report);
+        }
+
+        if !dropped_regions.is_empty() {
+            let report = self
+                .ctx
+                .gc_regions(&dropped_regions, true, gc_timeout, dropped_routes_override)
+                .await?;
+            combined_report.merge(report);
+        }
+
+        let report = GcJobReport::combined(combined_report);
+
+        info!("Finished manual gc request");
+        Ok(report)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::time::Duration;
+
+    use common_meta::datanode::RegionStat;
+    use common_meta::key::table_repart::TableRepartValue;
+    use common_meta::key::table_route::PhysicalTableRouteValue;
+    use store_api::storage::RegionId;
+    use table::metadata::TableId;
+
+    use super::*;
+
+    struct ErrorMockSchedulerCtx;
+
+    #[async_trait::async_trait]
+    impl SchedulerCtx for ErrorMockSchedulerCtx {
+        async fn get_table_to_region_stats(&self) -> Result<HashMap<TableId, Vec<RegionStat>>> {
+            Ok(HashMap::new())
+        }
+
+        async fn get_table_reparts(&self) -> Result<Vec<(TableId, TableRepartValue)>> {
+            Ok(vec![])
+        }
+
+        async fn get_table_route(
+            &self,
+            _table_id: TableId,
+        ) -> Result<(TableId, PhysicalTableRouteValue)> {
+            unreachable!("get_table_route should not be called in this test")
+        }
+
+        async fn batch_get_table_route(
+            &self,
+            _table_ids: &[TableId],
+        ) -> Result<HashMap<TableId, PhysicalTableRouteValue>> {
+            Ok(HashMap::new())
+        }
+
+        async fn gc_regions(
+            &self,
+            _region_ids: &[RegionId],
+            _full_file_listing: bool,
+            _timeout: Duration,
+            _region_routes_override: Region2Peers,
+        ) -> Result<GcReport> {
+            crate::error::UnexpectedSnafu {
+                violated: "mock gc failure".to_string(),
+            }
+            .fail()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_manual_gc_propagates_error() {
+        let (tx, rx) = GcScheduler::channel();
+        drop(tx);
+
+        let scheduler = GcScheduler {
+            ctx: Arc::new(ErrorMockSchedulerCtx),
+            receiver: rx,
+            config: GcSchedulerOptions::default(),
+            region_gc_tracker: Arc::new(Mutex::new(HashMap::new())),
+            last_tracker_cleanup: Arc::new(Mutex::new(Instant::now())),
+        };
+
+        let result = scheduler
+            .handle_manual_gc(
+                Some(vec![RegionId::new(1, 0)]),
+                Some(false),
+                Some(Duration::from_secs(1)),
+            )
+            .await;
+
+        assert!(result.is_err());
     }
 }

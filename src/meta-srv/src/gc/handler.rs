@@ -114,12 +114,27 @@ impl GcScheduler {
             .await;
 
         let duration = start_time.elapsed();
-        info!(
-            "Finished GC cycle. Processed {} datanodes ({} failed). Duration: {:?}",
-            report.per_datanode_reports.len(),
-            report.failed_datanodes.len(),
-            duration
-        );
+        match &report {
+            GcJobReport::PerDatanode {
+                per_datanode_reports,
+                failed_datanodes,
+            } => {
+                info!(
+                    "Finished GC cycle. Processed {} datanodes ({} failed). Duration: {:?}",
+                    per_datanode_reports.len(),
+                    failed_datanodes.len(),
+                    duration
+                );
+            }
+            GcJobReport::Combined { report } => {
+                info!(
+                    "Finished GC cycle with combined report. Deleted files: {}, deleted indexes: {}. Duration: {:?}",
+                    report.deleted_files.len(),
+                    report.deleted_indexes.len(),
+                    duration
+                );
+            }
+        }
         debug!("Detailed GC Job Report: {report:#?}");
 
         Ok(report)
@@ -196,7 +211,8 @@ impl GcScheduler {
         force_full_listing_by_peer: HashMap<Peer, HashSet<RegionId>>,
         region_routes_override_by_peer: HashMap<Peer, Region2Peers>,
     ) -> GcJobReport {
-        let mut report = GcJobReport::default();
+        let mut per_datanode_reports = HashMap::new();
+        let mut failed_datanodes: HashMap<_, Vec<_>> = HashMap::new();
 
         // Create a stream of datanode GC tasks with limited concurrency
         let results: Vec<_> = futures::stream::iter(
@@ -237,18 +253,21 @@ impl GcScheduler {
         for (peer, result) in results {
             match result {
                 Ok(dn_report) => {
-                    report.per_datanode_reports.insert(peer.id, dn_report);
+                    per_datanode_reports.insert(peer.id, dn_report);
                 }
                 Err(e) => {
                     error!(e; "Failed to process datanode GC for peer {}", peer);
                     // Note: We don't have a direct way to map peer to table_id here,
                     // so we just log the error. The table_reports will contain individual region failures.
-                    report.failed_datanodes.entry(peer.id).or_default().push(e);
+                    failed_datanodes.entry(peer.id).or_default().push(e);
                 }
             }
         }
 
-        report
+        GcJobReport::PerDatanode {
+            per_datanode_reports,
+            failed_datanodes,
+        }
     }
 
     /// Process GC for a single datanode with all its candidate regions.

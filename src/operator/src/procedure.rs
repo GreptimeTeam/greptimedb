@@ -19,7 +19,9 @@ use common_error::ext::BoxedError;
 use common_function::handlers::ProcedureServiceHandler;
 use common_meta::procedure_executor::{ExecutorContext, ProcedureExecutorRef};
 use common_meta::rpc::procedure::{
-    ManageRegionFollowerRequest, MigrateRegionRequest, ProcedureStateResponse,
+    GcRegionsRequest as MetaGcRegionsRequest, GcResponse as MetaGcResponse,
+    GcTableRequest as MetaGcTableRequest, ManageRegionFollowerRequest, MigrateRegionRequest,
+    ProcedureStateResponse,
 };
 use common_query::error as query_error;
 use common_query::error::Result as QueryResult;
@@ -89,5 +91,21 @@ impl ProcedureServiceHandler for ProcedureServiceOperator {
 
     fn catalog_manager(&self) -> &CatalogManagerRef {
         &self.catalog_manager
+    }
+
+    async fn gc_regions(&self, request: MetaGcRegionsRequest) -> QueryResult<MetaGcResponse> {
+        self.procedure_executor
+            .gc_regions(&ExecutorContext::default(), request)
+            .await
+            .map_err(BoxedError::new)
+            .context(query_error::ProcedureServiceSnafu)
+    }
+
+    async fn gc_table(&self, request: MetaGcTableRequest) -> QueryResult<MetaGcResponse> {
+        self.procedure_executor
+            .gc_table(&ExecutorContext::default(), request)
+            .await
+            .map_err(BoxedError::new)
+            .context(query_error::ProcedureServiceSnafu)
     }
 }

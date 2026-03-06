@@ -125,8 +125,17 @@ async fn trigger_table_gc(metasrv: &Arc<Metasrv>, table_name: &str) {
 async fn trigger_full_gc(ticker: &GcTickerRef) {
     info!("triggering full gc");
     let (tx, rx) = oneshot::channel();
-    ticker.sender.send(gc::Event::Manually(tx)).await.unwrap();
-    let _ = rx.await.unwrap();
+    ticker
+        .sender
+        .send(gc::Event::Manually {
+            sender: tx,
+            region_ids: None,
+            full_file_listing: None,
+            timeout: None,
+        })
+        .await
+        .unwrap();
+    let _ = rx.await.unwrap().unwrap();
 }
 
 fn query_partitions_sql(table_name: &str) -> String {

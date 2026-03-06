@@ -100,8 +100,18 @@ async fn test_concurrent_table_processing_limits() {
         .await;
 
     // Should process all datanodes
-    assert_eq!(report.per_datanode_reports.len(), 1);
-    assert_eq!(report.failed_datanodes.len(), 0);
+    match report {
+        crate::gc::scheduler::GcJobReport::PerDatanode {
+            per_datanode_reports,
+            failed_datanodes,
+        } => {
+            assert_eq!(per_datanode_reports.len(), 1);
+            assert_eq!(failed_datanodes.len(), 0);
+        }
+        crate::gc::scheduler::GcJobReport::Combined { .. } => {
+            panic!("expected per-datanode report");
+        }
+    }
 }
 
 #[tokio::test]
@@ -172,11 +182,21 @@ async fn test_datanode_processes_tables_with_partial_gc_failures() {
         .await;
 
     // Should have one datanode with mixed results
-    assert_eq!(report.per_datanode_reports.len(), 1);
+    let datanode_report = match &report {
+        crate::gc::scheduler::GcJobReport::PerDatanode {
+            per_datanode_reports,
+            failed_datanodes,
+        } => {
+            assert_eq!(per_datanode_reports.len(), 1);
+            assert_eq!(failed_datanodes.len(), 0);
+            per_datanode_reports.values().next().unwrap()
+        }
+        crate::gc::scheduler::GcJobReport::Combined { .. } => {
+            panic!("expected per-datanode report");
+        }
+    };
     // also check one failed region (region2 has no GC report, so it should be in need_retry_regions)
-    let datanode_report = report.per_datanode_reports.values().next().unwrap();
     assert_eq!(datanode_report.need_retry_regions.len(), 1);
-    assert_eq!(report.failed_datanodes.len(), 0);
 }
 
 // Region Concurrency Tests
@@ -376,7 +396,15 @@ async fn test_region_gc_concurrency_with_partial_failures() {
         .parallel_process_datanodes(datanode_to_candidates, HashMap::new(), HashMap::new())
         .await;
 
-    let report = report.per_datanode_reports.get(&peer.id).unwrap();
+    let report = match &report {
+        crate::gc::scheduler::GcJobReport::PerDatanode {
+            per_datanode_reports,
+            ..
+        } => per_datanode_reports.get(&peer.id).unwrap(),
+        crate::gc::scheduler::GcJobReport::Combined { .. } => {
+            panic!("expected per-datanode report");
+        }
+    };
 
     // Should have 3 successful and 3 failed regions
     // Even regions (2, 4, 6) should succeed, odd regions (1, 3, 5) should fail
@@ -506,7 +534,15 @@ async fn test_region_gc_concurrency_with_retryable_errors() {
         .parallel_process_datanodes(datanode_to_candidates, HashMap::new(), HashMap::new())
         .await;
 
-    let report = report.per_datanode_reports.get(&peer.id).unwrap();
+    let report = match &report {
+        crate::gc::scheduler::GcJobReport::PerDatanode {
+            per_datanode_reports,
+            ..
+        } => per_datanode_reports.get(&peer.id).unwrap(),
+        crate::gc::scheduler::GcJobReport::Combined { .. } => {
+            panic!("expected per-datanode report");
+        }
+    };
 
     // In the new implementation without retry logic, all regions should be processed
     // The exact behavior depends on how the mock handles the regions

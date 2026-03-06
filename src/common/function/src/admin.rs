@@ -15,6 +15,7 @@
 mod build_index_table;
 mod flush_compact_region;
 mod flush_compact_table;
+mod gc;
 mod migrate_region;
 mod reconcile_catalog;
 mod reconcile_database;
@@ -22,6 +23,7 @@ mod reconcile_table;
 
 use flush_compact_region::{CompactRegionFunction, FlushRegionFunction};
 use flush_compact_table::{CompactTableFunction, FlushTableFunction};
+use gc::{GcRegionsFunction, GcTableFunction};
 use migrate_region::MigrateRegionFunction;
 use reconcile_catalog::ReconcileCatalogFunction;
 use reconcile_database::ReconcileDatabaseFunction;
@@ -42,6 +44,8 @@ impl AdminFunction {
         registry.register(CompactRegionFunction::factory());
         registry.register(FlushTableFunction::factory());
         registry.register(CompactTableFunction::factory());
+        registry.register(GcRegionsFunction::factory());
+        registry.register(GcTableFunction::factory());
         registry.register(BuildIndexFunction::factory());
         registry.register(FlushFlowFunction::factory());
         registry.register(ReconcileCatalogFunction::factory());
