@@ -237,7 +237,6 @@ impl PromTimeSeries {
 
 #[derive(Default, Debug)]
 pub struct PromWriteRequest {
-    raw_data: Bytes,
     pub(crate) table_data: TablesBuilder,
     series: PromTimeSeries,
 }
@@ -245,7 +244,6 @@ pub struct PromWriteRequest {
 impl Clear for PromWriteRequest {
     fn clear(&mut self) {
         self.table_data.clear();
-        self.raw_data = Bytes::new();
     }
 }
 
@@ -262,7 +260,8 @@ impl PromWriteRequest {
         processor: &mut PromSeriesProcessor,
     ) -> Result<(), DecodeError> {
         const STRUCT_NAME: &str = "PromWriteRequest";
-        self.raw_data = buf.clone();
+        // Keep a reference to the underlying buffer so the decoded raw bytes won't be dangling.
+        self.table_data.set_raw_data(buf.clone());
         while buf.has_remaining() {
             let (tag, wire_type) = decode_key(&mut buf)?;
             assert_eq!(WireType::LengthDelimited, wire_type);

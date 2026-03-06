@@ -18,6 +18,7 @@ use api::prom_store::remote::Sample;
 use api::v1::helper::{field_column_schema, time_index_column_schema};
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnSchema, Row, RowInsertRequest, Rows, SemanticType, Value};
+use bytes::Bytes;
 use common_query::prelude::{greptime_timestamp, greptime_value};
 use pipeline::{ContextOpt, ContextReq};
 use prost::DecodeError;
@@ -38,11 +39,14 @@ pub struct PromCtx {
 pub struct TablesBuilder {
     // schema -> table -> table_builder
     pub tables: HashMap<PromCtx, HashMap<String, TableBuilder>>,
+    /// Raw request data.
+    raw_data: Bytes,
 }
 
 impl Clear for TablesBuilder {
     fn clear(&mut self) {
         self.tables.clear();
+        self.raw_data = Bytes::new();
     }
 }
 
@@ -89,6 +93,10 @@ impl TablesBuilder {
                 req.merge(reqs);
                 req
             })
+    }
+
+    pub(crate) fn set_raw_data(&mut self, buf: Bytes) {
+        self.raw_data = buf;
     }
 }
 
