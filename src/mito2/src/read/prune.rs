@@ -297,15 +297,9 @@ impl FlatPruneReader {
         }
     }
 
-    /// Merge metrics with the inner reader and return the merged metrics.
+    /// Returns metrics.
     pub(crate) fn metrics(&self) -> ReaderMetrics {
-        let mut metrics = self.metrics.clone();
-        if let FlatSource::LastRow(r) = &self.source
-            && let Some(inner_metrics) = r.metrics()
-        {
-            metrics.merge_from(inner_metrics);
-        }
-        metrics
+        self.metrics.clone()
     }
 
     pub(crate) fn next_batch(&mut self) -> Result<Option<RecordBatch>> {

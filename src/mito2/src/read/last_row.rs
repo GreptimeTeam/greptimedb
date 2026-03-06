@@ -167,7 +167,7 @@ impl LastRowCacheReader {
     async fn next_batch(&mut self) -> Result<Option<Batch>> {
         let batches = match &self.value.result {
             SelectorResult::PrimaryKey(batches) => batches,
-            SelectorResult::Flat(_) => return Ok(None),
+            SelectorResult::Flat(_) => unreachable!(),
         };
         if self.idx < batches.len() {
             let res = Ok(Some(batches[self.idx].clone()));
@@ -331,14 +331,6 @@ impl FlatRowGroupLastRowCachedReader {
         }
     }
 
-    /// Gets the underlying reader metrics if uncached.
-    pub(crate) fn metrics(&self) -> Option<&ReaderMetrics> {
-        match self {
-            FlatRowGroupLastRowCachedReader::Hit(_) => None,
-            FlatRowGroupLastRowCachedReader::Miss(reader) => Some(&reader.metrics),
-        }
-    }
-
     /// Returns the next RecordBatch.
     pub(crate) fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
         match self {
@@ -378,7 +370,7 @@ impl FlatLastRowCacheReader {
     fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
         let batches = match &self.value.result {
             SelectorResult::Flat(batches) => batches,
-            SelectorResult::PrimaryKey(_) => return Ok(None),
+            SelectorResult::PrimaryKey(_) => unreachable!(),
         };
         if self.idx < batches.len() {
             let res = Ok(Some(batches[self.idx].clone()));
@@ -441,7 +433,6 @@ pub(crate) struct FlatRowGroupLastRowReader {
     yielded_batches: Vec<RecordBatch>,
     cache_strategy: CacheStrategy,
     projection: Vec<usize>,
-    metrics: ReaderMetrics,
     /// Accumulates small selector-output batches before concatenating.
     pending: BatchBuffer,
 }
@@ -460,7 +451,6 @@ impl FlatRowGroupLastRowReader {
             yielded_batches: vec![],
             cache_strategy,
             projection,
-            metrics: ReaderMetrics::default(),
             pending: BatchBuffer::new(),
         }
     }
@@ -481,8 +471,6 @@ impl FlatRowGroupLastRowReader {
         }
 
         while let Some(batch) = self.reader.next_batch()? {
-            self.metrics.num_rows += batch.num_rows();
-            self.metrics.num_batches += 1;
             self.selector.on_next(batch, &mut self.pending)?;
             if self.pending.is_full() {
                 return self.flush_pending();
