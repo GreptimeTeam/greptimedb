@@ -81,13 +81,16 @@ pub struct ImportCommand {
     #[clap(long, value_parser = humantime::parse_duration)]
     timeout: Option<Duration>,
 
-    /// The proxy server address to connect, if set, will override the system proxy.
+    /// The proxy server address to connect.
     ///
-    /// The default behavior will use the system proxy if neither `proxy` nor `no_proxy` is set.
+    /// If set, it overrides the system proxy unless `--no-proxy` is specified.
+    /// If neither `--proxy` nor `--no-proxy` is set, system proxy (env) may be used.
     #[clap(long)]
     proxy: Option<String>,
 
-    /// Disable proxy server, if set, will not use any proxy.
+    /// Disable all proxy usage (ignores `--proxy` and system proxy).
+    ///
+    /// When set and `--proxy` is not provided, this explicitly disables system proxy.
     #[clap(long, default_value = "false")]
     no_proxy: bool,
 }
@@ -104,6 +107,7 @@ impl ImportCommand {
             // Treats `None` as `0s` to disable server-side default timeout.
             self.timeout.unwrap_or_default(),
             proxy,
+            self.no_proxy,
         );
 
         Ok(Box::new(Import {
@@ -314,6 +318,7 @@ mod tests {
                 None,
                 Duration::from_secs(0),
                 None,
+                false,
             ),
             input_dir: input_dir.to_string(),
             parallelism: 1,

@@ -67,6 +67,7 @@ snapshot-20250101/
 - Self-contained (all information needed for restore)
 - Immutable (content never changes after creation)
 - Verifiable (checksums at file, chunk, and snapshot levels)
+- Schema-only snapshots contain only `manifest.json` and `schema/`; `data/` is absent, `chunks` is empty, and later data append is rejected (use `--force` to recreate)
 
 ### Chunk
 
@@ -115,6 +116,8 @@ greptime export create \
 greptime export create \
   --schema-only \
   --to s3://my-bucket/snapshots/prod-schema-only
+
+Schema-only snapshots cannot be resumed with data; use `--force` to recreate.
 
 # Export with specific format (default: parquet)
 greptime export create \
@@ -173,7 +176,9 @@ The manifest is a JSON file containing snapshot metadata and chunk index:
 - `snapshot_id`: Unique identifier (UUID)
 - `catalog`, `schemas`: Catalog and schema list
 - `time_range`: Overall time range covered
+- `schema_only`: Whether the snapshot contains schema only
 - `chunks[]`: Array of chunk metadata
+- `format`: Data format for exported files
 - `checksum`: Snapshot-level SHA256 checksum
 
 **Chunk metadata structure**:
@@ -182,7 +187,7 @@ Each chunk entry in the manifest contains:
 
 - `id`: Chunk identifier (sequential number)
 - `time_range`: Start and end timestamps
-- `status`: Export status (Pending, Completed, Failed)
+- `status`: Export status (Pending, InProgress, Completed, Failed)
 - `files`: List of data files in the chunk directory
 - `checksum`: Chunk-level checksum for integrity verification
 
@@ -231,18 +236,18 @@ Data is partitioned into time-range chunks for efficient parallel processing and
 
 **Algorithm**:
 
-- Generate non-overlapping half-open intervals with configurable time window (default: 1 day)
+- Generate non-overlapping half-open intervals only when chunk time window is specified; otherwise export as a single chunk
 - Chunks are numbered sequentially (1, 2, 3, ...)
 - Each chunk's time range is recorded in manifest.json
 - Empty chunks (no data in time window) are skipped and not recorded in manifest
 - Guarantees: no gaps, no overlaps, complete coverage of time range
 
-**Chunk time window selection**:
+**Chunk time window selection** (only applicable when chunking is enabled):
 
 The optimal chunk time window depends on data density (volume per unit time):
 
 - **Target**: 100MB - 1GB per chunk (balances parallelism and retry cost)
-- **Default**: 1 day (suitable for most workloads)
+- **Default**: disabled (uses a single chunk)
 - **Recommendations**:
     - High density (>1GB/day): Use smaller windows like 1h, 6h, or 12h
     - Low density (<100MB/day): Use larger windows like 7d or 30d
@@ -292,9 +297,9 @@ Checksums are verified during import before data is written to the database.
 
 **Resume capability**:
 
-- Manifest tracks chunk status (Pending, Completed, Failed)
+- Manifest tracks chunk status (Pending, InProgress, Completed, Failed)
 - Export/import automatically resumes when executed on existing snapshot
-- Skips completed chunks, retries failed chunks, processes pending chunks
+- Skips completed chunks, retries failed/in-progress chunks, processes pending chunks
 - Works across process restarts
 - Use `--force` (export only) to delete existing snapshot and start over
 
@@ -327,7 +332,7 @@ Optional:
   --schemas <SCHEMAS>             Comma-separated schema list (default: all)
   --start-time <TIMESTAMP>        Time range start (default: earliest)
   --end-time <TIMESTAMP>          Time range end (default: now)
-  --chunk-time-window <DURATION>  Chunk time window (default: 1d)
+  --chunk-time-window <DURATION>  Optional; uses single chunk if not specified; requires both --start-time and --end-time when specified
   --parallelism <N>               Concurrency level (default: 1)
   --format <FORMAT>               Export format for data file: parquet (default), csv, json, or other formats supported by COPY DATABASE
   --schema-only                   Export schema only, no data
