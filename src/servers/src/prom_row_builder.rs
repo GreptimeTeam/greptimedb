@@ -166,7 +166,9 @@ impl TableBuilder {
                 row[*e].value_data = tag_value;
                 continue;
             }
-            let tag_name = prom_validation_mode.decode_label_name(raw_tag_name)?;
+
+            // Safety: we've validated the label name is valid in line 152.
+            let tag_name = unsafe { std::str::from_utf8_unchecked(raw_tag_name) };
             self.schema.push(ColumnSchema {
                 column_name: tag_name.to_owned(),
                 datatype: ColumnDataType::String as i32,
