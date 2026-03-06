@@ -250,7 +250,11 @@ impl WriteCache {
                     .write_all(source, write_request.max_sequence, write_opts)
                     .await?
             }
-            either::Right(flat_source) => writer.write_all_flat(flat_source, write_opts).await?,
+            either::Right(flat_source) => {
+                writer
+                    .write_all_flat(flat_source, write_request.max_sequence, write_opts)
+                    .await?
+            }
         };
 
         // Upload sst file to remote object store.

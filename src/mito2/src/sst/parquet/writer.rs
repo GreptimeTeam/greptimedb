@@ -321,9 +321,12 @@ where
     pub async fn write_all_flat(
         &mut self,
         source: FlatSource,
+        override_sequence: Option<SequenceNumber>,
         opts: &WriteOptions,
     ) -> Result<SstInfoArray> {
-        let res = self.write_all_flat_without_cleaning(source, opts).await;
+        let res = self
+            .write_all_flat_without_cleaning(source, override_sequence, opts)
+            .await;
         if res.is_err() {
             // Clean tmp files explicitly on failure.
             let file_id = self.current_file;
@@ -337,6 +340,7 @@ where
     async fn write_all_flat_without_cleaning(
         &mut self,
         mut source: FlatSource,
+        override_sequence: Option<SequenceNumber>,
         opts: &WriteOptions,
     ) -> Result<SstInfoArray> {
         let mut results = smallvec![];
@@ -344,7 +348,7 @@ where
             self.metadata.clone(),
             &FlatSchemaOptions::from_encoding(self.metadata.primary_key_encoding),
         )
-        .with_override_sequence(None);
+        .with_override_sequence(override_sequence);
         let mut stats = SourceStats::default();
 
         while let Some(record_batch) = self
