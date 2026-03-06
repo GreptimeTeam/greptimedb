@@ -739,6 +739,7 @@ impl RangeBase {
                     reason: "Failed to downcast to BooleanArray".to_string(),
                 })?;
 
+        // also need to consider nulls in the partition filter result. If a value is null, it should be treated as false (filtered out).
         let mut mask = boolean_array.values().clone();
         if let Some(nulls) = boolean_array.nulls() {
             mask = mask.bitand(nulls.inner());
