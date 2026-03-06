@@ -304,6 +304,14 @@ impl procedure_service_server::ProcedureService for Metasrv {
 }
 
 impl Metasrv {
+    fn normalize_gc_timeout(timeout: Duration) -> Option<Duration> {
+        if timeout.is_zero() {
+            None
+        } else {
+            Some(timeout)
+        }
+    }
+
     async fn handle_gc_regions(&self, request: MetaGcRegionsRequest) -> error::Result<GcResponse> {
         let region_ids: Vec<RegionId> = request
             .region_ids
@@ -350,6 +358,7 @@ impl Metasrv {
         full_file_listing: bool,
         timeout: Duration,
     ) -> error::Result<GcResponse> {
+        let timeout = Self::normalize_gc_timeout(timeout);
         let gc_ticker = self.gc_ticker().context(error::UnexpectedSnafu {
             violated: "GC ticker not available".to_string(),
         })?;
@@ -361,7 +370,7 @@ impl Metasrv {
                 sender: tx,
                 region_ids: Some(region_ids),
                 full_file_listing: Some(full_file_listing),
-                timeout: Some(timeout),
+                timeout,
             })
             .await
             .map_err(|_| {
@@ -428,5 +437,21 @@ fn gc_response_to_table_pb(resp: GcResponse) -> GcTableResponse {
             deleted_indexes: resp.deleted_indexes,
         }),
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::Metasrv;
+
+    #[test]
+    fn test_normalize_gc_timeout() {
+        assert_eq!(Metasrv::normalize_gc_timeout(Duration::ZERO), None);
+        assert_eq!(
+            Metasrv::normalize_gc_timeout(Duration::from_secs(10)),
+            Some(Duration::from_secs(10))
+        );
     }
 }
