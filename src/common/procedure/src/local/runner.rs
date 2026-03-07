@@ -19,7 +19,7 @@ use std::time::Duration;
 use backon::{BackoffBuilder, ExponentialBuilder};
 use common_event_recorder::EventRecorderRef;
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
-use common_telemetry::{debug, error, info, tracing};
+use common_telemetry::{debug, error, info, tracing, warn};
 use rand::Rng;
 use snafu::ResultExt;
 use tokio::time;
@@ -88,6 +88,45 @@ impl Drop for ProcedureGuard {
             .key_lock
             .clean_keys(self.meta.lock_key.keys_to_lock().map(|k| k.as_string()));
     }
+}
+
+/// Returns a list of conflicting lock keys between a parent and a child procedure.
+/// Evaluates the Read/Write lock compatibility matrix:
+/// - Share + Share => Compatible
+/// - Exclusive + Any => Conflict
+/// - Any + Exclusive => Conflict
+fn find_lock_conflicts<'a>(
+    parent_keys: impl Iterator<Item = &'a StringKey>,
+    child_keys: impl Iterator<Item = &'a StringKey>,
+) -> Vec<String> {
+    use std::collections::HashMap;
+
+    // Map from key string slice (&str) to a boolean indicating if the parent holds it EXCLUSIVELY.
+    let mut parent_map = HashMap::new();
+    for key in parent_keys {
+        match key {
+            StringKey::Exclusive(k) => {
+                parent_map.insert(k.as_str(), true);
+            }
+            StringKey::Share(k) => {
+                parent_map.entry(k.as_str()).or_insert(false);
+            }
+        }
+    }
+
+    child_keys
+        .filter_map(|child_key| match child_key {
+            StringKey::Exclusive(k) | StringKey::Share(k)
+                if parent_map.get(k.as_str()) == Some(&true) =>
+            {
+                Some(k.clone())
+            }
+            StringKey::Exclusive(k) if parent_map.get(k.as_str()) == Some(&false) => {
+                Some(k.clone())
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 pub(crate) struct Runner {
@@ -442,6 +481,39 @@ impl Runner {
         if self.manager_ctx.contains_procedure(procedure_id) {
             // If the parent has already submitted this procedure, don't submit it again.
             return;
+        }
+
+        // Detect potential deadlock: if the child procedure shares any lock key with
+        // the parent in a way that would block, the child will wait forever to acquire
+        // a lock already held by the parent (which is waiting for the child to finish).
+        let conflicting = find_lock_conflicts(
+            self.meta.lock_key.keys_to_lock(),
+            procedure.lock_key().keys_to_lock(),
+        );
+
+        if !conflicting.is_empty() {
+            warn!(
+                "Potential deadlock detected: Subprocedure {}-{} submitted by {}-{} \
+                 shares conflicting lock key(s) {:?} with its parent. \
+                 The child will block on lock acquisition while the parent waits for \
+                 the child to complete. Ensure parent and child procedures do not \
+                 share incompatible lock keys.",
+                procedure.type_name(),
+                procedure_id,
+                self.procedure.type_name(),
+                self.meta.id,
+                conflicting,
+            );
+            debug_assert!(
+                false,
+                "Subprocedure {}-{} shares conflicting lock key(s) {:?} with parent {}-{}; \
+                 this will cause a deadlock.",
+                procedure.type_name(),
+                procedure_id,
+                conflicting,
+                self.procedure.type_name(),
+                self.meta.id,
+            );
         }
 
         let step = 0;
@@ -1938,5 +2010,52 @@ mod tests {
         let tasks = [runner1.execute_once(&ctx1), runner2.execute_once(&ctx2)];
         join_all(tasks).await;
         assert_eq!(shared_atomic_value.load(Ordering::Relaxed), 2);
+    }
+    #[test]
+    fn test_find_lock_conflicts() {
+        use crate::procedure::StringKey;
+
+        // 1. Share + Share = No conflict (Compatible)
+        let parent = [StringKey::Share("A".to_string())];
+        let child = [StringKey::Share("A".to_string())];
+        assert!(super::find_lock_conflicts(parent.iter(), child.iter()).is_empty());
+
+        // 2. Share + Exclusive = Conflict
+        let parent = [StringKey::Share("A".to_string())];
+        let child = [StringKey::Exclusive("A".to_string())];
+        assert_eq!(
+            super::find_lock_conflicts(parent.iter(), child.iter()),
+            vec!["A".to_string()]
+        );
+
+        // 3. Exclusive + Share = Conflict
+        let parent = [StringKey::Exclusive("A".to_string())];
+        let child = [StringKey::Share("A".to_string())];
+        assert_eq!(
+            super::find_lock_conflicts(parent.iter(), child.iter()),
+            vec!["A".to_string()]
+        );
+
+        // 4. Exclusive + Exclusive = Conflict
+        let parent = [StringKey::Exclusive("A".to_string())];
+        let child = [StringKey::Exclusive("A".to_string())];
+        assert_eq!(
+            super::find_lock_conflicts(parent.iter(), child.iter()),
+            vec!["A".to_string()]
+        );
+
+        // 5. Multiple keys, partial overlap
+        let parent = [
+            StringKey::Share("A".to_string()),
+            StringKey::Exclusive("B".to_string()),
+        ];
+        let child = [
+            StringKey::Exclusive("A".to_string()), // Conflict with Share("A")
+            StringKey::Share("B".to_string()),     // Conflict with Exclusive("B")
+            StringKey::Exclusive("C".to_string()), // No conflict, parent doesn't hold C
+        ];
+        let mut conflicts = super::find_lock_conflicts(parent.iter(), child.iter());
+        conflicts.sort();
+        assert_eq!(conflicts, vec!["A".to_string(), "B".to_string()]);
     }
 }
