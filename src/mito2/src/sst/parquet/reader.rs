@@ -1473,7 +1473,7 @@ impl ReaderFilterMetrics {
 }
 
 #[cfg(all(test, feature = "vector_index"))]
-mod tests {
+mod vector_index_tests {
     use super::*;
 
     #[test]
