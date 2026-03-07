@@ -897,7 +897,12 @@ pub(crate) async fn build_flat_sources(
 
     for (position, index) in range_meta.row_group_indices.iter().enumerate() {
         if stream_ctx.is_mem_range_index(*index) {
-            let stream = scan_flat_mem_ranges(stream_ctx.clone(), part_metrics.clone(), *index);
+            let stream = scan_flat_mem_ranges(
+                stream_ctx.clone(),
+                part_metrics.clone(),
+                *index,
+                range_meta.time_range,
+            );
             ordered_sources[position] = Some(Box::pin(stream) as _);
         } else if stream_ctx.is_file_range_index(*index) {
             if let Some(semaphore_ref) = semaphore.as_ref() {

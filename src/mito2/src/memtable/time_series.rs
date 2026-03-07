@@ -51,9 +51,9 @@ use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::simple_bulk_memtable::SimpleBulkMemtable;
 use crate::memtable::stats::WriteMetrics;
 use crate::memtable::{
-    AllocTracker, BoxedBatchIterator, IterBuilder, KeyValues, MemScanMetrics, Memtable,
-    MemtableBuilder, MemtableId, MemtableRange, MemtableRangeContext, MemtableRanges, MemtableRef,
-    MemtableStats, RangesOptions,
+    AllocTracker, BatchToRecordBatchContext, BoxedBatchIterator, IterBuilder, KeyValues,
+    MemScanMetrics, Memtable, MemtableBuilder, MemtableId, MemtableRange, MemtableRangeContext,
+    MemtableRanges, MemtableRef, MemtableStats, RangesOptions, read_column_ids_from_projection,
 };
 use crate::metrics::{
     MEMTABLE_ACTIVE_FIELD_BUILDER_COUNT, MEMTABLE_ACTIVE_SERIES_COUNT, READ_ROWS_TOTAL,
@@ -307,6 +307,7 @@ impl Memtable for TimeSeriesMemtable {
     ) -> Result<MemtableRanges> {
         let predicate = options.predicate;
         let sequence = options.sequence;
+        let read_column_ids = read_column_ids_from_projection(&self.region_metadata, projection);
         let projection = if let Some(projection) = projection {
             projection.iter().copied().collect()
         } else {
@@ -323,7 +324,16 @@ impl Memtable for TimeSeriesMemtable {
             merge_mode: self.merge_mode,
             sequence,
         });
-        let context = Arc::new(MemtableRangeContext::new(self.id, builder, predicate));
+        let adapter_context = Arc::new(BatchToRecordBatchContext::new(
+            self.region_metadata.clone(),
+            read_column_ids,
+        ));
+        let context = Arc::new(MemtableRangeContext::new_with_batch_to_record_batch(
+            self.id,
+            builder,
+            predicate,
+            Some(adapter_context),
+        ));
 
         let range_stats = self.stats();
         let range = MemtableRange::new(context, range_stats);
@@ -1937,5 +1947,90 @@ mod tests {
         }
         assert_eq!(total_series, series_count);
         assert_eq!(total_series * rows_per_series, row_count);
+    }
+
+    #[test]
+    fn test_build_record_batch_iter_from_memtable() {
+        let schema = schema_for_test();
+        let memtable = TimeSeriesMemtable::new(schema.clone(), 1, None, true, MergeMode::LastRow);
+
+        let kvs = build_key_values(&schema, "test".to_string(), 1, 10);
+        memtable.write(&kvs).unwrap();
+
+        let read_column_ids: Vec<ColumnId> = schema
+            .column_metadatas
+            .iter()
+            .map(|c| c.column_id)
+            .collect();
+        let ranges = memtable
+            .ranges(Some(&read_column_ids), RangesOptions::default())
+            .unwrap();
+        assert_eq!(1, ranges.ranges.len());
+
+        let range = ranges.ranges.into_values().next().unwrap();
+        let mut iter = range.build_record_batch_iter(None, None).unwrap();
+        let rb = iter.next().transpose().unwrap().unwrap();
+        assert_eq!(10, rb.num_rows());
+        // k0, k1 (pk columns), v0, v1 (field columns), ts, __primary_key, __sequence, __op_type
+        let schema = rb.schema();
+        let column_names: Vec<_> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(
+            column_names,
+            vec![
+                "k0",
+                "k1",
+                "v0",
+                "v1",
+                "ts",
+                "__primary_key",
+                "__sequence",
+                "__op_type",
+            ]
+        );
+        assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn test_build_record_batch_iter_with_time_range() {
+        let schema = schema_for_test();
+        let memtable = TimeSeriesMemtable::new(schema.clone(), 1, None, true, MergeMode::LastRow);
+
+        let kvs = build_key_values(&schema, "test".to_string(), 1, 10);
+        memtable.write(&kvs).unwrap();
+
+        let read_column_ids: Vec<ColumnId> = schema
+            .column_metadatas
+            .iter()
+            .map(|c| c.column_id)
+            .collect();
+        let ranges = memtable
+            .ranges(Some(&read_column_ids), RangesOptions::default())
+            .unwrap();
+        assert_eq!(1, ranges.ranges.len());
+
+        let time_range = (Timestamp::new_millisecond(3), Timestamp::new_millisecond(7));
+
+        let range = ranges.ranges.into_values().next().unwrap();
+        let mut iter = range
+            .build_record_batch_iter(Some(time_range), None)
+            .unwrap();
+
+        let mut total_rows = 0;
+        let mut all_timestamps = Vec::new();
+        while let Some(rb) = iter.next().transpose().unwrap() {
+            total_rows += rb.num_rows();
+            let ts_col = rb
+                .column_by_name("ts")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<datatypes::arrow::array::TimestampMillisecondArray>()
+                .unwrap();
+            for i in 0..ts_col.len() {
+                all_timestamps.push(ts_col.value(i));
+            }
+        }
+        assert_eq!(5, total_rows);
+        all_timestamps.sort();
+        assert_eq!(vec![3, 4, 5, 6, 7], all_timestamps);
     }
 }

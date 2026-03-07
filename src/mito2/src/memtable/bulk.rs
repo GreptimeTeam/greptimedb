@@ -1485,7 +1485,7 @@ mod tests {
             assert!(range.num_rows() > 0);
             assert!(range.is_record_batch());
 
-            let record_batch_iter = range.build_record_batch_iter(None).unwrap();
+            let record_batch_iter = range.build_record_batch_iter(None, None).unwrap();
 
             let mut total_rows = 0;
             for batch_result in record_batch_iter {
@@ -1535,7 +1535,7 @@ mod tests {
         let range = ranges.ranges.get(&0).unwrap();
 
         assert!(range.is_record_batch());
-        let record_batch_iter = range.build_record_batch_iter(None).unwrap();
+        let record_batch_iter = range.build_record_batch_iter(None, None).unwrap();
 
         let mut total_rows = 0;
         for batch_result in record_batch_iter {
@@ -1731,7 +1731,7 @@ mod tests {
         assert_eq!(1, ranges.ranges.len());
         let range = ranges.ranges.get(&0).unwrap();
 
-        let mut record_batch_iter = range.build_record_batch_iter(None).unwrap();
+        let mut record_batch_iter = range.build_record_batch_iter(None, None).unwrap();
         assert!(record_batch_iter.next().is_none());
     }
 
@@ -1786,7 +1786,7 @@ mod tests {
             assert!(range.num_rows() > 0);
             assert!(range.is_record_batch());
 
-            let record_batch_iter = range.build_record_batch_iter(None).unwrap();
+            let record_batch_iter = range.build_record_batch_iter(None, None).unwrap();
             let mut total_rows = 0;
             for batch_result in record_batch_iter {
                 let batch = batch_result.unwrap();
@@ -1870,7 +1870,7 @@ mod tests {
         let mut total_rows_read = 0;
         for (_range_id, range) in ranges.ranges.iter() {
             assert!(range.is_record_batch());
-            let record_batch_iter = range.build_record_batch_iter(None).unwrap();
+            let record_batch_iter = range.build_record_batch_iter(None, None).unwrap();
 
             for batch_result in record_batch_iter {
                 let batch = batch_result.unwrap();
@@ -1957,7 +1957,7 @@ mod tests {
 
         let mut total_rows_read = 0;
         for (_range_id, range) in ranges.ranges.iter() {
-            let record_batch_iter = range.build_record_batch_iter(None).unwrap();
+            let record_batch_iter = range.build_record_batch_iter(None, None).unwrap();
             for batch_result in record_batch_iter {
                 let batch = batch_result.unwrap();
                 total_rows_read += batch.num_rows();
@@ -2016,7 +2016,7 @@ mod tests {
 
         // Verify data is sorted correctly in the range
         let range = ranges.ranges.get(&0).unwrap();
-        let record_batch_iter = range.build_record_batch_iter(None).unwrap();
+        let record_batch_iter = range.build_record_batch_iter(None, None).unwrap();
 
         let mut total_rows = 0;
         for batch_result in record_batch_iter {
@@ -2211,7 +2211,7 @@ mod tests {
         let mut total_rows_read = 0;
         for (_range_id, range) in ranges.ranges.iter() {
             assert!(range.is_record_batch());
-            let record_batch_iter = range.build_record_batch_iter(None).unwrap();
+            let record_batch_iter = range.build_record_batch_iter(None, None).unwrap();
 
             for batch_result in record_batch_iter {
                 let batch = batch_result.unwrap();

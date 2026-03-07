@@ -14,6 +14,7 @@
 
 //! Common structs and utilities for reading data.
 
+pub mod batch_adapter;
 pub mod compat;
 pub mod dedup;
 pub mod flat_dedup;

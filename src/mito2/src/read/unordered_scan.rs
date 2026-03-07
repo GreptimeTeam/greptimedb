@@ -179,6 +179,7 @@ impl UnorderedScan {
                         stream_ctx.clone(),
                         part_metrics.clone(),
                         *index,
+                        range_meta.time_range,
                     );
                     for await record_batch in stream {
                         yield record_batch?;
