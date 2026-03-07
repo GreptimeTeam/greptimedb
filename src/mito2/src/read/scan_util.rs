@@ -182,6 +182,10 @@ pub(crate) struct ScanMetricsSet {
     bloom_filter_cache_hit: usize,
     /// Number of index result cache misses for bloom filter index.
     bloom_filter_cache_miss: usize,
+    /// Number of index result cache hits for minmax pruning.
+    minmax_cache_hit: usize,
+    /// Number of index result cache misses for minmax pruning.
+    minmax_cache_miss: usize,
     /// Number of pruner builder cache hits.
     pruner_cache_hit: usize,
     /// Number of pruner builder cache misses.
@@ -308,6 +312,8 @@ impl fmt::Debug for ScanMetricsSet {
             inverted_index_cache_miss,
             bloom_filter_cache_hit,
             bloom_filter_cache_miss,
+            minmax_cache_hit,
+            minmax_cache_miss,
             pruner_cache_hit,
             pruner_cache_miss,
             pruner_prune_cost,
@@ -432,6 +438,12 @@ impl fmt::Debug for ScanMetricsSet {
         }
         if *bloom_filter_cache_miss > 0 {
             write!(f, ", \"bloom_filter_cache_miss\":{bloom_filter_cache_miss}")?;
+        }
+        if *minmax_cache_hit > 0 {
+            write!(f, ", \"minmax_cache_hit\":{minmax_cache_hit}")?;
+        }
+        if *minmax_cache_miss > 0 {
+            write!(f, ", \"minmax_cache_miss\":{minmax_cache_miss}")?;
         }
         if *pruner_cache_hit > 0 {
             write!(f, ", \"pruner_cache_hit\":{pruner_cache_hit}")?;
@@ -639,6 +651,8 @@ impl ScanMetricsSet {
                     inverted_index_cache_miss,
                     bloom_filter_cache_hit,
                     bloom_filter_cache_miss,
+                    minmax_cache_hit,
+                    minmax_cache_miss,
                     pruner_cache_hit,
                     pruner_cache_miss,
                     pruner_prune_cost,
@@ -680,6 +694,8 @@ impl ScanMetricsSet {
         self.inverted_index_cache_miss += *inverted_index_cache_miss;
         self.bloom_filter_cache_hit += *bloom_filter_cache_hit;
         self.bloom_filter_cache_miss += *bloom_filter_cache_miss;
+        self.minmax_cache_hit += *minmax_cache_hit;
+        self.minmax_cache_miss += *minmax_cache_miss;
         self.pruner_cache_hit += *pruner_cache_hit;
         self.pruner_cache_miss += *pruner_cache_miss;
         self.pruner_prune_cost += *pruner_prune_cost;
