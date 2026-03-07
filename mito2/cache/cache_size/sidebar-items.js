@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["column_descr_heap_size","file_meta_heap_size","parquet_column_index_heap_size","parquet_meta_size","parquet_offset_index_heap_size","row_group_meta_heap_size","schema_descr_heap_size"]};

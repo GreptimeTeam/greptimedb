@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["AZBLOB_SCHEMA","FS_SCHEMA","GCS_SCHEMA","OSS_SCHEMA","S3_SCHEMA"],"fn":["build_backend","handle_windows_path","parse_url"],"mod":["azblob","fs","gcs","oss","s3"],"struct":["DISK_SYMBOL_PATTERN"]};

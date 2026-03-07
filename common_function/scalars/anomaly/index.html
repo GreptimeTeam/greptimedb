@@ -1,0 +1,44 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Anomaly detection window functions."><title>common_function::scalars::anomaly - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-e56847b5.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="common_function" data-themes="" data-resource-suffix="" data-rustdoc-version="1.92.0-nightly (fa3155a64 2025-09-30)" data-channel="nightly" data-search-js="search-e256b49e.js" data-stringdex-js="stringdex-828709d0.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-ce535bd0.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-263c88ec.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module anomaly</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../common_function/index.html">common_<wbr>function</a><span class="version">1.0.0-rc.1</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module anomaly</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#minimum-samples" title="Minimum Samples">Minimum Samples</a></li><li><a href="#return-values" title="Return Values">Return Values</a></li><li><a href="#window-frame-semantics" title="Window Frame Semantics">Window Frame Semantics</a></li><li><a href="#performance-notes" title="Performance Notes">Performance Notes</a></li></ul><h3><a href="#modules">Module Items</a></h3><ul class="block"><li><a href="#modules" title="Modules">Modules</a></li><li><a href="#structs" title="Structs">Structs</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In common_<wbr>function::<wbr>scalars</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">common_function</a>::<wbr><a href="../index.html">scalars</a></div><h1>Module <span>anomaly</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/common_function/scalars/anomaly/mod.rs.html#15-90">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Anomaly detection window functions.</p>
+<p>This module provides statistical anomaly scoring functions that operate
+as window UDFs (User Defined Window Functions):</p>
+<ul>
+<li><code>anomaly_score_mad(value)</code> — MAD-based scoring</li>
+<li><code>anomaly_score_iqr(value, k)</code> — IQR-based scoring with configurable fence multiplier</li>
+<li><code>anomaly_score_zscore(value)</code> — Z-Score-based scoring</li>
+</ul>
+<p>These functions return a floating-point anomaly score rather than a boolean,
+allowing users to set their own threshold via <code>WHERE score &gt; N</code>.</p>
+<h3 id="minimum-samples"><a class="doc-anchor" href="#minimum-samples">§</a>Minimum Samples</h3>
+<p>Each function has its own minimum based on statistical validity:</p>
+<div><table><thead><tr><th>Function</th><th>min_samples</th><th>Rationale</th></tr></thead><tbody>
+<tr><td><code>anomaly_score_zscore</code></td><td>2</td><td>stddev requires n &gt;= 2 (aligned with <code>STDDEV_SAMP</code>)</td></tr>
+<tr><td><code>anomaly_score_mad</code></td><td>3</td><td>n &lt;= 2 makes MAD almost always 0, yielding spurious +inf</td></tr>
+<tr><td><code>anomaly_score_iqr</code></td><td>3</td><td>linear-interpolated Q1 != Q3 is possible at n &gt;= 3</td></tr>
+</tbody></table>
+</div><h3 id="return-values"><a class="doc-anchor" href="#return-values">§</a>Return Values</h3><div><table><thead><tr><th>Condition</th><th>zscore</th><th>mad</th><th>iqr</th><th>Result</th></tr></thead><tbody>
+<tr><td>insufficient valid points</td><td>n &lt; 2</td><td>n &lt; 3</td><td>n &lt; 3</td><td><code>NULL</code></td></tr>
+<tr><td>stddev / MAD / IQR = 0, value = center</td><td>distance = 0</td><td>distance = 0</td><td>on fence</td><td><code>0.0</code></td></tr>
+<tr><td>stddev / MAD / IQR = 0, value ≠ center</td><td>distance &gt; 0</td><td>distance &gt; 0</td><td>outside fence</td><td><code>+inf</code></td></tr>
+<tr><td>normal case</td><td>stddev &gt; 0</td><td>MAD &gt; 0</td><td>IQR &gt; 0</td><td>finite positive</td></tr>
+</tbody></table>
+</div><h3 id="window-frame-semantics"><a class="doc-anchor" href="#window-frame-semantics">§</a>Window Frame Semantics</h3>
+<p>The functions score the <strong>current row</strong> in the partition, regardless of
+window frame type. This works correctly for all frame specifications:</p>
+<div class="example-wrap"><pre class="language-sql"><code>-- Trailing window
+anomaly_score_mad(cpu) OVER (ORDER BY ts ROWS 100 PRECEDING)
+-- Centered window
+anomaly_score_mad(cpu) OVER (ORDER BY ts ROWS BETWEEN 50 PRECEDING AND 50 FOLLOWING)</code></pre></div>
+<p>Internally, a row counter tracks which partition row is being evaluated.
+The <code>range</code> parameter determines only which rows participate in computing
+the window statistics (median, MAD, IQR, mean, stddev).</p>
+<h3 id="performance-notes"><a class="doc-anchor" href="#performance-notes">§</a>Performance Notes</h3>
+<p>Current implementation uses per-row evaluation with O(N × W) complexity
+where N is the partition size and W is the window size. This is acceptable
+for typical window sizes (W ≤ a few thousand).</p>
+<p>Future optimizations could include:</p>
+<ul>
+<li>Incremental computation using order-statistic trees or two-heap median
+maintenance, reducing to O(N × log W)</li>
+<li>Batch <code>evaluate_all</code> for fixed-size windows</li>
+</ul>
+</div></details><h2 id="modules" class="section-header">Modules<a href="#modules" class="anchor">§</a></h2><dl class="item-table"><dt><a class="mod" href="iqr/index.html" title="mod common_function::scalars::anomaly::iqr">iqr</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd><code>anomaly_score_iqr</code> window function — IQR-based anomaly scoring.</dd><dt><a class="mod" href="mad/index.html" title="mod common_function::scalars::anomaly::mad">mad</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd><code>anomaly_score_mad</code> window function — MAD-based anomaly scoring.</dd><dt><a class="mod" href="utils/index.html" title="mod common_function::scalars::anomaly::utils">utils</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Shared statistical utilities for anomaly detection window functions.</dd><dt><a class="mod" href="zscore/index.html" title="mod common_function::scalars::anomaly::zscore">zscore</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd><code>anomaly_score_zscore</code> window function — Z-Score-based anomaly scoring.</dd></dl><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.AnomalyFunction.html" title="struct common_function::scalars::anomaly::AnomalyFunction">Anomaly<wbr>Function</a></dt></dl></section></div></main></body></html>

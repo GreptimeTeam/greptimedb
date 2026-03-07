@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["compact_region","flush_region","signature"],"macro":["define_region_function"],"struct":["CompactRegionFunction","FlushRegionFunction"]};

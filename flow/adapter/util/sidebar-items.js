@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["column_schemas_to_proto","from_proto_to_data_type","relation_desc_to_column_schemas_with_fallback","table_info_value_to_relation_desc"]};

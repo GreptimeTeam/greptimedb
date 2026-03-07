@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["ACCESS_KEY_ID","ACCESS_KEY_SECRET","ALLOW_ANONYMOUS","BUCKET","ENDPOINT","ROOT"],"fn":["build_oss_backend","is_supported_in_oss"]};

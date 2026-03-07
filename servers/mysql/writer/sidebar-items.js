@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["create_mysql_column","create_mysql_column_def","handle_err","mysql_error_kind","write_output"],"struct":["MysqlResultWriter","QueryResult"]};
