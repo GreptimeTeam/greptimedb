@@ -13,6 +13,8 @@
 // limitations under the License.
 
 mod common;
+/// Translator that converts insert expressions into CSV records.
+pub mod csv;
 pub mod mysql;
 pub mod postgres;
 
