@@ -15,9 +15,11 @@
 use common_error::ext::BoxedError;
 use common_meta::kv_backend::rds::postgres::{
     TlsMode as PgTlsMode, TlsOption as PgTlsOption, create_postgres_tls_connector,
+    is_pg_unix_socket,
 };
+use common_telemetry::warn;
 use deadpool_postgres::{Config, Runtime};
-use servers::tls::TlsOption;
+use servers::tls::{TlsMode, TlsOption};
 use snafu::{OptionExt, ResultExt};
 use tokio_postgres::NoTls;
 
@@ -57,14 +59,35 @@ pub async fn create_postgres_pool(
     cfg.url = Some(postgres_url.clone());
 
     let pool = if let Some(tls_config) = tls_config {
-        let pg_tls_config = convert_tls_option(&tls_config);
-        let tls_connector =
-            create_postgres_tls_connector(&pg_tls_config).map_err(|e| error::Error::Other {
-                source: BoxedError::new(e),
-                location: snafu::Location::new(file!(), line!(), 0),
-            })?;
-        cfg.create_pool(Some(Runtime::Tokio1), tls_connector)
-            .context(error::CreatePostgresPoolSnafu)?
+        let is_unix = is_pg_unix_socket(postgres_url);
+
+        match tls_config.mode {
+            TlsMode::Disable => cfg
+                .create_pool(Some(Runtime::Tokio1), NoTls)
+                .context(error::CreatePostgresPoolSnafu)?,
+            _ if is_unix => {
+                // Unix sockets don't support TLS; they are inherently secure
+                // via filesystem permissions.
+                warn!(
+                    "Connecting via Unix socket, TLS mode {:?} is not applicable, skipping TLS",
+                    tls_config.mode
+                );
+                cfg.create_pool(Some(Runtime::Tokio1), NoTls)
+                    .context(error::CreatePostgresPoolSnafu)?
+            }
+            _ => {
+                // TCP connection with TLS enabled
+                let pg_tls_config = convert_tls_option(&tls_config);
+                let tls_connector = create_postgres_tls_connector(&pg_tls_config).map_err(|e| {
+                    error::Error::Other {
+                        source: BoxedError::new(e),
+                        location: snafu::Location::new(file!(), line!(), 0),
+                    }
+                })?;
+                cfg.create_pool(Some(Runtime::Tokio1), tls_connector)
+                    .context(error::CreatePostgresPoolSnafu)?
+            }
+        }
     } else {
         cfg.create_pool(Some(Runtime::Tokio1), NoTls)
             .context(error::CreatePostgresPoolSnafu)?
