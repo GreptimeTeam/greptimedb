@@ -14,6 +14,7 @@
 
 //! Bulk part encoder/decoder.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -23,7 +24,7 @@ use api::v1::bulk_wal_entry::Body;
 use api::v1::{ArrowIpc, BulkWalEntry, Mutation, OpType, bulk_wal_entry};
 use bytes::Bytes;
 use common_grpc::flight::{FlightDecoder, FlightEncoder, FlightMessage};
-use common_recordbatch::DfRecordBatch as RecordBatch;
+use common_recordbatch::{DfRecordBatch as RecordBatch, recordbatch};
 use common_time::Timestamp;
 use common_time::timestamp::TimeUnit;
 use datatypes::arrow;
@@ -39,7 +40,9 @@ use datatypes::arrow::datatypes::{
 };
 use datatypes::arrow_array::BinaryArray;
 use datatypes::data_type::DataType;
+use datatypes::extension::json::is_json_extension_type;
 use datatypes::prelude::{MutableVector, ScalarVectorBuilder, Vector};
+use datatypes::types::json_type;
 use datatypes::value::{Value, ValueRef};
 use datatypes::vectors::Helper;
 use mito_codec::key_values::{KeyValue, KeyValues, KeyValuesRef};
@@ -62,7 +65,7 @@ use table::predicate::Predicate;
 use crate::error::{
     self, ColumnNotFoundSnafu, ComputeArrowSnafu, ConvertColumnDataTypeSnafu, CreateDefaultSnafu,
     DataTypeMismatchSnafu, EncodeMemtableSnafu, EncodeSnafu, InvalidMetadataSnafu,
-    InvalidRequestSnafu, NewRecordBatchSnafu, Result, UnexpectedSnafu,
+    InvalidRequestSnafu, NewRecordBatchSnafu, RecordBatchSnafu, Result, UnexpectedSnafu,
 };
 use crate::memtable::bulk::context::BulkIterContextRef;
 use crate::memtable::bulk::part_reader::EncodedBulkPartIter;
@@ -436,11 +439,10 @@ impl UnorderedPart {
             return Ok(Some(self.parts[0].batch.clone()));
         }
 
-        // Get the schema from the first part
+        // Get the schema from the first part and normalize JSON2 columns across all parts.
         let schema = self.parts[0].batch.schema();
+        let (schema, batches) = normalize_json_columns_for_concat(schema, &self.parts)?;
 
-        // Concatenate all record batches
-        let batches: Vec<RecordBatch> = self.parts.iter().map(|p| p.batch.clone()).collect();
         let concatenated =
             arrow::compute::concat_batches(&schema, &batches).context(ComputeArrowSnafu)?;
 
@@ -477,6 +479,75 @@ impl UnorderedPart {
         self.max_timestamp = i64::MIN;
         self.max_sequence = 0;
     }
+
+    pub(crate) fn parts(&self) -> &[BulkPart] {
+        &self.parts
+    }
+}
+
+fn normalize_json_columns_for_concat(
+    base_schema: SchemaRef,
+    parts: &[BulkPart],
+) -> Result<(SchemaRef, Vec<RecordBatch>)> {
+    let mut merged_json_types = HashMap::new();
+    for (index, field) in base_schema.fields().iter().enumerate() {
+        if !is_json_extension_type(field) {
+            continue;
+        }
+
+        let merged = parts
+            .iter()
+            .map(|x| Cow::Borrowed(x.batch.schema_ref().field(index).data_type()))
+            .reduce(|acc, e| {
+                Cow::Owned(json_type::merge_as_json_type(acc.as_ref(), e.as_ref()).into_owned())
+            });
+        if let Some(merged) = merged
+            && merged.as_ref() != field.data_type()
+        {
+            merged_json_types.insert(index, merged.into_owned());
+        }
+    }
+
+    if merged_json_types.is_empty() {
+        let batches = parts.iter().map(|p| p.batch.clone()).collect();
+        return Ok((base_schema, batches));
+    }
+
+    let fields = base_schema
+        .fields()
+        .iter()
+        .enumerate()
+        .map(|(index, field)| {
+            if let Some(data_type) = merged_json_types.get(&index) {
+                Arc::new(
+                    Field::new(field.name().clone(), data_type.clone(), field.is_nullable())
+                        .with_metadata(field.metadata().clone()),
+                )
+            } else {
+                field.clone()
+            }
+        })
+        .collect::<Vec<_>>();
+    let normalized_schema = Arc::new(Schema::new(fields));
+
+    let mut normalized_batches = Vec::with_capacity(parts.len());
+    for part in parts {
+        let mut columns = Vec::with_capacity(part.batch.num_columns());
+        for (index, column) in part.batch.columns().iter().enumerate() {
+            if let Some(target_type) = merged_json_types.get(&index) {
+                columns.push(
+                    recordbatch::align_json_array(column, target_type).context(RecordBatchSnafu)?,
+                );
+            } else {
+                columns.push(column.clone());
+            }
+        }
+        let batch = RecordBatch::try_new(normalized_schema.clone(), columns)
+            .context(NewRecordBatchSnafu)?;
+        normalized_batches.push(batch);
+    }
+
+    Ok((normalized_schema, normalized_batches))
 }
 
 /// More accurate estimation of the size of a record batch.
@@ -693,7 +764,8 @@ impl BulkPartConverter {
         columns.push(values.sequence.to_arrow_array());
         columns.push(values.op_type.to_arrow_array());
 
-        let batch = RecordBatch::try_new(self.schema, columns).context(NewRecordBatchSnafu)?;
+        let schema = align_schema_with_json_array(self.schema, &columns);
+        let batch = RecordBatch::try_new(schema, columns).context(NewRecordBatchSnafu)?;
         // Sorts the record batch.
         let batch = sort_primary_key_record_batch(&batch)?;
 
@@ -706,6 +778,26 @@ impl BulkPartConverter {
             raw_data: None,
         })
     }
+}
+
+fn align_schema_with_json_array(schema: SchemaRef, columns: &[ArrayRef]) -> SchemaRef {
+    if schema.fields().iter().all(|f| !is_json_extension_type(f)) {
+        return schema;
+    }
+
+    let mut fields = Vec::with_capacity(schema.fields().len());
+    for (field, array) in schema.fields().iter().zip(columns) {
+        if !is_json_extension_type(field) {
+            fields.push(field.clone());
+            continue;
+        }
+
+        let mut field = field.as_ref().clone();
+        field.set_data_type(array.data_type().clone());
+        fields.push(Arc::new(field));
+    }
+
+    Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()))
 }
 
 fn new_primary_key_column_builders(
@@ -1344,6 +1436,11 @@ impl MultiBulkPart {
     /// Returns the number of series.
     pub fn series_count(&self) -> usize {
         self.series_count
+    }
+
+    /// Returns the schema of batches in this part.
+    pub(crate) fn record_batch_schema(&self) -> Option<SchemaRef> {
+        self.batches.first().map(|batch| batch.schema())
     }
 
     /// Returns the number of record batches in this part.

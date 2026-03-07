@@ -14,6 +14,7 @@
 
 //! Memtables are write buffers for regions.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -59,6 +60,10 @@ pub use bulk::part::{
     BulkPart, BulkPartEncoder, BulkPartMeta, UnorderedPart, record_batch_estimated_size,
     sort_primary_key_record_batch,
 };
+use datatypes::arrow::datatypes::{Schema, SchemaRef};
+use datatypes::extension::json;
+use datatypes::schema::ext::ArrowSchemaExt;
+use datatypes::types::json_type;
 #[cfg(any(test, feature = "test"))]
 pub use time_partition::filter_record_batch;
 
@@ -225,6 +230,55 @@ impl MemtableRanges {
             .max()
             .unwrap_or(0)
     }
+
+    pub(crate) fn schema(&self) -> Option<SchemaRef> {
+        let mut schemas = self
+            .ranges
+            .values()
+            .filter_map(|x| x.record_batch_schema())
+            .collect::<Vec<_>>();
+
+        if schemas.iter().all(|x| !x.has_json_extension_field()) {
+            // If there are no JSON extension fields in any schemas, the invariant must be hold,
+            // that all schemas are same (they are all derived from same region metadata).
+            // So it's ok to return the first one as the schema of the whole memtable ranges.
+            return (!schemas.is_empty()).then(|| schemas.swap_remove(0));
+        }
+
+        // If there are JSON extension fields, by convention, only their concrete data types
+        // (Arrow's Struct) may differ. Other things like the metadata or the fields count are same.
+        // So to produce the final schema, we can solely merge the data types.
+        schemas
+            .split_first()
+            .map(|(first, rest)| merge_json_extension_fields(first, rest))
+    }
+}
+
+pub(crate) fn merge_json_extension_fields(base: &SchemaRef, others: &[SchemaRef]) -> SchemaRef {
+    let mut fields = base.fields().iter().cloned().collect::<Vec<_>>();
+    for (i, field) in fields.iter_mut().enumerate() {
+        if !json::is_json_extension_type(field) {
+            continue;
+        }
+
+        let merged = others
+            .iter()
+            .map(|x| Cow::Borrowed(x.field(i).data_type()))
+            .reduce(|acc, e| {
+                Cow::Owned(json_type::merge_as_json_type(acc.as_ref(), e.as_ref()).into_owned())
+            });
+        if let Some(merged) = merged
+            && field.data_type() != merged.as_ref()
+        {
+            let merged =
+                json_type::merge_as_json_type(field.data_type(), merged.as_ref()).into_owned();
+
+            let mut new = field.as_ref().clone();
+            new.set_data_type(merged);
+            *field = Arc::new(new);
+        }
+    }
+    Arc::new(Schema::new_with_metadata(fields, base.metadata().clone()))
 }
 
 impl IterBuilder for MemtableRanges {
@@ -552,6 +606,11 @@ pub trait IterBuilder: Send + Sync {
         .fail()
     }
 
+    /// Returns the schema of record batches produced by this iterator.
+    fn record_batch_schema(&self) -> Option<SchemaRef> {
+        None
+    }
+
     /// Returns the [EncodedRange] if the range is already encoded into SST.
     fn encoded_range(&self) -> Option<EncodedRange> {
         None
@@ -644,6 +703,11 @@ impl MemtableRange {
     /// Returns whether the iterator is a record batch iterator.
     pub fn is_record_batch(&self) -> bool {
         self.context.builder.is_record_batch()
+    }
+
+    /// Returns the schema of record batches if this range supports record batch iteration.
+    pub fn record_batch_schema(&self) -> Option<SchemaRef> {
+        self.context.builder.record_batch_schema()
     }
 
     pub fn num_rows(&self) -> usize {

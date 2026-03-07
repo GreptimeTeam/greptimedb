@@ -301,12 +301,22 @@ impl<'a, 'b> JsonColumnTypeUpdater<'a, 'b> {
                 .or_insert_with(|| value_type.clone());
 
             if !merged_type.is_include(&value_type) {
-                merged_type.merge(&value_type).map_err(|e| {
+                if column_schema
+                    .data_type
+                    .as_json()
+                    .map(|x| x.is_native_type())
+                    .unwrap_or(false)
+                {
+                    merged_type.merge(&value_type)
+                } else {
+                    merged_type.merge_with_lifting(&value_type)
+                }
+                .map_err(|e| {
                     InvalidInsertRequestSnafu {
                         reason: format!(r#"cannot merge "{value_type}" into "{merged_type}": {e}"#),
                     }
                     .build()
-                })?;
+                })?
             }
         }
         Ok(())
@@ -323,7 +333,17 @@ impl<'a, 'b> JsonColumnTypeUpdater<'a, 'b> {
         for (column_name, merged_type) in self.merged_value_types.iter() {
             let Some(column_type) = insert_columns
                 .iter()
-                .find_map(|x| (&x.name == column_name).then(|| x.data_type.as_json()))
+                .find_map(|x| {
+                    (&x.name == column_name).then(|| {
+                        if let ConcreteDataType::Json(t) = &x.data_type
+                            && t.is_native_type()
+                        {
+                            Some(t)
+                        } else {
+                            None
+                        }
+                    })
+                })
                 .flatten()
             else {
                 continue;

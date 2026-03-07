@@ -450,7 +450,7 @@ where
         let arrow_batch = flat_format.convert_batch(&record_batch)?;
 
         let start = Instant::now();
-        self.maybe_init_writer(flat_format.arrow_schema(), opts)
+        self.maybe_init_writer(arrow_batch.schema_ref(), opts)
             .await?
             .write(&arrow_batch)
             .await

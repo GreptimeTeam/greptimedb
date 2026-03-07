@@ -40,6 +40,7 @@ use crate::sst::{
 ///
 /// This mapper support duplicate and unsorted projection indices.
 /// The output schema is determined by the projection indices.
+#[derive(Clone)]
 pub struct FlatProjectionMapper {
     /// Metadata of the region.
     metadata: RegionMetadataRef,
@@ -235,6 +236,10 @@ impl FlatProjectionMapper {
     /// less columns than [FlatProjectionMapper::column_ids()].
     pub(crate) fn output_schema(&self) -> SchemaRef {
         self.output_schema.clone()
+    }
+
+    pub(crate) fn with_output_schema(&mut self, output_schema: SchemaRef) {
+        self.output_schema = output_schema;
     }
 
     /// Returns an empty [RecordBatch].

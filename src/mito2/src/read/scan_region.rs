@@ -14,6 +14,7 @@
 
 //! Scans a region according to the scan request.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fmt;
 use std::num::NonZeroU64;
@@ -30,6 +31,10 @@ use common_time::range::TimestampRange;
 use datafusion_common::Column;
 use datafusion_expr::Expr;
 use datafusion_expr::utils::expr_to_columns;
+use datatypes::data_type::ConcreteDataType;
+use datatypes::extension::json::is_json_extension_type;
+use datatypes::schema::Schema;
+use datatypes::types::json_type;
 use futures::StreamExt;
 use partition::expr::PartitionExpr;
 use smallvec::SmallVec;
@@ -566,6 +571,8 @@ impl ScanRegion {
         } else {
             input
         };
+
+        let input = maybe_concretize_flat_json2_schema(input);
         Ok(input)
     }
 
@@ -789,6 +796,59 @@ impl ScanRegion {
         .with_vector_index_cache(vector_index_cache);
 
         Some(Arc::new(applier))
+    }
+}
+
+fn maybe_concretize_flat_json2_schema(input: ScanInput) -> ScanInput {
+    let Some(flat_mapper) = input.mapper.as_flat() else {
+        return input;
+    };
+    let output_schema = flat_mapper.output_schema();
+    let output_arrow_schema = output_schema.arrow_schema();
+
+    let mem_schemas: Vec<_> = input
+        .memtables
+        .iter()
+        .filter_map(|mem| mem.record_batch_schema())
+        .collect();
+    if mem_schemas.is_empty() {
+        return input;
+    }
+
+    let mut column_schemas = output_schema.column_schemas().to_vec();
+    let mut changed = false;
+    for (idx, column_schema) in column_schemas.iter_mut().enumerate() {
+        let output_field = &output_arrow_schema.fields()[idx];
+        if !is_json_extension_type(output_field) {
+            continue;
+        }
+
+        let merged = mem_schemas
+            .iter()
+            .filter_map(|x| {
+                x.column_with_name(&column_schema.name)
+                    .map(|(_, f)| Cow::Borrowed(f.data_type()))
+            })
+            .reduce(|acc, e| {
+                Cow::Owned(json_type::merge_as_json_type(acc.as_ref(), e.as_ref()).into_owned())
+            });
+        if let Some(merged) = merged
+            && merged.as_ref() != output_field.data_type()
+        {
+            column_schema.data_type = ConcreteDataType::from_arrow_type(merged.as_ref());
+            changed = true;
+        }
+    }
+
+    if changed {
+        let mut mapper = Arc::unwrap_or_clone(input.mapper);
+        mapper.with_flat_output_schema(Arc::new(Schema::new(column_schemas)));
+        ScanInput {
+            mapper: Arc::new(mapper),
+            ..input
+        }
+    } else {
+        input
     }
 }
 

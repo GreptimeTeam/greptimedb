@@ -917,7 +917,9 @@ impl ValueBuilder {
             size += field_value.data_size();
             if !field_value.is_null() || self.fields[idx].is_some() {
                 if let Some(field) = self.fields[idx].as_mut() {
-                    let _ = field.push(field_value);
+                    field
+                        .push(field_value)
+                        .unwrap_or_else(|e| panic!("Failed to push field value: {e:?}"));
                 } else {
                     let mut mutable_vector =
                         if let ConcreteDataType::String(_) = &self.field_types[idx] {
