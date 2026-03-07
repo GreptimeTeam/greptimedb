@@ -13267,6 +13267,7 @@ name = "table"
 version = "1.0.0-rc.1"
 dependencies = [
  "api",
+ "arc-swap",
  "async-trait",
  "chrono",
  "common-base",

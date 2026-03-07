@@ -21,7 +21,7 @@ use std::time::Instant;
 use async_stream::{stream, try_stream};
 use common_error::ext::BoxedError;
 use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
-use common_telemetry::tracing;
+use common_telemetry::{tracing, warn};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::arrow::record_batch::RecordBatch;
@@ -491,8 +491,15 @@ impl RegionScanner for UnorderedScan {
             .input
             .predicate_group()
             .predicate_without_region();
+        predicate.is_some()
+    }
 
-        predicate.map(|p| !p.exprs().is_empty()).unwrap_or(false)
+    fn update_predicate_with_dyn_filter(
+        &mut self,
+        filter_exprs: Vec<Arc<dyn datafusion::physical_plan::PhysicalExpr>>,
+    ) -> Vec<bool> {
+        self.stream_ctx
+            .update_predicate_with_dyn_filter(filter_exprs)
     }
 
     fn set_logical_region(&mut self, logical_region: bool) {
