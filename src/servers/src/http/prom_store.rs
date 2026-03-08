@@ -209,12 +209,12 @@ pub async fn remote_read(
     state.prom_store_handler.read(request, query_ctx).await
 }
 
-pub fn try_decompress(is_zstd: bool, body: &[u8]) -> Result<Bytes> {
-    Ok(Bytes::from(if is_zstd {
-        zstd_decompress(body)?
+pub fn try_decompress(is_zstd: bool, body: &[u8]) -> Result<Vec<u8>> {
+    if is_zstd {
+        zstd_decompress(body)
     } else {
-        snappy_decompress(body)?
-    }))
+        snappy_decompress(body)
+    }
 }
 
 pub fn decode_remote_write_request(

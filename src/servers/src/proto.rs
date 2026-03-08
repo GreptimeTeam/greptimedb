@@ -17,7 +17,7 @@ use std::collections::btree_map::Entry;
 use std::slice;
 
 use api::prom_store::remote::Sample;
-use bytes::{Buf, Bytes};
+use bytes::Buf;
 use common_query::prelude::{greptime_timestamp, greptime_value};
 use common_telemetry::warn;
 use pipeline::{ContextReq, GreptimePipelineParams, PipelineContext, PipelineDefinition};
@@ -68,7 +68,7 @@ impl PromLabel {
         &mut self,
         tag: u32,
         wire_type: WireType,
-        buf: &mut Bytes,
+        buf: &mut &[u8],
     ) -> Result<(), DecodeError> {
         const STRUCT_NAME: &str = "PromLabel";
         match tag {
@@ -97,7 +97,7 @@ impl PromLabel {
 /// # Safety
 /// Callers must ensure `src` outlives `dst`.
 #[inline(always)]
-fn merge_bytes(dst: &mut RawBytes, src: &mut Bytes) -> Result<(), DecodeError> {
+fn merge_bytes(dst: &mut RawBytes, src: &mut &[u8]) -> Result<(), DecodeError> {
     let len = decode_varint(src)? as usize;
     if len > src.remaining() {
         return Err(DecodeError::new(format!(
@@ -136,7 +136,7 @@ impl PromTimeSeries {
         &mut self,
         tag: u32,
         wire_type: WireType,
-        buf: &mut Bytes,
+        buf: &mut &[u8],
         prom_validation_mode: PromValidationMode,
     ) -> Result<(), DecodeError> {
         const STRUCT_NAME: &str = "PromTimeSeries";
@@ -255,57 +255,72 @@ impl<'a> PromWriteRequest<'a> {
     /// Decode the buf.
     pub fn decode(
         &mut self,
-        mut buf: Bytes,
+        buf: Vec<u8>,
         prom_validation_mode: PromValidationMode,
         processor: &mut PromSeriesProcessor,
     ) -> Result<(), DecodeError> {
         const STRUCT_NAME: &str = "PromWriteRequest";
-        // Keep a reference to the underlying buffer so the decoded raw bytes won't be dangling.
-        self.table_data.set_raw_data(buf.clone());
-        while buf.has_remaining() {
-            let (tag, wire_type) = decode_key(&mut buf)?;
-            assert_eq!(WireType::LengthDelimited, wire_type);
-            match tag {
-                1u32 => {
-                    // decode TimeSeries
-                    let len = decode_varint(&mut buf).map_err(|mut e| {
-                        e.push(STRUCT_NAME, "timeseries");
-                        e
-                    })?;
-                    let remaining = buf.remaining();
-                    if len > remaining as u64 {
-                        return Err(DecodeError::new("buffer underflow"));
-                    }
+        self.table_data.set_raw_data(buf);
+        let mut offset = 0;
+        while offset < self.table_data.raw_data.len() {
+            let mut should_add_to_table_data = false;
+            let mut decoded_timeseries = false;
+            {
+                let raw_data = &self.table_data.raw_data;
+                let buf = &mut &raw_data[offset..];
+                let (tag, wire_type) = decode_key(buf)?;
+                assert_eq!(WireType::LengthDelimited, wire_type);
+                match tag {
+                    1u32 => {
+                        // decode TimeSeries
+                        let len = decode_varint(buf).map_err(|mut e| {
+                            e.push(STRUCT_NAME, "timeseries");
+                            e
+                        })?;
+                        let remaining = buf.remaining();
+                        if len > remaining as u64 {
+                            return Err(DecodeError::new("buffer underflow"));
+                        }
 
-                    let limit = remaining - len as usize;
-                    while buf.remaining() > limit {
-                        let (tag, wire_type) = decode_key(&mut buf)?;
-                        self.series
-                            .merge_field(tag, wire_type, &mut buf, prom_validation_mode)?;
-                    }
-                    if buf.remaining() != limit {
-                        return Err(DecodeError::new("delimited length exceeded"));
-                    }
+                        let limit = remaining - len as usize;
+                        while buf.remaining() > limit {
+                            let (tag, wire_type) = decode_key(buf)?;
+                            self.series
+                                .merge_field(tag, wire_type, buf, prom_validation_mode)?;
+                        }
+                        if buf.remaining() != limit {
+                            return Err(DecodeError::new("delimited length exceeded"));
+                        }
 
-                    if processor.use_pipeline {
-                        processor.consume_series_to_pipeline_map(
-                            &mut self.series,
-                            prom_validation_mode,
-                        )?;
-                    } else {
-                        self.series
-                            .add_to_table_data(&mut self.table_data, prom_validation_mode)?;
-                    }
+                        if processor.use_pipeline {
+                            processor.consume_series_to_pipeline_map(
+                                &mut self.series,
+                                prom_validation_mode,
+                            )?;
+                        } else {
+                            should_add_to_table_data = true;
+                        }
 
-                    // clear state
-                    self.series.labels.clear();
-                    self.series.samples.clear();
+                        decoded_timeseries = true;
+                    }
+                    3u32 => {
+                        // todo(hl): metadata are skipped.
+                        prost::encoding::skip_field(wire_type, tag, buf, Default::default())?;
+                    }
+                    _ => prost::encoding::skip_field(wire_type, tag, buf, Default::default())?,
                 }
-                3u32 => {
-                    // todo(hl): metadata are skipped.
-                    prost::encoding::skip_field(wire_type, tag, &mut buf, Default::default())?;
-                }
-                _ => prost::encoding::skip_field(wire_type, tag, &mut buf, Default::default())?,
+                offset = raw_data.len() - buf.remaining();
+            }
+
+            if should_add_to_table_data {
+                self.series
+                    .add_to_table_data(&mut self.table_data, prom_validation_mode)?;
+            }
+
+            if decoded_timeseries {
+                // clear state
+                self.series.labels.clear();
+                self.series.samples.clear();
             }
         }
 
@@ -465,14 +480,14 @@ mod tests {
 
     fn check_deserialized(
         prom_write_request: &mut PromWriteRequest,
-        data: &Bytes,
+        data: &[u8],
         expected_samples: usize,
         expected_rows: &RowInsertRequests,
     ) {
         let mut p = PromSeriesProcessor::default_processor();
         prom_write_request.clear();
         prom_write_request
-            .decode(data.clone(), PromValidationMode::Strict, &mut p)
+            .decode(data.to_owned(), PromValidationMode::Strict, &mut p)
             .unwrap();
 
         let req = prom_write_request.as_row_insert_requests();
@@ -507,10 +522,10 @@ mod tests {
         let mut d = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         d.push("benches");
         d.push("write_request.pb.data");
-        let data = Bytes::from(std::fs::read(d).unwrap());
+        let data = std::fs::read(d).unwrap();
 
         let (expected_rows, expected_samples) =
-            to_grpc_row_insert_requests(&WriteRequest::decode(data.clone()).unwrap()).unwrap();
+            to_grpc_row_insert_requests(&WriteRequest::decode(&data[..]).unwrap()).unwrap();
 
         let mut prom_write_request = PromWriteRequest::default();
         for _ in 0..3 {
