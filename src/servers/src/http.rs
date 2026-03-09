@@ -59,6 +59,9 @@ use crate::error::{
     OtherSnafu, Result,
 };
 use crate::http::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, influxdb_write_v2};
+use crate::http::loki::{
+    LokiQueryState, loki_label_values, loki_labels, loki_query_range, loki_series,
+};
 use crate::http::otlp::OtlpState;
 use crate::http::prom_store::PromStoreState;
 use crate::http::prometheus::{
@@ -676,6 +679,22 @@ impl HttpServerBuilder {
         );
 
         Self { router, ..self }
+    }
+
+    pub fn with_loki_query_handler(self, sql_handler: ServerSqlQueryHandlerRef) -> Self {
+        let state = LokiQueryState { sql_handler };
+        let query_router = Router::new()
+            .route("/api/v1/labels", routing::get(loki_labels))
+            .route("/api/v1/label/:name/values", routing::get(loki_label_values))
+            .route("/api/v1/query_range", routing::get(loki_query_range))
+            .route("/api/v1/series", routing::get(loki_series))
+            .with_state(state);
+        Self {
+            router: self
+                .router
+                .nest(&format!("/{HTTP_API_VERSION}/loki"), query_router),
+            ..self
+        }
     }
 
     pub fn with_plugins(self, plugins: Plugins) -> Self {

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -22,12 +22,13 @@ use api::v1::{
     RowInsertRequest, Rows, SemanticType, Value as GreptimeValue,
 };
 use axum::Extension;
-use axum::extract::State;
+use axum::extract::{Path, Query, State};
 use axum_extra::TypedHeader;
 use bytes::Bytes;
 use chrono::DateTime;
 use common_query::prelude::greptime_timestamp;
 use common_query::{Output, OutputData};
+use common_recordbatch::RecordBatches;
 use common_telemetry::{error, warn};
 use headers::ContentType;
 use jsonb::Value;
@@ -38,7 +39,8 @@ use pipeline::util::to_pipeline_version;
 use pipeline::{ContextReq, PipelineContext, PipelineDefinition, SchemaInfo};
 use prost::Message;
 use quoted_string::test_utils::TestSpec;
-use session::context::{Channel, QueryContext};
+use serde::{Deserialize, Serialize};
+use session::context::{Channel, QueryContext, QueryContextRef};
 use snafu::{OptionExt, ResultExt, ensure};
 use vrl::value::{KeyString, Value as VrlValue};
 
@@ -56,6 +58,7 @@ use crate::metrics::{
 };
 use crate::pipeline::run_pipeline;
 use crate::prom_store;
+use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
 const LOKI_TABLE_NAME: &str = "loki_logs";
 const LOKI_LINE_COLUMN: &str = "line";
@@ -763,6 +766,422 @@ fn process_labels(
             });
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Loki query API
+// ---------------------------------------------------------------------------
+
+/// State injected into Loki query handlers.
+#[derive(Clone)]
+pub struct LokiQueryState {
+    pub sql_handler: ServerSqlQueryHandlerRef,
+}
+
+// Non-label columns present in every loki_logs table.
+const LOKI_SYSTEM_COLUMNS: &[&str] = &[
+    "greptime_timestamp",
+    "line",
+    "structured_metadata",
+    "greptime_version",
+    "greptime_expire_after_secs",
+];
+
+#[derive(Serialize)]
+struct LokiApiResponse<T: Serialize> {
+    status: &'static str,
+    data: T,
+}
+
+impl<T: Serialize> LokiApiResponse<T> {
+    fn success(data: T) -> axum::Json<Self> {
+        axum::Json(LokiApiResponse {
+            status: "success",
+            data,
+        })
+    }
+}
+
+#[derive(Serialize)]
+struct LokiStream {
+    stream: BTreeMap<String, String>,
+    values: Vec<[String; 2]>, // [ns_timestamp_string, log_line]
+}
+
+#[derive(Serialize)]
+struct LokiQueryRangeData {
+    #[serde(rename = "resultType")]
+    result_type: &'static str,
+    result: Vec<LokiStream>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LokiQueryParams {
+    pub query: Option<String>,
+    pub start: Option<String>,
+    pub end: Option<String>,
+    pub limit: Option<usize>,
+    pub direction: Option<String>,
+    pub db: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LokiLabelParams {
+    pub start: Option<String>,
+    pub end: Option<String>,
+    pub db: Option<String>,
+    #[serde(rename = "match[]")]
+    pub matches: Option<String>,
+}
+
+/// Parse a Loki timestamp string into nanoseconds since epoch.
+/// Accepts: integer nanoseconds, float seconds, RFC3339.
+fn parse_loki_ts(s: &str) -> Option<i64> {
+    if let Ok(ns) = s.parse::<i64>() {
+        // Heuristic: values > 1e18 are already nanoseconds; smaller values are seconds.
+        return Some(if ns > 1_000_000_000_000_000_000 {
+            ns
+        } else {
+            ns * 1_000_000_000
+        });
+    }
+    if let Ok(f) = s.parse::<f64>() {
+        return Some((f * 1e9) as i64);
+    }
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+        return dt.timestamp_nanos_opt();
+    }
+    None
+}
+
+/// Return true if the column name is safe to embed in SQL (alphanumeric + underscore).
+fn is_safe_column_name(name: &str) -> bool {
+    !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Query the label (tag) column names for the given table.
+async fn get_label_columns(
+    sql_handler: &ServerSqlQueryHandlerRef,
+    query_ctx: QueryContextRef,
+    table_name: &str,
+) -> Vec<String> {
+    let schema = query_ctx.current_schema();
+    let sql = format!(
+        "SELECT column_name FROM information_schema.columns \
+         WHERE table_schema = '{}' AND table_name = '{}' \
+         AND greptime_semantic_type = 'TAG' \
+         ORDER BY column_name",
+        schema.replace('\'', "''"),
+        table_name.replace('\'', "''"),
+    );
+    let results = sql_handler.do_query(&sql, query_ctx).await;
+    let mut cols = Vec::new();
+    for result in results {
+        if let Ok(Output {
+            data: OutputData::RecordBatches(rbs),
+            ..
+        }) = result
+        {
+            for batch in rbs.iter() {
+                if let Some(col) = batch.column_by_name("column_name") {
+                    for i in 0..col.len() {
+                        if let Some(v) = col.get(i).and_then(|v| match v {
+                            datatypes::value::Value::String(s) => Some(s.as_utf8().to_string()),
+                            _ => None,
+                        }) {
+                            cols.push(v);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    cols
+}
+
+/// Build time range WHERE clauses; returns `(start_ns, end_ns, where_fragment)`.
+fn time_range_clause(start: Option<&str>, end: Option<&str>) -> (Option<i64>, Option<i64>, String) {
+    let start_ns = start.and_then(parse_loki_ts);
+    let end_ns = end.and_then(parse_loki_ts);
+    let mut clauses = Vec::new();
+    if let Some(s) = start_ns {
+        clauses.push(format!("greptime_timestamp >= {}", s));
+    }
+    if let Some(e) = end_ns {
+        clauses.push(format!("greptime_timestamp <= {}", e));
+    }
+    (start_ns, end_ns, clauses.join(" AND "))
+}
+
+// GET /loki/api/v1/labels
+pub async fn loki_labels(
+    State(state): State<LokiQueryState>,
+    Query(params): Query<LokiLabelParams>,
+    Extension(mut query_ctx): Extension<QueryContext>,
+) -> axum::Json<LokiApiResponse<Vec<String>>> {
+    if let Some(db) = &params.db {
+        let (catalog, schema) =
+            common_catalog::parse_catalog_and_schema_from_db_string(db);
+        query_ctx.set_current_catalog(&catalog);
+        query_ctx.set_current_schema(&schema);
+    }
+    let query_ctx = Arc::new(query_ctx);
+    let cols = get_label_columns(&state.sql_handler, query_ctx, LOKI_TABLE_NAME).await;
+    LokiApiResponse::success(cols)
+}
+
+// GET /loki/api/v1/label/:name/values
+pub async fn loki_label_values(
+    State(state): State<LokiQueryState>,
+    Path(name): Path<String>,
+    Query(params): Query<LokiLabelParams>,
+    Extension(mut query_ctx): Extension<QueryContext>,
+) -> axum::Json<LokiApiResponse<Vec<String>>> {
+    if let Some(db) = &params.db {
+        let (catalog, schema) =
+            common_catalog::parse_catalog_and_schema_from_db_string(db);
+        query_ctx.set_current_catalog(&catalog);
+        query_ctx.set_current_schema(&schema);
+    }
+    if !is_safe_column_name(&name) {
+        return LokiApiResponse::success(vec![]);
+    }
+    let query_ctx = Arc::new(query_ctx);
+    let (_, _, time_clause) = time_range_clause(
+        params.start.as_deref(),
+        params.end.as_deref(),
+    );
+    let where_clause = if time_clause.is_empty() {
+        format!("{} IS NOT NULL", name)
+    } else {
+        format!("{} AND {} IS NOT NULL", time_clause, name)
+    };
+    let sql = format!(
+        "SELECT DISTINCT {} FROM {} WHERE {} ORDER BY {} LIMIT 1000",
+        name, LOKI_TABLE_NAME, where_clause, name,
+    );
+    let results = state.sql_handler.do_query(&sql, query_ctx).await;
+    let mut values = Vec::new();
+    for result in results {
+        if let Ok(Output {
+            data: OutputData::RecordBatches(rbs),
+            ..
+        }) = result
+        {
+            for batch in rbs.iter() {
+                if let Some(col) = batch.column_by_name(&name) {
+                    for i in 0..col.len() {
+                        if let Some(v) = col.get(i).and_then(|v| match v {
+                            datatypes::value::Value::String(s) => Some(s.as_utf8().to_string()),
+                            _ => None,
+                        }) {
+                            values.push(v);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    LokiApiResponse::success(values)
+}
+
+// GET /loki/api/v1/query_range
+pub async fn loki_query_range(
+    State(state): State<LokiQueryState>,
+    Query(params): Query<LokiQueryParams>,
+    Extension(mut query_ctx): Extension<QueryContext>,
+) -> axum::Json<LokiApiResponse<LokiQueryRangeData>> {
+    if let Some(db) = &params.db {
+        let (catalog, schema) =
+            common_catalog::parse_catalog_and_schema_from_db_string(db);
+        query_ctx.set_current_catalog(&catalog);
+        query_ctx.set_current_schema(&schema);
+    }
+    let query_ctx = Arc::new(query_ctx);
+    let limit = params.limit.unwrap_or(100).min(5000);
+    let direction = params.direction.as_deref().unwrap_or("backward");
+    let order = if direction == "forward" { "ASC" } else { "DESC" };
+
+    let (_, _, time_clause) = time_range_clause(
+        params.start.as_deref(),
+        params.end.as_deref(),
+    );
+
+    // Parse label matchers from query, e.g. `{namespace="httpbin"}`
+    let selector_matchers = params
+        .query
+        .as_deref()
+        .and_then(|q| {
+            // Extract the stream selector {…} from the beginning of the LogQL expression.
+            let start = q.find('{')?;
+            let end = q.find('}')?;
+            let selector = &q[start..=end];
+            parse_loki_labels(selector).ok()
+        })
+        .unwrap_or_default();
+
+    // Build WHERE from matchers + time range.
+    let mut where_parts: Vec<String> = selector_matchers
+        .iter()
+        .filter(|(k, _)| is_safe_column_name(k))
+        .map(|(k, v)| format!("{} = '{}'", k, v.replace('\'', "''")))
+        .collect();
+    if !time_clause.is_empty() {
+        where_parts.push(time_clause);
+    }
+    let where_clause = if where_parts.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", where_parts.join(" AND "))
+    };
+
+    // Get label columns so we can group results into streams.
+    let label_cols = get_label_columns(&state.sql_handler, query_ctx.clone(), LOKI_TABLE_NAME).await;
+    let label_select = if label_cols.is_empty() {
+        String::new()
+    } else {
+        format!(", {}", label_cols.join(", "))
+    };
+
+    let sql = format!(
+        "SELECT greptime_timestamp, line{} FROM {} {} ORDER BY greptime_timestamp {} LIMIT {}",
+        label_select, LOKI_TABLE_NAME, where_clause, order, limit,
+    );
+
+    let results = state.sql_handler.do_query(&sql, query_ctx).await;
+
+    // Map from label-combination key → LokiStream
+    let mut streams: HashMap<String, LokiStream> = HashMap::new();
+
+    for result in results {
+        if let Ok(Output {
+            data: OutputData::RecordBatches(rbs),
+            ..
+        }) = result
+        {
+            for batch in rbs.iter() {
+                let ts_col = batch.column_by_name("greptime_timestamp");
+                let line_col = batch.column_by_name("line");
+                let (Some(ts_col), Some(line_col)) = (ts_col, line_col) else {
+                    continue;
+                };
+
+                for i in 0..batch.num_rows() {
+                    // Build label map for this row.
+                    let mut labels: BTreeMap<String, String> = BTreeMap::new();
+                    for lc in &label_cols {
+                        if let Some(col) = batch.column_by_name(lc) {
+                            if let Some(datatypes::value::Value::String(s)) = col.get(i) {
+                                labels.insert(lc.clone(), s.as_utf8().to_string());
+                            }
+                        }
+                    }
+
+                    // Stream key = sorted label pairs.
+                    let stream_key = labels
+                        .iter()
+                        .map(|(k, v)| format!("{}={}", k, v))
+                        .collect::<Vec<_>>()
+                        .join(",");
+
+                    // Timestamp in nanoseconds as string.
+                    let ts_ns = match ts_col.get(i) {
+                        Some(datatypes::value::Value::Timestamp(ts)) => {
+                            ts.value().to_string()
+                        }
+                        _ => continue,
+                    };
+
+                    let line = match line_col.get(i) {
+                        Some(datatypes::value::Value::String(s)) => s.as_utf8().to_string(),
+                        _ => String::new(),
+                    };
+
+                    streams
+                        .entry(stream_key)
+                        .or_insert_with(|| LokiStream {
+                            stream: labels,
+                            values: Vec::new(),
+                        })
+                        .values
+                        .push([ts_ns, line]);
+                }
+            }
+        }
+    }
+
+    let result: Vec<LokiStream> = streams.into_values().collect();
+    LokiApiResponse::success(LokiQueryRangeData {
+        result_type: "streams",
+        result,
+    })
+}
+
+// GET /loki/api/v1/series
+pub async fn loki_series(
+    State(state): State<LokiQueryState>,
+    Query(params): Query<LokiQueryParams>,
+    Extension(mut query_ctx): Extension<QueryContext>,
+) -> axum::Json<LokiApiResponse<Vec<BTreeMap<String, String>>>> {
+    if let Some(db) = &params.db {
+        let (catalog, schema) =
+            common_catalog::parse_catalog_and_schema_from_db_string(db);
+        query_ctx.set_current_catalog(&catalog);
+        query_ctx.set_current_schema(&schema);
+    }
+    let query_ctx = Arc::new(query_ctx);
+
+    let (_, _, time_clause) = time_range_clause(
+        params.start.as_deref(),
+        params.end.as_deref(),
+    );
+
+    let label_cols = get_label_columns(&state.sql_handler, query_ctx.clone(), LOKI_TABLE_NAME).await;
+    if label_cols.is_empty() {
+        return LokiApiResponse::success(vec![]);
+    }
+
+    let where_clause = if time_clause.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", time_clause)
+    };
+
+    let sql = format!(
+        "SELECT DISTINCT {} FROM {} {} LIMIT 1000",
+        label_cols.join(", "),
+        LOKI_TABLE_NAME,
+        where_clause,
+    );
+
+    let results = state.sql_handler.do_query(&sql, query_ctx).await;
+    let mut series: Vec<BTreeMap<String, String>> = Vec::new();
+
+    for result in results {
+        if let Ok(Output {
+            data: OutputData::RecordBatches(rbs),
+            ..
+        }) = result
+        {
+            for batch in rbs.iter() {
+                for i in 0..batch.num_rows() {
+                    let mut row: BTreeMap<String, String> = BTreeMap::new();
+                    for lc in &label_cols {
+                        if let Some(col) = batch.column_by_name(lc) {
+                            if let Some(datatypes::value::Value::String(s)) = col.get(i) {
+                                row.insert(lc.clone(), s.as_utf8().to_string());
+                            }
+                        }
+                    }
+                    if !row.is_empty() {
+                        series.push(row);
+                    }
+                }
+            }
+        }
+    }
+
+    LokiApiResponse::success(series)
 }
 
 #[cfg(test)]

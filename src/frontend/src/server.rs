@@ -109,6 +109,7 @@ where
         let ingest_interceptor = self.plugins.get::<LogIngestInterceptorRef<ServerError>>();
         builder =
             builder.with_log_ingest_handler(self.instance.clone(), validator, ingest_interceptor);
+        builder = builder.with_loki_query_handler(self.instance.clone());
         builder = builder.with_logs_handler(self.instance.clone());
 
         if let Some(user_provider) = self.plugins.get::<UserProviderRef>() {
