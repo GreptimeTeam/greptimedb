@@ -43,11 +43,12 @@ use object_store::{AzblobConnection, GcsConnection, ObjectStore, OssConnection, 
 use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::greptime_handler::GreptimeRequestHandler;
 use servers::grpc::{FlightCompression, GrpcOptions, GrpcServer, GrpcServerConfig};
-use servers::http::{HttpOptions, HttpServerBuilder, PromValidationMode};
+use servers::http::{HttpOptions, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
 use servers::otel_arrow::OtelArrowServiceHandler;
 use servers::postgres::PostgresServer;
+use servers::prom_remote_write::validation::PromValidationMode;
 use servers::query_handler::sql::SqlQueryHandler;
 use servers::request_memory_limiter::ServerMemoryLimiter;
 use servers::server::Server;

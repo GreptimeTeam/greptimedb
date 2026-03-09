@@ -33,7 +33,7 @@ impl Clear for Sample {
 }
 
 #[derive(Default, Clone, Debug)]
-pub struct PromLabel {
+pub(crate) struct PromLabel {
     pub name: RawBytes,
     pub value: RawBytes,
 }
@@ -46,7 +46,7 @@ impl Clear for PromLabel {
 }
 
 impl PromLabel {
-    pub fn merge_field(
+    pub(crate) fn merge_field(
         &mut self,
         tag: u32,
         wire_type: WireType,
@@ -75,7 +75,7 @@ impl PromLabel {
 
 /// Reads a variable-length encoded bytes field from `src` and assign it to `dst`.
 #[inline(always)]
-pub fn merge_bytes(dst: &mut RawBytes, src: &mut &[u8]) -> Result<(), DecodeError> {
+fn merge_bytes(dst: &mut RawBytes, src: &mut &[u8]) -> Result<(), DecodeError> {
     let len = decode_varint(src)? as usize;
     if len > src.remaining() {
         return Err(DecodeError::new(format!(

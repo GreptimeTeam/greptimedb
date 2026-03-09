@@ -17,21 +17,20 @@
 //! This module groups validation, row building, and protobuf decoding for
 //! the Prometheus remote write API.
 
-mod decode;
-mod row_builder;
-mod types;
-mod validation;
+pub mod decode;
+pub(crate) mod row_builder;
+pub(crate) mod types;
+pub mod validation;
 
 use bytes::Bytes;
-pub use decode::{PromSeriesProcessor, PromTimeSeries, PromWriteRequest};
 use lazy_static::lazy_static;
 use object_pool::Pool;
-pub use row_builder::{PromCtx, TableBuilder, TablesBuilder};
 use snafu::ResultExt;
-pub use types::{PromLabel, RawBytes};
-pub use validation::{PromValidationMode, validate_label_name};
 
 use crate::error;
+use crate::prom_remote_write::decode::{PromSeriesProcessor, PromWriteRequest};
+use crate::prom_remote_write::row_builder::TablesBuilder;
+use crate::prom_remote_write::validation::PromValidationMode;
 use crate::prom_store::{snappy_decompress, zstd_decompress};
 
 lazy_static! {

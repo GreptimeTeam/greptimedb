@@ -32,7 +32,9 @@ use vrl::value::{KeyString, Value as VrlValue};
 use crate::error::InternalSnafu;
 use crate::http::event::PipelineIngestRequest;
 use crate::pipeline::run_pipeline;
-use crate::prom_remote_write::{PromCtx, PromLabel, PromValidationMode, TablesBuilder};
+use crate::prom_remote_write::row_builder::{PromCtx, TablesBuilder};
+use crate::prom_remote_write::types::PromLabel;
+use crate::prom_remote_write::validation::PromValidationMode;
 #[allow(deprecated)]
 use crate::prom_store::{
     DATABASE_LABEL_ALT_BYTES, DATABASE_LABEL_BYTES, METRIC_NAME_LABEL_BYTES,
@@ -42,13 +44,13 @@ use crate::query_handler::PipelineHandlerRef;
 use crate::repeated_field::{Clear, RepeatedField};
 
 #[derive(Default, Debug)]
-pub struct PromTimeSeries {
-    pub table_name: String,
-    pub schema: Option<String>,
-    pub physical_table: Option<String>,
+pub(crate) struct PromTimeSeries {
+    pub(crate) table_name: String,
+    pub(crate) schema: Option<String>,
+    pub(crate) physical_table: Option<String>,
 
-    pub labels: RepeatedField<PromLabel>,
-    pub samples: RepeatedField<Sample>,
+    pub(crate) labels: RepeatedField<PromLabel>,
+    pub(crate) samples: RepeatedField<Sample>,
 }
 
 impl Clear for PromTimeSeries {

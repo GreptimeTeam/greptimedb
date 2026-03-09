@@ -112,7 +112,7 @@ pub mod utils;
 use result::HttpOutputWriter;
 pub(crate) use timeout::DynamicTimeoutLayer;
 
-pub use crate::prom_remote_write::PromValidationMode;
+use crate::prom_remote_write::validation::PromValidationMode;
 
 mod hints;
 mod read_preference;
@@ -1291,7 +1291,7 @@ mod test {
 
     use super::*;
     use crate::http::test_helpers::TestClient;
-    use crate::prom_remote_write::validate_label_name;
+    use crate::prom_remote_write::validation::validate_label_name;
     use crate::query_handler::sql::SqlQueryHandler;
 
     struct DummyInstance {
