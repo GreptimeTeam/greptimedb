@@ -339,6 +339,15 @@ impl CompactionScheduler {
         has_pending
     }
 
+    pub(crate) fn is_compacting(&self, region_id: RegionId) -> bool {
+        let is_compacting = self.region_status.contains_key(&region_id);
+        debug!(
+            "Checked compaction status for region: {}, is_compacting: {}",
+            region_id, is_compacting
+        );
+        is_compacting
+    }
+
     /// Schedules a compaction request.
     ///
     /// If the region has nothing to compact, it removes the region from the status map.

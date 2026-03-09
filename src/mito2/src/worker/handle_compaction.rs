@@ -23,6 +23,7 @@ use crate::metrics::COMPACTION_REQUEST_COUNT;
 use crate::region::MitoRegionRef;
 use crate::request::{
     BuildIndexRequest, CompactionFailed, CompactionFinished, OnFailure, OptionOutputTx,
+    WorkerRequest, WorkerRequestWithTime,
 };
 use crate::sst::index::IndexBuildType;
 use crate::worker::RegionWorkerLoop;
@@ -105,7 +106,7 @@ impl<S> RegionWorkerLoop<S> {
         }
 
         // Schedule next compaction if necessary.
-        let _pending_ddls = self
+        let mut pending_ddls = self
             .compaction_scheduler
             .on_compaction_finished(
                 region_id,
@@ -113,6 +114,18 @@ impl<S> RegionWorkerLoop<S> {
                 self.schema_metadata_manager.clone(),
             )
             .await;
+        for ddl in pending_ddls.drain(..) {
+            if let Err(res) = self
+                .sender
+                .send(WorkerRequestWithTime::new(WorkerRequest::Ddl(ddl)))
+                .await
+            {
+                warn!(
+                    "Failed to send pending DDL requests after compaction finished, region_id: {}, res: {:?}",
+                    region_id, res
+                );
+            }
+        }
     }
 
     /// When compaction fails, we simply log the error.

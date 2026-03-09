@@ -98,6 +98,19 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         }
 
+        if self.compaction_scheduler.is_compacting(region_id) {
+            self.compaction_scheduler
+                .add_ddl_request_to_pending(SenderDdlRequest {
+                    region_id,
+                    sender,
+                    request: DdlRequest::EnterStaging(EnterStagingRequest {
+                        partition_directive,
+                    }),
+                });
+
+            return;
+        }
+
         self.handle_enter_staging(region, partition_directive, sender);
     }
 
