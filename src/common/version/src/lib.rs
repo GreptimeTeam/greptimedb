@@ -16,7 +16,9 @@
 
 use std::fmt::Display;
 
-shadow_rs::shadow!(build);
+mod build {
+    include!(concat!(env!("OUT_DIR"), "/shadow.rs"));
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct BuildInfo {
