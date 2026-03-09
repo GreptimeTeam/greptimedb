@@ -1722,8 +1722,8 @@ impl PredicateGroup {
 
     /// Updates dynamic filters in the predicates.
     pub(crate) fn update_dyn_filters(&self, dyn_filters: Vec<Arc<DynamicFilterPhysicalExpr>>) {
-        self.predicate_all.set_dyn_filters(dyn_filters.clone());
-        self.predicate_without_region.set_dyn_filters(dyn_filters);
+        self.predicate_all.add_dyn_filters(dyn_filters.clone());
+        self.predicate_without_region.add_dyn_filters(dyn_filters);
     }
 
     /// Returns the region partition expr from metadata, if any.

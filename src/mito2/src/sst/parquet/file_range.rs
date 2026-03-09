@@ -148,7 +148,7 @@ impl FileRange {
         );
 
         // not costly to create a predicate here since dynamic filters are wrapped in Arc
-        let pred = Predicate::new(vec![]).with_dyn_filters(self.context.base.dyn_filters.clone());
+        let pred = Predicate::with_dyn_filters(vec![], self.context.base.dyn_filters.clone());
 
         pred.prune_with_stats(&stats, prune_schema.arrow_schema())
             .first()

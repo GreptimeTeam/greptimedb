@@ -75,20 +75,27 @@ impl Predicate {
         }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.exprs.is_empty() && self.dyn_filters.load().is_empty()
-    }
-
-    /// Sets the dynamic filter physical exprs.
-    pub fn with_dyn_filters(self, dyn_filters: Vec<Arc<DynamicFilterPhysicalExpr>>) -> Self {
+    pub fn with_dyn_filters(
+        exprs: Vec<Expr>,
+        dyn_filters: Vec<Arc<DynamicFilterPhysicalExpr>>,
+    ) -> Self {
         Self {
-            exprs: self.exprs,
+            exprs: Arc::new(exprs),
             dyn_filters: Arc::new(ArcSwap::new(Arc::new(dyn_filters))),
         }
     }
 
-    pub fn set_dyn_filters(&self, dyn_filters: Vec<Arc<DynamicFilterPhysicalExpr>>) {
-        self.dyn_filters.store(Arc::new(dyn_filters));
+    pub fn is_empty(&self) -> bool {
+        self.exprs.is_empty() && self.dyn_filters.load().is_empty()
+    }
+
+    /// Adds dynamic filter physical exprs to the existing list.
+    pub fn add_dyn_filters(&self, dyn_filters: Vec<Arc<DynamicFilterPhysicalExpr>>) {
+        self.dyn_filters.rcu(|existing| {
+            let mut new_filters = existing.as_ref().clone();
+            new_filters.extend(dyn_filters.clone());
+            Arc::new(new_filters)
+        });
     }
 
     /// Returns the logical exprs.
