@@ -65,7 +65,7 @@ use crate::read::{BoxedBatchReader, BoxedRecordBatchStream};
 use crate::region::options::{MergeMode, RegionOptions};
 use crate::region::version::VersionControlRef;
 use crate::region::{ManifestContextRef, RegionLeaderState, RegionRoleState};
-use crate::request::{OptionOutputTx, OutputTx, WorkerRequestWithTime};
+use crate::request::{OptionOutputTx, OutputTx, SenderDdlRequest, WorkerRequestWithTime};
 use crate::schedule::remote_job_scheduler::{
     CompactionJob, DefaultNotifier, RemoteJob, RemoteJobSchedulerRef,
 };
@@ -301,6 +301,30 @@ impl CompactionScheduler {
             region_id,
             Arc::new(RegionTruncatedSnafu { region_id }.build()),
         );
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn add_ddl_request_to_pending(&mut self, request: SenderDdlRequest) {
+        debug!(
+            "Added pending DDL request for region: {}, ddl: {:?}",
+            request.region_id, request.request
+        );
+        let status = self.region_status.get_mut(&request.region_id).unwrap();
+        status.pending_ddl_requests.push(request);
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn has_pending_ddls(&self, region_id: RegionId) -> bool {
+        let has_pending = self
+            .region_status
+            .get(&region_id)
+            .map(|status| !status.pending_ddl_requests.is_empty())
+            .unwrap_or(false);
+        debug!(
+            "Checked pending DDL requests for region: {}, has_pending: {}",
+            region_id, has_pending
+        );
+        has_pending
     }
 
     /// Schedules a compaction request.
@@ -597,6 +621,8 @@ struct CompactionStatus {
     waiters: Vec<OutputTx>,
     /// Pending compactions that are supposed to run as soon as current compaction task finished.
     pending_request: Option<PendingCompaction>,
+    /// Pneding DDL requests that should run when compaction is done.
+    pending_ddl_requests: Vec<SenderDdlRequest>,
 }
 
 impl CompactionStatus {
@@ -612,6 +638,7 @@ impl CompactionStatus {
             access_layer,
             waiters: Vec::new(),
             pending_request: None,
+            pending_ddl_requests: Vec::new(),
         }
     }
 
@@ -643,6 +670,14 @@ impl CompactionStatus {
         if let Some(pending_compaction) = self.pending_request {
             pending_compaction
                 .waiter
+                .send(Err(err.clone()).context(CompactRegionSnafu {
+                    region_id: self.region_id,
+                }));
+        }
+
+        for pending_ddl in self.pending_ddl_requests {
+            pending_ddl
+                .sender
                 .send(Err(err.clone()).context(CompactRegionSnafu {
                     region_id: self.region_id,
                 }));
@@ -869,6 +904,7 @@ struct PendingCompaction {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches::assert_matches;
     use std::time::Duration;
 
     use api::v1::region::StrictWindow;
@@ -1404,6 +1440,70 @@ mod tests {
         let result = rx.await.unwrap();
         assert_eq!(result.unwrap(), 0); // is there a better way to check this?
         assert_eq!(0, scheduler.region_status.len());
+    }
+
+    #[tokio::test]
+    async fn test_add_ddl_request_to_pending() {
+        let env = SchedulerEnv::new().await;
+        let (tx, _rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_compaction_scheduler(tx);
+        let builder = VersionControlBuilder::new();
+        let version_control = Arc::new(builder.build());
+        let region_id = builder.region_id();
+
+        scheduler.region_status.insert(
+            region_id,
+            CompactionStatus::new(region_id, version_control, env.access_layer.clone()),
+        );
+
+        let (output_tx, _output_rx) = oneshot::channel();
+        scheduler.add_ddl_request_to_pending(SenderDdlRequest {
+            region_id,
+            sender: OptionOutputTx::from(output_tx),
+            request: crate::request::DdlRequest::EnterStaging(
+                store_api::region_request::EnterStagingRequest {
+                    partition_directive:
+                        store_api::region_request::StagingPartitionDirective::RejectAllWrites,
+                },
+            ),
+        });
+
+        assert!(scheduler.has_pending_ddls(region_id));
+    }
+
+    #[tokio::test]
+    async fn test_pending_ddl_request_failed_on_compaction_failed() {
+        let env = SchedulerEnv::new().await;
+        let (tx, _rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_compaction_scheduler(tx);
+        let builder = VersionControlBuilder::new();
+        let version_control = Arc::new(builder.build());
+        let region_id = builder.region_id();
+
+        scheduler.region_status.insert(
+            region_id,
+            CompactionStatus::new(region_id, version_control, env.access_layer.clone()),
+        );
+
+        let (output_tx, output_rx) = oneshot::channel();
+        scheduler.add_ddl_request_to_pending(SenderDdlRequest {
+            region_id,
+            sender: OptionOutputTx::from(output_tx),
+            request: crate::request::DdlRequest::EnterStaging(
+                store_api::region_request::EnterStagingRequest {
+                    partition_directive:
+                        store_api::region_request::StagingPartitionDirective::RejectAllWrites,
+                },
+            ),
+        });
+
+        assert!(scheduler.has_pending_ddls(region_id));
+        scheduler
+            .on_compaction_failed(region_id, Arc::new(RegionClosedSnafu { region_id }.build()));
+
+        assert!(!scheduler.has_pending_ddls(region_id));
+        let result = output_rx.await.unwrap();
+        assert_matches!(result, Err(_));
     }
 
     #[tokio::test]
