@@ -25,8 +25,6 @@ use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
 use common_telemetry::tracing;
 use hyper::HeaderMap;
-use lazy_static::lazy_static;
-use object_pool::Pool;
 use pipeline::PipelineDefinition;
 use pipeline::util::to_pipeline_version;
 use prost::Message;
@@ -38,17 +36,12 @@ use crate::error::{self, InternalSnafu, PipelineSnafu, Result};
 use crate::http::PromValidationMode;
 use crate::http::extractor::PipelineInfo;
 use crate::http::header::{GREPTIME_DB_HEADER_METRICS, write_cost_header_map};
-use crate::prom_remote_write::TablesBuilder;
-use crate::prom_store::{extract_schema_from_read_request, snappy_decompress, zstd_decompress};
-use crate::proto::{PromSeriesProcessor, PromWriteRequest};
+use crate::prom_remote_write::decode_remote_write_request;
+use crate::prom_store::{extract_schema_from_read_request, snappy_decompress};
+use crate::proto::PromSeriesProcessor;
 use crate::query_handler::{PipelineHandlerRef, PromStoreProtocolHandlerRef, PromStoreResponse};
 
 pub const PHYSICAL_TABLE_PARAM: &str = "physical_table";
-lazy_static! {
-    static ref PROM_WRITE_REQUEST_POOL: Pool<PromWriteRequest<'static>> =
-        Pool::new(256, PromWriteRequest::default);
-}
-
 pub const DEFAULT_ENCODING: &str = "snappy";
 pub const VM_ENCODING: &str = "zstd";
 pub const VM_PROTO_VERSION: &str = "1";
@@ -207,43 +200,6 @@ pub async fn remote_read(
         .start_timer();
 
     state.prom_store_handler.read(request, query_ctx).await
-}
-
-pub fn try_decompress(is_zstd: bool, body: &[u8]) -> Result<Vec<u8>> {
-    if is_zstd {
-        zstd_decompress(body)
-    } else {
-        snappy_decompress(body)
-    }
-}
-
-pub fn decode_remote_write_request(
-    is_zstd: bool,
-    body: Bytes,
-    prom_validation_mode: PromValidationMode,
-    processor: &mut PromSeriesProcessor,
-) -> Result<TablesBuilder<'static>> {
-    let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_DECODE_ELAPSED.start_timer();
-
-    // due to vmagent's limitation, there is a chance that vmagent is
-    // sending content type wrong so we have to apply a fallback with decoding
-    // the content in another method.
-    //
-    // see https://github.com/VictoriaMetrics/VictoriaMetrics/issues/5301
-    // see https://github.com/GreptimeTeam/greptimedb/issues/3929
-    let buf = if let Ok(buf) = try_decompress(is_zstd, &body[..]) {
-        buf
-    } else {
-        // fallback to the other compression method
-        try_decompress(!is_zstd, &body[..])?
-    };
-
-    let mut request = PROM_WRITE_REQUEST_POOL.pull(PromWriteRequest::default);
-
-    request
-        .decode(buf, prom_validation_mode, processor)
-        .context(error::DecodePromRemoteRequestSnafu)?;
-    Ok(std::mem::take(&mut request.table_data))
 }
 
 async fn decode_remote_read_request(body: Bytes) -> Result<ReadRequest> {

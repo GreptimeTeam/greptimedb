@@ -68,20 +68,16 @@ pub fn validate_label_name(name: &[u8]) -> bool {
 /// Validation mode for decoding Prometheus remote write requests.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum PromValidationMode {
+    #[default]
     Strict,
     Lossy,
     Unchecked,
 }
 
-impl Default for PromValidationMode {
-    fn default() -> Self {
-        Self::Strict
-    }
-}
-
 impl PromValidationMode {
-    pub fn decode_string(&self, bytes: &[u8]) -> std::result::Result<String, DecodeError> {
+    pub fn decode_string(&self, bytes: &[u8]) -> Result<String, DecodeError> {
         let result = match self {
             PromValidationMode::Strict => match String::from_utf8(bytes.to_vec()) {
                 Ok(s) => s,
@@ -100,10 +96,7 @@ impl PromValidationMode {
         Ok(result)
     }
 
-    pub fn decode_label_name<'a>(
-        &self,
-        bytes: &'a [u8],
-    ) -> std::result::Result<&'a str, DecodeError> {
+    pub fn decode_label_name<'a>(&self, bytes: &'a [u8]) -> Result<&'a str, DecodeError> {
         if !validate_label_name(bytes) {
             common_telemetry::debug!(
                 "Invalid Prometheus label name: {:?}, must match [a-zA-Z_][a-zA-Z0-9_]*",

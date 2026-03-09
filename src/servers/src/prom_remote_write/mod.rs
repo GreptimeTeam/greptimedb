@@ -22,7 +22,56 @@ mod row_builder;
 mod types;
 mod validation;
 
+use bytes::Bytes;
 pub use decode::{PromSeriesProcessor, PromTimeSeries, PromWriteRequest};
+use lazy_static::lazy_static;
+use object_pool::Pool;
 pub use row_builder::{PromCtx, TableBuilder, TablesBuilder};
+use snafu::ResultExt;
 pub use types::{PromLabel, RawBytes};
 pub use validation::{PromValidationMode, validate_label_name};
+
+use crate::error;
+use crate::prom_store::{snappy_decompress, zstd_decompress};
+
+lazy_static! {
+    static ref PROM_WRITE_REQUEST_POOL: Pool<PromWriteRequest<'static>> =
+        Pool::new(256, PromWriteRequest::default);
+}
+
+pub fn try_decompress(is_zstd: bool, body: &[u8]) -> crate::error::Result<Vec<u8>> {
+    if is_zstd {
+        zstd_decompress(body)
+    } else {
+        snappy_decompress(body)
+    }
+}
+
+pub fn decode_remote_write_request(
+    is_zstd: bool,
+    body: Bytes,
+    prom_validation_mode: PromValidationMode,
+    processor: &mut PromSeriesProcessor,
+) -> crate::error::Result<TablesBuilder<'static>> {
+    let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_DECODE_ELAPSED.start_timer();
+
+    // due to vmagent's limitation, there is a chance that vmagent is
+    // sending content type wrong so we have to apply a fallback with decoding
+    // the content in another method.
+    //
+    // see https://github.com/VictoriaMetrics/VictoriaMetrics/issues/5301
+    // see https://github.com/GreptimeTeam/greptimedb/issues/3929
+    let buf = if let Ok(buf) = try_decompress(is_zstd, &body[..]) {
+        buf
+    } else {
+        // fallback to the other compression method
+        try_decompress(!is_zstd, &body[..])?
+    };
+
+    let mut request = PROM_WRITE_REQUEST_POOL.pull(PromWriteRequest::default);
+
+    request
+        .decode(buf, prom_validation_mode, processor)
+        .context(error::DecodePromRemoteRequestSnafu)?;
+    Ok(std::mem::take(&mut request.table_data))
+}
