@@ -315,7 +315,6 @@ impl CompactionScheduler {
         );
     }
 
-    #[allow(dead_code)]
     pub(crate) fn add_ddl_request_to_pending(&mut self, request: SenderDdlRequest) {
         debug!(
             "Added pending DDL request for region: {}, ddl: {:?}",
@@ -325,7 +324,6 @@ impl CompactionScheduler {
         status.pending_ddl_requests.push(request);
     }
 
-    #[allow(dead_code)]
     pub(crate) fn has_pending_ddls(&self, region_id: RegionId) -> bool {
         let has_pending = self
             .region_status
@@ -642,7 +640,7 @@ struct CompactionStatus {
     waiters: Vec<OutputTx>,
     /// Pending compactions that are supposed to run as soon as current compaction task finished.
     pending_request: Option<PendingCompaction>,
-    /// Pneding DDL requests that should run when compaction is done.
+    /// Pending DDL requests that should run when compaction is done.
     pending_ddl_requests: Vec<SenderDdlRequest>,
 }
 
