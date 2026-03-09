@@ -1528,6 +1528,108 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_pending_ddl_request_failed_on_region_closed() {
+        let env = SchedulerEnv::new().await;
+        let (tx, _rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_compaction_scheduler(tx);
+        let builder = VersionControlBuilder::new();
+        let version_control = Arc::new(builder.build());
+        let region_id = builder.region_id();
+
+        scheduler.region_status.insert(
+            region_id,
+            CompactionStatus::new(region_id, version_control, env.access_layer.clone()),
+        );
+
+        let (output_tx, output_rx) = oneshot::channel();
+        scheduler.add_ddl_request_to_pending(SenderDdlRequest {
+            region_id,
+            sender: OptionOutputTx::from(output_tx),
+            request: crate::request::DdlRequest::EnterStaging(
+                store_api::region_request::EnterStagingRequest {
+                    partition_directive:
+                        store_api::region_request::StagingPartitionDirective::RejectAllWrites,
+                },
+            ),
+        });
+
+        assert!(scheduler.has_pending_ddls(region_id));
+        scheduler.on_region_closed(region_id);
+
+        assert!(!scheduler.has_pending_ddls(region_id));
+        let result = output_rx.await.unwrap();
+        assert_matches!(result, Err(_));
+    }
+
+    #[tokio::test]
+    async fn test_pending_ddl_request_failed_on_region_dropped() {
+        let env = SchedulerEnv::new().await;
+        let (tx, _rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_compaction_scheduler(tx);
+        let builder = VersionControlBuilder::new();
+        let version_control = Arc::new(builder.build());
+        let region_id = builder.region_id();
+
+        scheduler.region_status.insert(
+            region_id,
+            CompactionStatus::new(region_id, version_control, env.access_layer.clone()),
+        );
+
+        let (output_tx, output_rx) = oneshot::channel();
+        scheduler.add_ddl_request_to_pending(SenderDdlRequest {
+            region_id,
+            sender: OptionOutputTx::from(output_tx),
+            request: crate::request::DdlRequest::EnterStaging(
+                store_api::region_request::EnterStagingRequest {
+                    partition_directive:
+                        store_api::region_request::StagingPartitionDirective::RejectAllWrites,
+                },
+            ),
+        });
+
+        assert!(scheduler.has_pending_ddls(region_id));
+        scheduler.on_region_dropped(region_id);
+
+        assert!(!scheduler.has_pending_ddls(region_id));
+        let result = output_rx.await.unwrap();
+        assert_matches!(result, Err(_));
+    }
+
+    #[tokio::test]
+    async fn test_pending_ddl_request_failed_on_region_truncated() {
+        let env = SchedulerEnv::new().await;
+        let (tx, _rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_compaction_scheduler(tx);
+        let builder = VersionControlBuilder::new();
+        let version_control = Arc::new(builder.build());
+        let region_id = builder.region_id();
+
+        scheduler.region_status.insert(
+            region_id,
+            CompactionStatus::new(region_id, version_control, env.access_layer.clone()),
+        );
+
+        let (output_tx, output_rx) = oneshot::channel();
+        scheduler.add_ddl_request_to_pending(SenderDdlRequest {
+            region_id,
+            sender: OptionOutputTx::from(output_tx),
+            request: crate::request::DdlRequest::EnterStaging(
+                store_api::region_request::EnterStagingRequest {
+                    partition_directive:
+                        store_api::region_request::StagingPartitionDirective::RejectAllWrites,
+                },
+            ),
+        });
+
+        assert!(scheduler.has_pending_ddls(region_id));
+        scheduler.on_region_truncated(region_id);
+
+        assert!(!scheduler.has_pending_ddls(region_id));
+        let result = output_rx.await.unwrap();
+        assert_matches!(result, Err(_));
+    }
+
+    #[tokio::test]
     async fn test_on_compaction_finished_returns_pending_ddl_requests() {
         let job_scheduler = Arc::new(VecScheduler::default());
         let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
