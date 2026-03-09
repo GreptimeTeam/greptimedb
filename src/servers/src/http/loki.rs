@@ -1013,7 +1013,7 @@ pub async fn loki_query(
         result_type: "vector",
         result: vec![LokiVectorSample {
             metric: BTreeMap::new(),
-            value: (now, "1"),
+            value: (now, "2"),
         }],
     })
 }
