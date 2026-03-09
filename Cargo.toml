@@ -211,6 +211,7 @@ url = "2.3"
 rskafka = { git = "https://github.com/GreptimeTeam/rskafka.git", rev = "f5688f83e7da591cda3f2674c2408b4c0ed4ed50", features = [
     "transport-tls",
 ] }
+async-nats = "0.46"
 rstest = "0.25"
 rstest_reuse = "0.7"
 rust_decimal = "1.33"

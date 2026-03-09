@@ -24,6 +24,33 @@ pub struct KafkaProvider {
     pub topic: String,
 }
 
+/// The Provider of NATS JetStream log store.
+///
+/// The `topic` field holds the NATS subject string for this region's WAL
+/// (e.g. `"greptimedb_wal_subject.42"`).  Multiple regions may share a
+/// subject, analogous to the Kafka topic pool.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct NatsProvider {
+    pub topic: String,
+}
+
+impl NatsProvider {
+    pub fn new(topic: String) -> Self {
+        Self { topic }
+    }
+
+    /// Returns the type name.
+    pub fn type_name() -> &'static str {
+        "NatsProvider"
+    }
+}
+
+impl Display for NatsProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.topic)
+    }
+}
+
 impl KafkaProvider {
     pub fn new(topic: String) -> Self {
         Self { topic }
@@ -63,6 +90,8 @@ impl RaftEngineProvider {
 pub enum Provider {
     RaftEngine(RaftEngineProvider),
     Kafka(Arc<KafkaProvider>),
+    /// NATS JetStream remote WAL.
+    Nats(Arc<NatsProvider>),
     Noop,
 }
 
@@ -73,6 +102,7 @@ impl Display for Provider {
                 write!(f, "RaftEngine(region={})", RegionId::from_u64(provider.id))
             }
             Provider::Kafka(provider) => write!(f, "Kafka(topic={})", provider.topic),
+            Provider::Nats(provider) => write!(f, "Nats(topic={})", provider.topic),
             Provider::Noop => write!(f, "Noop"),
         }
     }
@@ -85,7 +115,7 @@ impl Provider {
     /// Currently only used for remote WAL.
     /// For local WAL, the initial flushed entry id is 0.
     pub fn initial_flushed_entry_id<S: LogStore>(&self, wal: &S) -> u64 {
-        if matches!(self, Provider::Kafka(_)) {
+        if matches!(self, Provider::Kafka(_) | Provider::Nats(_)) {
             return wal.latest_entry_id(self).unwrap_or(0);
         }
         0
@@ -99,13 +129,17 @@ impl Provider {
         Provider::Kafka(Arc::new(KafkaProvider { topic }))
     }
 
+    pub fn nats_provider(topic: String) -> Provider {
+        Provider::Nats(Arc::new(NatsProvider { topic }))
+    }
+
     pub fn noop_provider() -> Provider {
         Provider::Noop
     }
 
     /// Returns true if it's remote WAL.
     pub fn is_remote_wal(&self) -> bool {
-        matches!(self, Provider::Kafka(_))
+        matches!(self, Provider::Kafka(_) | Provider::Nats(_))
     }
 
     /// Returns the type name.
@@ -113,6 +147,7 @@ impl Provider {
         match self {
             Provider::RaftEngine(_) => RaftEngineProvider::type_name(),
             Provider::Kafka(_) => KafkaProvider::type_name(),
+            Provider::Nats(_) => NatsProvider::type_name(),
             Provider::Noop => "Noop",
         }
     }
@@ -128,6 +163,14 @@ impl Provider {
     /// Returns the reference of [`KafkaProvider`] if it's the type of [`LogStoreProvider::Kafka`].
     pub fn as_kafka_provider(&self) -> Option<&Arc<KafkaProvider>> {
         if let Provider::Kafka(ns) = self {
+            return Some(ns);
+        }
+        None
+    }
+
+    /// Returns the reference of [`NatsProvider`] if it's the type of [`Provider::Nats`].
+    pub fn as_nats_provider(&self) -> Option<&Arc<NatsProvider>> {
+        if let Provider::Nats(ns) = self {
             return Some(ns);
         }
         None

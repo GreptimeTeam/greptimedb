@@ -223,6 +223,62 @@ overwrite_entry_start_id = false
 # client_cert_path = "/path/to/client_cert"
 # client_key_path = "/path/to/key"
 
+## ── NATS JetStream WAL (provider = "nats_jetstream") ────────────────────────
+## Set `provider = "nats_jetstream"` to use NATS JetStream as the remote WAL.
+## NATS decouples WAL durability from local disk — useful when local storage is
+## unreliable (e.g. iSCSI / NFS-backed volumes).
+##
+## All datanodes in the same cluster must point to the same NATS cluster and
+## use the same `stream_name_prefix`, `subject_prefix`, `num_subjects`, and
+## `cluster_name` values so they share a single JetStream stream.
+##
+## Example:
+# provider = "nats_jetstream"
+#
+## NATS server addresses.
+# servers = ["nats://nats.nats.svc.cluster.local:4222"]
+#
+## Cluster name — combined with `stream_name_prefix` to form the stream name:
+## `"{stream_name_prefix}-{cluster_name}"`.  All datanodes must use the same value.
+# cluster_name = "greptimedb"
+#
+## JetStream stream name prefix.
+# stream_name_prefix = "greptimedb-wal"
+#
+## Subject prefix.  Subjects are named `"{subject_prefix}.{n}"` for n in 0..num_subjects.
+# subject_prefix = "greptimedb_wal_subject"
+#
+## Number of subjects (WAL shards).  Analogous to `num_topics` in Kafka WAL.
+# num_subjects = 64
+#
+## JetStream stream replica count.  Use 1 for standalone, 3 for HA clusters.
+# num_replicas = 1
+#
+## Maximum bytes per publish batch.
+# max_batch_bytes = "1MB"
+#
+## Timeout waiting for a publish acknowledgement from NATS.
+# publish_ack_timeout = "5s"
+#
+## Maximum wait when fetching WAL entries from a pull consumer.
+# consumer_wait_timeout = "500ms"
+#
+## How often the background worker purges obsolete WAL entries.
+# purge_interval = "30s"
+#
+## Optional authentication — choose one method:
+# nkey_seed = "SUAOB..."          # NKey seed
+# credentials_file = "/etc/nats/user.creds"  # .creds file
+# username = "greptimedb"
+# password = "secret"
+#
+## Optional TLS:
+# [wal.tls]
+# ca_cert_path = "/etc/ssl/certs/nats-ca.pem"
+# client_cert_path = "/etc/ssl/certs/nats-client.pem"
+# client_key_path = "/etc/ssl/private/nats-client-key.pem"
+## ─────────────────────────────────────────────────────────────────────────────
+
 # Example of using S3 as the storage.
 # [storage]
 # type = "S3"

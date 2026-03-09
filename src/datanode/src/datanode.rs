@@ -33,10 +33,12 @@ use common_stat::ResourceStatImpl;
 use common_telemetry::{error, info, warn};
 use common_wal::config::DatanodeWalConfig;
 use common_wal::config::kafka::DatanodeKafkaConfig;
+use common_wal::config::nats::DatanodeNatsConfig;
 use common_wal::config::raft_engine::RaftEngineConfig;
 use file_engine::engine::FileRegionEngine;
 use log_store::kafka::log_store::KafkaLogStore;
 use log_store::kafka::{GlobalIndexCollector, default_index_file};
+use log_store::nats::NatsLogStore;
 use log_store::noop::log_store::NoopLogStore;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use meta_client::MetaClientRef;
@@ -591,6 +593,27 @@ impl DatanodeBuilder {
 
                 builder.try_build().await.context(BuildMitoEngineSnafu)?
             }
+            DatanodeWalConfig::NatsJetstream(nats_config) => {
+                let log_store = Self::build_nats_log_store(nats_config).await?;
+                let builder = MitoEngineBuilder::new(
+                    &opts.storage.data_home,
+                    config,
+                    log_store,
+                    object_store_manager,
+                    schema_metadata_manager,
+                    file_ref_manager,
+                    partition_expr_fetcher,
+                    plugins,
+                    opts.max_concurrent_queries,
+                );
+
+                #[cfg(feature = "enterprise")]
+                let builder = builder.with_extension_range_provider_factory(
+                    self.extension_range_provider_factory.take(),
+                );
+
+                builder.try_build().await.context(BuildMitoEngineSnafu)?
+            }
             DatanodeWalConfig::Noop => {
                 let log_store = Arc::new(NoopLogStore);
 
@@ -650,6 +673,14 @@ impl DatanodeBuilder {
         global_index_collector: Option<GlobalIndexCollector>,
     ) -> Result<Arc<KafkaLogStore>> {
         KafkaLogStore::try_new(config, global_index_collector)
+            .await
+            .map_err(Box::new)
+            .context(OpenLogStoreSnafu)
+            .map(Arc::new)
+    }
+
+    async fn build_nats_log_store(config: &DatanodeNatsConfig) -> Result<Arc<NatsLogStore>> {
+        NatsLogStore::try_new(config)
             .await
             .map_err(Box::new)
             .context(OpenLogStoreSnafu)

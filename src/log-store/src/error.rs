@@ -306,6 +306,94 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    // -----------------------------------------------------------------------
+    // NATS JetStream WAL errors
+    // -----------------------------------------------------------------------
+
+    #[snafu(display("Failed to connect to NATS servers: {:?}", servers))]
+    ConnectNats {
+        servers: Vec<String>,
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: async_nats::ConnectError,
+    },
+
+    #[snafu(display("Failed to create NATS JetStream stream: {}", stream_name))]
+    CreateNatsStream {
+        stream_name: String,
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: async_nats::jetstream::context::CreateStreamError,
+    },
+
+    #[snafu(display("Failed to get NATS JetStream stream: {}", stream_name))]
+    GetNatsStream {
+        stream_name: String,
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: async_nats::jetstream::context::GetStreamError,
+    },
+
+    #[snafu(display("Failed to publish to NATS subject: {}", subject))]
+    NatsPublish {
+        subject: String,
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: async_nats::error::Error<async_nats::jetstream::context::PublishErrorKind>,
+    },
+
+    #[snafu(display("Failed to await NATS publish ack for subject {}: {}", subject, msg))]
+    NatsPublishAck {
+        subject: String,
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to create NATS pull consumer for subject: {}", subject))]
+    CreateNatsConsumer {
+        subject: String,
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: async_nats::jetstream::stream::ConsumerError,
+    },
+
+    #[snafu(display("Failed to iterate NATS messages for subject: {}", subject))]
+    ConsumeNatsMessages {
+        subject: String,
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: async_nats::jetstream::consumer::StreamError,
+    },
+
+    #[snafu(display("Failed to get last NATS message for subject: {}", subject))]
+    GetLastNatsMessage {
+        subject: String,
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: async_nats::jetstream::stream::LastRawMessageError,
+    },
+
+    #[snafu(display("NATS WAL batch producer is stopped"))]
+    NatsBatchProducerStopped {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to decode NATS WAL record header: {}", msg))]
+    DecodeNatsHeader {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -373,6 +461,16 @@ impl ErrorExt for Error {
             | BatchProduce { error, .. }
             | GetOffset { error, .. }
             | ConsumeRecord { error, .. } => rskafka_client_error_to_status_code(error),
+            // NATS errors
+            ConnectNats { .. }
+            | CreateNatsStream { .. }
+            | GetNatsStream { .. }
+            | NatsPublish { .. }
+            | NatsPublishAck { .. }
+            | CreateNatsConsumer { .. }
+            | ConsumeNatsMessages { .. }
+            | GetLastNatsMessage { .. } => StatusCode::StorageUnavailable,
+            NatsBatchProducerStopped { .. } | DecodeNatsHeader { .. } => StatusCode::Internal,
         }
     }
 }

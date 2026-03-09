@@ -25,6 +25,7 @@ use common_wal::options::WalOptions;
 use futures::StreamExt;
 use futures::future::BoxFuture;
 use log_store::kafka::log_store::KafkaLogStore;
+use log_store::nats::NatsLogStore;
 use log_store::noop::log_store::NoopLogStore;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use object_store::manager::ObjectStoreManagerRef;
@@ -408,6 +409,17 @@ impl RegionOpener {
                     }
                 );
                 Ok(Provider::kafka_provider(options.topic.clone()))
+            }
+            WalOptions::NatsJetstream(options) => {
+                ensure!(
+                    TypeId::of::<NatsLogStore>() == TypeId::of::<S>()
+                        || TypeId::of::<NoopLogStore>() == TypeId::of::<S>(),
+                    error::IncompatibleWalProviderChangeSnafu {
+                        global: "`raft_engine`",
+                        region: "`nats_jetstream`",
+                    }
+                );
+                Ok(Provider::nats_provider(options.topic.clone()))
             }
             WalOptions::Noop => Ok(Provider::noop_provider()),
         }

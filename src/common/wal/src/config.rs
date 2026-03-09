@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod kafka;
+pub mod nats;
 pub mod raft_engine;
 
 use std::time::Duration;
@@ -24,6 +25,7 @@ use crate::config::kafka::common::{
     DEFAULT_FLUSH_TRIGGER_SIZE,
 };
 use crate::config::kafka::{DatanodeKafkaConfig, MetasrvKafkaConfig};
+use crate::config::nats::{DatanodeNatsConfig, MetasrvNatsConfig};
 use crate::config::raft_engine::RaftEngineConfig;
 use crate::error::{Error, UnsupportedWalProviderSnafu};
 
@@ -35,6 +37,8 @@ pub enum MetasrvWalConfig {
     #[default]
     RaftEngine,
     Kafka(MetasrvKafkaConfig),
+    /// NATS JetStream remote WAL.
+    NatsJetstream(MetasrvNatsConfig),
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -44,6 +48,8 @@ pub enum MetasrvWalConfig {
 pub enum DatanodeWalConfig {
     RaftEngine(RaftEngineConfig),
     Kafka(DatanodeKafkaConfig),
+    /// NATS JetStream remote WAL.
+    NatsJetstream(DatanodeNatsConfig),
     Noop,
 }
 
@@ -72,6 +78,9 @@ impl TryFrom<DatanodeWalConfig> for MetasrvWalConfig {
                 // This field won't be used in standalone mode
                 checkpoint_trigger_size: DEFAULT_CHECKPOINT_TRIGGER_SIZE,
             })),
+            DatanodeWalConfig::NatsJetstream(config) => {
+                Ok(Self::NatsJetstream(MetasrvNatsConfig::from(config)))
+            }
             DatanodeWalConfig::Noop => UnsupportedWalProviderSnafu {
                 provider: "noop".to_string(),
             }
@@ -86,6 +95,8 @@ impl MetasrvWalConfig {
         match self {
             MetasrvWalConfig::RaftEngine => false,
             MetasrvWalConfig::Kafka(config) => config.auto_prune_interval > Duration::ZERO,
+            // NATS WAL purge is driven per-datanode by each node's PurgeWorker.
+            MetasrvWalConfig::NatsJetstream(_) => false,
         }
     }
 
@@ -94,6 +105,7 @@ impl MetasrvWalConfig {
         match self {
             MetasrvWalConfig::RaftEngine => None,
             MetasrvWalConfig::Kafka(config) => Some(config),
+            MetasrvWalConfig::NatsJetstream(_) => None,
         }
     }
 }
@@ -107,6 +119,21 @@ impl From<MetasrvWalConfig> for DatanodeWalConfig {
                 kafka_topic: config.kafka_topic,
                 ..Default::default()
             }),
+            MetasrvWalConfig::NatsJetstream(config) => {
+                Self::NatsJetstream(DatanodeNatsConfig {
+                    servers: config.servers,
+                    stream_name_prefix: config.stream_name_prefix,
+                    subject_prefix: config.subject_prefix,
+                    num_subjects: config.num_subjects,
+                    num_replicas: config.num_replicas,
+                    nkey_seed: config.nkey_seed,
+                    credentials_file: config.credentials_file,
+                    username: config.username,
+                    password: config.password,
+                    tls: config.tls,
+                    ..Default::default()
+                })
+            }
         }
     }
 }

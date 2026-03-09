@@ -125,6 +125,14 @@ impl<S: LogStore> Wal<S> {
                     reader, region_id,
                 )))
             }
+            Provider::Nats(_) => {
+                // NATS JetStream handles seek natively via sequence numbers;
+                // no WAL index needed.
+                let reader = LogStoreRawEntryReader::new(self.store.clone());
+                Box::new(LogStoreEntryReader::new(RegionRawEntryReader::new(
+                    reader, region_id,
+                )))
+            }
             Provider::Noop => Box::new(NoopEntryReader),
         }
     }

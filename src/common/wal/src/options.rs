@@ -13,11 +13,13 @@
 // limitations under the License.
 
 pub mod kafka;
+pub mod nats;
 
 use serde::{Deserialize, Serialize};
 use serde_with::with_prefix;
 
 pub use crate::options::kafka::KafkaWalOptions;
+pub use crate::options::nats::NatsWalOptions;
 
 /// An encoded wal options will be wrapped into a (WAL_OPTIONS_KEY, encoded wal options) key-value pair
 /// and inserted into the options of a `RegionCreateRequest`.
@@ -33,10 +35,14 @@ pub enum WalOptions {
     RaftEngine,
     #[serde(with = "kafka_prefix")]
     Kafka(KafkaWalOptions),
+    /// NATS JetStream remote WAL.
+    #[serde(rename = "nats_jetstream", with = "nats_prefix")]
+    NatsJetstream(NatsWalOptions),
     Noop,
 }
 
 with_prefix!(kafka_prefix "wal.kafka.");
+with_prefix!(nats_prefix "wal.nats.");
 
 #[cfg(test)]
 mod tests {
@@ -68,6 +74,18 @@ mod tests {
         let wal_options = WalOptions::Noop;
         let encoded = serde_json::to_string(&wal_options).unwrap();
         let expected = r#"{"wal.provider":"noop"}"#;
+        assert_eq!(&encoded, expected);
+
+        let decoded: WalOptions = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, wal_options);
+
+        // Test serde NATS JetStream wal options.
+        let wal_options = WalOptions::NatsJetstream(NatsWalOptions {
+            topic: "greptimedb_wal_subject.42".to_string(),
+        });
+        let encoded = serde_json::to_string(&wal_options).unwrap();
+        let expected =
+            r#"{"wal.provider":"nats_jetstream","wal.nats.topic":"greptimedb_wal_subject.42"}"#;
         assert_eq!(&encoded, expected);
 
         let decoded: WalOptions = serde_json::from_str(&encoded).unwrap();

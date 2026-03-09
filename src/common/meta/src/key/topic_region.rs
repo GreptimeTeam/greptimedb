@@ -351,6 +351,10 @@ impl TopicRegionManager {
                         let region_id = RegionId::new(table_id, *region_number);
                         Some((region_id, kafka.topic.as_str()))
                     }
+                    Some(WalOptions::NatsJetstream(nats)) => {
+                        let region_id = RegionId::new(table_id, *region_number);
+                        Some((region_id, nats.topic.as_str()))
+                    }
                     Some(WalOptions::RaftEngine) => None,
                     Some(WalOptions::Noop) => None,
                     None => None,

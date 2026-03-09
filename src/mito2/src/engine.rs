@@ -715,7 +715,7 @@ struct EngineInner {
     extension_range_provider_factory: Option<BoxedExtensionRangeProviderFactory>,
 }
 
-type TopicGroupedRegionOpenRequests = HashMap<String, Vec<(RegionId, RegionOpenRequest)>>;
+type TopicGroupedRegionOpenRequests = HashMap<Provider, Vec<(RegionId, RegionOpenRequest)>>;
 
 /// Returns requests([TopicGroupedRegionOpenRequests]) grouped by topic and remaining requests.
 fn prepare_batch_open_requests(
@@ -724,13 +724,19 @@ fn prepare_batch_open_requests(
     TopicGroupedRegionOpenRequests,
     Vec<(RegionId, RegionOpenRequest)>,
 )> {
-    let mut topic_to_regions: HashMap<String, Vec<(RegionId, RegionOpenRequest)>> = HashMap::new();
+    let mut topic_to_regions: HashMap<Provider, Vec<(RegionId, RegionOpenRequest)>> = HashMap::new();
     let mut remaining_regions: Vec<(RegionId, RegionOpenRequest)> = Vec::new();
     for (region_id, request) in requests {
         match parse_wal_options(&request.options).context(SerdeJsonSnafu)? {
             WalOptions::Kafka(options) => {
                 topic_to_regions
-                    .entry(options.topic)
+                    .entry(Provider::kafka_provider(options.topic))
+                    .or_default()
+                    .push((region_id, request));
+            }
+            WalOptions::NatsJetstream(options) => {
+                topic_to_regions
+                    .entry(Provider::nats_provider(options.topic))
                     .or_default()
                     .push((region_id, request));
             }
@@ -778,7 +784,7 @@ impl EngineInner {
 
     async fn open_topic_regions(
         &self,
-        topic: String,
+        provider: Provider,
         region_requests: Vec<(RegionId, RegionOpenRequest)>,
     ) -> Result<Vec<(RegionId, Result<AffectedRows>)>> {
         let now = Instant::now();
@@ -786,7 +792,6 @@ impl EngineInner {
             .iter()
             .map(|(region_id, _)| *region_id)
             .collect::<Vec<_>>();
-        let provider = Provider::kafka_provider(topic);
         let (distributor, entry_receivers) = build_wal_entry_distributor_and_receivers(
             provider.clone(),
             self.wal_raw_entry_reader.clone(),
@@ -813,10 +818,9 @@ impl EngineInner {
 
         let num_failure = responses.iter().filter(|r| r.is_err()).count();
         info!(
-            "Opened {} regions for topic '{}', failures: {}, elapsed: {:?}",
+            "Opened {} regions for provider '{}', failures: {}, elapsed: {:?}",
             region_ids.len() - num_failure,
-            // Safety: provider is kafka provider.
-            provider.as_kafka_provider().unwrap(),
+            provider,
             num_failure,
             now.elapsed(),
         );
@@ -836,12 +840,12 @@ impl EngineInner {
 
         if !topic_to_region_requests.is_empty() {
             let mut tasks = Vec::with_capacity(topic_to_region_requests.len());
-            for (topic, region_requests) in topic_to_region_requests {
+            for (provider, region_requests) in topic_to_region_requests {
                 let semaphore_moved = semaphore.clone();
                 tasks.push(async move {
                     // Safety: semaphore must exist
                     let _permit = semaphore_moved.acquire().await.unwrap();
-                    self.open_topic_regions(topic, region_requests).await
+                    self.open_topic_regions(provider, region_requests).await
                 })
             }
             let r = try_join_all(tasks).await?;

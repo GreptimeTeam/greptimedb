@@ -12,13 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(io_error_more)]
-#![feature(assert_matches)]
+use serde::{Deserialize, Serialize};
 
-pub mod error;
-pub mod kafka;
-pub mod metrics;
-pub mod nats;
-pub mod noop;
-pub mod raft_engine;
-pub mod test_util;
+/// NATS JetStream WAL options allocated to a region.
+///
+/// The `topic` field holds the full NATS subject string for this region's WAL
+/// (e.g. `"greptimedb_wal_subject.42"`).  It is serialised into the region's
+/// `wal_options` map by metasrv and deserialised by the datanode at region open.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NatsWalOptions {
+    /// The NATS subject used as the WAL namespace for this region.
+    pub topic: String,
+}

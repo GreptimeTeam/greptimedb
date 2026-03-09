@@ -211,8 +211,9 @@ tcp_nodelay = true
 
 [wal]
 # Available wal providers:
-# - `raft_engine` (default): there're none raft-engine wal config since metasrv only involves in remote wal currently.
-# - `kafka`: metasrv **have to be** configured with kafka wal config when using kafka wal provider in datanode.
+# - `raft_engine` (default): no raft-engine WAL config needed; metasrv only involves in remote WAL currently.
+# - `kafka`: metasrv **must** be configured with kafka WAL config when datanodes use the kafka provider.
+# - `nats_jetstream`: metasrv **must** be configured with nats_jetstream WAL config when datanodes use it.
 provider = "raft_engine"
 
 ## The broker endpoints of the Kafka cluster.
@@ -297,6 +298,42 @@ create_topic_timeout = "30s"
 # server_ca_cert_path = "/path/to/server_cert"
 # client_cert_path = "/path/to/client_cert"
 # client_key_path = "/path/to/key"
+
+## ── NATS JetStream WAL (provider = "nats_jetstream") ────────────────────────
+## Set `provider = "nats_jetstream"` when datanodes use NATS JetStream WAL.
+## Metasrv does not make NATS calls at region allocation time — subjects are
+## assigned deterministically from the pool without network I/O.
+##
+## `stream_name_prefix`, `subject_prefix`, and `num_subjects` **must** match
+## the values configured on all datanodes.
+##
+## Example:
+# provider = "nats_jetstream"
+#
+## NATS server addresses (used to validate connectivity on startup).
+# servers = ["nats://nats.nats.svc.cluster.local:4222"]
+#
+## Must match the datanodes' `stream_name_prefix`.
+# stream_name_prefix = "greptimedb-wal"
+#
+## Must match the datanodes' `subject_prefix`.
+# subject_prefix = "greptimedb_wal_subject"
+#
+## Must match the datanodes' `num_subjects`.
+# num_subjects = 64
+#
+## Optional authentication:
+# nkey_seed = "SUAOB..."
+# credentials_file = "/etc/nats/metasrv.creds"
+# username = "greptimedb"
+# password = "secret"
+#
+## Optional TLS:
+# [wal.tls]
+# ca_cert_path = "/etc/ssl/certs/nats-ca.pem"
+# client_cert_path = "/etc/ssl/certs/nats-client.pem"
+# client_key_path = "/etc/ssl/private/nats-client-key.pem"
+## ─────────────────────────────────────────────────────────────────────────────
 
 ## Configuration options for the event recorder.
 [event_recorder]

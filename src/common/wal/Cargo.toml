@@ -11,6 +11,7 @@ testing = []
 workspace = true
 
 [dependencies]
+async-nats.workspace = true
 common-base.workspace = true
 common-error.workspace = true
 common-macro.workspace = true

@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_wal::config::MetasrvWalConfig;
-use common_wal::options::{KafkaWalOptions, WAL_OPTIONS_KEY, WalOptions};
+use common_wal::options::{KafkaWalOptions, NatsWalOptions, WAL_OPTIONS_KEY, WalOptions};
 use snafu::{ResultExt, ensure};
 use store_api::storage::{RegionId, RegionNumber};
 
@@ -34,12 +34,49 @@ use crate::leadership_notifier::LeadershipChangeListener;
 pub use crate::wal_provider::topic_creator::{build_kafka_client, build_kafka_topic_creator};
 use crate::wal_provider::topic_pool::KafkaTopicPool;
 
+/// Allocates WAL subjects from a fixed pool for the NATS JetStream WAL backend.
+///
+/// Subjects are named `"{prefix}.{n}"` for `n` in `0..num_subjects`.  Regions
+/// are assigned subjects via round-robin, analogous to the Kafka topic pool.
+/// Unlike Kafka topics, NATS subjects require no pre-creation — they are
+/// virtual and come into existence on first publish.
+#[derive(Debug)]
+pub struct NatsSubjectAllocator {
+    /// Subject name prefix (e.g. `"greptimedb_wal_subject"`).
+    subject_prefix: String,
+    /// Total number of subjects in the pool.
+    num_subjects: u32,
+    /// Atomic counter for round-robin selection.
+    counter: std::sync::atomic::AtomicU32,
+}
+
+impl NatsSubjectAllocator {
+    pub fn new(subject_prefix: String, num_subjects: u32) -> Self {
+        Self {
+            subject_prefix,
+            num_subjects,
+            counter: std::sync::atomic::AtomicU32::new(0),
+        }
+    }
+
+    /// Selects the next subject from the pool using round-robin.
+    fn select_next(&self) -> String {
+        let idx = self
+            .counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            % self.num_subjects;
+        format!("{}.{}", self.subject_prefix, idx)
+    }
+}
+
 /// Provides wal options in region granularity.
 #[derive(Default, Debug)]
 pub enum WalProvider {
     #[default]
     RaftEngine,
     Kafka(KafkaTopicPool),
+    /// NATS JetStream remote WAL.
+    Nats(NatsSubjectAllocator),
 }
 
 /// Arc wrapper of WalProvider.
@@ -70,6 +107,8 @@ impl WalProvider {
         match self {
             Self::RaftEngine => Ok(()),
             Self::Kafka(kafka_topic_manager) => kafka_topic_manager.activate().await,
+            // NATS subjects are virtual — no activation needed.
+            Self::Nats(_) => Ok(()),
         }
     }
 
@@ -88,6 +127,16 @@ impl WalProvider {
                     .map(|topic| {
                         WalOptions::Kafka(KafkaWalOptions {
                             topic: topic.clone(),
+                        })
+                    })
+                    .collect();
+                Ok(options_batch)
+            }
+            WalProvider::Nats(allocator) => {
+                let options_batch = (0..num_regions)
+                    .map(|_| {
+                        WalOptions::NatsJetstream(NatsWalOptions {
+                            topic: allocator.select_next(),
                         })
                     })
                     .collect();
@@ -135,6 +184,13 @@ pub async fn build_wal_provider(
                     .await?;
             let topic_pool = KafkaTopicPool::new(kafka_config, kv_backend, topic_creator);
             Ok(WalProvider::Kafka(topic_pool))
+        }
+        MetasrvWalConfig::NatsJetstream(nats_config) => {
+            // NATS subjects are virtual — no pre-creation or network calls needed.
+            Ok(WalProvider::Nats(NatsSubjectAllocator::new(
+                nats_config.subject_prefix.clone(),
+                nats_config.num_subjects,
+            )))
         }
     }
 }

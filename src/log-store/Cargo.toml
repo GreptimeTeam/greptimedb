@@ -13,6 +13,7 @@ protobuf-build = { version = "0.15", default-features = false, features = [
 workspace = true
 
 [dependencies]
+async-nats.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
