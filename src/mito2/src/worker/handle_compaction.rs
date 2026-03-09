@@ -105,7 +105,8 @@ impl<S> RegionWorkerLoop<S> {
         }
 
         // Schedule next compaction if necessary.
-        self.compaction_scheduler
+        let _pending_ddls = self
+            .compaction_scheduler
             .on_compaction_finished(
                 region_id,
                 &region.manifest_ctx,
