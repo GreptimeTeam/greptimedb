@@ -323,6 +323,10 @@ impl WriteCache {
             .await
     }
 
+    /// Downloads the target file into write cache only when it is not cached.
+    ///
+    /// Returns `Ok(true)` if this call performs a download, or `Ok(false)` if the
+    /// file is already present in write cache and download is skipped.
     pub(crate) async fn download_if_absent(
         &self,
         index_key: IndexKey,
