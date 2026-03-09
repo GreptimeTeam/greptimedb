@@ -685,7 +685,7 @@ impl HttpServerBuilder {
         let state = LokiQueryState { sql_handler };
         let query_router = Router::new()
             .route("/api/v1/labels", routing::get(loki_labels))
-            .route("/api/v1/label/:name/values", routing::get(loki_label_values))
+            .route("/api/v1/label/{name}/values", routing::get(loki_label_values))
             .route("/api/v1/query_range", routing::get(loki_query_range))
             .route("/api/v1/series", routing::get(loki_series))
             .with_state(state);
