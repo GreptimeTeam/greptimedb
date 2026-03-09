@@ -659,7 +659,13 @@ impl TableMetadataManager {
         let mut res = self.kv_backend.txn(txn).await?;
         let mut set = TxnOpGetResponseSet::from(&mut res.responses);
         let table_info_value = TxnOpGetResponseSet::decode_with(table_info_filter)(&mut set)?;
-        let table_route_value = TxnOpGetResponseSet::decode_with(table_route_filter)(&mut set)?;
+        let mut table_route_value = TxnOpGetResponseSet::decode_with(table_route_filter)(&mut set)?;
+        if let Some(table_route_value) = &mut table_route_value {
+            self.table_route_manager()
+                .table_route_storage()
+                .remap_route_address(table_route_value)
+                .await?;
+        }
         Ok((table_info_value, table_route_value))
     }
 
