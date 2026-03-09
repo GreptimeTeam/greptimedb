@@ -12,9 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Re-exports of Prometheus remote write decode types for backward compatibility.
-//! Implementation lives in [crate::prom_remote_write::decode].
+//! Prometheus remote write support.
+//!
+//! This module groups validation, row building, and protobuf decoding for
+//! the Prometheus remote write API.
 
-pub use crate::prom_remote_write::{
-    PromLabel, PromSeriesProcessor, PromTimeSeries, PromWriteRequest, RawBytes,
-};
+mod decode;
+mod row_builder;
+mod types;
+mod validation;
+
+pub use decode::{PromSeriesProcessor, PromTimeSeries, PromWriteRequest};
+pub use row_builder::{PromCtx, TableBuilder, TablesBuilder};
+pub use types::{PromLabel, RawBytes};
+pub use validation::{PromValidationMode, validate_label_name};

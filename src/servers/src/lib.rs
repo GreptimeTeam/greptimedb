@@ -43,7 +43,7 @@ pub mod otel_arrow;
 pub mod otlp;
 mod pipeline;
 pub mod postgres;
-pub mod prom_row_builder;
+pub mod prom_remote_write;
 pub mod prom_store;
 pub mod prometheus;
 pub mod prometheus_handler;

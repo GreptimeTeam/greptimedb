@@ -30,7 +30,7 @@ use axum::{Router, middleware, routing};
 use common_base::Plugins;
 use common_base::readable_size::ReadableSize;
 use common_recordbatch::RecordBatch;
-use common_telemetry::{debug, error, info};
+use common_telemetry::{error, info};
 use common_time::Timestamp;
 use common_time::timestamp::TimeUnit;
 use datatypes::data_type::DataType;
@@ -38,7 +38,6 @@ use datatypes::schema::SchemaRef;
 use event::{LogState, LogValidatorRef};
 use futures::FutureExt;
 use http::{HeaderValue, Method};
-use prost::DecodeError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use snafu::{ResultExt, ensure};
@@ -113,6 +112,8 @@ pub mod utils;
 use result::HttpOutputWriter;
 pub(crate) use timeout::DynamicTimeoutLayer;
 
+pub use crate::prom_remote_write::PromValidationMode;
+
 mod hints;
 mod read_preference;
 #[cfg(any(test, feature = "testing"))]
@@ -163,113 +164,6 @@ pub struct HttpOptions {
     pub cors_allowed_origins: Vec<String>,
 
     pub enable_cors: bool,
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PromValidationMode {
-    /// Force UTF8 validation
-    Strict,
-    /// Allow lossy UTF8 strings
-    Lossy,
-    /// Do not validate UTF8 strings.
-    Unchecked,
-}
-
-/// Returns `true` if the given byte slice is a valid Prometheus label name,
-/// i.e., it matches `[a-zA-Z_][a-zA-Z0-9_]*`.
-///
-/// Since the allowed characters are pure ASCII, valid label names are
-/// also valid UTF-8 by definition.
-const IS_VALID_LABEL_REST: [bool; 256] = {
-    let mut table = [false; 256];
-    let mut i = 0;
-    while i < 256 {
-        let b = i as u8;
-        table[i] = b.is_ascii_alphanumeric() || b == b'_';
-        i += 1;
-    }
-    table
-};
-
-#[inline]
-pub fn validate_label_name(name: &[u8]) -> bool {
-    if name.is_empty() {
-        return false;
-    }
-    let first = name[0];
-    if !(first.is_ascii_alphabetic() || first == b'_') {
-        return false;
-    }
-
-    let mut rest = &name[1..];
-    while rest.len() >= 8 {
-        let res = IS_VALID_LABEL_REST[rest[0] as usize] as u8
-            & IS_VALID_LABEL_REST[rest[1] as usize] as u8
-            & IS_VALID_LABEL_REST[rest[2] as usize] as u8
-            & IS_VALID_LABEL_REST[rest[3] as usize] as u8
-            & IS_VALID_LABEL_REST[rest[4] as usize] as u8
-            & IS_VALID_LABEL_REST[rest[5] as usize] as u8
-            & IS_VALID_LABEL_REST[rest[6] as usize] as u8
-            & IS_VALID_LABEL_REST[rest[7] as usize] as u8;
-
-        if res == 0 {
-            return false;
-        }
-        rest = &rest[8..];
-    }
-
-    for &b in rest {
-        if !IS_VALID_LABEL_REST[b as usize] {
-            return false;
-        }
-    }
-
-    true
-}
-
-impl PromValidationMode {
-    /// Decodes provided bytes to [String] with optional UTF-8 validation.
-    ///
-    /// Use this for label **values** and other general string fields.
-    pub fn decode_string(&self, bytes: &[u8]) -> std::result::Result<String, DecodeError> {
-        let result = match self {
-            PromValidationMode::Strict => match String::from_utf8(bytes.to_vec()) {
-                Ok(s) => s,
-                Err(e) => {
-                    debug!("Invalid UTF-8 string value: {:?}, error: {:?}", bytes, e);
-                    return Err(DecodeError::new("invalid utf-8"));
-                }
-            },
-            PromValidationMode::Lossy => String::from_utf8_lossy(bytes).to_string(),
-            PromValidationMode::Unchecked => unsafe { String::from_utf8_unchecked(bytes.to_vec()) },
-        };
-        Ok(result)
-    }
-
-    /// Decodes provided bytes to a label name [`&str`] with Prometheus label name validation.
-    ///
-    /// The check is always performed regardless of [`PromValidationMode`], as required by
-    /// the [Prometheus data model](https://prometheus.io/docs/concepts/data_model/#metric-names-and-labels).
-    pub fn decode_label_name<'a>(
-        &self,
-        bytes: &'a [u8],
-    ) -> std::result::Result<&'a str, DecodeError> {
-        if !validate_label_name(bytes) {
-            debug!(
-                "Invalid Prometheus label name: {:?}, must match [a-zA-Z_][a-zA-Z0-9_]*",
-                bytes
-            );
-            return Err(DecodeError::new(format!(
-                "invalid prometheus label name: '{}', must match [a-zA-Z_][a-zA-Z0-9_]*",
-                String::from_utf8_lossy(bytes)
-            )));
-        }
-
-        // SAFETY: `validate_label_name` only allows ASCII bytes,
-        // and ASCII is always valid UTF-8.
-        Ok(unsafe { std::str::from_utf8_unchecked(bytes) })
-    }
 }
 
 impl Default for HttpOptions {
@@ -1397,6 +1291,7 @@ mod test {
 
     use super::*;
     use crate::http::test_helpers::TestClient;
+    use crate::prom_remote_write::validate_label_name;
     use crate::query_handler::sql::SqlQueryHandler;
 
     struct DummyInstance {
@@ -1887,8 +1782,6 @@ mod test {
 
     #[test]
     fn test_is_valid_prom_label_name_bytes() {
-        use super::validate_label_name;
-
         assert!(validate_label_name(b"__name__"));
         assert!(validate_label_name(b"job"));
         assert!(validate_label_name(b"_"));

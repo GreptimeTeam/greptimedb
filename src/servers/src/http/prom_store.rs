@@ -38,7 +38,7 @@ use crate::error::{self, InternalSnafu, PipelineSnafu, Result};
 use crate::http::PromValidationMode;
 use crate::http::extractor::PipelineInfo;
 use crate::http::header::{GREPTIME_DB_HEADER_METRICS, write_cost_header_map};
-use crate::prom_row_builder::TablesBuilder;
+use crate::prom_remote_write::TablesBuilder;
 use crate::prom_store::{extract_schema_from_read_request, snappy_decompress, zstd_decompress};
 use crate::proto::{PromSeriesProcessor, PromWriteRequest};
 use crate::query_handler::{PipelineHandlerRef, PromStoreProtocolHandlerRef, PromStoreResponse};
