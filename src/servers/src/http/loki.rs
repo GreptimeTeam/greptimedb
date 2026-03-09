@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
-use arrow::array::AsArray;
+use arrow::array::{Array, ArrayRef, AsArray};
 use arrow::datatypes::TimestampNanosecondType;
 
 use api::v1::value::ValueData;
@@ -887,7 +887,7 @@ async fn get_label_columns(
             for batch in rbs.iter() {
                 if let Some(col) = batch.column_by_name("column_name") {
                     let arr = col.as_string::<i32>();
-                    for i in 0..arr.len() {
+                    for i in 0..col.len() {
                         if arr.is_valid(i) {
                             cols.push(arr.value(i).to_string());
                         }
@@ -971,7 +971,7 @@ pub async fn loki_label_values(
             for batch in rbs.iter() {
                 if let Some(col) = batch.column_by_name(&name) {
                     let arr = col.as_string::<i32>();
-                    for i in 0..arr.len() {
+                    for i in 0..col.len() {
                         if arr.is_valid(i) {
                             values.push(arr.value(i).to_string());
                         }
@@ -1068,11 +1068,11 @@ pub async fn loki_query_range(
                 let ts_arr = ts_col.as_primitive::<TimestampNanosecondType>();
                 let line_arr = line_col.as_string::<i32>();
 
-                // Pre-fetch label arrays for this batch.
-                let label_arrays: Vec<(&str, _)> = label_cols
+                // Pre-collect Arc<dyn Array> for label columns.
+                let label_col_arcs: Vec<(String, ArrayRef)> = label_cols
                     .iter()
                     .filter_map(|lc| {
-                        batch.column_by_name(lc).map(|col| (lc.as_str(), col.as_string::<i32>()))
+                        batch.column_by_name(lc).map(|col| (lc.clone(), col.clone()))
                     })
                     .collect();
 
@@ -1083,9 +1083,10 @@ pub async fn loki_query_range(
 
                     // Build label map for this row.
                     let mut labels: BTreeMap<String, String> = BTreeMap::new();
-                    for (name, arr) in &label_arrays {
+                    for (name, col) in &label_col_arcs {
+                        let arr = col.as_string::<i32>();
                         if arr.is_valid(i) {
-                            labels.insert(name.to_string(), arr.value(i).to_string());
+                            labels.insert(name.clone(), arr.value(i).to_string());
                         }
                     }
 
@@ -1169,18 +1170,19 @@ pub async fn loki_series(
         }) = result
         {
             for batch in rbs.iter() {
-                let label_arrays: Vec<(&str, _)> = label_cols
+                let label_col_arcs: Vec<(String, ArrayRef)> = label_cols
                     .iter()
                     .filter_map(|lc| {
-                        batch.column_by_name(lc).map(|col| (lc.as_str(), col.as_string::<i32>()))
+                        batch.column_by_name(lc).map(|col| (lc.clone(), col.clone()))
                     })
                     .collect();
 
                 for i in 0..batch.num_rows() {
                     let mut row: BTreeMap<String, String> = BTreeMap::new();
-                    for (name, arr) in &label_arrays {
+                    for (name, col) in &label_col_arcs {
+                        let arr = col.as_string::<i32>();
                         if arr.is_valid(i) {
-                            row.insert(name.to_string(), arr.value(i).to_string());
+                            row.insert(name.clone(), arr.value(i).to_string());
                         }
                     }
                     if !row.is_empty() {
