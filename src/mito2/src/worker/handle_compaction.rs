@@ -14,6 +14,7 @@
 
 use api::v1::region::compact_request;
 use common_telemetry::{error, info, warn};
+use store_api::logstore::LogStore;
 use store_api::region_request::RegionCompactRequest;
 use store_api::storage::RegionId;
 
@@ -23,7 +24,6 @@ use crate::metrics::COMPACTION_REQUEST_COUNT;
 use crate::region::MitoRegionRef;
 use crate::request::{
     BuildIndexRequest, CompactionFailed, CompactionFinished, OnFailure, OptionOutputTx,
-    WorkerRequest, WorkerRequestWithTime,
 };
 use crate::sst::index::IndexBuildType;
 use crate::worker::RegionWorkerLoop;
@@ -69,7 +69,9 @@ impl<S> RegionWorkerLoop<S> {
         &mut self,
         region_id: RegionId,
         mut request: CompactionFinished,
-    ) {
+    ) where
+        S: LogStore,
+    {
         let region = match self.regions.get_region(region_id) {
             Some(region) => region,
             None => {
@@ -114,18 +116,7 @@ impl<S> RegionWorkerLoop<S> {
                 self.schema_metadata_manager.clone(),
             )
             .await;
-        for ddl in pending_ddls.drain(..) {
-            if let Err(res) = self
-                .sender
-                .send(WorkerRequestWithTime::new(WorkerRequest::Ddl(ddl)))
-                .await
-            {
-                warn!(
-                    "Failed to send pending DDL requests after compaction finished, region_id: {}, res: {:?}",
-                    region_id, res
-                );
-            }
-        }
+        self.handle_ddl_requests(&mut pending_ddls).await;
     }
 
     /// When compaction fails, we simply log the error.
