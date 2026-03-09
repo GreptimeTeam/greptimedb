@@ -18,9 +18,8 @@ use api::prom_store::remote::WriteRequest;
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use prost::Message;
 use servers::http::PromValidationMode;
-use servers::prom_remote_write::validate_label_name;
+use servers::prom_remote_write::{PromSeriesProcessor, PromWriteRequest, validate_label_name};
 use servers::prom_store::to_grpc_row_insert_requests;
-use servers::proto::{PromSeriesProcessor, PromWriteRequest};
 
 fn bench_decode_prom_request(c: &mut Criterion) {
     let mut d = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -36,7 +35,6 @@ fn bench_decode_prom_request(c: &mut Criterion) {
     let mut request = WriteRequest::default();
     group.bench_function("standard_write_request", |b| {
         b.iter(|| {
-            let data = data.clone();
             request.merge(data.as_slice()).unwrap();
             to_grpc_row_insert_requests(&request).unwrap();
         });

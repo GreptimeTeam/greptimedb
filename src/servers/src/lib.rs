@@ -47,7 +47,6 @@ pub mod prom_remote_write;
 pub mod prom_store;
 pub mod prometheus;
 pub mod prometheus_handler;
-pub mod proto;
 pub mod query_handler;
 pub mod repeated_field;
 pub mod request_memory_limiter;
