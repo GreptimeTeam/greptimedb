@@ -252,7 +252,6 @@ impl CompactionScheduler {
             for waiter in std::mem::take(&mut status.waiters) {
                 waiter.send(Ok(0));
             }
-            let _ = status;
             self.region_status.remove(&region_id);
             return pending_ddl_requests;
         }
@@ -324,6 +323,7 @@ impl CompactionScheduler {
         status.pending_ddl_requests.push(request);
     }
 
+    #[cfg(test)]
     pub(crate) fn has_pending_ddls(&self, region_id: RegionId) -> bool {
         let has_pending = self
             .region_status
