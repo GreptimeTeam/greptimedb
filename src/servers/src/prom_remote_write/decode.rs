@@ -193,7 +193,12 @@ impl<'a> PromWriteRequest<'a> {
                 let raw_data = &self.table_data.raw_data;
                 let buf = &mut &raw_data[offset..];
                 let (tag, wire_type) = decode_key(buf)?;
-                assert_eq!(WireType::LengthDelimited, wire_type);
+                if wire_type != WireType::LengthDelimited {
+                    return Err(DecodeError::new(format!(
+                        "invalid wire type: {:?}",
+                        wire_type
+                    )));
+                }
                 match tag {
                     1u32 => {
                         let len = decode_varint(buf).map_err(|mut e| {
