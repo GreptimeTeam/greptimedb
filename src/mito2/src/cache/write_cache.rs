@@ -323,6 +323,30 @@ impl WriteCache {
             .await
     }
 
+    /// Downloads the target file into write cache only when it is not cached.
+    ///
+    /// Returns `Ok(true)` if this call performs a download, or `Ok(false)` if the
+    /// file is already present in write cache and download is skipped.
+    pub(crate) async fn download_if_absent(
+        &self,
+        index_key: IndexKey,
+        remote_path: &str,
+        remote_store: &ObjectStore,
+        file_size: u64,
+    ) -> Result<bool> {
+        if self.file_cache.contains_key(&index_key) {
+            debug!(
+                "Skip downloading file already in write cache, region: {}, file: {}",
+                index_key.region_id, index_key.file_id
+            );
+            return Ok(false);
+        }
+
+        self.download(index_key, remote_path, remote_store, file_size)
+            .await?;
+        Ok(true)
+    }
+
     /// Uploads a Parquet file or a Puffin file to the remote object store.
     pub(crate) async fn upload(
         &self,
@@ -472,13 +496,16 @@ impl UploadTracker {
 
 #[cfg(test)]
 mod tests {
+    use bytes::Bytes;
     use common_test_util::temp_dir::create_temp_dir;
     use object_store::ATOMIC_WRITE_DIR;
     use parquet::file::metadata::PageIndexPolicy;
     use store_api::region_request::PathType;
+    use store_api::storage::FileId;
 
     use super::*;
     use crate::access_layer::OperationType;
+    use crate::cache::file_cache::IndexValue;
     use crate::cache::test_util::{assert_parquet_metadata_equal, new_fs_store};
     use crate::cache::{CacheManager, CacheStrategy};
     use crate::error::InvalidBatchSnafu;
@@ -744,5 +771,68 @@ mod tests {
         }
 
         assert!(!has_files);
+    }
+
+    #[tokio::test]
+    async fn test_download_if_absent_skips_when_cached() {
+        let mut env = TestEnv::new().await;
+        let remote_store = env.init_object_store_manager();
+
+        let local_dir = create_temp_dir("");
+        let local_store = new_fs_store(local_dir.path().to_str().unwrap());
+        let write_cache = env
+            .create_write_cache(local_store.clone(), ReadableSize::mb(10))
+            .await;
+
+        let region_id = RegionId::new(1024, 1);
+        let file_id = FileId::random();
+        let key = IndexKey::new(region_id, file_id, FileType::Parquet);
+        write_cache
+            .file_cache()
+            .put(key, IndexValue { file_size: 1 })
+            .await;
+
+        let downloaded = write_cache
+            .download_if_absent(key, "missing/path.parquet", &remote_store, 1)
+            .await
+            .unwrap();
+
+        assert!(!downloaded);
+    }
+
+    #[tokio::test]
+    async fn test_download_if_absent_downloads_when_missing() {
+        let mut env = TestEnv::new().await;
+        let remote_store = env.init_object_store_manager();
+
+        let local_dir = create_temp_dir("");
+        let local_store = new_fs_store(local_dir.path().to_str().unwrap());
+        let write_cache = env
+            .create_write_cache(local_store.clone(), ReadableSize::mb(10))
+            .await;
+
+        let region_id = RegionId::new(1024, 2);
+        let file_id = FileId::random();
+        let key = IndexKey::new(region_id, file_id, FileType::Parquet);
+        let remote_path = format!("download-if-absent/{file_id}.parquet");
+        let remote_data = Bytes::from_static(b"download-if-absent-test");
+        remote_store
+            .write(&remote_path, remote_data.clone())
+            .await
+            .unwrap();
+
+        let downloaded = write_cache
+            .download_if_absent(key, &remote_path, &remote_store, remote_data.len() as u64)
+            .await
+            .unwrap();
+
+        assert!(downloaded);
+        assert!(write_cache.file_cache().contains_key(&key));
+
+        let cached_data = local_store
+            .read(&write_cache.file_cache().cache_file_path(key))
+            .await
+            .unwrap();
+        assert_eq!(cached_data.to_vec(), remote_data.to_vec());
     }
 }
