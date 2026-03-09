@@ -1493,19 +1493,20 @@ mod tests {
     use crate::ddl::utils::region_storage_path;
     use crate::error::Result;
     use crate::key::datanode_table::RegionInfo;
+    use crate::key::node_address::{NodeAddressKey, NodeAddressValue};
     use crate::key::table_info::TableInfoValue;
     use crate::key::table_name::TableNameKey;
     use crate::key::table_route::TableRouteValue;
     use crate::key::topic_region::TopicRegionKey;
     use crate::key::{
-        DeserializedValueWithBytes, RegionDistribution, RegionRoleSet, TOPIC_REGION_PREFIX,
-        TableMetadataManager, ViewInfoValue,
+        DeserializedValueWithBytes, MetadataValue, RegionDistribution, RegionRoleSet,
+        TOPIC_REGION_PREFIX, TableMetadataManager, ViewInfoValue,
     };
     use crate::kv_backend::KvBackend;
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::peer::Peer;
     use crate::rpc::router::{LeaderState, Region, RegionRoute, region_distribution};
-    use crate::rpc::store::RangeRequest;
+    use crate::rpc::store::{PutRequest, RangeRequest};
     use crate::wal_provider::WalProvider;
 
     #[test]
@@ -1715,6 +1716,61 @@ mod tests {
             assert_eq!(regions.len(), 8);
             assert!(regions.contains(&region_id));
         }
+    }
+
+    #[tokio::test]
+    async fn test_get_full_table_info_remaps_route_address() {
+        let mem_kv = Arc::new(MemoryKvBackend::default());
+        let table_metadata_manager = TableMetadataManager::new(mem_kv.clone());
+
+        let mut region_route = new_test_region_route();
+        region_route.follower_peers = vec![Peer::empty(3)];
+        let region_routes = vec![region_route];
+        let table_info = new_test_table_info();
+        let table_id = table_info.ident.table_id;
+
+        create_physical_table_metadata(
+            &table_metadata_manager,
+            table_info,
+            region_routes,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+        mem_kv
+            .put(PutRequest {
+                key: NodeAddressKey::with_datanode(2).to_string().into_bytes(),
+                value: NodeAddressValue::new(Peer::new(2, "new-a2"))
+                    .try_as_raw_value()
+                    .unwrap(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        mem_kv
+            .put(PutRequest {
+                key: NodeAddressKey::with_datanode(3).to_string().into_bytes(),
+                value: NodeAddressValue::new(Peer::new(3, "new-a3"))
+                    .try_as_raw_value()
+                    .unwrap(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let (_, table_route) = table_metadata_manager
+            .get_full_table_info(table_id)
+            .await
+            .unwrap();
+        let table_route = table_route.unwrap().into_inner();
+        let region_routes = table_route.region_routes().unwrap();
+
+        assert_eq!(
+            region_routes[0].leader_peer.as_ref().unwrap().addr,
+            "new-a2"
+        );
+        assert_eq!(region_routes[0].follower_peers[0].addr, "new-a3");
     }
 
     #[tokio::test]

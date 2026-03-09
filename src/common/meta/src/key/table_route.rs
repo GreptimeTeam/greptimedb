@@ -791,7 +791,10 @@ impl TableRouteStorage {
         Ok(())
     }
 
-    pub(crate) async fn remap_route_address(&self, table_route: &mut TableRouteValue) -> Result<()> {
+    pub(crate) async fn remap_route_address(
+        &self,
+        table_route: &mut TableRouteValue,
+    ) -> Result<()> {
         let keys = extract_address_keys(table_route).into_iter().collect();
         let node_addrs = self.get_node_addresses(keys).await?;
         set_addresses(&node_addrs, table_route)?;
