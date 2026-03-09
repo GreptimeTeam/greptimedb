@@ -130,7 +130,7 @@ impl<'a> TableBuilder<'a> {
 
     pub(crate) fn add_labels_and_samples(
         &mut self,
-        labels: &[PromLabel],
+        labels: &[PromLabel<'a>],
         samples: &[Sample],
         prom_validation_mode: PromValidationMode,
     ) -> Result<(), DecodeError> {

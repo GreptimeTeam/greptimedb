@@ -44,16 +44,15 @@ use crate::query_handler::PipelineHandlerRef;
 use crate::repeated_field::{Clear, RepeatedField};
 
 #[derive(Default, Debug)]
-pub(crate) struct PromTimeSeries {
+pub struct PromTimeSeries<'a> {
     pub(crate) table_name: String,
     pub(crate) schema: Option<String>,
     pub(crate) physical_table: Option<String>,
-
-    pub(crate) labels: RepeatedField<PromLabel>,
+    pub(crate) labels: RepeatedField<PromLabel<'a>>,
     pub(crate) samples: RepeatedField<Sample>,
 }
 
-impl Clear for PromTimeSeries {
+impl<'a> Clear for PromTimeSeries<'a> {
     fn clear(&mut self) {
         self.table_name.clear();
         self.labels.clear();
@@ -61,7 +60,7 @@ impl Clear for PromTimeSeries {
     }
 }
 
-impl PromTimeSeries {
+impl<'a> PromTimeSeries<'a> {
     pub fn merge_field(
         &mut self,
         tag: u32,
@@ -133,7 +132,7 @@ impl PromTimeSeries {
         }
     }
 
-    fn add_to_table_data<'a>(
+    fn add_to_table_data(
         &mut self,
         table_builders: &mut TablesBuilder<'a>,
         prom_validation_mode: PromValidationMode,
@@ -165,7 +164,7 @@ impl PromTimeSeries {
 #[derive(Default, Debug)]
 pub struct PromWriteRequest<'a> {
     pub(crate) table_data: TablesBuilder<'a>,
-    series: PromTimeSeries,
+    series: PromTimeSeries<'a>,
 }
 
 impl<'a> Clear for PromWriteRequest<'a> {

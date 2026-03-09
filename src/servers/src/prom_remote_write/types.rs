@@ -23,7 +23,7 @@ use prost::encoding::{WireType, decode_varint};
 
 use crate::repeated_field::Clear;
 
-pub type RawBytes = &'static [u8];
+pub type RawBytes<'a> = &'a [u8];
 
 impl Clear for Sample {
     fn clear(&mut self) {
@@ -33,12 +33,12 @@ impl Clear for Sample {
 }
 
 #[derive(Default, Clone, Debug)]
-pub(crate) struct PromLabel {
-    pub name: RawBytes,
-    pub value: RawBytes,
+pub(crate) struct PromLabel<'a> {
+    pub name: RawBytes<'a>,
+    pub value: RawBytes<'a>,
 }
 
-impl Clear for PromLabel {
+impl<'a> Clear for PromLabel<'a> {
     fn clear(&mut self) {
         self.name.clear();
         self.value.clear();
