@@ -323,6 +323,23 @@ impl WriteCache {
             .await
     }
 
+    #[allow(dead_code)]
+    pub(crate) async fn download_if_absent(
+        &self,
+        index_key: IndexKey,
+        remote_path: &str,
+        remote_store: &ObjectStore,
+        file_size: u64,
+    ) -> Result<bool> {
+        if self.file_cache.contains_key(&index_key) {
+            return Ok(false);
+        }
+
+        self.download(index_key, remote_path, remote_store, file_size)
+            .await?;
+        Ok(true)
+    }
+
     /// Uploads a Parquet file or a Puffin file to the remote object store.
     pub(crate) async fn upload(
         &self,
