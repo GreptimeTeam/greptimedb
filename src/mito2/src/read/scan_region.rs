@@ -1167,9 +1167,9 @@ impl ScanInput {
             .compaction(self.compaction)
             .pre_filter_mode(filter_mode)
             .decode_primary_key_values(decode_pk_values)
-            .build_reader_input_opt(reader_metrics)
+            .build_reader_input(reader_metrics)
             .await;
-        let (file_range_ctx, selection) = match res {
+        let read_input = match res {
             Ok(x) => x,
             Err(e) => {
                 if e.is_object_not_found() && self.ignore_file_not_found {
@@ -1181,7 +1181,7 @@ impl ScanInput {
             }
         };
 
-        let Some(mut file_range_ctx) = file_range_ctx else {
+        let Some((mut file_range_ctx, selection)) = read_input else {
             return Ok(FileRangeBuilder::default());
         };
 

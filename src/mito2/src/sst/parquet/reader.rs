@@ -300,11 +300,15 @@ impl ParquetReaderBuilder {
             file_id = %self.file_handle.file_id()
         )
     )]
-    pub async fn build(&self) -> Result<ParquetReader> {
+    pub async fn build(&self) -> Result<Option<ParquetReader>> {
         let mut metrics = ReaderMetrics::default();
 
-        let (context, selection) = self.build_reader_input(&mut metrics).await?;
-        ParquetReader::new(Arc::new(context), selection).await
+        let Some((context, selection)) = self.build_reader_input(&mut metrics).await? else {
+            return Ok(None);
+        };
+        ParquetReader::new(Arc::new(context), selection)
+            .await
+            .map(Some)
     }
 
     /// Builds a [FileRangeContext] and collects row groups to read.
@@ -320,38 +324,14 @@ impl ParquetReaderBuilder {
     pub(crate) async fn build_reader_input(
         &self,
         metrics: &mut ReaderMetrics,
-    ) -> Result<(FileRangeContext, RowGroupSelection)> {
-        let (context, selection) = self.build_reader_input_inner(metrics, false).await?;
-        Ok((
-            context.expect(
-                "build_reader_input_inner always returns context when allow_no_context=false",
-            ),
-            selection,
-        ))
-    }
-
-    /// Builds a [FileRangeContext] and collects row groups to read.
-    ///
-    /// This method may return `None` context when there is nothing to read.
-    #[tracing::instrument(
-        skip_all,
-        fields(
-            region_id = %self.file_handle.region_id(),
-            file_id = %self.file_handle.file_id()
-        )
-    )]
-    pub(crate) async fn build_reader_input_opt(
-        &self,
-        metrics: &mut ReaderMetrics,
-    ) -> Result<(Option<FileRangeContext>, RowGroupSelection)> {
-        self.build_reader_input_inner(metrics, true).await
+    ) -> Result<Option<(FileRangeContext, RowGroupSelection)>> {
+        self.build_reader_input_inner(metrics).await
     }
 
     async fn build_reader_input_inner(
         &self,
         metrics: &mut ReaderMetrics,
-        allow_no_context: bool,
-    ) -> Result<(Option<FileRangeContext>, RowGroupSelection)> {
+    ) -> Result<Option<(FileRangeContext, RowGroupSelection)>> {
         let start = Instant::now();
 
         let file_path = self.file_handle.file_path(&self.table_dir, self.path_type);
@@ -439,9 +419,9 @@ impl ParquetReaderBuilder {
             .row_groups_to_read(&read_format, &parquet_meta, &mut metrics.filter_metrics)
             .await;
 
-        if allow_no_context && selection.is_empty() {
+        if selection.is_empty() {
             metrics.build_cost += start.elapsed();
-            return Ok((None, selection));
+            return Ok(None);
         }
 
         // Trigger background download if metadata had a cache miss and selection is not empty
@@ -533,7 +513,7 @@ impl ParquetReaderBuilder {
 
         metrics.build_cost += start.elapsed();
 
-        Ok((Some(context), selection))
+        Ok(Some((context, selection)))
     }
 
     fn is_same_region_partition(

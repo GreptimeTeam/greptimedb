@@ -793,22 +793,24 @@ impl IndexBuildTask {
             )));
         }
 
-        let mut parquet_reader = self
+        let parquet_reader = self
             .access_layer
             .read_sst(self.file.clone()) // use the latest file handle instead of creating a new one
             .build()
             .await?;
 
-        // TODO(SNC123): optimize index batch
-        loop {
-            match parquet_reader.next_batch().await {
-                Ok(Some(mut batch)) => {
-                    indexer.update(&mut batch).await;
-                }
-                Ok(None) => break,
-                Err(e) => {
-                    indexer.abort().await;
-                    return Err(e);
+        if let Some(mut parquet_reader) = parquet_reader {
+            // TODO(SNC123): optimize index batch
+            loop {
+                match parquet_reader.next_batch().await {
+                    Ok(Some(mut batch)) => {
+                        indexer.update(&mut batch).await;
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        indexer.abort().await;
+                        return Err(e);
+                    }
                 }
             }
         }

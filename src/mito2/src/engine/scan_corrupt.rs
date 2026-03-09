@@ -85,6 +85,7 @@ async fn test_scan_corrupt() {
     )
     .build()
     .await
+    .unwrap()
     .unwrap();
 
     let codec = DensePrimaryKeyCodec::new(&version.metadata);

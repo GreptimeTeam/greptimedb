@@ -218,6 +218,15 @@ impl ObjbenchCommand {
             }
             .build()
         })?;
+        let reader = reader.ok_or_else(|| {
+            error::IllegalConfigSnafu {
+                msg: format!(
+                    "build reader returned no readable rows for source file {}",
+                    src_handle.file_id()
+                ),
+            }
+            .build()
+        })?;
 
         let reader_build_elapsed = reader_build_start.elapsed();
         let total_rows = reader.parquet_metadata().file_metadata().num_rows();
