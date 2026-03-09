@@ -85,6 +85,7 @@ LIMIT 3;
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+-- SQLNESS REPLACE DynamicFilter\s\[\samount@2\sIS\sNULL\sOR\samount@2\s>\s[0-9]*\s\] DynamicFilter [ amount@2 IS NULL OR amount@2 > REDACTED ]
 EXPLAIN ANALYZE VERBOSE SELECT "id", customer_id, amount
 FROM orders
 ORDER BY amount DESC
@@ -98,7 +99,7 @@ LIMIT 3;
 |_|_|_|
 | 1_| 0_|_SortPreservingMergeExec: [amount@2 DESC], fetch=3 metrics=REDACTED_|
 |_|_|_SortExec: TopK(fetch=3), expr=[amount@2 DESC], preserve_partitioning=[true] metrics=REDACTED_|
-|_|_|_SeqScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["id", "customer_id", "amount"], "dyn_filters": ["DynamicFilter [ amount@2 IS NULL OR amount@2 > 900 ]"], "files": [{"file_id":"REDACTED","time_range_start":"REDACTED","time_range_end":"REDACTED","rows":1,"size":REDACTED,"index_size":0}, {"file_id":"REDACTED","time_range_start":"REDACTED","time_range_end":"REDACTED","rows":1,"size":REDACTED,"index_size":0}, {"file_id":"REDACTED","time_range_start":"REDACTED","time_range_end":"REDACTED","rows":1,"size":REDACTED,"index_size":0}, {"file_id":"REDACTED","time_range_start":"REDACTED","time_range_end":"REDACTED","rows":4,"size":REDACTED,"index_size":0}], "flat_format":REDACTED, "metrics_per_partition": REDACTED metrics=REDACTED |
+|_|_|_SeqScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["id", "customer_id", "amount"], "dyn_filters": ["DynamicFilter [ amount@2 IS NULL OR amount@2 > REDACTED ]"], "files": [{"file_id":"REDACTED","time_range_start":"REDACTED","time_range_end":"REDACTED","rows":1,"size":REDACTED,"index_size":0}, {"file_id":"REDACTED","time_range_start":"REDACTED","time_range_end":"REDACTED","rows":1,"size":REDACTED,"index_size":0}, {"file_id":"REDACTED","time_range_start":"REDACTED","time_range_end":"REDACTED","rows":1,"size":REDACTED,"index_size":0}, {"file_id":"REDACTED","time_range_start":"REDACTED","time_range_end":"REDACTED","rows":4,"size":REDACTED,"index_size":0}], "flat_format":REDACTED, "metrics_per_partition": REDACTED metrics=REDACTED |
 |_|_|_|
 |_|_| Total rows: REDACTED_|
 +-+-+-+

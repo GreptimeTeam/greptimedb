@@ -52,6 +52,7 @@ LIMIT 3;
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+-- SQLNESS REPLACE DynamicFilter\s\[\samount@2\sIS\sNULL\sOR\samount@2\s>\s[0-9]*\s\] DynamicFilter [ amount@2 IS NULL OR amount@2 > REDACTED ]
 EXPLAIN ANALYZE VERBOSE SELECT "id", customer_id, amount
 FROM orders
 ORDER BY amount DESC
