@@ -817,6 +817,20 @@ pub(crate) struct LokiQueryRangeData {
     result: Vec<LokiStream>,
 }
 
+// For instant query (/loki/api/v1/query) — vector result type used by Grafana health check
+#[derive(Serialize)]
+struct LokiVectorSample {
+    metric: BTreeMap<String, String>,
+    value: (u64, &'static str), // [unix_timestamp, value_string]
+}
+
+#[derive(Serialize)]
+pub(crate) struct LokiInstantQueryData {
+    #[serde(rename = "resultType")]
+    result_type: &'static str,
+    result: Vec<LokiVectorSample>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct LokiQueryParams {
     pub query: Option<String>,
@@ -984,15 +998,23 @@ pub async fn loki_label_values(
 }
 
 // GET /loki/api/v1/query — instant query (used by Grafana health check)
-// We return an empty vector result; full metric query support is not implemented.
+// Returns a synthetic vector result so Grafana's health check passes.
 pub async fn loki_query(
     State(_state): State<LokiQueryState>,
     Query(_params): Query<LokiQueryParams>,
     Extension(_query_ctx): Extension<QueryContext>,
-) -> axum::Json<LokiApiResponse<LokiQueryRangeData>> {
-    LokiApiResponse::success(LokiQueryRangeData {
+) -> axum::Json<LokiApiResponse<LokiInstantQueryData>> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    LokiApiResponse::success(LokiInstantQueryData {
         result_type: "vector",
-        result: vec![],
+        result: vec![LokiVectorSample {
+            metric: BTreeMap::new(),
+            value: (now, "1"),
+        }],
     })
 }
 
