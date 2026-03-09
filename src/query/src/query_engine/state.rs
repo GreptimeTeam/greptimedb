@@ -181,6 +181,9 @@ impl QueryEngineState {
         physical_optimizer
             .rules
             .push(Arc::new(WindowedSortPhysicalRule));
+        // explicitly not do filter pushdown for windowed sort&part sort as
+        // benchmark shows it can cause performance regression due to useless filtering and extra shuffle.
+        // We can add a rule to do filter pushdown for windowed sort in the future if we find a way to avoid the performance regression.
         physical_optimizer
             .rules
             .push(Arc::new(MatchesConstantTermOptimizer));

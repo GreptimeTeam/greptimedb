@@ -237,6 +237,7 @@ impl ExecutionPlan for PartSortExec {
         } else {
             internal_err!("No children found")?
         };
+        // create a new dynamic filter when with_new_children, as the old filter is bound to the old input and cannot be reused
         let new = Self::try_new(
             self.expression.clone(),
             self.limit,
