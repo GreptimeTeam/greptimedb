@@ -65,7 +65,7 @@ impl<'a> PromTimeSeries<'a> {
         &mut self,
         tag: u32,
         wire_type: WireType,
-        buf: &mut &[u8],
+        buf: &mut &'a [u8],
         prom_validation_mode: PromValidationMode,
     ) -> Result<(), DecodeError> {
         const STRUCT_NAME: &str = "PromTimeSeries";
@@ -164,7 +164,7 @@ impl<'a> PromTimeSeries<'a> {
 #[derive(Default, Debug)]
 pub struct PromWriteRequest<'a> {
     pub(crate) table_data: TablesBuilder<'a>,
-    series: PromTimeSeries<'a>,
+
 }
 
 impl<'a> Clear for PromWriteRequest<'a> {
@@ -177,22 +177,35 @@ impl<'a> PromWriteRequest<'a> {
     pub fn as_row_insert_requests(&mut self) -> ContextReq {
         self.table_data.as_insert_requests()
     }
+}
 
+
+impl<'a, 's> PromWriteRequest<'a>
+where
+    'a: 's,
+{
     pub fn decode(
-        &mut self,
+        &'s mut self,
         buf: Vec<u8>,
         prom_validation_mode: PromValidationMode,
         processor: &mut PromSeriesProcessor,
     ) -> Result<(), DecodeError> {
         const STRUCT_NAME: &str = "PromWriteRequest";
+        let mut series = PromTimeSeries::default();
         self.table_data.set_raw_data(buf);
+        let raw_data_ptr = self.table_data.raw_data.as_ptr();
+        let raw_data_len = self.table_data.raw_data.len();
         let mut offset = 0;
-        while offset < self.table_data.raw_data.len() {
+        while offset < raw_data_len {
             let mut should_add_to_table_data = false;
             let mut decoded_timeseries = false;
             {
-                let raw_data = &self.table_data.raw_data;
-                let buf = &mut &raw_data[offset..];
+                // SAFETY: `raw_data_ptr` points to `self.table_data.raw_data` and that vector is not
+                // mutated during decoding. We only read from it and keep references inside
+                // `self.table_data` until the request is consumed.
+                let raw_data = unsafe { std::slice::from_raw_parts(raw_data_ptr, raw_data_len) };
+                let mut series_buf = &raw_data[offset..];
+                let buf = &mut series_buf;
                 let (tag, wire_type) = decode_key(buf)?;
                 if wire_type != WireType::LengthDelimited {
                     return Err(DecodeError::new(format!(
@@ -214,7 +227,7 @@ impl<'a> PromWriteRequest<'a> {
                         let limit = remaining - len as usize;
                         while buf.remaining() > limit {
                             let (tag, wire_type) = decode_key(buf)?;
-                            self.series
+                            series
                                 .merge_field(tag, wire_type, buf, prom_validation_mode)?;
                         }
                         if buf.remaining() != limit {
@@ -223,7 +236,7 @@ impl<'a> PromWriteRequest<'a> {
 
                         if processor.use_pipeline {
                             processor.consume_series_to_pipeline_map(
-                                &mut self.series,
+                                &mut series,
                                 prom_validation_mode,
                             )?;
                         } else {
@@ -237,17 +250,17 @@ impl<'a> PromWriteRequest<'a> {
                     }
                     _ => prost::encoding::skip_field(wire_type, tag, buf, Default::default())?,
                 }
-                offset = raw_data.len() - buf.remaining();
+                offset = raw_data_len - buf.remaining();
             }
 
             if should_add_to_table_data {
-                self.series
+                series
                     .add_to_table_data(&mut self.table_data, prom_validation_mode)?;
             }
 
             if decoded_timeseries {
-                self.series.labels.clear();
-                self.series.samples.clear();
+                series.labels.clear();
+                series.samples.clear();
             }
         }
 
@@ -394,9 +407,9 @@ mod tests {
         }
     }
 
-    fn check_deserialized(
-        prom_write_request: &mut PromWriteRequest,
-        data: &[u8],
+    fn check_deserialized<'a>(
+        prom_write_request: &mut PromWriteRequest<'a>,
+        data: &'a [u8],
         expected_samples: usize,
         expected_rows: &RowInsertRequests,
     ) {

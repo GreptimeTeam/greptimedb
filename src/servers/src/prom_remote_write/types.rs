@@ -14,8 +14,6 @@
 
 //! Shared types for Prometheus remote write decoding.
 
-use std::slice;
-
 use api::prom_store::remote::Sample;
 use bytes::Buf;
 use prost::DecodeError;
@@ -50,7 +48,7 @@ impl PromLabel {
         &mut self,
         tag: u32,
         wire_type: WireType,
-        buf: &mut &[u8],
+        buf: &mut &'a [u8],
     ) -> Result<(), DecodeError> {
         const STRUCT_NAME: &str = "PromLabel";
         match tag {
@@ -75,7 +73,7 @@ impl PromLabel {
 
 /// Reads a variable-length encoded bytes field from `src` and assign it to `dst`.
 #[inline(always)]
-fn merge_bytes(dst: &mut RawBytes, src: &mut &[u8]) -> Result<(), DecodeError> {
+pub fn merge_bytes<'a>(dst: &mut RawBytes<'a>, src: &mut &'a [u8]) -> Result<(), DecodeError> {
     let len = decode_varint(src)? as usize;
     if len > src.remaining() {
         return Err(DecodeError::new(format!(
@@ -84,7 +82,7 @@ fn merge_bytes(dst: &mut RawBytes, src: &mut &[u8]) -> Result<(), DecodeError> {
             src.remaining()
         )));
     }
-    *dst = unsafe { slice::from_raw_parts(src.as_ptr(), len) };
+    *dst = &src[..len];
     src.advance(len);
     Ok(())
 }
