@@ -885,7 +885,7 @@ async fn get_label_columns(
     let sql = format!(
         "SELECT column_name FROM information_schema.columns \
          WHERE table_schema = '{}' AND table_name = '{}' \
-         AND greptime_semantic_type = 'TAG' \
+         AND semantic_type = 'TAG' \
          ORDER BY column_name",
         schema.replace('\'', "''"),
         table_name.replace('\'', "''"),
