@@ -31,6 +31,7 @@ use bytes::Bytes;
 use chrono::DateTime;
 use common_query::prelude::greptime_timestamp;
 use common_query::{Output, OutputData};
+use common_recordbatch::RecordBatches;
 use common_telemetry::{error, warn};
 use headers::ContentType;
 use jsonb::Value;
@@ -893,18 +894,26 @@ async fn get_label_columns(
     let results = sql_handler.do_query(&sql, query_ctx).await;
     let mut cols = Vec::new();
     for result in results {
-        if let Ok(Output {
-            data: OutputData::RecordBatches(rbs),
-            ..
-        }) = result
-        {
-            for batch in rbs.iter() {
-                if let Some(col) = batch.column_by_name("column_name") {
-                    let arr = col.as_string::<i32>();
-                    for i in 0..col.len() {
-                        if arr.is_valid(i) {
-                            cols.push(arr.value(i).to_string());
-                        }
+        let rbs = match result {
+            Ok(Output {
+                data: OutputData::RecordBatches(rbs),
+                ..
+            }) => rbs,
+            Ok(Output {
+                data: OutputData::Stream(stream),
+                ..
+            }) => match RecordBatches::try_collect(stream).await {
+                Ok(rbs) => rbs,
+                Err(_) => continue,
+            },
+            _ => continue,
+        };
+        for batch in rbs.iter() {
+            if let Some(col) = batch.column_by_name("column_name") {
+                let arr = col.as_string::<i32>();
+                for i in 0..col.len() {
+                    if arr.is_valid(i) {
+                        cols.push(arr.value(i).to_string());
                     }
                 }
             }
@@ -977,18 +986,22 @@ pub async fn loki_label_values(
     let results = state.sql_handler.do_query(&sql, query_ctx).await;
     let mut values = Vec::new();
     for result in results {
-        if let Ok(Output {
-            data: OutputData::RecordBatches(rbs),
-            ..
-        }) = result
-        {
-            for batch in rbs.iter() {
-                if let Some(col) = batch.column_by_name(&name) {
-                    let arr = col.as_string::<i32>();
-                    for i in 0..col.len() {
-                        if arr.is_valid(i) {
-                            values.push(arr.value(i).to_string());
-                        }
+        let rbs = match result {
+            Ok(Output { data: OutputData::RecordBatches(rbs), .. }) => rbs,
+            Ok(Output { data: OutputData::Stream(stream), .. }) => {
+                match RecordBatches::try_collect(stream).await {
+                    Ok(rbs) => rbs,
+                    Err(_) => continue,
+                }
+            }
+            _ => continue,
+        };
+        for batch in rbs.iter() {
+            if let Some(col) = batch.column_by_name(&name) {
+                let arr = col.as_string::<i32>();
+                for i in 0..col.len() {
+                    if arr.is_valid(i) {
+                        values.push(arr.value(i).to_string());
                     }
                 }
             }
@@ -1087,10 +1100,16 @@ pub async fn loki_query_range(
     let mut streams: HashMap<String, LokiStream> = HashMap::new();
 
     for result in results {
-        if let Ok(Output {
-            data: OutputData::RecordBatches(rbs),
-            ..
-        }) = result
+        let rbs = match result {
+            Ok(Output { data: OutputData::RecordBatches(rbs), .. }) => rbs,
+            Ok(Output { data: OutputData::Stream(stream), .. }) => {
+                match RecordBatches::try_collect(stream).await {
+                    Ok(rbs) => rbs,
+                    Err(_) => continue,
+                }
+            }
+            _ => continue,
+        };
         {
             for batch in rbs.iter() {
                 let Some(ts_col) = batch.column_by_name("greptime_timestamp") else {
@@ -1199,30 +1218,34 @@ pub async fn loki_series(
     let mut series: Vec<BTreeMap<String, String>> = Vec::new();
 
     for result in results {
-        if let Ok(Output {
-            data: OutputData::RecordBatches(rbs),
-            ..
-        }) = result
-        {
-            for batch in rbs.iter() {
-                let label_col_arcs: Vec<(String, ArrayRef)> = label_cols
-                    .iter()
-                    .filter_map(|lc| {
-                        batch.column_by_name(lc).map(|col| (lc.clone(), col.clone()))
-                    })
-                    .collect();
+        let rbs = match result {
+            Ok(Output { data: OutputData::RecordBatches(rbs), .. }) => rbs,
+            Ok(Output { data: OutputData::Stream(stream), .. }) => {
+                match RecordBatches::try_collect(stream).await {
+                    Ok(rbs) => rbs,
+                    Err(_) => continue,
+                }
+            }
+            _ => continue,
+        };
+        for batch in rbs.iter() {
+            let label_col_arcs: Vec<(String, ArrayRef)> = label_cols
+                .iter()
+                .filter_map(|lc| {
+                    batch.column_by_name(lc).map(|col| (lc.clone(), col.clone()))
+                })
+                .collect();
 
-                for i in 0..batch.num_rows() {
-                    let mut row: BTreeMap<String, String> = BTreeMap::new();
-                    for (name, col) in &label_col_arcs {
-                        let arr = col.as_string::<i32>();
-                        if arr.is_valid(i) {
-                            row.insert(name.clone(), arr.value(i).to_string());
-                        }
+            for i in 0..batch.num_rows() {
+                let mut row: BTreeMap<String, String> = BTreeMap::new();
+                for (name, col) in &label_col_arcs {
+                    let arr = col.as_string::<i32>();
+                    if arr.is_valid(i) {
+                        row.insert(name.clone(), arr.value(i).to_string());
                     }
-                    if !row.is_empty() {
-                        series.push(row);
-                    }
+                }
+                if !row.is_empty() {
+                    series.push(row);
                 }
             }
         }
