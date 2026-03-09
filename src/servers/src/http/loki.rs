@@ -832,6 +832,57 @@ pub(crate) struct LokiInstantQueryData {
     result: Vec<LokiVectorSample>,
 }
 
+/// Placeholder for metric query responses (Grafana logsVolume / metric queries).
+/// We don't evaluate LogQL metric expressions; return an empty matrix so Grafana
+/// doesn't crash when it sends supporting queries like `count_over_time(...)`.
+#[derive(Serialize)]
+pub(crate) struct LokiMatrixData {
+    #[serde(rename = "resultType")]
+    result_type: &'static str,
+    result: Vec<serde_json::Value>,
+}
+
+/// Returns true when `query` is a LogQL metric expression rather than a plain
+/// log stream selector.  We detect this by looking for aggregation / range
+/// function keywords that only appear in metric queries.
+fn is_metric_query(query: &str) -> bool {
+    const METRIC_KEYWORDS: &[&str] = &[
+        "count_over_time",
+        "rate(",
+        "bytes_rate",
+        "bytes_over_time",
+        "avg_over_time",
+        "sum_over_time",
+        "min_over_time",
+        "max_over_time",
+        "first_over_time",
+        "last_over_time",
+        "absent_over_time",
+        "stdvar_over_time",
+        "stddev_over_time",
+        "quantile_over_time",
+        "sum(",
+        "avg(",
+        "min(",
+        "max(",
+        "count(",
+        "stddev(",
+        "stdvar(",
+        "topk(",
+        "bottomk(",
+        "sort(",
+        "sort_desc(",
+    ];
+    let q = query.trim();
+    // A bare stream selector starts with '{'; anything that starts with a
+    // function/aggregation name, or contains a metric function after the
+    // stream selector, is a metric query.
+    if !q.starts_with('{') {
+        return true;
+    }
+    METRIC_KEYWORDS.iter().any(|kw| q.contains(kw))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct LokiQueryParams {
     pub query: Option<String>,
@@ -1036,7 +1087,17 @@ pub async fn loki_query_range(
     State(state): State<LokiQueryState>,
     Query(params): Query<LokiQueryParams>,
     Extension(mut query_ctx): Extension<QueryContext>,
-) -> axum::Json<LokiApiResponse<LokiQueryRangeData>> {
+) -> axum::Json<serde_json::Value> {
+    // Grafana 11 sends supporting metric queries (logsVolume, dataSample histogram).
+    // We don't evaluate LogQL metric expressions — return an empty matrix so
+    // Grafana doesn't crash trying to render the volume histogram.
+    if params.query.as_deref().map(is_metric_query).unwrap_or(false) {
+        return axum::Json(serde_json::json!({
+            "status": "success",
+            "data": { "resultType": "matrix", "result": [] }
+        }));
+    }
+
     if let Some(db) = &params.db {
         let (catalog, schema) =
             common_catalog::parse_catalog_and_schema_from_db_string(db);
@@ -1171,10 +1232,10 @@ pub async fn loki_query_range(
     }
 
     let result: Vec<LokiStream> = streams.into_values().collect();
-    LokiApiResponse::success(LokiQueryRangeData {
-        result_type: "streams",
-        result,
-    })
+    axum::Json(serde_json::json!({
+        "status": "success",
+        "data": { "resultType": "streams", "result": result }
+    }))
 }
 
 // GET /loki/api/v1/series
@@ -1252,6 +1313,22 @@ pub async fn loki_series(
     }
 
     LokiApiResponse::success(series)
+}
+
+// GET /loki/api/v1/index/stats
+// Grafana 11 calls this to display the log volume badge.  We don't maintain
+// chunk-level index stats, so return zeros; Grafana handles this gracefully.
+pub async fn loki_index_stats(
+    State(_state): State<LokiQueryState>,
+    Query(_params): Query<LokiQueryParams>,
+    Extension(_query_ctx): Extension<QueryContext>,
+) -> axum::Json<serde_json::Value> {
+    axum::Json(serde_json::json!({
+        "streams": 0,
+        "chunks": 0,
+        "bytes": 0,
+        "entries": 0
+    }))
 }
 
 #[cfg(test)]

@@ -60,7 +60,8 @@ use crate::error::{
 };
 use crate::http::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, influxdb_write_v2};
 use crate::http::loki::{
-    LokiQueryState, loki_label_values, loki_labels, loki_query, loki_query_range, loki_series,
+    LokiQueryState, loki_index_stats, loki_label_values, loki_labels, loki_query,
+    loki_query_range, loki_series,
 };
 use crate::http::otlp::OtlpState;
 use crate::http::prom_store::PromStoreState;
@@ -689,6 +690,7 @@ impl HttpServerBuilder {
             .route("/api/v1/query", routing::get(loki_query))
             .route("/api/v1/query_range", routing::get(loki_query_range))
             .route("/api/v1/series", routing::get(loki_series))
+            .route("/api/v1/index/stats", routing::get(loki_index_stats))
             .with_state(state);
         Self {
             router: self
