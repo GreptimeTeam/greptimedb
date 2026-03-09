@@ -1130,7 +1130,7 @@ async fn test_all_index_metas_list_all_types_with_format(flat_format: bool, expe
         .unwrap();
 
     fn bucket_size(size: u64) -> u64 {
-        if size < 512 {
+        if size < 1000 {
             size
         } else {
             (size / 1000) * 1000
