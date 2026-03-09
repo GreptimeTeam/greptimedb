@@ -790,7 +790,7 @@ const LOKI_SYSTEM_COLUMNS: &[&str] = &[
 ];
 
 #[derive(Serialize)]
-struct LokiApiResponse<T: Serialize> {
+pub(crate) struct LokiApiResponse<T: Serialize> {
     status: &'static str,
     data: T,
 }
@@ -805,13 +805,13 @@ impl<T: Serialize> LokiApiResponse<T> {
 }
 
 #[derive(Serialize)]
-struct LokiStream {
+pub(crate) struct LokiStream {
     stream: BTreeMap<String, String>,
     values: Vec<[String; 2]>, // [ns_timestamp_string, log_line]
 }
 
 #[derive(Serialize)]
-struct LokiQueryRangeData {
+pub(crate) struct LokiQueryRangeData {
     #[serde(rename = "resultType")]
     result_type: &'static str,
     result: Vec<LokiStream>,
