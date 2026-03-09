@@ -983,6 +983,19 @@ pub async fn loki_label_values(
     LokiApiResponse::success(values)
 }
 
+// GET /loki/api/v1/query — instant query (used by Grafana health check)
+// We return an empty vector result; full metric query support is not implemented.
+pub async fn loki_query(
+    State(_state): State<LokiQueryState>,
+    Query(_params): Query<LokiQueryParams>,
+    Extension(_query_ctx): Extension<QueryContext>,
+) -> axum::Json<LokiApiResponse<LokiQueryRangeData>> {
+    LokiApiResponse::success(LokiQueryRangeData {
+        result_type: "vector",
+        result: vec![],
+    })
+}
+
 // GET /loki/api/v1/query_range
 pub async fn loki_query_range(
     State(state): State<LokiQueryState>,
