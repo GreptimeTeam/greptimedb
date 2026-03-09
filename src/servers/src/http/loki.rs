@@ -16,6 +16,9 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
+use arrow::array::AsArray;
+use arrow::datatypes::TimestampNanosecondType;
+
 use api::v1::value::ValueData;
 use api::v1::{
     ColumnDataType, ColumnDataTypeExtension, ColumnSchema, JsonTypeExtension, Row,
@@ -28,7 +31,6 @@ use bytes::Bytes;
 use chrono::DateTime;
 use common_query::prelude::greptime_timestamp;
 use common_query::{Output, OutputData};
-use common_recordbatch::RecordBatches;
 use common_telemetry::{error, warn};
 use headers::ContentType;
 use jsonb::Value;
@@ -884,12 +886,10 @@ async fn get_label_columns(
         {
             for batch in rbs.iter() {
                 if let Some(col) = batch.column_by_name("column_name") {
-                    for i in 0..col.len() {
-                        if let Some(v) = col.get(i).and_then(|v| match v {
-                            datatypes::value::Value::String(s) => Some(s.as_utf8().to_string()),
-                            _ => None,
-                        }) {
-                            cols.push(v);
+                    let arr = col.as_string::<i32>();
+                    for i in 0..arr.len() {
+                        if arr.is_valid(i) {
+                            cols.push(arr.value(i).to_string());
                         }
                     }
                 }
@@ -970,12 +970,10 @@ pub async fn loki_label_values(
         {
             for batch in rbs.iter() {
                 if let Some(col) = batch.column_by_name(&name) {
-                    for i in 0..col.len() {
-                        if let Some(v) = col.get(i).and_then(|v| match v {
-                            datatypes::value::Value::String(s) => Some(s.as_utf8().to_string()),
-                            _ => None,
-                        }) {
-                            values.push(v);
+                    let arr = col.as_string::<i32>();
+                    for i in 0..arr.len() {
+                        if arr.is_valid(i) {
+                            values.push(arr.value(i).to_string());
                         }
                     }
                 }
@@ -1060,41 +1058,48 @@ pub async fn loki_query_range(
         }) = result
         {
             for batch in rbs.iter() {
-                let ts_col = batch.column_by_name("greptime_timestamp");
-                let line_col = batch.column_by_name("line");
-                let (Some(ts_col), Some(line_col)) = (ts_col, line_col) else {
+                let Some(ts_col) = batch.column_by_name("greptime_timestamp") else {
+                    continue;
+                };
+                let Some(line_col) = batch.column_by_name("line") else {
                     continue;
                 };
 
+                let ts_arr = ts_col.as_primitive::<TimestampNanosecondType>();
+                let line_arr = line_col.as_string::<i32>();
+
+                // Pre-fetch label arrays for this batch.
+                let label_arrays: Vec<(&str, _)> = label_cols
+                    .iter()
+                    .filter_map(|lc| {
+                        batch.column_by_name(lc).map(|col| (lc.as_str(), col.as_string::<i32>()))
+                    })
+                    .collect();
+
                 for i in 0..batch.num_rows() {
+                    if !ts_arr.is_valid(i) {
+                        continue;
+                    }
+
                     // Build label map for this row.
                     let mut labels: BTreeMap<String, String> = BTreeMap::new();
-                    for lc in &label_cols {
-                        if let Some(col) = batch.column_by_name(lc) {
-                            if let Some(datatypes::value::Value::String(s)) = col.get(i) {
-                                labels.insert(lc.clone(), s.as_utf8().to_string());
-                            }
+                    for (name, arr) in &label_arrays {
+                        if arr.is_valid(i) {
+                            labels.insert(name.to_string(), arr.value(i).to_string());
                         }
                     }
 
-                    // Stream key = sorted label pairs.
                     let stream_key = labels
                         .iter()
                         .map(|(k, v)| format!("{}={}", k, v))
                         .collect::<Vec<_>>()
                         .join(",");
 
-                    // Timestamp in nanoseconds as string.
-                    let ts_ns = match ts_col.get(i) {
-                        Some(datatypes::value::Value::Timestamp(ts)) => {
-                            ts.value().to_string()
-                        }
-                        _ => continue,
-                    };
-
-                    let line = match line_col.get(i) {
-                        Some(datatypes::value::Value::String(s)) => s.as_utf8().to_string(),
-                        _ => String::new(),
+                    let ts_ns = ts_arr.value(i).to_string();
+                    let line = if line_arr.is_valid(i) {
+                        line_arr.value(i).to_string()
+                    } else {
+                        String::new()
                     };
 
                     streams
@@ -1164,13 +1169,18 @@ pub async fn loki_series(
         }) = result
         {
             for batch in rbs.iter() {
+                let label_arrays: Vec<(&str, _)> = label_cols
+                    .iter()
+                    .filter_map(|lc| {
+                        batch.column_by_name(lc).map(|col| (lc.as_str(), col.as_string::<i32>()))
+                    })
+                    .collect();
+
                 for i in 0..batch.num_rows() {
                     let mut row: BTreeMap<String, String> = BTreeMap::new();
-                    for lc in &label_cols {
-                        if let Some(col) = batch.column_by_name(lc) {
-                            if let Some(datatypes::value::Value::String(s)) = col.get(i) {
-                                row.insert(lc.clone(), s.as_utf8().to_string());
-                            }
+                    for (name, arr) in &label_arrays {
+                        if arr.is_valid(i) {
+                            row.insert(name.to_string(), arr.value(i).to_string());
                         }
                     }
                     if !row.is_empty() {
