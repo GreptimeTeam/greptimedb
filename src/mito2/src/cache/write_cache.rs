@@ -323,7 +323,6 @@ impl WriteCache {
             .await
     }
 
-    #[allow(dead_code)]
     pub(crate) async fn download_if_absent(
         &self,
         index_key: IndexKey,
