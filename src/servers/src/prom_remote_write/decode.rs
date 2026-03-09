@@ -29,12 +29,10 @@ use snafu::OptionExt;
 use vrl::prelude::NotNan;
 use vrl::value::{KeyString, Value as VrlValue};
 
-use super::row_builder::{PromCtx, TablesBuilder};
-use super::types::PromLabel;
-use super::validation::PromValidationMode;
 use crate::error::InternalSnafu;
 use crate::http::event::PipelineIngestRequest;
 use crate::pipeline::run_pipeline;
+use crate::prom_remote_write::{PromCtx, PromLabel, PromValidationMode, TablesBuilder};
 #[allow(deprecated)]
 use crate::prom_store::{
     DATABASE_LABEL_ALT_BYTES, DATABASE_LABEL_BYTES, METRIC_NAME_LABEL_BYTES,

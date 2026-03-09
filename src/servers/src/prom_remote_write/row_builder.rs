@@ -22,8 +22,7 @@ use common_query::prelude::{greptime_timestamp, greptime_value};
 use pipeline::{ContextOpt, ContextReq};
 use prost::DecodeError;
 
-use super::types::PromLabel;
-use super::validation::{PromValidationMode, validate_label_name};
+use crate::prom_remote_write::{PromLabel, PromValidationMode, validate_label_name};
 use crate::repeated_field::Clear;
 
 #[derive(Debug, Default, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
