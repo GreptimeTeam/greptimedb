@@ -809,6 +809,7 @@ mod tests {
                 .num_fields(2)
                 .build(),
         );
+        let cache = CacheStrategy::Disabled;
         let mapper = ProjectionMapper::all(&metadata, true).unwrap();
         assert_eq!([0, 1, 2, 3, 4], mapper.column_ids());
         assert_eq!(
@@ -823,7 +824,7 @@ mod tests {
         );
 
         let batch = new_flat_batch(Some(0), &[(1, 1), (2, 2)], &[(3, 3), (4, 4)], 3);
-        let record_batch = mapper.as_flat().unwrap().convert(&batch).unwrap();
+        let record_batch = mapper.as_flat().unwrap().convert(&batch, &cache).unwrap();
         let expect = "\
 +---------------------+----+----+----+----+
 | ts                  | k0 | k1 | v0 | v1 |
@@ -843,6 +844,7 @@ mod tests {
                 .num_fields(2)
                 .build(),
         );
+        let cache = CacheStrategy::Disabled;
         // Columns v1, k0
         let mapper = ProjectionMapper::new(&metadata, [4, 1].into_iter(), true).unwrap();
         assert_eq!([4, 1], mapper.column_ids());
@@ -856,7 +858,7 @@ mod tests {
         );
 
         let batch = new_flat_batch(None, &[(1, 1)], &[(4, 4)], 3);
-        let record_batch = mapper.as_flat().unwrap().convert(&batch).unwrap();
+        let record_batch = mapper.as_flat().unwrap().convert(&batch, &cache).unwrap();
         let expect = "\
 +----+----+
 | v1 | k0 |
@@ -876,6 +878,7 @@ mod tests {
                 .num_fields(2)
                 .build(),
         );
+        let cache = CacheStrategy::Disabled;
         // Output columns v1, k0. Read also includes v0.
         let mapper = ProjectionMapper::new_with_read_columns(
             &metadata,
@@ -887,7 +890,7 @@ mod tests {
         assert_eq!([4, 1, 3], mapper.column_ids());
 
         let batch = new_flat_batch(None, &[(1, 1)], &[(3, 3), (4, 4)], 3);
-        let record_batch = mapper.as_flat().unwrap().convert(&batch).unwrap();
+        let record_batch = mapper.as_flat().unwrap().convert(&batch, &cache).unwrap();
         let expect = "\
 +----+----+
 | v1 | k0 |
@@ -907,6 +910,7 @@ mod tests {
                 .num_fields(2)
                 .build(),
         );
+        let cache = CacheStrategy::Disabled;
         // Empty projection
         let mapper = ProjectionMapper::new(&metadata, [].into_iter(), true).unwrap();
         assert_eq!([0], mapper.column_ids()); // Should still read the time index column
@@ -918,7 +922,7 @@ mod tests {
         );
 
         let batch = new_flat_batch(Some(0), &[], &[], 3);
-        let record_batch = flat_mapper.convert(&batch).unwrap();
+        let record_batch = flat_mapper.convert(&batch, &cache).unwrap();
         assert_eq!(3, record_batch.num_rows());
         assert_eq!(0, record_batch.num_columns());
         assert!(record_batch.schema.is_empty());

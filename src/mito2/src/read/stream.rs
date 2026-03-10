@@ -66,24 +66,20 @@ impl ConvertBatchStream {
         }
     }
 
-    fn convert(&mut self, batch: ScanBatch) -> common_recordbatch::error::Result<RecordBatch> {
+    fn convert_into_pending(&mut self, batch: ScanBatch) -> common_recordbatch::error::Result<()> {
         match batch {
             ScanBatch::Normal(batch) => {
                 // Safety: Only primary key format returns this batch.
                 let mapper = self.projection_mapper.as_primary_key().unwrap();
 
                 if batch.is_empty() {
-                    Ok(mapper.empty_record_batch())
+                    self.pending.push_back(mapper.empty_record_batch());
                 } else {
-                    mapper.convert(&batch, &self.cache_strategy)
+                    self.pending
+                        .push_back(mapper.convert(&batch, &self.cache_strategy)?);
                 }
             }
             ScanBatch::Series(series) => {
-                debug_assert!(
-                    self.pending.is_empty(),
-                    "ConvertBatchStream should not convert a new SeriesBatch when pending batches exist"
-                );
-
                 match series {
                     SeriesBatch::PrimaryKey(primary_key_batch) => {
                         // Safety: Only primary key format returns this batch.
@@ -99,24 +95,22 @@ impl ConvertBatchStream {
                         let mapper = self.projection_mapper.as_flat().unwrap();
 
                         for batch in flat_batch.batches {
-                            self.pending.push_back(mapper.convert(&batch)?);
+                            self.pending
+                                .push_back(mapper.convert(&batch, &self.cache_strategy)?);
                         }
                     }
                 }
-
-                let output_schema = self.projection_mapper.output_schema();
-                Ok(self
-                    .pending
-                    .pop_front()
-                    .unwrap_or_else(|| RecordBatch::new_empty(output_schema)))
             }
             ScanBatch::RecordBatch(df_record_batch) => {
                 // Safety: Only flat format returns this batch.
                 let mapper = self.projection_mapper.as_flat().unwrap();
 
-                mapper.convert(&df_record_batch)
+                self.pending
+                    .push_back(mapper.convert(&df_record_batch, &self.cache_strategy)?);
             }
         }
+
+        Ok(())
     }
 }
 
@@ -128,21 +122,30 @@ impl Stream for ConvertBatchStream {
             return Poll::Ready(Some(Ok(batch)));
         }
 
-        let batch = futures::ready!(self.inner.poll_next_unpin(cx));
-        let Some(batch) = batch else {
-            return Poll::Ready(None);
-        };
+        loop {
+            let batch = futures::ready!(self.inner.poll_next_unpin(cx));
+            let Some(batch) = batch else {
+                return Poll::Ready(None);
+            };
 
-        let record_batch = match batch {
-            Ok(batch) => {
-                let start = Instant::now();
-                let record_batch = self.convert(batch);
-                self.partition_metrics
-                    .inc_convert_batch_cost(start.elapsed());
-                record_batch
+            let result = match batch {
+                Ok(batch) => {
+                    let start = Instant::now();
+                    let result = self.convert_into_pending(batch);
+                    self.partition_metrics
+                        .inc_convert_batch_cost(start.elapsed());
+                    result
+                }
+                Err(e) => Err(BoxedError::new(e)).context(ExternalSnafu),
+            };
+
+            if let Err(e) = result {
+                return Poll::Ready(Some(Err(e)));
             }
-            Err(e) => Err(BoxedError::new(e)).context(ExternalSnafu),
-        };
-        Poll::Ready(Some(record_batch))
+
+            if let Some(batch) = self.pending.pop_front() {
+                return Poll::Ready(Some(Ok(batch)));
+            }
+        }
     }
 }
