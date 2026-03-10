@@ -1715,6 +1715,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_on_compaction_finished_replays_pending_ddl_after_manual_noop() {
+        let env = SchedulerEnv::new().await;
+        let (tx, _rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_compaction_scheduler(tx);
+        let builder = VersionControlBuilder::new();
+        let version_control = Arc::new(builder.build());
+        let region_id = builder.region_id();
+        let manifest_ctx = env
+            .mock_manifest_context(version_control.current().version.metadata.clone())
+            .await;
+        let (schema_metadata_manager, _kv_backend) = mock_schema_metadata_manager();
+
+        let (manual_tx, manual_rx) = oneshot::channel();
+        let mut status =
+            CompactionStatus::new(region_id, version_control.clone(), env.access_layer.clone());
+        status.set_pending_request(PendingCompaction {
+            options: compact_request::Options::Regular(Default::default()),
+            waiter: OptionOutputTx::from(manual_tx),
+            max_parallelism: 1,
+        });
+        scheduler.region_status.insert(region_id, status);
+
+        let (ddl_tx, _ddl_rx) = oneshot::channel();
+        scheduler.add_ddl_request_to_pending(SenderDdlRequest {
+            region_id,
+            sender: OptionOutputTx::from(ddl_tx),
+            request: crate::request::DdlRequest::EnterStaging(
+                store_api::region_request::EnterStagingRequest {
+                    partition_directive:
+                        store_api::region_request::StagingPartitionDirective::RejectAllWrites,
+                },
+            ),
+        });
+
+        let pending_ddls = scheduler
+            .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager)
+            .await;
+
+        assert_eq!(pending_ddls.len(), 1);
+        assert!(!scheduler.region_status.contains_key(&region_id));
+        assert_eq!(manual_rx.await.unwrap().unwrap(), 0);
+    }
+
+    #[tokio::test]
     async fn test_concurrent_memory_competition() {
         let manager = Arc::new(new_compaction_memory_manager(3 * 1024 * 1024)); // 3MB
         let barrier = Arc::new(Barrier::new(3));
