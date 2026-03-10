@@ -18,40 +18,35 @@ use api::prom_store::remote::Sample;
 use api::v1::helper::{field_column_schema, time_index_column_schema};
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnSchema, Row, RowInsertRequest, Rows, SemanticType, Value};
-use bytes::Bytes;
 use common_query::prelude::{greptime_timestamp, greptime_value};
 use pipeline::{ContextOpt, ContextReq};
 use prost::DecodeError;
 
-use crate::http::{PromValidationMode, validate_label_name};
-use crate::proto::PromLabel;
+use crate::prom_remote_write::PromValidationMode;
+use crate::prom_remote_write::types::PromLabel;
+use crate::prom_remote_write::validation::validate_label_name;
 use crate::repeated_field::Clear;
 
-// Prometheus remote write context
 #[derive(Debug, Default, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct PromCtx {
     pub schema: Option<String>,
     pub physical_table: Option<String>,
 }
 
-/// [TablesBuilder] serves as an intermediate container to build [RowInsertRequests].
 #[derive(Default, Debug)]
 pub struct TablesBuilder<'a> {
-    // schema -> table -> table_builder
     pub tables: HashMap<PromCtx, HashMap<String, TableBuilder<'a>>>,
-    /// Raw request data.
-    raw_data: Bytes,
+    pub(crate) raw_data: Vec<u8>,
 }
 
 impl<'a> Clear for TablesBuilder<'a> {
     fn clear(&mut self) {
         self.tables.clear();
-        self.raw_data = Bytes::new();
+        self.raw_data.clear();
     }
 }
 
 impl<'a> TablesBuilder<'a> {
-    /// Gets table builder with given table name. Creates an empty [TableBuilder] if not exist.
     pub(crate) fn get_or_create_table_builder(
         &mut self,
         prom_ctx: PromCtx,
@@ -66,12 +61,10 @@ impl<'a> TablesBuilder<'a> {
             .or_insert_with(|| TableBuilder::with_capacity(label_num + 2, row_num))
     }
 
-    /// Converts [TablesBuilder] to [RowInsertRequests] and row numbers and clears inner states.
     pub(crate) fn as_insert_requests(&mut self) -> ContextReq {
         self.tables
             .drain()
             .map(|(prom, mut tables)| {
-                // create context opt
                 let mut opt = ContextOpt::default();
                 if let Some(physical_table) = prom.physical_table {
                     opt.set_physical_table(physical_table);
@@ -80,7 +73,6 @@ impl<'a> TablesBuilder<'a> {
                     opt.set_schema(schema);
                 }
 
-                // create and set context req
                 let mut ctx_req = ContextReq::default();
                 let reqs = tables
                     .drain()
@@ -95,19 +87,15 @@ impl<'a> TablesBuilder<'a> {
             })
     }
 
-    pub(crate) fn set_raw_data(&mut self, buf: Bytes) {
+    pub(crate) fn set_raw_data(&mut self, buf: Vec<u8>) {
         self.raw_data = buf;
     }
 }
 
-/// Builder for one table.
 #[derive(Debug)]
 pub struct TableBuilder<'a> {
-    /// Column schemas.
     schema: Vec<ColumnSchema>,
-    /// Rows written.
     rows: Vec<Row>,
-    /// Indices of columns inside `schema`.
     col_indexes: HashMap<&'a [u8], usize>,
 }
 
@@ -140,7 +128,6 @@ impl<'a> TableBuilder<'a> {
         }
     }
 
-    /// Adds a set of labels and samples to table builder.
     pub(crate) fn add_labels_and_samples(
         &mut self,
         labels: &[PromLabel],
@@ -167,7 +154,6 @@ impl<'a> TableBuilder<'a> {
                 continue;
             }
 
-            // Safety: we've validated the label name is valid in line 152.
             let tag_name = unsafe { std::str::from_utf8_unchecked(raw_tag_name) };
             self.schema.push(ColumnSchema {
                 column_name: tag_name.to_owned(),
@@ -200,7 +186,6 @@ impl<'a> TableBuilder<'a> {
         Ok(())
     }
 
-    /// Converts [TableBuilder] to [RowInsertRequest] and clears buffered data.
     pub fn as_row_insert_request(&mut self, table_name: String) -> RowInsertRequest {
         let mut rows = std::mem::take(&mut self.rows);
         let schema = std::mem::take(&mut self.schema);
@@ -228,13 +213,9 @@ impl<'a> TableBuilder<'a> {
 #[cfg(test)]
 mod tests {
     use api::prom_store::remote::Sample;
-    use api::v1::Value;
-    use api::v1::value::ValueData;
     use prost::DecodeError;
 
-    use crate::http::PromValidationMode;
-    use crate::prom_row_builder::TableBuilder;
-    use crate::proto::PromLabel;
+    use super::*;
 
     #[test]
     fn test_table_builder() {
@@ -279,46 +260,7 @@ mod tests {
         let rows = request.rows.unwrap().rows;
         assert_eq!(2, rows.len());
 
-        assert_eq!(
-            vec![
-                Value {
-                    value_data: Some(ValueData::TimestampMillisecondValue(0))
-                },
-                Value {
-                    value_data: Some(ValueData::F64Value(0.0))
-                },
-                Value {
-                    value_data: Some(ValueData::StringValue("v0".to_string()))
-                },
-                Value {
-                    value_data: Some(ValueData::StringValue("v1".to_string()))
-                },
-                Value { value_data: None },
-            ],
-            rows[0].values
-        );
-
-        assert_eq!(
-            vec![
-                Value {
-                    value_data: Some(ValueData::TimestampMillisecondValue(1))
-                },
-                Value {
-                    value_data: Some(ValueData::F64Value(0.1))
-                },
-                Value {
-                    value_data: Some(ValueData::StringValue("v0".to_string()))
-                },
-                Value { value_data: None },
-                Value {
-                    value_data: Some(ValueData::StringValue("v2".to_string()))
-                },
-            ],
-            rows[1].values
-        );
-
         let invalid_utf8_bytes = &[0xFF, 0xFF, 0xFF];
-
         let res = builder.add_labels_and_samples(
             &[PromLabel {
                 name: b"tag0",

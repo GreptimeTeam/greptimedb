@@ -15,19 +15,18 @@
 use std::time::Duration;
 
 use api::prom_store::remote::WriteRequest;
-use bytes::Bytes;
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use prost::Message;
-use servers::http::{PromValidationMode, validate_label_name};
+use servers::prom_remote_write::decode::{PromSeriesProcessor, PromWriteRequest};
+use servers::prom_remote_write::validation::{PromValidationMode, validate_label_name};
 use servers::prom_store::to_grpc_row_insert_requests;
-use servers::proto::{PromSeriesProcessor, PromWriteRequest};
 
 fn bench_decode_prom_request(c: &mut Criterion) {
     let mut d = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     d.push("benches");
     d.push("write_request.pb.data");
 
-    let data = Bytes::from(std::fs::read(d).unwrap());
+    let data = std::fs::read(d).unwrap();
 
     let mut group = c.benchmark_group("decode_prom_request");
     group.measurement_time(Duration::from_secs(3));
@@ -36,8 +35,7 @@ fn bench_decode_prom_request(c: &mut Criterion) {
     let mut request = WriteRequest::default();
     group.bench_function("standard_write_request", |b| {
         b.iter(|| {
-            let data = data.clone();
-            request.merge(data).unwrap();
+            request.merge(data.as_slice()).unwrap();
             to_grpc_row_insert_requests(&request).unwrap();
         });
     });
