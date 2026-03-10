@@ -41,10 +41,13 @@
 mod chunker;
 mod command;
 mod coordinator;
+pub mod delete;
 pub mod error;
 pub mod extractor;
+pub mod list;
 pub mod manifest;
 pub mod schema;
+pub mod verify;
 pub use command::{ExportCreateCommand, ExportV2Command};
 
 pub use super::snapshot_storage as storage;

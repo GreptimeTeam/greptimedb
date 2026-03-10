@@ -27,14 +27,17 @@ use snafu::{OptionExt, ResultExt};
 
 use super::chunker::generate_chunks;
 use super::coordinator::export_data;
+use super::delete::ExportDeleteCommand;
 use super::error::{
     DatabaseSnafu, EmptyResultSnafu, ExportConfigMismatchSnafu, ManifestVersionMismatchSnafu,
     Result, UnexpectedValueTypeSnafu,
 };
 use super::extractor::SchemaExtractor;
+use super::list::ExportListCommand;
 use super::manifest::{DataFormat, MANIFEST_VERSION, Manifest, TimeRange};
 use super::schema::{DDL_DIR, SCHEMA_DIR, SchemaSnapshot};
-use super::storage::{OpenDalStorage, SnapshotStorage, validate_uri};
+use super::storage::{OpenDalStorage, SnapshotStorage, validate_snapshot_target_uri};
+use super::verify::ExportVerifyCommand;
 use crate::Tool;
 use crate::common::ObjectStoreConfig;
 use crate::data::retry::RetryConfig;
@@ -46,12 +49,21 @@ use crate::export_v2::error::ChunkTimeWindowRequiresBoundsSnafu;
 pub enum ExportV2Command {
     /// Create a new snapshot.
     Create(ExportCreateCommand),
+    /// List snapshots at a storage location.
+    List(ExportListCommand),
+    /// Verify snapshot integrity.
+    Verify(ExportVerifyCommand),
+    /// Delete a snapshot.
+    Delete(ExportDeleteCommand),
 }
 
 impl ExportV2Command {
     pub async fn build(&self) -> StdResult<Box<dyn Tool>, BoxedError> {
         match self {
             ExportV2Command::Create(cmd) => cmd.build().await,
+            ExportV2Command::List(cmd) => cmd.build().await,
+            ExportV2Command::Verify(cmd) => cmd.build().await,
+            ExportV2Command::Delete(cmd) => cmd.build().await,
         }
     }
 }
@@ -152,8 +164,8 @@ pub struct ExportCreateCommand {
 
 impl ExportCreateCommand {
     pub async fn build(&self) -> StdResult<Box<dyn Tool>, BoxedError> {
-        // Validate URI format
-        validate_uri(&self.to).map_err(BoxedError::new)?;
+        // Validate snapshot target URI to avoid broad-path operations.
+        validate_snapshot_target_uri(&self.to).map_err(BoxedError::new)?;
 
         // Parse and validate time range
         let time_range = TimeRange::parse(self.start_time.as_deref(), self.end_time.as_deref())

@@ -82,7 +82,7 @@ fn extract_bucket_and_root(uri: &str) -> Result<(String, String)> {
     Ok((bucket, root))
 }
 
-/// Validates that a URI has a proper scheme.
+/// Validates that a storage URI uses a supported scheme and has a scheme prefix.
 ///
 /// Rejects bare paths (e.g., `/tmp/backup`, `./backup`) because:
 /// - Schema export (CLI) and data export (server) run in different processes
@@ -94,7 +94,7 @@ fn extract_bucket_and_root(uri: &str) -> Result<(String, String)> {
 /// - `gs://bucket/path` - Google Cloud Storage
 /// - `azblob://container/path` - Azure Blob Storage
 /// - `file:///absolute/path` - Local filesystem
-pub fn validate_uri(uri: &str) -> Result<StorageScheme> {
+pub fn validate_storage_uri(uri: &str) -> Result<StorageScheme> {
     // Must have a scheme
     if !uri.contains("://") {
         return InvalidUriSnafu {
@@ -105,6 +105,53 @@ pub fn validate_uri(uri: &str) -> Result<StorageScheme> {
     }
 
     StorageScheme::from_uri(uri)
+}
+
+/// Validates a snapshot target URI: must be a valid URI with a non-empty path segment.
+///
+/// This prevents dangerous operations (e.g., `delete`) from targeting bucket roots
+/// or filesystem roots. For object storage schemes, the URI must have a non-empty
+/// path after the bucket/container. Bucket/container already provides one isolation
+/// boundary, so requiring one path segment is sufficient. For `file://`, there is
+/// no equivalent storage boundary, so the path must have at least two directory
+/// levels (e.g., `file:///tmp/snapshots/prod`, not `file:///tmp`).
+pub fn validate_snapshot_target_uri(uri: &str) -> Result<StorageScheme> {
+    let scheme = validate_storage_uri(uri)?;
+    let url = Url::parse(uri).context(UrlParseSnafu)?;
+
+    match scheme {
+        StorageScheme::File => {
+            let path = url.path();
+            let segments: Vec<&str> = path
+                .trim_start_matches('/')
+                .split('/')
+                .filter(|s| !s.is_empty())
+                .collect();
+            if segments.len() < 2 {
+                return InvalidUriSnafu {
+                    uri,
+                    reason: "file:// snapshot URI must have at least two directory levels \
+                             (e.g., file:///tmp/snapshots/prod) to prevent accidental deletion \
+                             of broad paths",
+                }
+                .fail();
+            }
+        }
+        _ => {
+            let path = url.path().trim_start_matches('/');
+            if path.is_empty() {
+                return InvalidUriSnafu {
+                    uri,
+                    reason: "Snapshot URI must include a path after the bucket/container \
+                             (e.g., s3://bucket/snapshots/prod) to prevent accidental deletion \
+                             of the entire bucket",
+                }
+                .fail();
+            }
+        }
+    }
+
+    Ok(scheme)
 }
 
 /// Extracts the path component from a URI.
@@ -166,6 +213,7 @@ pub trait SnapshotStorage: Send + Sync {
 pub struct OpenDalStorage {
     object_store: ObjectStore,
     root_path: String,
+    target_uri: String,
 }
 
 impl OpenDalStorage {
@@ -182,6 +230,7 @@ impl OpenDalStorage {
         Ok(Self {
             object_store,
             root_path: String::new(), // Root is already set in the operator
+            target_uri: uri.to_string(),
         })
     }
 
@@ -233,6 +282,7 @@ impl OpenDalStorage {
                 Ok(Self {
                     object_store,
                     root_path: String::new(),
+                    target_uri: uri.to_string(),
                 })
             }
             StorageScheme::Oss => {
@@ -264,6 +314,7 @@ impl OpenDalStorage {
                 Ok(Self {
                     object_store,
                     root_path: String::new(),
+                    target_uri: uri.to_string(),
                 })
             }
             StorageScheme::Gcs => {
@@ -295,6 +346,7 @@ impl OpenDalStorage {
                 Ok(Self {
                     object_store,
                     root_path: String::new(),
+                    target_uri: uri.to_string(),
                 })
             }
             StorageScheme::Azblob => {
@@ -326,15 +378,21 @@ impl OpenDalStorage {
                 Ok(Self {
                     object_store,
                     root_path: String::new(),
+                    target_uri: uri.to_string(),
                 })
             }
         }
     }
 
-    /// Creates a new storage with an existing ObjectStore and root path.
-    pub fn new(object_store: ObjectStore, root_path: String) -> Self {
+    /// Creates a new storage with an existing ObjectStore, root path and display target.
+    ///
+    /// `target_uri` is used in user-facing error messages and should describe the
+    /// logical snapshot location, while `root_path` is the relative path prefix
+    /// used for object store operations.
+    pub fn new(object_store: ObjectStore, root_path: String, target_uri: String) -> Self {
         Self {
             object_store,
+            target_uri,
             root_path,
         }
     }
@@ -395,7 +453,7 @@ impl SnapshotStorage for OpenDalStorage {
     async fn read_manifest(&self) -> Result<Manifest> {
         if !self.exists().await? {
             return SnapshotNotFoundSnafu {
-                uri: self.root_path.as_str(),
+                uri: self.target_uri.as_str(),
             }
             .fail();
         }
@@ -504,39 +562,77 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_validate_uri_valid() {
-        assert_eq!(validate_uri("s3://bucket/path").unwrap(), StorageScheme::S3);
+    fn test_validate_storage_uri_valid() {
         assert_eq!(
-            validate_uri("oss://bucket/path").unwrap(),
+            validate_storage_uri("s3://bucket/path").unwrap(),
+            StorageScheme::S3
+        );
+        assert_eq!(
+            validate_storage_uri("oss://bucket/path").unwrap(),
             StorageScheme::Oss
         );
         assert_eq!(
-            validate_uri("gs://bucket/path").unwrap(),
+            validate_storage_uri("gs://bucket/path").unwrap(),
             StorageScheme::Gcs
         );
         assert_eq!(
-            validate_uri("gcs://bucket/path").unwrap(),
+            validate_storage_uri("gcs://bucket/path").unwrap(),
             StorageScheme::Gcs
         );
         assert_eq!(
-            validate_uri("azblob://container/path").unwrap(),
+            validate_storage_uri("azblob://container/path").unwrap(),
             StorageScheme::Azblob
         );
         assert_eq!(
-            validate_uri("file:///tmp/backup").unwrap(),
+            validate_storage_uri("file:///tmp/backup").unwrap(),
             StorageScheme::File
         );
     }
 
     #[test]
-    fn test_validate_uri_invalid() {
+    fn test_validate_storage_uri_invalid() {
         // Bare paths should be rejected
-        assert!(validate_uri("/tmp/backup").is_err());
-        assert!(validate_uri("./backup").is_err());
-        assert!(validate_uri("backup").is_err());
+        assert!(validate_storage_uri("/tmp/backup").is_err());
+        assert!(validate_storage_uri("./backup").is_err());
+        assert!(validate_storage_uri("backup").is_err());
 
         // Unknown schemes
-        assert!(validate_uri("ftp://server/path").is_err());
+        assert!(validate_storage_uri("ftp://server/path").is_err());
+    }
+
+    #[test]
+    fn test_validate_snapshot_target_uri_valid() {
+        // Object storage: must have path after bucket
+        assert_eq!(
+            validate_snapshot_target_uri("s3://bucket/snapshots/prod").unwrap(),
+            StorageScheme::S3
+        );
+        assert_eq!(
+            validate_snapshot_target_uri("oss://bucket/path").unwrap(),
+            StorageScheme::Oss
+        );
+
+        // File: must have at least two directory levels
+        assert_eq!(
+            validate_snapshot_target_uri("file:///tmp/snapshots/prod").unwrap(),
+            StorageScheme::File
+        );
+        assert_eq!(
+            validate_snapshot_target_uri("file:///data/backups").unwrap(),
+            StorageScheme::File
+        );
+    }
+
+    #[test]
+    fn test_validate_snapshot_target_uri_rejects_shallow_paths() {
+        // Object storage: no path after bucket
+        assert!(validate_snapshot_target_uri("s3://bucket").is_err());
+        assert!(validate_snapshot_target_uri("s3://bucket/").is_err());
+        assert!(validate_snapshot_target_uri("oss://bucket").is_err());
+
+        // File: only one directory level
+        assert!(validate_snapshot_target_uri("file:///tmp").is_err());
+        assert!(validate_snapshot_target_uri("file:///").is_err());
     }
 
     #[test]

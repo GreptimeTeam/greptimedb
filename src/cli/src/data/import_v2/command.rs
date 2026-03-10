@@ -36,7 +36,7 @@ use crate::Tool;
 use crate::common::ObjectStoreConfig;
 use crate::data::export_v2::manifest::{ChunkMeta, ChunkStatus, MANIFEST_VERSION};
 use crate::data::retry::RetryConfig;
-use crate::data::snapshot_storage::{OpenDalStorage, SnapshotStorage, validate_uri};
+use crate::data::snapshot_storage::{OpenDalStorage, SnapshotStorage, validate_storage_uri};
 use crate::database::{DatabaseClient, parse_proxy_opts};
 use crate::import_v2::error::StateOperationSnafu;
 
@@ -120,8 +120,8 @@ pub struct ImportV2Command {
 
 impl ImportV2Command {
     pub async fn build(&self) -> StdResult<Box<dyn Tool>, BoxedError> {
-        // Validate URI format
-        validate_uri(&self.from)
+        // Validate storage URI format and supported scheme.
+        validate_storage_uri(&self.from)
             .context(ExportSnafu)
             .map_err(BoxedError::new)?;
 

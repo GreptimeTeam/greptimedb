@@ -185,6 +185,24 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Deletion cancelled by user"))]
+    DeletionCancelled {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Snapshot verification failed: {} error(s), {} warning(s)",
+        error_count,
+        warn_count
+    ))]
+    VerificationFailed {
+        error_count: usize,
+        warn_count: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -218,6 +236,8 @@ impl ErrorExt for Error {
 
             Error::SnapshotNotFound { .. } => StatusCode::InvalidArguments,
             Error::SchemaNotFound { .. } => StatusCode::DatabaseNotFound,
+            Error::DeletionCancelled { .. } => StatusCode::Cancelled,
+            Error::VerificationFailed { .. } => StatusCode::InvalidArguments,
         }
     }
 

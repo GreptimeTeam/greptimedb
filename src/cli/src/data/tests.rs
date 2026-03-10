@@ -188,12 +188,13 @@ async fn export_import_v2_schema_parity_e2e() -> Result<()> {
         None,
         false,
     );
+    let schema = "test_db_m1_schema_parity";
 
     database_client
-        .sql_in_public("DROP DATABASE IF EXISTS test_db")
+        .sql_in_public(&format!("DROP DATABASE IF EXISTS {schema}"))
         .await?;
     database_client
-        .sql_in_public("CREATE DATABASE test_db")
+        .sql_in_public(&format!("CREATE DATABASE {schema}"))
         .await?;
     database_client
         .sql(
@@ -203,7 +204,7 @@ async fn export_import_v2_schema_parity_e2e() -> Result<()> {
                 cpu DOUBLE DEFAULT 0.0, \
                 region_name STRING \
             ) ENGINE = mito WITH (ttl='7d', 'compaction.type'='twcs')",
-            "test_db",
+            schema,
         )
         .await?;
     database_client
@@ -213,7 +214,7 @@ async fn export_import_v2_schema_parity_e2e() -> Result<()> {
                 app STRING PRIMARY KEY, \
                 msg STRING NOT NULL COMMENT 'log message' \
             ) ENGINE = mito",
-            "test_db",
+            schema,
         )
         .await?;
     database_client
@@ -225,7 +226,7 @@ async fn export_import_v2_schema_parity_e2e() -> Result<()> {
                 cpu DOUBLE DEFAULT 0.0, \
                 PRIMARY KEY (host, region_name) \
             ) ENGINE = metric WITH (physical_metric_table='true')",
-            "test_db",
+            schema,
         )
         .await?;
     database_client
@@ -237,13 +238,13 @@ async fn export_import_v2_schema_parity_e2e() -> Result<()> {
                 cpu DOUBLE DEFAULT 0.0, \
                 PRIMARY KEY (host, region_name) \
             ) ENGINE = metric WITH (on_physical_table='metrics_physical')",
-            "test_db",
+            schema,
         )
         .await?;
     database_client
         .sql(
             "CREATE VIEW metrics_view AS SELECT * FROM metrics WHERE cpu > 0.5",
-            "test_db",
+            schema,
         )
         .await?;
 
@@ -266,7 +267,7 @@ async fn export_import_v2_schema_parity_e2e() -> Result<()> {
         "--catalog",
         &catalog,
         "--schemas",
-        "test_db",
+        schema,
         "--schema-only",
     ];
     if let Some(auth) = &auth_basic {
@@ -283,7 +284,7 @@ async fn export_import_v2_schema_parity_e2e() -> Result<()> {
         .context(OtherSnafu)?;
 
     database_client
-        .sql_in_public("DROP DATABASE test_db")
+        .sql_in_public(&format!("DROP DATABASE {schema}"))
         .await?;
 
     let mut import_args = vec![
@@ -295,7 +296,7 @@ async fn export_import_v2_schema_parity_e2e() -> Result<()> {
         "--catalog",
         &catalog,
         "--schemas",
-        "test_db",
+        schema,
     ];
     if let Some(auth) = &auth_basic {
         import_args.push("--auth-basic");
@@ -329,7 +330,7 @@ async fn export_import_v2_schema_parity_e2e() -> Result<()> {
         "--catalog",
         &catalog,
         "--schemas",
-        "test_db",
+        schema,
         "--schema-only",
     ];
     if let Some(auth) = &auth_basic {
@@ -372,7 +373,7 @@ async fn export_import_v2_schema_parity_e2e() -> Result<()> {
     assert_eq!(src_schema, dst_schema);
 
     database_client
-        .sql_in_public("DROP DATABASE IF EXISTS test_db")
+        .sql_in_public(&format!("DROP DATABASE IF EXISTS {schema}"))
         .await?;
 
     Ok(())
@@ -981,7 +982,7 @@ async fn export_v2_chunk_parallelism_resume_e2e() -> Result<()> {
         .await
         .context(OtherSnafu)?;
 
-    let export_cmd = ExportCreateCommand::parse_from(vec![
+    let mut resume_args = vec![
         "export-v2-create",
         "--addr",
         &addr,
@@ -991,7 +992,18 @@ async fn export_v2_chunk_parallelism_resume_e2e() -> Result<()> {
         &catalog,
         "--schemas",
         schema,
-    ]);
+        "--start-time",
+        "2025-01-01T00:00:00Z",
+        "--end-time",
+        "2025-01-03T00:00:00Z",
+        "--chunk-time-window",
+        "1d",
+    ];
+    if let Some(auth) = &auth_basic {
+        resume_args.push("--auth-basic");
+        resume_args.push(auth);
+    }
+    let export_cmd = ExportCreateCommand::parse_from(resume_args);
     export_cmd
         .build()
         .await
@@ -1755,6 +1767,399 @@ async fn import_v2_state_target_mismatch_e2e() -> Result<()> {
     }
 
     Ok(())
+}
+
+// =============================================================================
+// Management commands (list / verify / delete) unit tests
+// =============================================================================
+
+use crate::data::export_v2::manifest::{
+    ChunkMeta, DataFormat, MANIFEST_VERSION, Manifest, TimeRange,
+};
+use crate::data::export_v2::schema::{DDL_DIR, SCHEMA_DIR};
+
+/// Helper: create a minimal complete manifest and write it to storage.
+async fn write_test_manifest(storage: &dyn SnapshotStorage, manifest: &Manifest) {
+    storage.write_manifest(manifest).await.unwrap();
+    // Write minimal schema files so verify doesn't warn about missing ones.
+    let schema_snapshot = crate::data::export_v2::schema::SchemaSnapshot {
+        schemas: manifest
+            .schemas
+            .iter()
+            .map(|s| crate::data::export_v2::schema::SchemaDefinition {
+                catalog: manifest.catalog.clone(),
+                name: s.clone(),
+                options: Default::default(),
+            })
+            .collect(),
+        tables: vec![],
+        views: vec![],
+    };
+    storage.write_schema(&schema_snapshot).await.unwrap();
+}
+
+fn make_complete_manifest(schemas: Vec<String>) -> Manifest {
+    Manifest {
+        version: MANIFEST_VERSION,
+        snapshot_id: uuid::Uuid::new_v4(),
+        catalog: "greptime".to_string(),
+        schemas,
+        time_range: TimeRange::unbounded(),
+        schema_only: false,
+        format: DataFormat::Parquet,
+        chunks: vec![
+            {
+                let mut c = ChunkMeta::new(1, TimeRange::unbounded());
+                c.mark_completed(vec!["data/public/1/t1.parquet".to_string()]);
+                c
+            },
+            {
+                let mut c = ChunkMeta::new(2, TimeRange::unbounded());
+                c.mark_skipped();
+                c
+            },
+        ],
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    }
+}
+
+fn make_schema_only_manifest() -> Manifest {
+    Manifest {
+        version: MANIFEST_VERSION,
+        snapshot_id: uuid::Uuid::new_v4(),
+        catalog: "greptime".to_string(),
+        schemas: vec!["public".to_string()],
+        time_range: TimeRange::unbounded(),
+        schema_only: true,
+        format: DataFormat::Parquet,
+        chunks: vec![],
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    }
+}
+
+// --- List tests ---
+
+use crate::data::export_v2::list::ExportList;
+
+#[tokio::test]
+async fn test_list_finds_snapshots() {
+    let parent_dir = tempdir().unwrap();
+
+    // Create two snapshot subdirectories with valid manifests.
+    for name in ["snap-a", "snap-b"] {
+        let snap_path = parent_dir.path().join(name);
+        std::fs::create_dir_all(&snap_path).unwrap();
+        let uri = format!("file://{}", snap_path.display());
+        let storage = OpenDalStorage::from_uri(&uri, &ObjectStoreConfig::default()).unwrap();
+        let manifest = make_complete_manifest(vec!["public".to_string()]);
+        write_test_manifest(&storage, &manifest).await;
+    }
+
+    // Create a non-snapshot directory (no manifest.json).
+    std::fs::create_dir_all(parent_dir.path().join("not-a-snapshot")).unwrap();
+    std::fs::write(
+        parent_dir.path().join("not-a-snapshot").join("random.txt"),
+        "hello",
+    )
+    .unwrap();
+
+    let parent_uri = format!("file://{}", parent_dir.path().display());
+    let list = ExportList::new(parent_uri, ObjectStoreConfig::default());
+    let result = list.scan_snapshots().await.unwrap();
+
+    assert_eq!(result.snapshots.len(), 2);
+    assert!(result.unreadable.is_empty());
+}
+
+#[tokio::test]
+async fn test_list_empty_location() {
+    let parent_dir = tempdir().unwrap();
+
+    let parent_uri = format!("file://{}", parent_dir.path().display());
+    let list = ExportList::new(parent_uri, ObjectStoreConfig::default());
+    let result = list.scan_snapshots().await.unwrap();
+
+    assert_eq!(result.snapshots.len(), 0);
+    assert!(result.unreadable.is_empty());
+}
+
+#[tokio::test]
+async fn test_list_skips_corrupt_manifest() {
+    let parent_dir = tempdir().unwrap();
+
+    // Create a directory with corrupt manifest.json.
+    let corrupt_path = parent_dir.path().join("corrupt-snap");
+    std::fs::create_dir_all(&corrupt_path).unwrap();
+    std::fs::write(corrupt_path.join("manifest.json"), "not valid json{{{").unwrap();
+
+    // Create a valid snapshot.
+    let valid_path = parent_dir.path().join("valid-snap");
+    std::fs::create_dir_all(&valid_path).unwrap();
+    let uri = format!("file://{}", valid_path.display());
+    let storage = OpenDalStorage::from_uri(&uri, &ObjectStoreConfig::default()).unwrap();
+    let manifest = make_complete_manifest(vec!["public".to_string()]);
+    write_test_manifest(&storage, &manifest).await;
+
+    let parent_uri = format!("file://{}", parent_dir.path().display());
+    let list = ExportList::new(parent_uri, ObjectStoreConfig::default());
+    let result = list.scan_snapshots().await.unwrap();
+
+    assert_eq!(result.snapshots.len(), 1);
+    assert_eq!(result.unreadable.len(), 1);
+}
+
+// --- Verify tests ---
+
+#[tokio::test]
+async fn test_verify_complete_snapshot() {
+    let dir = tempdir().unwrap();
+    let snap_path = dir.path().join("snapshots").join("prod");
+    std::fs::create_dir_all(&snap_path).unwrap();
+
+    let uri = format!("file://{}", snap_path.display());
+    let storage = OpenDalStorage::from_uri(&uri, &ObjectStoreConfig::default()).unwrap();
+
+    let manifest = make_complete_manifest(vec!["public".to_string()]);
+    write_test_manifest(&storage, &manifest).await;
+
+    // Write the data file that chunk 1 references.
+    storage
+        .write_text("data/public/1/t1.parquet", "fake parquet data")
+        .await
+        .unwrap();
+
+    // Verify should pass (run via Tool trait).
+    use crate::Tool;
+    let verify_tool = crate::data::export_v2::verify::ExportVerify::new(Box::new(storage));
+    let result = verify_tool.do_work().await;
+    assert!(result.is_ok(), "Expected valid snapshot, got: {:?}", result);
+}
+
+#[tokio::test]
+async fn test_verify_missing_data_file_is_error() {
+    let dir = tempdir().unwrap();
+    let snap_path = dir.path().join("snapshots").join("prod");
+    std::fs::create_dir_all(&snap_path).unwrap();
+
+    let uri = format!("file://{}", snap_path.display());
+    let storage = OpenDalStorage::from_uri(&uri, &ObjectStoreConfig::default()).unwrap();
+
+    let manifest = make_complete_manifest(vec!["public".to_string()]);
+    write_test_manifest(&storage, &manifest).await;
+
+    // Do NOT write the data file — chunk 1 references data/public/1/t1.parquet.
+
+    use crate::Tool;
+    let verify_tool = crate::data::export_v2::verify::ExportVerify::new(Box::new(storage));
+    let result = verify_tool.do_work().await;
+    assert!(
+        result.is_err(),
+        "Expected verification failure for missing data file"
+    );
+}
+
+#[tokio::test]
+async fn test_verify_failed_chunk_is_error() {
+    let dir = tempdir().unwrap();
+    let snap_path = dir.path().join("snapshots").join("prod");
+    std::fs::create_dir_all(&snap_path).unwrap();
+
+    let uri = format!("file://{}", snap_path.display());
+    let storage = OpenDalStorage::from_uri(&uri, &ObjectStoreConfig::default()).unwrap();
+
+    let mut manifest = make_complete_manifest(vec!["public".to_string()]);
+    // Mark chunk 1 as failed.
+    manifest.chunks[0].mark_failed("Connection timeout".to_string());
+    write_test_manifest(&storage, &manifest).await;
+
+    use crate::Tool;
+    let verify_tool = crate::data::export_v2::verify::ExportVerify::new(Box::new(storage));
+    let result = verify_tool.do_work().await;
+    assert!(
+        result.is_err(),
+        "Expected verification failure for failed chunk"
+    );
+}
+
+#[tokio::test]
+async fn test_verify_completed_chunk_with_empty_files_is_error() {
+    let dir = tempdir().unwrap();
+    let snap_path = dir.path().join("snapshots").join("prod");
+    std::fs::create_dir_all(&snap_path).unwrap();
+
+    let uri = format!("file://{}", snap_path.display());
+    let storage = OpenDalStorage::from_uri(&uri, &ObjectStoreConfig::default()).unwrap();
+
+    let mut manifest = make_complete_manifest(vec!["public".to_string()]);
+    manifest.chunks[0].mark_completed(vec![]);
+    write_test_manifest(&storage, &manifest).await;
+
+    use crate::Tool;
+    let verify_tool = crate::data::export_v2::verify::ExportVerify::new(Box::new(storage));
+    let result = verify_tool.do_work().await;
+    assert!(
+        result.is_err(),
+        "Expected verification failure for completed chunk with empty files"
+    );
+}
+
+#[tokio::test]
+async fn test_verify_skipped_chunk_with_files_is_error() {
+    let dir = tempdir().unwrap();
+    let snap_path = dir.path().join("snapshots").join("prod");
+    std::fs::create_dir_all(&snap_path).unwrap();
+
+    let uri = format!("file://{}", snap_path.display());
+    let storage = OpenDalStorage::from_uri(&uri, &ObjectStoreConfig::default()).unwrap();
+
+    let mut manifest = make_complete_manifest(vec!["public".to_string()]);
+    manifest.chunks[1].status = ChunkStatus::Skipped;
+    manifest.chunks[1].files = vec!["data/public/2/t2.parquet".to_string()];
+    write_test_manifest(&storage, &manifest).await;
+
+    // Keep completed chunk file valid to isolate skipped/files consistency check.
+    storage
+        .write_text("data/public/1/t1.parquet", "fake parquet data")
+        .await
+        .unwrap();
+
+    use crate::Tool;
+    let verify_tool = crate::data::export_v2::verify::ExportVerify::new(Box::new(storage));
+    let result = verify_tool.do_work().await;
+    assert!(
+        result.is_err(),
+        "Expected verification failure for skipped chunk with files"
+    );
+}
+
+#[tokio::test]
+async fn test_verify_schema_only_snapshot() {
+    let dir = tempdir().unwrap();
+    let snap_path = dir.path().join("snapshots").join("prod");
+    std::fs::create_dir_all(&snap_path).unwrap();
+
+    let uri = format!("file://{}", snap_path.display());
+    let storage = OpenDalStorage::from_uri(&uri, &ObjectStoreConfig::default()).unwrap();
+
+    let manifest = make_schema_only_manifest();
+    write_test_manifest(&storage, &manifest).await;
+
+    use crate::Tool;
+    let verify_tool = crate::data::export_v2::verify::ExportVerify::new(Box::new(storage));
+    let result = verify_tool.do_work().await;
+    assert!(result.is_ok(), "Schema-only snapshot should be valid");
+}
+
+#[tokio::test]
+async fn test_verify_ddl_file_missing_is_error() {
+    let dir = tempdir().unwrap();
+    let snap_path = dir.path().join("snapshots").join("prod");
+    std::fs::create_dir_all(&snap_path).unwrap();
+
+    let uri = format!("file://{}", snap_path.display());
+    let storage = OpenDalStorage::from_uri(&uri, &ObjectStoreConfig::default()).unwrap();
+
+    let manifest = make_complete_manifest(vec!["public".to_string(), "metrics".to_string()]);
+    write_test_manifest(&storage, &manifest).await;
+
+    // Write data file for chunk 1.
+    storage
+        .write_text("data/public/1/t1.parquet", "fake data")
+        .await
+        .unwrap();
+
+    // Write DDL for "public" but NOT for "metrics" — should trigger ERROR.
+    let ddl_path = format!("{}/{}/public.sql", SCHEMA_DIR, DDL_DIR);
+    storage
+        .write_text(&ddl_path, "CREATE TABLE public.t1 ();")
+        .await
+        .unwrap();
+
+    use crate::Tool;
+    let verify_tool = crate::data::export_v2::verify::ExportVerify::new(Box::new(storage));
+    let result = verify_tool.do_work().await;
+    assert!(
+        result.is_err(),
+        "Expected error for missing DDL file for 'metrics'"
+    );
+}
+
+// --- Delete tests ---
+
+#[tokio::test]
+async fn test_delete_with_yes_flag() {
+    let dir = tempdir().unwrap();
+    let snap_path = dir.path().join("snapshots").join("prod");
+    std::fs::create_dir_all(&snap_path).unwrap();
+
+    let uri = format!("file://{}", snap_path.display());
+    let storage = OpenDalStorage::from_uri(&uri, &ObjectStoreConfig::default()).unwrap();
+
+    let manifest = make_complete_manifest(vec!["public".to_string()]);
+    write_test_manifest(&storage, &manifest).await;
+    storage
+        .write_text("data/public/1/t1.parquet", "fake data")
+        .await
+        .unwrap();
+
+    // Confirm snapshot exists.
+    assert!(storage.exists().await.unwrap());
+
+    use crate::Tool;
+    let delete_tool =
+        crate::data::export_v2::delete::ExportDelete::new(uri.clone(), Box::new(storage), true);
+    let result = delete_tool.do_work().await;
+    assert!(result.is_ok(), "Delete with --yes should succeed");
+
+    // Confirm snapshot is gone.
+    let storage2 = OpenDalStorage::from_uri(&uri, &ObjectStoreConfig::default()).unwrap();
+    assert!(!storage2.exists().await.unwrap());
+}
+
+#[tokio::test]
+async fn test_delete_rejects_nonexistent_snapshot() {
+    let dir = tempdir().unwrap();
+    let snap_path = dir.path().join("snapshots").join("prod");
+    std::fs::create_dir_all(&snap_path).unwrap();
+
+    let uri = format!("file://{}", snap_path.display());
+    let storage = OpenDalStorage::from_uri(&uri, &ObjectStoreConfig::default()).unwrap();
+
+    // Do NOT write manifest — snapshot doesn't exist.
+    use crate::Tool;
+    let delete_tool =
+        crate::data::export_v2::delete::ExportDelete::new(uri.clone(), Box::new(storage), true);
+    let result = delete_tool.do_work().await;
+    let error = result
+        .expect_err("Delete should fail when no manifest exists")
+        .to_string();
+    assert!(
+        error.contains("Snapshot not found at"),
+        "Expected snapshot-not-found error, got: {error}"
+    );
+    assert!(
+        error.contains(&uri),
+        "Expected error to contain target URI '{uri}', got: {error}"
+    );
+}
+
+#[tokio::test]
+async fn test_import_build_accepts_shallow_file_uri() {
+    let cmd = ImportV2Command::parse_from(vec![
+        "import-v2",
+        "--addr",
+        "127.0.0.1:4000",
+        "--from",
+        "file:///tmp",
+    ]);
+
+    let result = cmd.build().await;
+    assert!(
+        result.is_ok(),
+        "Import build should accept shallow file URI"
+    );
 }
 
 // Scenario: --clean-state removes existing state and exits without importing.

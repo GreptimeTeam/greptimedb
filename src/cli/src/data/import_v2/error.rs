@@ -168,10 +168,11 @@ impl ErrorExt for Error {
             }
             Error::Export { error, .. } => error.status_code(),
             Error::StateOperation { .. } => StatusCode::StorageUnavailable,
+            Error::StateSnapshotMismatch { .. } | Error::StateTargetMismatch { .. } => {
+                StatusCode::InvalidArguments
+            }
             Error::StateParse { .. }
             | Error::StateSerialize { .. }
-            | Error::StateSnapshotMismatch { .. }
-            | Error::StateTargetMismatch { .. }
             | Error::InvalidColumnDefinition { .. }
             | Error::IncompleteSnapshot { .. }
             | Error::ImportIncomplete { .. } => StatusCode::Internal,
