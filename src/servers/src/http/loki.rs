@@ -1335,10 +1335,13 @@ pub async fn loki_index_stats(
 mod tests {
     use std::collections::BTreeMap;
 
+    use bytes::Bytes;
     use loki_proto::prost_types::Timestamp;
 
     use crate::error::Error::InvalidLokiLabels;
     use crate::http::loki::{parse_loki_labels, prost_ts_to_nano};
+
+    use super::{is_metric_query, is_safe_column_name, LokiJsonParser};
 
     #[test]
     fn test_ts_to_nano() {
@@ -1350,6 +1353,15 @@ mod tests {
             nanos: 804293888,
         };
         assert_eq!(prost_ts_to_nano(&ts), 1731748568804293888);
+    }
+
+    #[test]
+    fn test_ts_to_nano_zero_nanos() {
+        let ts = Timestamp {
+            seconds: 1000000000,
+            nanos: 0,
+        };
+        assert_eq!(prost_ts_to_nano(&ts), 1000000000_000000000i64);
     }
 
     #[test]
@@ -1396,5 +1408,177 @@ mod tests {
         let missing_comma = r#"{job="foobar" cluster="foo-central1"}"#;
         let re = parse_loki_labels(missing_comma);
         assert!(matches!(re.err().unwrap(), InvalidLokiLabels { .. }));
+    }
+
+    #[test]
+    fn test_parse_loki_labels_empty_selector() {
+        // Empty selector {} is valid and returns an empty map
+        let re = parse_loki_labels("{}");
+        assert!(re.is_ok());
+        assert!(re.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_parse_loki_labels_value_with_special_chars() {
+        // Label values may contain spaces and slashes
+        let input = r#"{pod="my-pod-abc123", namespace="default"}"#;
+        let re = parse_loki_labels(input);
+        assert!(re.is_ok());
+        let map = re.unwrap();
+        assert_eq!(map.get("pod").unwrap(), "my-pod-abc123");
+        assert_eq!(map.get("namespace").unwrap(), "default");
+    }
+
+    #[test]
+    fn test_is_metric_query_plain_selector() {
+        // A bare stream selector is NOT a metric query
+        assert!(!is_metric_query(r#"{job="foo"}"#));
+        assert!(!is_metric_query(r#"{namespace="default", pod="bar"}"#));
+        assert!(!is_metric_query("{}"));
+    }
+
+    #[test]
+    fn test_is_metric_query_with_pipe_filter() {
+        // A selector followed by a log filter is still NOT a metric query
+        assert!(!is_metric_query(r#"{job="foo"} |= "error""#));
+        assert!(!is_metric_query(r#"{job="foo"} | json"#));
+        assert!(!is_metric_query(r#"{job="foo"} | logfmt | level="error""#));
+    }
+
+    #[test]
+    fn test_is_metric_query_range_functions() {
+        assert!(is_metric_query(r#"count_over_time({job="foo"}[5m])"#));
+        assert!(is_metric_query(r#"rate({job="foo"}[1m])"#));
+        assert!(is_metric_query(r#"bytes_rate({job="foo"}[1m])"#));
+        assert!(is_metric_query(r#"bytes_over_time({job="foo"}[1m])"#));
+        assert!(is_metric_query(r#"avg_over_time({job="foo"} | unwrap duration [1m])"#));
+        assert!(is_metric_query(r#"sum_over_time({job="foo"} | unwrap bytes [5m])"#));
+        assert!(is_metric_query(r#"min_over_time({job="foo"} | unwrap ms [1m])"#));
+        assert!(is_metric_query(r#"max_over_time({job="foo"} | unwrap ms [1m])"#));
+        assert!(is_metric_query(r#"quantile_over_time(0.99, {job="foo"} | unwrap ms [1m])"#));
+        assert!(is_metric_query(r#"absent_over_time({job="foo"}[5m])"#));
+        assert!(is_metric_query(r#"stdvar_over_time({job="foo"} | unwrap ms [1m])"#));
+        assert!(is_metric_query(r#"stddev_over_time({job="foo"} | unwrap ms [1m])"#));
+    }
+
+    #[test]
+    fn test_is_metric_query_aggregation_operators() {
+        assert!(is_metric_query(r#"sum(rate({job="foo"}[1m]))"#));
+        assert!(is_metric_query(r#"avg(rate({job="foo"}[1m]))"#));
+        assert!(is_metric_query(r#"min(rate({job="foo"}[1m]))"#));
+        assert!(is_metric_query(r#"max(rate({job="foo"}[1m]))"#));
+        assert!(is_metric_query(r#"count(rate({job="foo"}[1m]))"#));
+        assert!(is_metric_query(r#"stddev(rate({job="foo"}[1m]))"#));
+        assert!(is_metric_query(r#"stdvar(rate({job="foo"}[1m]))"#));
+        assert!(is_metric_query(r#"topk(10, rate({job="foo"}[1m]))"#));
+        assert!(is_metric_query(r#"bottomk(10, rate({job="foo"}[1m]))"#));
+        assert!(is_metric_query(r#"sort(rate({job="foo"}[1m]))"#));
+        assert!(is_metric_query(r#"sort_desc(rate({job="foo"}[1m]))"#));
+    }
+
+    #[test]
+    fn test_is_metric_query_grafana_volume_histogram() {
+        // Grafana 11 sends these as supporting queries for the log volume panel
+        let query = r#"sum by (level) (count_over_time({namespace="default"}[1m]))"#;
+        assert!(is_metric_query(query));
+    }
+
+    #[test]
+    fn test_is_metric_query_not_starting_with_brace() {
+        // Anything not starting with '{' is considered a metric query
+        assert!(is_metric_query("vector(1)+vector(1)"));
+        assert!(is_metric_query("1 + 1"));
+        assert!(is_metric_query("topk(5, ...)"));
+    }
+
+    #[test]
+    fn test_is_safe_column_name() {
+        assert!(is_safe_column_name("namespace"));
+        assert!(is_safe_column_name("pod_name"));
+        assert!(is_safe_column_name("my_label_123"));
+        assert!(is_safe_column_name("A"));
+
+        // Unsafe names
+        assert!(!is_safe_column_name(""));
+        assert!(!is_safe_column_name("pod-name"));      // hyphen
+        assert!(!is_safe_column_name("pod name"));      // space
+        assert!(!is_safe_column_name("pod.name"));      // dot
+        assert!(!is_safe_column_name("'; DROP TABLE")); // SQL injection attempt
+        assert!(!is_safe_column_name("pod/name"));      // slash
+    }
+
+    #[test]
+    fn test_loki_json_parser_basic() {
+        let payload = r#"{
+            "streams": [
+                {
+                    "stream": {"job": "myapp", "namespace": "default"},
+                    "values": [
+                        ["1694784000000000000", "log line one"],
+                        ["1694784001000000000", "log line two"]
+                    ]
+                }
+            ]
+        }"#;
+
+        let bytes = Bytes::from(payload);
+        let mut parser = LokiJsonParser::from_bytes(bytes).expect("parse should succeed");
+
+        let stream = parser.next().expect("should have one stream");
+        let labels = stream.labels.as_ref().expect("labels should be present");
+        assert_eq!(labels.get("job").unwrap(), "myapp");
+        assert_eq!(labels.get("namespace").unwrap(), "default");
+
+        // Iterate lines via the stream item
+        let lines: Vec<_> = stream.collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].ts, 1694784000000000000i64);
+        assert_eq!(lines[0].line, "log line one");
+        assert_eq!(lines[1].ts, 1694784001000000000i64);
+        assert_eq!(lines[1].line, "log line two");
+
+        // Only one stream
+        assert!(parser.next().is_none());
+    }
+
+    #[test]
+    fn test_loki_json_parser_multiple_streams() {
+        let payload = r#"{
+            "streams": [
+                {
+                    "stream": {"job": "app1"},
+                    "values": [["1000000000000000000", "line A"]]
+                },
+                {
+                    "stream": {"job": "app2"},
+                    "values": [["2000000000000000000", "line B"]]
+                }
+            ]
+        }"#;
+
+        let bytes = Bytes::from(payload);
+        let parser = LokiJsonParser::from_bytes(bytes).expect("parse should succeed");
+        let streams: Vec<_> = parser.collect();
+        assert_eq!(streams.len(), 2);
+    }
+
+    #[test]
+    fn test_loki_json_parser_empty_streams() {
+        let payload = r#"{"streams": []}"#;
+        let bytes = Bytes::from(payload);
+        let mut parser = LokiJsonParser::from_bytes(bytes).expect("parse should succeed");
+        assert!(parser.next().is_none());
+    }
+
+    #[test]
+    fn test_loki_json_parser_invalid_payload() {
+        let bytes = Bytes::from(r#"not json"#);
+        assert!(LokiJsonParser::from_bytes(bytes).is_err());
+
+        let bytes = Bytes::from(r#"[]"#); // array, not object
+        assert!(LokiJsonParser::from_bytes(bytes).is_err());
+
+        let bytes = Bytes::from(r#"{}"#); // missing "streams" key
+        assert!(LokiJsonParser::from_bytes(bytes).is_err());
     }
 }
