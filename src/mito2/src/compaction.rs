@@ -288,7 +288,7 @@ impl CompactionScheduler {
             )
             .await
         {
-            return vec![];
+            return Vec::new();
         }
 
         let Some(status) = self.region_status.get_mut(&region_id) else {
