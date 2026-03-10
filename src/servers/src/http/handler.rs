@@ -426,7 +426,6 @@ pub async fn health(Query(_params): Query<HealthQuery>) -> Json<HealthResponse> 
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StatusResponse<'a> {
-    pub source_time: &'a str,
     pub commit: &'a str,
     pub branch: &'a str,
     pub rustc_version: &'a str,
@@ -442,7 +441,6 @@ pub async fn status() -> Json<StatusResponse<'static>> {
         .unwrap_or_else(|_| "unknown".to_string());
     let build_info = common_version::build_info();
     Json(StatusResponse {
-        source_time: build_info.source_time,
         commit: build_info.commit,
         branch: build_info.branch,
         rustc_version: build_info.rustc,

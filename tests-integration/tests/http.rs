@@ -1358,7 +1358,6 @@ pub async fn test_status_api(store_type: StorageType) {
     assert_eq!(res_get.status(), StatusCode::OK);
 
     let res_body = res_get.text().await;
-    assert!(res_body.contains("{\"source_time\""));
     assert!(res_body.contains("\"commit\":"));
     assert!(res_body.contains("\"branch\":"));
     assert!(res_body.contains("\"rustc_version\":"));
