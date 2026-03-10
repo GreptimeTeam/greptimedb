@@ -212,6 +212,65 @@ impl CompactionScheduler {
         result.map(|_| ())
     }
 
+    // Handle pending manual compaction request for the region.
+    //
+    // Returns true if should early return, false otherwise.
+    pub(crate) async fn handle_pending_compaction_request(
+        &mut self,
+        region_id: RegionId,
+        manifest_ctx: &ManifestContextRef,
+        schema_metadata_manager: SchemaMetadataManagerRef,
+    ) -> bool {
+        let Some(status) = self.region_status.get_mut(&region_id) else {
+            return true;
+        };
+
+        // If there is a pending manual compaction request, schedule it.
+        // and defer returning the pending DDL requests to the caller.
+        let Some(pending_request) = std::mem::take(&mut status.pending_request) else {
+            return false;
+        };
+
+        let PendingCompaction {
+            options,
+            waiter,
+            max_parallelism,
+        } = pending_request;
+
+        let request = {
+            status.new_compaction_request(
+                self.request_sender.clone(),
+                waiter,
+                self.engine_config.clone(),
+                self.cache_manager.clone(),
+                manifest_ctx,
+                self.listener.clone(),
+                schema_metadata_manager,
+                max_parallelism,
+            )
+        };
+
+        match self.schedule_compaction_request(request, options).await {
+            Ok(true) => {
+                debug!(
+                    "Successfully scheduled manual compaction for region id: {}",
+                    region_id
+                );
+                true
+            }
+            Ok(false) => {
+                // We still need to handle the pending DDL requests.
+                // So we can't return early here.
+                false
+            }
+            Err(e) => {
+                error!(e; "Failed to continue pending manual compaction for region id: {}", region_id);
+                self.remove_region_on_failure(region_id, Arc::new(e));
+                true
+            }
+        }
+    }
+
     /// Notifies the scheduler that the compaction job is finished successfully.
     pub(crate) async fn on_compaction_finished(
         &mut self,
@@ -219,66 +278,24 @@ impl CompactionScheduler {
         manifest_ctx: &ManifestContextRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
     ) -> Vec<SenderDdlRequest> {
-        let pending_request = {
-            let Some(status) = self.region_status.get_mut(&region_id) else {
-                return Vec::new();
-            };
-            std::mem::take(&mut status.pending_request)
-        };
-
-        // If there is a pending manual compaction request, schedule it.
+        // If there a pending compaction request, handle it first
         // and defer returning the pending DDL requests to the caller.
-        let pending_ddl_requests = if let Some(pending_request) = pending_request {
-            let PendingCompaction {
-                options,
-                waiter,
-                max_parallelism,
-            } = pending_request;
-
-            let request = {
-                let status = self.region_status.get_mut(&region_id).unwrap();
-                status.new_compaction_request(
-                    self.request_sender.clone(),
-                    waiter,
-                    self.engine_config.clone(),
-                    self.cache_manager.clone(),
-                    manifest_ctx,
-                    self.listener.clone(),
-                    schema_metadata_manager.clone(),
-                    max_parallelism,
-                )
-            };
-
-            match self.schedule_compaction_request(request, options).await {
-                Ok(true) => {
-                    debug!(
-                        "Successfully scheduled manual compaction for region id: {}",
-                        region_id
-                    );
-                    Some(Vec::new())
-                }
-                Ok(false) => {
-                    // Continue
-                    // We still need to handle the pending DDL requests.
-                    // So we can't return early here.
-                    None
-                }
-                Err(e) => {
-                    error!(e; "Failed to continue pending manual compaction for region id: {}", region_id);
-                    self.remove_region_on_failure(region_id, Arc::new(e));
-                    Some(Vec::new())
-                }
-            }
-        } else {
-            None
-        };
-
-        if let Some(pending_ddl_requests) = pending_ddl_requests {
-            return pending_ddl_requests;
+        if self
+            .handle_pending_compaction_request(
+                region_id,
+                manifest_ctx,
+                schema_metadata_manager.clone(),
+            )
+            .await
+        {
+            return vec![];
         }
 
-        // Safety: The region status must exist.
-        let status = self.region_status.get_mut(&region_id).unwrap();
+        let Some(status) = self.region_status.get_mut(&region_id) else {
+            // The region status might be removed by the previous steps.
+            // So we return empty DDL requests.
+            return Vec::new();
+        };
 
         // Notify all waiters that compaction is finished.
         for waiter in std::mem::take(&mut status.waiters) {
@@ -397,6 +414,7 @@ impl CompactionScheduler {
     /// Schedules a compaction request.
     ///
     /// Returns true if the compaction request is scheduled successfully.
+    /// Returns false if no compaction task can be scheduled for this region.
     async fn schedule_compaction_request(
         &mut self,
         request: CompactionRequest,
@@ -980,12 +998,27 @@ mod tests {
 
     use super::*;
     use crate::compaction::memory_manager::{CompactionMemoryGuard, new_compaction_memory_manager};
+    use crate::error::InvalidSchedulerStateSnafu;
     use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
     use crate::region::ManifestContext;
+    use crate::schedule::scheduler::{Job, Scheduler};
     use crate::sst::FormatType;
     use crate::test_util::mock_schema_metadata_manager;
     use crate::test_util::scheduler_util::{SchedulerEnv, VecScheduler};
     use crate::test_util::version_util::{VersionControlBuilder, apply_edit};
+
+    struct FailingScheduler;
+
+    #[async_trait::async_trait]
+    impl Scheduler for FailingScheduler {
+        fn schedule(&self, _job: Job) -> Result<()> {
+            InvalidSchedulerStateSnafu.fail()
+        }
+
+        async fn stop(&self, _await_termination: bool) -> Result<()> {
+            Ok(())
+        }
+    }
 
     #[tokio::test]
     async fn test_find_compaction_options_db_level() {
@@ -1756,6 +1789,145 @@ mod tests {
         assert_eq!(pending_ddls.len(), 1);
         assert!(!scheduler.region_status.contains_key(&region_id));
         assert_eq!(manual_rx.await.unwrap().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_on_compaction_finished_returns_empty_when_region_absent() {
+        let env = SchedulerEnv::new().await;
+        let (tx, _rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_compaction_scheduler(tx);
+        let builder = VersionControlBuilder::new();
+        let region_id = builder.region_id();
+        let version_control = Arc::new(builder.build());
+        let manifest_ctx = env
+            .mock_manifest_context(version_control.current().version.metadata.clone())
+            .await;
+        let (schema_metadata_manager, _kv_backend) = mock_schema_metadata_manager();
+
+        let pending_ddls = scheduler
+            .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager)
+            .await;
+
+        assert!(pending_ddls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_on_compaction_finished_manual_schedule_error_cleans_status() {
+        let env = SchedulerEnv::new()
+            .await
+            .scheduler(Arc::new(FailingScheduler));
+        let (tx, _rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_compaction_scheduler(tx);
+        let mut builder = VersionControlBuilder::new();
+        let end = 1000 * 1000;
+        let version_control = Arc::new(
+            builder
+                .push_l0_file(0, end)
+                .push_l0_file(10, end)
+                .push_l0_file(50, end)
+                .push_l0_file(80, end)
+                .push_l0_file(90, end)
+                .build(),
+        );
+        let region_id = builder.region_id();
+        let manifest_ctx = env
+            .mock_manifest_context(version_control.current().version.metadata.clone())
+            .await;
+        let (schema_metadata_manager, _kv_backend) = mock_schema_metadata_manager();
+
+        let (manual_tx, manual_rx) = oneshot::channel();
+        let mut status =
+            CompactionStatus::new(region_id, version_control.clone(), env.access_layer.clone());
+        status.set_pending_request(PendingCompaction {
+            options: compact_request::Options::Regular(Default::default()),
+            waiter: OptionOutputTx::from(manual_tx),
+            max_parallelism: 1,
+        });
+        scheduler.region_status.insert(region_id, status);
+
+        let (ddl_tx, ddl_rx) = oneshot::channel();
+        scheduler.add_ddl_request_to_pending(SenderDdlRequest {
+            region_id,
+            sender: OptionOutputTx::from(ddl_tx),
+            request: crate::request::DdlRequest::EnterStaging(
+                store_api::region_request::EnterStagingRequest {
+                    partition_directive:
+                        store_api::region_request::StagingPartitionDirective::RejectAllWrites,
+                },
+            ),
+        });
+
+        let pending_ddls = scheduler
+            .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager)
+            .await;
+
+        assert!(pending_ddls.is_empty());
+        assert!(!scheduler.region_status.contains_key(&region_id));
+        assert!(manual_rx.await.is_err());
+        assert_matches!(ddl_rx.await.unwrap(), Err(_));
+    }
+
+    #[tokio::test]
+    async fn test_on_compaction_finished_next_schedule_noop_removes_status() {
+        let env = SchedulerEnv::new().await;
+        let (tx, _rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_compaction_scheduler(tx);
+        let builder = VersionControlBuilder::new();
+        let version_control = Arc::new(builder.build());
+        let region_id = builder.region_id();
+        let manifest_ctx = env
+            .mock_manifest_context(version_control.current().version.metadata.clone())
+            .await;
+        let (schema_metadata_manager, _kv_backend) = mock_schema_metadata_manager();
+
+        scheduler.region_status.insert(
+            region_id,
+            CompactionStatus::new(region_id, version_control, env.access_layer.clone()),
+        );
+
+        let pending_ddls = scheduler
+            .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager)
+            .await;
+
+        assert!(pending_ddls.is_empty());
+        assert!(!scheduler.region_status.contains_key(&region_id));
+    }
+
+    #[tokio::test]
+    async fn test_on_compaction_finished_next_schedule_error_cleans_status() {
+        let env = SchedulerEnv::new()
+            .await
+            .scheduler(Arc::new(FailingScheduler));
+        let (tx, _rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_compaction_scheduler(tx);
+        let mut builder = VersionControlBuilder::new();
+        let end = 1000 * 1000;
+        let version_control = Arc::new(
+            builder
+                .push_l0_file(0, end)
+                .push_l0_file(10, end)
+                .push_l0_file(50, end)
+                .push_l0_file(80, end)
+                .push_l0_file(90, end)
+                .build(),
+        );
+        let region_id = builder.region_id();
+        let manifest_ctx = env
+            .mock_manifest_context(version_control.current().version.metadata.clone())
+            .await;
+        let (schema_metadata_manager, _kv_backend) = mock_schema_metadata_manager();
+
+        scheduler.region_status.insert(
+            region_id,
+            CompactionStatus::new(region_id, version_control, env.access_layer.clone()),
+        );
+
+        let pending_ddls = scheduler
+            .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager)
+            .await;
+
+        assert!(pending_ddls.is_empty());
+        assert!(!scheduler.region_status.contains_key(&region_id));
     }
 
     #[tokio::test]
