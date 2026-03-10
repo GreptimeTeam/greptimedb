@@ -2373,7 +2373,11 @@ async fn test_copy_from_noheader_csvfile(instance: Arc<dyn MockInstance>) {
         ),
     )
     .await;
-    assert!(output.is_err());
+    let err = output.unwrap_err();
+    assert!(matches!(
+        unwrap_frontend_error(&err),
+        Error::TableOperation { .. }
+    ));
 }
 
 #[apply(both_instances_cases)]
