@@ -1,0 +1,74 @@
+name: Fork Image Build
+
+on:
+  push:
+    tags:
+      - 'loki-query-*'
+      - 'nats-wal-*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Image tag to push to ghcr.io/jpikoulas/greptimedb'
+        required: true
+        default: 'loki-query-v3'
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    name: Build and push image
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Determine image tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build release binary
+        run: |
+          cargo build --release --bin greptime
+          mkdir -p amd64
+          cp target/release/greptime amd64/greptime
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/ci/ubuntu/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/jpikoulas/greptimedb:${{ steps.tag.outputs.tag }}
