@@ -14,6 +14,7 @@
 
 use api::v1::region::compact_request;
 use common_telemetry::{error, info, warn};
+use store_api::logstore::LogStore;
 use store_api::region_request::RegionCompactRequest;
 use store_api::storage::RegionId;
 
@@ -68,7 +69,9 @@ impl<S> RegionWorkerLoop<S> {
         &mut self,
         region_id: RegionId,
         mut request: CompactionFinished,
-    ) {
+    ) where
+        S: LogStore,
+    {
         let region = match self.regions.get_region(region_id) {
             Some(region) => region,
             None => {
@@ -105,13 +108,15 @@ impl<S> RegionWorkerLoop<S> {
         }
 
         // Schedule next compaction if necessary.
-        self.compaction_scheduler
+        let mut pending_ddls = self
+            .compaction_scheduler
             .on_compaction_finished(
                 region_id,
                 &region.manifest_ctx,
                 self.schema_metadata_manager.clone(),
             )
             .await;
+        self.handle_ddl_requests(&mut pending_ddls).await;
     }
 
     /// When compaction fails, we simply log the error.
@@ -124,6 +129,13 @@ impl<S> RegionWorkerLoop<S> {
 
     /// Schedule compaction for the region if necessary.
     pub(crate) async fn schedule_compaction(&mut self, region: &MitoRegionRef) {
+        if region.is_staging() || region.is_enter_staging() {
+            info!(
+                "Region {} is staging or entering staging, skip compaction",
+                region.region_id
+            );
+            return;
+        }
         let now = self.time_provider.current_time_millis();
         if now - region.last_compaction_millis()
             >= self.config.min_compaction_interval.as_millis() as i64
