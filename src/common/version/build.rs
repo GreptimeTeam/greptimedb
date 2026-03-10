@@ -68,7 +68,7 @@ struct VersionState {
 impl VersionState {
     fn collect(_workspace_root: &Path) -> Self {
         Self {
-            branch: build_data::get_git_branch().unwrap_or_default(),
+            branch: normalize_git_branch(build_data::get_git_branch().unwrap_or_default()),
             commit_hash: build_data::get_git_commit().unwrap_or_default(),
             short_commit: build_data::get_git_commit_short().unwrap_or_default(),
             git_clean: build_data::get_git_dirty()
@@ -77,6 +77,14 @@ impl VersionState {
             rust_version: build_data::get_rustc_version().unwrap_or_default(),
             build_target: env::var("TARGET").unwrap_or_default(),
         }
+    }
+}
+
+fn normalize_git_branch(branch: String) -> String {
+    if branch == "HEAD" {
+        String::new()
+    } else {
+        branch
     }
 }
 
@@ -98,6 +106,10 @@ fn load_product_version(workspace_root: &Path) -> String {
 }
 
 fn emit_workspace_watch_list(workspace_root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    // Watch the workspace root so newly added or removed top-level untracked paths also rerun
+    // the build script and refresh `git_clean`.
+    println!("cargo:rerun-if-changed={}", workspace_root.display());
+
     let Some(paths) = git_ls_files(workspace_root) else {
         return Ok(());
     };
