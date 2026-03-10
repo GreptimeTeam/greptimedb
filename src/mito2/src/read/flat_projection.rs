@@ -325,7 +325,7 @@ pub(crate) fn flat_projected_columns(
 ///
 /// # Panics
 /// Panics if it can't find the column by the column id in the batch_schema.
-fn compute_input_arrow_schema(
+pub(crate) fn compute_input_arrow_schema(
     metadata: &RegionMetadata,
     batch_schema: &[(ColumnId, ConcreteDataType)],
 ) -> datatypes::arrow::datatypes::SchemaRef {

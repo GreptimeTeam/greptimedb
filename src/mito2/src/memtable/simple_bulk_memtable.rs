@@ -34,8 +34,9 @@ use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::stats::WriteMetrics;
 use crate::memtable::time_series::Series;
 use crate::memtable::{
-    AllocTracker, BoxedBatchIterator, IterBuilder, KeyValues, MemScanMetrics, Memtable, MemtableId,
-    MemtableRange, MemtableRangeContext, MemtableRanges, MemtableRef, MemtableStats, RangesOptions,
+    AllocTracker, BatchToRecordBatchContext, BoxedBatchIterator, IterBuilder, KeyValues,
+    MemScanMetrics, Memtable, MemtableId, MemtableRange, MemtableRangeContext, MemtableRanges,
+    MemtableRef, MemtableStats, RangesOptions, read_column_ids_from_projection,
 };
 use crate::metrics::MEMTABLE_ACTIVE_SERIES_COUNT;
 use crate::read::Batch;
@@ -236,6 +237,7 @@ impl Memtable for SimpleBulkMemtable {
         let predicate = options.predicate;
         let sequence = options.sequence;
         let start_time = Instant::now();
+        let read_column_ids = read_column_ids_from_projection(&self.region_metadata, projection);
         let projection = Arc::new(self.build_projection(projection));
 
         // Use the memtable's overall time range and max sequence for all ranges
@@ -255,6 +257,11 @@ impl Memtable for SimpleBulkMemtable {
         };
 
         let values = self.series.read().unwrap().read_to_values();
+        let batch_to_record_batch = Arc::new(BatchToRecordBatchContext::new(
+            self.region_metadata.clone(),
+            read_column_ids.clone(),
+        ));
+
         let contexts = values
             .into_par_iter()
             .filter_map(|v| {
@@ -298,10 +305,11 @@ impl Memtable for SimpleBulkMemtable {
                     };
                     (
                         range_stats,
-                        Arc::new(MemtableRangeContext::new(
+                        Arc::new(MemtableRangeContext::new_with_batch_to_record_batch(
                             self.id,
                             Box::new(builder),
                             predicate.clone(),
+                            Some(batch_to_record_batch.clone()),
                         )),
                     )
                 })
@@ -940,5 +948,45 @@ mod tests {
             rows += b.num_rows();
         }
         assert_eq!(rows, 2);
+    }
+
+    #[test]
+    fn test_build_record_batch_iter_from_memtable() {
+        let memtable = new_test_memtable(false, MergeMode::LastRow);
+
+        let kvs = build_key_values(
+            &memtable.region_metadata,
+            0,
+            &[(1, 1.0, "a".to_string()), (2, 2.0, "b".to_string())],
+            OpType::Put,
+        );
+        memtable.write(&kvs).unwrap();
+
+        let read_column_ids: Vec<ColumnId> = memtable
+            .region_metadata
+            .column_metadatas
+            .iter()
+            .map(|c| c.column_id)
+            .collect();
+        let ranges = memtable
+            .ranges(Some(&read_column_ids), RangesOptions::default())
+            .unwrap();
+        assert!(!ranges.ranges.is_empty());
+
+        let mut total_rows = 0;
+        for range in ranges.ranges.into_values() {
+            let mut iter = range.build_record_batch_iter(None, None).unwrap();
+            while let Some(rb) = iter.next().transpose().unwrap() {
+                total_rows += rb.num_rows();
+                let schema = rb.schema();
+                let column_names: Vec<_> =
+                    schema.fields().iter().map(|f| f.name().as_str()).collect();
+                assert_eq!(
+                    column_names,
+                    vec!["f1", "f2", "ts", "__primary_key", "__sequence", "__op_type"]
+                );
+            }
+        }
+        assert_eq!(2, total_rows);
     }
 }
