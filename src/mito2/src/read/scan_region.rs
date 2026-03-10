@@ -1619,8 +1619,7 @@ impl StreamContext {
         let filter_expr = filter_exprs
             .into_iter()
             .filter_map(|expr| {
-                let expr: Arc<dyn std::any::Any + Send + Sync + 'static> = expr;
-                if let Ok(dyn_filter) = expr
+                if let Ok(dyn_filter) = (expr as Arc<dyn std::any::Any + Send + Sync + 'static>)
                 .downcast::<datafusion::physical_plan::expressions::DynamicFilterPhysicalExpr>()
             {
                 supported.push(true);

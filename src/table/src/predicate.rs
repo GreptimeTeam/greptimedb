@@ -175,7 +175,7 @@ impl Predicate {
                 },
                 Err(e) => {
                     // since dynamic filter exprs could be complex, it's possible that `PruningPredicate::try_new` fails to prove anything from it. In that case, we just log it and skip pruning with this expr.
-                    debug!("Failed to create predicate for expr: {e:?}");
+                    debug!("Failed to create pruning predicate for expr: {e:?}");
                 }
             }
         }

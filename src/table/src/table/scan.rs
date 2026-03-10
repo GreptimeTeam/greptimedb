@@ -445,8 +445,6 @@ impl ExecutionPlan for RegionScanExec {
         child_pushdown_result: ChildPushdownResult,
         _config: &datafusion::config::ConfigOptions,
     ) -> DfResult<FilterPushdownPropagation<Arc<dyn ExecutionPlan>>> {
-        // TODO(discord9): use the pushdown result to update the scanner's predicate
-
         let parent_filters = child_pushdown_result
             .parent_filters
             .into_iter()

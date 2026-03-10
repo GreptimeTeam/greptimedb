@@ -181,7 +181,8 @@ impl QueryEngineState {
         physical_optimizer
             .rules
             .push(Arc::new(WindowedSortPhysicalRule));
-        // explicitly not do filter pushdown for windowed sort&part sort as
+        // explicitly not do filter pushdown for windowed sort&part sort
+        // (notice that `PartSortExec` create another new dyn filter that need to be pushdown if want to use dyn filter optimization)
         // benchmark shows it can cause performance regression due to useless filtering and extra shuffle.
         // We can add a rule to do filter pushdown for windowed sort in the future if we find a way to avoid the performance regression.
         physical_optimizer
