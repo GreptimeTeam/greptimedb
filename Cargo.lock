@@ -1464,16 +1464,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40e38929add23cdf8a366df9b0e088953150724bcbe5fc330b0d8eb3b328eec8"
 
 [[package]]
-name = "build-data"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23084982b6264a75acfd469b97ce0ef9301e154e7af51fec388e695eedf01bc1"
-dependencies = [
- "chrono",
- "safe-regex",
-]
-
-[[package]]
 name = "bumpalo"
 version = "3.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2826,9 +2816,9 @@ dependencies = [
 name = "common-version"
 version = "1.0.0-rc.1"
 dependencies = [
- "build-data",
  "cargo-manifest",
  "const_format",
+ "git2",
  "serde",
 ]
 
@@ -5669,6 +5659,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07e28edb80900c19c28f1072f2e8aeca7fa06b23cd4169cefe1af5aa3260783f"
 
 [[package]]
+name = "git2"
+version = "0.20.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b88256088d75a56f8ecfa070513a775dd9107f6530ef14919dac831af9cfe2b"
+dependencies = [
+ "bitflags 2.9.1",
+ "libc",
+ "libgit2-sys",
+ "log",
+ "url",
+]
+
+[[package]]
 name = "glob"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7280,6 +7283,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "libgit2-sys"
+version = "0.18.3+1.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c9b3acc4b91781bb0b3386669d325163746af5f6e4f73e6d2d630e09a35f3487"
+dependencies = [
+ "cc",
+ "libc",
+ "libz-sys",
+ "pkg-config",
+]
+
+[[package]]
 name = "libloading"
 version = "0.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7343,6 +7358,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8b70e7a7df205e92a1a4cd9aaae7898dac0aa555503cc0a649494d0d60e7651d"
 dependencies = [
  "cc",
+ "libc",
  "pkg-config",
  "vcpkg",
 ]
@@ -11674,53 +11690,6 @@ dependencies = [
  "lazy_static",
  "libm",
  "serde",
-]
-
-[[package]]
-name = "safe-proc-macro2"
-version = "1.0.95"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "492d1a72624b0bd5b7f0193ea5834a1905534a517573a117e949e895f342906c"
-dependencies = [
- "unicode-xid",
-]
-
-[[package]]
-name = "safe-quote"
-version = "1.0.40"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bcaa9a650f2f98ba4da0190623210c85945cb78b262709f606c57655eda173e1"
-dependencies = [
- "safe-proc-macro2",
-]
-
-[[package]]
-name = "safe-regex"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5194fafa3cb9da89e0cab6dffa1f3fdded586bd6396d12be11b4cae0c7ee45c2"
-dependencies = [
- "safe-regex-macro",
-]
-
-[[package]]
-name = "safe-regex-compiler"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e822ae1e61251bcfd698317c237cf83f7c57161a5dc24ee609a85697f1ed15b3"
-dependencies = [
- "safe-proc-macro2",
- "safe-quote",
-]
-
-[[package]]
-name = "safe-regex-macro"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2768de7e6ef19f59c5fd3c3ac207ef12b68a49f95e3172d67e4a04cfd992ca06"
-dependencies = [
- "safe-proc-macro2",
- "safe-regex-compiler",
 ]
 
 [[package]]

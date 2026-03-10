@@ -14,9 +14,12 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::{env, fs, io};
 
 use cargo_manifest::Manifest;
+use git2::{Repository, RepositoryOpenFlags, StatusOptions};
+
 const SHADOW_FILE_NAME: &str = "shadow.rs";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -41,12 +44,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let product_version = load_product_version(&workspace_root);
     println!("cargo:rustc-env=GREPTIME_PRODUCT_VERSION={product_version}");
 
+    let repository = open_repository(&workspace_root);
+
     if refresh {
-        emit_workspace_watch_list(&workspace_root)?;
-        emit_git_watch_list(&workspace_root);
+        emit_workspace_watch_list(&workspace_root, repository.as_ref())?;
+        emit_git_watch_list(repository.as_ref());
     }
 
-    let version_state = VersionState::collect(&workspace_root);
+    let version_state = VersionState::collect(repository.as_ref());
 
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
     let shadow_file = out_dir.join(SHADOW_FILE_NAME);
@@ -66,25 +71,15 @@ struct VersionState {
 }
 
 impl VersionState {
-    fn collect(_workspace_root: &Path) -> Self {
+    fn collect(repository: Option<&Repository>) -> Self {
         Self {
-            branch: normalize_git_branch(build_data::get_git_branch().unwrap_or_default()),
-            commit_hash: build_data::get_git_commit().unwrap_or_default(),
-            short_commit: build_data::get_git_commit_short().unwrap_or_default(),
-            git_clean: build_data::get_git_dirty()
-                .map(|dirty| !dirty)
-                .unwrap_or(false),
-            rust_version: build_data::get_rustc_version().unwrap_or_default(),
+            branch: git_branch(repository),
+            commit_hash: git_commit_hash(repository),
+            short_commit: git_short_commit(repository),
+            git_clean: git_clean(repository),
+            rust_version: rustc_version(),
             build_target: env::var("TARGET").unwrap_or_default(),
         }
-    }
-}
-
-fn normalize_git_branch(branch: String) -> String {
-    if branch == "HEAD" {
-        String::new()
-    } else {
-        branch
     }
 }
 
@@ -105,16 +100,21 @@ fn load_product_version(workspace_root: &Path) -> String {
         .unwrap_or_else(|| env::var("CARGO_PKG_VERSION").unwrap())
 }
 
-fn emit_workspace_watch_list(workspace_root: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    // Watch the workspace root so newly added or removed top-level untracked paths also rerun
-    // the build script and refresh `git_clean`.
-    println!("cargo:rerun-if-changed={}", workspace_root.display());
+fn emit_workspace_watch_list(
+    workspace_root: &Path,
+    repository: Option<&Repository>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut watch_roots = BTreeSet::new();
 
-    let Some(paths) = git_ls_files(workspace_root) else {
-        return Ok(());
-    };
+    if let Some(paths) = git_tracked_files(workspace_root, repository) {
+        watch_roots.extend(tracked_watch_roots(workspace_root, &paths));
+    }
 
-    for path in tracked_watch_roots(workspace_root, &paths) {
+    if let Some(paths) = git_status_paths(workspace_root, repository) {
+        watch_roots.extend(tracked_watch_roots(workspace_root, &paths));
+    }
+
+    for path in watch_roots {
         println!("cargo:rerun-if-changed={}", path.display());
     }
 
@@ -134,38 +134,47 @@ fn tracked_watch_roots(workspace_root: &Path, tracked_files: &[PathBuf]) -> BTre
         .collect()
 }
 
-fn git_ls_files(workspace_root: &Path) -> Option<Vec<PathBuf>> {
-    let output = std::process::Command::new("git")
-        .args(["ls-files", "-z"])
-        .current_dir(workspace_root)
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
+fn git_tracked_files(
+    workspace_root: &Path,
+    repository: Option<&Repository>,
+) -> Option<Vec<PathBuf>> {
+    let index = repository?.index().ok()?;
 
     Some(
-        output
-            .stdout
-            .split(|byte| *byte == b'\0')
-            .filter(|path| !path.is_empty())
-            .filter_map(|path| std::str::from_utf8(path).ok())
-            .map(|path| workspace_root.join(path))
+        index
+            .iter()
+            .filter_map(|entry| {
+                std::str::from_utf8(entry.path.as_ref())
+                    .ok()
+                    .map(|path| workspace_root.join(path))
+            })
             .collect(),
     )
 }
 
-fn emit_git_watch_list(workspace_root: &Path) {
-    let Some(git_dir) = git(workspace_root, &["rev-parse", "--git-dir"]).map(PathBuf::from) else {
+fn git_status_paths(
+    workspace_root: &Path,
+    repository: Option<&Repository>,
+) -> Option<Vec<PathBuf>> {
+    let repository = repository?;
+    let mut options = status_options();
+
+    repository
+        .statuses(Some(&mut options))
+        .ok()
+        .map(|statuses| {
+            statuses
+                .iter()
+                .filter_map(|entry| entry.path().map(|path| workspace_root.join(path)))
+                .collect()
+        })
+}
+
+fn emit_git_watch_list(repository: Option<&Repository>) {
+    let Some(repository) = repository else {
         return;
     };
-
-    let git_dir = if git_dir.is_absolute() {
-        git_dir
-    } else {
-        workspace_root.join(git_dir)
-    };
+    let git_dir = repository.path();
 
     for path in [
         git_dir.join("HEAD"),
@@ -175,8 +184,11 @@ fn emit_git_watch_list(workspace_root: &Path) {
         println!("cargo:rerun-if-changed={}", path.display());
     }
 
-    if let Some(head_ref) = git(workspace_root, &["symbolic-ref", "-q", "HEAD"])
-        && head_ref.starts_with("refs/")
+    if let Some(head_ref) = repository
+        .head()
+        .ok()
+        .and_then(|head| head.name().map(str::to_string))
+        .filter(|head_ref| head_ref.starts_with("refs/"))
     {
         println!(
             "cargo:rerun-if-changed={}",
@@ -211,17 +223,73 @@ fn write_if_changed(path: &Path, content: String) -> io::Result<()> {
     fs::write(path, content)
 }
 
-fn git(workspace_root: &Path, args: &[&str]) -> Option<String> {
-    let output = std::process::Command::new("git")
-        .args(args)
-        .current_dir(workspace_root)
+fn open_repository(workspace_root: &Path) -> Option<Repository> {
+    Repository::open_ext(
+        workspace_root,
+        RepositoryOpenFlags::NO_SEARCH,
+        std::iter::empty::<&Path>(),
+    )
+    .ok()
+}
+
+fn git_branch(repository: Option<&Repository>) -> String {
+    repository
+        .and_then(|repo| repo.head().ok())
+        .filter(|head| head.is_branch())
+        .and_then(|head| head.shorthand().map(str::to_string))
+        .unwrap_or_default()
+}
+
+fn git_commit_hash(repository: Option<&Repository>) -> String {
+    repository
+        .and_then(|repo| head_target(Some(repo)))
+        .map(|oid| oid.to_string())
+        .unwrap_or_default()
+}
+
+fn git_short_commit(repository: Option<&Repository>) -> String {
+    repository
+        .and_then(|repo| {
+            let object = repo.find_object(head_target(Some(repo))?, None).ok()?;
+            object.short_id().ok()?.as_str().map(str::to_string)
+        })
+        .unwrap_or_default()
+}
+
+fn git_clean(repository: Option<&Repository>) -> bool {
+    let Some(repository) = repository else {
+        return false;
+    };
+
+    let mut options = status_options();
+
+    repository
+        .statuses(Some(&mut options))
+        .map(|statuses| statuses.is_empty())
+        .unwrap_or(false)
+}
+
+fn head_target(repository: Option<&Repository>) -> Option<git2::Oid> {
+    repository?.head().ok()?.target()
+}
+
+fn rustc_version() -> String {
+    let rustc = env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+    Command::new(rustc)
+        .arg("--version")
         .output()
-        .ok()?;
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|stdout| stdout.trim().to_string())
+        .unwrap_or_default()
+}
 
-    if !output.status.success() {
-        return None;
-    }
-
-    let stdout = String::from_utf8(output.stdout).ok()?;
-    Some(stdout.trim().to_string())
+fn status_options() -> StatusOptions {
+    let mut options = StatusOptions::new();
+    options
+        .include_untracked(true)
+        .recurse_untracked_dirs(true)
+        .renames_head_to_index(true);
+    options
 }

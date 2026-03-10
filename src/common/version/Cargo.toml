@@ -15,5 +15,5 @@ const_format.workspace = true
 serde = { workspace = true, optional = true }
 
 [build-dependencies]
-build-data = "0.2"
 cargo-manifest = "0.19"
+git2 = { version = "0.20", default-features = false }
