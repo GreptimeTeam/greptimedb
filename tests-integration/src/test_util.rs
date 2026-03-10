@@ -621,6 +621,7 @@ pub async fn setup_test_prom_app_with_frontend(
             Some(frontend_ref.clone()),
             true,
             PromValidationMode::Strict,
+            None,
         )
         .with_prometheus_handler(frontend_ref)
         .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
