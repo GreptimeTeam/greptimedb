@@ -1624,7 +1624,7 @@ impl StreamContext {
                 .downcast::<datafusion::physical_plan::expressions::DynamicFilterPhysicalExpr>()
             {
                 supported.push(true);
-                Some(dyn_filter.clone())
+                Some(dyn_filter)
             } else {
                 supported.push(false);
                 None
