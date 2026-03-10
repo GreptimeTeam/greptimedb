@@ -198,13 +198,18 @@ impl CompactionScheduler {
             schema_metadata_manager,
             max_parallelism,
         );
-        self.region_status.insert(region_id, status);
+
         let result = self
             .schedule_compaction_request(request, compact_options)
             .await;
+        if matches!(result, Ok(true)) {
+            // Only if the compaction request is scheduled successfully,
+            // we insert the region into the status map.
+            self.region_status.insert(region_id, status);
+        }
 
         self.listener.on_compaction_scheduled(region_id);
-        result
+        result.map(|_| ())
     }
 
     /// Notifies the scheduler that the compaction job is finished successfully.
@@ -214,39 +219,66 @@ impl CompactionScheduler {
         manifest_ctx: &ManifestContextRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
     ) -> Vec<SenderDdlRequest> {
-        let Some(status) = self.region_status.get_mut(&region_id) else {
-            return Vec::new();
+        let pending_request = {
+            let Some(status) = self.region_status.get_mut(&region_id) else {
+                return Vec::new();
+            };
+            std::mem::take(&mut status.pending_request)
         };
 
-        // if there is a pending manual compaction request, schedule it.
-        if let Some(pending_request) = std::mem::take(&mut status.pending_request) {
+        // If there is a pending manual compaction request, schedule it.
+        // and defer returning the pending DDL requests to the caller.
+        let pending_ddl_requests = if let Some(pending_request) = pending_request {
             let PendingCompaction {
                 options,
                 waiter,
                 max_parallelism,
             } = pending_request;
 
-            let request = status.new_compaction_request(
-                self.request_sender.clone(),
-                waiter,
-                self.engine_config.clone(),
-                self.cache_manager.clone(),
-                manifest_ctx,
-                self.listener.clone(),
-                schema_metadata_manager,
-                max_parallelism,
-            );
+            let request = {
+                let status = self.region_status.get_mut(&region_id).unwrap();
+                status.new_compaction_request(
+                    self.request_sender.clone(),
+                    waiter,
+                    self.engine_config.clone(),
+                    self.cache_manager.clone(),
+                    manifest_ctx,
+                    self.listener.clone(),
+                    schema_metadata_manager.clone(),
+                    max_parallelism,
+                )
+            };
 
-            if let Err(e) = self.schedule_compaction_request(request, options).await {
-                error!(e; "Failed to continue pending manual compaction for region id: {}", region_id);
-            } else {
-                debug!(
-                    "Successfully scheduled manual compaction for region id: {}",
-                    region_id
-                );
+            match self.schedule_compaction_request(request, options).await {
+                Ok(true) => {
+                    debug!(
+                        "Successfully scheduled manual compaction for region id: {}",
+                        region_id
+                    );
+                    Some(Vec::new())
+                }
+                Ok(false) => {
+                    // Continue
+                    // We still need to handle the pending DDL requests.
+                    // So we can't return early here.
+                    None
+                }
+                Err(e) => {
+                    error!(e; "Failed to continue pending manual compaction for region id: {}", region_id);
+                    self.remove_region_on_failure(region_id, Arc::new(e));
+                    Some(Vec::new())
+                }
             }
-            return Vec::new();
+        } else {
+            None
+        };
+
+        if let Some(pending_ddl_requests) = pending_ddl_requests {
+            return pending_ddl_requests;
         }
+
+        // Safety: The region status must exist.
+        let status = self.region_status.get_mut(&region_id).unwrap();
 
         // Notify all waiters that compaction is finished.
         for waiter in std::mem::take(&mut status.waiters) {
@@ -273,15 +305,31 @@ impl CompactionScheduler {
             schema_metadata_manager,
             MAX_PARALLEL_COMPACTION,
         );
+
         // Try to schedule next compaction task for this region.
-        if let Err(e) = self
+        match self
             .schedule_compaction_request(
                 request,
                 compact_request::Options::Regular(Default::default()),
             )
             .await
         {
-            error!(e; "Failed to schedule next compaction for region {}", region_id);
+            Ok(true) => {
+                debug!(
+                    "Successfully scheduled next compaction for region id: {}",
+                    region_id
+                );
+            }
+            Ok(false) => {
+                // No further compaction tasks can be scheduled; cleanup the `CompactionStatus` for this region.
+                // All DDL requests and pending compaction requests have already been processed.
+                // Safe to remove the region from status tracking.
+                self.region_status.remove(&region_id);
+            }
+            Err(e) => {
+                error!(e; "Failed to schedule next compaction for region {}", region_id);
+                self.remove_region_on_failure(region_id, Arc::new(e));
+            }
         }
 
         Vec::new()
@@ -290,13 +338,7 @@ impl CompactionScheduler {
     /// Notifies the scheduler that the compaction job is failed.
     pub(crate) fn on_compaction_failed(&mut self, region_id: RegionId, err: Arc<Error>) {
         error!(err; "Region {} failed to compact, cancel all pending tasks", region_id);
-        // Remove this region.
-        let Some(status) = self.region_status.remove(&region_id) else {
-            return;
-        };
-
-        // Fast fail: cancels all pending tasks and sends error to their waiters.
-        status.on_failure(err);
+        self.remove_region_on_failure(region_id, err);
     }
 
     /// Notifies the scheduler that the region is dropped.
@@ -354,12 +396,12 @@ impl CompactionScheduler {
 
     /// Schedules a compaction request.
     ///
-    /// If the region has nothing to compact, it removes the region from the status map.
+    /// Returns true if the compaction request is scheduled successfully.
     async fn schedule_compaction_request(
         &mut self,
         request: CompactionRequest,
         options: compact_request::Options,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let region_id = request.region_id();
         let (dynamic_compaction_opts, ttl) = find_dynamic_options(
             region_id.table_id(),
@@ -432,8 +474,7 @@ impl CompactionScheduler {
             for waiter in waiters {
                 waiter.send(Ok(0));
             }
-            self.region_status.remove(&region_id);
-            return Ok(());
+            return Ok(false);
         };
 
         // If specified to run compaction remotely, we schedule the compaction job remotely.
@@ -464,7 +505,7 @@ impl CompactionScheduler {
                             job_id, region_id
                         );
                         INFLIGHT_COMPACTION_COUNT.inc();
-                        return Ok(());
+                        return Ok(true);
                     }
                     Err(e) => {
                         if !dynamic_compaction_opts.fallback_to_local() {
@@ -510,6 +551,7 @@ impl CompactionScheduler {
         });
 
         self.submit_compaction_task(local_compaction_task, region_id)
+            .map(|_| true)
     }
 
     fn submit_compaction_task(
@@ -523,11 +565,9 @@ impl CompactionScheduler {
                 task.run().await;
                 INFLIGHT_COMPACTION_COUNT.dec();
             }))
-            .map_err(|e| {
-                error!(e; "Failed to submit compaction request for region {}", region_id);
-                self.region_status.remove(&region_id);
-                e
-            })
+            .inspect_err(
+                |e| error!(e; "Failed to submit compaction request for region {}", region_id),
+            )
     }
 
     fn remove_region_on_failure(&mut self, region_id: RegionId, err: Arc<Error>) {
