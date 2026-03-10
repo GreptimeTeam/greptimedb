@@ -1021,18 +1021,11 @@ pub async fn loki_label_values(
         return LokiApiResponse::success(vec![]);
     }
     let query_ctx = Arc::new(query_ctx);
-    let (_, _, time_clause) = time_range_clause(
-        params.start.as_deref(),
-        params.end.as_deref(),
-    );
-    let where_clause = if time_clause.is_empty() {
-        format!("{} IS NOT NULL", name)
-    } else {
-        format!("{} AND {} IS NOT NULL", time_clause, name)
-    };
+    // Ignore time range for label value discovery — Grafana's default 1h window
+    // would return empty values if no data was ingested in the last hour.
     let sql = format!(
-        "SELECT DISTINCT {} FROM {} WHERE {} ORDER BY {} LIMIT 1000",
-        name, LOKI_TABLE_NAME, where_clause, name,
+        "SELECT DISTINCT {} FROM {} WHERE {} IS NOT NULL ORDER BY {} LIMIT 1000",
+        name, LOKI_TABLE_NAME, name, name,
     );
     let results = state.sql_handler.do_query(&sql, query_ctx).await;
     let mut values = Vec::new();
