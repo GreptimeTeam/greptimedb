@@ -1061,6 +1061,40 @@ pub async fn loki_label_values(
     LokiApiResponse::success(values)
 }
 
+// GET /loki/api/v1/detected_labels — Grafana 11 uses this instead of /labels when
+// the lokiStructuredMetadata feature flag is enabled.  Returns the same TAG columns
+// but wrapped in the detected_labels envelope Grafana 11 expects.
+#[derive(Serialize)]
+pub(crate) struct DetectedLabel {
+    label: String,
+    cardinality: u64,
+}
+
+#[derive(Serialize)]
+pub(crate) struct DetectedLabelsData {
+    labels: Vec<DetectedLabel>,
+}
+
+pub async fn loki_detected_labels(
+    State(state): State<LokiQueryState>,
+    Query(params): Query<LokiLabelParams>,
+    Extension(mut query_ctx): Extension<QueryContext>,
+) -> axum::Json<LokiApiResponse<DetectedLabelsData>> {
+    if let Some(db) = &params.db {
+        let (catalog, schema) =
+            common_catalog::parse_catalog_and_schema_from_db_string(db);
+        query_ctx.set_current_catalog(&catalog);
+        query_ctx.set_current_schema(&schema);
+    }
+    let query_ctx = Arc::new(query_ctx);
+    let cols = get_label_columns(&state.sql_handler, query_ctx, LOKI_TABLE_NAME).await;
+    let labels = cols
+        .into_iter()
+        .map(|label| DetectedLabel { label, cardinality: 0 })
+        .collect();
+    LokiApiResponse::success(DetectedLabelsData { labels })
+}
+
 // GET /loki/api/v1/query — instant query (used by Grafana health check)
 // Returns a synthetic vector result so Grafana's health check passes.
 pub async fn loki_query(
