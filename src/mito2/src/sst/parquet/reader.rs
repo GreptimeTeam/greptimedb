@@ -300,11 +300,15 @@ impl ParquetReaderBuilder {
             file_id = %self.file_handle.file_id()
         )
     )]
-    pub async fn build(&self) -> Result<ParquetReader> {
+    pub async fn build(&self) -> Result<Option<ParquetReader>> {
         let mut metrics = ReaderMetrics::default();
 
-        let (context, selection) = self.build_reader_input(&mut metrics).await?;
-        ParquetReader::new(Arc::new(context), selection).await
+        let Some((context, selection)) = self.build_reader_input(&mut metrics).await? else {
+            return Ok(None);
+        };
+        ParquetReader::new(Arc::new(context), selection)
+            .await
+            .map(Some)
     }
 
     /// Builds a [FileRangeContext] and collects row groups to read.
@@ -320,7 +324,14 @@ impl ParquetReaderBuilder {
     pub(crate) async fn build_reader_input(
         &self,
         metrics: &mut ReaderMetrics,
-    ) -> Result<(FileRangeContext, RowGroupSelection)> {
+    ) -> Result<Option<(FileRangeContext, RowGroupSelection)>> {
+        self.build_reader_input_inner(metrics).await
+    }
+
+    async fn build_reader_input_inner(
+        &self,
+        metrics: &mut ReaderMetrics,
+    ) -> Result<Option<(FileRangeContext, RowGroupSelection)>> {
         let start = Instant::now();
 
         let file_path = self.file_handle.file_path(&self.table_dir, self.path_type);
@@ -337,14 +348,14 @@ impl ParquetReaderBuilder {
             .await?;
         // Decodes region metadata.
         let key_value_meta = parquet_meta.file_metadata().key_value_metadata();
-        // Gets the metadata stored in the SST.
         let region_meta = Arc::new(Self::get_region_metadata(&file_path, key_value_meta)?);
-        let region_partition_expr = self
+        let region_partition_expr_str = self
             .expected_metadata
             .as_ref()
-            .and_then(|meta| meta.partition_expr.as_ref());
+            .and_then(|meta| meta.partition_expr.as_ref())
+            .map(|expr| expr.as_str());
         let (_, is_same_region_partition) = Self::is_same_region_partition(
-            region_partition_expr.as_ref().map(|expr| expr.as_str()),
+            region_partition_expr_str,
             self.file_handle.meta_ref().partition_expr.as_ref(),
         )?;
         // Skip auto convert when:
@@ -404,21 +415,14 @@ impl ParquetReaderBuilder {
                 .set_override_sequence(self.file_handle.meta_ref().sequence.map(|x| x.get()));
         }
 
-        // Computes the projection mask.
-        let parquet_schema_desc = parquet_meta.file_metadata().schema_descr();
-        let indices = read_format.projection_indices();
-        // Now we assumes we don't have nested schemas.
-        // TODO(yingwen): Revisit this if we introduce nested types such as JSON type.
-        let projection_mask = ProjectionMask::roots(parquet_schema_desc, indices.iter().copied());
-
-        // Computes the field levels.
-        let hint = Some(read_format.arrow_schema().fields());
-        let field_levels =
-            parquet_to_arrow_field_levels(parquet_schema_desc, projection_mask.clone(), hint)
-                .context(ReadDataPartSnafu)?;
         let selection = self
             .row_groups_to_read(&read_format, &parquet_meta, &mut metrics.filter_metrics)
             .await;
+
+        if selection.is_empty() {
+            metrics.build_cost += start.elapsed();
+            return Ok(None);
+        }
 
         // Trigger background download if metadata had a cache miss and selection is not empty
         if cache_miss && !selection.is_empty() {
@@ -441,6 +445,19 @@ impl ParquetReaderBuilder {
             .as_ref()
             .map(|meta| meta.schema.clone())
             .unwrap_or_else(|| region_meta.schema.clone());
+
+        // Computes the projection mask.
+        let parquet_schema_desc = parquet_meta.file_metadata().schema_descr();
+        let indices = read_format.projection_indices();
+        // Now we assumes we don't have nested schemas.
+        // TODO(yingwen): Revisit this if we introduce nested types such as JSON type.
+        let projection_mask = ProjectionMask::roots(parquet_schema_desc, indices.iter().copied());
+
+        // Computes the field levels.
+        let hint = Some(read_format.arrow_schema().fields());
+        let field_levels =
+            parquet_to_arrow_field_levels(parquet_schema_desc, projection_mask.clone(), hint)
+                .context(ReadDataPartSnafu)?;
 
         let reader_builder = RowGroupReaderBuilder {
             file_handle: self.file_handle.clone(),
@@ -496,7 +513,7 @@ impl ParquetReaderBuilder {
 
         metrics.build_cost += start.elapsed();
 
-        Ok((context, selection))
+        Ok(Some((context, selection)))
     }
 
     fn is_same_region_partition(
@@ -1244,7 +1261,6 @@ impl ParquetReaderBuilder {
         }
     }
 }
-
 fn apply_selection_and_update_metrics(
     output: &mut RowGroupSelection,
     result: &RowGroupSelection,

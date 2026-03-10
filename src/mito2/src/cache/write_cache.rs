@@ -685,7 +685,7 @@ mod tests {
         )
         .cache(CacheStrategy::EnableAll(cache_manager.clone()))
         .page_index_policy(PageIndexPolicy::Optional);
-        let reader = builder.build().await.unwrap();
+        let reader = builder.build().await.unwrap().unwrap();
 
         // Check parquet metadata
         assert_parquet_metadata_equal(write_parquet_metadata, reader.parquet_metadata());
