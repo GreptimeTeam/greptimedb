@@ -12,30 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::{env, fs, io};
 
-use build_data::{format_timestamp, get_source_time};
 use cargo_manifest::Manifest;
 const SHADOW_FILE_NAME: &str = "shadow.rs";
-const BUILD_INFO_CACHE_FILE_NAME: &str = "build-info.cache";
-const BUILD_TIMESTAMP_PREFIX: &str = "build_timestamp=";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Refresh timestamps by default in release builds. In non-release builds (debug, bench,
-    // etc.), skip refreshing to preserve incremental compilation.
-    // Set DISABLE_BUILD_INFO=1 to force-disable refreshing even in release builds.
+    // Refresh VCS-derived build info only in release builds. In non-release builds (debug,
+    // bench, etc.), skip refreshing to preserve incremental compilation.
     let profile = env::var("PROFILE").unwrap_or_default();
-    let disabled = env::var("DISABLE_BUILD_INFO")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    let refresh = profile == "release" && !disabled;
+    let refresh = profile == "release";
 
-    println!("cargo:rerun-if-env-changed=DISABLE_BUILD_INFO");
-    println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
     println!("cargo:rerun-if-env-changed=RUSTC");
-    println!("cargo:rerun-if-env-changed=TARGET");
-    println!("cargo:rerun-if-changed=build.rs");
 
     // The "CARGO_WORKSPACE_DIR" is set manually (not by Rust itself) in Cargo config file, to
     // solve the problem where the "CARGO_MANIFEST_DIR" is not what we want when this repo is
@@ -56,28 +46,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         emit_git_watch_list(&workspace_root);
     }
 
-    let version_state = VersionState::collect(&workspace_root, &product_version, refresh);
-    println!(
-        "cargo:rustc-env=SOURCE_TIMESTAMP={}",
-        version_state.source_timestamp
-    );
+    let version_state = VersionState::collect(&workspace_root);
 
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
-    let build_timestamp = if refresh {
-        let cache_path = out_dir.join(BUILD_INFO_CACHE_FILE_NAME);
-        let signature = version_state.signature();
-        let build_timestamp =
-            read_cached_build_timestamp(&cache_path, &signature).unwrap_or_else(current_timestamp);
-        write_if_changed(
-            &cache_path,
-            format!("{signature}\n{BUILD_TIMESTAMP_PREFIX}{build_timestamp}\n"),
-        )?;
-        build_timestamp
-    } else {
-        String::new()
-    };
-    println!("cargo:rustc-env=BUILD_TIMESTAMP={build_timestamp}");
-
     let shadow_file = out_dir.join(SHADOW_FILE_NAME);
     write_if_changed(&shadow_file, render_shadow_rs(&version_state))?;
 
@@ -90,19 +61,12 @@ struct VersionState {
     commit_hash: String,
     short_commit: String,
     git_clean: bool,
-    git_status_hash: u64,
-    source_timestamp: String,
     rust_version: String,
     build_target: String,
-    product_version: String,
 }
 
 impl VersionState {
-    fn collect(workspace_root: &Path, product_version: &str, refresh: bool) -> Self {
-        let git_status = git(workspace_root, &["status", "--short"])
-            .unwrap_or_default()
-            .replace('\r', "");
-
+    fn collect(_workspace_root: &Path) -> Self {
         Self {
             branch: build_data::get_git_branch().unwrap_or_default(),
             commit_hash: build_data::get_git_commit().unwrap_or_default(),
@@ -110,31 +74,9 @@ impl VersionState {
             git_clean: build_data::get_git_dirty()
                 .map(|dirty| !dirty)
                 .unwrap_or(false),
-            git_status_hash: fnv1a64(git_status.as_bytes()),
-            source_timestamp: if refresh {
-                get_source_time().map(format_timestamp).unwrap_or_default()
-            } else {
-                String::new()
-            },
             rust_version: build_data::get_rustc_version().unwrap_or_default(),
             build_target: env::var("TARGET").unwrap_or_default(),
-            product_version: product_version.to_string(),
         }
-    }
-
-    fn signature(&self) -> String {
-        [
-            format!("branch={}", self.branch),
-            format!("commit_hash={}", self.commit_hash),
-            format!("short_commit={}", self.short_commit),
-            format!("git_clean={}", self.git_clean),
-            format!("git_status_hash={:016x}", self.git_status_hash),
-            format!("source_timestamp={}", self.source_timestamp),
-            format!("rust_version={}", self.rust_version),
-            format!("build_target={}", self.build_target),
-            format!("product_version={}", self.product_version),
-        ]
-        .join("\n")
     }
 }
 
@@ -155,28 +97,29 @@ fn load_product_version(workspace_root: &Path) -> String {
         .unwrap_or_else(|| env::var("CARGO_PKG_VERSION").unwrap())
 }
 
-fn emit_workspace_watch_list(workspace_root: &Path) -> io::Result<()> {
-    let mut paths = git_ls_files(workspace_root).unwrap_or_else(|| {
-        fs::read_dir(workspace_root)
-            .into_iter()
-            .flatten()
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name != ".git" && name != "target")
-            })
-            .collect()
-    });
+fn emit_workspace_watch_list(workspace_root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(paths) = git_ls_files(workspace_root) else {
+        return Ok(());
+    };
 
-    paths.sort();
-
-    for path in paths {
+    for path in tracked_watch_roots(workspace_root, &paths) {
         println!("cargo:rerun-if-changed={}", path.display());
     }
 
     Ok(())
+}
+
+fn tracked_watch_roots(workspace_root: &Path, tracked_files: &[PathBuf]) -> BTreeSet<PathBuf> {
+    tracked_files
+        .iter()
+        .filter_map(|path| path.strip_prefix(workspace_root).ok())
+        .filter_map(|relative| {
+            relative
+                .components()
+                .next()
+                .map(|first| workspace_root.join(first))
+        })
+        .collect()
 }
 
 fn git_ls_files(workspace_root: &Path) -> Option<Vec<PathBuf>> {
@@ -214,7 +157,6 @@ fn emit_git_watch_list(workspace_root: &Path) {
 
     for path in [
         git_dir.join("HEAD"),
-        git_dir.join("logs/HEAD"),
         git_dir.join("index"),
         git_dir.join("packed-refs"),
     ] {
@@ -229,23 +171,6 @@ fn emit_git_watch_list(workspace_root: &Path) {
             git_dir.join(head_ref).display()
         );
     }
-}
-
-fn read_cached_build_timestamp(cache_path: &Path, signature: &str) -> Option<String> {
-    let cached = fs::read_to_string(cache_path).ok()?;
-    let (cached_signature, cached_timestamp) =
-        cached.rsplit_once(&format!("\n{BUILD_TIMESTAMP_PREFIX}"))?;
-
-    if cached_signature != signature {
-        return None;
-    }
-
-    Some(cached_timestamp.trim().to_string())
-}
-
-fn current_timestamp() -> String {
-    let now = build_data::now();
-    format_timestamp(now)
 }
 
 fn render_shadow_rs(version_state: &VersionState) -> String {
@@ -287,13 +212,4 @@ fn git(workspace_root: &Path, args: &[&str]) -> Option<String> {
 
     let stdout = String::from_utf8(output.stdout).ok()?;
     Some(stdout.trim().to_string())
-}
-
-fn fnv1a64(bytes: &[u8]) -> u64 {
-    const OFFSET: u64 = 0xcbf29ce484222325;
-    const PRIME: u64 = 0x100000001b3;
-
-    bytes.iter().fold(OFFSET, |hash, byte| {
-        (hash ^ u64::from(*byte)).wrapping_mul(PRIME)
-    })
 }
