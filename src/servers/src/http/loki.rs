@@ -1023,9 +1023,10 @@ pub async fn loki_label_values(
     let query_ctx = Arc::new(query_ctx);
     // Ignore time range for label value discovery — Grafana's default 1h window
     // would return empty values if no data was ingested in the last hour.
+    let quoted_name = format!("\"{}\"", name.replace('"', "\"\""));
     let sql = format!(
         "SELECT DISTINCT {} FROM {} WHERE {} IS NOT NULL ORDER BY {} LIMIT 1000",
-        name, LOKI_TABLE_NAME, name, name,
+        quoted_name, LOKI_TABLE_NAME, quoted_name, quoted_name,
     );
     let results = state.sql_handler.do_query(&sql, query_ctx).await;
     let mut values = Vec::new();
@@ -1158,7 +1159,13 @@ pub async fn loki_query_range(
     let mut where_parts: Vec<String> = selector_matchers
         .iter()
         .filter(|(k, _)| is_safe_column_name(k))
-        .map(|(k, v)| format!("{} = '{}'", k, v.replace('\'', "''")))
+        .map(|(k, v)| {
+            format!(
+                "\"{}\" = '{}'",
+                k.replace('"', "\"\""),
+                v.replace('\'', "''")
+            )
+        })
         .collect();
     if !time_clause.is_empty() {
         where_parts.push(time_clause);
@@ -1174,7 +1181,11 @@ pub async fn loki_query_range(
     let label_select = if label_cols.is_empty() {
         String::new()
     } else {
-        format!(", {}", label_cols.join(", "))
+        let quoted: Vec<String> = label_cols
+            .iter()
+            .map(|c| format!("\"{}\"", c.replace('"', "\"\"")))
+            .collect();
+        format!(", {}", quoted.join(", "))
     };
 
     let sql = format!(
@@ -1295,9 +1306,13 @@ pub async fn loki_series(
         format!("WHERE {}", time_clause)
     };
 
+    let quoted_label_cols: Vec<String> = label_cols
+        .iter()
+        .map(|c| format!("\"{}\"", c.replace('"', "\"\"")))
+        .collect();
     let sql = format!(
         "SELECT DISTINCT {} FROM {} {} LIMIT 1000",
-        label_cols.join(", "),
+        quoted_label_cols.join(", "),
         LOKI_TABLE_NAME,
         where_clause,
     );
