@@ -1609,9 +1609,9 @@ impl StreamContext {
         write!(f, "{:?}", InputWrapper { input: &self.input })
     }
 
-    /// Updates dynamic filters in the predicates.
+    /// Add new dynamic filters to the predicates.
     /// Safe after stream creation; in-flight reads may still observe an older snapshot.
-    pub(crate) fn update_predicate_with_dyn_filter(
+    pub(crate) fn add_dyn_filter_to_predicate(
         self: &Arc<Self>,
         filter_exprs: Vec<Arc<dyn datafusion::physical_plan::PhysicalExpr>>,
     ) -> Vec<bool> {
@@ -1631,7 +1631,7 @@ impl StreamContext {
             }
             })
             .collect();
-        self.input.predicate.update_dyn_filters(filter_expr);
+        self.input.predicate.add_dyn_filters(filter_expr);
         supported
     }
 }
@@ -1720,8 +1720,8 @@ impl PredicateGroup {
         }
     }
 
-    /// Updates dynamic filters in the predicates.
-    pub(crate) fn update_dyn_filters(&self, dyn_filters: Vec<Arc<DynamicFilterPhysicalExpr>>) {
+    /// Add dynamic filters in the predicates.
+    pub(crate) fn add_dyn_filters(&self, dyn_filters: Vec<Arc<DynamicFilterPhysicalExpr>>) {
         self.predicate_all.add_dyn_filters(dyn_filters.clone());
         self.predicate_without_region.add_dyn_filters(dyn_filters);
     }
@@ -1928,7 +1928,7 @@ mod tests {
         assert!(predicate_group.predicate_without_region().is_none());
 
         let dyn_filter = Arc::new(DynamicFilterPhysicalExpr::new(vec![], physical_lit(false)));
-        predicate_group.update_dyn_filters(vec![dyn_filter]);
+        predicate_group.add_dyn_filters(vec![dyn_filter]);
 
         let predicate_all = predicate_group.predicate().unwrap();
         assert!(predicate_all.exprs().is_empty());

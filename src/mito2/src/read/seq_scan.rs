@@ -718,12 +718,11 @@ impl RegionScanner for SeqScan {
         predicate.is_some()
     }
 
-    fn update_predicate_with_dyn_filter(
+    fn add_dyn_filter_to_predicate(
         &mut self,
         filter_exprs: Vec<Arc<dyn datafusion::physical_plan::PhysicalExpr>>,
     ) -> Vec<bool> {
-        self.stream_ctx
-            .update_predicate_with_dyn_filter(filter_exprs)
+        self.stream_ctx.add_dyn_filter_to_predicate(filter_exprs)
     }
 
     fn set_logical_region(&mut self, logical_region: bool) {

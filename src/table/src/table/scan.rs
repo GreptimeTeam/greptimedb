@@ -457,7 +457,7 @@ impl ExecutionPlan for RegionScanExec {
             .scanner
             .lock()
             .unwrap()
-            .update_predicate_with_dyn_filter(parent_filters);
+            .add_dyn_filter_to_predicate(parent_filters);
         // datafusion api require to clone self after mutate, even though we are only mutate inside mutex
         let new_self = Arc::new(self.clone());
 

@@ -756,7 +756,7 @@ mod tests {
             true
         }
 
-        fn update_predicate_with_dyn_filter(
+        fn add_dyn_filter_to_predicate(
             &mut self,
             filter_exprs: Vec<Arc<dyn PhysicalExpr>>,
         ) -> Vec<bool> {

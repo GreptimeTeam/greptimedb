@@ -451,11 +451,11 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
     /// Check if there is any predicate exclude region partition exprs that may be executed in this scanner.
     fn has_predicate_without_region(&self) -> bool;
 
-    /// Updates the predicate of the scanner with the given dynamic filter expressions.
+    /// Add the given dynamic filter expressions to the predicate of the scanner.
     /// Returns a vector of booleans indicating which filter expressions were applied.
     /// true indicates the filter expression was applied(will be use by scanner to prune by stat for row group),
     /// false otherwise.
-    fn update_predicate_with_dyn_filter(
+    fn add_dyn_filter_to_predicate(
         &mut self,
         filter_exprs: Vec<Arc<dyn PhysicalExpr>>,
     ) -> Vec<bool>;
@@ -1005,7 +1005,7 @@ impl RegionScanner for SinglePartitionScanner {
         false
     }
 
-    fn update_predicate_with_dyn_filter(
+    fn add_dyn_filter_to_predicate(
         &mut self,
         filter_exprs: Vec<Arc<dyn datafusion_physical_plan::PhysicalExpr>>,
     ) -> Vec<bool> {
