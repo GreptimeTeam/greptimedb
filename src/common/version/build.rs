@@ -18,7 +18,7 @@ use std::process::Command;
 use std::{env, fs, io};
 
 use cargo_manifest::Manifest;
-use git2::{Repository, RepositoryOpenFlags, StatusOptions};
+use git2::{ErrorCode, Repository, RepositoryOpenFlags, StatusOptions};
 
 const SHADOW_FILE_NAME: &str = "shadow.rs";
 
@@ -138,7 +138,16 @@ fn git_tracked_files(
     workspace_root: &Path,
     repository: Option<&Repository>,
 ) -> Option<Vec<PathBuf>> {
-    let index = repository?.index().ok()?;
+    let repository = repository?;
+    let index = match repository.index() {
+        Ok(index) => index,
+        Err(err) => {
+            cargo_warning(format!(
+                "Failed to read git index for build watch list: {err}. Git-derived build info may become stale."
+            ));
+            return None;
+        }
+    };
 
     Some(
         index
@@ -159,15 +168,20 @@ fn git_status_paths(
     let repository = repository?;
     let mut options = status_options();
 
-    repository
-        .statuses(Some(&mut options))
-        .ok()
-        .map(|statuses| {
+    match repository.statuses(Some(&mut options)) {
+        Ok(statuses) => Some(
             statuses
                 .iter()
                 .filter_map(|entry| entry.path().map(|path| workspace_root.join(path)))
-                .collect()
-        })
+                .collect(),
+        ),
+        Err(err) => {
+            cargo_warning(format!(
+                "Failed to read git status for build watch list: {err}. Git-derived build info may become stale."
+            ));
+            None
+        }
+    }
 }
 
 fn emit_git_watch_list(repository: Option<&Repository>) {
@@ -224,12 +238,21 @@ fn write_if_changed(path: &Path, content: String) -> io::Result<()> {
 }
 
 fn open_repository(workspace_root: &Path) -> Option<Repository> {
-    Repository::open_ext(
+    match Repository::open_ext(
         workspace_root,
         RepositoryOpenFlags::NO_SEARCH,
         std::iter::empty::<&Path>(),
-    )
-    .ok()
+    ) {
+        Ok(repository) => Some(repository),
+        Err(err) if err.code() == ErrorCode::NotFound => None,
+        Err(err) => {
+            cargo_warning(format!(
+                "Failed to open git repository at {}: {err}. Git-derived build info may be unavailable.",
+                workspace_root.display()
+            ));
+            None
+        }
+    }
 }
 
 fn git_branch(repository: Option<&Repository>) -> String {
@@ -292,4 +315,8 @@ fn status_options() -> StatusOptions {
         .recurse_untracked_dirs(true)
         .renames_head_to_index(true);
     options
+}
+
+fn cargo_warning(message: impl AsRef<str>) {
+    println!("cargo:warning={}", message.as_ref());
 }
