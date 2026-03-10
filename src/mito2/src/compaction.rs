@@ -186,7 +186,7 @@ impl CompactionScheduler {
         }
 
         // The region can compact directly.
-        let mut status =
+        let mut status: CompactionStatus =
             CompactionStatus::new(region_id, version_control.clone(), access_layer.clone());
         let request = status.new_compaction_request(
             self.request_sender.clone(),
@@ -218,6 +218,7 @@ impl CompactionScheduler {
             return Vec::new();
         };
 
+        // if there is a pending manual compaction request, schedule it.
         if let Some(pending_request) = std::mem::take(&mut status.pending_request) {
             let PendingCompaction {
                 options,
@@ -247,12 +248,17 @@ impl CompactionScheduler {
             return Vec::new();
         }
 
+        // Notify all waiters that compaction is finished.
+        for waiter in std::mem::take(&mut status.waiters) {
+            waiter.send(Ok(0));
+        }
+
+        // If there are pending DDL requests, run them.
         let pending_ddl_requests = std::mem::take(&mut status.pending_ddl_requests);
         if !pending_ddl_requests.is_empty() {
-            for waiter in std::mem::take(&mut status.waiters) {
-                waiter.send(Ok(0));
-            }
             self.region_status.remove(&region_id);
+            // If there are pending DDL requests, we should return them to the caller.
+            // And skip try to schedule next compaction task.
             return pending_ddl_requests;
         }
 
@@ -314,6 +320,10 @@ impl CompactionScheduler {
         );
     }
 
+    /// Add ddl request to pending queue.
+    ///
+    /// # Panics
+    /// Panics if region didn't request compaction.
     pub(crate) fn add_ddl_request_to_pending(&mut self, request: SenderDdlRequest) {
         debug!(
             "Added pending DDL request for region: {}, ddl: {:?}",
@@ -337,13 +347,9 @@ impl CompactionScheduler {
         has_pending
     }
 
+    /// Returns true if the region is compacting.
     pub(crate) fn is_compacting(&self, region_id: RegionId) -> bool {
-        let is_compacting = self.region_status.contains_key(&region_id);
-        debug!(
-            "Checked compaction status for region: {}, is_compacting: {}",
-            region_id, is_compacting
-        );
-        is_compacting
+        self.region_status.contains_key(&region_id)
     }
 
     /// Schedules a compaction request.

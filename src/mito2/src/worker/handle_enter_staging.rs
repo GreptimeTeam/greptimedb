@@ -99,6 +99,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
 
         if self.compaction_scheduler.is_compacting(region_id) {
+            // Safety: region is compacting, add ddl request to pending queue.
             self.compaction_scheduler
                 .add_ddl_request_to_pending(SenderDdlRequest {
                     region_id,
