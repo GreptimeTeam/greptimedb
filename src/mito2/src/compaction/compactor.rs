@@ -43,7 +43,7 @@ use crate::error::{
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::metrics;
-use crate::read::{FlatSource, Source};
+use crate::read::FlatSource;
 use crate::region::options::RegionOptions;
 use crate::region::version::VersionRef;
 use crate::region::{ManifestContext, RegionLeaderState, RegionRoleState};
@@ -356,13 +356,8 @@ impl DefaultCompactor {
             time_range: output.output_time_range,
             merge_mode,
         };
-        let source = if flat_format {
-            let reader = builder.build_flat_sst_reader().await?;
-            Either::Right(FlatSource::Stream(reader))
-        } else {
-            let reader = builder.build_sst_reader().await?;
-            Either::Left(Source::Reader(reader))
-        };
+        let reader = builder.build_flat_sst_reader().await?;
+        let source = Either::Right(FlatSource::Stream(reader));
         let mut metrics = Metrics::new(WriteType::Compaction);
         let region_metadata = compaction_region.region_metadata.clone();
         let sst_infos = compaction_region
