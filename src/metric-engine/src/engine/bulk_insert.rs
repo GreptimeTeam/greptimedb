@@ -32,10 +32,8 @@ use store_api::storage::RegionId;
 
 use crate::batch_modifier::{TagColumnInfo, modify_batch_sparse};
 use crate::engine::MetricEngineInner;
-use crate::error::{
-    ColumnNotFoundSnafu, Error as MetricError, ForbiddenPhysicalAlterSnafu,
-    PhysicalRegionNotFoundSnafu, Result, UnexpectedRequestSnafu, UnsupportedRegionRequestSnafu,
-};
+use crate::error;
+use crate::error::Result;
 
 impl MetricEngineInner {
     pub async fn bulk_insert_region(
@@ -43,15 +41,18 @@ impl MetricEngineInner {
         region_id: RegionId,
         request: RegionBulkInsertsRequest,
     ) -> Result<AffectedRows> {
-        if self.is_physical_region(region_id) {
-            return ForbiddenPhysicalAlterSnafu.fail();
-        }
+        ensure!(
+            self.is_physical_region(region_id),
+            error::UnsupportedRegionRequestSnafu {
+                request: RegionRequest::BulkInserts(request),
+            }
+        );
 
         let (physical_region_id, data_region_id, primary_key_encoding) =
             self.find_data_region_meta(region_id)?;
 
         if primary_key_encoding != PrimaryKeyEncoding::Sparse {
-            return UnsupportedRegionRequestSnafu {
+            return error::UnsupportedRegionRequestSnafu {
                 request: RegionRequest::BulkInserts(request),
             }
             .fail();
@@ -76,6 +77,7 @@ impl MetricEngineInner {
         )?;
         let (schema, data_header, payload) = record_batch_to_ipc(&modified_batch)?;
 
+        let partition_expr_version = request.partition_expr_version;
         let request = RegionBulkInsertsRequest {
             region_id: data_region_id,
             payload: modified_batch,
@@ -84,7 +86,7 @@ impl MetricEngineInner {
                 data_header,
                 payload,
             },
-            partition_expr_version: None,
+            partition_expr_version,
         };
         match self
             .data_region
@@ -92,10 +94,17 @@ impl MetricEngineInner {
             .await
         {
             Ok(affected_rows) => Ok(affected_rows),
-            Err(err) if is_unsupported_bulk_write(&err) => {
+            Err(err) if err.status_code() == StatusCode::Unsupported => {
                 let rows = record_batch_to_rows(&batch, &logical_metadata, region_id)?;
-                self.put_region(region_id, RegionPutRequest { rows, hint: None, partition_expr_version: None })
-                    .await
+                self.put_region(
+                    region_id,
+                    RegionPutRequest {
+                        rows,
+                        hint: None,
+                        partition_expr_version,
+                    },
+                )
+                .await
             }
             Err(err) => Err(err),
         }
@@ -141,7 +150,7 @@ fn resolve_tag_columns_from_metadata(
     let physical_columns = state
         .physical_region_states()
         .get(&data_region_id)
-        .context(PhysicalRegionNotFoundSnafu {
+        .context(error::PhysicalRegionNotFoundSnafu {
             region_id: data_region_id,
         })?
         .physical_columns();
@@ -151,10 +160,12 @@ fn resolve_tag_columns_from_metadata(
 
     for (index, field) in batch.schema().fields().iter().enumerate() {
         let name = field.name();
-        let column_id = *physical_columns.get(name).context(ColumnNotFoundSnafu {
-            name: name.clone(),
-            region_id: logical_region_id,
-        })?;
+        let column_id = *physical_columns
+            .get(name)
+            .context(error::ColumnNotFoundSnafu {
+                name: name.clone(),
+                region_id: logical_region_id,
+            })?;
         if tag_names.contains(name.as_str()) {
             tag_columns.push(TagColumnInfo {
                 name: name.clone(),
@@ -168,10 +179,6 @@ fn resolve_tag_columns_from_metadata(
 
     tag_columns.sort_by(|a, b| a.name.cmp(&b.name));
     Ok((tag_columns, non_tag_indices))
-}
-
-fn is_unsupported_bulk_write(err: &MetricError) -> bool {
-    err.status_code() == StatusCode::Unsupported
 }
 
 fn record_batch_to_rows(
@@ -191,7 +198,7 @@ fn record_batch_to_rows(
         let metadata = metadata_by_name
             .get(field.name().as_str())
             .copied()
-            .context(ColumnNotFoundSnafu {
+            .context(error::ColumnNotFoundSnafu {
                 name: field.name().clone(),
                 region_id: logical_region_id,
             })?;
@@ -200,7 +207,7 @@ fn record_batch_to_rows(
             metadata.column_schema.data_type.clone(),
         )
         .map_err(|e| {
-            UnexpectedRequestSnafu {
+            error::UnexpectedRequestSnafu {
                 reason: format!(
                     "Failed to convert column '{}' datatype: {}",
                     field.name(),
@@ -217,7 +224,7 @@ fn record_batch_to_rows(
             options: None,
         });
         vectors.push(Helper::try_into_vector(batch.column(idx)).map_err(|e| {
-            UnexpectedRequestSnafu {
+            error::UnexpectedRequestSnafu {
                 reason: format!(
                     "Failed to convert column '{}' to vector: {}",
                     field.name(),
@@ -248,14 +255,14 @@ fn record_batch_to_ipc(record_batch: &RecordBatch) -> Result<(Bytes, Bytes, Byte
         .into_iter();
 
     let Some(flight_data) = iter.next() else {
-        return UnexpectedRequestSnafu {
-            reason: "Failed to encode empty flight data".to_string(),
+        return error::UnexpectedRequestSnafu {
+            reason: "Failed to encode empty flight data",
         }
         .fail();
     };
     ensure!(
         iter.next().is_none(),
-        UnexpectedRequestSnafu {
+        error::UnexpectedRequestSnafu {
             reason: "Bulk insert RecordBatch with dictionary arrays is unsupported".to_string(),
         }
     );
