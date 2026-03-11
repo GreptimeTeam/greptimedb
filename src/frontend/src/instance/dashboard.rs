@@ -244,7 +244,7 @@ impl Instance {
     async fn list_dashboards(
         &self,
         query_ctx: QueryContextRef,
-    ) -> servers::error::Result<Vec<(String, String)>> {
+    ) -> servers::error::Result<Vec<DashboardDefinition>> {
         let table = self
             .create_dashboard_table_if_not_exists(query_ctx.clone())
             .await?;
@@ -302,7 +302,10 @@ impl Instance {
                     })?;
 
             for i in 0..name.len() {
-                dashboards.push((name.value(i).to_string(), definition.value(i).to_string()));
+                dashboards.push(DashboardDefinition {
+                    name: name.value(i).to_string(),
+                    definition: definition.value(i).to_string(),
+                });
             }
         }
 
@@ -378,12 +381,7 @@ impl servers::query_handler::DashboardHandler for Instance {
     }
 
     async fn list(&self, ctx: QueryContextRef) -> servers::error::Result<Vec<DashboardDefinition>> {
-        let dashboards: Vec<(String, String)> = self.list_dashboards(ctx).await?;
-
-        Ok(dashboards
-            .into_iter()
-            .map(|(name, definition)| DashboardDefinition { name, definition })
-            .collect())
+        self.list_dashboards(ctx).await
     }
 
     async fn delete(&self, name: &str, ctx: QueryContextRef) -> servers::error::Result<()> {
