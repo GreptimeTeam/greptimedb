@@ -29,7 +29,7 @@ use crate::data::import_v2::ddl_generator::DdlGenerator;
 use crate::data::import_v2::error::{
     ExportSnafu, ManifestVersionMismatchSnafu, Result, SchemaNotInSnapshotSnafu,
 };
-use crate::data::import_v2::executor::DdlExecutor;
+use crate::data::import_v2::executor::{DdlExecutor, DdlStatement};
 use crate::data::snapshot_storage::{OpenDalStorage, SnapshotStorage, validate_uri};
 use crate::database::{DatabaseClient, parse_proxy_opts};
 
@@ -206,7 +206,11 @@ impl Import {
             self.read_ddl_statements(&schemas_to_import).await?
         } else {
             let generator = DdlGenerator::new(&schema_snapshot);
-            generator.generate(&schemas_to_import)?
+            generator
+                .generate(&schemas_to_import)?
+                .into_iter()
+                .map(DdlStatement::new)
+                .collect()
         };
 
         info!("Generated {} DDL statements", ddl_statements.len());
@@ -217,7 +221,7 @@ impl Import {
             println!();
             for (i, stmt) in ddl_statements.iter().enumerate() {
                 println!("-- Statement {}", i + 1);
-                println!("{};", stmt);
+                println!("{};", stmt.sql);
                 println!();
             }
             return Ok(());
@@ -250,12 +254,16 @@ impl Import {
         Ok(())
     }
 
-    async fn read_ddl_statements(&self, schemas: &[String]) -> Result<Vec<String>> {
+    async fn read_ddl_statements(&self, schemas: &[String]) -> Result<Vec<DdlStatement>> {
         let mut statements = Vec::new();
         for schema in schemas {
             let path = ddl_path_for_schema(schema);
             let content = self.storage.read_text(&path).await.context(ExportSnafu)?;
-            statements.extend(parse_ddl_statements(&content));
+            statements.extend(
+                parse_ddl_statements(&content)
+                    .into_iter()
+                    .map(|sql| DdlStatement::with_fallback_schema(sql, schema.clone())),
+            );
         }
 
         Ok(statements)
