@@ -78,7 +78,7 @@ use crate::metrics_handler::MetricsHandler;
 use crate::prometheus_handler::PrometheusHandlerRef;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::query_handler::{
-    InfluxdbLineProtocolHandlerRef, JaegerQueryHandlerRef, LogQueryHandlerRef,
+    DashboardHandlerRef, InfluxdbLineProtocolHandlerRef, JaegerQueryHandlerRef, LogQueryHandlerRef,
     OpenTelemetryProtocolHandlerRef, OpentsdbProtocolHandlerRef, PipelineHandlerRef,
     PromStoreProtocolHandlerRef,
 };
@@ -507,6 +507,11 @@ pub struct GreptimeOptionsConfigState {
     pub greptime_config_options: String,
 }
 
+#[derive(Clone)]
+pub struct DashboardState {
+    pub handler: DashboardHandlerRef,
+}
+
 pub struct HttpServerBuilder {
     options: HttpOptions,
     plugins: Plugins,
@@ -698,6 +703,16 @@ impl HttpServerBuilder {
             router: self.router.nest(
                 &format!("/{HTTP_API_VERSION}/jaeger"),
                 HttpServer::route_jaeger(handler),
+            ),
+            ..self
+        }
+    }
+
+    pub fn with_dashboard_handler(self, handler: DashboardHandlerRef) -> Self {
+        Self {
+            router: self.router.nest(
+                &format!("/{HTTP_API_VERSION}/dashboards"),
+                HttpServer::route_dashboard(handler),
             ),
             ..self
         }
@@ -1168,6 +1183,26 @@ impl HttpServer {
                 routing::get(jaeger::handle_get_trace),
             )
             .with_state(handler)
+    }
+
+    #[cfg(feature = "dashboard")]
+    fn route_dashboard<S>(handler: DashboardHandlerRef) -> Router<S> {
+        use crate::http::dashboard::{add_dashboard, delete_dashboard, list_dashboards};
+
+        Router::new()
+            .route("/", routing::get(list_dashboards))
+            .route("/{dashboard_name}", routing::post(add_dashboard))
+            .route("/{dashboard_name}", routing::delete(delete_dashboard))
+            .layer(
+                ServiceBuilder::new()
+                    .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
+            )
+            .with_state(DashboardState { handler })
+    }
+
+    #[cfg(not(feature = "dashboard"))]
+    fn route_dashboard<S>(handler: DashboardHandlerRef) -> Router<S> {
+        Router::new().with_state(DashboardState { handler })
     }
 }
 

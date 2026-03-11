@@ -143,6 +143,8 @@ where
             builder = builder.with_jaeger_handler(self.instance.clone());
         }
 
+        builder = builder.with_dashboard_handler(self.instance.clone());
+
         if let Some(configurator) = self.plugins.get::<RouterConfigurator>() {
             info!("Adding extra router from plugins");
             builder = builder.with_extra_router(configurator.router());
