@@ -110,6 +110,7 @@ mod tests {
         TimestampMillisecondArray, UInt8Array, UInt64Array,
     };
     use datatypes::arrow::datatypes::{DataType, Field, Schema, UInt32Type};
+    use datatypes::arrow::util::pretty::pretty_format_batches;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{FulltextAnalyzer, FulltextBackend, FulltextOptions};
     use object_store::ObjectStore;
@@ -129,7 +130,7 @@ mod tests {
     use crate::cache::test_util::assert_parquet_metadata_equal;
     use crate::cache::{CacheManager, CacheStrategy, PageKey};
     use crate::config::IndexConfig;
-    use crate::read::{BatchBuilder, BatchReader, FlatSource};
+    use crate::read::FlatSource;
     use crate::region::options::{IndexOptions, InvertedIndexOptions};
     use crate::sst::file::{FileHandle, FileMeta, RegionFileId, RegionIndexId};
     use crate::sst::file_purger::NoopFilePurger;
@@ -143,13 +144,13 @@ mod tests {
     use crate::sst::{
         DEFAULT_WRITE_CONCURRENCY, FlatSchemaOptions, location, to_flat_sst_arrow_schema,
     };
+    use crate::test_util::TestEnv;
     use crate::test_util::sst_util::{
         build_test_binary_test_region_metadata, new_batch_by_range, new_batch_with_binary,
         new_batch_with_custom_sequence, new_primary_key, new_source, new_sparse_primary_key,
         sst_file_handle, sst_file_handle_with_file_id, sst_region_metadata,
         sst_region_metadata_with_encoding,
     };
-    use crate::test_util::{TestEnv, check_reader_result};
 
     const FILE_DIR: &str = "/";
     const REGION_ID: RegionId = RegionId::new(0, 0);
@@ -235,14 +236,14 @@ mod tests {
             object_store,
         );
         let mut reader = builder.build().await.unwrap().unwrap();
-        check_reader_result(
+        check_record_batch_reader_result(
             &mut reader,
             &[
-                new_batch_by_range(&["a", "d"], 0, 50),
-                new_batch_by_range(&["a", "d"], 50, 60),
-                new_batch_by_range(&["b", "f"], 0, 40),
-                new_batch_by_range(&["b", "h"], 100, 150),
-                new_batch_by_range(&["b", "h"], 150, 200),
+                new_record_batch_by_range(&["a", "d"], 0, 50),
+                new_record_batch_by_range(&["a", "d"], 50, 60),
+                new_record_batch_by_range(&["b", "f"], 0, 40),
+                new_record_batch_by_range(&["b", "h"], 100, 150),
+                new_record_batch_by_range(&["b", "h"], 150, 200),
             ],
         )
         .await;
@@ -299,14 +300,14 @@ mod tests {
         .cache(cache.clone());
         for _ in 0..3 {
             let mut reader = builder.build().await.unwrap().unwrap();
-            check_reader_result(
+            check_record_batch_reader_result(
                 &mut reader,
                 &[
-                    new_batch_by_range(&["a", "d"], 0, 50),
-                    new_batch_by_range(&["a", "d"], 50, 60),
-                    new_batch_by_range(&["b", "f"], 0, 40),
-                    new_batch_by_range(&["b", "h"], 100, 150),
-                    new_batch_by_range(&["b", "h"], 150, 200),
+                    new_record_batch_by_range(&["a", "d"], 0, 50),
+                    new_record_batch_by_range(&["a", "d"], 50, 60),
+                    new_record_batch_by_range(&["b", "f"], 0, 40),
+                    new_record_batch_by_range(&["b", "h"], 100, 150),
+                    new_record_batch_by_range(&["b", "h"], 150, 200),
                 ],
             )
             .await;
@@ -436,11 +437,11 @@ mod tests {
         )
         .predicate(predicate);
         let mut reader = builder.build().await.unwrap().unwrap();
-        check_reader_result(
+        check_record_batch_reader_result(
             &mut reader,
             &[
-                new_batch_by_range(&["a", "d"], 0, 50),
-                new_batch_by_range(&["a", "d"], 50, 60),
+                new_record_batch_by_range(&["a", "d"], 0, 50),
+                new_record_batch_by_range(&["a", "d"], 50, 60),
             ],
         )
         .await;
@@ -488,7 +489,11 @@ mod tests {
             object_store,
         );
         let mut reader = builder.build().await.unwrap().unwrap();
-        check_reader_result(&mut reader, &[new_batch_by_range(&["a", "z"], 200, 230)]).await;
+        check_record_batch_reader_result(
+            &mut reader,
+            &[new_record_batch_by_range(&["a", "z"], 200, 230)],
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -542,7 +547,11 @@ mod tests {
         )
         .predicate(predicate);
         let mut reader = builder.build().await.unwrap().unwrap();
-        check_reader_result(&mut reader, &[new_batch_by_range(&["b", "h"], 150, 200)]).await;
+        check_record_batch_reader_result(
+            &mut reader,
+            &[new_record_batch_by_range(&["b", "h"], 150, 200)],
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -629,11 +638,11 @@ mod tests {
             object_store,
         );
         let mut reader = builder.build().await.unwrap().unwrap();
-        check_reader_result(
+        check_record_batch_reader_result(
             &mut reader,
             &[
-                new_batch_with_binary(&["a"], 0, 50),
-                new_batch_with_binary(&["a"], 50, 60),
+                new_record_batch_with_binary(&["a"], 0, 50),
+                new_record_batch_with_binary(&["a"], 50, 60),
             ],
         )
         .await;
@@ -695,7 +704,7 @@ mod tests {
                 object_store.clone(),
             );
             let mut reader = builder.build().await.unwrap().unwrap();
-            while let Some(batch) = reader.next_batch().await.unwrap() {
+            while let Some(batch) = reader.next_record_batch().await.unwrap() {
                 rows_read += batch.num_rows();
             }
         }
@@ -877,6 +886,7 @@ mod tests {
             handle.clone(),
             object_store.clone(),
         )
+        .flat_format(true)
         .predicate(Some(Predicate::new(preds)))
         .inverted_index_appliers([inverted_index_applier.clone(), None])
         .bloom_filter_index_appliers([bloom_filter_applier.clone(), None])
@@ -891,7 +901,11 @@ mod tests {
         let mut reader = ParquetReader::new(Arc::new(context), selection)
             .await
             .unwrap();
-        check_reader_result(&mut reader, &[new_batch_by_range(&["b", "d"], 0, 20)]).await;
+        check_record_batch_reader_result(
+            &mut reader,
+            &[new_record_batch_by_range(&["b", "d"], 0, 20)],
+        )
+        .await;
 
         assert_eq!(metrics.filter_metrics.rg_total, 4);
         assert_eq!(metrics.filter_metrics.rg_minmax_filtered, 3);
@@ -937,6 +951,7 @@ mod tests {
             handle.clone(),
             object_store.clone(),
         )
+        .flat_format(true)
         .predicate(Some(Predicate::new(preds)))
         .inverted_index_appliers([inverted_index_applier.clone(), None])
         .bloom_filter_index_appliers([bloom_filter_applier.clone(), None])
@@ -1005,13 +1020,13 @@ mod tests {
         let mut reader = ParquetReader::new(Arc::new(context), selection)
             .await
             .unwrap();
-        check_reader_result(
+        check_record_batch_reader_result(
             &mut reader,
             &[
-                new_batch_by_range(&["a", "d"], 0, 20),
-                new_batch_by_range(&["b", "d"], 0, 20),
-                new_batch_by_range(&["c", "d"], 0, 10),
-                new_batch_by_range(&["c", "d"], 10, 20),
+                new_record_batch_by_range(&["a", "d"], 0, 20),
+                new_record_batch_by_range(&["b", "d"], 0, 20),
+                new_record_batch_by_range(&["c", "d"], 0, 10),
+                new_record_batch_by_range(&["c", "d"], 10, 20),
             ],
         )
         .await;
@@ -1080,6 +1095,63 @@ mod tests {
         )));
 
         RecordBatch::try_new(flat_schema, columns).unwrap()
+    }
+
+    fn new_record_batch_with_binary(tags: &[&str], start: usize, end: usize) -> RecordBatch {
+        assert!(end >= start);
+        let metadata = build_test_binary_test_region_metadata();
+        let flat_schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
+
+        let num_rows = end - start;
+        let mut columns = Vec::new();
+
+        let mut tag_0_builder = StringDictionaryBuilder::<UInt32Type>::new();
+        for _ in 0..num_rows {
+            tag_0_builder.append_value(tags[0]);
+        }
+        columns.push(Arc::new(tag_0_builder.finish()) as ArrayRef);
+
+        let values = (0..num_rows)
+            .map(|_| "some data".as_bytes())
+            .collect::<Vec<_>>();
+        columns.push(
+            Arc::new(datatypes::arrow::array::BinaryArray::from_iter_values(
+                values,
+            )) as ArrayRef,
+        );
+
+        let timestamps: Vec<i64> = (start..end).map(|v| v as i64).collect();
+        columns.push(Arc::new(TimestampMillisecondArray::from(timestamps)));
+
+        let pk = new_primary_key(tags);
+        let mut pk_builder = BinaryDictionaryBuilder::<UInt32Type>::new();
+        for _ in 0..num_rows {
+            pk_builder.append(&pk).unwrap();
+        }
+        columns.push(Arc::new(pk_builder.finish()));
+
+        columns.push(Arc::new(UInt64Array::from_value(1000, num_rows)));
+        columns.push(Arc::new(UInt8Array::from_value(
+            OpType::Put as u8,
+            num_rows,
+        )));
+
+        RecordBatch::try_new(flat_schema, columns).unwrap()
+    }
+
+    async fn check_record_batch_reader_result(
+        reader: &mut ParquetReader,
+        expected: &[RecordBatch],
+    ) {
+        let mut actual = Vec::new();
+        while let Some(batch) = reader.next_record_batch().await.unwrap() {
+            actual.push(batch);
+        }
+        assert_eq!(
+            pretty_format_batches(expected).unwrap().to_string(),
+            pretty_format_batches(&actual).unwrap().to_string()
+        );
+        assert!(reader.next_record_batch().await.unwrap().is_none());
     }
 
     /// Creates a FlatSource from flat format RecordBatches.
@@ -1369,7 +1441,7 @@ mod tests {
         );
         let mut reader = builder.build().await.unwrap().unwrap();
         let mut normal_batches = Vec::new();
-        while let Some(batch) = reader.next_batch().await.unwrap() {
+        while let Some(batch) = reader.next_record_batch().await.unwrap() {
             normal_batches.push(batch);
         }
 
@@ -1391,22 +1463,19 @@ mod tests {
         );
         let mut reader = builder.build().await.unwrap().unwrap();
         let mut override_batches = Vec::new();
-        while let Some(batch) = reader.next_batch().await.unwrap() {
+        while let Some(batch) = reader.next_record_batch().await.unwrap() {
             override_batches.push(batch);
         }
 
         // Compare the results
         assert_eq!(normal_batches.len(), override_batches.len());
         for (normal, override_batch) in normal_batches.into_iter().zip(override_batches.iter()) {
-            // Create expected batch with override sequence
             let expected_batch = {
-                let num_rows = normal.num_rows();
-                let mut builder = BatchBuilder::from(normal);
-                builder
-                    .sequences_array(Arc::new(UInt64Array::from_value(custom_sequence, num_rows)))
-                    .unwrap();
-
-                builder.build().unwrap()
+                let mut columns = normal.columns().to_vec();
+                let num_cols = columns.len();
+                columns[num_cols - 2] =
+                    Arc::new(UInt64Array::from_value(custom_sequence, normal.num_rows()));
+                RecordBatch::try_new(normal.schema(), columns).unwrap()
             };
 
             // Override batch should match expected batch

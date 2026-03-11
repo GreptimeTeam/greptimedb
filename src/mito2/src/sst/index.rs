@@ -58,7 +58,7 @@ use crate::error::{
 };
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::metrics::INDEX_CREATE_MEMORY_USAGE;
-use crate::read::{Batch, BatchReader};
+use crate::read::Batch;
 use crate::region::options::IndexOptions;
 use crate::region::version::VersionControlRef;
 use crate::region::{ManifestContextRef, RegionLeaderState};
@@ -802,9 +802,9 @@ impl IndexBuildTask {
         if let Some(mut parquet_reader) = parquet_reader {
             // TODO(SNC123): optimize index batch
             loop {
-                match parquet_reader.next_batch().await {
-                    Ok(Some(mut batch)) => {
-                        indexer.update(&mut batch).await;
+                match parquet_reader.next_record_batch().await {
+                    Ok(Some(batch)) => {
+                        indexer.update_flat(&batch).await;
                     }
                     Ok(None) => break,
                     Err(e) => {
