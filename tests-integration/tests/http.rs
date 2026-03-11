@@ -1769,7 +1769,38 @@ pub async fn test_dashboard_api(store_type: StorageType) {
     assert!(names.contains(&"test_dashboard"));
     assert!(names.contains(&"another_dashboard"));
 
-    // 5. Delete one dashboard
+    // 5. Update a dashboard by posting again with new definition
+    let updated_definition = r#"{"title": "Updated Dashboard", "panels": [{"id": 1}]}"#;
+    let res = client
+        .post("/v1/dashboards/test_dashboard")
+        .body(updated_definition)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body: Value = res.json().await;
+    let dashboards = body.get("dashboards").unwrap().as_array().unwrap();
+    assert_eq!(dashboards.len(), 1);
+    assert_eq!(dashboards[0].get("name").unwrap(), "test_dashboard");
+
+    // Verify the definition was updated by listing again
+    let res = client.get("/v1/dashboards").send().await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: Value = res.json().await;
+    let dashboards = body.get("dashboards").unwrap().as_array().unwrap();
+    assert_eq!(dashboards.len(), 2);
+
+    // Find test_dashboard and verify it has updated definition
+    let test_db = dashboards
+        .iter()
+        .find(|d| d.get("name").unwrap() == "test_dashboard")
+        .unwrap();
+    assert_eq!(
+        test_db.get("definition").unwrap(),
+        r#"{"title": "Updated Dashboard", "panels": [{"id": 1}]}"#
+    );
+
+    // 6. Delete one dashboard
     let res = client.delete("/v1/dashboards/test_dashboard").send().await;
     assert_eq!(res.status(), StatusCode::OK);
     let body: Value = res.json().await;
@@ -1777,7 +1808,7 @@ pub async fn test_dashboard_api(store_type: StorageType) {
     assert_eq!(dashboards.len(), 1);
     assert_eq!(dashboards[0].get("name").unwrap(), "test_dashboard");
 
-    // 6. List dashboards - should have 1
+    // 7. List dashboards - should have 1
     let res = client.get("/v1/dashboards").send().await;
     assert_eq!(res.status(), StatusCode::OK);
     let body: Value = res.json().await;
@@ -1785,14 +1816,14 @@ pub async fn test_dashboard_api(store_type: StorageType) {
     assert_eq!(dashboards.len(), 1);
     assert_eq!(dashboards[0].get("name").unwrap(), "another_dashboard");
 
-    // 7. Delete the remaining dashboard
+    // 8. Delete the remaining dashboard
     let res = client
         .delete("/v1/dashboards/another_dashboard")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
 
-    // 8. List dashboards - should be empty
+    // 9. List dashboards - should be empty
     let res = client.get("/v1/dashboards").send().await;
     assert_eq!(res.status(), StatusCode::OK);
     let body: Value = res.json().await;
