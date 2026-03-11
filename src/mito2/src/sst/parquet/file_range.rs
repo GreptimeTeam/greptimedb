@@ -148,7 +148,7 @@ impl FileRange {
         );
 
         // not costly to create a predicate here since dynamic filters are wrapped in Arc
-        let pred = Predicate::new(vec![]).with_dyn_filters(self.context.base.dyn_filters.clone());
+        let pred = Predicate::with_dyn_filters(vec![], self.context.base.dyn_filters.clone());
 
         pred.prune_with_stats(&stats, prune_schema.arrow_schema())
             .first()
@@ -440,7 +440,7 @@ pub(crate) struct RangeBase {
     /// Filters pushed down.
     pub(crate) filters: Vec<SimpleFilterContext>,
     /// Dynamic filter physical exprs.
-    pub(crate) dyn_filters: Arc<Vec<DynamicFilterPhysicalExpr>>,
+    pub(crate) dyn_filters: Vec<Arc<DynamicFilterPhysicalExpr>>,
     /// Helper to read the SST.
     pub(crate) read_format: ReadFormat,
     pub(crate) expected_metadata: Option<RegionMetadataRef>,
