@@ -180,22 +180,7 @@ impl Import {
 
         // 3. Determine schemas to import
         let schemas_to_import = match &self.schemas {
-            Some(filter) => {
-                // Validate that all specified schemas exist in snapshot
-                for schema in filter {
-                    if !manifest
-                        .schemas
-                        .iter()
-                        .any(|s| s.eq_ignore_ascii_case(schema))
-                    {
-                        return SchemaNotInSnapshotSnafu {
-                            schema: schema.clone(),
-                        }
-                        .fail();
-                    }
-                }
-                filter.clone()
-            }
+            Some(filter) => canonicalize_schema_filter(filter, &manifest.schemas)?,
             None => manifest.schemas.clone(),
         };
 
@@ -293,6 +278,27 @@ fn parse_ddl_statements(content: &str) -> Vec<String> {
         .collect()
 }
 
+fn canonicalize_schema_filter(
+    filter: &[String],
+    manifest_schemas: &[String],
+) -> Result<Vec<String>> {
+    filter
+        .iter()
+        .map(|schema| {
+            manifest_schemas
+                .iter()
+                .find(|candidate| candidate.eq_ignore_ascii_case(schema))
+                .cloned()
+                .ok_or_else(|| {
+                    SchemaNotInSnapshotSnafu {
+                        schema: schema.clone(),
+                    }
+                    .build()
+                })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,5 +318,27 @@ CREATE VIEW v AS SELECT * FROM t;
         assert!(statements[0].starts_with("CREATE DATABASE public"));
         assert!(statements[1].starts_with("CREATE TABLE t"));
         assert!(statements[2].starts_with("CREATE VIEW v"));
+    }
+
+    #[test]
+    fn test_canonicalize_schema_filter_uses_manifest_casing() {
+        let filter = vec!["TEST_DB".to_string(), "PUBLIC".to_string()];
+        let manifest_schemas = vec!["test_db".to_string(), "public".to_string()];
+
+        let canonicalized = canonicalize_schema_filter(&filter, &manifest_schemas).unwrap();
+
+        assert_eq!(canonicalized, vec!["test_db", "public"]);
+    }
+
+    #[test]
+    fn test_canonicalize_schema_filter_rejects_missing_schema() {
+        let filter = vec!["missing".to_string()];
+        let manifest_schemas = vec!["test_db".to_string()];
+
+        let error = canonicalize_schema_filter(&filter, &manifest_schemas)
+            .expect_err("missing schema should fail")
+            .to_string();
+
+        assert!(error.contains("missing"));
     }
 }
