@@ -26,6 +26,7 @@ use common_error::ext::BoxedError;
 use common_query::OutputData;
 use common_recordbatch::util as record_util;
 use common_telemetry::info;
+use common_time::FOREVER;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::logical_expr::col;
 use datafusion::sql::TableReference;
@@ -40,6 +41,7 @@ use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
 use table::TableRef;
 use table::metadata::TableInfo;
+use table::requests::TTL_KEY;
 use table::table::adapter::DfTableProviderAdapter;
 
 use crate::instance::Instance;
@@ -146,7 +148,7 @@ impl Instance {
         let (time_index, primary_keys, column_defs) = Self::build_dashboard_schema();
 
         let mut table_options = HashMap::new();
-        table_options.insert("ttl".to_string(), "forever".to_string());
+        table_options.insert(TTL_KEY.to_string(), FOREVER.to_string());
 
         let mut create_table_expr = api::v1::CreateTableExpr {
             catalog_name: catalog.to_string(),
@@ -245,9 +247,22 @@ impl Instance {
         &self,
         query_ctx: QueryContextRef,
     ) -> servers::error::Result<Vec<DashboardDefinition>> {
-        let table = self
-            .create_dashboard_table_if_not_exists(query_ctx.clone())
-            .await?;
+        let table = if let Some(table) = self
+            .catalog_manager
+            .table(
+                query_ctx.current_catalog(),
+                DEFAULT_PRIVATE_SCHEMA_NAME,
+                DASHBOARD_TABLE_NAME,
+                Some(&query_ctx),
+            )
+            .await
+            .context(CatalogSnafu)?
+        {
+            table
+        } else {
+            return Ok(vec![]);
+        };
+
         let table_info = table.table_info();
 
         let dataframe = self
