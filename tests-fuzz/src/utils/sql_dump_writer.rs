@@ -216,9 +216,9 @@ mod tests {
 
         let content_a = std::fs::read_to_string(run_dir.join("metric-a.trace.sql")).unwrap();
         let content_b = std::fs::read_to_string(run_dir.join("metric-b.trace.sql")).unwrap();
-        assert!(content_a.contains("-- event=repartition action_idx=3"));
+        assert!(content_a.contains("-- repartition action_idx=3"));
         assert!(content_a.contains("ALTER TABLE t REPARTITION;"));
-        assert!(content_b.contains("-- event=repartition action_idx=3"));
+        assert!(content_b.contains("-- repartition action_idx=3"));
         assert!(content_b.contains("ALTER TABLE t REPARTITION;"));
     }
 
