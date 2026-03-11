@@ -59,6 +59,9 @@ impl PipelineOperator {
     fn create_table_request(&self, catalog: &str) -> RegisterSystemTableRequest {
         let (time_index, primary_keys, column_defs) = PipelineTable::build_pipeline_schema();
 
+        let mut table_options = HashMap::new();
+        table_options.insert("ttl".to_string(), "forever".to_string());
+
         let create_table_expr = CreateTableExpr {
             catalog_name: catalog.to_string(),
             schema_name: DEFAULT_PRIVATE_SCHEMA_NAME.to_string(),
@@ -68,7 +71,7 @@ impl PipelineOperator {
             time_index,
             primary_keys,
             create_if_not_exists: true,
-            table_options: Default::default(),
+            table_options,
             table_id: None, // Should and will be assigned by Meta.
             engine: default_engine().to_string(),
         };
