@@ -41,17 +41,13 @@ use crate::error::{
 };
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::memtable::bulk::ENCODE_ROW_THRESHOLD;
-use crate::memtable::{
-    BoxedRecordBatchIterator, EncodedRange, IterBuilder, MemtableRanges, RangesOptions,
-};
+use crate::memtable::{BoxedRecordBatchIterator, EncodedRange, MemtableRanges, RangesOptions};
 use crate::metrics::{
     FLUSH_BYTES_TOTAL, FLUSH_ELAPSED, FLUSH_FAILURE_TOTAL, FLUSH_FILE_TOTAL, FLUSH_REQUESTS_TOTAL,
     INFLIGHT_FLUSH_COUNT,
 };
-use crate::read::dedup::{DedupReader, LastNonNull, LastRow};
 use crate::read::flat_dedup::{FlatDedupIterator, FlatLastNonNull, FlatLastRow};
 use crate::read::flat_merge::FlatMergeIterator;
-use crate::read::merge::MergeReaderBuilder;
 use crate::read::{FlatSource, Source};
 use crate::region::options::{IndexOptions, MergeMode, RegionOptions};
 use crate::region::version::{VersionControlData, VersionControlRef, VersionRef};
@@ -63,7 +59,7 @@ use crate::request::{
 use crate::schedule::scheduler::{Job, SchedulerRef};
 use crate::sst::file::FileMeta;
 use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, DEFAULT_ROW_GROUP_SIZE, SstInfo, WriteOptions};
-use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
+use crate::sst::{FlatSchemaOptions, FormatType, to_flat_sst_arrow_schema};
 use crate::worker::WorkerListener;
 
 /// Global write buffer (memtable) manager.
@@ -480,78 +476,29 @@ impl RegionFlushTask {
             // the counter may have more series than the actual series count.
             series_count += memtable_series_count;
 
-            if mem_ranges.is_record_batch() {
-                let flush_start = Instant::now();
-                let FlushFlatMemResult {
-                    num_encoded,
-                    num_sources,
-                    results,
-                } = self
-                    .flush_flat_mem_ranges(version, &write_opts, mem_ranges)
-                    .await?;
-                encoded_part_count += num_encoded;
-                for (source_idx, result) in results.into_iter().enumerate() {
-                    let (max_sequence, ssts_written, metrics) = result?;
-                    if ssts_written.is_empty() {
-                        // No data written.
-                        continue;
-                    }
-
-                    common_telemetry::debug!(
-                        "Region {} flush one memtable {} {}/{}, metrics: {:?}",
-                        self.region_id,
-                        memtable_id,
-                        source_idx,
-                        num_sources,
-                        metrics
-                    );
-
-                    flush_metrics = flush_metrics.merge(metrics);
-
-                    file_metas.extend(ssts_written.into_iter().map(|sst_info| {
-                        flushed_bytes += sst_info.file_size;
-                        Self::new_file_meta(
-                            self.region_id,
-                            max_sequence,
-                            sst_info,
-                            partition_expr.clone(),
-                        )
-                    }));
-                }
-
-                common_telemetry::debug!(
-                    "Region {} flush {} memtables for {}, num_mem_ranges: {}, num_encoded: {}, num_rows: {}, flush_cost: {:?}, compact_cost: {:?}",
-                    self.region_id,
-                    num_sources,
-                    memtable_id,
-                    num_mem_ranges,
-                    num_encoded,
-                    num_mem_rows,
-                    flush_start.elapsed(),
-                    compact_cost,
-                );
-            } else {
-                let max_sequence = mem_ranges.max_sequence();
-                let source = memtable_source(mem_ranges, &version.options).await?;
-
-                // Flush to level 0.
-                let source = Either::Left(source);
-                let write_request = self.new_write_request(version, max_sequence, source);
-
-                let mut metrics = Metrics::new(WriteType::Flush);
-                let ssts_written = self
-                    .access_layer
-                    .write_sst(write_request, &write_opts, &mut metrics)
-                    .await?;
-                FLUSH_FILE_TOTAL.inc_by(ssts_written.len() as u64);
+            let flush_start = Instant::now();
+            let FlushFlatMemResult {
+                num_encoded,
+                num_sources,
+                results,
+            } = self
+                .flush_flat_mem_ranges(version, &write_opts, mem_ranges)
+                .await?;
+            encoded_part_count += num_encoded;
+            for (source_idx, result) in results.into_iter().enumerate() {
+                let (max_sequence, ssts_written, metrics) = result?;
                 if ssts_written.is_empty() {
                     // No data written.
                     continue;
                 }
 
-                debug!(
-                    "Region {} flush one memtable, num_mem_ranges: {}, num_rows: {}, metrics: {:?}",
-                    self.region_id, num_mem_ranges, num_mem_rows, metrics
+                common_telemetry::debug!(
+                    "Region {} flush one memtable {} {}/{}, metrics: {:?}",
+                    self.region_id,
+                    memtable_id,
+                    source_idx,
+                    num_sources,
+                    metrics
                 );
 
                 flush_metrics = flush_metrics.merge(metrics);
@@ -565,7 +512,19 @@ impl RegionFlushTask {
                         partition_expr.clone(),
                     )
                 }));
-            };
+            }
+
+            common_telemetry::debug!(
+                "Region {} flush {} memtables for {}, num_mem_ranges: {}, num_encoded: {}, num_rows: {}, flush_cost: {:?}, compact_cost: {:?}",
+                self.region_id,
+                num_sources,
+                memtable_id,
+                num_mem_ranges,
+                num_encoded,
+                num_mem_rows,
+                flush_start.elapsed(),
+                compact_cost,
+            );
         }
 
         Ok(DoFlushMemtablesResult {
@@ -669,6 +628,11 @@ impl RegionFlushTask {
         max_sequence: u64,
         source: Either<Source, FlatSource>,
     ) -> SstWriteRequest {
+        let flat_format = version
+            .options
+            .sst_format
+            .map(|f| f == FormatType::Flat)
+            .unwrap_or(self.engine_config.default_experimental_flat_format);
         SstWriteRequest {
             op_type: OperationType::Flush,
             metadata: version.metadata.clone(),
@@ -676,6 +640,11 @@ impl RegionFlushTask {
             cache_manager: self.cache_manager.clone(),
             storage: version.options.storage.clone(),
             max_sequence: Some(max_sequence),
+            sst_write_format: if flat_format {
+                FormatType::Flat
+            } else {
+                FormatType::PrimaryKey
+            },
             index_options: self.index_options.clone(),
             index_config: self.engine_config.index.clone(),
             inverted_index_config: self.engine_config.inverted_index.clone(),
@@ -720,41 +689,6 @@ struct DoFlushMemtablesResult {
     series_count: usize,
     encoded_part_count: usize,
     flush_metrics: Metrics,
-}
-
-/// Returns a [Source] for the given memtable.
-async fn memtable_source(mem_ranges: MemtableRanges, options: &RegionOptions) -> Result<Source> {
-    let source = if mem_ranges.ranges.len() == 1 {
-        let only_range = mem_ranges.ranges.into_values().next().unwrap();
-        let iter = only_range.build_iter()?;
-        Source::Iter(iter)
-    } else {
-        // todo(hl): a workaround since sync version of MergeReader is wip.
-        let sources = mem_ranges
-            .ranges
-            .into_values()
-            .map(|r| r.build_iter().map(Source::Iter))
-            .collect::<Result<Vec<_>>>()?;
-        let merge_reader = MergeReaderBuilder::from_sources(sources).build().await?;
-        let maybe_dedup = if options.append_mode {
-            // no dedup in append mode
-            Box::new(merge_reader) as _
-        } else {
-            // dedup according to merge mode
-            match options.merge_mode.unwrap_or(MergeMode::LastRow) {
-                MergeMode::LastRow => {
-                    Box::new(DedupReader::new(merge_reader, LastRow::new(false), None)) as _
-                }
-                MergeMode::LastNonNull => Box::new(DedupReader::new(
-                    merge_reader,
-                    LastNonNull::new(false),
-                    None,
-                )) as _,
-            }
-        };
-        Source::Reader(maybe_dedup)
-    };
-    Ok(source)
 }
 
 struct FlatSources {

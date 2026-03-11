@@ -375,6 +375,11 @@ impl DefaultCompactor {
                     cache_manager: compaction_region.cache_manager.clone(),
                     storage,
                     max_sequence: max_sequence.map(NonZero::get),
+                    sst_write_format: if flat_format {
+                        FormatType::Flat
+                    } else {
+                        FormatType::PrimaryKey
+                    },
                     index_options,
                     index_config,
                     inverted_index_config,

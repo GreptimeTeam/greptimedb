@@ -1371,6 +1371,7 @@ mod tests {
             source: either::Left(source),
             storage: None,
             max_sequence: None,
+            sst_write_format: Default::default(),
             cache_manager: Default::default(),
             index_options: IndexOptions::default(),
             index_config,

@@ -250,11 +250,22 @@ impl WriteCache {
                     .write_all(source, write_request.max_sequence, write_opts)
                     .await?
             }
-            either::Right(flat_source) => {
-                writer
-                    .write_all_flat(flat_source, write_request.max_sequence, write_opts)
-                    .await?
-            }
+            either::Right(flat_source) => match write_request.sst_write_format {
+                crate::sst::FormatType::PrimaryKey => {
+                    writer
+                        .write_all_flat_as_primary_key(
+                            flat_source,
+                            write_request.max_sequence,
+                            write_opts,
+                        )
+                        .await?
+                }
+                crate::sst::FormatType::Flat => {
+                    writer
+                        .write_all_flat(flat_source, write_request.max_sequence, write_opts)
+                        .await?
+                }
+            },
         };
 
         // Upload sst file to remote object store.
@@ -547,6 +558,7 @@ mod tests {
             source: either::Left(source),
             storage: None,
             max_sequence: None,
+            sst_write_format: Default::default(),
             cache_manager: Default::default(),
             index_options: IndexOptions::default(),
             index_config: Default::default(),
@@ -649,6 +661,7 @@ mod tests {
             source: either::Left(source),
             storage: None,
             max_sequence: None,
+            sst_write_format: Default::default(),
             cache_manager: cache_manager.clone(),
             index_options: IndexOptions::default(),
             index_config: Default::default(),
@@ -733,6 +746,7 @@ mod tests {
             source: either::Left(source),
             storage: None,
             max_sequence: None,
+            sst_write_format: Default::default(),
             cache_manager: cache_manager.clone(),
             index_options: IndexOptions::default(),
             index_config: Default::default(),

@@ -47,7 +47,7 @@ use crate::sst::location::{self, region_dir_from_table_dir};
 use crate::sst::parquet::reader::ParquetReaderBuilder;
 use crate::sst::parquet::writer::ParquetWriter;
 use crate::sst::parquet::{SstInfo, WriteOptions};
-use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY};
+use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY, FormatType};
 
 pub type AccessLayerRef = Arc<AccessLayer>;
 /// SST write results.
@@ -397,11 +397,22 @@ impl AccessLayer {
                         .write_all(source, request.max_sequence, write_opts)
                         .await?
                 }
-                Either::Right(flat_source) => {
-                    writer
-                        .write_all_flat(flat_source, request.max_sequence, write_opts)
-                        .await?
-                }
+                Either::Right(flat_source) => match request.sst_write_format {
+                    FormatType::PrimaryKey => {
+                        writer
+                            .write_all_flat_as_primary_key(
+                                flat_source,
+                                request.max_sequence,
+                                write_opts,
+                            )
+                            .await?
+                    }
+                    FormatType::Flat => {
+                        writer
+                            .write_all_flat(flat_source, request.max_sequence, write_opts)
+                            .await?
+                    }
+                },
             }
         };
 
@@ -525,6 +536,7 @@ pub struct SstWriteRequest {
     #[allow(dead_code)]
     pub storage: Option<String>,
     pub max_sequence: Option<SequenceNumber>,
+    pub sst_write_format: FormatType,
 
     /// Configs for index
     pub index_options: IndexOptions,
