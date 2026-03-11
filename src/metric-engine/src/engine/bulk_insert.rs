@@ -14,14 +14,14 @@
 
 use std::collections::HashSet;
 
-use api::helper::{ColumnDataTypeWrapper, to_grpc_value};
-use api::v1::{ArrowIpc, SemanticType};
+use api::v1::{ArrowIpc, ColumnDataType, SemanticType};
 use bytes::Bytes;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_grpc::flight::{FlightEncoder, FlightMessage};
+use common_query::prelude::{greptime_timestamp, greptime_value};
+use datatypes::arrow::array::{Array, Float64Array, StringArray, TimestampMillisecondArray};
 use datatypes::arrow::record_batch::RecordBatch;
-use datatypes::vectors::Helper;
 use snafu::{OptionExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
@@ -98,7 +98,7 @@ impl MetricEngineInner {
         {
             Ok(affected_rows) => Ok(affected_rows),
             Err(err) if err.status_code() == StatusCode::Unsupported => {
-                let rows = record_batch_to_rows(&batch, &logical_metadata, region_id)?;
+                let rows = record_batch_to_rows(&batch, region_id)?;
                 self.put_region(
                     region_id,
                     RegionPutRequest {
@@ -168,70 +168,170 @@ impl MetricEngineInner {
     }
 }
 
-fn record_batch_to_rows(
-    batch: &RecordBatch,
-    logical_metadata: &RegionMetadataRef,
-    logical_region_id: RegionId,
-) -> Result<api::v1::Rows> {
-    let metadata_by_name: std::collections::HashMap<_, _> = logical_metadata
-        .column_metadatas
-        .iter()
-        .map(|meta| (meta.column_schema.name.as_str(), meta))
-        .collect();
+fn record_batch_to_rows(batch: &RecordBatch, logical_region_id: RegionId) -> Result<api::v1::Rows> {
+    let schema_ref = batch.schema();
+    let fields = schema_ref.fields();
 
-    let mut schema = Vec::with_capacity(batch.num_columns());
-    let mut vectors = Vec::with_capacity(batch.num_columns());
-    for (idx, field) in batch.schema().fields().iter().enumerate() {
-        let metadata = metadata_by_name
-            .get(field.name().as_str())
-            .copied()
-            .context(error::ColumnNotFoundSnafu {
-                name: field.name().clone(),
-                region_id: logical_region_id,
-            })?;
+    let mut ts_idx = None;
+    let mut val_idx = None;
+    let mut tag_indices = Vec::new();
 
-        let data_type_wrapper = ColumnDataTypeWrapper::try_from(
-            metadata.column_schema.data_type.clone(),
-        )
-        .map_err(|e| {
-            error::UnexpectedRequestSnafu {
-                reason: format!(
-                    "Failed to convert column '{}' datatype: {}",
-                    field.name(),
-                    e
-                ),
+    for (idx, field) in fields.iter().enumerate() {
+        if field.name() == greptime_timestamp() {
+            ts_idx = Some(idx);
+            if !matches!(
+                field.data_type(),
+                datatypes::arrow::datatypes::DataType::Timestamp(
+                    datatypes::arrow::datatypes::TimeUnit::Millisecond,
+                    _
+                )
+            ) {
+                return error::UnexpectedRequestSnafu {
+                    reason: format!(
+                        "Timestamp column '{}' in region {:?} has incompatible type: {:?}",
+                        field.name(),
+                        logical_region_id,
+                        field.data_type()
+                    ),
+                }
+                .fail();
             }
-            .build()
-        })?;
+        } else if field.name() == greptime_value() {
+            val_idx = Some(idx);
+            if !matches!(
+                field.data_type(),
+                datatypes::arrow::datatypes::DataType::Float64
+            ) {
+                return error::UnexpectedRequestSnafu {
+                    reason: format!(
+                        "Value column '{}' in region {:?} has incompatible type: {:?}",
+                        field.name(),
+                        logical_region_id,
+                        field.data_type()
+                    ),
+                }
+                .fail();
+            }
+        } else {
+            if !matches!(
+                field.data_type(),
+                datatypes::arrow::datatypes::DataType::Utf8
+            ) {
+                return error::UnexpectedRequestSnafu {
+                    reason: format!(
+                        "Tag column '{}' in region {:?} must be Utf8, found: {:?}",
+                        field.name(),
+                        logical_region_id,
+                        field.data_type()
+                    ),
+                }
+                .fail();
+            }
+            tag_indices.push(idx);
+        }
+    }
+
+    let ts_idx = ts_idx.context(error::UnexpectedRequestSnafu {
+        reason: format!(
+            "Timestamp column '{}' not found in RecordBatch for region {:?}",
+            greptime_timestamp(),
+            logical_region_id
+        ),
+    })?;
+    let val_idx = val_idx.context(error::UnexpectedRequestSnafu {
+        reason: format!(
+            "Value column '{}' not found in RecordBatch for region {:?}",
+            greptime_value(),
+            logical_region_id
+        ),
+    })?;
+
+    let mut schema = Vec::with_capacity(2 + tag_indices.len());
+    schema.push(api::v1::ColumnSchema {
+        column_name: greptime_timestamp().to_string(),
+        datatype: ColumnDataType::TimestampMillisecond as i32,
+        semantic_type: SemanticType::Timestamp as i32,
+        datatype_extension: None,
+        options: None,
+    });
+    schema.push(api::v1::ColumnSchema {
+        column_name: greptime_value().to_string(),
+        datatype: ColumnDataType::Float64 as i32,
+        semantic_type: SemanticType::Field as i32,
+        datatype_extension: None,
+        options: None,
+    });
+    for &idx in &tag_indices {
+        let field = &fields[idx];
         schema.push(api::v1::ColumnSchema {
             column_name: field.name().clone(),
-            datatype: data_type_wrapper.datatype() as i32,
-            semantic_type: metadata.semantic_type as i32,
-            // Metric engine logical columns are constrained to: String/Float64/timestamp types
-            // so extension-backed logical types are not expected here.
+            datatype: ColumnDataType::String as i32,
+            semantic_type: SemanticType::Tag as i32,
             datatype_extension: None,
             options: None,
         });
-        vectors.push(Helper::try_into_vector(batch.column(idx)).map_err(|e| {
-            error::UnexpectedRequestSnafu {
-                reason: format!(
-                    "Failed to convert column '{}' to vector: {}",
-                    field.name(),
-                    e
-                ),
-            }
-            .build()
-        })?);
     }
 
-    let rows = (0..batch.num_rows())
-        .map(|row_idx| api::v1::Row {
-            values: vectors
-                .iter()
-                .map(|vector| to_grpc_value(vector.get(row_idx)))
-                .collect(),
+    let ts_array = batch
+        .column(ts_idx)
+        .as_any()
+        .downcast_ref::<TimestampMillisecondArray>()
+        .expect("validated as TimestampMillisecond");
+    let val_array = batch
+        .column(val_idx)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .expect("validated as Float64");
+    let tag_arrays: Vec<&StringArray> = tag_indices
+        .iter()
+        .map(|&idx| {
+            batch
+                .column(idx)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("validated as Utf8")
         })
         .collect();
+
+    let num_rows = batch.num_rows();
+    let mut rows = Vec::with_capacity(num_rows);
+    for row_idx in 0..num_rows {
+        let mut values = Vec::with_capacity(2 + tag_arrays.len());
+
+        if ts_array.is_null(row_idx) {
+            values.push(api::v1::Value { value_data: None });
+        } else {
+            values.push(api::v1::Value {
+                value_data: Some(api::v1::value::ValueData::TimestampMillisecondValue(
+                    ts_array.value(row_idx),
+                )),
+            });
+        }
+
+        if val_array.is_null(row_idx) {
+            values.push(api::v1::Value { value_data: None });
+        } else {
+            values.push(api::v1::Value {
+                value_data: Some(api::v1::value::ValueData::F64Value(
+                    val_array.value(row_idx),
+                )),
+            });
+        }
+
+        for arr in &tag_arrays {
+            if arr.is_null(row_idx) {
+                values.push(api::v1::Value { value_data: None });
+            } else {
+                values.push(api::v1::Value {
+                    value_data: Some(api::v1::value::ValueData::StringValue(
+                        arr.value(row_idx).to_string(),
+                    )),
+                });
+            }
+        }
+
+        rows.push(api::v1::Row { values });
+    }
 
     Ok(api::v1::Rows { schema, rows })
 }
