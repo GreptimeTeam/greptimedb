@@ -51,6 +51,7 @@ use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
 use tests_fuzz::translator::mysql::insert_expr::InsertIntoExprTranslator;
 use tests_fuzz::translator::mysql::repartition_expr::RepartitionExprTranslator;
 use tests_fuzz::utils::csv_dump_writer::{CsvDumpMetadata, CsvDumpSession};
+use tests_fuzz::utils::retry::retry_with_backoff;
 use tests_fuzz::utils::sql_dump_writer::SqlDumpSession;
 use tests_fuzz::utils::{
     Connections, get_fuzz_override, get_gt_fuzz_input_max_alter_actions,
@@ -60,6 +61,9 @@ use tests_fuzz::validator::row::count_values;
 use tokio::sync::{mpsc, oneshot};
 
 const BARRIER_ACK_TIMEOUT_SECS: u64 = 10;
+const VALIDATE_QUERY_MAX_ATTEMPTS: usize = 6;
+const VALIDATE_QUERY_INIT_BACKOFF: Duration = Duration::from_millis(50);
+const VALIDATE_QUERY_MAX_BACKOFF: Duration = Duration::from_millis(800);
 
 #[derive(Clone)]
 struct FuzzContext {
@@ -364,13 +368,25 @@ async fn validate_rows(
     for table_ctx in logical_tables.values() {
         let expected = *inserted_rows.get(&table_ctx.name.to_string()).unwrap_or(&0) as usize;
         let count_sql = format!("SELECT COUNT(1) AS count FROM {}", table_ctx.name);
-        let count = count_values(&ctx.greptime, &count_sql).await?;
+        let count = retry_with_backoff(
+            || count_values(&ctx.greptime, &count_sql),
+            VALIDATE_QUERY_MAX_ATTEMPTS,
+            VALIDATE_QUERY_INIT_BACKOFF,
+            VALIDATE_QUERY_MAX_BACKOFF,
+        )
+        .await?;
         let distinct_count_sql = format!(
             "SELECT COUNT(DISTINCT {}) AS count FROM {}",
             table_ctx.timestamp_column().unwrap().name,
             table_ctx.name
         );
-        let distinct_count = count_values(&ctx.greptime, &distinct_count_sql).await?;
+        let distinct_count = retry_with_backoff(
+            || count_values(&ctx.greptime, &distinct_count_sql),
+            VALIDATE_QUERY_MAX_ATTEMPTS,
+            VALIDATE_QUERY_INIT_BACKOFF,
+            VALIDATE_QUERY_MAX_BACKOFF,
+        )
+        .await?;
         info!(
             "Validate rows for table: {}, expected: {}, count: {}, distinct_count: {}",
             table_ctx.name, expected, count.count as usize, distinct_count.count as usize

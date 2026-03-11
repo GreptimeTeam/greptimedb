@@ -24,6 +24,7 @@ pub mod pod_failure;
 pub mod procedure;
 #[cfg(feature = "unstable")]
 pub mod process;
+pub mod retry;
 /// SQL dump writer utilities for fuzz tests.
 pub mod sql_dump_writer;
 pub mod wait;
