@@ -20,6 +20,7 @@ use api::v1::CreateTableExpr;
 use catalog::{CatalogManagerRef, RegisterSystemTableRequest};
 use common_catalog::consts::{DEFAULT_PRIVATE_SCHEMA_NAME, default_engine};
 use common_telemetry::info;
+use common_time::FOREVER;
 use datatypes::timestamp::TimestampNanosecond;
 use futures::FutureExt;
 use operator::insert::InserterRef;
@@ -28,6 +29,7 @@ use query::QueryEngineRef;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use table::TableRef;
+use table::requests::TTL_KEY;
 
 use crate::Pipeline;
 use crate::error::{CatalogSnafu, CreateTableSnafu, PipelineTableNotFoundSnafu, Result};
@@ -60,7 +62,7 @@ impl PipelineOperator {
         let (time_index, primary_keys, column_defs) = PipelineTable::build_pipeline_schema();
 
         let mut table_options = HashMap::new();
-        table_options.insert("ttl".to_string(), "forever".to_string());
+        table_options.insert(TTL_KEY.to_string(), FOREVER.to_string());
 
         let create_table_expr = CreateTableExpr {
             catalog_name: catalog.to_string(),
