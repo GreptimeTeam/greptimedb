@@ -66,9 +66,12 @@ impl MetricEngineInner {
         let logical_metadata = self
             .logical_region_metadata(physical_region_id, region_id)
             .await?;
-        let (tag_columns, non_tag_indices) = self
-            .resolve_tag_columns(region_id, data_region_id, &batch, &logical_metadata)
-            .await?;
+        let (tag_columns, non_tag_indices) = self.resolve_tag_columns_from_metadata(
+            region_id,
+            data_region_id,
+            &batch,
+            &logical_metadata,
+        )?;
         let modified_batch = modify_batch_sparse(
             batch.clone(),
             region_id.table_id(),
@@ -110,75 +113,59 @@ impl MetricEngineInner {
         }
     }
 
-    async fn resolve_tag_columns(
+    fn resolve_tag_columns_from_metadata(
         &self,
         logical_region_id: RegionId,
         data_region_id: RegionId,
         batch: &RecordBatch,
         logical_metadata: &RegionMetadataRef,
     ) -> Result<(Vec<TagColumnInfo>, Vec<usize>)> {
-        resolve_tag_columns_from_metadata(
-            logical_region_id,
-            data_region_id,
-            batch,
-            logical_metadata,
-            self,
-        )
-    }
-}
+        let tag_names: HashSet<&str> = logical_metadata
+            .column_metadatas
+            .iter()
+            .filter_map(|column| {
+                if column.semantic_type == SemanticType::Tag {
+                    Some(column.column_schema.name.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect();
 
-fn resolve_tag_columns_from_metadata(
-    logical_region_id: RegionId,
-    data_region_id: RegionId,
-    batch: &RecordBatch,
-    logical_metadata: &RegionMetadataRef,
-    engine: &MetricEngineInner,
-) -> Result<(Vec<TagColumnInfo>, Vec<usize>)> {
-    let tag_names: HashSet<&str> = logical_metadata
-        .column_metadatas
-        .iter()
-        .filter_map(|column| {
-            if column.semantic_type == SemanticType::Tag {
-                Some(column.column_schema.name.as_str())
+        let state = self.state.read().unwrap();
+        let physical_columns = state
+            .physical_region_states()
+            .get(&data_region_id)
+            .context(error::PhysicalRegionNotFoundSnafu {
+                region_id: data_region_id,
+            })?
+            .physical_columns();
+
+        let mut tag_columns = Vec::new();
+        let mut non_tag_indices = Vec::new();
+
+        for (index, field) in batch.schema().fields().iter().enumerate() {
+            let name = field.name();
+            let column_id = *physical_columns
+                .get(name)
+                .context(error::ColumnNotFoundSnafu {
+                    name: name.clone(),
+                    region_id: logical_region_id,
+                })?;
+            if tag_names.contains(name.as_str()) {
+                tag_columns.push(TagColumnInfo {
+                    name: name.clone(),
+                    index,
+                    column_id,
+                });
             } else {
-                None
+                non_tag_indices.push(index);
             }
-        })
-        .collect();
-
-    let state = engine.state.read().unwrap();
-    let physical_columns = state
-        .physical_region_states()
-        .get(&data_region_id)
-        .context(error::PhysicalRegionNotFoundSnafu {
-            region_id: data_region_id,
-        })?
-        .physical_columns();
-
-    let mut tag_columns = Vec::new();
-    let mut non_tag_indices = Vec::new();
-
-    for (index, field) in batch.schema().fields().iter().enumerate() {
-        let name = field.name();
-        let column_id = *physical_columns
-            .get(name)
-            .context(error::ColumnNotFoundSnafu {
-                name: name.clone(),
-                region_id: logical_region_id,
-            })?;
-        if tag_names.contains(name.as_str()) {
-            tag_columns.push(TagColumnInfo {
-                name: name.clone(),
-                index,
-                column_id,
-            });
-        } else {
-            non_tag_indices.push(index);
         }
-    }
 
-    tag_columns.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok((tag_columns, non_tag_indices))
+        tag_columns.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok((tag_columns, non_tag_indices))
+    }
 }
 
 fn record_batch_to_rows(
