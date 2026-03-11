@@ -34,6 +34,11 @@ jobs:
             echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y protobuf-compiler
+
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:

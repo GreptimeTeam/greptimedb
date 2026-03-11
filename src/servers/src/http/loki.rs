@@ -32,7 +32,7 @@ use chrono::DateTime;
 use common_query::prelude::greptime_timestamp;
 use common_query::{Output, OutputData};
 use common_recordbatch::RecordBatches;
-use common_telemetry::{error, warn};
+use common_telemetry::{debug, error, warn};
 use headers::ContentType;
 use jsonb::Value;
 use lazy_static::lazy_static;
@@ -1193,6 +1193,7 @@ pub async fn loki_query_range(
         label_select, LOKI_TABLE_NAME, where_clause, order, limit,
     );
 
+    debug!("loki query_range: label_cols={:?} sql={}", label_cols, sql);
     let results = state.sql_handler.do_query(&sql, query_ctx).await;
 
     // Map from label-combination key → LokiStream
@@ -1204,10 +1205,20 @@ pub async fn loki_query_range(
             Ok(Output { data: OutputData::Stream(stream), .. }) => {
                 match RecordBatches::try_collect(stream).await {
                     Ok(rbs) => rbs,
-                    Err(_) => continue,
+                    Err(e) => {
+                        warn!(e; "loki query_range: failed to collect stream");
+                        continue;
+                    }
                 }
             }
-            _ => continue,
+            Err(e) => {
+                warn!(e; "loki query_range: do_query error");
+                continue;
+            }
+            _ => {
+                warn!("loki query_range: unexpected AffectedRows output");
+                continue;
+            }
         };
         {
             for batch in rbs.iter() {
