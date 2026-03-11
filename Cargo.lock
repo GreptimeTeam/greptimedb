@@ -12618,6 +12618,7 @@ dependencies = [
  "hex",
  "local-ip-address",
  "mysql",
+ "nom 7.1.3",
  "num_cpus",
  "reqwest",
  "semver",
