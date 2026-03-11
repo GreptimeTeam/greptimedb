@@ -43,7 +43,7 @@ impl<'a> Clear for PromLabel<'a> {
     }
 }
 
-impl PromLabel {
+impl<'a> PromLabel<'a> {
     pub(crate) fn merge_field(
         &mut self,
         tag: u32,

@@ -164,7 +164,6 @@ impl<'a> PromTimeSeries<'a> {
 #[derive(Default, Debug)]
 pub struct PromWriteRequest<'a> {
     pub(crate) table_data: TablesBuilder<'a>,
-
 }
 
 impl<'a> Clear for PromWriteRequest<'a> {
@@ -178,7 +177,6 @@ impl<'a> PromWriteRequest<'a> {
         self.table_data.as_insert_requests()
     }
 }
-
 
 impl<'a, 's> PromWriteRequest<'a>
 where
@@ -227,8 +225,7 @@ where
                         let limit = remaining - len as usize;
                         while buf.remaining() > limit {
                             let (tag, wire_type) = decode_key(buf)?;
-                            series
-                                .merge_field(tag, wire_type, buf, prom_validation_mode)?;
+                            series.merge_field(tag, wire_type, buf, prom_validation_mode)?;
                         }
                         if buf.remaining() != limit {
                             return Err(DecodeError::new("delimited length exceeded"));
@@ -254,8 +251,7 @@ where
             }
 
             if should_add_to_table_data {
-                series
-                    .add_to_table_data(&mut self.table_data, prom_validation_mode)?;
+                series.add_to_table_data(&mut self.table_data, prom_validation_mode)?;
             }
 
             if decoded_timeseries {
