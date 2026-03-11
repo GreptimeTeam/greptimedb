@@ -55,16 +55,7 @@ pub(crate) fn compute_tsid_array(
         hasher.finish()
     };
 
-    let tag_arrays: Vec<&StringArray> = sorted_tag_columns
-        .iter()
-        .map(|tc| {
-            batch
-                .column(tc.index)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .expect("tag column must be utf8")
-        })
-        .collect();
+    let tag_arrays: Vec<&StringArray> = build_tag_arrays(batch, sorted_tag_columns);
 
     let mut tsid_values = Vec::with_capacity(num_rows);
     for row in 0..num_rows {
@@ -105,6 +96,22 @@ pub(crate) fn compute_tsid_array(
     UInt64Array::from(tsid_values)
 }
 
+fn build_tag_arrays<'a>(
+    batch: &'a RecordBatch,
+    sorted_tag_columns: &[TagColumnInfo],
+) -> Vec<&'a StringArray> {
+    sorted_tag_columns
+        .iter()
+        .map(|tc| {
+            batch
+                .column(tc.index)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("tag column must be utf8")
+        })
+        .collect()
+}
+
 /// Modifies a RecordBatch for sparse primary key encoding.
 #[allow(dead_code)]
 pub(crate) fn modify_batch_sparse(
@@ -117,16 +124,7 @@ pub(crate) fn modify_batch_sparse(
     let codec = SparsePrimaryKeyCodec::schemaless();
     let tsid_array = compute_tsid_array(&batch, sorted_tag_columns);
 
-    let tag_arrays: Vec<&StringArray> = sorted_tag_columns
-        .iter()
-        .map(|tc| {
-            batch
-                .column(tc.index)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .expect("tag column must be utf8")
-        })
-        .collect();
+    let tag_arrays: Vec<&StringArray> = build_tag_arrays(&batch, sorted_tag_columns);
 
     let mut pk_values: Vec<Vec<u8>> = Vec::with_capacity(num_rows);
     for row in 0..num_rows {
@@ -192,6 +190,40 @@ mod tests {
 
     use super::*;
     use crate::row_modifier::{RowModifier, RowsIter, TableIdInput};
+
+    fn build_sparse_test_batch() -> RecordBatch {
+        let schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("greptime_timestamp", DataType::Int64, false),
+            Field::new("greptime_value", DataType::Float64, true),
+            Field::new("namespace", DataType::Utf8, true),
+            Field::new("host", DataType::Utf8, true),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![1000])),
+                Arc::new(datatypes::arrow::array::Float64Array::from(vec![42.0])),
+                Arc::new(StringArray::from(vec!["greptimedb"])),
+                Arc::new(StringArray::from(vec!["127.0.0.1"])),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn sparse_tag_columns() -> Vec<TagColumnInfo> {
+        vec![
+            TagColumnInfo {
+                name: "host".to_string(),
+                index: 3,
+                column_id: 3,
+            },
+            TagColumnInfo {
+                name: "namespace".to_string(),
+                index: 2,
+                column_id: 2,
+            },
+        ]
+    }
 
     #[test]
     fn test_compute_tsid_basic() {
@@ -291,35 +323,8 @@ mod tests {
 
     #[test]
     fn test_modify_batch_sparse() {
-        let schema = Arc::new(ArrowSchema::new(vec![
-            Field::new("greptime_timestamp", DataType::Int64, false),
-            Field::new("greptime_value", DataType::Float64, true),
-            Field::new("namespace", DataType::Utf8, true),
-            Field::new("host", DataType::Utf8, true),
-        ]));
-        let batch = RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(Int64Array::from(vec![1000])),
-                Arc::new(datatypes::arrow::array::Float64Array::from(vec![42.0])),
-                Arc::new(StringArray::from(vec!["greptimedb"])),
-                Arc::new(StringArray::from(vec!["127.0.0.1"])),
-            ],
-        )
-        .unwrap();
-
-        let tag_columns = vec![
-            TagColumnInfo {
-                name: "host".to_string(),
-                index: 3,
-                column_id: 2,
-            },
-            TagColumnInfo {
-                name: "namespace".to_string(),
-                index: 2,
-                column_id: 1,
-            },
-        ];
+        let batch = build_sparse_test_batch();
+        let tag_columns = sparse_tag_columns();
         let non_tag_indices = vec![0, 1];
         let table_id: u32 = 1025;
 
@@ -334,74 +339,47 @@ mod tests {
 
     #[test]
     fn test_modify_batch_sparse_matches_row_modifier() {
-        let schema = Arc::new(ArrowSchema::new(vec![
-            Field::new("greptime_timestamp", DataType::Int64, false),
-            Field::new("greptime_value", DataType::Float64, true),
-            Field::new("namespace", DataType::Utf8, true),
-            Field::new("host", DataType::Utf8, true),
-        ]));
-        let batch = RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(Int64Array::from(vec![1000])),
-                Arc::new(datatypes::arrow::array::Float64Array::from(vec![42.0])),
-                Arc::new(StringArray::from(vec!["greptimedb"])),
-                Arc::new(StringArray::from(vec!["127.0.0.1"])),
-            ],
-        )
-        .unwrap();
-
-        let tag_columns = vec![
-            TagColumnInfo {
-                name: "host".to_string(),
-                index: 3,
-                column_id: 2,
-            },
-            TagColumnInfo {
-                name: "namespace".to_string(),
-                index: 2,
-                column_id: 1,
-            },
-        ];
+        let batch = build_sparse_test_batch();
+        let tag_columns = sparse_tag_columns();
         let non_tag_indices = vec![0, 1];
         let table_id: u32 = 1025;
         let modified =
             modify_batch_sparse(batch, table_id, &tag_columns, &non_tag_indices).unwrap();
 
-        let mut name_to_column_id = HashMap::new();
-        name_to_column_id.insert("greptime_timestamp".to_string(), 0);
-        name_to_column_id.insert("greptime_value".to_string(), 1);
-        name_to_column_id.insert("namespace".to_string(), 1);
-        name_to_column_id.insert("host".to_string(), 2);
+        let name_to_column_id: HashMap<String, ColumnId> = [
+            ("greptime_timestamp".to_string(), 0),
+            ("greptime_value".to_string(), 1),
+            ("namespace".to_string(), 2),
+            ("host".to_string(), 3),
+        ]
+        .into_iter()
+        .collect();
+
         let rows = Rows {
             schema: vec![
                 ColumnSchema {
                     column_name: "greptime_timestamp".to_string(),
                     datatype: ColumnDataType::TimestampMillisecond as i32,
                     semantic_type: SemanticType::Timestamp as i32,
-                    datatype_extension: None,
-                    options: None,
+                    ..Default::default()
                 },
                 ColumnSchema {
                     column_name: "greptime_value".to_string(),
                     datatype: ColumnDataType::Float64 as i32,
                     semantic_type: SemanticType::Field as i32,
-                    datatype_extension: None,
-                    options: None,
+                    ..Default::default()
                 },
                 ColumnSchema {
                     column_name: "namespace".to_string(),
                     datatype: ColumnDataType::String as i32,
                     semantic_type: SemanticType::Tag as i32,
-                    datatype_extension: None,
-                    options: None,
+                    ..Default::default()
                 },
                 ColumnSchema {
                     column_name: "host".to_string(),
                     datatype: ColumnDataType::String as i32,
                     semantic_type: SemanticType::Tag as i32,
-                    datatype_extension: None,
-                    options: None,
+                    ..Default::default()
                 },
             ],
             rows: vec![Row {
@@ -421,6 +399,7 @@ mod tests {
                 ],
             }],
         };
+
         let row_iter = RowsIter::new(rows, &name_to_column_id);
         let rows = RowModifier::default()
             .modify_rows(
