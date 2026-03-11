@@ -132,34 +132,36 @@ impl MetricEngineInner {
             })
             .collect();
 
-        let state = self.state.read().unwrap();
-        let physical_columns = state
-            .physical_region_states()
-            .get(&data_region_id)
-            .context(error::PhysicalRegionNotFoundSnafu {
-                region_id: data_region_id,
-            })?
-            .physical_columns();
-
         let mut tag_columns = Vec::new();
         let mut non_tag_indices = Vec::new();
+        {
+            let state = self.state.read().unwrap();
+            let physical_columns = state
+                .physical_region_states()
+                .get(&data_region_id)
+                .context(error::PhysicalRegionNotFoundSnafu {
+                    region_id: data_region_id,
+                })?
+                .physical_columns();
 
-        for (index, field) in batch.schema().fields().iter().enumerate() {
-            let name = field.name();
-            let column_id = *physical_columns
-                .get(name)
-                .context(error::ColumnNotFoundSnafu {
-                    name: name.clone(),
-                    region_id: logical_region_id,
-                })?;
-            if tag_names.contains(name.as_str()) {
-                tag_columns.push(TagColumnInfo {
-                    name: name.clone(),
-                    index,
-                    column_id,
-                });
-            } else {
-                non_tag_indices.push(index);
+            for (index, field) in batch.schema().fields().iter().enumerate() {
+                let name = field.name();
+                let column_id =
+                    *physical_columns
+                        .get(name)
+                        .context(error::ColumnNotFoundSnafu {
+                            name: name.clone(),
+                            region_id: logical_region_id,
+                        })?;
+                if tag_names.contains(name.as_str()) {
+                    tag_columns.push(TagColumnInfo {
+                        name: name.clone(),
+                        index,
+                        column_id,
+                    });
+                } else {
+                    non_tag_indices.push(index);
+                }
             }
         }
 
