@@ -17,6 +17,7 @@ pub mod export_v2;
 mod import;
 pub mod import_v2;
 pub mod snapshot_storage;
+pub(crate) mod sql;
 mod storage_export;
 
 use clap::Subcommand;

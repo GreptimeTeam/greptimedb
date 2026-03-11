@@ -32,6 +32,7 @@ use crate::data::export_v2::schema::{
     ColumnDefinition, SchemaDefinition, SchemaSnapshot, SemanticType, TableDefinition,
     TableOptions, ViewDefinition,
 };
+use crate::data::sql::escape_sql_literal;
 use crate::database::DatabaseClient;
 
 /// System schemas that should be excluded from export.
@@ -95,7 +96,7 @@ impl<'a> SchemaExtractor<'a> {
         let sql = format!(
             "SELECT schema_name FROM information_schema.schemata \
              WHERE catalog_name = '{}'",
-            self.catalog
+            escape_sql_literal(self.catalog)
         );
 
         let records = self.query(&sql).await?;
@@ -142,7 +143,8 @@ impl<'a> SchemaExtractor<'a> {
         let sql = format!(
             "SELECT schema_name, options FROM information_schema.schemata \
              WHERE catalog_name = '{}' AND schema_name = '{}'",
-            self.catalog, schema
+            escape_sql_literal(self.catalog),
+            escape_sql_literal(schema)
         );
 
         let records = self.query(&sql).await?;
@@ -179,7 +181,8 @@ impl<'a> SchemaExtractor<'a> {
         let sql = format!(
             "SELECT table_name FROM information_schema.tables \
              WHERE table_catalog = '{}' AND table_schema = '{}' AND table_type = 'BASE TABLE'",
-            self.catalog, schema
+            escape_sql_literal(self.catalog),
+            escape_sql_literal(schema)
         );
 
         let records = self.query(&sql).await?;
@@ -201,7 +204,8 @@ impl<'a> SchemaExtractor<'a> {
         let sql = format!(
             "SELECT DISTINCT table_name FROM information_schema.columns \
              WHERE table_catalog = '{}' AND table_schema = '{}' AND column_name = '__tsid'",
-            self.catalog, schema
+            escape_sql_literal(self.catalog),
+            escape_sql_literal(schema)
         );
 
         let records = self.query(&sql).await?;
@@ -262,7 +266,9 @@ impl<'a> SchemaExtractor<'a> {
             "SELECT table_type, table_id, engine, create_options, table_comment \
              FROM information_schema.tables \
              WHERE table_catalog = '{}' AND table_schema = '{}' AND table_name = '{}'",
-            self.catalog, schema, table
+            escape_sql_literal(self.catalog),
+            escape_sql_literal(schema),
+            escape_sql_literal(table)
         );
 
         let records = self.query(&sql).await?;
@@ -295,7 +301,9 @@ impl<'a> SchemaExtractor<'a> {
              FROM information_schema.columns \
              WHERE table_catalog = '{}' AND table_schema = '{}' AND table_name = '{}' \
              ORDER BY ordinal_position",
-            self.catalog, schema, table
+            escape_sql_literal(self.catalog),
+            escape_sql_literal(schema),
+            escape_sql_literal(table)
         );
 
         let records = self.query(&sql).await?;
@@ -337,7 +345,8 @@ impl<'a> SchemaExtractor<'a> {
         let sql = format!(
             "SELECT table_name, view_definition FROM information_schema.views \
              WHERE table_catalog = '{}' AND table_schema = '{}'",
-            self.catalog, schema
+            escape_sql_literal(self.catalog),
+            escape_sql_literal(schema)
         );
 
         let records = self.query(&sql).await?;

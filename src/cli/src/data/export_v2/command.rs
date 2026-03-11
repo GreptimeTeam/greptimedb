@@ -33,6 +33,7 @@ use crate::data::export_v2::extractor::SchemaExtractor;
 use crate::data::export_v2::manifest::{DataFormat, MANIFEST_VERSION, Manifest, TimeRange};
 use crate::data::export_v2::schema::{DDL_DIR, SCHEMA_DIR, SchemaSnapshot};
 use crate::data::snapshot_storage::{OpenDalStorage, SnapshotStorage, validate_uri};
+use crate::data::sql::{escape_sql_identifier, escape_sql_literal};
 use crate::database::{DatabaseClient, parse_proxy_opts};
 
 /// Export V2 commands.
@@ -347,7 +348,8 @@ impl ExportCreate {
         let sql = format!(
             "SELECT DISTINCT table_name FROM information_schema.columns \
              WHERE table_catalog = '{}' AND table_schema = '{}' AND column_name = '__tsid'",
-            self.catalog, schema
+            escape_sql_literal(&self.catalog),
+            escape_sql_literal(schema)
         );
         let records: Option<Vec<Vec<Value>>> = self
             .database_client
@@ -378,11 +380,16 @@ impl ExportCreate {
         let sql = match table {
             Some(table) => format!(
                 r#"SHOW CREATE {} "{}"."{}"."{}""#,
-                show_type, self.catalog, schema, table
+                show_type,
+                escape_sql_identifier(&self.catalog),
+                escape_sql_identifier(schema),
+                escape_sql_identifier(table)
             ),
             None => format!(
                 r#"SHOW CREATE {} "{}"."{}""#,
-                show_type, self.catalog, schema
+                show_type,
+                escape_sql_identifier(&self.catalog),
+                escape_sql_identifier(schema)
             ),
         };
 
