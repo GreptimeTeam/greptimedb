@@ -17,7 +17,7 @@
 use common_telemetry::info;
 use snafu::ResultExt;
 
-use super::error::{DatabaseSnafu, Result};
+use crate::data::import_v2::error::{DatabaseSnafu, Result};
 use crate::database::DatabaseClient;
 
 /// Executes DDL statements against the database.

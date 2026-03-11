@@ -24,15 +24,15 @@ use common_telemetry::info;
 use serde_json::Value;
 use snafu::{OptionExt, ResultExt};
 
-use super::error::{
-    CannotResumeSchemaOnlySnafu, DatabaseSnafu, EmptyResultSnafu, Result, UnexpectedValueTypeSnafu,
-};
-use super::extractor::SchemaExtractor;
-use super::manifest::{DataFormat, MANIFEST_VERSION, Manifest, TimeRange};
-use super::schema::{DDL_DIR, SCHEMA_DIR, SchemaSnapshot};
-use super::storage::{OpenDalStorage, SnapshotStorage, validate_uri};
 use crate::Tool;
 use crate::common::ObjectStoreConfig;
+use crate::data::export_v2::error::{
+    CannotResumeSchemaOnlySnafu, DatabaseSnafu, EmptyResultSnafu, Result, UnexpectedValueTypeSnafu,
+};
+use crate::data::export_v2::extractor::SchemaExtractor;
+use crate::data::export_v2::manifest::{DataFormat, MANIFEST_VERSION, Manifest, TimeRange};
+use crate::data::export_v2::schema::{DDL_DIR, SCHEMA_DIR, SchemaSnapshot};
+use crate::data::snapshot_storage::{OpenDalStorage, SnapshotStorage, validate_uri};
 use crate::database::{DatabaseClient, parse_proxy_opts};
 
 /// Export V2 commands.

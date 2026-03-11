@@ -22,12 +22,14 @@ use common_error::ext::BoxedError;
 use common_telemetry::info;
 use snafu::ResultExt;
 
-use super::ddl_generator::DdlGenerator;
-use super::error::{ExportSnafu, ManifestVersionMismatchSnafu, Result, SchemaNotInSnapshotSnafu};
-use super::executor::DdlExecutor;
 use crate::Tool;
 use crate::common::ObjectStoreConfig;
 use crate::data::export_v2::manifest::MANIFEST_VERSION;
+use crate::data::import_v2::ddl_generator::DdlGenerator;
+use crate::data::import_v2::error::{
+    ExportSnafu, ManifestVersionMismatchSnafu, Result, SchemaNotInSnapshotSnafu,
+};
+use crate::data::import_v2::executor::DdlExecutor;
 use crate::data::snapshot_storage::{OpenDalStorage, SnapshotStorage, validate_uri};
 use crate::database::{DatabaseClient, parse_proxy_opts};
 

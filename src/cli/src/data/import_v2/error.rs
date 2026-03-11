@@ -45,15 +45,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to execute DDL: {}", sql))]
-    DdlExecution {
-        sql: String,
-        #[snafu(source)]
-        error: crate::error::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Export error"))]
     Export {
         #[snafu(source)]
@@ -88,9 +79,7 @@ impl ErrorExt for Error {
                 StatusCode::InvalidArguments
             }
             Error::ManifestVersionMismatch { .. } => StatusCode::InvalidArguments,
-            Error::DdlExecution { error, .. } | Error::Database { error, .. } => {
-                error.status_code()
-            }
+            Error::Database { error, .. } => error.status_code(),
             Error::Export { error, .. } => error.status_code(),
             Error::InvalidColumnDefinition { .. } => StatusCode::InvalidArguments,
         }

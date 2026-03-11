@@ -20,11 +20,11 @@ use store_api::metric_engine_consts::{
     LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
 };
 
-use super::error::{InvalidColumnDefinitionSnafu, Result};
 use crate::data::export_v2::schema::{
     ColumnDefinition, SchemaDefinition, SchemaSnapshot, SemanticType, TableDefinition,
     ViewDefinition,
 };
+use crate::data::import_v2::error::{InvalidColumnDefinitionSnafu, Result};
 
 /// Generates DDL statements from schema definitions.
 pub struct DdlGenerator<'a> {

@@ -38,13 +38,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid format '{}': expected one of parquet, csv, json", format))]
-    InvalidFormat {
-        format: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Storage operation '{}' failed", operation))]
     StorageOperation {
         operation: String,
@@ -119,13 +112,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Snapshot already exists at '{}'. Use --force to overwrite.", uri))]
-    SnapshotAlreadyExists {
-        uri: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Schema '{}' not found in catalog '{}'", schema, catalog))]
     SchemaNotFound {
         catalog: String,
@@ -157,13 +143,6 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-
-    #[snafu(display("Failed to parse time: {}", input))]
-    TimeParse {
-        input: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -173,12 +152,9 @@ impl ErrorExt for Error {
         match self {
             Error::InvalidUri { .. }
             | Error::UnsupportedScheme { .. }
-            | Error::InvalidFormat { .. }
             | Error::InvalidSemanticType { .. }
             | Error::CannotResumeSchemaOnly { .. }
-            | Error::SnapshotAlreadyExists { .. }
-            | Error::ManifestVersionMismatch { .. }
-            | Error::TimeParse { .. } => StatusCode::InvalidArguments,
+            | Error::ManifestVersionMismatch { .. } => StatusCode::InvalidArguments,
 
             Error::StorageOperation { .. }
             | Error::ManifestParse { .. }

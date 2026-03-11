@@ -24,11 +24,11 @@ use std::collections::{HashMap, HashSet};
 use serde_json::Value;
 use snafu::ResultExt;
 
-use super::error::{
+use crate::data::export_v2::error::{
     DatabaseSnafu, EmptyResultSnafu, InvalidSemanticTypeSnafu, NoTimeIndexSnafu, Result,
     SchemaNotFoundSnafu, UnexpectedValueTypeSnafu,
 };
-use super::schema::{
+use crate::data::export_v2::schema::{
     ColumnDefinition, SchemaDefinition, SchemaSnapshot, SemanticType, TableDefinition,
     TableOptions, ViewDefinition,
 };
