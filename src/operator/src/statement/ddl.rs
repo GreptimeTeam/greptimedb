@@ -664,6 +664,7 @@ impl StatementExecutor {
         expr: &CreateFlowExpr,
         query_ctx: QueryContextRef,
     ) -> Result<FlowType> {
+        let mut has_missing_source_table = false;
         // first check if source table's ttl is instant, if it is, force streaming mode
         for src_table_name in &expr.source_table_names {
             let table = self
@@ -676,14 +677,12 @@ impl StatementExecutor {
                 )
                 .await
                 .map_err(BoxedError::new)
-                .context(ExternalSnafu)?
-                .with_context(|| TableNotFoundSnafu {
-                    table_name: format_full_table_name(
-                        &src_table_name.catalog_name,
-                        &src_table_name.schema_name,
-                        &src_table_name.table_name,
-                    ),
-                })?;
+                .context(ExternalSnafu)?;
+
+            let Some(table) = table else {
+                has_missing_source_table = true;
+                continue;
+            };
 
             // instant source table can only be handled by streaming mode
             if table.table_info().meta.options.ttl == Some(common_time::TimeToLive::Instant) {
@@ -698,6 +697,10 @@ impl StatementExecutor {
                 );
                 return Ok(FlowType::Streaming);
             }
+        }
+
+        if has_missing_source_table {
+            return Ok(FlowType::Batching);
         }
 
         let engine = &self.query_engine;

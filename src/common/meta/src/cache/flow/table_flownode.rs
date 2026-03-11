@@ -208,7 +208,7 @@ mod tests {
     use crate::cache::flow::table_flownode::{FlowIdent, new_table_flownode_set_cache};
     use crate::instruction::{CacheIdent, CreateFlow, DropFlow};
     use crate::key::flow::FlowMetadataManager;
-    use crate::key::flow::flow_info::FlowInfoValue;
+    use crate::key::flow::flow_info::{FlowInfoValue, FlowStatus};
     use crate::key::flow::flow_route::FlowRouteValue;
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::peer::Peer;
@@ -231,6 +231,8 @@ mod tests {
                 1024,
                 FlowInfoValue {
                     source_table_ids: vec![1024, 1025],
+                    all_source_table_names: vec![],
+                    unresolved_source_table_names: vec![],
                     sink_table_name: TableName {
                         catalog_name: DEFAULT_CATALOG_NAME.to_string(),
                         schema_name: DEFAULT_SCHEMA_NAME.to_string(),
@@ -245,6 +247,8 @@ mod tests {
                     eval_interval_secs: None,
                     comment: "comment".to_string(),
                     options: Default::default(),
+                    status: FlowStatus::Active,
+                    last_activation_error: None,
                     created_time: chrono::Utc::now(),
                     updated_time: chrono::Utc::now(),
                 },

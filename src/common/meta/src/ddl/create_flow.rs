@@ -34,13 +34,14 @@ use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, ensure};
 use strum::AsRefStr;
 use table::metadata::TableId;
+use table::table_name::TableName;
 
 use crate::cache_invalidator::Context;
 use crate::ddl::DdlContext;
 use crate::ddl::utils::{add_peer_context_if_needed, map_to_procedure_error};
 use crate::error::{self, Result, UnexpectedSnafu};
 use crate::instruction::{CacheIdent, CreateFlow, DropFlow};
-use crate::key::flow::flow_info::FlowInfoValue;
+use crate::key::flow::flow_info::{FlowInfoValue, FlowStatus};
 use crate::key::flow::flow_route::FlowRouteValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::{DeserializedValueWithBytes, FlowId, FlowPartitionId};
@@ -67,11 +68,13 @@ impl CreateFlowProcedure {
                 flow_id: None,
                 peers: vec![],
                 source_table_ids: vec![],
+                unresolved_source_table_names: vec![],
                 flow_context: query_context.into(), // Convert to FlowQueryContext
                 state: CreateFlowState::Prepare,
                 prev_flow_info_value: None,
                 did_replace: false,
                 flow_type: None,
+                last_activation_error: None,
             },
         }
     }
@@ -189,15 +192,32 @@ impl CreateFlowProcedure {
         if self.data.flow_id.is_none() {
             self.allocate_flow_id().await?;
         }
-        self.data.state = CreateFlowState::CreateFlows;
-        // determine flow type
         self.data.flow_type = Some(get_flow_type_from_options(&self.data.task)?);
+
+        if self.data.is_pending() {
+            self.data.peers.clear();
+            self.data.state = CreateFlowState::CreateMetadata;
+        } else {
+            if self.data.peers.is_empty() {
+                self.data.peers = self.context.flow_metadata_allocator.alloc_peers(1).await?;
+            }
+            self.data.state = CreateFlowState::CreateFlows;
+        }
 
         Ok(Status::executing(true))
     }
 
     async fn on_flownode_create_flows(&mut self) -> Result<Status> {
-        // Safety: must be allocated.
+        ensure!(
+            !self.data.peers.is_empty(),
+            UnexpectedSnafu {
+                err_msg: format!(
+                    "Flow {:?} enters CreateFlows with no peers allocated",
+                    self.data.flow_id
+                ),
+            }
+        );
+
         let mut create_flow = Vec::with_capacity(self.data.peers.len());
         for peer in &self.data.peers {
             let requester = self.context.node_manager.flownode(peer).await;
@@ -281,20 +301,20 @@ impl CreateFlowProcedure {
             })]);
         }
 
-        let (_flow_info, flow_routes) = (&self.data).into();
-        let flow_part2peers = flow_routes
-            .into_iter()
-            .map(|(part_id, route)| (part_id, route.peer))
-            .collect();
+        if self.data.is_active() {
+            let (_flow_info, flow_routes) = (&self.data).into();
+            let flow_part2peers = flow_routes
+                .into_iter()
+                .map(|(part_id, route)| (part_id, route.peer))
+                .collect();
 
-        caches.extend([
-            CacheIdent::CreateFlow(CreateFlow {
+            caches.push(CacheIdent::CreateFlow(CreateFlow {
                 flow_id,
                 source_table_ids: self.data.source_table_ids.clone(),
                 partition_to_peer_mapping: flow_part2peers,
-            }),
-            CacheIdent::FlowId(flow_id),
-        ]);
+            }));
+        }
+        caches.push(CacheIdent::FlowId(flow_id));
 
         self.context
             .cache_invalidator
@@ -411,6 +431,8 @@ pub struct CreateFlowData {
     pub(crate) flow_id: Option<FlowId>,
     pub(crate) peers: Vec<Peer>,
     pub(crate) source_table_ids: Vec<TableId>,
+    #[serde(default)]
+    pub(crate) unresolved_source_table_names: Vec<TableName>,
     /// Use alias for backward compatibility with QueryContext serialized data
     #[serde(alias = "query_context")]
     pub(crate) flow_context: FlowQueryContext,
@@ -422,6 +444,18 @@ pub struct CreateFlowData {
     #[serde(default)]
     pub(crate) did_replace: bool,
     pub(crate) flow_type: Option<FlowType>,
+    #[serde(default)]
+    pub(crate) last_activation_error: Option<String>,
+}
+
+impl CreateFlowData {
+    pub(crate) fn is_pending(&self) -> bool {
+        !self.unresolved_source_table_names.is_empty()
+    }
+
+    pub(crate) fn is_active(&self) -> bool {
+        !self.is_pending()
+    }
 }
 
 impl From<&CreateFlowData> for CreateRequest {
@@ -495,6 +529,8 @@ impl From<&CreateFlowData> for (FlowInfoValue, Vec<(FlowPartitionId, FlowRouteVa
 
         let flow_info: FlowInfoValue = FlowInfoValue {
             source_table_ids: value.source_table_ids.clone(),
+            all_source_table_names: value.task.source_table_names.clone(),
+            unresolved_source_table_names: value.unresolved_source_table_names.clone(),
             sink_table_name,
             flownode_ids,
             catalog_name,
@@ -506,6 +542,12 @@ impl From<&CreateFlowData> for (FlowInfoValue, Vec<(FlowPartitionId, FlowRouteVa
             eval_interval_secs: eval_interval,
             comment,
             options,
+            status: if value.is_pending() {
+                FlowStatus::PendingSources
+            } else {
+                FlowStatus::Active
+            },
+            last_activation_error: value.last_activation_error.clone(),
             created_time: create_time,
             updated_time: chrono::Utc::now(),
         };

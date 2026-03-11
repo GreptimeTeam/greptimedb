@@ -70,6 +70,7 @@ use crate::error::{
     StartTelemetryTaskSnafu, StopProcedureManagerSnafu,
 };
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
+use crate::flow::PendingFlowReconcileTickerRef;
 use crate::gc::{GcSchedulerOptions, GcTickerRef};
 use crate::handler::{HeartbeatHandlerGroupBuilder, HeartbeatHandlerGroupRef};
 use crate::procedure::ProcedureManagerListenerAdapter;
@@ -638,6 +639,7 @@ pub struct Metasrv {
     region_flush_ticker: Option<RegionFlushTickerRef>,
     table_id_allocator: ResourceIdAllocatorRef,
     reconciliation_manager: ReconciliationManagerRef,
+    pending_flow_reconcile_ticker: Option<PendingFlowReconcileTickerRef>,
     resource_stat: ResourceStatRef,
     gc_ticker: Option<GcTickerRef>,
 
@@ -702,6 +704,9 @@ impl Metasrv {
             }
             if let Some(gc_ticker) = &self.gc_ticker {
                 leadership_change_notifier.add_listener(gc_ticker.clone() as _);
+            }
+            if let Some(pending_flow_reconcile_ticker) = &self.pending_flow_reconcile_ticker {
+                leadership_change_notifier.add_listener(pending_flow_reconcile_ticker.clone() as _);
             }
             if let Some(customizer) = self.plugins.get::<LeadershipChangeNotifierCustomizerRef>() {
                 customizer.customize(&mut leadership_change_notifier);
