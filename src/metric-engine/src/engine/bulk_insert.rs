@@ -42,7 +42,7 @@ impl MetricEngineInner {
         request: RegionBulkInsertsRequest,
     ) -> Result<AffectedRows> {
         ensure!(
-            self.is_physical_region(region_id),
+            !self.is_physical_region(region_id),
             error::UnsupportedRegionRequestSnafu {
                 request: RegionRequest::BulkInserts(request),
             }
@@ -296,7 +296,7 @@ mod tests {
     use crate::error::Error;
     use crate::test_util::{self, TestEnv};
 
-    fn build_logical_batch(rows: usize) -> RecordBatch {
+    fn build_logical_batch(start: usize, rows: usize) -> RecordBatch {
         let schema = Arc::new(ArrowSchema::new(vec![
             Field::new(
                 greptime_timestamp(),
@@ -310,7 +310,7 @@ mod tests {
         let mut ts = Vec::with_capacity(rows);
         let mut values = Vec::with_capacity(rows);
         let mut tags = Vec::with_capacity(rows);
-        for i in 0..rows {
+        for i in start..start + rows {
             ts.push(i as i64);
             values.push(i as f64);
             tags.push("tag_0".to_string());
@@ -367,12 +367,176 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_bulk_insert_empty_batch_returns_zero() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let logical_region_id = env.default_logical_region_id();
+
+        let batch = build_logical_batch(0, 0);
+        let request = RegionRequest::BulkInserts(RegionBulkInsertsRequest {
+            region_id: logical_region_id,
+            payload: batch,
+            raw_data: ArrowIpc::default(),
+            partition_expr_version: None,
+        });
+        let response = env
+            .metric()
+            .handle_request(logical_region_id, request)
+            .await
+            .unwrap();
+        assert_eq!(response.affected_rows, 0);
+    }
+
+    #[tokio::test]
+    async fn test_bulk_insert_physical_region_rejected() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+
+        let physical_region_id = env.default_physical_region_id();
+        let batch = build_logical_batch(0, 2);
+        let request = build_bulk_request(physical_region_id, batch);
+
+        let err = env
+            .metric()
+            .handle_request(physical_region_id, request)
+            .await
+            .unwrap_err();
+        let Some(err) = err.as_any().downcast_ref::<Error>() else {
+            panic!("unexpected error type");
+        };
+        assert_matches!(err, Error::UnsupportedRegionRequest { .. });
+    }
+
+    #[tokio::test]
+    async fn test_bulk_insert_unknown_column_errors() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let logical_region_id = env.default_logical_region_id();
+
+        let schema = Arc::new(ArrowSchema::new(vec![
+            Field::new(
+                greptime_timestamp(),
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new(greptime_value(), DataType::Float64, true),
+            Field::new("nonexistent_column", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![0i64])),
+                Arc::new(Float64Array::from(vec![1.0])),
+                Arc::new(StringArray::from(vec!["val"])),
+            ],
+        )
+        .unwrap();
+
+        let request = build_bulk_request(logical_region_id, batch);
+        let err = env
+            .metric()
+            .handle_request(logical_region_id, request)
+            .await
+            .unwrap_err();
+        let Some(err) = err.as_any().downcast_ref::<Error>() else {
+            panic!("unexpected error type");
+        };
+        assert_matches!(err, Error::ColumnNotFound { .. });
+    }
+
+    #[tokio::test]
+    async fn test_bulk_insert_multiple_tag_columns() {
+        let env = TestEnv::new().await;
+        let physical_region_id = env.default_physical_region_id();
+        env.create_physical_region(physical_region_id, &TestEnv::default_table_dir(), vec![])
+            .await;
+        let logical_region_id = env.default_logical_region_id();
+        let request = test_util::create_logical_region_request(
+            &["host", "region"],
+            physical_region_id,
+            &table_dir("test", logical_region_id.table_id()),
+        );
+        env.metric()
+            .handle_request(logical_region_id, RegionRequest::Create(request))
+            .await
+            .unwrap();
+
+        let schema = Arc::new(ArrowSchema::new(vec![
+            Field::new(
+                greptime_timestamp(),
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new(greptime_value(), DataType::Float64, true),
+            Field::new("host", DataType::Utf8, true),
+            Field::new("region", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![0i64, 1, 2])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0])),
+                Arc::new(StringArray::from(vec!["h1", "h2", "h1"])),
+                Arc::new(StringArray::from(vec!["us-east", "us-west", "eu-west"])),
+            ],
+        )
+        .unwrap();
+
+        let request = build_bulk_request(logical_region_id, batch);
+        let response = env
+            .metric()
+            .handle_request(logical_region_id, request)
+            .await
+            .unwrap();
+        assert_eq!(response.affected_rows, 3);
+
+        let stream = env
+            .metric()
+            .scan_to_stream(logical_region_id, ScanRequest::default())
+            .await
+            .unwrap();
+        let batches = RecordBatches::try_collect(stream).await.unwrap();
+        assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_bulk_insert_accumulates_rows() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let logical_region_id = env.default_logical_region_id();
+
+        let request = build_bulk_request(logical_region_id, build_logical_batch(0, 3));
+        let response = env
+            .metric()
+            .handle_request(logical_region_id, request)
+            .await
+            .unwrap();
+        assert_eq!(response.affected_rows, 3);
+
+        let request = build_bulk_request(logical_region_id, build_logical_batch(3, 5));
+        let response = env
+            .metric()
+            .handle_request(logical_region_id, request)
+            .await
+            .unwrap();
+        assert_eq!(response.affected_rows, 5);
+
+        let stream = env
+            .metric()
+            .scan_to_stream(logical_region_id, ScanRequest::default())
+            .await
+            .unwrap();
+        let batches = RecordBatches::try_collect(stream).await.unwrap();
+        assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 8);
+    }
+
+    #[tokio::test]
     async fn test_bulk_insert_sparse_encoding() {
         let env = TestEnv::new().await;
         env.init_metric_region().await;
         let logical_region_id = env.default_logical_region_id();
 
-        let request = build_bulk_request(logical_region_id, build_logical_batch(4));
+        let request = build_bulk_request(logical_region_id, build_logical_batch(0, 4));
         let response = env
             .metric()
             .handle_request(logical_region_id, request)
@@ -394,7 +558,7 @@ mod tests {
         let env = TestEnv::new().await;
         let logical_region_id = init_dense_metric_region(&env).await;
 
-        let request = build_bulk_request(logical_region_id, build_logical_batch(2));
+        let request = build_bulk_request(logical_region_id, build_logical_batch(0, 2));
         let err = env
             .metric()
             .handle_request(logical_region_id, request)
@@ -435,7 +599,7 @@ mod tests {
 
         let env_bulk = TestEnv::new().await;
         env_bulk.init_metric_region().await;
-        let request = build_bulk_request(logical_region_id, build_logical_batch(5));
+        let request = build_bulk_request(logical_region_id, build_logical_batch(0, 5));
         env_bulk
             .metric()
             .handle_request(logical_region_id, request)
