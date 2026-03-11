@@ -21,7 +21,7 @@ use sqlness::{ConfigBuilder, Runner};
 use crate::cmd::bare::ServerAddr;
 use crate::env::bare::{StoreConfig, WalConfig};
 use crate::env::compat::Env;
-use crate::interceptors::{since, till};
+use crate::interceptors::version as version_interceptor;
 use crate::version::Version;
 use crate::{protocol_interceptor, util};
 
@@ -118,12 +118,10 @@ impl CompatibilityRunner {
             Arc::new(protocol_interceptor::ProtocolInterceptorFactory),
         );
         interceptor_registry.register(
-            since::PREFIX,
-            Arc::new(since::SinceInterceptorFactory::new(version.clone())),
-        );
-        interceptor_registry.register(
-            till::PREFIX,
-            Arc::new(till::TillInterceptorFactory::new(version.clone())),
+            version_interceptor::PREFIX,
+            Arc::new(version_interceptor::VersionInterceptorFactory::new(
+                version.clone(),
+            )),
         );
 
         let env_filter = Self::env_filter(mode_filter);

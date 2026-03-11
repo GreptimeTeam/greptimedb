@@ -36,12 +36,16 @@ The compat command runs cases in three phases:
 
 ## Case markers
 
-Compatibility cases can use sqlness markers:
+Compatibility cases can use sqlness marker:
 
-- `-- SQLNESS SINCE <version>`
-- `-- SQLNESS TILL <version>`
+- `-- SQLNESS VERSION <expression>`
 
-For `since`/`till` skips, runner rewrites the statement before execution to avoid running skipped SQL.
+Examples:
+
+- `-- SQLNESS VERSION version >= 0.15.0`
+- `-- SQLNESS VERSION version > 1.0.0 AND version < 1.1.0`
+
+For `VERSION` skips, runner rewrites the statement before execution to avoid running skipped SQL.
 
 ## Filter behavior
 
