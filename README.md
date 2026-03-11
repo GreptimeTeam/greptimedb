@@ -15,7 +15,7 @@ replacing Prometheus, Loki, and Elasticsearch</h2>
 <h3 align="center">
   <a href="https://docs.greptime.com/user-guide/overview/">User Guide</a> |
   <a href="https://greptimedb.rs/">API Docs</a> |
-  <a href="https://github.com/GreptimeTeam/greptimedb/issues/5446">Roadmap 2025</a>
+  <a href="https://github.com/GreptimeTeam/greptimedb/issues/7685">Roadmap 2026</a>
 </h3>
 
 <a href="https://github.com/GreptimeTeam/greptimedb/releases/latest">
