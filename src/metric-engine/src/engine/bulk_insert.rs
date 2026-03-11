@@ -220,6 +220,8 @@ fn record_batch_to_rows(
             column_name: field.name().clone(),
             datatype: data_type_wrapper.datatype() as i32,
             semantic_type: metadata.semantic_type as i32,
+            // Metric engine logical columns are constrained to: String/Float64/timestamp types
+            // so extension-backed logical types are not expected here.
             datatype_extension: None,
             options: None,
         });
