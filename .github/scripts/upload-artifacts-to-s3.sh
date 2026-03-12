@@ -13,7 +13,7 @@ function check_vars() {
   for var in VERSION ARTIFACTS_DIR; do
     if [ -z "${!var}" ]; then
       echo "$var is not set or empty."
-      echo "Usage: $0 <artifacts-dir> <version> <aws-s3-bucket>"
+      echo "Usage: $0 <artifacts-dir> <version>"
       exit 1
     fi
   done
