@@ -1,0 +1,126 @@
+CREATE TABLE sensor_readings (
+    `value` DOUBLE,
+    ts TIMESTAMP TIME INDEX,
+    sensor STRING,
+    loc STRING,
+    PRIMARY KEY (sensor, loc)
+);
+
+Affected Rows: 0
+
+CREATE TABLE sensor_readings_avg (
+    `value` DOUBLE,
+    ts TIMESTAMP TIME INDEX,
+    sensor STRING,
+    PRIMARY KEY (sensor)
+);
+
+Affected Rows: 0
+
+INSERT INTO sensor_readings VALUES
+    (20, now() - '30s'::interval, 'test', 'A');
+
+Affected Rows: 1
+
+-- SQLNESS REPLACE (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}) TS
+TQL EVAL (now() - '1m'::interval, now(), '1m')
+avg by(sensor) (sensor_readings) AS value;
+
++-------+--------+---------------------+
+| value | sensor | ts                  |
++-------+--------+---------------------+
+| 20.0  | test   | TS |
++-------+--------+---------------------+
+
+-- SQLNESS REPLACE (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}) TS
+TQL EVAL (now() - '1m'::interval, now(), '1m') (sum by(sensor) (sensor_readings) / count by(sensor) (sensor_readings)) AS value;
+
++-------+--------+---------------------+
+| value | sensor | ts                  |
++-------+--------+---------------------+
+| 20.0  | test   | TS |
++-------+--------+---------------------+
+
+CREATE FLOW sensor_readings_avg_flow
+SINK TO sensor_readings_avg
+EVAL INTERVAL '1m' AS
+TQL EVAL (now() - '1m'::interval, now(), '1m')
+avg by(sensor) (sensor_readings) AS value;
+
+Affected Rows: 0
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('sensor_readings_avg_flow');
+
++----------------------------------------------+
+| ADMIN FLUSH_FLOW('sensor_readings_avg_flow') |
++----------------------------------------------+
+|  FLOW_FLUSHED  |
++----------------------------------------------+
+
+-- SQLNESS REPLACE (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}) TS
+SELECT * FROM sensor_readings_avg ORDER BY ts DESC LIMIT 1;
+
++-------+---------------------+--------+
+| value | ts                  | sensor |
++-------+---------------------+--------+
+| 20.0  | TS | test   |
++-------+---------------------+--------+
+
+DROP FLOW sensor_readings_avg_flow;
+
+Affected Rows: 0
+
+-- SQLNESS SLEEP 1s
+INSERT INTO sensor_readings VALUES
+    (30, now() - '40s'::interval, 'test', 'B');
+
+Affected Rows: 1
+
+-- SQLNESS REPLACE (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}) TS
+TQL EVAL (now() - '1m'::interval, now(), '1m')
+avg by(sensor) (sensor_readings) AS value;
+
++-------+--------+---------------------+
+| value | sensor | ts                  |
++-------+--------+---------------------+
+| 25.0  | test   | TS |
++-------+--------+---------------------+
+
+CREATE FLOW sensor_readings_avg_flow
+SINK TO sensor_readings_avg
+EVAL INTERVAL '1m' AS
+TQL EVAL (now() - '1m'::interval, now(), '1m') (sum by(sensor) (sensor_readings) / count by(sensor) (sensor_readings)) AS value;
+
+Affected Rows: 0
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('sensor_readings_avg_flow');
+
++----------------------------------------------+
+| ADMIN FLUSH_FLOW('sensor_readings_avg_flow') |
++----------------------------------------------+
+|  FLOW_FLUSHED  |
++----------------------------------------------+
+
+-- SQLNESS REPLACE (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}) TS
+SELECT * FROM sensor_readings_avg ORDER BY ts DESC LIMIT 1;
+
++-------+---------------------+--------+
+| value | ts                  | sensor |
++-------+---------------------+--------+
+| 25.0  | TS | test   |
++-------+---------------------+--------+
+
+DROP FLOW sensor_readings_avg_flow;
+
+Affected Rows: 0
+
+DROP TABLE sensor_readings_avg;
+
+Affected Rows: 0
+
+DROP TABLE sensor_readings;
+
+Affected Rows: 0
+
