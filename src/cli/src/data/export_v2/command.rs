@@ -31,7 +31,8 @@ use crate::data::export_v2::error::{
 };
 use crate::data::export_v2::extractor::SchemaExtractor;
 use crate::data::export_v2::manifest::{DataFormat, MANIFEST_VERSION, Manifest, TimeRange};
-use crate::data::export_v2::schema::{DDL_DIR, SCHEMA_DIR, SchemaSnapshot};
+use crate::data::export_v2::schema::SchemaSnapshot;
+use crate::data::path::ddl_path_for_schema;
 use crate::data::snapshot_storage::{OpenDalStorage, SnapshotStorage, validate_uri};
 use crate::data::sql::{escape_sql_identifier, escape_sql_literal};
 use crate::database::{DatabaseClient, parse_proxy_opts};
@@ -408,10 +409,6 @@ impl ExportCreate {
     }
 }
 
-fn ddl_path_for_schema(schema: &str) -> String {
-    format!("{}/{}/{}.sql", SCHEMA_DIR, DDL_DIR, schema)
-}
-
 fn build_schema_ddl(
     schema: &str,
     create_database: String,
@@ -438,10 +435,15 @@ fn build_schema_ddl(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data::path::ddl_path_for_schema;
 
     #[test]
     fn test_ddl_path_for_schema() {
         assert_eq!(ddl_path_for_schema("public"), "schema/ddl/public.sql");
+        assert_eq!(
+            ddl_path_for_schema("../evil"),
+            "schema/ddl/%2E%2E%2Fevil.sql"
+        );
     }
 
     #[test]

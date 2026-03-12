@@ -30,6 +30,7 @@ use crate::data::import_v2::error::{
     ExportSnafu, ManifestVersionMismatchSnafu, Result, SchemaNotInSnapshotSnafu,
 };
 use crate::data::import_v2::executor::{DdlExecutor, DdlStatement};
+use crate::data::path::ddl_path_for_schema;
 use crate::data::snapshot_storage::{OpenDalStorage, SnapshotStorage, validate_uri};
 use crate::database::{DatabaseClient, parse_proxy_opts};
 
@@ -249,10 +250,6 @@ impl Import {
 
         Ok(statements)
     }
-}
-
-fn ddl_path_for_schema(schema: &str) -> String {
-    format!("schema/ddl/{}.sql", schema)
 }
 
 fn parse_ddl_statements(content: &str) -> Vec<String> {

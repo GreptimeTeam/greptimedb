@@ -16,6 +16,7 @@ mod export;
 pub mod export_v2;
 mod import;
 pub mod import_v2;
+pub(crate) mod path;
 pub mod snapshot_storage;
 pub(crate) mod sql;
 mod storage_export;
