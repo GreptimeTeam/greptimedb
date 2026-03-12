@@ -1486,26 +1486,29 @@ pub(crate) fn build_scan_fingerprint(input: &ScanInput) -> Option<ScanRequestFin
     filters.sort_unstable();
     time_filters.sort_unstable();
 
-    Some(ScanRequestFingerprint {
-        read_column_ids: input.read_column_ids.clone(),
-        read_column_types: input
-            .read_column_ids
-            .iter()
-            .map(|id| {
-                metadata
-                    .column_by_id(*id)
-                    .map(|col| col.column_schema.data_type.clone())
-            })
-            .collect(),
-        filters,
-        time_filters,
-        series_row_selector: input.series_row_selector,
-        distribution: input.distribution,
-        append_mode: input.append_mode,
-        filter_deleted: input.filter_deleted,
-        merge_mode: input.merge_mode,
-        partition_expr_version: metadata.partition_expr_version,
-    })
+    Some(
+        crate::read::range_cache::ScanRequestFingerprintBuilder {
+            read_column_ids: input.read_column_ids.clone(),
+            read_column_types: input
+                .read_column_ids
+                .iter()
+                .map(|id| {
+                    metadata
+                        .column_by_id(*id)
+                        .map(|col| col.column_schema.data_type.clone())
+                })
+                .collect(),
+            filters,
+            time_filters,
+            series_row_selector: input.series_row_selector,
+            distribution: input.distribution,
+            append_mode: input.append_mode,
+            filter_deleted: input.filter_deleted,
+            merge_mode: input.merge_mode,
+            partition_expr_version: metadata.partition_expr_version,
+        }
+        .build(),
+    )
 }
 
 /// Context shared by different streams from a scanner.
@@ -2052,7 +2055,7 @@ mod tests {
 
         let fingerprint = build_scan_fingerprint(&input).unwrap();
 
-        assert_eq!(input.read_column_ids, fingerprint.read_column_ids);
+        assert_eq!(input.read_column_ids, fingerprint.read_column_ids());
         assert_eq!(
             vec![
                 metadata
@@ -2065,18 +2068,18 @@ mod tests {
                     .column_by_id(3)
                     .map(|col| col.column_schema.data_type.clone()),
             ],
-            fingerprint.read_column_types
+            fingerprint.read_column_types()
         );
         assert_eq!(
             vec![
                 col("k0").eq(lit("foo")).to_string(),
                 col("v0").gt(lit(1)).to_string()
             ],
-            fingerprint.filters
+            fingerprint.filters()
         );
         assert_eq!(
-            vec![col("ts").gt_eq(lit(1000)).to_string()],
-            fingerprint.time_filters
+            [col("ts").gt_eq(lit(1000)).to_string()].as_slice(),
+            fingerprint.time_filters()
         );
         assert_eq!(
             Some(TimeSeriesDistribution::PerSeries),
@@ -2148,7 +2151,7 @@ mod tests {
             metadata
                 .column_by_id(3)
                 .map(|col| col.column_schema.data_type.clone()),
-            fingerprint.read_column_types.get(2).cloned().unwrap()
+            fingerprint.read_column_types().get(2).cloned().unwrap()
         );
         assert_ne!(0, fingerprint.partition_expr_version);
     }
