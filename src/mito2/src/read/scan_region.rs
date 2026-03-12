@@ -1424,6 +1424,7 @@ fn pre_filter_mode(append_mode: bool, merge_mode: MergeMode) -> PreFilterMode {
 pub(crate) fn build_scan_fingerprint(input: &ScanInput) -> Option<ScanRequestFingerprint> {
     let eligible = input.flat_format
         && !input.compaction
+        && !input.files.is_empty()
         && matches!(input.cache_strategy, CacheStrategy::EnableAll(_));
 
     if !eligible {
@@ -1471,6 +1472,7 @@ pub(crate) fn build_scan_fingerprint(input: &ScanInput) -> Option<ScanRequestFin
     }
 
     if !has_tag_filter {
+        // We only cache requests that have tag filters to avoid caching all series.
         return None;
     }
 
@@ -1898,6 +1900,10 @@ mod tests {
         let env = SchedulerEnv::new().await;
         let mapper = ProjectionMapper::new(&metadata, [0, 2, 3].into_iter(), true).unwrap();
         let predicate = PredicateGroup::new(metadata.as_ref(), &filters).unwrap();
+        let file = FileHandle::new(
+            crate::sst::file::FileMeta::default(),
+            Arc::new(crate::sst::file_purger::NoopFilePurger),
+        );
 
         ScanInput::new(env.access_layer.clone(), mapper)
             .with_predicate(predicate)
@@ -1907,6 +1913,7 @@ mod tests {
                     .build(),
             )))
             .with_flat_format(true)
+            .with_files(vec![file])
     }
 
     #[tokio::test]
@@ -2115,10 +2122,14 @@ mod tests {
             .with_flat_format(false);
         assert!(build_scan_fingerprint(&non_flat).is_none());
 
-        let compaction = new_scan_input(metadata, filters)
+        let compaction = new_scan_input(metadata.clone(), filters.clone())
             .await
             .with_compaction(true);
         assert!(build_scan_fingerprint(&compaction).is_none());
+
+        // No files to read.
+        let no_files = new_scan_input(metadata, filters).await.with_files(vec![]);
+        assert!(build_scan_fingerprint(&no_files).is_none());
     }
 
     #[tokio::test]
