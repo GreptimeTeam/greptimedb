@@ -22,7 +22,6 @@ use std::time::Instant;
 
 use common_telemetry::{debug, error, info};
 use datatypes::arrow::datatypes::SchemaRef;
-use either::Either;
 use partition::expr::PartitionExpr;
 use smallvec::{SmallVec, smallvec};
 use snafu::ResultExt;
@@ -46,9 +45,9 @@ use crate::metrics::{
     FLUSH_BYTES_TOTAL, FLUSH_ELAPSED, FLUSH_FAILURE_TOTAL, FLUSH_FILE_TOTAL, FLUSH_REQUESTS_TOTAL,
     INFLIGHT_FLUSH_COUNT,
 };
+use crate::read::FlatSource;
 use crate::read::flat_dedup::{FlatDedupIterator, FlatLastNonNull, FlatLastRow};
 use crate::read::flat_merge::FlatMergeIterator;
-use crate::read::{FlatSource, Source};
 use crate::region::options::{IndexOptions, MergeMode, RegionOptions};
 use crate::region::version::{VersionControlData, VersionControlRef, VersionRef};
 use crate::region::{ManifestContextRef, RegionLeaderState, RegionRoleState, parse_partition_expr};
@@ -555,7 +554,6 @@ impl RegionFlushTask {
         let mut tasks = Vec::with_capacity(flat_sources.encoded.len() + flat_sources.sources.len());
         let num_encoded = flat_sources.encoded.len();
         for (source, max_sequence) in flat_sources.sources {
-            let source = Either::Right(source);
             let write_request = self.new_write_request(version, max_sequence, source);
             let access_layer = self.access_layer.clone();
             let write_opts = write_opts.clone();
@@ -626,7 +624,7 @@ impl RegionFlushTask {
         &self,
         version: &VersionRef,
         max_sequence: u64,
-        source: Either<Source, FlatSource>,
+        source: FlatSource,
     ) -> SstWriteRequest {
         let flat_format = version
             .options

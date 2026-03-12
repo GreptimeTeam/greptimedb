@@ -1227,7 +1227,9 @@ mod tests {
     use crate::sst::parquet::WriteOptions;
     use crate::test_util::memtable_util::EmptyMemtableBuilder;
     use crate::test_util::scheduler_util::SchedulerEnv;
-    use crate::test_util::sst_util::{new_batch_by_range, new_source, sst_region_metadata};
+    use crate::test_util::sst_util::{
+        new_flat_source_from_record_batches, new_record_batch_by_range, sst_region_metadata,
+    };
 
     struct MetaConfig {
         with_inverted: bool,
@@ -1358,17 +1360,17 @@ mod tests {
         env: &SchedulerEnv,
         build_mode: IndexBuildMode,
     ) -> SstInfo {
-        let source = new_source(&[
-            new_batch_by_range(&["a", "d"], 0, 60),
-            new_batch_by_range(&["b", "f"], 0, 40),
-            new_batch_by_range(&["b", "h"], 100, 200),
+        let source = new_flat_source_from_record_batches(vec![
+            new_record_batch_by_range(&["a", "d"], 0, 60),
+            new_record_batch_by_range(&["b", "f"], 0, 40),
+            new_record_batch_by_range(&["b", "h"], 100, 200),
         ]);
         let mut index_config = MitoConfig::default().index;
         index_config.build_mode = build_mode;
         let write_request = SstWriteRequest {
             op_type: OperationType::Flush,
             metadata: metadata.clone(),
-            source: either::Left(source),
+            source,
             storage: None,
             max_sequence: None,
             sst_write_format: Default::default(),

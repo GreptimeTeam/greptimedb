@@ -17,7 +17,6 @@ use std::time::{Duration, Instant};
 
 use async_stream::try_stream;
 use common_time::Timestamp;
-use either::Either;
 use futures::{Stream, TryStreamExt};
 use object_store::services::Fs;
 use object_store::util::{join_dir, with_instrument_layers};
@@ -37,7 +36,7 @@ use crate::error::{
     CleanDirSnafu, DeleteIndexSnafu, DeleteIndexesSnafu, DeleteSstsSnafu, OpenDalSnafu, Result,
 };
 use crate::metrics::{COMPACTION_STAGE_ELAPSED, FLUSH_ELAPSED};
-use crate::read::{FlatSource, Source};
+use crate::read::FlatSource;
 use crate::region::options::IndexOptions;
 use crate::sst::file::{FileHandle, RegionFileId, RegionIndexId};
 use crate::sst::index::IndexerBuilderImpl;
@@ -391,28 +390,21 @@ impl AccessLayer {
             )
             .await
             .with_file_cleaner(cleaner);
-            match request.source {
-                Either::Left(source) => {
+            match request.sst_write_format {
+                FormatType::PrimaryKey => {
                     writer
-                        .write_all(source, request.max_sequence, write_opts)
+                        .write_all_flat_as_primary_key(
+                            request.source,
+                            request.max_sequence,
+                            write_opts,
+                        )
                         .await?
                 }
-                Either::Right(flat_source) => match request.sst_write_format {
-                    FormatType::PrimaryKey => {
-                        writer
-                            .write_all_flat_as_primary_key(
-                                flat_source,
-                                request.max_sequence,
-                                write_opts,
-                            )
-                            .await?
-                    }
-                    FormatType::Flat => {
-                        writer
-                            .write_all_flat(flat_source, request.max_sequence, write_opts)
-                            .await?
-                    }
-                },
+                FormatType::Flat => {
+                    writer
+                        .write_all_flat(request.source, request.max_sequence, write_opts)
+                        .await?
+                }
             }
         };
 
@@ -531,7 +523,7 @@ pub enum OperationType {
 pub struct SstWriteRequest {
     pub op_type: OperationType,
     pub metadata: RegionMetadataRef,
-    pub source: Either<Source, FlatSource>,
+    pub source: FlatSource,
     pub cache_manager: CacheManagerRef,
     #[allow(dead_code)]
     pub storage: Option<String>,

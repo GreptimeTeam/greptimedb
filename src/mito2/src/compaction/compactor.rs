@@ -357,7 +357,7 @@ impl DefaultCompactor {
             merge_mode,
         };
         let reader = builder.build_flat_sst_reader().await?;
-        let source = Either::Right(FlatSource::Stream(reader));
+        let source = FlatSource::Stream(reader);
         let mut metrics = Metrics::new(WriteType::Compaction);
         let region_metadata = compaction_region.region_metadata.clone();
         let sst_infos = compaction_region

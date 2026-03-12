@@ -20,7 +20,6 @@ use clap::Parser;
 use colored::Colorize;
 use datanode::config::RegionEngineConfig;
 use datanode::store;
-use either::Either;
 use futures::stream;
 use mito2::access_layer::{
     AccessLayer, AccessLayerRef, Metrics, OperationType, SstWriteRequest, WriteType,
@@ -248,7 +247,7 @@ impl ObjbenchCommand {
         let write_req = SstWriteRequest {
             op_type: OperationType::Flush,
             metadata: region_meta,
-            source: Either::Right(FlatSource::Stream(reader_stream)),
+            source: FlatSource::Stream(reader_stream),
             cache_manager,
             storage: None,
             max_sequence: None,

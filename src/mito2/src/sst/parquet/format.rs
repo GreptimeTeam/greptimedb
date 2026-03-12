@@ -34,12 +34,12 @@ use api::v1::SemanticType;
 use common_time::Timestamp;
 use datafusion_common::ScalarValue;
 use datatypes::arrow::array::{
-    ArrayRef, BinaryArray, BinaryDictionaryBuilder, DictionaryArray, UInt32Array, UInt64Array,
+    ArrayRef, BinaryArray, BinaryDictionaryBuilder, DictionaryArray, UInt64Array,
 };
 use datatypes::arrow::datatypes::{SchemaRef, UInt32Type};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::DataType;
-use datatypes::vectors::{Helper, Vector};
+use datatypes::vectors::Helper;
 use mito_codec::row_converter::{
     CompositeValues, PrimaryKeyCodec, SortField, build_primary_key_codec,
     build_primary_key_codec_with_fields,
@@ -51,8 +51,7 @@ use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
 use store_api::storage::{ColumnId, SequenceNumber};
 
 use crate::error::{
-    ConvertVectorSnafu, DecodeSnafu, InvalidBatchSnafu, InvalidRecordBatchSnafu,
-    NewRecordBatchSnafu, Result,
+    ConvertVectorSnafu, DecodeSnafu, InvalidRecordBatchSnafu, NewRecordBatchSnafu, Result,
 };
 use crate::read::{Batch, BatchBuilder, BatchColumn};
 use crate::sst::file::{FileMeta, FileTimeRange};
@@ -73,7 +72,6 @@ pub(crate) const INTERNAL_COLUMN_NUM: usize = 3;
 
 /// Helper for writing the SST format with primary key.
 pub(crate) struct PrimaryKeyWriteFormat {
-    metadata: RegionMetadataRef,
     /// SST file schema.
     arrow_schema: SchemaRef,
     override_sequence: Option<SequenceNumber>,
@@ -84,7 +82,6 @@ impl PrimaryKeyWriteFormat {
     pub(crate) fn new(metadata: RegionMetadataRef) -> PrimaryKeyWriteFormat {
         let arrow_schema = to_sst_arrow_schema(&metadata);
         PrimaryKeyWriteFormat {
-            metadata,
             arrow_schema,
             override_sequence: None,
         }
@@ -102,44 +99,6 @@ impl PrimaryKeyWriteFormat {
     /// Gets the arrow schema to store in parquet.
     pub(crate) fn arrow_schema(&self) -> &SchemaRef {
         &self.arrow_schema
-    }
-
-    /// Convert `batch` to a arrow record batch to store in parquet.
-    pub(crate) fn convert_batch(&self, batch: &Batch) -> Result<RecordBatch> {
-        debug_assert_eq!(
-            batch.fields().len() + FIXED_POS_COLUMN_NUM,
-            self.arrow_schema.fields().len()
-        );
-        let mut columns = Vec::with_capacity(batch.fields().len() + FIXED_POS_COLUMN_NUM);
-        // Store all fields first.
-        for (column, column_metadata) in batch.fields().iter().zip(self.metadata.field_columns()) {
-            ensure!(
-                column.column_id == column_metadata.column_id,
-                InvalidBatchSnafu {
-                    reason: format!(
-                        "Batch has column {} but metadata has column {}",
-                        column.column_id, column_metadata.column_id
-                    ),
-                }
-            );
-
-            columns.push(column.data.to_arrow_array());
-        }
-        // Add time index column.
-        columns.push(batch.timestamps().to_arrow_array());
-        // Add internal columns: primary key, sequences, op types.
-        columns.push(new_primary_key_array(batch.primary_key(), batch.num_rows()));
-
-        if let Some(override_sequence) = self.override_sequence {
-            let sequence_array =
-                Arc::new(UInt64Array::from(vec![override_sequence; batch.num_rows()]));
-            columns.push(sequence_array);
-        } else {
-            columns.push(batch.sequences().to_arrow_array());
-        }
-        columns.push(batch.op_types().to_arrow_array());
-
-        RecordBatch::try_new(self.arrow_schema.clone(), columns).context(NewRecordBatchSnafu)
     }
 
     /// Convert a flat `RecordBatch` to primary-key format, retaining only
@@ -949,15 +908,6 @@ pub(crate) fn primary_key_offsets(pk_dict_array: &PrimaryKeyArray) -> Result<Vec
     Ok(offsets)
 }
 
-/// Creates a new array for specific `primary_key`.
-fn new_primary_key_array(primary_key: &[u8], num_rows: usize) -> ArrayRef {
-    let values = Arc::new(BinaryArray::from_iter_values([primary_key]));
-    let keys = UInt32Array::from_value(0, num_rows);
-
-    // Safety: The key index is valid.
-    Arc::new(DictionaryArray::new(keys, values))
-}
-
 /// Gets the min/max time index of the row group from the parquet meta.
 /// It assumes the parquet is created by the mito engine.
 pub(crate) fn parquet_row_group_time_range(
@@ -1040,7 +990,7 @@ mod tests {
 
     use api::v1::OpType;
     use datatypes::arrow::array::{
-        Int64Array, StringArray, TimestampMillisecondArray, UInt8Array, UInt64Array,
+        Int64Array, StringArray, TimestampMillisecondArray, UInt8Array, UInt32Array, UInt64Array,
     };
     use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field, Schema, TimeUnit};
     use datatypes::prelude::ConcreteDataType;
@@ -1168,13 +1118,6 @@ mod tests {
         assert_eq!(&build_test_arrow_schema(), write_format.arrow_schema());
     }
 
-    #[test]
-    fn test_new_primary_key_array() {
-        let array = new_primary_key_array(b"test", 3);
-        let expect = build_test_pk_array(&[(b"test".to_vec(), 3)]) as ArrayRef;
-        assert_eq!(&expect, &array);
-    }
-
     fn build_test_pk_array(pk_row_nums: &[(Vec<u8>, usize)]) -> Arc<PrimaryKeyArray> {
         let values = Arc::new(BinaryArray::from_iter_values(
             pk_row_nums.iter().map(|v| &v.0),
@@ -1185,49 +1128,6 @@ mod tests {
         }
         let keys = UInt32Array::from(keys);
         Arc::new(DictionaryArray::new(keys, values))
-    }
-
-    #[test]
-    fn test_convert_batch() {
-        let metadata = build_test_region_metadata();
-        let write_format = PrimaryKeyWriteFormat::new(metadata);
-
-        let num_rows = 4;
-        let batch = new_batch(b"test", 1, 2, num_rows);
-        let columns: Vec<ArrayRef> = vec![
-            Arc::new(Int64Array::from(vec![2; num_rows])), // field1
-            Arc::new(Int64Array::from(vec![3; num_rows])), // field0
-            Arc::new(TimestampMillisecondArray::from(vec![1, 2, 3, 4])), // ts
-            build_test_pk_array(&[(b"test".to_vec(), num_rows)]), // primary key
-            Arc::new(UInt64Array::from(vec![TEST_SEQUENCE; num_rows])), // sequence
-            Arc::new(UInt8Array::from(vec![TEST_OP_TYPE; num_rows])), // op type
-        ];
-        let expect_record = RecordBatch::try_new(build_test_arrow_schema(), columns).unwrap();
-
-        let actual = write_format.convert_batch(&batch).unwrap();
-        assert_eq!(expect_record, actual);
-    }
-
-    #[test]
-    fn test_convert_batch_with_override_sequence() {
-        let metadata = build_test_region_metadata();
-        let write_format =
-            PrimaryKeyWriteFormat::new(metadata).with_override_sequence(Some(415411));
-
-        let num_rows = 4;
-        let batch = new_batch(b"test", 1, 2, num_rows);
-        let columns: Vec<ArrayRef> = vec![
-            Arc::new(Int64Array::from(vec![2; num_rows])), // field1
-            Arc::new(Int64Array::from(vec![3; num_rows])), // field0
-            Arc::new(TimestampMillisecondArray::from(vec![1, 2, 3, 4])), // ts
-            build_test_pk_array(&[(b"test".to_vec(), num_rows)]), // primary key
-            Arc::new(UInt64Array::from(vec![415411; num_rows])), // sequence
-            Arc::new(UInt8Array::from(vec![TEST_OP_TYPE; num_rows])), // op type
-        ];
-        let expect_record = RecordBatch::try_new(build_test_arrow_schema(), columns).unwrap();
-
-        let actual = write_format.convert_batch(&batch).unwrap();
-        assert_eq!(expect_record, actual);
     }
 
     #[test]
