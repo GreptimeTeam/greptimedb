@@ -14,8 +14,10 @@
 
 use std::assert_matches::assert_matches;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use api::v1::flow::flow_request::Body as PbFlowRequest;
+use api::v1::flow::{DropRequest, FlowRequest, FlowResponse};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_procedure::Status;
 use common_procedure_test::execute_procedure_until_done;
@@ -30,6 +32,36 @@ use crate::key::FlowId;
 use crate::key::table_route::TableRouteValue;
 use crate::rpc::ddl::{CreateFlowTask, FlowQueryContext, QueryContext};
 use crate::test_util::{MockFlownodeManager, new_ddl_context};
+
+#[derive(Clone, Default)]
+struct RecordingDropFlownodeHandler {
+    drop_requests: Arc<Mutex<Vec<DropRequest>>>,
+}
+
+#[async_trait::async_trait]
+impl crate::test_util::MockFlownodeHandler for RecordingDropFlownodeHandler {
+    async fn handle(
+        &self,
+        _peer: &crate::peer::Peer,
+        request: FlowRequest,
+    ) -> crate::error::Result<FlowResponse> {
+        if let Some(PbFlowRequest::Drop(drop_req)) = request.body {
+            self.drop_requests.lock().unwrap().push(drop_req);
+        }
+        Ok(FlowResponse {
+            affected_rows: 0,
+            ..Default::default()
+        })
+    }
+
+    async fn handle_inserts(
+        &self,
+        _peer: &crate::peer::Peer,
+        _requests: api::v1::region::InsertRequests,
+    ) -> crate::error::Result<FlowResponse> {
+        unreachable!()
+    }
+}
 
 fn test_query_context() -> QueryContext {
     QueryContext {
@@ -242,6 +274,74 @@ async fn test_replace_pending_flow_activates_with_allocated_peers() {
         .await
         .unwrap();
     assert!(!routes.is_empty());
+}
+
+#[tokio::test]
+async fn test_replace_active_flow_to_pending_drops_old_flows() {
+    let existing_source_table = TableName::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        "replace_active_source_table",
+    );
+    let missing_source_table = TableName::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        "replace_missing_source_table",
+    );
+    let sink_table_name = TableName::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        "replace_active_sink_table",
+    );
+
+    let handler = RecordingDropFlownodeHandler::default();
+    let node_manager = Arc::new(MockFlownodeManager::new(handler.clone()));
+    let ddl_context = new_ddl_context(node_manager);
+
+    let create_table_task = test_create_table_task("replace_active_source_table", 2026);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            create_table_task.table_info.clone(),
+            TableRouteValue::physical(vec![]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let flow_id = create_test_flow(
+        &ddl_context,
+        "replace_active_flow_to_pending",
+        vec![existing_source_table],
+        sink_table_name.clone(),
+    )
+    .await;
+
+    let mut replace_task = test_create_flow_task(
+        "replace_active_flow_to_pending",
+        vec![missing_source_table],
+        sink_table_name,
+        false,
+    );
+    replace_task.or_replace = true;
+    let query_ctx = test_query_context();
+    let mut procedure = CreateFlowProcedure::new(replace_task, query_ctx, ddl_context.clone());
+    let output = execute_procedure_until_done(&mut procedure).await.unwrap();
+    let replaced_flow_id = *output.downcast_ref::<FlowId>().unwrap();
+    assert_eq!(replaced_flow_id, flow_id);
+
+    let replaced_flow = ddl_context
+        .flow_metadata_manager
+        .flow_info_manager()
+        .get(flow_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(replaced_flow.is_pending());
+
+    let drop_requests = handler.drop_requests.lock().unwrap();
+    assert!(!drop_requests.is_empty());
+    assert_eq!(drop_requests[0].flow_id.as_ref().unwrap().id, flow_id);
 }
 
 #[tokio::test]
