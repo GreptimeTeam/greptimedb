@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Cache key types for range scan outputs.
+//! Utilities for the partition range scan result cache.
 
 use std::mem;
 use std::sync::Arc;
@@ -26,7 +26,12 @@ use store_api::storage::{
 use crate::memtable::record_batch_estimated_size;
 use crate::region::options::MergeMode;
 
-/// Fingerprint of request-relevant scan options.
+/// Fingerprint of the scan request fields that affect partition range cache reuse.
+///
+/// It records a normalized view of the projected columns and filters, plus
+/// scan options that can change the returned rows. Schema-dependent metadata
+/// and the partition expression version are included so cached results are not
+/// reused across incompatible schema or partitioning changes.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ScanRequestFingerprint {
     /// Projection and filters without the time index and partition exprs.
@@ -139,19 +144,24 @@ impl ScanRequestFingerprint {
     }
 
     pub(crate) fn estimated_size(&self) -> usize {
-        self.inner.read_column_ids.capacity() * mem::size_of::<ColumnId>()
+        mem::size_of::<SharedScanRequestFingerprint>()
+            + self.inner.read_column_ids.capacity() * mem::size_of::<ColumnId>()
             + self.inner.read_column_types.capacity() * mem::size_of::<Option<ConcreteDataType>>()
+            + self.inner.filters.capacity() * mem::size_of::<String>()
             + self
                 .inner
                 .filters
                 .iter()
                 .map(|filter| filter.capacity())
                 .sum::<usize>()
-            + self
-                .time_filters()
-                .iter()
-                .map(|filter| filter.capacity())
-                .sum::<usize>()
+            + self.time_filters.as_ref().map_or(0, |filters| {
+                mem::size_of::<Vec<String>>()
+                    + filters.capacity() * mem::size_of::<String>()
+                    + filters
+                        .iter()
+                        .map(|filter| filter.capacity())
+                        .sum::<usize>()
+            })
     }
 }
 
