@@ -27,7 +27,12 @@ static GREPTIME_TIMESTAMP_CELL: OnceCell<String> = OnceCell::new();
 static GREPTIME_VALUE_CELL: OnceCell<String> = OnceCell::new();
 
 pub fn set_default_prefix(prefix: Option<&str>) -> Result<()> {
-    match prefix {
+    // Strip surrounding double quotes as a defensive measure against upstream
+    // sources (scripts, CI, template engines, incorrect shell escaping) that may
+    // pass literal `""` as the value instead of an empty string.
+    let stripped = prefix.map(|s| s.trim_matches('"'));
+
+    match stripped {
         None => {
             // use default greptime prefix
             GREPTIME_TIMESTAMP_CELL.get_or_init(|| GREPTIME_TIMESTAMP.to_string());
@@ -70,3 +75,45 @@ const GREPTIME_VALUE: &str = "greptime_value";
 pub const GREPTIME_COUNT: &str = "greptime_count";
 /// Default physical table name
 pub const GREPTIME_PHYSICAL_TABLE: &str = "greptime_physical_table";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Each test runs in a separate process via `cargo nextest`, so OnceCell
+    // state does not leak between tests.
+
+    #[test]
+    fn test_set_default_prefix_none() {
+        set_default_prefix(None).unwrap();
+        assert_eq!(greptime_timestamp(), "greptime_timestamp");
+        assert_eq!(greptime_value(), "greptime_value");
+    }
+
+    #[test]
+    fn test_set_default_prefix_empty_string() {
+        set_default_prefix(Some("")).unwrap();
+        assert_eq!(greptime_timestamp(), "timestamp");
+        assert_eq!(greptime_value(), "value");
+    }
+
+    #[test]
+    fn test_set_default_prefix_quoted_empty() {
+        // Handles upstream sources that pass literal `""` instead of an empty string
+        set_default_prefix(Some("\"\"")).unwrap();
+        assert_eq!(greptime_timestamp(), "timestamp");
+        assert_eq!(greptime_value(), "value");
+    }
+
+    #[test]
+    fn test_set_default_prefix_custom() {
+        set_default_prefix(Some("mydb")).unwrap();
+        assert_eq!(greptime_timestamp(), "mydb_timestamp");
+        assert_eq!(greptime_value(), "mydb_value");
+    }
+
+    #[test]
+    fn test_set_default_prefix_invalid() {
+        assert!(set_default_prefix(Some("invalid prefix!")).is_err());
+    }
+}
