@@ -1446,34 +1446,21 @@ pub(crate) fn build_scan_fingerprint(input: &ScanInput) -> Option<ScanRequestFin
         .map(|predicate| predicate.exprs())
         .unwrap_or_default();
 
-    let has_tag_filter = if tag_names.is_empty() {
-        false
-    } else {
-        let mut columns = HashSet::new();
-        exprs.iter().any(|expr| {
-            columns.clear();
-            if expr_to_columns(expr, &mut columns).is_err() {
-                return false;
-            }
-            columns
-                .iter()
-                .any(|col| tag_names.contains(col.name.as_str()))
-        })
-    };
-
-    if !has_tag_filter {
-        return None;
-    }
-
     let mut filters = Vec::new();
     let mut time_filters = Vec::new();
+    let mut has_tag_filter = false;
+    let mut columns = HashSet::new();
 
     for expr in exprs {
-        let mut columns = HashSet::new();
-        let is_time_only = if expr_to_columns(expr, &mut columns).is_err() || columns.is_empty() {
-            false
-        } else {
-            columns.iter().all(|col| col.name == time_index_name)
+        columns.clear();
+        let is_time_only = match expr_to_columns(expr, &mut columns) {
+            Ok(()) if !columns.is_empty() => {
+                has_tag_filter |= columns
+                    .iter()
+                    .any(|col| tag_names.contains(col.name.as_str()));
+                columns.iter().all(|col| col.name == time_index_name)
+            }
+            _ => false,
         };
 
         if is_time_only {
@@ -1481,6 +1468,10 @@ pub(crate) fn build_scan_fingerprint(input: &ScanInput) -> Option<ScanRequestFin
         } else {
             filters.push(expr.to_string());
         }
+    }
+
+    if !has_tag_filter {
+        return None;
     }
 
     filters.sort_unstable();
