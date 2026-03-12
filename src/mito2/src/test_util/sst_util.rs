@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use api::v1::{OpType, SemanticType};
 use common_time::Timestamp;
-use datatypes::arrow::array::{BinaryArray, TimestampMillisecondArray, UInt8Array, UInt64Array};
+use datatypes::arrow::array::{TimestampMillisecondArray, UInt8Array, UInt64Array};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SkippingIndexOptions};
 use datatypes::value::ValueRef;
@@ -244,36 +244,6 @@ pub fn new_batch_with_custom_sequence(
 
 pub fn new_batch_by_range(tags: &[&str], start: usize, end: usize) -> Batch {
     new_batch_with_custom_sequence(tags, start, end, 1000)
-}
-
-pub fn new_batch_with_binary(tags: &[&str], start: usize, end: usize) -> Batch {
-    assert!(end >= start);
-    let pk = new_primary_key(tags);
-    let timestamps: Vec<_> = (start..end).map(|v| v as i64).collect();
-    let sequences = vec![1000; end - start];
-    let op_types = vec![OpType::Put; end - start];
-
-    let field: Vec<_> = (start..end)
-        .map(|_v| "some data".as_bytes().to_vec())
-        .collect();
-
-    let mut builder = BatchBuilder::new(pk);
-    builder
-        .timestamps_array(Arc::new(TimestampMillisecondArray::from_iter_values(
-            timestamps.iter().copied(),
-        )))
-        .unwrap()
-        .sequences_array(Arc::new(UInt64Array::from_iter_values(
-            sequences.iter().copied(),
-        )))
-        .unwrap()
-        .op_types_array(Arc::new(UInt8Array::from_iter_values(
-            op_types.iter().map(|v| *v as u8),
-        )))
-        .unwrap()
-        .push_field_array(1, Arc::new(BinaryArray::from_iter_values(field)))
-        .unwrap();
-    builder.build().unwrap()
 }
 
 /// Creates a new region metadata for testing SSTs with binary datatype.

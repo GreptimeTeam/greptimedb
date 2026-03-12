@@ -138,7 +138,7 @@ mod tests {
     use crate::sst::index::fulltext_index::applier::builder::FulltextIndexApplierBuilder;
     use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
     use crate::sst::index::{IndexBuildType, Indexer, IndexerBuilder, IndexerBuilderImpl};
-    use crate::sst::parquet::format::PrimaryKeyWriteFormat;
+    use crate::sst::parquet::flat_format::FlatWriteFormat;
     use crate::sst::parquet::reader::{ParquetReader, ParquetReaderBuilder, ReaderMetrics};
     use crate::sst::parquet::writer::ParquetWriter;
     use crate::sst::{
@@ -146,10 +146,9 @@ mod tests {
     };
     use crate::test_util::TestEnv;
     use crate::test_util::sst_util::{
-        build_test_binary_test_region_metadata, new_batch_by_range, new_batch_with_binary,
-        new_batch_with_custom_sequence, new_primary_key, new_source, new_sparse_primary_key,
-        sst_file_handle, sst_file_handle_with_file_id, sst_region_metadata,
-        sst_region_metadata_with_encoding,
+        build_test_binary_test_region_metadata, new_batch_by_range, new_batch_with_custom_sequence,
+        new_primary_key, new_source, new_sparse_primary_key, sst_file_handle,
+        sst_file_handle_with_file_id, sst_region_metadata, sst_region_metadata_with_encoding,
     };
 
     const FILE_DIR: &str = "/";
@@ -578,7 +577,7 @@ mod tests {
 
         let writer_props = props_builder.build();
 
-        let write_format = PrimaryKeyWriteFormat::new(metadata);
+        let write_format = FlatWriteFormat::new(metadata, &FlatSchemaOptions::default());
         let fields: Vec<_> = write_format
             .arrow_schema()
             .fields()
@@ -612,9 +611,8 @@ mod tests {
         )
         .unwrap();
 
-        let batch = new_batch_with_binary(&["a"], 0, 60);
-        let arrow_batch = write_format.convert_batch(&batch).unwrap();
-        let arrays: Vec<_> = arrow_batch
+        let batch = new_record_batch_with_binary(&["a"], 0, 60);
+        let arrays: Vec<_> = batch
             .columns()
             .iter()
             .map(|array| {
