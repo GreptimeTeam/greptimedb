@@ -337,14 +337,16 @@ where
             match record_batch {
                 Ok(batch) => {
                     stats.update_flat(&batch)?;
-                    let start = Instant::now();
-                    // safety: self.current_indexer must be set when first batch has been written.
-                    self.current_indexer
-                        .as_mut()
-                        .unwrap()
-                        .update_flat(&batch)
-                        .await;
-                    self.metrics.update_index += start.elapsed();
+                    if matches!(self.index_config.build_mode, IndexBuildMode::Sync) {
+                        let start = Instant::now();
+                        // safety: self.current_indexer must be set when first batch has been written.
+                        self.current_indexer
+                            .as_mut()
+                            .unwrap()
+                            .update_flat(&batch)
+                            .await;
+                        self.metrics.update_index += start.elapsed();
+                    }
                     if let Some(max_file_size) = opts.max_file_size
                         && self.bytes_written.load(Ordering::Relaxed) > max_file_size
                     {
