@@ -30,7 +30,11 @@ pub fn set_default_prefix(prefix: Option<&str>) -> Result<()> {
     // Strip surrounding double quotes as a defensive measure against upstream
     // sources (scripts, CI, template engines, incorrect shell escaping) that may
     // pass literal `""` as the value instead of an empty string.
-    let stripped = prefix.map(|s| s.trim_matches('"'));
+    let stripped = prefix.map(|s| {
+        s.strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .unwrap_or(s)
+    });
 
     match stripped {
         None => {
