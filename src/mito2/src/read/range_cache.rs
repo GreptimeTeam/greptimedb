@@ -122,6 +122,7 @@ impl ScanRequestFingerprint {
         &self.inner.filters
     }
 
+    #[cfg(test)]
     pub(crate) fn time_filters(&self) -> &[String] {
         self.time_filters
             .as_deref()
