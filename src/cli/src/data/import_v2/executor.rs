@@ -20,25 +20,25 @@ use snafu::ResultExt;
 use crate::data::import_v2::error::{DatabaseSnafu, Result};
 use crate::database::DatabaseClient;
 
-/// A DDL statement with an optional fallback schema context.
+/// A DDL statement with an explicit execution schema context.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DdlStatement {
     pub sql: String,
-    pub fallback_schema: Option<String>,
+    pub execution_schema: Option<String>,
 }
 
 impl DdlStatement {
     pub fn new(sql: String) -> Self {
         Self {
             sql,
-            fallback_schema: None,
+            execution_schema: None,
         }
     }
 
-    pub fn with_fallback_schema(sql: String, schema: String) -> Self {
+    pub fn with_execution_schema(sql: String, schema: String) -> Self {
         Self {
             sql,
-            fallback_schema: Some(schema),
+            execution_schema: Some(schema),
         }
     }
 }
@@ -68,9 +68,7 @@ impl<'a> DdlExecutor<'a> {
 
             info!("Executing DDL ({}/{}): {}", i + 1, total, preview);
 
-            let result = if let Some(schema) =
-                execution_schema_for_statement(&stmt.sql, stmt.fallback_schema.as_deref())
-            {
+            let result = if let Some(schema) = stmt.execution_schema.as_deref() {
                 self.client.sql(&stmt.sql, schema).await
             } else {
                 self.client.sql_in_public(&stmt.sql).await
@@ -109,9 +107,7 @@ impl<'a> DdlExecutor<'a> {
 
             info!("Executing DDL ({}/{}): {}", i + 1, total, preview);
 
-            if let Some(schema) =
-                execution_schema_for_statement(&stmt.sql, stmt.fallback_schema.as_deref())
-            {
+            if let Some(schema) = stmt.execution_schema.as_deref() {
                 self.client
                     .sql(&stmt.sql, schema)
                     .await
@@ -126,104 +122,6 @@ impl<'a> DdlExecutor<'a> {
 
         Ok(())
     }
-}
-
-fn extract_schema_from_statement(stmt: &str) -> Option<&str> {
-    if !is_schema_scoped_statement(stmt) {
-        return None;
-    }
-
-    let parts = parse_object_name_parts(stmt)?;
-    match parts.len() {
-        0 | 1 => None,
-        2 => Some(parts[0]),
-        _ => Some(parts[parts.len() - 2]),
-    }
-}
-
-fn parse_object_name_parts(stmt: &str) -> Option<Vec<&str>> {
-    let mut rest = stmt.trim_start();
-    if !starts_with_keyword(rest, "CREATE") {
-        return None;
-    }
-
-    rest = rest.get("CREATE".len()..)?.trim_start();
-    if starts_with_keyword(rest, "TABLE") {
-        rest = rest.get("TABLE".len()..)?.trim_start();
-    } else if starts_with_keyword(rest, "VIEW") {
-        rest = rest.get("VIEW".len()..)?.trim_start();
-    } else {
-        return None;
-    }
-
-    if starts_with_keyword(rest, "IF NOT EXISTS") {
-        rest = rest.get("IF NOT EXISTS".len()..)?.trim_start();
-    }
-
-    let mut parts = Vec::new();
-    loop {
-        rest = rest.trim_start();
-        if rest.is_empty() {
-            break;
-        }
-
-        let (part, after_part) = if let Some(after_quote) = rest.strip_prefix('"') {
-            let end = after_quote.find('"')?;
-            (&after_quote[..end], &after_quote[end + 1..])
-        } else {
-            let end = rest
-                .find(|c: char| c.is_whitespace() || c == '.' || c == '(')
-                .unwrap_or(rest.len());
-            if end == 0 {
-                break;
-            }
-            (&rest[..end], &rest[end..])
-        };
-
-        parts.push(part);
-        rest = after_part.trim_start();
-
-        if let Some(after_dot) = rest.strip_prefix('.') {
-            rest = after_dot;
-            continue;
-        }
-        break;
-    }
-
-    Some(parts)
-}
-
-fn is_schema_scoped_statement(stmt: &str) -> bool {
-    let trimmed = stmt.trim_start();
-    if !starts_with_keyword(trimmed, "CREATE") {
-        return false;
-    }
-
-    let Some(rest) = trimmed.get("CREATE".len()..) else {
-        return false;
-    };
-    let rest = rest.trim_start();
-    starts_with_keyword(rest, "TABLE") || starts_with_keyword(rest, "VIEW")
-}
-
-fn execution_schema_for_statement<'a>(
-    stmt: &'a str,
-    fallback_schema: Option<&'a str>,
-) -> Option<&'a str> {
-    extract_schema_from_statement(stmt).or_else(|| {
-        if is_schema_scoped_statement(stmt) {
-            fallback_schema
-        } else {
-            None
-        }
-    })
-}
-
-fn starts_with_keyword(input: &str, keyword: &str) -> bool {
-    input
-        .get(0..keyword.len())
-        .map(|s| s.eq_ignore_ascii_case(keyword))
-        .unwrap_or(false)
 }
 
 fn preview_sql(sql: &str) -> String {
@@ -283,74 +181,19 @@ mod tests {
     }
 
     #[test]
-    fn test_execution_schema_for_qualified_statement() {
-        let stmt =
-            r#"CREATE TABLE "greptime"."test_db"."metrics" (ts TIMESTAMP TIME INDEX) ENGINE=mito"#;
-        assert_eq!(
-            execution_schema_for_statement(stmt, Some("public")),
-            Some("test_db")
+    fn test_statement_without_execution_schema_uses_public() {
+        let stmt = DdlStatement::new("CREATE DATABASE IF NOT EXISTS test_db".to_string());
+        assert_eq!(stmt.execution_schema, None);
+    }
+
+    #[test]
+    fn test_statement_with_execution_schema_preserves_context() {
+        let stmt = DdlStatement::with_execution_schema(
+            r#"CREATE TABLE IF NOT EXISTS "my""schema"."metrics" (ts TIMESTAMP TIME INDEX)"#
+                .to_string(),
+            r#"my"schema"#.to_string(),
         );
-    }
-
-    #[test]
-    fn test_execution_schema_for_two_part_name() {
-        let stmt = r#"CREATE VIEW "test_db"."metrics_view" AS SELECT * FROM metrics"#;
-        assert_eq!(
-            execution_schema_for_statement(stmt, Some("public")),
-            Some("test_db")
-        );
-    }
-
-    #[test]
-    fn test_execution_schema_for_unqualified_table_uses_fallback() {
-        let stmt = "CREATE TABLE metrics (ts TIMESTAMP TIME INDEX) ENGINE=mito";
-        assert_eq!(
-            execution_schema_for_statement(stmt, Some("test_db")),
-            Some("test_db")
-        );
-    }
-
-    #[test]
-    fn test_execution_schema_for_unqualified_view_uses_fallback() {
-        let stmt = "CREATE VIEW metrics_view AS SELECT * FROM metrics";
-        assert_eq!(
-            execution_schema_for_statement(stmt, Some("test_db")),
-            Some("test_db")
-        );
-    }
-
-    #[test]
-    fn test_execution_schema_for_create_database_ignores_fallback() {
-        let stmt = "CREATE DATABASE test_db";
-        assert_eq!(execution_schema_for_statement(stmt, Some("test_db")), None);
-    }
-
-    #[test]
-    fn test_parse_object_name_parts_unquoted_two_part_name() {
-        let stmt = "CREATE TABLE test_db.metrics (ts TIMESTAMP TIME INDEX)";
-        assert_eq!(
-            parse_object_name_parts(stmt),
-            Some(vec!["test_db", "metrics"])
-        );
-    }
-
-    #[test]
-    fn test_parse_object_name_parts_with_if_not_exists() {
-        let stmt = "CREATE VIEW IF NOT EXISTS test_db.metrics_view AS SELECT * FROM metrics";
-        assert_eq!(
-            parse_object_name_parts(stmt),
-            Some(vec!["test_db", "metrics_view"])
-        );
-    }
-
-    #[test]
-    fn test_parse_object_name_parts_empty_input() {
-        assert_eq!(parse_object_name_parts(""), None);
-    }
-
-    #[test]
-    fn test_parse_object_name_parts_missing_name() {
-        assert_eq!(parse_object_name_parts("CREATE TABLE"), Some(vec![]));
+        assert_eq!(stmt.execution_schema.as_deref(), Some(r#"my"schema"#));
     }
 
     #[test]

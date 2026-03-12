@@ -25,6 +25,7 @@ use crate::data::export_v2::schema::{
     ViewDefinition,
 };
 use crate::data::import_v2::error::{InvalidColumnDefinitionSnafu, Result};
+use crate::data::import_v2::executor::DdlStatement;
 
 /// Generates DDL statements from schema definitions.
 pub struct DdlGenerator<'a> {
@@ -43,7 +44,7 @@ impl<'a> DdlGenerator<'a> {
     /// 1. CREATE DATABASE statements
     /// 2. CREATE TABLE statements
     /// 3. CREATE VIEW statements (after tables they depend on)
-    pub fn generate(&self, schemas: &[String]) -> Result<Vec<String>> {
+    pub fn generate(&self, schemas: &[String]) -> Result<Vec<DdlStatement>> {
         let mut statements = Vec::new();
 
         // Filter snapshot to only include specified schemas
@@ -51,7 +52,7 @@ impl<'a> DdlGenerator<'a> {
 
         // 1. CREATE DATABASE statements
         for schema_def in &filtered.schemas {
-            statements.push(self.generate_create_database(schema_def));
+            statements.push(DdlStatement::new(self.generate_create_database(schema_def)));
         }
 
         // 2. CREATE TABLE statements
@@ -69,16 +70,25 @@ impl<'a> DdlGenerator<'a> {
                 if !existing_tables.contains(&key) && generated_physical.insert(key.clone()) {
                     let physical_def =
                         self.build_physical_table_definition(table_def, physical_name);
-                    statements.push(self.generate_create_table(&physical_def)?);
+                    statements.push(DdlStatement::with_execution_schema(
+                        self.generate_create_table(&physical_def)?,
+                        physical_def.schema.clone(),
+                    ));
                 }
             }
 
-            statements.push(self.generate_create_table(table_def)?);
+            statements.push(DdlStatement::with_execution_schema(
+                self.generate_create_table(table_def)?,
+                table_def.schema.clone(),
+            ));
         }
 
         // 3. CREATE VIEW statements
         for view_def in &filtered.views {
-            statements.push(self.generate_create_view(view_def));
+            statements.push(DdlStatement::with_execution_schema(
+                self.generate_create_view(view_def),
+                view_def.schema.clone(),
+            ));
         }
 
         Ok(statements)
@@ -686,11 +696,13 @@ mod tests {
         let statements = generator.generate(&["public".to_string()]).unwrap();
 
         assert_eq!(statements.len(), 3);
-        assert!(statements[1].contains("\"metrics_physical\""));
-        assert!(statements[1].contains("ENGINE = metric"));
-        assert!(statements[1].contains("physical_metric_table"));
-        assert!(statements[2].contains("\"metrics_logical\""));
-        assert!(statements[2].contains("on_physical_table"));
+        assert!(statements[1].sql.contains("\"metrics_physical\""));
+        assert!(statements[1].sql.contains("ENGINE = metric"));
+        assert!(statements[1].sql.contains("physical_metric_table"));
+        assert_eq!(statements[1].execution_schema.as_deref(), Some("public"));
+        assert!(statements[2].sql.contains("\"metrics_logical\""));
+        assert!(statements[2].sql.contains("on_physical_table"));
+        assert_eq!(statements[2].execution_schema.as_deref(), Some("public"));
     }
 
     #[test]
@@ -790,7 +802,7 @@ mod tests {
         assert_eq!(statements.len(), 3);
         let physical_count = statements
             .iter()
-            .filter(|stmt| stmt.contains("\"metrics_physical\""))
+            .filter(|stmt| stmt.sql.contains("\"metrics_physical\""))
             .count();
         assert_eq!(physical_count, 1);
     }

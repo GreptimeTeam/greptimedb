@@ -191,11 +191,7 @@ impl Import {
             self.read_ddl_statements(&schemas_to_import).await?
         } else {
             let generator = DdlGenerator::new(&schema_snapshot);
-            generator
-                .generate(&schemas_to_import)?
-                .into_iter()
-                .map(DdlStatement::new)
-                .collect()
+            generator.generate(&schemas_to_import)?
         };
 
         info!("Generated {} DDL statements", ddl_statements.len());
@@ -247,7 +243,7 @@ impl Import {
             statements.extend(
                 parse_ddl_statements(&content)
                     .into_iter()
-                    .map(|sql| DdlStatement::with_fallback_schema(sql, schema.clone())),
+                    .map(|sql| ddl_statement_for_schema(schema, sql)),
             );
         }
 
@@ -276,6 +272,34 @@ fn parse_ddl_statements(content: &str) -> Vec<String> {
         .filter(|stmt| !stmt.is_empty())
         .map(|stmt| stmt.to_string())
         .collect()
+}
+
+fn ddl_statement_for_schema(schema: &str, sql: String) -> DdlStatement {
+    if is_schema_scoped_statement(&sql) {
+        DdlStatement::with_execution_schema(sql, schema.to_string())
+    } else {
+        DdlStatement::new(sql)
+    }
+}
+
+fn is_schema_scoped_statement(sql: &str) -> bool {
+    let trimmed = sql.trim_start();
+    if !starts_with_keyword(trimmed, "CREATE") {
+        return false;
+    }
+
+    let Some(rest) = trimmed.get("CREATE".len()..) else {
+        return false;
+    };
+    let rest = rest.trim_start();
+    starts_with_keyword(rest, "TABLE") || starts_with_keyword(rest, "VIEW")
+}
+
+fn starts_with_keyword(input: &str, keyword: &str) -> bool {
+    input
+        .get(0..keyword.len())
+        .map(|s| s.eq_ignore_ascii_case(keyword))
+        .unwrap_or(false)
 }
 
 fn canonicalize_schema_filter(
@@ -340,5 +364,29 @@ CREATE VIEW v AS SELECT * FROM t;
             .to_string();
 
         assert!(error.contains("missing"));
+    }
+
+    #[test]
+    fn test_ddl_statement_for_schema_create_table_uses_execution_schema() {
+        let stmt = ddl_statement_for_schema(
+            "test_db",
+            "CREATE TABLE metrics (ts TIMESTAMP TIME INDEX) ENGINE=mito".to_string(),
+        );
+        assert_eq!(stmt.execution_schema.as_deref(), Some("test_db"));
+    }
+
+    #[test]
+    fn test_ddl_statement_for_schema_create_view_uses_execution_schema() {
+        let stmt = ddl_statement_for_schema(
+            "test_db",
+            "CREATE VIEW metrics_view AS SELECT * FROM metrics".to_string(),
+        );
+        assert_eq!(stmt.execution_schema.as_deref(), Some("test_db"));
+    }
+
+    #[test]
+    fn test_ddl_statement_for_schema_create_database_uses_public_context() {
+        let stmt = ddl_statement_for_schema("test_db", "CREATE DATABASE test_db".to_string());
+        assert_eq!(stmt.execution_schema, None);
     }
 }
