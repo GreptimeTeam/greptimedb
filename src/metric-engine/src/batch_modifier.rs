@@ -43,6 +43,7 @@ pub(crate) struct TagColumnInfo {
 pub(crate) fn compute_tsid_array(
     batch: &RecordBatch,
     sorted_tag_columns: &[TagColumnInfo],
+    tag_arrays: &[&StringArray],
 ) -> UInt64Array {
     let num_rows = batch.num_rows();
 
@@ -55,8 +56,6 @@ pub(crate) fn compute_tsid_array(
         hasher.finish()
     };
 
-    let tag_arrays: Vec<&StringArray> = build_tag_arrays(batch, sorted_tag_columns);
-
     let mut tsid_values = Vec::with_capacity(num_rows);
     for row in 0..num_rows {
         let has_null = tag_arrays.iter().any(|arr| arr.is_null(row));
@@ -64,7 +63,7 @@ pub(crate) fn compute_tsid_array(
         let tsid = if !has_null {
             let mut hasher = FxHasher::default();
             hasher.write_u64(label_name_hash);
-            for arr in &tag_arrays {
+            for arr in tag_arrays {
                 hasher.write(arr.value(row).as_bytes());
                 hasher.write_u8(0xff);
             }
@@ -81,7 +80,7 @@ pub(crate) fn compute_tsid_array(
 
             let mut val_hasher = FxHasher::default();
             val_hasher.write_u64(row_label_hash);
-            for arr in &tag_arrays {
+            for arr in tag_arrays {
                 if !arr.is_null(row) {
                     val_hasher.write(arr.value(row).as_bytes());
                     val_hasher.write_u8(0xff);
@@ -122,9 +121,8 @@ pub(crate) fn modify_batch_sparse(
 ) -> Result<RecordBatch> {
     let num_rows = batch.num_rows();
     let codec = SparsePrimaryKeyCodec::schemaless();
-    let tsid_array = compute_tsid_array(&batch, sorted_tag_columns);
-
     let tag_arrays: Vec<&StringArray> = build_tag_arrays(&batch, sorted_tag_columns);
+    let tsid_array = compute_tsid_array(&batch, sorted_tag_columns, &tag_arrays);
 
     let mut pk_values: Vec<Vec<u8>> = Vec::with_capacity(num_rows);
     for row in 0..num_rows {
@@ -252,7 +250,8 @@ mod tests {
                 column_id: 1,
             },
         ];
-        let tsid_array = compute_tsid_array(&batch, &tag_columns);
+        let tag_arrays = build_tag_arrays(&batch, &tag_columns);
+        let tsid_array = compute_tsid_array(&batch, &tag_columns, &tag_arrays);
 
         assert_eq!(tsid_array.value(0), 2721566936019240841);
     }
@@ -283,7 +282,8 @@ mod tests {
                 column_id: 2,
             },
         ];
-        let tsid_no_null = compute_tsid_array(&batch_no_null, &tag_cols_2);
+        let tag_arrays_2 = build_tag_arrays(&batch_no_null, &tag_cols_2);
+        let tsid_no_null = compute_tsid_array(&batch_no_null, &tag_cols_2, &tag_arrays_2);
 
         let schema3 = Arc::new(ArrowSchema::new(vec![
             Field::new("a", DataType::Utf8, true),
@@ -316,7 +316,8 @@ mod tests {
                 column_id: 3,
             },
         ];
-        let tsid_with_null = compute_tsid_array(&batch_with_null, &tag_cols_3);
+        let tag_arrays_3 = build_tag_arrays(&batch_with_null, &tag_cols_3);
+        let tsid_with_null = compute_tsid_array(&batch_with_null, &tag_cols_3, &tag_arrays_3);
 
         assert_eq!(tsid_no_null.value(0), tsid_with_null.value(0));
     }
