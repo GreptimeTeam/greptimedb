@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod builder;
+mod dashboard;
 mod grpc;
 mod influxdb;
 mod jaeger;
