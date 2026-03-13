@@ -134,10 +134,14 @@ impl Instance {
         self.frontend.server_handlers().addr(name)
     }
 
+    /// Get the mutable Frontend component of this Standalone instance for externally modification
+    /// by others (might not be in this code base, so don't delete this function).
     pub fn mut_frontend(&mut self) -> &mut Frontend {
         &mut self.frontend
     }
 
+    /// Get the Datanode component of this Standalone instance for externally usage
+    /// by others (might not be in this code base, so don't delete this function).
     pub fn datanode(&self) -> &Datanode {
         &self.datanode
     }
