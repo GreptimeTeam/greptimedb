@@ -438,7 +438,7 @@ pub enum CreateFlowState {
     Prepare,
     /// Creates flows on the flownode.
     CreateFlows,
-    /// Drops old flows on the flownode when replacing a old flow with a pending flow.
+    /// (Optional, only when replacing a old flow with a pending flow)Drops old flows on the flownode.
     DropOldFlows,
     /// Invalidate flow cache.
     InvalidateFlowCache,

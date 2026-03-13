@@ -40,7 +40,7 @@ use crate::key::flow::flow_info::{FlowInfoValue, FlowStatus};
 use crate::key::flow::flow_route::FlowRouteValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::{DeserializedValueWithBytes, FlowId, FlowPartitionId};
-use crate::lock_key::{CatalogLock, FlowLock};
+use crate::lock_key::{CatalogLock, FlowLock, FlowNameLock};
 use crate::metrics;
 use crate::peer::Peer;
 
@@ -253,10 +253,24 @@ impl Procedure for ActivatePendingFlowProcedure {
     }
 
     fn lock_key(&self) -> LockKey {
-        LockKey::new(vec![
-            CatalogLock::Read(&self.data.catalog_name).into(),
-            FlowLock::Write(self.data.flow_id).into(),
-        ])
+        if let Some(flow_info) = &self.data.prev_flow_info_value {
+            // if previous flow info is available, it means the flow is already created
+            // we should lock the flow name to avoid concurrent modification with create/replace flow procedure
+            LockKey::new(vec![
+                CatalogLock::Read(&self.data.catalog_name).into(),
+                FlowLock::Write(self.data.flow_id).into(),
+                FlowNameLock::new(
+                    flow_info.get_inner_ref().catalog_name(),
+                    flow_info.get_inner_ref().flow_name(),
+                )
+                .into(),
+            ])
+        } else {
+            LockKey::new(vec![
+                CatalogLock::Read(&self.data.catalog_name).into(),
+                FlowLock::Write(self.data.flow_id).into(),
+            ])
+        }
     }
 }
 
