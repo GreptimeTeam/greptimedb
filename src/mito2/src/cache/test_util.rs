@@ -23,8 +23,13 @@ use object_store::ObjectStore;
 use object_store::services::Fs;
 use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use parquet::file::metadata::ParquetMetaData;
+use parquet::file::metadata::{KeyValue, ParquetMetaData};
+use parquet::file::properties::WriterProperties;
 use parquet::file::statistics::Statistics;
+use store_api::metadata::RegionMetadataRef;
+
+use crate::sst::parquet::PARQUET_METADATA_KEY;
+use crate::test_util::sst_util::sst_region_metadata;
 
 /// Returns a parquet meta data.
 pub(crate) fn parquet_meta() -> Arc<ParquetMetaData> {
@@ -33,13 +38,34 @@ pub(crate) fn parquet_meta() -> Arc<ParquetMetaData> {
     builder.metadata().clone()
 }
 
+/// Returns parquet metadata for an SST parquet file and its decoded region metadata.
+pub(crate) fn sst_parquet_meta() -> (Arc<ParquetMetaData>, RegionMetadataRef) {
+    let region_metadata = Arc::new(sst_region_metadata());
+    let file_data = parquet_file_data_with_region_metadata(&region_metadata);
+    let builder = ParquetRecordBatchReaderBuilder::try_new(Bytes::from(file_data)).unwrap();
+    (builder.metadata().clone(), region_metadata)
+}
+
 /// Write a test parquet file to a buffer
 fn parquet_file_data() -> Vec<u8> {
+    parquet_file_data_inner(None)
+}
+
+fn parquet_file_data_with_region_metadata(region_metadata: &RegionMetadataRef) -> Vec<u8> {
+    let json = region_metadata.to_json().unwrap();
+    let key_value = KeyValue::new(PARQUET_METADATA_KEY.to_string(), json);
+    parquet_file_data_inner(Some(vec![key_value]))
+}
+
+fn parquet_file_data_inner(key_value_metadata: Option<Vec<KeyValue>>) -> Vec<u8> {
     let col = Arc::new(Int64Array::from_iter_values([1, 2, 3])) as ArrayRef;
     let to_write = RecordBatch::try_from_iter([("col", col)]).unwrap();
 
     let mut buffer = Vec::new();
-    let mut writer = ArrowWriter::try_new(&mut buffer, to_write.schema(), None).unwrap();
+    let props = WriterProperties::builder()
+        .set_key_value_metadata(key_value_metadata)
+        .build();
+    let mut writer = ArrowWriter::try_new(&mut buffer, to_write.schema(), Some(props)).unwrap();
     writer.write(&to_write).unwrap();
     writer.close().unwrap();
 

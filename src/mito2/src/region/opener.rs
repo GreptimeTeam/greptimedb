@@ -1153,6 +1153,8 @@ mod tests {
     use object_store::ObjectStore;
     use object_store::services::{Fs, Memory};
     use parquet::arrow::ArrowWriter;
+    use parquet::file::metadata::KeyValue;
+    use parquet::file::properties::WriterProperties;
     use store_api::region_request::PathType;
     use store_api::storage::{FileId, RegionId};
 
@@ -1161,7 +1163,27 @@ mod tests {
     use crate::cache::file_cache::{FileType, IndexKey};
     use crate::sst::file::{FileHandle, FileMeta};
     use crate::sst::file_purger::NoopFilePurger;
+    use crate::sst::parquet::PARQUET_METADATA_KEY;
     use crate::test_util::TestEnv;
+    use crate::test_util::sst_util::sst_region_metadata;
+
+    fn sst_parquet_bytes(batch: &RecordBatch) -> Vec<u8> {
+        let key_value_meta = KeyValue::new(
+            PARQUET_METADATA_KEY.to_string(),
+            sst_region_metadata().to_json().unwrap(),
+        );
+        let props = WriterProperties::builder()
+            .set_key_value_metadata(Some(vec![key_value_meta]))
+            .build();
+
+        let mut parquet_bytes = Vec::new();
+        let mut writer =
+            ArrowWriter::try_new(&mut parquet_bytes, batch.schema(), Some(props)).unwrap();
+        writer.write(batch).unwrap();
+        writer.close().unwrap();
+
+        parquet_bytes
+    }
 
     #[tokio::test]
     async fn test_preload_parquet_meta_cache_uses_file_cache() {
@@ -1183,10 +1205,7 @@ mod tests {
 
         let col = Arc::new(Int64Array::from_iter_values([1, 2, 3])) as ArrayRef;
         let batch = RecordBatch::try_from_iter([("col", col)]).unwrap();
-        let mut parquet_bytes = Vec::new();
-        let mut writer = ArrowWriter::try_new(&mut parquet_bytes, batch.schema(), None).unwrap();
-        writer.write(&batch).unwrap();
-        writer.close().unwrap();
+        let parquet_bytes = sst_parquet_bytes(&batch);
         let file_size = parquet_bytes.len() as u64;
 
         let file_meta = FileMeta {
@@ -1334,10 +1353,7 @@ mod tests {
 
         let col = Arc::new(Int64Array::from_iter_values([1, 2, 3])) as ArrayRef;
         let batch = RecordBatch::try_from_iter([("col", col)]).unwrap();
-        let mut parquet_bytes = Vec::new();
-        let mut writer = ArrowWriter::try_new(&mut parquet_bytes, batch.schema(), None).unwrap();
-        writer.write(&batch).unwrap();
-        writer.close().unwrap();
+        let parquet_bytes = sst_parquet_bytes(&batch);
 
         // file_size is 0 when it's missing/defaulted in manifests; MetadataLoader::load will stat
         // the local filesystem to retrieve it.

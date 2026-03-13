@@ -28,6 +28,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use common_telemetry::warn;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
@@ -36,8 +37,10 @@ use index::result_cache::IndexResultCache;
 use moka::notification::RemovalCause;
 use moka::sync::Cache;
 use object_store::ObjectStore;
-use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData};
+use parquet::file::metadata::{FileMetaData, PageIndexPolicy, ParquetMetaData};
 use puffin::puffin_manager::cache::{PuffinMetadataCache, PuffinMetadataCacheRef};
+use snafu::{OptionExt, ResultExt};
+use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ConcreteDataType, FileId, RegionId, TimeSeriesRowSelector};
 
 use crate::cache::cache_size::parquet_meta_size;
@@ -46,10 +49,12 @@ use crate::cache::index::inverted_index::{InvertedIndexCache, InvertedIndexCache
 #[cfg(feature = "vector_index")]
 use crate::cache::index::vector_index::{VectorIndexCache, VectorIndexCacheRef};
 use crate::cache::write_cache::WriteCacheRef;
+use crate::error::{InvalidMetadataSnafu, InvalidParquetSnafu, Result};
 use crate::memtable::record_batch_estimated_size;
 use crate::metrics::{CACHE_BYTES, CACHE_EVICTION, CACHE_HIT, CACHE_MISS};
 use crate::read::Batch;
 use crate::sst::file::{RegionFileId, RegionIndexId};
+use crate::sst::parquet::PARQUET_METADATA_KEY;
 use crate::sst::parquet::reader::MetadataCacheMetrics;
 
 /// Metrics type key for sst meta.
@@ -64,6 +69,96 @@ const FILE_TYPE: &str = "file";
 const INDEX_TYPE: &str = "index";
 /// Metrics type key for selector result cache.
 const SELECTOR_RESULT_TYPE: &str = "selector_result";
+
+/// Cached SST metadata combines the parquet footer with the decoded region metadata.
+///
+/// The cached parquet footer strips the `greptime:metadata` JSON payload and stores the decoded
+/// [RegionMetadata] separately so readers can skip repeated deserialization work.
+#[derive(Debug)]
+pub(crate) struct CachedSstMeta {
+    parquet_metadata: Arc<ParquetMetaData>,
+    region_metadata: RegionMetadataRef,
+    region_metadata_size_hint: usize,
+}
+
+impl CachedSstMeta {
+    pub(crate) fn try_new(file_path: &str, parquet_metadata: ParquetMetaData) -> Result<Self> {
+        let (region_metadata, region_metadata_size_hint) = {
+            let file_metadata = parquet_metadata.file_metadata();
+            let key_values = file_metadata
+                .key_value_metadata()
+                .context(InvalidParquetSnafu {
+                    file: file_path,
+                    reason: "missing key value meta",
+                })?;
+            let meta_value = key_values
+                .iter()
+                .find(|kv| kv.key == PARQUET_METADATA_KEY)
+                .with_context(|| InvalidParquetSnafu {
+                    file: file_path,
+                    reason: format!("key {} not found", PARQUET_METADATA_KEY),
+                })?;
+            let json = meta_value
+                .value
+                .as_ref()
+                .with_context(|| InvalidParquetSnafu {
+                    file: file_path,
+                    reason: format!("No value for key {}", PARQUET_METADATA_KEY),
+                })?;
+            let region_metadata = Arc::new(
+                store_api::metadata::RegionMetadata::from_json(json)
+                    .context(InvalidMetadataSnafu)?,
+            );
+            (region_metadata, json.len())
+        };
+        let parquet_metadata = Arc::new(strip_region_metadata_from_parquet(parquet_metadata));
+
+        Ok(Self {
+            parquet_metadata,
+            region_metadata,
+            region_metadata_size_hint,
+        })
+    }
+
+    pub(crate) fn parquet_metadata(&self) -> Arc<ParquetMetaData> {
+        self.parquet_metadata.clone()
+    }
+
+    pub(crate) fn region_metadata(&self) -> RegionMetadataRef {
+        self.region_metadata.clone()
+    }
+}
+
+fn strip_region_metadata_from_parquet(parquet_metadata: ParquetMetaData) -> ParquetMetaData {
+    let file_metadata = parquet_metadata.file_metadata();
+    let filtered_key_values = file_metadata.key_value_metadata().and_then(|key_values| {
+        let filtered = key_values
+            .iter()
+            .filter(|kv| kv.key != PARQUET_METADATA_KEY)
+            .cloned()
+            .collect::<Vec<_>>();
+        (!filtered.is_empty()).then_some(filtered)
+    });
+    let stripped_file_metadata = FileMetaData::new(
+        file_metadata.version(),
+        file_metadata.num_rows(),
+        file_metadata.created_by().map(ToString::to_string),
+        filtered_key_values,
+        file_metadata.schema_descr_ptr(),
+        file_metadata.column_orders().cloned(),
+    );
+
+    let mut builder = parquet_metadata.into_builder();
+    let row_groups = builder.take_row_groups();
+    let column_index = builder.take_column_index();
+    let offset_index = builder.take_offset_index();
+
+    parquet::file::metadata::ParquetMetaDataBuilder::new(stripped_file_metadata)
+        .set_row_groups(row_groups)
+        .set_column_index(column_index)
+        .set_offset_index(offset_index)
+        .build()
+}
 
 /// Cache strategies that may only enable a subset of caches.
 #[derive(Clone)]
@@ -81,18 +176,17 @@ pub enum CacheStrategy {
 }
 
 impl CacheStrategy {
-    /// Gets parquet metadata with cache metrics tracking.
-    /// Returns the metadata and updates the provided metrics.
-    pub(crate) async fn get_parquet_meta_data(
+    /// Gets fused SST metadata with cache metrics tracking.
+    pub(crate) async fn get_sst_meta_data(
         &self,
         file_id: RegionFileId,
         metrics: &mut MetadataCacheMetrics,
         page_index_policy: PageIndexPolicy,
-    ) -> Option<Arc<ParquetMetaData>> {
+    ) -> Option<Arc<CachedSstMeta>> {
         match self {
             CacheStrategy::EnableAll(cache_manager) | CacheStrategy::Compaction(cache_manager) => {
                 cache_manager
-                    .get_parquet_meta_data(file_id, metrics, page_index_policy)
+                    .get_sst_meta_data(file_id, metrics, page_index_policy)
                     .await
             }
             CacheStrategy::Disabled => {
@@ -102,19 +196,35 @@ impl CacheStrategy {
         }
     }
 
+    /// Calls [CacheManager::get_sst_meta_data_from_mem_cache()].
+    pub(crate) fn get_sst_meta_data_from_mem_cache(
+        &self,
+        file_id: RegionFileId,
+    ) -> Option<Arc<CachedSstMeta>> {
+        match self {
+            CacheStrategy::EnableAll(cache_manager) | CacheStrategy::Compaction(cache_manager) => {
+                cache_manager.get_sst_meta_data_from_mem_cache(file_id)
+            }
+            CacheStrategy::Disabled => None,
+        }
+    }
+
     /// Calls [CacheManager::get_parquet_meta_data_from_mem_cache()].
     pub fn get_parquet_meta_data_from_mem_cache(
         &self,
         file_id: RegionFileId,
     ) -> Option<Arc<ParquetMetaData>> {
+        self.get_sst_meta_data_from_mem_cache(file_id)
+            .map(|metadata| metadata.parquet_metadata())
+    }
+
+    /// Calls [CacheManager::put_sst_meta_data()].
+    pub(crate) fn put_sst_meta_data(&self, file_id: RegionFileId, metadata: Arc<CachedSstMeta>) {
         match self {
-            CacheStrategy::EnableAll(cache_manager) => {
-                cache_manager.get_parquet_meta_data_from_mem_cache(file_id)
+            CacheStrategy::EnableAll(cache_manager) | CacheStrategy::Compaction(cache_manager) => {
+                cache_manager.put_sst_meta_data(file_id, metadata);
             }
-            CacheStrategy::Compaction(cache_manager) => {
-                cache_manager.get_parquet_meta_data_from_mem_cache(file_id)
-            }
-            CacheStrategy::Disabled => None,
+            CacheStrategy::Disabled => {}
         }
     }
 
@@ -336,6 +446,35 @@ impl CacheManager {
         CacheManagerBuilder::default()
     }
 
+    /// Gets fused SST metadata with metrics tracking.
+    /// Tries in-memory cache first, then file cache, updating metrics accordingly.
+    pub(crate) async fn get_sst_meta_data(
+        &self,
+        file_id: RegionFileId,
+        metrics: &mut MetadataCacheMetrics,
+        page_index_policy: PageIndexPolicy,
+    ) -> Option<Arc<CachedSstMeta>> {
+        if let Some(metadata) = self.get_sst_meta_data_from_mem_cache(file_id) {
+            metrics.mem_cache_hit += 1;
+            return Some(metadata);
+        }
+
+        let key = IndexKey::new(file_id.region_id(), file_id.file_id(), FileType::Parquet);
+        if let Some(write_cache) = &self.write_cache
+            && let Some(metadata) = write_cache
+                .file_cache()
+                .get_sst_meta_data(key, metrics, page_index_policy)
+                .await
+        {
+            metrics.file_cache_hit += 1;
+            self.put_sst_meta_data(file_id, metadata.clone());
+            return Some(metadata);
+        }
+
+        metrics.cache_miss += 1;
+        None
+    }
+
     /// Gets cached [ParquetMetaData] with metrics tracking.
     /// Tries in-memory cache first, then file cache, updating metrics accordingly.
     pub(crate) async fn get_parquet_meta_data(
@@ -344,29 +483,21 @@ impl CacheManager {
         metrics: &mut MetadataCacheMetrics,
         page_index_policy: PageIndexPolicy,
     ) -> Option<Arc<ParquetMetaData>> {
-        // Try to get metadata from sst meta cache
-        if let Some(metadata) = self.get_parquet_meta_data_from_mem_cache(file_id) {
-            metrics.mem_cache_hit += 1;
-            return Some(metadata);
-        }
+        self.get_sst_meta_data(file_id, metrics, page_index_policy)
+            .await
+            .map(|metadata| metadata.parquet_metadata())
+    }
 
-        // Try to get metadata from write cache
-        let key = IndexKey::new(file_id.region_id(), file_id.file_id(), FileType::Parquet);
-        if let Some(write_cache) = &self.write_cache
-            && let Some(metadata) = write_cache
-                .file_cache()
-                .get_parquet_meta_data(key, metrics, page_index_policy)
-                .await
-        {
-            metrics.file_cache_hit += 1;
-            let metadata = Arc::new(metadata);
-            // Put metadata into sst meta cache
-            self.put_parquet_meta_data(file_id, metadata.clone());
-            return Some(metadata);
-        };
-        metrics.cache_miss += 1;
-
-        None
+    /// Gets cached fused SST metadata from in-memory cache.
+    /// This method does not perform I/O.
+    pub(crate) fn get_sst_meta_data_from_mem_cache(
+        &self,
+        file_id: RegionFileId,
+    ) -> Option<Arc<CachedSstMeta>> {
+        self.sst_meta_cache.as_ref().and_then(|sst_meta_cache| {
+            let value = sst_meta_cache.get(&SstMetaKey(file_id.region_id(), file_id.file_id()));
+            update_hit_miss(value, SST_META_TYPE)
+        })
     }
 
     /// Gets cached [ParquetMetaData] from in-memory cache.
@@ -375,21 +506,37 @@ impl CacheManager {
         &self,
         file_id: RegionFileId,
     ) -> Option<Arc<ParquetMetaData>> {
-        // Try to get metadata from sst meta cache
-        self.sst_meta_cache.as_ref().and_then(|sst_meta_cache| {
-            let value = sst_meta_cache.get(&SstMetaKey(file_id.region_id(), file_id.file_id()));
-            update_hit_miss(value, SST_META_TYPE)
-        })
+        self.get_sst_meta_data_from_mem_cache(file_id)
+            .map(|metadata| metadata.parquet_metadata())
     }
 
-    /// Puts [ParquetMetaData] into the cache.
-    pub fn put_parquet_meta_data(&self, file_id: RegionFileId, metadata: Arc<ParquetMetaData>) {
+    /// Puts fused SST metadata into the cache.
+    pub(crate) fn put_sst_meta_data(&self, file_id: RegionFileId, metadata: Arc<CachedSstMeta>) {
         if let Some(cache) = &self.sst_meta_cache {
             let key = SstMetaKey(file_id.region_id(), file_id.file_id());
             CACHE_BYTES
                 .with_label_values(&[SST_META_TYPE])
                 .add(meta_cache_weight(&key, &metadata).into());
             cache.insert(key, metadata);
+        }
+    }
+
+    /// Puts [ParquetMetaData] into the cache.
+    pub fn put_parquet_meta_data(&self, file_id: RegionFileId, metadata: Arc<ParquetMetaData>) {
+        if self.sst_meta_cache.is_some() {
+            let file_path = format!(
+                "region_id={}, file_id={}",
+                file_id.region_id(),
+                file_id.file_id()
+            );
+            match CachedSstMeta::try_new(&file_path, Arc::unwrap_or_clone(metadata)) {
+                Ok(metadata) => self.put_sst_meta_data(file_id, Arc::new(metadata)),
+                Err(err) => warn!(
+                    err; "Failed to decode region metadata while caching parquet metadata, region_id: {}, file_id: {}",
+                    file_id.region_id(),
+                    file_id.file_id()
+                ),
+            }
         }
     }
 
@@ -728,9 +875,10 @@ impl CacheManagerBuilder {
     }
 }
 
-fn meta_cache_weight(k: &SstMetaKey, v: &Arc<ParquetMetaData>) -> u32 {
+fn meta_cache_weight(k: &SstMetaKey, v: &Arc<CachedSstMeta>) -> u32 {
     // We ignore the size of `Arc`.
-    (k.estimated_size() + parquet_meta_size(v)) as u32
+    (k.estimated_size() + parquet_meta_size(&v.parquet_metadata) + v.region_metadata_size_hint)
+        as u32
 }
 
 fn vector_cache_weight(_k: &(ConcreteDataType, Value), v: &VectorRef) -> u32 {
@@ -892,8 +1040,8 @@ impl SelectorResultValue {
     }
 }
 
-/// Maps (region id, file id) to [ParquetMetaData].
-type SstMetaCache = Cache<SstMetaKey, Arc<ParquetMetaData>>;
+/// Maps (region id, file id) to fused SST metadata.
+type SstMetaCache = Cache<SstMetaKey, Arc<CachedSstMeta>>;
 /// Maps [Value] to a vector that holds this value repeatedly.
 ///
 /// e.g. `"hello" => ["hello", "hello", "hello"]`
@@ -915,7 +1063,7 @@ mod tests {
     use super::*;
     use crate::cache::index::bloom_filter_index::Tag;
     use crate::cache::index::result_cache::PredicateKey;
-    use crate::cache::test_util::parquet_meta;
+    use crate::cache::test_util::{parquet_meta, sst_parquet_meta};
     use crate::sst::parquet::row_selection::RowGroupSelection;
 
     #[tokio::test]
@@ -966,13 +1114,23 @@ mod tests {
                 .await
                 .is_none()
         );
-        let metadata = parquet_meta();
+        let (metadata, region_metadata) = sst_parquet_meta();
         cache.put_parquet_meta_data(file_id, metadata);
+        let cached = cache
+            .get_sst_meta_data(file_id, &mut metrics, Default::default())
+            .await
+            .unwrap();
+        assert_eq!(region_metadata, cached.region_metadata());
         assert!(
-            cache
-                .get_parquet_meta_data(file_id, &mut metrics, Default::default())
-                .await
-                .is_some()
+            cached
+                .parquet_metadata()
+                .file_metadata()
+                .key_value_metadata()
+                .is_none_or(|key_values| {
+                    key_values
+                        .iter()
+                        .all(|key_value| key_value.key != PARQUET_METADATA_KEY)
+                })
         );
         cache.remove_parquet_meta_data(file_id);
         assert!(

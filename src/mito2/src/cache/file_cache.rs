@@ -34,7 +34,7 @@ use store_api::storage::{FileId, RegionId};
 use tokio::sync::mpsc::{Sender, UnboundedReceiver};
 
 use crate::access_layer::TempFileCleaner;
-use crate::cache::{FILE_TYPE, INDEX_TYPE};
+use crate::cache::{CachedSstMeta, FILE_TYPE, INDEX_TYPE};
 use crate::error::{self, OpenDalSnafu, Result};
 use crate::metrics::{
     CACHE_BYTES, CACHE_HIT, CACHE_MISS, WRITE_CACHE_DOWNLOAD_BYTES_TOTAL,
@@ -610,6 +610,34 @@ impl FileCache {
                 .inc();
             None
         }
+    }
+
+    /// Get fused SST metadata from the file cache.
+    /// If the file is not in the cache, or metadata loading/decoding fails, return None.
+    pub(crate) async fn get_sst_meta_data(
+        &self,
+        key: IndexKey,
+        cache_metrics: &mut MetadataCacheMetrics,
+        page_index_policy: PageIndexPolicy,
+    ) -> Option<Arc<CachedSstMeta>> {
+        let file_path = self.inner.cache_file_path(key);
+        self.get_parquet_meta_data(key, cache_metrics, page_index_policy)
+            .await
+            .and_then(
+                |metadata| match CachedSstMeta::try_new(&file_path, metadata) {
+                    Ok(metadata) => Some(Arc::new(metadata)),
+                    Err(err) => {
+                        CACHE_MISS
+                            .with_label_values(&[key.file_type.metric_label()])
+                            .inc();
+                        warn!(
+                            err; "Failed to decode cached parquet metadata for key {:?}",
+                            key
+                        );
+                        None
+                    }
+                },
+            )
     }
 
     async fn get_reader(&self, file_path: &str) -> object_store::Result<Option<Reader>> {

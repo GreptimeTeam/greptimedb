@@ -686,9 +686,15 @@ mod tests {
         .cache(CacheStrategy::EnableAll(cache_manager.clone()))
         .page_index_policy(PageIndexPolicy::Optional);
         let reader = builder.build().await.unwrap().unwrap();
+        let cached_write_parquet_metadata = crate::cache::CachedSstMeta::try_new(
+            "test.sst",
+            Arc::unwrap_or_clone(write_parquet_metadata),
+        )
+        .unwrap()
+        .parquet_metadata();
 
         // Check parquet metadata
-        assert_parquet_metadata_equal(write_parquet_metadata, reader.parquet_metadata());
+        assert_parquet_metadata_equal(cached_write_parquet_metadata, reader.parquet_metadata());
     }
 
     #[tokio::test]

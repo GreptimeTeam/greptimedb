@@ -382,8 +382,12 @@ mod tests {
         .page_index_policy(PageIndexPolicy::Optional);
         let reader = builder.build().await.unwrap().unwrap();
         let reader_metadata = reader.parquet_metadata();
+        let cached_writer_metadata =
+            crate::cache::CachedSstMeta::try_new("test.sst", Arc::unwrap_or_clone(writer_metadata))
+                .unwrap()
+                .parquet_metadata();
 
-        assert_parquet_metadata_equal(writer_metadata, reader_metadata);
+        assert_parquet_metadata_equal(cached_writer_metadata, reader_metadata);
     }
 
     #[tokio::test]
