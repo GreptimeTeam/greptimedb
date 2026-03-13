@@ -396,7 +396,7 @@ pub fn jsonb_to_string(val: &[u8]) -> Result<String> {
     match jsonb::from_slice(val) {
         Ok(jsonb_value) => {
             let serialized = jsonb_value.to_string();
-            Ok(serialized)
+            jsonb_string_to_serde_value(&serialized)
         }
         Err(e) => InvalidJsonbSnafu { error: e }.fail(),
     }
@@ -405,16 +405,16 @@ pub fn jsonb_to_string(val: &[u8]) -> Result<String> {
 /// Converts a json type value to serde_json::Value
 pub fn jsonb_to_serde_json(val: &[u8]) -> Result<serde_json::Value> {
     let json_string = jsonb_to_string(val)?;
-    jsonb_string_to_serde_value(&json_string)
+    let normalized = jsonb_string_to_serde_value(&json_string)?;
+    serde_json::Value::from_str(&normalized).context(DeserializeSnafu { json: normalized })
 }
 
-/// Attempts to deserialize a JSON text into `serde_json::Value`, with a best-effort
-/// fallback for Rust-style Unicode escape sequences.
+/// Normalizes a JSON string by converting Rust-style Unicode escape sequences to JSON-compatible format.
 ///
 /// This function is intended to be used on JSON strings produced from the internal
 /// JSONB representation (e.g. via [`jsonb_to_string`]). It first calls
-/// `serde_json::Value::from_str` directly. If that succeeds, the parsed value is
-/// returned as-is.
+/// `serde_json::Value::from_str` to check if the string is valid. If that succeeds,
+/// the original string is returned as-is.
 ///
 /// If the initial parse fails, the input is scanned for Rust-style Unicode code
 /// point escapes of the form `\\u{H...}` (a backslash, `u`, an opening brace,
@@ -427,12 +427,11 @@ pub fn jsonb_to_serde_json(val: &[u8]) -> Result<serde_json::Value> {
 ///   the code point is encoded as a UTF‑16 surrogate pair and emitted as two consecutive
 ///   `\\uXXXX` sequences (as JSON format required).
 ///
-/// After this normalization, the function retries parsing the resulting string as
-/// JSON and returns the deserialized value or a `DeserializeSnafu` error if it
-/// still cannot be parsed.
-fn jsonb_string_to_serde_value(json: &str) -> Result<serde_json::Value> {
+/// After this normalization, the function returns the normalized string, or a
+/// `DeserializeSnafu` error if the parse failed for reasons other than invalid escape sequences.
+fn jsonb_string_to_serde_value(json: &str) -> Result<String> {
     match serde_json::Value::from_str(json) {
-        Ok(v) => Ok(v),
+        Ok(v) => Ok(v.to_string()),
         Err(e) => {
             // If above deserialization is failed, the JSON string might contain some Rust chars
             // that are somehow incorrectly represented as Unicode code point literal. For example,
@@ -477,7 +476,7 @@ fn jsonb_string_to_serde_value(json: &str) -> Result<serde_json::Value> {
                     format!("\\u{:04X}\\u{:04X}", high, low)
                 }
             });
-            serde_json::Value::from_str(&v).context(DeserializeSnafu { json })
+            Ok(v.to_string())
         }
     }
 }
@@ -499,38 +498,46 @@ mod tests {
         let valid_cases = vec![
             (r#"{"data": "simple ascii"}"#, r#"{"data":"simple ascii"}"#),
             (
-                r#"{"data": "Greek sigma: \u{03a3}"}"#,
-                r#"{"data":"Greek sigma: Σ"}"#,
+                r#"{"data":"Greek sigma: \u{03a3}"}"#,
+                r#"{"data":"Greek sigma: \u03A3"}"#,
             ),
             (
-                r#"{"data": "Joker card: \u{1f0df}"}"#,
-                r#"{"data":"Joker card: 🃟"}"#,
+                r#"{"data":"Joker card: \u{1f0df}"}"#,
+                r#"{"data":"Joker card: \uD83C\uDCDF"}"#,
             ),
             (
-                r#"{"data": "BMP boundary: \u{ffff}"}"#,
-                r#"{"data":"BMP boundary: ￿"}"#,
+                r#"{"data":"BMP boundary: \u{ffff}"}"#,
+                r#"{"data":"BMP boundary: \uFFFF"}"#,
             ),
             (
-                r#"{"data": "Supplementary min: \u{10000}"}"#,
-                r#"{"data":"Supplementary min: 𐀀"}"#,
+                r#"{"data":"Supplementary min: \u{10000}"}"#,
+                r#"{"data":"Supplementary min: \uD800\uDC00"}"#,
             ),
             (
-                r#"{"data": "Supplementary max: \u{10ffff}"}"#,
-                r#"{"data":"Supplementary max: 􏿿"}"#,
+                r#"{"data":"Supplementary max: \u{10ffff}"}"#,
+                r#"{"data":"Supplementary max: \uDBFF\uDFFF"}"#,
             ),
         ];
         for (input, expect) in valid_cases {
             let v = jsonb_string_to_serde_value(input)?;
-            assert_eq!(v.to_string(), expect);
+            assert_eq!(v, expect);
         }
 
-        let invalid_cases = vec![
-            r#"{"data": "Invalid hex: \u{gggg}"}"#,
-            r#"{"data": "Beyond max Unicode code point: \u{110000}"}"#,
-            r#"{"data": "Out of range: \u{1100000}"}"#, // 7 digit
-            r#"{"data": "Empty braces: \u{}"}"#,
+        let invalid_escape_cases = vec![
+            (r#"{"data": "Invalid hex: \u{gggg}"}"#, r#"{"data": "Invalid hex: \u{gggg}"}"#),
+            (r#"{"data": "Empty braces: \u{}"}"#, r#"{"data": "Empty braces: \u{}"}"#),
+            (
+                r#"{"data": "Out of range: \u{1100000}"}"#,
+                r#"{"data": "Out of range: \u{1100000}"}"#,
+            ),
         ];
-        for input in invalid_cases {
+        for (input, expect) in invalid_escape_cases {
+            let v = jsonb_string_to_serde_value(input)?;
+            assert_eq!(v, expect);
+        }
+
+        let non_syntax_error_cases = vec![r#"{"data": unterminated"#];
+        for input in non_syntax_error_cases {
             let result = jsonb_string_to_serde_value(input);
             assert!(result.is_err());
         }
