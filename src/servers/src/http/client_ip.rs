@@ -15,7 +15,7 @@
 use std::net::SocketAddr;
 
 use axum::body::Body;
-use axum::extract::ConnectInfo;
+use axum::extract::{ConnectInfo, MatchedPath};
 use axum::http::Request;
 use axum::middleware::Next;
 use axum::response::Response;
@@ -24,24 +24,34 @@ use common_telemetry::warn;
 /// Middleware that logs HTTP error responses (4xx/5xx) with client IP address.
 ///
 /// Extracts client address from [`ConnectInfo`] if available.
-/// If `ConnectInfo` is not present (e.g., in tests), logs without IP.
 pub async fn log_error_with_client_ip(req: Request<Body>, next: Next) -> Response {
-    let client_addr = req
+    let request_info = req
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
-        .map(|c| c.0);
+        .map(|c| c.0)
+        .map(|addr| {
+            let method = req.method().clone();
+            let uri = req.uri().clone();
+            let matched_path = req.extensions().get::<MatchedPath>().cloned();
+            (addr, method, uri, matched_path)
+        });
+
     let response = next.run(req).await;
 
-    if response.status().is_client_error() || response.status().is_server_error() {
-        if let Some(addr) = client_addr {
-            warn!(
-                "HTTP error response {} from client {}",
-                response.status(),
-                addr
-            );
-        } else {
-            warn!("HTTP error response {}", response.status(),);
-        }
+    if (response.status().is_client_error() || response.status().is_server_error())
+        && let Some((addr, method, uri, matched_path)) = request_info
+    {
+        warn!(
+            "HTTP error response {} for {} {} (matched: {}) from client {}",
+            response.status(),
+            method,
+            uri,
+            matched_path
+                .as_ref()
+                .map(|p| p.as_str())
+                .unwrap_or("<unknown>"),
+            addr
+        );
     }
 
     response
@@ -49,11 +59,12 @@ pub async fn log_error_with_client_ip(req: Request<Body>, next: Next) -> Respons
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use axum::routing::get;
     use axum::Router;
+    use axum::routing::get;
     use http::StatusCode;
     use tower::ServiceExt;
+
+    use super::*;
 
     #[tokio::test]
     async fn test_middleware_passes_error_response() {
@@ -89,12 +100,7 @@ mod tests {
             .layer(axum::middleware::from_fn(log_error_with_client_ip));
 
         let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/ok")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::builder().uri("/ok").body(Body::empty()).unwrap())
             .await
             .unwrap();
 
