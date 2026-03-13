@@ -52,8 +52,8 @@ use crate::error::{
     NewRecordBatchSnafu, Result,
 };
 use crate::sst::parquet::format::{
-    FormatProjection, INTERNAL_COLUMN_NUM, PrimaryKeyArray, PrimaryKeyReadFormat, ReadFormat,
-    StatValues,
+    FIXED_POS_COLUMN_NUM, FormatProjection, INTERNAL_COLUMN_NUM, PrimaryKeyArray,
+    PrimaryKeyReadFormat, ReadFormat, StatValues,
 };
 use crate::sst::{
     FlatSchemaOptions, flat_sst_arrow_schema_column_num, tag_maybe_to_dictionary_field,
@@ -125,6 +125,21 @@ pub(crate) fn primary_key_column_index(num_columns: usize) -> usize {
 /// Returns the position of the op type key column.
 pub(crate) fn op_type_column_index(num_columns: usize) -> usize {
     num_columns - 1
+}
+
+/// Returns the start index of field columns in a flat batch.
+///
+/// `num_columns` is the total number of columns in the flat batch schema,
+/// including tag columns (if present), field columns, and fixed position columns
+/// (time index, primary key, sequence, op type).
+///
+/// For Dense encoding (raw PK columns included): field_column_start = primary_key.len()
+/// For Sparse encoding (no raw PK columns): field_column_start = 0
+pub(crate) fn field_column_start(metadata: &RegionMetadata, num_columns: usize) -> usize {
+    // Calculates field column start: total columns - fixed columns - field columns
+    // Field column count = total metadata columns - time index column - primary key columns
+    let field_column_count = metadata.column_metadatas.len() - 1 - metadata.primary_key.len();
+    num_columns - FIXED_POS_COLUMN_NUM - field_column_count
 }
 
 // TODO(yingwen): Add an option to skip reading internal columns if the region is

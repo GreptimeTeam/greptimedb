@@ -57,7 +57,9 @@ use crate::request::{
 };
 use crate::schedule::scheduler::{Job, SchedulerRef};
 use crate::sst::file::FileMeta;
-use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, DEFAULT_ROW_GROUP_SIZE, SstInfo, WriteOptions};
+use crate::sst::parquet::{
+    DEFAULT_READ_BATCH_SIZE, DEFAULT_ROW_GROUP_SIZE, SstInfo, WriteOptions, flat_format,
+};
 use crate::sst::{FlatSchemaOptions, FormatType, to_flat_sst_arrow_schema};
 use crate::worker::WorkerListener;
 
@@ -545,11 +547,13 @@ impl RegionFlushTask {
             &version.metadata,
             &FlatSchemaOptions::from_encoding(version.metadata.primary_key_encoding),
         );
+        let field_column_start =
+            flat_format::field_column_start(&version.metadata, batch_schema.fields().len());
         let flat_sources = memtable_flat_sources(
             batch_schema,
             mem_ranges,
             &version.options,
-            version.metadata.primary_key.len(),
+            field_column_start,
         )?;
         let mut tasks = Vec::with_capacity(flat_sources.encoded.len() + flat_sources.sources.len());
         let num_encoded = flat_sources.encoded.len();
