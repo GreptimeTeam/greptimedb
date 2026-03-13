@@ -177,16 +177,6 @@ impl Memtable for PartitionTreeMemtable {
         .fail()
     }
 
-    #[cfg(any(test, feature = "test"))]
-    fn iter(
-        &self,
-        projection: Option<&[ColumnId]>,
-        predicate: Option<Predicate>,
-        sequence: Option<SequenceRange>,
-    ) -> Result<BoxedBatchIterator> {
-        self.tree.read(projection, predicate, sequence, None)
-    }
-
     fn ranges(
         &self,
         projection: Option<&[ColumnId]>,
@@ -396,8 +386,6 @@ mod tests {
     use api::v1::{Mutation, OpType, Rows, SemanticType};
     use common_query::prelude::{greptime_timestamp, greptime_value};
     use common_time::Timestamp;
-    use datafusion_common::Column;
-    use datafusion_expr::{BinaryExpr, Expr, Literal, Operator};
     use datatypes::data_type::ConcreteDataType;
     use datatypes::prelude::Vector;
     use datatypes::scalars::ScalarVector;
@@ -548,7 +536,10 @@ mod tests {
         let expect = (0..100).collect::<Vec<_>>();
         let kvs = memtable_util::build_key_values(&metadata, "hello".to_string(), 10, &expect, 1);
         memtable.write(&kvs).unwrap();
-        let iter = memtable.iter(Some(&[3]), None, None).unwrap();
+        let ranges = memtable
+            .ranges(Some(&[3]), RangesOptions::default())
+            .unwrap();
+        let iter = ranges.build(None).unwrap();
 
         let mut v0_all = vec![];
         for res in iter {
@@ -623,41 +614,6 @@ mod tests {
         let iter = memtable.iter(None, None, None).unwrap();
         let read = collect_iter_timestamps(iter);
         assert_eq!(expect, read);
-    }
-
-    #[test]
-    fn test_memtable_filter() {
-        let metadata = Arc::new(memtable_util::metadata_with_primary_key(vec![0, 1], false));
-        // Try to build a memtable via the builder.
-        let memtable = PartitionTreeMemtableBuilder::new(
-            PartitionTreeConfig {
-                index_max_keys_per_shard: 40,
-                ..Default::default()
-            },
-            None,
-        )
-        .build(1, &metadata);
-
-        for i in 0..100 {
-            let timestamps: Vec<_> = (0..10).map(|v| i as i64 * 1000 + v).collect();
-            let kvs =
-                memtable_util::build_key_values(&metadata, "hello".to_string(), i, &timestamps, 1);
-            memtable.write(&kvs).unwrap();
-        }
-
-        for i in 0..100 {
-            let timestamps: Vec<_> = (0..10).map(|v| i as i64 * 1000 + v).collect();
-            let expr = Expr::BinaryExpr(BinaryExpr {
-                left: Box::new(Expr::Column(Column::from_name("k1"))),
-                op: Operator::Eq,
-                right: Box::new((i as u32).lit()),
-            });
-            let iter = memtable
-                .iter(None, Some(Predicate::new(vec![expr])), None)
-                .unwrap();
-            let read = collect_iter_timestamps(iter);
-            assert_eq!(timestamps, read);
-        }
     }
 
     #[test]
@@ -811,7 +767,11 @@ mod tests {
             ))
             .unwrap();
 
-        let mut reader = new_memtable.iter(None, None, None).unwrap();
+        let mut reader = new_memtable
+            .ranges(None, RangesOptions::default())
+            .unwrap()
+            .build(None)
+            .unwrap();
         let batch = reader.next().unwrap().unwrap();
         let pk = codec.decode(batch.primary_key()).unwrap().into_dense();
         if let Value::String(s) = &pk[2] {
@@ -916,7 +876,14 @@ mod tests {
             .unwrap();
         memtable.freeze().unwrap();
         assert_eq!(
-            collect_kvs(memtable.iter(None, None, None).unwrap(), &metadata),
+            collect_kvs(
+                memtable
+                    .ranges(None, RangesOptions::default())
+                    .unwrap()
+                    .build(None)
+                    .unwrap(),
+                &metadata
+            ),
             ('a'..'h').map(|c| (c.to_string(), c.to_string())).collect()
         );
         let forked = memtable.fork(2, &metadata);
@@ -925,7 +892,14 @@ mod tests {
         forked.write(&key_values(&metadata, keys.iter())).unwrap();
         forked.freeze().unwrap();
         assert_eq!(
-            collect_kvs(forked.iter(None, None, None).unwrap(), &metadata),
+            collect_kvs(
+                forked
+                    .ranges(None, RangesOptions::default())
+                    .unwrap()
+                    .build(None)
+                    .unwrap(),
+                &metadata
+            ),
             keys.iter()
                 .map(|c| (c.to_string(), c.to_string()))
                 .collect()
@@ -936,7 +910,14 @@ mod tests {
         let keys = ["g", "e", "a", "f", "b", "c", "h"];
         forked2.write(&key_values(&metadata, keys.iter())).unwrap();
 
-        let kvs = collect_kvs(forked2.iter(None, None, None).unwrap(), &metadata);
+        let kvs = collect_kvs(
+            forked2
+                .ranges(None, RangesOptions::default())
+                .unwrap()
+                .build(None)
+                .unwrap(),
+            &metadata,
+        );
         let expected = keys
             .iter()
             .map(|c| (c.to_string(), c.to_string()))

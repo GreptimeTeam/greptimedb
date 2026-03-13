@@ -213,22 +213,6 @@ impl Memtable for SimpleBulkMemtable {
         Ok(())
     }
 
-    #[cfg(any(test, feature = "test"))]
-    fn iter(
-        &self,
-        projection: Option<&[ColumnId]>,
-        _predicate: Option<table::predicate::Predicate>,
-        sequence: Option<store_api::storage::SequenceRange>,
-    ) -> error::Result<BoxedBatchIterator> {
-        let iter = self.create_iter(projection, sequence)?.build(None)?;
-        if self.merge_mode == MergeMode::LastNonNull {
-            let iter = LastNonNullIter::new(iter);
-            Ok(Box::new(iter))
-        } else {
-            Ok(Box::new(iter))
-        }
-    }
-
     fn ranges(
         &self,
         projection: Option<&[ColumnId]>,
@@ -526,7 +510,11 @@ mod tests {
             ))
             .unwrap();
 
-        let mut iter = memtable.iter(None, None, None).unwrap();
+        let mut iter = memtable
+            .ranges(None, RangesOptions::default())
+            .unwrap()
+            .build(None)
+            .unwrap();
         let batch = iter.next().unwrap().unwrap();
         assert_eq!(2, batch.num_rows());
         assert_eq!(2, batch.fields().len());
@@ -551,7 +539,11 @@ mod tests {
             ))
             .unwrap();
 
-        let mut iter = memtable.iter(None, None, None).unwrap();
+        let mut iter = memtable
+            .ranges(None, RangesOptions::default())
+            .unwrap()
+            .build(None)
+            .unwrap();
         let batch = iter.next().unwrap().unwrap();
         assert_eq!(1, batch.num_rows());
         assert_eq!(2, batch.fields().len());
@@ -565,7 +557,11 @@ mod tests {
 
         // Only project column 2 (f1)
         let projection = vec![2];
-        let mut iter = memtable.iter(Some(&projection), None, None).unwrap();
+        let mut iter = memtable
+            .ranges(Some(&projection), RangesOptions::default())
+            .unwrap()
+            .build(None)
+            .unwrap();
         let batch = iter.next().unwrap().unwrap();
 
         assert_eq!(1, batch.num_rows());
@@ -592,7 +588,11 @@ mod tests {
                 OpType::Put,
             ))
             .unwrap();
-        let mut iter = memtable.iter(None, None, None).unwrap();
+        let mut iter = memtable
+            .ranges(None, RangesOptions::default())
+            .unwrap()
+            .build(None)
+            .unwrap();
         let batch = iter.next().unwrap().unwrap();
 
         assert_eq!(1, batch.num_rows()); // deduped to 1 row
@@ -611,7 +611,11 @@ mod tests {
         let kv = kvs.iter().next().unwrap();
         memtable.write_one(kv).unwrap();
 
-        let mut iter = memtable.iter(None, None, None).unwrap();
+        let mut iter = memtable
+            .ranges(None, RangesOptions::default())
+            .unwrap()
+            .build(None)
+            .unwrap();
         let batch = iter.next().unwrap().unwrap();
         assert_eq!(1, batch.num_rows());
     }
@@ -745,7 +749,11 @@ mod tests {
         };
         memtable.write_bulk(part).unwrap();
 
-        let mut iter = memtable.iter(None, None, None).unwrap();
+        let mut iter = memtable
+            .ranges(None, RangesOptions::default())
+            .unwrap()
+            .build(None)
+            .unwrap();
         let batch = iter.next().unwrap().unwrap();
         assert_eq!(2, batch.num_rows());
 
@@ -764,7 +772,11 @@ mod tests {
             OpType::Put,
         );
         memtable.write(&kvs).unwrap();
-        let mut iter = memtable.iter(None, None, None).unwrap();
+        let mut iter = memtable
+            .ranges(None, RangesOptions::default())
+            .unwrap()
+            .build(None)
+            .unwrap();
         let batch = iter.next().unwrap().unwrap();
         assert_eq!(3, batch.num_rows());
         assert_eq!(
@@ -854,7 +866,15 @@ mod tests {
 
         // Filter with sequence 0 should only return first write
         let mut iter = memtable
-            .iter(None, None, Some(SequenceRange::LtEq { max: 0 }))
+            .ranges(
+                None,
+                RangesOptions {
+                    sequence: Some(SequenceRange::LtEq { max: 0 }),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .build(None)
             .unwrap();
         let batch = iter.next().unwrap().unwrap();
         assert_eq!(1, batch.num_rows());

@@ -231,10 +231,8 @@ impl MemtableRanges {
 
 impl IterBuilder for MemtableRanges {
     fn build(&self, _metrics: Option<MemScanMetrics>) -> Result<BoxedBatchIterator> {
-        UnsupportedOperationSnafu {
-            err_msg: "MemtableRanges does not support build iterator",
-        }
-        .fail()
+        assert_eq!(self.ranges.len(), 1);
+        self.ranges.values().next().unwrap().build_iter()
     }
 
     fn is_record_batch(&self) -> bool {
@@ -255,20 +253,6 @@ pub trait Memtable: Send + Sync + fmt::Debug {
 
     /// Writes an encoded batch of into memtable.
     fn write_bulk(&self, part: crate::memtable::bulk::part::BulkPart) -> Result<()>;
-
-    /// Scans the memtable.
-    /// `projection` selects columns to read, `None` means reading all columns.
-    /// `filters` are the predicates to be pushed down to memtable.
-    ///
-    /// # Note
-    /// This method should only be used for tests.
-    #[cfg(any(test, feature = "test"))]
-    fn iter(
-        &self,
-        projection: Option<&[ColumnId]>,
-        predicate: Option<table::predicate::Predicate>,
-        sequence: Option<SequenceRange>,
-    ) -> Result<BoxedBatchIterator>;
 
     /// Returns the ranges in the memtable.
     ///

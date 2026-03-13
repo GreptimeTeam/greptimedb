@@ -83,16 +83,6 @@ impl Memtable for EmptyMemtable {
         Ok(())
     }
 
-    #[cfg(any(test, feature = "test"))]
-    fn iter(
-        &self,
-        _projection: Option<&[ColumnId]>,
-        _filters: Option<Predicate>,
-        _sequence: Option<SequenceRange>,
-    ) -> Result<BoxedBatchIterator> {
-        Ok(Box::new(std::iter::empty()))
-    }
-
     fn ranges(
         &self,
         _projection: Option<&[ColumnId]>,
