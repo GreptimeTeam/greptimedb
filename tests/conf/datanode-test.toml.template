@@ -28,7 +28,7 @@ type = 'File'
 data_home = '{data_home}'
 
 [meta_client_options]
-metasrv_addrs = ['{metasrv_addr}']
+metasrv_addrs = ['{addrs.metasrv_addr}']
 timeout_millis = 3000
 connect_timeout_millis = 5000
 tcp_nodelay = false
