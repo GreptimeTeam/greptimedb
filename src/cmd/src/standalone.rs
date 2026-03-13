@@ -32,14 +32,15 @@ use common_meta::cache::LayeredCacheRegistryBuilder;
 use common_meta::ddl::flow_meta::FlowMetadataAllocator;
 use common_meta::ddl::table_meta::TableMetadataAllocator;
 use common_meta::ddl::{DdlContext, NoopRegionFailureDetectorControl};
-use common_meta::ddl_manager::{DdlManager, DdlManagerConfiguratorRef};
+use common_meta::ddl_manager::{DdlManager, DdlManagerConfiguratorRef, DdlManagerRef};
 use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
-use common_meta::procedure_executor::LocalProcedureExecutor;
+use common_meta::node_manager::{FlownodeRef, NodeManagerRef};
+use common_meta::procedure_executor::{LocalProcedureExecutor, ProcedureExecutorRef};
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::region_registry::LeaderRegionRegistry;
-use common_meta::sequence::SequenceBuilder;
+use common_meta::sequence::{Sequence, SequenceBuilder};
 use common_meta::wal_provider::{WalProviderRef, build_wal_provider};
 use common_procedure::ProcedureManagerRef;
 use common_query::prelude::set_default_prefix;
@@ -49,6 +50,7 @@ use common_time::timezone::set_default_timezone;
 use common_version::{short_version, verbose_version};
 use datanode::config::DatanodeOptions;
 use datanode::datanode::{Datanode, DatanodeBuilder};
+use datanode::region_server::RegionServer;
 use flow::{
     FlownodeBuilder, FlownodeInstance, FlownodeOptions, FrontendClient, FrontendInvoker,
     GrpcQueryHandlerWithBoxedError,
@@ -58,6 +60,7 @@ use frontend::instance::StandaloneDatanodeManager;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
+use plugins::PluginOptions;
 use plugins::frontend::context::{
     CatalogManagerConfigureContext, StandaloneCatalogManagerConfigureContext,
 };
@@ -129,6 +132,14 @@ impl Instance {
     /// Find the socket addr of a server by its `name`.
     pub fn server_addr(&self, name: &str) -> Option<SocketAddr> {
         self.frontend.server_handlers().addr(name)
+    }
+
+    pub fn mut_frontend(&mut self) -> &mut Frontend {
+        &mut self.frontend
+    }
+
+    pub fn datanode(&self) -> &Datanode {
+        &self.datanode
     }
 }
 
@@ -342,9 +353,18 @@ impl StartCommand {
         info!("Standalone start command: {:#?}", self);
         info!("Standalone options: {opts:#?}");
 
+        let (mut instance, _) =
+            Self::build_with(opts.component, opts.plugins, InstanceCreator::default()).await?;
+        instance._guard.extend(guard);
+        Ok(instance)
+    }
+
+    pub async fn build_with(
+        mut opts: StandaloneOptions,
+        plugin_opts: Vec<PluginOptions>,
+        creator: InstanceCreator,
+    ) -> Result<(Instance, InstanceCreatorResult)> {
         let mut plugins = Plugins::new();
-        let plugin_opts = opts.plugins;
-        let mut opts = opts.component;
         set_default_prefix(opts.default_column_prefix.as_deref())
             .map_err(BoxedError::new)
             .context(error::BuildCliSnafu)?;
@@ -462,17 +482,16 @@ impl StartCommand {
                 .await;
         }
 
-        let node_manager = Arc::new(StandaloneDatanodeManager {
-            region_server: datanode.region_server(),
-            flow_server: flownode.flow_engine(),
-        });
+        let node_manager = creator
+            .node_manager_creator
+            .create(
+                &kv_backend,
+                datanode.region_server(),
+                flownode.flow_engine(),
+            )
+            .await?;
 
-        let table_id_allocator = Arc::new(
-            SequenceBuilder::new(TABLE_ID_SEQ, kv_backend.clone())
-                .initial(MIN_USER_TABLE_ID as u64)
-                .step(10)
-                .build(),
-        );
+        let table_id_allocator = creator.table_id_allocator_creator.create(&kv_backend);
         let flow_id_sequence = Arc::new(
             SequenceBuilder::new(FLOW_ID_SEQ, kv_backend.clone())
                 .initial(MIN_USER_FLOW_ID as u64)
@@ -489,7 +508,7 @@ impl StartCommand {
             .context(error::BuildWalProviderSnafu)?;
         let wal_provider = Arc::new(wal_provider);
         let table_metadata_allocator = Arc::new(TableMetadataAllocator::new(
-            table_id_allocator,
+            table_id_allocator.clone(),
             wal_provider.clone(),
         ));
         let flow_metadata_allocator = Arc::new(FlowMetadataAllocator::with_noop_peer_allocator(
@@ -532,10 +551,10 @@ impl StartCommand {
             ddl_manager
         };
 
-        let procedure_executor = Arc::new(LocalProcedureExecutor::new(
-            Arc::new(ddl_manager),
-            procedure_manager.clone(),
-        ));
+        let procedure_executor = creator
+            .procedure_executor_creator
+            .create(Arc::new(ddl_manager), procedure_manager.clone())
+            .await?;
 
         let fe_instance = FrontendBuilder::new(
             fe_opts.clone(),
@@ -568,7 +587,7 @@ impl StartCommand {
             kv_backend.clone(),
             layered_cache_registry.clone(),
             procedure_executor,
-            node_manager,
+            node_manager.clone(),
         )
         .await
         .context(StartFlownodeSnafu)?;
@@ -584,14 +603,20 @@ impl StartCommand {
             heartbeat_task: None,
         };
 
-        Ok(Instance {
+        let instance = Instance {
             datanode,
             frontend,
             flownode,
             procedure_manager,
             wal_provider,
-            _guard: guard,
-        })
+            _guard: vec![],
+        };
+        let result = InstanceCreatorResult {
+            kv_backend,
+            node_manager,
+            table_id_allocator,
+        };
+        Ok((instance, result))
     }
 
     pub async fn create_table_metadata_manager(
@@ -606,6 +631,115 @@ impl StartCommand {
 
         Ok(table_metadata_manager)
     }
+}
+
+#[async_trait]
+pub trait NodeManagerCreator {
+    async fn create(
+        &self,
+        kv_backend: &KvBackendRef,
+        region_server: RegionServer,
+        flow_server: FlownodeRef,
+    ) -> Result<NodeManagerRef>;
+}
+
+pub struct DefaultNodeManagerCreator;
+
+#[async_trait]
+impl NodeManagerCreator for DefaultNodeManagerCreator {
+    async fn create(
+        &self,
+        _: &KvBackendRef,
+        region_server: RegionServer,
+        flow_server: FlownodeRef,
+    ) -> Result<NodeManagerRef> {
+        Ok(Arc::new(StandaloneDatanodeManager {
+            region_server,
+            flow_server,
+        }))
+    }
+}
+
+pub trait TableIdAllocatorCreator {
+    fn create(&self, kv_backend: &KvBackendRef) -> Arc<Sequence>;
+}
+
+struct DefaultTableIdAllocatorCreator;
+
+impl TableIdAllocatorCreator for DefaultTableIdAllocatorCreator {
+    fn create(&self, kv_backend: &KvBackendRef) -> Arc<Sequence> {
+        Arc::new(
+            SequenceBuilder::new(TABLE_ID_SEQ, kv_backend.clone())
+                .initial(MIN_USER_TABLE_ID as u64)
+                .step(10)
+                .build(),
+        )
+    }
+}
+
+#[async_trait]
+pub trait ProcedureExecutorCreator {
+    async fn create(
+        &self,
+        ddl_manager: DdlManagerRef,
+        procedure_manager: ProcedureManagerRef,
+    ) -> Result<ProcedureExecutorRef>;
+}
+
+pub struct DefaultProcedureExecutorCreator;
+
+#[async_trait]
+impl ProcedureExecutorCreator for DefaultProcedureExecutorCreator {
+    async fn create(
+        &self,
+        ddl_manager: DdlManagerRef,
+        procedure_manager: ProcedureManagerRef,
+    ) -> Result<ProcedureExecutorRef> {
+        Ok(Arc::new(LocalProcedureExecutor::new(
+            ddl_manager,
+            procedure_manager,
+        )))
+    }
+}
+
+/// `InstanceCreator` is used for grouping various component creators for building the
+/// Standalone instance, suitable for customizing how the instance can be built.
+pub struct InstanceCreator {
+    node_manager_creator: Box<dyn NodeManagerCreator>,
+    table_id_allocator_creator: Box<dyn TableIdAllocatorCreator>,
+    procedure_executor_creator: Box<dyn ProcedureExecutorCreator>,
+}
+
+impl InstanceCreator {
+    pub fn new(
+        node_manager_creator: Box<dyn NodeManagerCreator>,
+        table_id_allocator_creator: Box<dyn TableIdAllocatorCreator>,
+        procedure_executor_creator: Box<dyn ProcedureExecutorCreator>,
+    ) -> Self {
+        Self {
+            node_manager_creator,
+            table_id_allocator_creator,
+            procedure_executor_creator,
+        }
+    }
+}
+
+impl Default for InstanceCreator {
+    fn default() -> Self {
+        Self {
+            node_manager_creator: Box::new(DefaultNodeManagerCreator),
+            table_id_allocator_creator: Box::new(DefaultTableIdAllocatorCreator),
+            procedure_executor_creator: Box::new(DefaultProcedureExecutorCreator),
+        }
+    }
+}
+
+/// `InstanceCreatorResult` is expected to be used paired with [InstanceCreator].
+/// It stores the created and other important components for further reusing.
+pub struct InstanceCreatorResult {
+    pub kv_backend: KvBackendRef,
+    pub node_manager: NodeManagerRef,
+    pub table_id_allocator: Arc<Sequence>,
 }
 
 #[cfg(test)]
