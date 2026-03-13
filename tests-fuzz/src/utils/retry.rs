@@ -45,5 +45,5 @@ where
         }
     }
 
-    unreachable!("retry loop should always return")
+    panic!("retry loop should always return")
 }

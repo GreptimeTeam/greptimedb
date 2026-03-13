@@ -254,13 +254,6 @@ enum WriterControl {
     Stop,
 }
 
-fn touch_writer_control_skeleton() {
-    let (ack, _ack_rx) = oneshot::channel();
-    let _barrier = WriterControl::Barrier { epoch: 0, ack };
-    let _resume = WriterControl::Resume { epoch: 0 };
-    let _stop = WriterControl::Stop;
-}
-
 fn handle_writer_control(control: WriterControl, paused: &mut bool) -> bool {
     match control {
         WriterControl::Barrier { epoch, ack } => {
@@ -357,6 +350,7 @@ async fn write_loop<R: Rng + 'static>(
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     info!("Write loop ended");
+
     Ok(())
 }
 
@@ -483,7 +477,6 @@ impl Arbitrary<'_> for FuzzInput {
 }
 
 async fn execute_repartition_metric_table(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
-    touch_writer_control_skeleton();
     info!("input: {input:?}");
     let mut rng = ChaChaRng::seed_from_u64(input.seed);
     let clock = Arc::new(Mutex::new(Timestamp::current_millis()));
