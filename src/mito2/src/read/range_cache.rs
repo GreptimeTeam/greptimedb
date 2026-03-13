@@ -19,9 +19,7 @@ use std::sync::Arc;
 
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
-use store_api::storage::{
-    ColumnId, FileId, RegionId, TimeSeriesRowSelector,
-};
+use store_api::storage::{ColumnId, FileId, RegionId, TimeSeriesRowSelector};
 
 use crate::memtable::record_batch_estimated_size;
 use crate::region::options::MergeMode;
