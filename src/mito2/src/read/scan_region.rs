@@ -1495,7 +1495,6 @@ pub(crate) fn build_scan_fingerprint(input: &ScanInput) -> Option<ScanRequestFin
             filters,
             time_filters,
             series_row_selector: input.series_row_selector,
-            distribution: input.distribution,
             append_mode: input.append_mode,
             filter_deleted: input.filter_deleted,
             merge_mode: input.merge_mode,
@@ -1859,6 +1858,7 @@ mod tests {
     use super::*;
     use crate::cache::CacheManager;
     use crate::memtable::time_partition::TimePartitions;
+    use crate::read::range_cache::ScanRequestFingerprintBuilder;
     use crate::region::options::RegionOptions;
     use crate::region::version::VersionBuilder;
     use crate::sst::FormatType;
@@ -2054,9 +2054,9 @@ mod tests {
 
         let fingerprint = build_scan_fingerprint(&input).unwrap();
 
-        assert_eq!(input.read_column_ids, fingerprint.read_column_ids());
-        assert_eq!(
-            vec![
+        let expected = ScanRequestFingerprintBuilder {
+            read_column_ids: input.read_column_ids.clone(),
+            read_column_types: vec![
                 metadata
                     .column_by_id(0)
                     .map(|col| col.column_schema.data_type.clone()),
@@ -2067,29 +2067,19 @@ mod tests {
                     .column_by_id(3)
                     .map(|col| col.column_schema.data_type.clone()),
             ],
-            fingerprint.read_column_types()
-        );
-        assert_eq!(
-            vec![
+            filters: vec![
                 col("k0").eq(lit("foo")).to_string(),
-                col("v0").gt(lit(1)).to_string()
+                col("v0").gt(lit(1)).to_string(),
             ],
-            fingerprint.filters()
-        );
-        assert_eq!(
-            [col("ts").gt_eq(lit(1000)).to_string()].as_slice(),
-            fingerprint.time_filters()
-        );
-        assert_eq!(
-            Some(TimeSeriesDistribution::PerSeries),
-            fingerprint.distribution
-        );
-        assert_eq!(
-            Some(TimeSeriesRowSelector::LastRow),
-            fingerprint.series_row_selector
-        );
-        assert!(!fingerprint.filter_deleted);
-        assert_eq!(MergeMode::LastNonNull, fingerprint.merge_mode);
+            time_filters: vec![col("ts").gt_eq(lit(1000)).to_string()],
+            series_row_selector: Some(TimeSeriesRowSelector::LastRow),
+            append_mode: false,
+            filter_deleted: false,
+            merge_mode: MergeMode::LastNonNull,
+            partition_expr_version: 0,
+        }
+        .build();
+        assert_eq!(expected, fingerprint);
     }
 
     #[tokio::test]
@@ -2146,17 +2136,30 @@ mod tests {
         let input = new_scan_input(metadata.clone(), vec![col("k0").eq(lit("foo"))]).await;
         let fingerprint = build_scan_fingerprint(&input).unwrap();
 
-        assert_eq!(
-            metadata.partition_expr_version,
-            fingerprint.partition_expr_version
-        );
-        assert_eq!(
-            metadata
-                .column_by_id(3)
-                .map(|col| col.column_schema.data_type.clone()),
-            fingerprint.read_column_types().get(2).cloned().unwrap()
-        );
-        assert_ne!(0, fingerprint.partition_expr_version);
+        let expected = ScanRequestFingerprintBuilder {
+            read_column_ids: input.read_column_ids.clone(),
+            read_column_types: vec![
+                metadata
+                    .column_by_id(0)
+                    .map(|col| col.column_schema.data_type.clone()),
+                metadata
+                    .column_by_id(2)
+                    .map(|col| col.column_schema.data_type.clone()),
+                metadata
+                    .column_by_id(3)
+                    .map(|col| col.column_schema.data_type.clone()),
+            ],
+            filters: vec![col("k0").eq(lit("foo")).to_string()],
+            time_filters: vec![],
+            series_row_selector: None,
+            append_mode: false,
+            filter_deleted: true,
+            merge_mode: MergeMode::LastRow,
+            partition_expr_version: metadata.partition_expr_version,
+        }
+        .build();
+        assert_eq!(expected, fingerprint);
+        assert_ne!(0, metadata.partition_expr_version);
     }
 
     #[test]

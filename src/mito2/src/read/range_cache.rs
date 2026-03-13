@@ -20,7 +20,7 @@ use std::sync::Arc;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
 use store_api::storage::{
-    ColumnId, FileId, RegionId, TimeSeriesDistribution, TimeSeriesRowSelector,
+    ColumnId, FileId, RegionId, TimeSeriesRowSelector,
 };
 
 use crate::memtable::record_batch_estimated_size;
@@ -38,14 +38,13 @@ pub(crate) struct ScanRequestFingerprint {
     inner: Arc<SharedScanRequestFingerprint>,
     /// Filters with the time index column.
     time_filters: Option<Arc<Vec<String>>>,
-    pub(crate) series_row_selector: Option<TimeSeriesRowSelector>,
-    pub(crate) distribution: Option<TimeSeriesDistribution>,
-    pub(crate) append_mode: bool,
-    pub(crate) filter_deleted: bool,
-    pub(crate) merge_mode: MergeMode,
+    series_row_selector: Option<TimeSeriesRowSelector>,
+    append_mode: bool,
+    filter_deleted: bool,
+    merge_mode: MergeMode,
     /// We keep the partition expr version to ensure we won't reuse the fingerprint after we change the partition expr.
     /// We store the version instead of the whole partition expr or partition expr filters.
-    pub(crate) partition_expr_version: u64,
+    partition_expr_version: u64,
 }
 
 #[derive(Debug)]
@@ -55,7 +54,6 @@ pub(crate) struct ScanRequestFingerprintBuilder {
     pub(crate) filters: Vec<String>,
     pub(crate) time_filters: Vec<String>,
     pub(crate) series_row_selector: Option<TimeSeriesRowSelector>,
-    pub(crate) distribution: Option<TimeSeriesDistribution>,
     pub(crate) append_mode: bool,
     pub(crate) filter_deleted: bool,
     pub(crate) merge_mode: MergeMode,
@@ -70,7 +68,6 @@ impl ScanRequestFingerprintBuilder {
             filters,
             time_filters,
             series_row_selector,
-            distribution,
             append_mode,
             filter_deleted,
             merge_mode,
@@ -85,7 +82,6 @@ impl ScanRequestFingerprintBuilder {
             }),
             time_filters: (!time_filters.is_empty()).then(|| Arc::new(time_filters)),
             series_row_selector,
-            distribution,
             append_mode,
             filter_deleted,
             merge_mode,
@@ -136,7 +132,6 @@ impl ScanRequestFingerprint {
             inner: Arc::clone(&self.inner),
             time_filters: None,
             series_row_selector: self.series_row_selector,
-            distribution: self.distribution,
             append_mode: self.append_mode,
             filter_deleted: self.filter_deleted,
             merge_mode: self.merge_mode,
@@ -207,7 +202,7 @@ impl RangeScanCacheValue {
 
 #[cfg(test)]
 mod tests {
-    use store_api::storage::{TimeSeriesDistribution, TimeSeriesRowSelector};
+    use store_api::storage::TimeSeriesRowSelector;
 
     use super::*;
 
@@ -219,7 +214,6 @@ mod tests {
             filters: vec!["k0 = 'foo'".to_string()],
             time_filters: vec![],
             series_row_selector: None,
-            distribution: None,
             append_mode: false,
             filter_deleted: true,
             merge_mode: MergeMode::LastRow,
@@ -235,7 +229,6 @@ mod tests {
             filters: vec!["k0 = 'foo'".to_string()],
             time_filters: vec!["ts >= 1000".to_string()],
             series_row_selector: Some(TimeSeriesRowSelector::LastRow),
-            distribution: Some(TimeSeriesDistribution::PerSeries),
             append_mode: false,
             filter_deleted: true,
             merge_mode: MergeMode::LastRow,
@@ -250,7 +243,6 @@ mod tests {
         assert_eq!(reset.filters(), fingerprint.filters());
         assert!(reset.time_filters().is_empty());
         assert_eq!(reset.series_row_selector, fingerprint.series_row_selector);
-        assert_eq!(reset.distribution, fingerprint.distribution);
         assert_eq!(reset.append_mode, fingerprint.append_mode);
         assert_eq!(reset.filter_deleted, fingerprint.filter_deleted);
         assert_eq!(reset.merge_mode, fingerprint.merge_mode);
