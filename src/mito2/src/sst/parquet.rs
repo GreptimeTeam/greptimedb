@@ -110,6 +110,7 @@ mod tests {
         TimestampMillisecondArray, UInt8Array, UInt64Array,
     };
     use datatypes::arrow::datatypes::{DataType, Field, Schema, UInt32Type};
+    use datatypes::arrow::util::pretty::pretty_format_batches;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{FulltextAnalyzer, FulltextBackend, FulltextOptions};
     use object_store::ObjectStore;
@@ -129,7 +130,7 @@ mod tests {
     use crate::cache::test_util::assert_parquet_metadata_equal;
     use crate::cache::{CacheManager, CacheStrategy, PageKey};
     use crate::config::IndexConfig;
-    use crate::read::{BatchBuilder, BatchReader, FlatSource};
+    use crate::read::FlatSource;
     use crate::region::options::{IndexOptions, InvertedIndexOptions};
     use crate::sst::file::{FileHandle, FileMeta, RegionFileId, RegionIndexId};
     use crate::sst::file_purger::NoopFilePurger;
@@ -137,19 +138,19 @@ mod tests {
     use crate::sst::index::fulltext_index::applier::builder::FulltextIndexApplierBuilder;
     use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
     use crate::sst::index::{IndexBuildType, Indexer, IndexerBuilder, IndexerBuilderImpl};
-    use crate::sst::parquet::format::PrimaryKeyWriteFormat;
+    use crate::sst::parquet::flat_format::FlatWriteFormat;
     use crate::sst::parquet::reader::{ParquetReader, ParquetReaderBuilder, ReaderMetrics};
     use crate::sst::parquet::writer::ParquetWriter;
     use crate::sst::{
         DEFAULT_WRITE_CONCURRENCY, FlatSchemaOptions, location, to_flat_sst_arrow_schema,
     };
+    use crate::test_util::TestEnv;
     use crate::test_util::sst_util::{
-        build_test_binary_test_region_metadata, new_batch_by_range, new_batch_with_binary,
-        new_batch_with_custom_sequence, new_primary_key, new_source, new_sparse_primary_key,
-        sst_file_handle, sst_file_handle_with_file_id, sst_region_metadata,
+        build_test_binary_test_region_metadata, new_flat_source_from_record_batches,
+        new_primary_key, new_record_batch_by_range, new_record_batch_with_custom_sequence,
+        new_sparse_primary_key, sst_file_handle, sst_file_handle_with_file_id, sst_region_metadata,
         sst_region_metadata_with_encoding,
     };
-    use crate::test_util::{TestEnv, check_reader_result};
 
     const FILE_DIR: &str = "/";
     const REGION_ID: RegionId = RegionId::new(0, 0);
@@ -191,10 +192,10 @@ mod tests {
             region_file_id: handle.file_id(),
         };
         let metadata = Arc::new(sst_region_metadata());
-        let source = new_source(&[
-            new_batch_by_range(&["a", "d"], 0, 60),
-            new_batch_by_range(&["b", "f"], 0, 40),
-            new_batch_by_range(&["b", "h"], 100, 200),
+        let source = new_flat_source_from_record_batches(vec![
+            new_record_batch_by_range(&["a", "d"], 0, 60),
+            new_record_batch_by_range(&["b", "f"], 0, 40),
+            new_record_batch_by_range(&["b", "h"], 100, 200),
         ]);
         // Use a small row group size for test.
         let write_opts = WriteOptions {
@@ -214,7 +215,7 @@ mod tests {
         .await;
 
         let info = writer
-            .write_all(source, None, &write_opts)
+            .write_all_flat_as_primary_key(source, None, &write_opts)
             .await
             .unwrap()
             .remove(0);
@@ -235,14 +236,14 @@ mod tests {
             object_store,
         );
         let mut reader = builder.build().await.unwrap().unwrap();
-        check_reader_result(
+        check_record_batch_reader_result(
             &mut reader,
             &[
-                new_batch_by_range(&["a", "d"], 0, 50),
-                new_batch_by_range(&["a", "d"], 50, 60),
-                new_batch_by_range(&["b", "f"], 0, 40),
-                new_batch_by_range(&["b", "h"], 100, 150),
-                new_batch_by_range(&["b", "h"], 150, 200),
+                new_record_batch_by_range(&["a", "d"], 0, 50),
+                new_record_batch_by_range(&["a", "d"], 50, 60),
+                new_record_batch_by_range(&["b", "f"], 0, 40),
+                new_record_batch_by_range(&["b", "h"], 100, 150),
+                new_record_batch_by_range(&["b", "h"], 150, 200),
             ],
         )
         .await;
@@ -254,10 +255,10 @@ mod tests {
         let object_store = env.init_object_store_manager();
         let handle = sst_file_handle(0, 1000);
         let metadata = Arc::new(sst_region_metadata());
-        let source = new_source(&[
-            new_batch_by_range(&["a", "d"], 0, 60),
-            new_batch_by_range(&["b", "f"], 0, 40),
-            new_batch_by_range(&["b", "h"], 100, 200),
+        let source = new_flat_source_from_record_batches(vec![
+            new_record_batch_by_range(&["a", "d"], 0, 60),
+            new_record_batch_by_range(&["b", "f"], 0, 40),
+            new_record_batch_by_range(&["b", "h"], 100, 200),
         ]);
         // Use a small row group size for test.
         let write_opts = WriteOptions {
@@ -279,7 +280,7 @@ mod tests {
         .await;
 
         let sst_info = writer
-            .write_all(source, None, &write_opts)
+            .write_all_flat_as_primary_key(source, None, &write_opts)
             .await
             .unwrap()
             .remove(0);
@@ -299,14 +300,14 @@ mod tests {
         .cache(cache.clone());
         for _ in 0..3 {
             let mut reader = builder.build().await.unwrap().unwrap();
-            check_reader_result(
+            check_record_batch_reader_result(
                 &mut reader,
                 &[
-                    new_batch_by_range(&["a", "d"], 0, 50),
-                    new_batch_by_range(&["a", "d"], 50, 60),
-                    new_batch_by_range(&["b", "f"], 0, 40),
-                    new_batch_by_range(&["b", "h"], 100, 150),
-                    new_batch_by_range(&["b", "h"], 150, 200),
+                    new_record_batch_by_range(&["a", "d"], 0, 50),
+                    new_record_batch_by_range(&["a", "d"], 50, 60),
+                    new_record_batch_by_range(&["b", "f"], 0, 40),
+                    new_record_batch_by_range(&["b", "h"], 100, 150),
+                    new_record_batch_by_range(&["b", "h"], 150, 200),
                 ],
             )
             .await;
@@ -340,10 +341,10 @@ mod tests {
         let object_store = env.init_object_store_manager();
         let handle = sst_file_handle(0, 1000);
         let metadata = Arc::new(sst_region_metadata());
-        let source = new_source(&[
-            new_batch_by_range(&["a", "d"], 0, 60),
-            new_batch_by_range(&["b", "f"], 0, 40),
-            new_batch_by_range(&["b", "h"], 100, 200),
+        let source = new_flat_source_from_record_batches(vec![
+            new_record_batch_by_range(&["a", "d"], 0, 60),
+            new_record_batch_by_range(&["b", "f"], 0, 40),
+            new_record_batch_by_range(&["b", "h"], 100, 200),
         ]);
         let write_opts = WriteOptions {
             row_group_size: 50,
@@ -366,7 +367,7 @@ mod tests {
         .await;
 
         let sst_info = writer
-            .write_all(source, None, &write_opts)
+            .write_all_flat_as_primary_key(source, None, &write_opts)
             .await
             .unwrap()
             .remove(0);
@@ -392,10 +393,10 @@ mod tests {
         let object_store = env.init_object_store_manager();
         let handle = sst_file_handle(0, 1000);
         let metadata = Arc::new(sst_region_metadata());
-        let source = new_source(&[
-            new_batch_by_range(&["a", "d"], 0, 60),
-            new_batch_by_range(&["b", "f"], 0, 40),
-            new_batch_by_range(&["b", "h"], 100, 200),
+        let source = new_flat_source_from_record_batches(vec![
+            new_record_batch_by_range(&["a", "d"], 0, 60),
+            new_record_batch_by_range(&["b", "f"], 0, 40),
+            new_record_batch_by_range(&["b", "h"], 100, 200),
         ]);
         // Use a small row group size for test.
         let write_opts = WriteOptions {
@@ -416,7 +417,7 @@ mod tests {
         )
         .await;
         writer
-            .write_all(source, None, &write_opts)
+            .write_all_flat_as_primary_key(source, None, &write_opts)
             .await
             .unwrap()
             .remove(0);
@@ -436,11 +437,11 @@ mod tests {
         )
         .predicate(predicate);
         let mut reader = builder.build().await.unwrap().unwrap();
-        check_reader_result(
+        check_record_batch_reader_result(
             &mut reader,
             &[
-                new_batch_by_range(&["a", "d"], 0, 50),
-                new_batch_by_range(&["a", "d"], 50, 60),
+                new_record_batch_by_range(&["a", "d"], 0, 50),
+                new_record_batch_by_range(&["a", "d"], 50, 60),
             ],
         )
         .await;
@@ -452,10 +453,10 @@ mod tests {
         let object_store = env.init_object_store_manager();
         let handle = sst_file_handle(0, 1000);
         let metadata = Arc::new(sst_region_metadata());
-        let source = new_source(&[
-            new_batch_by_range(&["a", "z"], 0, 0),
-            new_batch_by_range(&["a", "z"], 100, 100),
-            new_batch_by_range(&["a", "z"], 200, 230),
+        let source = new_flat_source_from_record_batches(vec![
+            new_record_batch_by_range(&["a", "z"], 0, 0),
+            new_record_batch_by_range(&["a", "z"], 100, 100),
+            new_record_batch_by_range(&["a", "z"], 200, 230),
         ]);
         // Use a small row group size for test.
         let write_opts = WriteOptions {
@@ -476,7 +477,7 @@ mod tests {
         )
         .await;
         writer
-            .write_all(source, None, &write_opts)
+            .write_all_flat_as_primary_key(source, None, &write_opts)
             .await
             .unwrap()
             .remove(0);
@@ -488,7 +489,11 @@ mod tests {
             object_store,
         );
         let mut reader = builder.build().await.unwrap().unwrap();
-        check_reader_result(&mut reader, &[new_batch_by_range(&["a", "z"], 200, 230)]).await;
+        check_record_batch_reader_result(
+            &mut reader,
+            &[new_record_batch_by_range(&["a", "z"], 200, 230)],
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -497,10 +502,10 @@ mod tests {
         let object_store = env.init_object_store_manager();
         let handle = sst_file_handle(0, 1000);
         let metadata = Arc::new(sst_region_metadata());
-        let source = new_source(&[
-            new_batch_by_range(&["a", "d"], 0, 60),
-            new_batch_by_range(&["b", "f"], 0, 40),
-            new_batch_by_range(&["b", "h"], 100, 200),
+        let source = new_flat_source_from_record_batches(vec![
+            new_record_batch_by_range(&["a", "d"], 0, 60),
+            new_record_batch_by_range(&["b", "f"], 0, 40),
+            new_record_batch_by_range(&["b", "h"], 100, 200),
         ]);
         // Use a small row group size for test.
         let write_opts = WriteOptions {
@@ -522,7 +527,7 @@ mod tests {
         .await;
 
         writer
-            .write_all(source, None, &write_opts)
+            .write_all_flat_as_primary_key(source, None, &write_opts)
             .await
             .unwrap()
             .remove(0);
@@ -542,7 +547,11 @@ mod tests {
         )
         .predicate(predicate);
         let mut reader = builder.build().await.unwrap().unwrap();
-        check_reader_result(&mut reader, &[new_batch_by_range(&["b", "h"], 150, 200)]).await;
+        check_record_batch_reader_result(
+            &mut reader,
+            &[new_record_batch_by_range(&["b", "h"], 150, 200)],
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -569,7 +578,7 @@ mod tests {
 
         let writer_props = props_builder.build();
 
-        let write_format = PrimaryKeyWriteFormat::new(metadata);
+        let write_format = FlatWriteFormat::new(metadata, &FlatSchemaOptions::default());
         let fields: Vec<_> = write_format
             .arrow_schema()
             .fields()
@@ -603,9 +612,8 @@ mod tests {
         )
         .unwrap();
 
-        let batch = new_batch_with_binary(&["a"], 0, 60);
-        let arrow_batch = write_format.convert_batch(&batch).unwrap();
-        let arrays: Vec<_> = arrow_batch
+        let batch = new_record_batch_with_binary(&["a"], 0, 60);
+        let arrays: Vec<_> = batch
             .columns()
             .iter()
             .map(|array| {
@@ -629,11 +637,11 @@ mod tests {
             object_store,
         );
         let mut reader = builder.build().await.unwrap().unwrap();
-        check_reader_result(
+        check_record_batch_reader_result(
             &mut reader,
             &[
-                new_batch_with_binary(&["a"], 0, 50),
-                new_batch_with_binary(&["a"], 50, 60),
+                new_record_batch_with_binary(&["a"], 0, 50),
+                new_record_batch_with_binary(&["a"], 50, 60),
             ],
         )
         .await;
@@ -646,17 +654,17 @@ mod tests {
         let mut env = TestEnv::new().await;
         let object_store = env.init_object_store_manager();
         let metadata = Arc::new(sst_region_metadata());
-        let batches = &[
-            new_batch_by_range(&["a", "d"], 0, 1000),
-            new_batch_by_range(&["b", "f"], 0, 1000),
-            new_batch_by_range(&["c", "g"], 0, 1000),
-            new_batch_by_range(&["b", "h"], 100, 200),
-            new_batch_by_range(&["b", "h"], 200, 300),
-            new_batch_by_range(&["b", "h"], 300, 1000),
+        let batches = vec![
+            new_record_batch_by_range(&["a", "d"], 0, 1000),
+            new_record_batch_by_range(&["b", "f"], 0, 1000),
+            new_record_batch_by_range(&["c", "g"], 0, 1000),
+            new_record_batch_by_range(&["b", "h"], 100, 200),
+            new_record_batch_by_range(&["b", "h"], 200, 300),
+            new_record_batch_by_range(&["b", "h"], 300, 1000),
         ];
         let total_rows: usize = batches.iter().map(|batch| batch.num_rows()).sum();
 
-        let source = new_source(batches);
+        let source = new_flat_source_from_record_batches(batches);
         let write_opts = WriteOptions {
             row_group_size: 50,
             max_file_size: Some(1024 * 16),
@@ -678,7 +686,10 @@ mod tests {
         )
         .await;
 
-        let files = writer.write_all(source, None, &write_opts).await.unwrap();
+        let files = writer
+            .write_all_flat_as_primary_key(source, None, &write_opts)
+            .await
+            .unwrap();
         assert_eq!(2, files.len());
 
         let mut rows_read = 0;
@@ -695,7 +706,7 @@ mod tests {
                 object_store.clone(),
             );
             let mut reader = builder.build().await.unwrap().unwrap();
-            while let Some(batch) = reader.next_batch().await.unwrap() {
+            while let Some(batch) = reader.next_record_batch().await.unwrap() {
                 rows_read += batch.num_rows();
             }
         }
@@ -710,12 +721,12 @@ mod tests {
         let metadata = Arc::new(sst_region_metadata());
         let row_group_size = 50;
 
-        let source = new_source(&[
-            new_batch_by_range(&["a", "d"], 0, 20),
-            new_batch_by_range(&["b", "d"], 0, 20),
-            new_batch_by_range(&["c", "d"], 0, 20),
-            new_batch_by_range(&["c", "f"], 0, 40),
-            new_batch_by_range(&["c", "h"], 100, 200),
+        let source = new_flat_source_from_record_batches(vec![
+            new_record_batch_by_range(&["a", "d"], 0, 20),
+            new_record_batch_by_range(&["b", "d"], 0, 20),
+            new_record_batch_by_range(&["c", "d"], 0, 20),
+            new_record_batch_by_range(&["c", "f"], 0, 40),
+            new_record_batch_by_range(&["c", "h"], 100, 200),
         ]);
         // Use a small row group size for test.
         let write_opts = WriteOptions {
@@ -760,7 +771,7 @@ mod tests {
         .await;
 
         let info = writer
-            .write_all(source, None, &write_opts)
+            .write_all_flat_as_primary_key(source, None, &write_opts)
             .await
             .unwrap()
             .remove(0);
@@ -877,6 +888,7 @@ mod tests {
             handle.clone(),
             object_store.clone(),
         )
+        .flat_format(true)
         .predicate(Some(Predicate::new(preds)))
         .inverted_index_appliers([inverted_index_applier.clone(), None])
         .bloom_filter_index_appliers([bloom_filter_applier.clone(), None])
@@ -891,7 +903,11 @@ mod tests {
         let mut reader = ParquetReader::new(Arc::new(context), selection)
             .await
             .unwrap();
-        check_reader_result(&mut reader, &[new_batch_by_range(&["b", "d"], 0, 20)]).await;
+        check_record_batch_reader_result(
+            &mut reader,
+            &[new_record_batch_by_range(&["b", "d"], 0, 20)],
+        )
+        .await;
 
         assert_eq!(metrics.filter_metrics.rg_total, 4);
         assert_eq!(metrics.filter_metrics.rg_minmax_filtered, 3);
@@ -937,6 +953,7 @@ mod tests {
             handle.clone(),
             object_store.clone(),
         )
+        .flat_format(true)
         .predicate(Some(Predicate::new(preds)))
         .inverted_index_appliers([inverted_index_applier.clone(), None])
         .bloom_filter_index_appliers([bloom_filter_applier.clone(), None])
@@ -991,6 +1008,7 @@ mod tests {
             handle.clone(),
             object_store.clone(),
         )
+        .flat_format(true)
         .predicate(Some(Predicate::new(preds)))
         .inverted_index_appliers([inverted_index_applier.clone(), None])
         .bloom_filter_index_appliers([bloom_filter_applier.clone(), None])
@@ -1005,13 +1023,13 @@ mod tests {
         let mut reader = ParquetReader::new(Arc::new(context), selection)
             .await
             .unwrap();
-        check_reader_result(
+        check_record_batch_reader_result(
             &mut reader,
             &[
-                new_batch_by_range(&["a", "d"], 0, 20),
-                new_batch_by_range(&["b", "d"], 0, 20),
-                new_batch_by_range(&["c", "d"], 0, 10),
-                new_batch_by_range(&["c", "d"], 10, 20),
+                new_record_batch_by_range(&["a", "d"], 0, 20),
+                new_record_batch_by_range(&["b", "d"], 0, 20),
+                new_record_batch_by_range(&["c", "d"], 0, 10),
+                new_record_batch_by_range(&["c", "d"], 10, 20),
             ],
         )
         .await;
@@ -1032,37 +1050,32 @@ mod tests {
         assert!(cached.contains_row_group(3));
     }
 
-    /// Creates a flat format RecordBatch for testing.
-    /// Similar to `new_batch_by_range` but returns a RecordBatch in flat format.
-    fn new_record_batch_by_range(tags: &[&str], start: usize, end: usize) -> RecordBatch {
+    fn new_record_batch_with_binary(tags: &[&str], start: usize, end: usize) -> RecordBatch {
         assert!(end >= start);
-        let metadata = Arc::new(sst_region_metadata());
+        let metadata = build_test_binary_test_region_metadata();
         let flat_schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
 
         let num_rows = end - start;
         let mut columns = Vec::new();
 
-        // Add primary key columns (tag_0, tag_1) as dictionary arrays
         let mut tag_0_builder = StringDictionaryBuilder::<UInt32Type>::new();
-        let mut tag_1_builder = StringDictionaryBuilder::<UInt32Type>::new();
-
         for _ in 0..num_rows {
             tag_0_builder.append_value(tags[0]);
-            tag_1_builder.append_value(tags[1]);
         }
-
         columns.push(Arc::new(tag_0_builder.finish()) as ArrayRef);
-        columns.push(Arc::new(tag_1_builder.finish()) as ArrayRef);
 
-        // Add field column (field_0)
-        let field_values: Vec<u64> = (start..end).map(|v| v as u64).collect();
-        columns.push(Arc::new(UInt64Array::from(field_values)));
+        let values = (0..num_rows)
+            .map(|_| "some data".as_bytes())
+            .collect::<Vec<_>>();
+        columns.push(
+            Arc::new(datatypes::arrow::array::BinaryArray::from_iter_values(
+                values,
+            )) as ArrayRef,
+        );
 
-        // Add time index column (ts)
         let timestamps: Vec<i64> = (start..end).map(|v| v as i64).collect();
         columns.push(Arc::new(TimestampMillisecondArray::from(timestamps)));
 
-        // Add encoded primary key column
         let pk = new_primary_key(tags);
         let mut pk_builder = BinaryDictionaryBuilder::<UInt32Type>::new();
         for _ in 0..num_rows {
@@ -1070,10 +1083,7 @@ mod tests {
         }
         columns.push(Arc::new(pk_builder.finish()));
 
-        // Add sequence column
         columns.push(Arc::new(UInt64Array::from_value(1000, num_rows)));
-
-        // Add op_type column
         columns.push(Arc::new(UInt8Array::from_value(
             OpType::Put as u8,
             num_rows,
@@ -1082,9 +1092,19 @@ mod tests {
         RecordBatch::try_new(flat_schema, columns).unwrap()
     }
 
-    /// Creates a FlatSource from flat format RecordBatches.
-    fn new_flat_source_from_record_batches(batches: Vec<RecordBatch>) -> FlatSource {
-        FlatSource::Iter(Box::new(batches.into_iter().map(Ok)))
+    async fn check_record_batch_reader_result(
+        reader: &mut ParquetReader,
+        expected: &[RecordBatch],
+    ) {
+        let mut actual = Vec::new();
+        while let Some(batch) = reader.next_record_batch().await.unwrap() {
+            actual.push(batch);
+        }
+        assert_eq!(
+            pretty_format_batches(expected).unwrap().to_string(),
+            pretty_format_batches(&actual).unwrap().to_string()
+        );
+        assert!(reader.next_record_batch().await.unwrap().is_none());
     }
 
     /// Creates a flat format RecordBatch for testing with sparse primary key encoding.
@@ -1333,10 +1353,11 @@ mod tests {
         };
         let metadata = Arc::new(sst_region_metadata());
 
-        // Create batches with sequence 0 to trigger override functionality
-        let batch1 = new_batch_with_custom_sequence(&["a", "d"], 0, 60, 0);
-        let batch2 = new_batch_with_custom_sequence(&["b", "f"], 0, 40, 0);
-        let source = new_source(&[batch1, batch2]);
+        // Create batches with sequence 0 to trigger override functionality.
+        let source = new_flat_source_from_record_batches(vec![
+            new_record_batch_with_custom_sequence(&["a", "d"], 0, 60, 0),
+            new_record_batch_with_custom_sequence(&["b", "f"], 0, 40, 0),
+        ]);
 
         let write_opts = WriteOptions {
             row_group_size: 50,
@@ -1355,7 +1376,7 @@ mod tests {
         .await;
 
         writer
-            .write_all(source, None, &write_opts)
+            .write_all_flat_as_primary_key(source, None, &write_opts)
             .await
             .unwrap()
             .remove(0);
@@ -1369,7 +1390,7 @@ mod tests {
         );
         let mut reader = builder.build().await.unwrap().unwrap();
         let mut normal_batches = Vec::new();
-        while let Some(batch) = reader.next_batch().await.unwrap() {
+        while let Some(batch) = reader.next_record_batch().await.unwrap() {
             normal_batches.push(batch);
         }
 
@@ -1391,22 +1412,19 @@ mod tests {
         );
         let mut reader = builder.build().await.unwrap().unwrap();
         let mut override_batches = Vec::new();
-        while let Some(batch) = reader.next_batch().await.unwrap() {
+        while let Some(batch) = reader.next_record_batch().await.unwrap() {
             override_batches.push(batch);
         }
 
         // Compare the results
         assert_eq!(normal_batches.len(), override_batches.len());
         for (normal, override_batch) in normal_batches.into_iter().zip(override_batches.iter()) {
-            // Create expected batch with override sequence
             let expected_batch = {
-                let num_rows = normal.num_rows();
-                let mut builder = BatchBuilder::from(normal);
-                builder
-                    .sequences_array(Arc::new(UInt64Array::from_value(custom_sequence, num_rows)))
-                    .unwrap();
-
-                builder.build().unwrap()
+                let mut columns = normal.columns().to_vec();
+                let num_cols = columns.len();
+                columns[num_cols - 2] =
+                    Arc::new(UInt64Array::from_value(custom_sequence, normal.num_rows()));
+                RecordBatch::try_new(normal.schema(), columns).unwrap()
             };
 
             // Override batch should match expected batch
