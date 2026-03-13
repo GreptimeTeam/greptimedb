@@ -22,6 +22,7 @@ use std::time::Duration;
 use api::v1::Rows;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_function::utils::partition_expr_version;
 use common_recordbatch::RecordBatches;
 use datatypes::value::Value;
 use object_store::Buffer;
@@ -30,24 +31,36 @@ use object_store::layers::mock::{
     Result as MockResult, Write, Writer,
 };
 use partition::expr::{PartitionExpr, col};
-use store_api::region_engine::{RegionEngine, SettableRegionRoleState};
+use store_api::region_engine::{
+    RegionEngine, RemapManifestsRequest, SetRegionRoleStateResponse, SettableRegionRoleState,
+};
 use store_api::region_request::{
-    EnterStagingRequest, RegionAlterRequest, RegionFlushRequest, RegionRequest,
-    RegionTruncateRequest,
+    ApplyStagingManifestRequest, EnterStagingRequest, RegionAlterRequest, RegionFlushRequest,
+    RegionPutRequest, RegionRequest, RegionTruncateRequest, StagingPartitionDirective,
 };
 use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
 use crate::engine::listener::NotifyEnterStagingResultListener;
 use crate::error::Error;
+use crate::manifest::action::{
+    RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList, RegionPartitionExprChange,
+};
 use crate::region::{RegionLeaderState, RegionRoleState, parse_partition_expr};
 use crate::request::WorkerRequest;
+use crate::sst::FormatType;
 use crate::test_util::{CreateRequestBuilder, TestEnv, build_rows, put_rows, rows_schema};
 
 fn range_expr(col_name: &str, start: i64, end: i64) -> PartitionExpr {
     col(col_name)
         .gt_eq(Value::Int64(start))
         .and(col(col_name).lt(Value::Int64(end)))
+}
+
+fn float_range_expr(col_name: &str, start: f64, end: f64) -> PartitionExpr {
+    col(col_name)
+        .gt_eq(Value::Float64(start.into()))
+        .and(col(col_name).lt(Value::Float64(end.into())))
 }
 
 #[tokio::test]
@@ -240,6 +253,248 @@ fn default_partition_expr() -> String {
 }
 
 #[tokio::test]
+async fn test_staging_reject_all_writes_rejects_put() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(2048, 0);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = rows_schema(&request);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_directive: StagingPartitionDirective::RejectAllWrites,
+            }),
+        )
+        .await
+        .unwrap();
+
+    let rows = Rows {
+        schema: column_schemas,
+        rows: build_rows(0, 2),
+    };
+    let err = engine
+        .handle_request(
+            region_id,
+            RegionRequest::Put(RegionPutRequest {
+                rows,
+                hint: None,
+                partition_expr_version: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.status_code(), StatusCode::StorageUnavailable);
+    assert_matches!(
+        err.into_inner().as_any().downcast_ref::<Error>().unwrap(),
+        Error::RejectWrite { .. }
+    );
+}
+
+#[tokio::test]
+async fn test_staging_write_partition_expr_version() {
+    test_staging_write_partition_expr_version_with_format(false).await;
+    test_staging_write_partition_expr_version_with_format(true).await;
+}
+
+async fn test_staging_write_partition_expr_version_with_format(flat_format: bool) {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
+
+    let region_id = RegionId::new(1024, 0);
+    let origin_partition_expr = range_expr("a", 0, 50).as_json_str().unwrap();
+    let request = CreateRequestBuilder::new()
+        .partition_expr_json(Some(origin_partition_expr.clone()))
+        .build();
+    let column_schemas = rows_schema(&request);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let partition_expr = default_partition_expr();
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                    partition_expr.clone(),
+                ),
+            }),
+        )
+        .await
+        .unwrap();
+
+    let expected_version = partition_expr_version(Some(&partition_expr));
+    let origin_version = partition_expr_version(Some(&origin_partition_expr));
+    common_telemetry::info!(
+        "expected_version: {}, origin_version: {}",
+        expected_version,
+        origin_version
+    );
+    let bad_rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows(0, 3),
+    };
+    let err = engine
+        .handle_request(
+            region_id,
+            RegionRequest::Put(RegionPutRequest {
+                rows: bad_rows,
+                hint: None,
+                partition_expr_version: Some(origin_version),
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.status_code(), StatusCode::InvalidArguments);
+    assert_matches!(
+        err.into_inner().as_any().downcast_ref::<Error>().unwrap(),
+        Error::PartitionExprVersionMismatch { .. }
+    );
+
+    let compat_rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows(3, 6),
+    };
+    let result = engine
+        .handle_request(
+            region_id,
+            RegionRequest::Put(RegionPutRequest {
+                rows: compat_rows,
+                hint: None,
+                partition_expr_version: None,
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.affected_rows, 3);
+
+    let ok_rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows(6, 9),
+    };
+    let result = engine
+        .handle_request(
+            region_id,
+            RegionRequest::Put(RegionPutRequest {
+                rows: ok_rows,
+                hint: None,
+                partition_expr_version: Some(expected_version),
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.affected_rows, 3);
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Flush(RegionFlushRequest {
+                row_group_size: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+    let result = engine
+        .remap_manifests(RemapManifestsRequest {
+            region_id,
+            input_regions: vec![region_id],
+            region_mapping: [(region_id, vec![region_id])].into_iter().collect(),
+            new_partition_exprs: [(region_id, default_partition_expr())]
+                .into_iter()
+                .collect(),
+        })
+        .await
+        .unwrap();
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::ApplyStagingManifest(ApplyStagingManifestRequest {
+                partition_expr: default_partition_expr(),
+                central_region_id: region_id,
+                manifest_path: result.manifest_paths[&region_id].clone(),
+            }),
+        )
+        .await
+        .unwrap();
+
+    let exit_rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows(9, 12),
+    };
+    let err = engine
+        .handle_request(
+            region_id,
+            RegionRequest::Put(RegionPutRequest {
+                rows: exit_rows,
+                hint: None,
+                partition_expr_version: Some(origin_version),
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.status_code(), StatusCode::InvalidArguments);
+
+    let compat_rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows(12, 15),
+    };
+    let result = engine
+        .handle_request(
+            region_id,
+            RegionRequest::Put(RegionPutRequest {
+                rows: compat_rows,
+                hint: None,
+                partition_expr_version: None,
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.affected_rows, 3);
+
+    let committed_version = engine
+        .get_region(region_id)
+        .unwrap()
+        .version()
+        .metadata
+        .partition_expr_version;
+    assert_ne!(0, committed_version);
+    assert_eq!(committed_version, expected_version,);
+
+    let commit_rows = Rows {
+        schema: column_schemas,
+        rows: build_rows(15, 18),
+    };
+    let result = engine
+        .handle_request(
+            region_id,
+            RegionRequest::Put(RegionPutRequest {
+                rows: commit_rows,
+                hint: None,
+                partition_expr_version: Some(expected_version),
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.affected_rows, 3);
+}
+
+#[tokio::test]
 async fn test_staging_manifest_directory() {
     test_staging_manifest_directory_with_format(false).await;
     test_staging_manifest_directory_with_format(true).await;
@@ -285,14 +540,23 @@ async fn test_staging_manifest_directory_with_format(flat_format: bool) {
         .handle_request(
             region_id,
             RegionRequest::EnterStaging(EnterStagingRequest {
-                partition_expr: partition_expr.clone(),
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                    partition_expr.clone(),
+                ),
             }),
         )
         .await
         .unwrap();
     let region = engine.get_region(region_id).unwrap();
-    let staging_partition_expr = region.staging_partition_expr.lock().unwrap().clone();
-    assert_eq!(staging_partition_expr.unwrap(), partition_expr);
+    let staging_partition_info = region.staging_partition_info.lock().unwrap().clone();
+    assert_eq!(
+        staging_partition_info
+            .unwrap()
+            .partition_expr()
+            .unwrap()
+            .to_string(),
+        partition_expr,
+    );
     {
         let manager = region.manifest_ctx.manifest_manager.read().await;
         assert_eq!(
@@ -313,7 +577,9 @@ async fn test_staging_manifest_directory_with_format(flat_format: bool) {
         .handle_request(
             region_id,
             RegionRequest::EnterStaging(EnterStagingRequest {
-                partition_expr: partition_expr.clone(),
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                    partition_expr.clone(),
+                ),
             }),
         )
         .await
@@ -324,7 +590,7 @@ async fn test_staging_manifest_directory_with_format(flat_format: bool) {
         .handle_request(
             region_id,
             RegionRequest::EnterStaging(EnterStagingRequest {
-                partition_expr: "".to_string(),
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr("".to_string()),
             }),
         )
         .await
@@ -388,7 +654,7 @@ async fn test_staging_exit_success_with_manifests() {
 
 async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool) {
     common_telemetry::init_default_ut_logging();
-    let partition_expr = default_partition_expr();
+    let partition_expr = float_range_expr("field_0", 0., 100.).as_json_str().unwrap();
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
@@ -419,7 +685,9 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
         .handle_request(
             region_id,
             RegionRequest::EnterStaging(EnterStagingRequest {
-                partition_expr: partition_expr.clone(),
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                    partition_expr.clone(),
+                ),
             }),
         )
         .await
@@ -606,6 +874,152 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
     assert!(sst_entries.iter().all(|e| e.visible));
 }
 
+#[tokio::test]
+async fn test_enter_staging_writes_partition_expr_change_action() {
+    test_enter_staging_writes_partition_expr_change_action_with_format(false).await;
+    test_enter_staging_writes_partition_expr_change_action_with_format(true).await;
+}
+
+async fn test_enter_staging_writes_partition_expr_change_action_with_format(flat_format: bool) {
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
+
+    let region_id = RegionId::new(2000, 1);
+    let request = CreateRequestBuilder::new().build();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let partition_expr = default_partition_expr();
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                    partition_expr.clone(),
+                ),
+            }),
+        )
+        .await
+        .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    let manager = region.manifest_ctx.manifest_manager.read().await;
+    let staging_manifests = manager.store().fetch_staging_manifests().await.unwrap();
+    assert!(!staging_manifests.is_empty());
+
+    let mut found_partition_expr_change = false;
+    let mut found_change = false;
+    for (_, raw_action_list) in staging_manifests {
+        let action_list = RegionMetaActionList::decode(&raw_action_list).unwrap();
+        for action in action_list.actions {
+            match action {
+                RegionMetaAction::PartitionExprChange(change) => {
+                    found_partition_expr_change = true;
+                    assert_eq!(change.partition_expr, Some(partition_expr.clone()));
+                }
+                RegionMetaAction::Change(_) => {
+                    found_change = true;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    assert!(found_partition_expr_change);
+    assert!(!found_change);
+}
+
+#[tokio::test]
+async fn test_staging_exit_conflict_partition_expr_change_and_change() {
+    test_staging_exit_conflict_partition_expr_change_and_change_with_format(false).await;
+    test_staging_exit_conflict_partition_expr_change_and_change_with_format(true).await;
+}
+
+async fn test_staging_exit_conflict_partition_expr_change_and_change_with_format(
+    flat_format: bool,
+) {
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_experimental_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
+
+    let region_id = RegionId::new(2000, 2);
+    let request = CreateRequestBuilder::new().build();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let partition_expr = default_partition_expr();
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                    partition_expr.clone(),
+                ),
+            }),
+        )
+        .await
+        .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    let mut changed_metadata = region.version().metadata.as_ref().clone();
+    changed_metadata.set_partition_expr(Some(partition_expr.clone()));
+
+    let mut manager = region.manifest_ctx.manifest_manager.write().await;
+    manager
+        .update(
+            RegionMetaActionList::new(vec![
+                RegionMetaAction::PartitionExprChange(RegionPartitionExprChange {
+                    partition_expr: Some(partition_expr),
+                }),
+                RegionMetaAction::Change(RegionChange {
+                    metadata: Arc::new(changed_metadata),
+                    sst_format: FormatType::PrimaryKey,
+                    append_mode: None,
+                }),
+                RegionMetaAction::Edit(RegionEdit {
+                    files_to_add: Vec::new(),
+                    files_to_remove: Vec::new(),
+                    timestamp_ms: None,
+                    compaction_time_window: None,
+                    flushed_entry_id: None,
+                    flushed_sequence: None,
+                    committed_sequence: None,
+                }),
+            ]),
+            true,
+        )
+        .await
+        .unwrap();
+    drop(manager);
+
+    let response = engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Leader)
+        .await
+        .unwrap();
+    match response {
+        SetRegionRoleStateResponse::InvalidTransition(err) => {
+            assert_matches!(
+                err.as_any().downcast_ref::<Error>().unwrap(),
+                Error::Unexpected { .. }
+            );
+        }
+        _ => panic!("Expected InvalidTransition response, got: {response:?}"),
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_write_stall_on_enter_staging() {
     test_write_stall_on_enter_staging_with_format(false).await;
@@ -654,7 +1068,9 @@ async fn test_write_stall_on_enter_staging_with_format(flat_format: bool) {
             .handle_request(
                 region_id,
                 RegionRequest::EnterStaging(EnterStagingRequest {
-                    partition_expr: partition_expr.clone(),
+                    partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                        partition_expr.clone(),
+                    ),
                 }),
             )
             .await
@@ -756,7 +1172,9 @@ async fn test_enter_staging_error(env: &mut TestEnv, flat_format: bool) {
         .handle_request(
             region_id,
             RegionRequest::EnterStaging(EnterStagingRequest {
-                partition_expr: partition_expr.clone(),
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                    partition_expr.clone(),
+                ),
             }),
         )
         .await

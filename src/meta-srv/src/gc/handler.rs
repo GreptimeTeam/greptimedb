@@ -15,86 +15,144 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
-use common_meta::key::table_route::PhysicalTableRouteValue;
+use common_catalog::consts::MITO_ENGINE;
+use common_meta::datanode::{RegionManifestInfo, RegionStat};
 use common_meta::peer::Peer;
+use common_telemetry::tracing::Instrument as _;
 use common_telemetry::{debug, error, info, warn};
 use futures::StreamExt;
 use itertools::Itertools;
-use store_api::storage::{FileRefsManifest, GcReport, RegionId};
+use ordered_float::OrderedFloat;
+use store_api::region_engine::RegionRole;
+use store_api::storage::{GcReport, RegionId};
 use table::metadata::TableId;
-use tokio::time::sleep;
 
 use crate::error::Result;
+use crate::gc::Region2Peers;
 use crate::gc::candidate::GcCandidate;
+use crate::gc::dropped::DroppedRegionCollector;
 use crate::gc::scheduler::{GcJobReport, GcScheduler};
 use crate::gc::tracker::RegionGcInfo;
-use crate::region;
-
-pub(crate) type Region2Peers = HashMap<RegionId, (Peer, Vec<Peer>)>;
-
-pub(crate) type Peer2Regions = HashMap<Peer, HashSet<RegionId>>;
+use crate::metrics::METRIC_META_GC_CANDIDATE_REGIONS;
 
 impl GcScheduler {
-    /// Iterate through all region stats, find region that might need gc, and send gc instruction to
-    /// the corresponding datanode with improved parallel processing and retry logic.
     pub(crate) async fn trigger_gc(&self) -> Result<GcJobReport> {
         let start_time = Instant::now();
         info!("Starting GC cycle");
 
-        // Step 1: Get all region statistics
-        let table_to_region_stats = self.ctx.get_table_to_region_stats().await?;
+        // limit gc region scope to regions whose datanode have reported stats(by heartbeat)
+        let table_to_region_stats = self
+            .ctx
+            .get_table_to_region_stats()
+            .instrument(common_telemetry::tracing::info_span!(
+                "meta_gc_get_region_stats"
+            ))
+            .await?;
         info!(
             "Fetched region stats for {} tables",
             table_to_region_stats.len()
         );
 
-        // Step 2: Select GC candidates based on our scoring algorithm
-        let per_table_candidates = self.select_gc_candidates(&table_to_region_stats).await?;
+        let per_table_candidates = self
+            .select_gc_candidates(&table_to_region_stats)
+            .instrument(common_telemetry::tracing::info_span!(
+                "meta_gc_select_candidates"
+            ))
+            .await?;
 
-        if per_table_candidates.is_empty() {
+        let table_reparts = self
+            .ctx
+            .get_table_reparts()
+            .instrument(common_telemetry::tracing::info_span!(
+                "meta_gc_get_table_reparts"
+            ))
+            .await?;
+        let dropped_collector =
+            DroppedRegionCollector::new(self.ctx.as_ref(), &self.config, &self.region_gc_tracker);
+        let dropped_assignment = dropped_collector
+            .collect_and_assign(&table_reparts)
+            .instrument(common_telemetry::tracing::info_span!(
+                "meta_gc_collect_dropped_regions"
+            ))
+            .await?;
+        let candidate_count: usize = per_table_candidates.values().map(|c| c.len()).sum();
+        let dropped_count: usize = dropped_assignment
+            .regions_by_peer
+            .values()
+            .map(|regions| regions.len())
+            .sum();
+        METRIC_META_GC_CANDIDATE_REGIONS.set((candidate_count + dropped_count) as i64);
+
+        if per_table_candidates.is_empty() && dropped_assignment.regions_by_peer.is_empty() {
             info!("No GC candidates found, skipping GC cycle");
             return Ok(Default::default());
         }
 
-        // Step 3: Aggregate candidates by datanode
-        let datanode_to_candidates = self
+        let mut datanode_to_candidates = self
             .aggregate_candidates_by_datanode(per_table_candidates)
+            .instrument(common_telemetry::tracing::info_span!(
+                "meta_gc_aggregate_by_datanode"
+            ))
             .await?;
+
+        self.merge_dropped_regions(&mut datanode_to_candidates, &dropped_assignment);
 
         if datanode_to_candidates.is_empty() {
             info!("No valid datanode candidates found, skipping GC cycle");
             return Ok(Default::default());
         }
 
-        // Step 4: Process datanodes concurrently with limited parallelism
         let report = self
-            .parallel_process_datanodes(datanode_to_candidates)
+            .parallel_process_datanodes(
+                datanode_to_candidates,
+                dropped_assignment.force_full_listing,
+                dropped_assignment.region_routes_override,
+            )
+            .instrument(common_telemetry::tracing::info_span!(
+                "meta_gc_dispatch_to_datanodes"
+            ))
             .await;
 
         let duration = start_time.elapsed();
-        info!(
-            "Finished GC cycle. Processed {} datanodes ({} failed). Duration: {:?}",
-            report.per_datanode_reports.len(), // Reuse field for datanode count
-            report.failed_datanodes.len(),
-            duration
-        );
+        match &report {
+            GcJobReport::PerDatanode {
+                per_datanode_reports,
+                failed_datanodes,
+            } => {
+                info!(
+                    "Finished GC cycle. Processed {} datanodes ({} failed). Duration: {:?}",
+                    per_datanode_reports.len(),
+                    failed_datanodes.len(),
+                    duration
+                );
+            }
+            GcJobReport::Combined { report } => {
+                info!(
+                    "Finished GC cycle with combined report. Deleted files: {}, deleted indexes: {}. Duration: {:?}",
+                    report.deleted_files.len(),
+                    report.deleted_indexes.len(),
+                    duration
+                );
+            }
+        }
         debug!("Detailed GC Job Report: {report:#?}");
 
         Ok(report)
     }
 
-    /// Find related regions that might share files with the candidate regions.
-    /// Currently returns the same regions since repartition is not implemented yet.
-    /// TODO(discord9): When repartition is implemented, this should also find src/dst regions
-    /// that might share files with the candidate regions.
-    pub(crate) async fn find_related_regions(
+    fn merge_dropped_regions(
         &self,
-        candidate_region_ids: &[RegionId],
-    ) -> Result<HashMap<RegionId, Vec<RegionId>>> {
-        Ok(candidate_region_ids.iter().map(|&r| (r, vec![r])).collect())
+        datanode_to_candidates: &mut HashMap<Peer, Vec<(TableId, GcCandidate)>>,
+        assignment: &crate::gc::dropped::DroppedRegionAssignment,
+    ) {
+        for (peer, dropped_infos) in &assignment.regions_by_peer {
+            let entry = datanode_to_candidates.entry(peer.clone()).or_default();
+            for info in dropped_infos {
+                entry.push((info.table_id, dropped_candidate(info.region_id)));
+            }
+        }
     }
 
-    /// Aggregate GC candidates by their corresponding datanode peer.
     pub(crate) async fn aggregate_candidates_by_datanode(
         &self,
         per_table_candidates: HashMap<TableId, Vec<GcCandidate>>,
@@ -150,8 +208,11 @@ impl GcScheduler {
     pub(crate) async fn parallel_process_datanodes(
         &self,
         datanode_to_candidates: HashMap<Peer, Vec<(TableId, GcCandidate)>>,
+        force_full_listing_by_peer: HashMap<Peer, HashSet<RegionId>>,
+        region_routes_override_by_peer: HashMap<Peer, Region2Peers>,
     ) -> GcJobReport {
-        let mut report = GcJobReport::default();
+        let mut per_datanode_reports = HashMap::new();
+        let mut failed_datanodes: HashMap<_, Vec<_>> = HashMap::new();
 
         // Create a stream of datanode GC tasks with limited concurrency
         let results: Vec<_> = futures::stream::iter(
@@ -162,10 +223,25 @@ impl GcScheduler {
         .map(|(peer, candidates)| {
             let scheduler = self;
             let peer_clone = peer.clone();
+            let force_full_listing = force_full_listing_by_peer
+                .get(&peer)
+                .cloned()
+                .unwrap_or_default();
+            let region_routes_override = region_routes_override_by_peer
+                .get(&peer)
+                .cloned()
+                .unwrap_or_default();
             async move {
                 (
                     peer,
-                    scheduler.process_datanode_gc(peer_clone, candidates).await,
+                    scheduler
+                        .process_datanode_gc(
+                            peer_clone,
+                            candidates,
+                            force_full_listing,
+                            region_routes_override,
+                        )
+                        .await,
                 )
             }
         })
@@ -177,18 +253,21 @@ impl GcScheduler {
         for (peer, result) in results {
             match result {
                 Ok(dn_report) => {
-                    report.per_datanode_reports.insert(peer.id, dn_report);
+                    per_datanode_reports.insert(peer.id, dn_report);
                 }
                 Err(e) => {
-                    error!("Failed to process datanode GC for peer {}: {:#?}", peer, e);
+                    error!(e; "Failed to process datanode GC for peer {}", peer);
                     // Note: We don't have a direct way to map peer to table_id here,
                     // so we just log the error. The table_reports will contain individual region failures.
-                    report.failed_datanodes.entry(peer.id).or_default().push(e);
+                    failed_datanodes.entry(peer.id).or_default().push(e);
                 }
             }
         }
 
-        report
+        GcJobReport::PerDatanode {
+            per_datanode_reports,
+            failed_datanodes,
+        }
     }
 
     /// Process GC for a single datanode with all its candidate regions.
@@ -197,6 +276,8 @@ impl GcScheduler {
         &self,
         peer: Peer,
         candidates: Vec<(TableId, GcCandidate)>,
+        force_full_listing: HashSet<RegionId>,
+        region_routes_override: Region2Peers,
     ) -> Result<GcReport> {
         info!(
             "Starting GC for datanode {} with {} candidate regions",
@@ -210,29 +291,13 @@ impl GcScheduler {
 
         let all_region_ids: Vec<RegionId> = candidates.iter().map(|(_, c)| c.region_id).collect();
 
-        let all_related_regions = self.find_related_regions(&all_region_ids).await?;
-
-        let (region_to_peer, _) = self
-            .discover_datanodes_for_regions(&all_related_regions.keys().cloned().collect_vec())
-            .await?;
-
-        // Step 1: Get file references for all regions on this datanode
-        let file_refs_manifest = self
-            .ctx
-            .get_file_references(
-                &all_region_ids,
-                all_related_regions,
-                &region_to_peer,
-                self.config.mailbox_timeout,
-            )
-            .await?;
-
-        // Step 2: Create a single GcRegionProcedure for all regions on this datanode
+        // Step 2: Run GC for all regions on this datanode in a single batch
         let (gc_report, fully_listed_regions) = {
             // Partition regions into full listing and fast listing in a single pass
 
-            let mut batch_full_listing_decisions =
-                self.batch_should_use_full_listing(&all_region_ids).await;
+            let batch_full_listing_decisions = self
+                .batch_should_use_full_listing(&all_region_ids, &force_full_listing)
+                .await;
 
             let need_full_list_regions = batch_full_listing_decisions
                 .iter()
@@ -242,7 +307,7 @@ impl GcScheduler {
                     },
                 )
                 .collect_vec();
-            let mut fast_list_regions = batch_full_listing_decisions
+            let fast_list_regions = batch_full_listing_decisions
                 .iter()
                 .filter_map(
                     |(&region_id, &need_full)| {
@@ -258,19 +323,24 @@ impl GcScheduler {
                 match self
                     .ctx
                     .gc_regions(
-                        peer.clone(),
                         &fast_list_regions,
-                        &file_refs_manifest,
                         false,
                         self.config.mailbox_timeout,
+                        region_routes_override.clone(),
                     )
+                    .instrument(common_telemetry::tracing::info_span!(
+                        "meta_gc_call_datanode",
+                        peer = %peer,
+                        mode = "fast",
+                        region_count = fast_list_regions.len()
+                    ))
                     .await
                 {
                     Ok(report) => combined_report.merge(report),
                     Err(e) => {
                         error!(
-                            "Failed to GC regions {:?} on datanode {}: {}",
-                            fast_list_regions, peer, e
+                            e; "Failed to GC regions {:?} on datanode {}",
+                            fast_list_regions, peer,
                         );
 
                         // Add to need_retry_regions since it failed
@@ -285,19 +355,24 @@ impl GcScheduler {
                 match self
                     .ctx
                     .gc_regions(
-                        peer.clone(),
                         &need_full_list_regions,
-                        &file_refs_manifest,
                         true,
                         self.config.mailbox_timeout,
+                        region_routes_override,
                     )
+                    .instrument(common_telemetry::tracing::info_span!(
+                        "meta_gc_call_datanode",
+                        peer = %peer,
+                        mode = "full",
+                        region_count = need_full_list_regions.len()
+                    ))
                     .await
                 {
                     Ok(report) => combined_report.merge(report),
                     Err(e) => {
                         error!(
-                            "Failed to GC regions {:?} on datanode {}: {}",
-                            need_full_list_regions, peer, e
+                            e; "Failed to GC regions {:?} on datanode {}",
+                            need_full_list_regions, peer,
                         );
 
                         // Add to need_retry_regions since it failed
@@ -330,106 +405,29 @@ impl GcScheduler {
         Ok(gc_report)
     }
 
-    /// Discover datanodes for the given regions(and it's related regions) by fetching table routes in batches.
-    /// Returns mappings from region to peer(leader, Vec<followers>) and peer to regions.
-    async fn discover_datanodes_for_regions(
-        &self,
-        regions: &[RegionId],
-    ) -> Result<(Region2Peers, Peer2Regions)> {
-        let all_related_regions = self
-            .find_related_regions(regions)
-            .await?
-            .into_iter()
-            .flat_map(|(k, mut v)| {
-                v.push(k);
-                v
-            })
-            .collect_vec();
-        let mut region_to_peer = HashMap::new();
-        let mut peer_to_regions = HashMap::new();
-
-        // Group regions by table ID for batch processing
-        let mut table_to_regions: HashMap<TableId, Vec<RegionId>> = HashMap::new();
-        for region_id in all_related_regions {
-            let table_id = region_id.table_id();
-            table_to_regions
-                .entry(table_id)
-                .or_default()
-                .push(region_id);
-        }
-
-        // Process each table's regions together for efficiency
-        for (table_id, table_regions) in table_to_regions {
-            match self.ctx.get_table_route(table_id).await {
-                Ok((_phy_table_id, table_route)) => {
-                    self.get_table_regions_peer(
-                        &table_route,
-                        &table_regions,
-                        &mut region_to_peer,
-                        &mut peer_to_regions,
-                    );
-                }
-                Err(e) => {
-                    // Continue with other tables instead of failing completely
-                    // TODO(discord9): consider failing here instead
-                    warn!(
-                        "Failed to get table route for table {}: {}, skipping its regions",
-                        table_id, e
-                    );
-                    continue;
-                }
-            }
-        }
-
-        Ok((region_to_peer, peer_to_regions))
-    }
-
-    /// Process regions for a single table to find their current leader peers.
-    fn get_table_regions_peer(
-        &self,
-        table_route: &PhysicalTableRouteValue,
-        table_regions: &[RegionId],
-        region_to_peer: &mut Region2Peers,
-        peer_to_regions: &mut Peer2Regions,
-    ) {
-        for &region_id in table_regions {
-            let mut found = false;
-
-            // Find the region in the table route
-            for region_route in &table_route.region_routes {
-                if region_route.region.id == region_id
-                    && let Some(leader_peer) = &region_route.leader_peer
-                {
-                    region_to_peer.insert(
-                        region_id,
-                        (leader_peer.clone(), region_route.follower_peers.clone()),
-                    );
-                    peer_to_regions
-                        .entry(leader_peer.clone())
-                        .or_default()
-                        .insert(region_id);
-                    found = true;
-                    break;
-                }
-            }
-
-            if !found {
-                warn!(
-                    "Failed to find region {} in table route or no leader peer found",
-                    region_id,
-                );
-            }
-        }
-    }
-
     async fn batch_should_use_full_listing(
         &self,
         region_ids: &[RegionId],
+        force_full_listing: &HashSet<RegionId>,
     ) -> HashMap<RegionId, bool> {
         let mut result = HashMap::new();
         let mut gc_tracker = self.region_gc_tracker.lock().await;
         let now = Instant::now();
         for &region_id in region_ids {
+            if force_full_listing.contains(&region_id) {
+                gc_tracker
+                    .entry(region_id)
+                    .and_modify(|info| {
+                        info.last_full_listing_time = Some(now);
+                        info.last_gc_time = now;
+                    })
+                    .or_insert_with(|| RegionGcInfo {
+                        last_gc_time: now,
+                        last_full_listing_time: Some(now),
+                    });
+                result.insert(region_id, true);
+                continue;
+            }
             let use_full_listing = {
                 if let Some(gc_info) = gc_tracker.get(&region_id) {
                     if let Some(last_full_listing) = gc_info.last_full_listing_time {
@@ -455,5 +453,38 @@ impl GcScheduler {
             result.insert(region_id, use_full_listing);
         }
         result
+    }
+}
+
+fn dropped_candidate(region_id: RegionId) -> GcCandidate {
+    GcCandidate {
+        region_id,
+        score: OrderedFloat(0.0),
+        region_stat: dropped_region_stat(region_id),
+    }
+}
+
+fn dropped_region_stat(region_id: RegionId) -> RegionStat {
+    RegionStat {
+        id: region_id,
+        rcus: 0,
+        wcus: 0,
+        approximate_bytes: 0,
+        engine: MITO_ENGINE.to_string(),
+        role: RegionRole::Leader,
+        num_rows: 0,
+        memtable_size: 0,
+        manifest_size: 0,
+        sst_size: 0,
+        sst_num: 0,
+        index_size: 0,
+        region_manifest: RegionManifestInfo::Mito {
+            manifest_version: 0,
+            flushed_entry_id: 0,
+            file_removed_cnt: 0,
+        },
+        written_bytes: 0,
+        data_topic_latest_entry_id: 0,
+        metadata_topic_latest_entry_id: 0,
     }
 }

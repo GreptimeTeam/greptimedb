@@ -209,18 +209,7 @@ jobs:
           disable-run-tests: ${{ env.DISABLE_RUN_TESTS }}
           image-registry: ${{ vars.ECR_IMAGE_REGISTRY }}
           image-namespace: ${{ vars.ECR_IMAGE_NAMESPACE }}
-
-  run-multi-lang-tests:
-    name: Run Multi-language SDK Tests
-    if: ${{ inputs.build_linux_artifacts || github.event_name == 'push' || github.event_name == 'schedule' }}
-    needs: [
-      allocate-runners,
-      build-linux-amd64-artifacts,
-    ]
-    uses: ./.github/workflows/run-multi-lang-tests.yml
-    with:
-      artifact-name: greptime-linux-amd64-${{ needs.allocate-runners.outputs.version }}
-      artifact-is-tarball: true
+          large-page-size: true
 
   build-macos-artifacts:
     name: Build macOS artifacts
@@ -310,7 +299,6 @@ jobs:
       allocate-runners,
       build-linux-amd64-artifacts,
       build-linux-arm64-artifacts,
-      run-multi-lang-tests,
     ]
     runs-on: ubuntu-latest
     outputs:
@@ -391,8 +379,7 @@ jobs:
       (needs.build-linux-arm64-artifacts.result == 'success' || needs.build-linux-arm64-artifacts.result == 'skipped') &&
       (needs.build-macos-artifacts.result == 'success' || needs.build-macos-artifacts.result == 'skipped') &&
       (needs.build-windows-artifacts.result == 'success' || needs.build-windows-artifacts.result == 'skipped') &&
-      (needs.release-images-to-dockerhub.result == 'success' || needs.release-images-to-dockerhub.result == 'skipped') &&
-      (needs.run-multi-lang-tests.result == 'success' || needs.run-multi-lang-tests.result == 'skipped')
+      (needs.release-images-to-dockerhub.result == 'success' || needs.release-images-to-dockerhub.result == 'skipped')
     needs: [ # The job have to wait for all the artifacts are built.
       allocate-runners,
       build-linux-amd64-artifacts,
@@ -400,7 +387,6 @@ jobs:
       build-macos-artifacts,
       build-windows-artifacts,
       release-images-to-dockerhub,
-      run-multi-lang-tests,
     ]
     runs-on: ubuntu-latest
     steps:

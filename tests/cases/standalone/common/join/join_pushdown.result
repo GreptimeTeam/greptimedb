@@ -3,7 +3,7 @@ CREATE TABLE events_push(event_id INTEGER, user_id INTEGER, event_type VARCHAR, 
 
 Affected Rows: 0
 
-CREATE TABLE users_push(user_id INTEGER, user_name VARCHAR, region VARCHAR, ts TIMESTAMP TIME INDEX);
+CREATE TABLE users_push(user_id INTEGER, user_name VARCHAR, "region" VARCHAR, ts TIMESTAMP TIME INDEX);
 
 Affected Rows: 0
 

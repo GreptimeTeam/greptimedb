@@ -66,6 +66,15 @@ impl TryFrom<Value> for PGByteaOutputValue {
     }
 }
 
+impl Display for PGByteaOutputValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PGByteaOutputValue::HEX => write!(f, "hex"),
+            PGByteaOutputValue::ESCAPE => write!(f, "escape"),
+        }
+    }
+}
+
 // Refers to: https://www.postgresql.org/docs/current/runtime-config-client.html#GUC-DATESTYLE
 #[derive(Default, PartialEq, Eq, Clone, Copy, Debug)]
 pub enum PGDateOrder {
@@ -169,6 +178,63 @@ impl TryFrom<&Value> for PGDateTimeStyle {
             }
             _ => InvalidConfigValueSnafu {
                 name: "DateStyle",
+                value: value.to_string(),
+                hint: format!("Unrecognized key word: {}", value),
+            }
+            .fail(),
+        }
+    }
+}
+
+#[derive(Default, PartialEq, Eq, Clone, Copy, Debug)]
+pub enum PGIntervalStyle {
+    ISO,
+    SQL,
+    #[default]
+    Postgres,
+    PostgresVerbose,
+}
+
+impl Display for PGIntervalStyle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PGIntervalStyle::ISO => write!(f, "iso_8601"),
+            PGIntervalStyle::SQL => write!(f, "sql_standard"),
+            PGIntervalStyle::Postgres => write!(f, "postgres"),
+            PGIntervalStyle::PostgresVerbose => write!(f, "postgres_verbose"),
+        }
+    }
+}
+
+impl TryFrom<&str> for PGIntervalStyle {
+    type Error = Error;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        match s.to_uppercase().as_str() {
+            "ISO" | "ISO_8601" => Ok(PGIntervalStyle::ISO),
+            "SQL" | "SQL_STANDARD" => Ok(PGIntervalStyle::SQL),
+            "POSTGRES" => Ok(PGIntervalStyle::Postgres),
+            "POSTGRES_VERBOSE" | "POSTGRES, VERBOSE" => Ok(PGIntervalStyle::PostgresVerbose),
+            _ => InvalidConfigValueSnafu {
+                name: "IntervalStyle",
+                value: s,
+                hint: format!("Unrecognized key word: {}", s),
+            }
+            .fail(),
+        }
+    }
+}
+
+impl TryFrom<&Value> for PGIntervalStyle {
+    type Error = Error;
+
+    fn try_from(value: &Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::DoubleQuotedString(s) | Value::SingleQuotedString(s) => {
+                Self::try_from(s.as_str())
+            }
+            _ => InvalidConfigValueSnafu {
+                name: "IntervalStyle",
                 value: value.to_string(),
                 hint: format!("Unrecognized key word: {}", value),
             }

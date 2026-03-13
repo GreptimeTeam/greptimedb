@@ -895,7 +895,7 @@ pub fn is_column_type_value_eq(
         .unwrap_or(false)
 }
 
-fn encode_json_value(value: JsonValue) -> v1::JsonValue {
+pub fn encode_json_value(value: JsonValue) -> v1::JsonValue {
     fn helper(json: JsonVariant) -> v1::JsonValue {
         let value = match json {
             JsonVariant::Null => None,

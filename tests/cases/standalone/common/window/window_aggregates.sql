@@ -1,7 +1,7 @@
 -- Migrated from DuckDB test: Multiple window aggregate tests
 -- Tests window aggregate functions
 
-CREATE TABLE sales(region VARCHAR, "quarter" INTEGER, amount INTEGER, ts TIMESTAMP TIME INDEX);
+CREATE TABLE sales("region" VARCHAR, "quarter" INTEGER, amount INTEGER, ts TIMESTAMP TIME INDEX);
 
 INSERT INTO sales VALUES 
 ('North', 1, 1000, 1000), ('North', 2, 1200, 2000), ('North', 3, 1100, 3000),

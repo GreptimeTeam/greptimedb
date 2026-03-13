@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use common_error::ext::BoxedError;
 use common_meta::rpc::router::RegionRoute;
-use common_telemetry::error;
+use common_telemetry::{error, info};
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{self, Result};
@@ -34,6 +34,7 @@ impl UpdateMetadata {
         group_id: GroupId,
         sources: &[RegionDescriptor],
         targets: &[RegionDescriptor],
+        pending_deallocate_region_ids: &[store_api::storage::RegionId],
         current_region_routes: &[RegionRoute],
     ) -> Result<Vec<RegionRoute>> {
         let mut region_routes = current_region_routes.to_vec();
@@ -54,6 +55,7 @@ impl UpdateMetadata {
                 .as_json_str()
                 .context(error::SerializePartitionExprSnafu)?;
             region_route.set_leader_staging();
+            region_route.clear_ignore_all_writes();
         }
 
         for source in sources {
@@ -64,6 +66,10 @@ impl UpdateMetadata {
                 },
             )?;
             region_route.set_leader_staging();
+            if pending_deallocate_region_ids.contains(&source.region_id) {
+                // When a region is pending deallocation, it should ignore all writes.
+                region_route.set_ignore_all_writes();
+            }
         }
 
         Ok(region_routes)
@@ -77,7 +83,6 @@ impl UpdateMetadata {
     /// - Source region not found.
     /// - Failed to update the table route.
     /// - Central region datanode table value not found.
-    #[allow(dead_code)]
     pub(crate) async fn apply_staging_regions(&self, ctx: &mut Context) -> Result<()> {
         let table_id = ctx.persistent_ctx.table_id;
         let group_id = ctx.persistent_ctx.group_id;
@@ -87,8 +92,16 @@ impl UpdateMetadata {
             group_id,
             &ctx.persistent_ctx.sources,
             &ctx.persistent_ctx.targets,
+            &ctx.persistent_ctx.pending_deallocate_region_ids,
             region_routes,
         )?;
+
+        let source_count = ctx.persistent_ctx.sources.len();
+        let target_count = ctx.persistent_ctx.targets.len();
+        info!(
+            "Apply staging regions for repartition, table_id: {}, group_id: {}, sources: {}, targets: {}",
+            table_id, group_id, source_count, target_count
+        );
 
         if let Err(err) = ctx
             .update_table_route(&current_table_route_value, new_region_routes)
@@ -163,6 +176,7 @@ mod tests {
             group_id,
             &[source_region],
             &[target_region],
+            &[],
             &region_routes,
         )
         .unwrap();
@@ -177,5 +191,54 @@ mod tests {
         );
         assert!(new_region_routes[1].is_leader_staging());
         assert!(!new_region_routes[2].is_leader_staging());
+    }
+
+    #[test]
+    fn test_generate_region_routes_mark_pending_deallocate_reject_all_writes() {
+        let group_id = Uuid::new_v4();
+        let table_id = 1024;
+        let pending_deallocate_region_id = RegionId::new(table_id, 1);
+        let region_routes = vec![
+            RegionRoute {
+                region: Region {
+                    id: pending_deallocate_region_id,
+                    partition_expr: range_expr("x", 0, 100).as_json_str().unwrap(),
+                    ..Default::default()
+                },
+                leader_peer: Some(Peer::empty(1)),
+                ..Default::default()
+            },
+            RegionRoute {
+                region: Region {
+                    id: RegionId::new(table_id, 2),
+                    partition_expr: String::new(),
+                    ..Default::default()
+                },
+                leader_peer: Some(Peer::empty(1)),
+                ..Default::default()
+            },
+        ];
+        let source_region = RegionDescriptor {
+            region_id: pending_deallocate_region_id,
+            partition_expr: range_expr("x", 0, 100),
+        };
+        let target_region = RegionDescriptor {
+            region_id: RegionId::new(table_id, 2),
+            partition_expr: range_expr("x", 0, 10),
+        };
+
+        let new_region_routes = UpdateMetadata::apply_staging_region_routes(
+            group_id,
+            &[source_region],
+            &[target_region],
+            &[pending_deallocate_region_id],
+            &region_routes,
+        )
+        .unwrap();
+
+        assert!(new_region_routes[0].is_leader_staging());
+        assert!(new_region_routes[0].is_ignore_all_writes());
+        assert!(new_region_routes[1].is_leader_staging());
+        assert!(!new_region_routes[1].is_ignore_all_writes());
     }
 }

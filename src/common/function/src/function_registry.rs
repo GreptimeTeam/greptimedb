@@ -17,7 +17,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, RwLock};
 
 use datafusion::catalog::TableFunction;
-use datafusion_expr::AggregateUDF;
+use datafusion_expr::expr_rewriter::FunctionRewrite;
+use datafusion_expr::{AggregateUDF, WindowUDF};
 
 use crate::admin::AdminFunction;
 use crate::aggrs::aggr_wrapper::StateMergeHelper;
@@ -26,6 +27,7 @@ use crate::aggrs::count_hash::CountHash;
 use crate::aggrs::vector::VectorFunction as VectorAggrFunction;
 use crate::function::{Function, FunctionRef};
 use crate::function_factory::ScalarFunctionFactory;
+use crate::scalars::anomaly::AnomalyFunction;
 use crate::scalars::date::DateFunction;
 use crate::scalars::expression::ExpressionFunction;
 use crate::scalars::hll_count::HllCalcFunction;
@@ -46,6 +48,8 @@ pub struct FunctionRegistry {
     functions: RwLock<HashMap<String, ScalarFunctionFactory>>,
     aggregate_functions: RwLock<HashMap<String, AggregateUDF>>,
     table_functions: RwLock<HashMap<String, Arc<TableFunction>>>,
+    function_rewrites: RwLock<Vec<Arc<dyn FunctionRewrite + Send + Sync>>>,
+    window_functions: RwLock<HashMap<String, WindowUDF>>,
 }
 
 impl FunctionRegistry {
@@ -100,6 +104,20 @@ impl FunctionRegistry {
             .insert(func.name().to_string(), Arc::new(func));
     }
 
+    /// Register a function rewrite rule.
+    pub fn register_function_rewrite(&self, func: impl FunctionRewrite + Send + Sync + 'static) {
+        self.function_rewrites.write().unwrap().push(Arc::new(func));
+    }
+
+    /// Register a window function (UDWF).
+    pub fn register_window(&self, func: WindowUDF) {
+        let _ = self
+            .window_functions
+            .write()
+            .unwrap()
+            .insert(func.name().to_string(), func);
+    }
+
     pub fn get_function(&self, name: &str) -> Option<ScalarFunctionFactory> {
         self.functions.read().unwrap().get(name).cloned()
     }
@@ -128,9 +146,24 @@ impl FunctionRegistry {
             .collect()
     }
 
+    /// Returns a list of all window functions registered in the registry.
+    pub fn window_functions(&self) -> Vec<WindowUDF> {
+        self.window_functions
+            .read()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect()
+    }
+
     /// Returns true if an aggregate function with the given name exists in the registry.
     pub fn is_aggr_func_exist(&self, name: &str) -> bool {
         self.aggregate_functions.read().unwrap().contains_key(name)
+    }
+
+    /// Returns a list of all function rewrite rules registered in the registry.
+    pub fn function_rewrites(&self) -> Vec<Arc<dyn FunctionRewrite + Send + Sync>> {
+        self.function_rewrites.read().unwrap().clone()
     }
 }
 
@@ -181,6 +214,9 @@ pub static FUNCTION_REGISTRY: LazyLock<Arc<FunctionRegistry>> = LazyLock::new(||
 
     // state function of supported aggregate functions
     StateMergeHelper::register(&function_registry);
+
+    // Anomaly detection window functions
+    AnomalyFunction::register(&function_registry);
 
     Arc::new(function_registry)
 });

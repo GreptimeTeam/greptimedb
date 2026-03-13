@@ -44,6 +44,8 @@ pub struct TaskState {
     last_update_time: Instant,
     /// last time query duration
     last_query_duration: Duration,
+    /// Last successful execution time in unix timestamp milliseconds.
+    last_exec_time_millis: Option<i64>,
     /// Dirty Time windows need to be updated
     /// mapping of `start -> end` and non-overlapping
     pub(crate) dirty_time_windows: DirtyTimeWindows,
@@ -59,6 +61,7 @@ impl TaskState {
             query_ctx,
             last_update_time: Instant::now(),
             last_query_duration: Duration::from_secs(0),
+            last_exec_time_millis: None,
             dirty_time_windows: Default::default(),
             exec_state: ExecState::Idle,
             shutdown_rx,
@@ -68,10 +71,17 @@ impl TaskState {
 
     /// called after last query is done
     /// `is_succ` indicate whether the last query is successful
-    pub fn after_query_exec(&mut self, elapsed: Duration, _is_succ: bool) {
+    pub fn after_query_exec(&mut self, elapsed: Duration, is_succ: bool) {
         self.exec_state = ExecState::Idle;
         self.last_query_duration = elapsed;
         self.last_update_time = Instant::now();
+        if is_succ {
+            self.last_exec_time_millis = Some(common_time::util::current_time_millis());
+        }
+    }
+
+    pub fn last_execution_time_millis(&self) -> Option<i64> {
+        self.last_exec_time_millis
     }
 
     /// Compute the next query delay based on the time window size or the last query duration.
@@ -577,6 +587,20 @@ mod test {
     use crate::batching_mode::time_window::find_time_window_expr;
     use crate::batching_mode::utils::sql_to_df_plan;
     use crate::test_utils::create_test_query_engine;
+
+    #[test]
+    fn test_task_state_records_last_execution_time() {
+        let query_ctx = QueryContext::arc();
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let mut state = TaskState::new(query_ctx, rx);
+
+        assert_eq!(None, state.last_execution_time_millis());
+        state.after_query_exec(std::time::Duration::from_millis(1), false);
+        assert_eq!(None, state.last_execution_time_millis());
+
+        state.after_query_exec(std::time::Duration::from_millis(1), true);
+        assert!(state.last_execution_time_millis().is_some());
+    }
 
     #[test]
     fn test_merge_dirty_time_windows() {

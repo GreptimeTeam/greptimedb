@@ -23,13 +23,15 @@ mod tests {
     use client::OutputData;
     use common_base::Plugins;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_error::ext::ErrorExt;
+    use common_error::status_code::StatusCode;
     use common_meta::key::table_name::TableNameKey;
     use common_meta::rpc::router::region_distribution;
     use common_query::Output;
     use common_recordbatch::RecordBatches;
     use common_telemetry::debug;
     use datafusion_expr::LogicalPlan;
-    use frontend::error::{self, Error, Result};
+    use frontend::error::{Error, Result};
     use frontend::instance::Instance;
     use query::parser::QueryLanguageParser;
     use query::query_engine::DefaultSerializer;
@@ -443,7 +445,7 @@ mod tests {
             .await
             .remove(0)
         {
-            assert!(matches!(e, error::Error::NotSupported { .. }));
+            assert_eq!(e.status_code(), StatusCode::Unsupported);
         } else {
             unreachable!();
         }
@@ -453,7 +455,7 @@ mod tests {
             .await
             .remove(0)
         {
-            assert!(matches!(e, error::Error::NotSupported { .. }));
+            assert_eq!(e.status_code(), StatusCode::Unsupported);
         } else {
             unreachable!();
         }

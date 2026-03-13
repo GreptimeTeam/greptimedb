@@ -18,6 +18,7 @@ use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::{CacheInvalidator, Context};
 use common_meta::error::{self as meta_error, Result as MetaResult};
 use common_meta::instruction::{CacheIdent, Instruction};
+use common_telemetry::tracing_context::TracingContext;
 use snafu::ResultExt;
 
 use crate::metasrv::MetasrvInfo;
@@ -44,12 +45,14 @@ impl MetasrvCacheInvalidator {
             .clone()
             .unwrap_or_else(|| DEFAULT_SUBJECT.to_string());
 
+        let tracing_ctx = TracingContext::from_current_span();
         let mut msg = MailboxMessage::json_message(
             subject,
             &format!("Metasrv@{}", self.info.server_addr),
             "Frontend broadcast",
             common_time::util::current_time_millis(),
             &instruction,
+            Some(tracing_ctx.to_w3c()),
         )
         .with_context(|_| meta_error::SerdeJsonSnafu)?;
 

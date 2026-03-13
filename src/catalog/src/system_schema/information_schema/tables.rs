@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use core::pin::pin;
 use std::sync::{Arc, Weak};
 
 use arrow_schema::SchemaRef as ArrowSchemaRef;
@@ -31,15 +32,17 @@ use datatypes::value::Value;
 use datatypes::vectors::{
     StringVectorBuilder, TimestampSecondVectorBuilder, UInt32VectorBuilder, UInt64VectorBuilder,
 };
-use futures::TryStreamExt;
+use futures::StreamExt;
 use snafu::{OptionExt, ResultExt};
-use store_api::storage::{RegionId, ScanRequest, TableId};
+use store_api::storage::{ScanRequest, TableId};
 use table::metadata::{TableInfo, TableType};
 
 use crate::CatalogManager;
 use crate::error::{
-    CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
+    CreateRecordBatchSnafu, FindRegionRoutesSnafu, InternalSnafu, Result,
+    UpgradeWeakCatalogManagerRefSnafu,
 };
+use crate::kvbackend::KvBackendCatalogManager;
 use crate::system_schema::information_schema::{InformationTable, Predicates, TABLES};
 use crate::system_schema::utils;
 
@@ -247,6 +250,10 @@ impl InformationSchemaTablesBuilder {
             .catalog_manager
             .upgrade()
             .context(UpgradeWeakCatalogManagerRefSnafu)?;
+        let partition_manager = catalog_manager
+            .as_any()
+            .downcast_ref::<KvBackendCatalogManager>()
+            .map(|catalog_manager| catalog_manager.partition_manager());
         let predicates = Predicates::from_scan_request(&request);
 
         let information_extension = utils::information_extension(&self.catalog_manager)?;
@@ -267,37 +274,59 @@ impl InformationSchemaTablesBuilder {
         };
 
         for schema_name in catalog_manager.schema_names(&catalog_name, None).await? {
-            let mut stream = catalog_manager.tables(&catalog_name, &schema_name, None);
+            let table_stream = catalog_manager.tables(&catalog_name, &schema_name, None);
 
-            while let Some(table) = stream.try_next().await? {
-                let table_info = table.table_info();
+            const BATCH_SIZE: usize = 128;
+            // Split tables into chunks
+            let mut table_chunks = pin!(table_stream.ready_chunks(BATCH_SIZE));
 
-                // TODO(dennis): make it working for metric engine
-                let table_region_stats =
-                    if table_info.meta.engine == MITO_ENGINE || table_info.is_physical_table() {
-                        table_info
-                            .meta
-                            .region_numbers
-                            .iter()
-                            .map(|n| RegionId::new(table_info.ident.table_id, *n))
-                            .flat_map(|region_id| {
-                                region_stats
-                                    .binary_search_by_key(&region_id, |x| x.id)
-                                    .map(|i| &region_stats[i])
-                            })
-                            .collect::<Vec<_>>()
-                    } else {
-                        vec![]
-                    };
+            while let Some(tables) = table_chunks.next().await {
+                let tables = tables.into_iter().collect::<Result<Vec<_>>>()?;
+                let mito_or_physical_table_ids = tables
+                    .iter()
+                    .filter(|table| {
+                        table.table_info().meta.engine == MITO_ENGINE
+                            || table.table_info().is_physical_table()
+                    })
+                    .map(|table| table.table_info().ident.table_id)
+                    .collect::<Vec<_>>();
 
-                self.add_table(
-                    &predicates,
-                    &catalog_name,
-                    &schema_name,
-                    table_info,
-                    table.table_type(),
-                    &table_region_stats,
-                );
+                let table_routes = if let Some(partition_manager) = &partition_manager {
+                    partition_manager
+                        .batch_find_region_routes(&mito_or_physical_table_ids)
+                        .await
+                        .context(FindRegionRoutesSnafu)?
+                } else {
+                    mito_or_physical_table_ids
+                        .into_iter()
+                        .map(|id| (id, vec![]))
+                        .collect()
+                };
+
+                for table in tables {
+                    let table_region_stats =
+                        match table_routes.get(&table.table_info().ident.table_id) {
+                            Some(routes) => routes
+                                .iter()
+                                .flat_map(|route| {
+                                    let region_id = route.region.id;
+                                    region_stats
+                                        .binary_search_by_key(&region_id, |x| x.id)
+                                        .map(|i| &region_stats[i])
+                                })
+                                .collect::<Vec<_>>(),
+                            None => vec![],
+                        };
+
+                    self.add_table(
+                        &predicates,
+                        &catalog_name,
+                        &schema_name,
+                        table.table_info(),
+                        table.table_type(),
+                        &table_region_stats,
+                    );
+                }
             }
         }
 

@@ -44,7 +44,7 @@ use datafusion::common::ScalarValue;
 use datafusion::prelude::SessionContext;
 use datafusion_expr::{Expr, SortExpr, case, col, lit};
 use datatypes::prelude::*;
-use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, RawSchema, Schema};
+use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, Schema};
 use datatypes::vectors::StringVector;
 use itertools::Itertools;
 use object_store::ObjectStore;
@@ -742,6 +742,12 @@ pub fn show_variable(stmt: ShowVariables, query_ctx: QueryContextRef) -> Result<
             let (style, order) = *query_ctx.configuration_parameter().pg_datetime_style();
             format!("{}, {}", style, order)
         }
+        "INTERVALSTYLE" => {
+            let style = *query_ctx
+                .configuration_parameter()
+                .pg_intervalstyle_format();
+            style.to_string()
+        }
         "MAX_EXECUTION_TIME" => {
             if query_ctx.channel() == Channel::Mysql {
                 query_ctx.query_timeout_as_millis().to_string()
@@ -1045,7 +1051,10 @@ pub fn show_create_flow(
 
     let stmt = CreateFlow {
         flow_name,
-        sink_table_name: ObjectName::from(vec![Ident::new(&flow_val.sink_table_name().table_name)]),
+        sink_table_name: ObjectName::from(vec![
+            Ident::new(&flow_val.sink_table_name().schema_name),
+            Ident::new(&flow_val.sink_table_name().table_name),
+        ]),
         // notice we don't want `OR REPLACE` and `IF NOT EXISTS` in same sql since it's unclear what to do
         // so we set `or_replace` to false.
         or_replace: false,
@@ -1197,14 +1206,12 @@ pub async fn infer_file_table_schema(
     object_store: &ObjectStore,
     files: &[String],
     options: &HashMap<String, String>,
-) -> Result<RawSchema> {
+) -> Result<Schema> {
     let format = parse_file_table_format(options)?;
     let merged = infer_schemas(object_store, files, format.as_ref())
         .await
         .context(error::InferSchemaSnafu)?;
-    Ok(RawSchema::from(
-        &Schema::try_from(merged).context(error::ConvertSchemaSnafu)?,
-    ))
+    Schema::try_from(merged).context(error::ConvertSchemaSnafu)
 }
 
 // Converts the file column schemas to table column schemas.

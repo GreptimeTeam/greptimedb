@@ -676,16 +676,15 @@ impl LocalManager {
         let tracing_context = TracingContext::from_current_span();
 
         let _handle = common_runtime::spawn_global(async move {
+            let span = tracing_context.attach(tracing::info_span!(
+            "LocalManager::submit_root_procedure",
+                procedure_name = %runner.meta.type_name,
+                procedure_id = %runner.meta.id,
+            ));
             // Run the root procedure.
             // The task was moved to another runtime for execution.
             // In order not to interrupt tracing, a span needs to be created to continue tracing the current task.
-            runner
-                .run()
-                .trace(
-                    tracing_context
-                        .attach(tracing::info_span!("LocalManager::submit_root_procedure")),
-                )
-                .await;
+            runner.run().trace(span).await;
         });
 
         Ok(watcher)

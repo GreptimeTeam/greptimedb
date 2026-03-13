@@ -24,6 +24,7 @@ use common_error::ext::BoxedError;
 use common_meta::ddl::create_flow::FlowType;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::flow::FlowMetadataManagerRef;
+use common_meta::key::flow::flow_state::FlowStat;
 use common_meta::key::table_info::{TableInfoManager, TableInfoValue};
 use common_runtime::JoinHandle;
 use common_telemetry::tracing::warn;
@@ -36,6 +37,7 @@ use query::QueryEngineRef;
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt, ensure};
 use sql::parsers::utils::is_tql;
+use store_api::metric_engine_consts::is_metric_engine_internal_column;
 use store_api::storage::{RegionId, TableId};
 use table::table_reference::TableReference;
 use tokio::sync::{RwLock, oneshot};
@@ -45,7 +47,7 @@ use crate::batching_mode::frontend_client::FrontendClient;
 use crate::batching_mode::task::{BatchingTask, TaskArgs};
 use crate::batching_mode::time_window::{TimeWindowExpr, find_time_window_expr};
 use crate::batching_mode::utils::sql_to_df_plan;
-use crate::engine::FlowEngine;
+use crate::engine::{FlowEngine, FlowStatProvider};
 use crate::error::{
     CreateFlowSnafu, DatafusionSnafu, ExternalSnafu, FlowAlreadyExistSnafu, FlowNotFoundSnafu,
     InvalidQuerySnafu, TableNotFoundMetaSnafu, UnexpectedSnafu, UnsupportedSnafu,
@@ -91,6 +93,18 @@ impl BatchingEngine {
         }
     }
 
+    /// Returns last execution timestamps (millisecond) for all batching flows.
+    pub async fn get_last_exec_time_map(&self) -> BTreeMap<FlowId, i64> {
+        let tasks = self.tasks.read().await;
+        tasks
+            .iter()
+            .filter_map(|(flow_id, task)| {
+                task.last_execution_time_millis()
+                    .map(|timestamp| (*flow_id, timestamp))
+            })
+            .collect()
+    }
+
     pub async fn handle_mark_dirty_time_window(
         &self,
         reqs: DirtyWindowRequests,
@@ -126,7 +140,7 @@ impl BatchingEngine {
                     table_name.table_name,
                 ];
                 let schema = &table_infos.get(&id).unwrap().table_info.meta.schema;
-                let time_index_unit = schema.column_schemas[schema.timestamp_index.unwrap()]
+                let time_index_unit = schema.column_schemas()[schema.timestamp_index().unwrap()]
                     .data_type
                     .as_timestamp()
                     .unwrap()
@@ -319,6 +333,20 @@ impl BatchingEngine {
     }
 }
 
+impl FlowStatProvider for BatchingEngine {
+    async fn flow_stat(&self) -> FlowStat {
+        FlowStat {
+            state_size: BTreeMap::new(),
+            last_exec_time_map: self
+                .get_last_exec_time_map()
+                .await
+                .into_iter()
+                .map(|(flow_id, timestamp)| (flow_id as u32, timestamp))
+                .collect(),
+        }
+    }
+}
+
 async fn get_table_name(
     table_info: &TableInfoManager,
     table_id: &TableId,
@@ -438,23 +466,27 @@ impl BatchingEngine {
             self.check_is_tql_table(&plan, &query_ctx).await?;
         }
 
-        let (column_name, time_window_expr, _, df_schema) = find_time_window_expr(
-            &plan,
-            self.query_engine.engine_state().catalog_manager().clone(),
-            query_ctx.clone(),
-        )
-        .await?;
-
-        let phy_expr = time_window_expr
-            .map(|expr| {
-                TimeWindowExpr::from_expr(
-                    &expr,
-                    &column_name,
-                    &df_schema,
-                    &self.query_engine.engine_state().session_state(),
-                )
-            })
-            .transpose()?;
+        let phy_expr = if !is_tql {
+            let (column_name, time_window_expr, _, df_schema) = find_time_window_expr(
+                &plan,
+                self.query_engine.engine_state().catalog_manager().clone(),
+                query_ctx.clone(),
+            )
+            .await?;
+            time_window_expr
+                .map(|expr| {
+                    TimeWindowExpr::from_expr(
+                        &expr,
+                        &column_name,
+                        &df_schema,
+                        &self.query_engine.engine_state().session_state(),
+                    )
+                })
+                .transpose()?
+        } else {
+            // tql control by `EVAL INTERVAL`, no need to find time window expr
+            None
+        };
 
         debug!(
             "Flow id={}, found time window expr={}",
@@ -571,7 +603,7 @@ impl BatchingEngine {
                 .table_info
                 .meta
                 .schema
-                .column_schemas
+                .column_schemas()
                 .iter()
                 .filter(|col| col.data_type == ConcreteDataType::float64_datatype())
                 .collect::<Vec<_>>();
@@ -599,10 +631,13 @@ impl BatchingEngine {
                 .table_info
                 .meta
                 .schema
-                .column_schemas
+                .column_schemas()
                 .iter()
                 .enumerate()
             {
+                if is_metric_engine_internal_column(&col.name) {
+                    continue;
+                }
                 // three cases:
                 // 1. val column
                 // 2. timestamp column

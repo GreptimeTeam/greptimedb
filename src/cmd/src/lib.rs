@@ -108,7 +108,7 @@ pub trait App: Send {
     }
 }
 
-/// Log the versions of the application, and the arguments passed to the cli.
+/// Log the versions of the application.
 ///
 /// `version` should be the same as the output of cli "--version";
 /// and the `short_version` is the short version of the codes, often consist of git branch and commit.
@@ -118,10 +118,7 @@ pub fn log_versions(version: &str, short_version: &str, app: &str) {
         .with_label_values(&[common_version::version(), short_version, app])
         .inc();
 
-    // Log version and argument flags.
     info!("GreptimeDB version: {}", version);
-
-    log_env_flags();
 }
 
 pub fn create_resource_limit_metrics(app: &str) {
@@ -141,13 +138,6 @@ pub fn create_resource_limit_metrics(app: &str) {
             memory_limit
         );
         MEMORY_LIMIT.with_label_values(&[app]).set(memory_limit);
-    }
-}
-
-fn log_env_flags() {
-    info!("command line arguments");
-    for argument in std::env::args() {
-        info!("argument: {}", argument);
     }
 }
 

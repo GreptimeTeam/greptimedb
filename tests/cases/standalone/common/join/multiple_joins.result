@@ -8,7 +8,7 @@ CREATE TABLE orders_multi("id" INTEGER, customer_id INTEGER, product_id INTEGER,
 
 Affected Rows: 0
 
-CREATE TABLE products_multi("id" INTEGER, "name" VARCHAR, category VARCHAR, price DOUBLE, ts TIMESTAMP TIME INDEX);
+CREATE TABLE products_multi("id" INTEGER, "name" VARCHAR, "category" VARCHAR, price DOUBLE, ts TIMESTAMP TIME INDEX);
 
 Affected Rows: 0
 

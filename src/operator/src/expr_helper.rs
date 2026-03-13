@@ -155,7 +155,8 @@ pub(crate) async fn create_external_expr(
     let file_column_schemas = infer_file_table_schema(&object_store, &files, &table_options)
         .await
         .context(InferFileTableSchemaSnafu)?
-        .column_schemas;
+        .column_schemas()
+        .to_vec();
 
     let (time_index, primary_keys, table_column_schemas) = if !create.columns.is_empty() {
         // expanded form
@@ -549,15 +550,10 @@ fn find_primary_keys(
     let columns_pk = columns
         .iter()
         .filter_map(|x| {
-            if x.options().iter().any(|o| {
-                matches!(
-                    o.option,
-                    ColumnOption::Unique {
-                        is_primary: true,
-                        ..
-                    }
-                )
-            }) {
+            if x.options()
+                .iter()
+                .any(|o| matches!(o.option, ColumnOption::PrimaryKey(_)))
+            {
                 Some(x.name().value.clone())
             } else {
                 None
@@ -695,18 +691,24 @@ pub struct RepartitionRequest {
     pub table_name: String,
     pub from_exprs: Vec<Expr>,
     pub into_exprs: Vec<Expr>,
+    pub options: OptionMap,
 }
 
 pub(crate) fn to_repartition_request(
     alter_table: AlterTable,
     query_ctx: &QueryContextRef,
 ) -> Result<RepartitionRequest> {
-    let (catalog_name, schema_name, table_name) =
-        table_idents_to_full_name(alter_table.table_name(), query_ctx)
-            .map_err(BoxedError::new)
-            .context(ExternalSnafu)?;
+    let AlterTable {
+        table_name,
+        alter_operation,
+        options,
+    } = alter_table;
 
-    let AlterTableOperation::Repartition { operation } = alter_table.alter_operation else {
+    let (catalog_name, schema_name, table_name) = table_idents_to_full_name(&table_name, query_ctx)
+        .map_err(BoxedError::new)
+        .context(ExternalSnafu)?;
+
+    let AlterTableOperation::Repartition { operation } = alter_operation else {
         return InvalidSqlSnafu {
             err_msg: "expected REPARTITION operation",
         }
@@ -719,6 +721,7 @@ pub(crate) fn to_repartition_request(
         table_name,
         from_exprs: operation.from_exprs,
         into_exprs: operation.into_exprs,
+        options,
     })
 }
 
@@ -1108,10 +1111,149 @@ TQL EVAL (now() - '15s'::interval, now(), '5s') count_values("status_code", http
             "greptime.public.cnt_reqs",
             expr.sink_table_name.map(to_dot_sep).unwrap()
         );
-        assert!(expr.source_table_names.is_empty());
+        assert_eq!(1, expr.source_table_names.len());
+        assert_eq!(
+            "greptime.public.http_requests",
+            to_dot_sep(expr.source_table_names[0].clone())
+        );
         assert_eq!(
             r#"TQL EVAL (now() - '15s'::interval, now(), '5s') count_values("status_code", http_requests)"#,
             expr.sql
+        );
+
+        let sql = r#"
+CREATE FLOW calc_reqs SINK TO cnt_reqs AS
+TQL EVAL (now() - '15s'::interval, now(), '5s') count_values("status_code", http_requests{__schema__="greptime_private"});"#;
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+        let Statement::CreateFlow(create_flow) = stmt else {
+            unreachable!()
+        };
+        let expr = to_create_flow_task_expr(create_flow, &QueryContext::arc()).unwrap();
+        assert_eq!(1, expr.source_table_names.len());
+        assert_eq!(
+            "greptime.greptime_private.http_requests",
+            to_dot_sep(expr.source_table_names[0].clone())
+        );
+
+        let sql = r#"
+CREATE FLOW calc_reqs SINK TO cnt_reqs AS
+TQL EVAL (now() - '15s'::interval, now(), '5s') count_values("status_code", http_requests{__database__="greptime_private"});"#;
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+        let Statement::CreateFlow(create_flow) = stmt else {
+            unreachable!()
+        };
+        let expr = to_create_flow_task_expr(create_flow, &QueryContext::arc()).unwrap();
+        assert_eq!(1, expr.source_table_names.len());
+        assert_eq!(
+            "greptime.greptime_private.http_requests",
+            to_dot_sep(expr.source_table_names[0].clone())
+        );
+    }
+
+    #[test]
+    fn test_create_flow_tql_cte_source_tables() {
+        let sql = r#"
+CREATE FLOW calc_cte
+SINK TO metric_cte_sink
+EVAL INTERVAL '1m'
+AS
+WITH tql(ts, the_value) AS (
+  TQL EVAL (now() - '1m'::interval, now(), '5s') metric_cte
+)
+SELECT * FROM tql;
+"#;
+
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+
+        let Statement::CreateFlow(create_flow) = stmt else {
+            unreachable!()
+        };
+        let expr = to_create_flow_task_expr(create_flow, &QueryContext::arc()).unwrap();
+
+        let to_dot_sep =
+            |c: TableName| format!("{}.{}.{}", c.catalog_name, c.schema_name, c.table_name);
+        assert_eq!(1, expr.source_table_names.len());
+        assert_eq!(
+            "greptime.public.metric_cte",
+            to_dot_sep(expr.source_table_names[0].clone())
+        );
+    }
+
+    #[test]
+    fn test_create_flow_tql_cte_source_tables_quoted_cte_name() {
+        let sql = r#"
+CREATE FLOW calc_cte
+SINK TO metric_cte_sink
+EVAL INTERVAL '1m'
+AS
+WITH "TQL"(ts, the_value) AS (
+  TQL EVAL (now() - '1m'::interval, now(), '5s') metric_cte
+)
+SELECT * FROM "TQL";
+"#;
+
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+
+        let Statement::CreateFlow(create_flow) = stmt else {
+            unreachable!()
+        };
+        let expr = to_create_flow_task_expr(create_flow, &QueryContext::arc()).unwrap();
+
+        let to_dot_sep =
+            |c: TableName| format!("{}.{}.{}", c.catalog_name, c.schema_name, c.table_name);
+        assert_eq!(1, expr.source_table_names.len());
+        assert_eq!(
+            "greptime.public.metric_cte",
+            to_dot_sep(expr.source_table_names[0].clone())
+        );
+    }
+
+    #[test]
+    fn test_create_flow_tql_cte_source_tables_same_name() {
+        let sql = r#"
+CREATE FLOW calc_cte
+SINK TO metric_cte_sink
+EVAL INTERVAL '1m'
+AS
+WITH tql(ts, the_value) AS (
+  TQL EVAL (now() - '1m'::interval, now(), '5s') tql
+)
+SELECT * FROM tql;
+"#;
+
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+
+        let Statement::CreateFlow(create_flow) = stmt else {
+            unreachable!()
+        };
+        let expr = to_create_flow_task_expr(create_flow, &QueryContext::arc()).unwrap();
+
+        let to_dot_sep =
+            |c: TableName| format!("{}.{}.{}", c.catalog_name, c.schema_name, c.table_name);
+        assert_eq!(1, expr.source_table_names.len());
+        assert_eq!(
+            "greptime.public.tql",
+            to_dot_sep(expr.source_table_names[0].clone())
         );
     }
 

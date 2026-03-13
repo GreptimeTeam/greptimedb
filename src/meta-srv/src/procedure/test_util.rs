@@ -18,7 +18,8 @@ use api::v1::meta::mailbox_message::Payload;
 use api::v1::meta::{HeartbeatResponse, MailboxMessage};
 use common_meta::instruction::{
     DowngradeRegionReply, DowngradeRegionsReply, EnterStagingRegionReply, EnterStagingRegionsReply,
-    FlushRegionReply, InstructionReply, SimpleReply, UpgradeRegionReply, UpgradeRegionsReply,
+    FlushRegionReply, InstructionReply, SimpleReply, SyncRegionReply, SyncRegionsReply,
+    UpgradeRegionReply, UpgradeRegionsReply,
 };
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::table_route::TableRouteValue;
@@ -102,6 +103,7 @@ pub fn new_open_region_reply(id: u64, result: bool, error: Option<String>) -> Ma
             }))
             .unwrap(),
         )),
+        header: None,
     }
 }
 
@@ -124,6 +126,7 @@ pub fn new_flush_region_reply(id: u64, result: bool, error: Option<String>) -> M
         payload: Some(Payload::Json(
             serde_json::to_string(&InstructionReply::FlushRegions(flush_reply)).unwrap(),
         )),
+        header: None,
     }
 }
 
@@ -149,6 +152,7 @@ pub fn new_flush_region_reply_for_region(
         payload: Some(Payload::Json(
             serde_json::to_string(&InstructionReply::FlushRegions(flush_reply)).unwrap(),
         )),
+        header: None,
     }
 }
 
@@ -167,6 +171,7 @@ pub fn new_close_region_reply(id: u64) -> MailboxMessage {
             }))
             .unwrap(),
         )),
+        header: None,
     }
 }
 
@@ -195,6 +200,7 @@ pub fn new_downgrade_region_reply(
             ))
             .unwrap(),
         )),
+        header: None,
     }
 }
 
@@ -222,6 +228,7 @@ pub fn new_upgrade_region_reply(
             ))
             .unwrap(),
         )),
+        header: None,
     }
 }
 
@@ -250,6 +257,36 @@ pub fn new_enter_staging_region_reply(
             ))
             .unwrap(),
         )),
+        header: None,
+    }
+}
+
+/// Generates a [InstructionReply::SyncRegions] reply.
+pub fn new_sync_region_reply(
+    id: u64,
+    region_id: RegionId,
+    ready: bool,
+    exists: bool,
+    error: Option<String>,
+) -> MailboxMessage {
+    MailboxMessage {
+        id,
+        subject: "mock".to_string(),
+        from: "datanode".to_string(),
+        to: "meta".to_string(),
+        timestamp_millis: current_time_millis(),
+        payload: Some(Payload::Json(
+            serde_json::to_string(&InstructionReply::SyncRegions(SyncRegionsReply::new(vec![
+                SyncRegionReply {
+                    region_id,
+                    ready,
+                    exists,
+                    error,
+                },
+            ])))
+            .unwrap(),
+        )),
+        header: None,
     }
 }
 
@@ -271,7 +308,7 @@ pub async fn new_wal_prune_metadata(
         let region_ids = (0..n_region)
             .map(|i| RegionId::new(table_id, i))
             .collect::<Vec<_>>();
-        let table_info = new_test_table_info(table_id, 0..n_region).into();
+        let table_info = new_test_table_info(table_id);
         let region_routes = region_ids
             .iter()
             .map(|region_id| RegionRoute {

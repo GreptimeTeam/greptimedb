@@ -18,8 +18,8 @@ use std::sync::Arc;
 
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
-use common_recordbatch::RecordBatch;
 use common_recordbatch::error::{ArrowComputeSnafu, ExternalSnafu};
+use common_recordbatch::{DfRecordBatch, RecordBatch};
 use datatypes::arrow::datatypes::Field;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::schema::{Schema, SchemaRef};
@@ -28,7 +28,8 @@ use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
 
-use crate::error::{InvalidRequestSnafu, Result};
+use crate::error::{InvalidRequestSnafu, RecordBatchSnafu, Result};
+use crate::read::projection::read_column_ids_from_projection;
 use crate::sst::parquet::flat_format::sst_column_id_indices;
 use crate::sst::parquet::format::FormatProjection;
 use crate::sst::{
@@ -44,12 +45,11 @@ pub struct FlatProjectionMapper {
     metadata: RegionMetadataRef,
     /// Schema for converted [RecordBatch] to return.
     output_schema: SchemaRef,
-    /// Ids of columns to project. It keeps ids in the same order as the `projection`
-    /// indices to build the mapper.
+    /// Ids of columns to read from memtables and SSTs.
     /// The mapper won't deduplicate the column ids.
     ///
     /// Note that this doesn't contain the `__table_id` and `__tsid`.
-    column_ids: Vec<ColumnId>,
+    read_column_ids: Vec<ColumnId>,
     /// Ids and DataTypes of columns of the expected batch.
     /// We can use this to check if the batch is compatible with the expected schema.
     ///
@@ -72,30 +72,36 @@ impl FlatProjectionMapper {
         metadata: &RegionMetadataRef,
         projection: impl Iterator<Item = usize>,
     ) -> Result<Self> {
-        let mut projection: Vec<_> = projection.collect();
+        let projection: Vec<_> = projection.collect();
+        let read_column_ids = read_column_ids_from_projection(metadata, &projection)?;
+        Self::new_with_read_columns(metadata, projection, read_column_ids)
+    }
 
+    /// Returns a new mapper with output projection and explicit read columns.
+    pub fn new_with_read_columns(
+        metadata: &RegionMetadataRef,
+        projection: Vec<usize>,
+        read_column_ids: Vec<ColumnId>,
+    ) -> Result<Self> {
         // If the original projection is empty.
         let is_empty_projection = projection.is_empty();
-        if is_empty_projection {
-            // If the projection is empty, we still read the time index column.
-            projection.push(metadata.time_index_column_pos());
-        }
 
         // Output column schemas for the projection.
         let mut column_schemas = Vec::with_capacity(projection.len());
-        // Column ids of the projection without deduplication.
-        let mut column_ids = Vec::with_capacity(projection.len());
+        // Column ids of the output projection without deduplication.
+        let mut output_column_ids = Vec::with_capacity(projection.len());
         for idx in &projection {
             // For each projection index, we get the column id for projection.
-            let column = metadata
-                .column_metadatas
-                .get(*idx)
-                .context(InvalidRequestSnafu {
-                    region_id: metadata.region_id,
-                    reason: format!("projection index {} is out of bound", idx),
-                })?;
+            let column =
+                metadata
+                    .column_metadatas
+                    .get(*idx)
+                    .with_context(|| InvalidRequestSnafu {
+                        region_id: metadata.region_id,
+                        reason: format!("projection index {} is out of bound", idx),
+                    })?;
 
-            column_ids.push(column.column_id);
+            output_column_ids.push(column.column_id);
             // Safety: idx is valid.
             column_schemas.push(metadata.schema.column_schemas()[*idx].clone());
         }
@@ -107,7 +113,7 @@ impl FlatProjectionMapper {
             &id_to_index,
             // All columns with internal columns.
             metadata.column_metadatas.len() + 3,
-            column_ids.iter().copied(),
+            read_column_ids.iter().copied(),
         );
 
         let batch_schema = flat_projected_columns(metadata, &format_projection);
@@ -115,38 +121,46 @@ impl FlatProjectionMapper {
         // Safety: We get the column id from the metadata.
         let input_arrow_schema = compute_input_arrow_schema(metadata, &batch_schema);
 
-        if is_empty_projection {
-            // If projection is empty, we don't output any column.
-            return Ok(FlatProjectionMapper {
-                metadata: metadata.clone(),
-                output_schema: Arc::new(Schema::new(vec![])),
-                column_ids,
-                batch_schema: vec![],
-                is_empty_projection,
-                batch_indices: vec![],
-                input_arrow_schema,
-            });
-        }
+        // If projection is empty, we don't output any column.
+        let output_schema = if is_empty_projection {
+            Arc::new(Schema::new(vec![]))
+        } else {
+            // Safety: Columns come from existing schema.
+            Arc::new(Schema::new(column_schemas))
+        };
 
-        // Safety: Columns come from existing schema.
-        let output_schema = Arc::new(Schema::new(column_schemas));
-
-        let batch_indices: Vec<_> = column_ids
-            .iter()
-            .map(|id| {
-                // Safety: The map is computed from `projection` itself.
-                format_projection
-                    .column_id_to_projected_index
-                    .get(id)
-                    .copied()
-                    .unwrap()
-            })
-            .collect();
+        let batch_indices = if is_empty_projection {
+            vec![]
+        } else {
+            output_column_ids
+                .iter()
+                .map(|id| {
+                    // Safety: The map is computed from the read projection.
+                    format_projection
+                        .column_id_to_projected_index
+                        .get(id)
+                        .copied()
+                        .with_context(|| {
+                            let name = metadata
+                                .column_by_id(*id)
+                                .map(|column| column.column_schema.name.clone())
+                                .unwrap_or_else(|| id.to_string());
+                            InvalidRequestSnafu {
+                                region_id: metadata.region_id,
+                                reason: format!(
+                                    "output column {} is missing in read projection",
+                                    name
+                                ),
+                            }
+                        })
+                })
+                .collect::<Result<Vec<_>>>()?
+        };
 
         Ok(FlatProjectionMapper {
             metadata: metadata.clone(),
             output_schema,
-            column_ids,
+            read_column_ids,
             batch_schema,
             is_empty_projection,
             batch_indices,
@@ -167,7 +181,7 @@ impl FlatProjectionMapper {
     /// Returns ids of projected columns that we need to read
     /// from memtables and SSTs.
     pub(crate) fn column_ids(&self) -> &[ColumnId] {
-        &self.column_ids
+        &self.read_column_ids
     }
 
     /// Returns the field column start index in output batch.
@@ -238,7 +252,15 @@ impl FlatProjectionMapper {
         if self.is_empty_projection {
             return RecordBatch::new_with_count(self.output_schema.clone(), batch.num_rows());
         }
+        let columns = self.project_vectors(batch)?;
+        RecordBatch::new(self.output_schema.clone(), columns)
+    }
 
+    /// Projects columns from the input batch and converts them into vectors.
+    pub(crate) fn project_vectors(
+        &self,
+        batch: &datatypes::arrow::record_batch::RecordBatch,
+    ) -> common_recordbatch::error::Result<Vec<datatypes::vectors::VectorRef>> {
         let mut columns = Vec::with_capacity(self.output_schema.num_columns());
         for index in &self.batch_indices {
             let mut array = batch.column(*index).clone();
@@ -255,8 +277,7 @@ impl FlatProjectionMapper {
                 .context(ExternalSnafu)?;
             columns.push(vector);
         }
-
-        RecordBatch::new(self.output_schema.clone(), columns)
+        Ok(columns)
     }
 }
 
@@ -304,7 +325,7 @@ pub(crate) fn flat_projected_columns(
 ///
 /// # Panics
 /// Panics if it can't find the column by the column id in the batch_schema.
-fn compute_input_arrow_schema(
+pub(crate) fn compute_input_arrow_schema(
     metadata: &RegionMetadata,
     batch_schema: &[(ColumnId, ConcreteDataType)],
 ) -> datatypes::arrow::datatypes::SchemaRef {
@@ -326,4 +347,100 @@ fn compute_input_arrow_schema(
     new_fields.extend_from_slice(&internal_fields());
 
     Arc::new(datatypes::arrow::datatypes::Schema::new(new_fields))
+}
+
+/// Helper to project compaction batches into flat format columns
+/// (fields + time index + __primary_key + __sequence + __op_type).
+pub(crate) struct CompactionProjectionMapper {
+    mapper: FlatProjectionMapper,
+    assembler: DfBatchAssembler,
+}
+
+impl CompactionProjectionMapper {
+    pub(crate) fn try_new(metadata: &RegionMetadataRef) -> Result<Self> {
+        let projection = metadata
+            .column_metadatas
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, col)| {
+                if matches!(col.semantic_type, SemanticType::Field) {
+                    Some(idx)
+                } else {
+                    None
+                }
+            })
+            .chain([metadata.time_index_column_pos()])
+            .collect::<Vec<_>>();
+
+        let mapper = FlatProjectionMapper::new_with_read_columns(
+            metadata,
+            projection,
+            metadata
+                .column_metadatas
+                .iter()
+                .map(|col| col.column_id)
+                .collect(),
+        )?;
+        let assembler = DfBatchAssembler::new(mapper.output_schema());
+
+        Ok(Self { mapper, assembler })
+    }
+
+    /// Projects columns and appends internal columns for compaction output.
+    ///
+    /// The input batch is expected to be in flat format with internal columns appended.
+    pub(crate) fn project(&self, batch: DfRecordBatch) -> Result<DfRecordBatch> {
+        let columns = self
+            .mapper
+            .project_vectors(&batch)
+            .context(RecordBatchSnafu)?;
+        self.assembler
+            .build_df_record_batch_with_internal(&batch, columns)
+            .context(RecordBatchSnafu)
+    }
+}
+
+/// Builds [DfRecordBatch] with internal columns appended.
+pub(crate) struct DfBatchAssembler {
+    output_arrow_schema_with_internal: datatypes::arrow::datatypes::SchemaRef,
+}
+
+impl DfBatchAssembler {
+    /// Precomputes the output schema with internal columns.
+    pub(crate) fn new(output_schema: SchemaRef) -> Self {
+        let fields = output_schema
+            .arrow_schema()
+            .fields()
+            .into_iter()
+            .chain(internal_fields().iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        let output_arrow_schema_with_internal =
+            Arc::new(datatypes::arrow::datatypes::Schema::new(fields));
+        Self {
+            output_arrow_schema_with_internal,
+        }
+    }
+
+    /// Builds a [DfRecordBatch] from projected vectors plus internal columns.
+    ///
+    /// Assumes the input batch already contains internal columns as the last three fields
+    /// ("__primary_key", "__sequence", "__op_type").
+    pub(crate) fn build_df_record_batch_with_internal(
+        &self,
+        batch: &datatypes::arrow::record_batch::RecordBatch,
+        mut columns: Vec<datatypes::vectors::VectorRef>,
+    ) -> common_recordbatch::error::Result<DfRecordBatch> {
+        let num_columns = batch.columns().len();
+        // The last 3 columns are the internal columns.
+        let internal_indices = [num_columns - 3, num_columns - 2, num_columns - 1];
+        for index in internal_indices.iter() {
+            let array = batch.column(*index).clone();
+            let vector = Helper::try_into_vector(array)
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?;
+            columns.push(vector);
+        }
+        RecordBatch::to_df_record_batch(self.output_arrow_schema_with_internal.clone(), columns)
+    }
 }

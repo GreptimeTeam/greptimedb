@@ -42,9 +42,9 @@ use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::partition_tree::tree::PartitionTree;
 use crate::memtable::stats::WriteMetrics;
 use crate::memtable::{
-    AllocTracker, BoxedBatchIterator, IterBuilder, KeyValues, MemScanMetrics, Memtable,
-    MemtableBuilder, MemtableId, MemtableRange, MemtableRangeContext, MemtableRanges, MemtableRef,
-    MemtableStats, RangesOptions,
+    AllocTracker, BatchToRecordBatchContext, BoxedBatchIterator, IterBuilder, KeyValues,
+    MemScanMetrics, Memtable, MemtableBuilder, MemtableId, MemtableRange, MemtableRangeContext,
+    MemtableRanges, MemtableRef, MemtableStats, RangesOptions, read_column_ids_from_projection,
 };
 use crate::region::options::MergeMode;
 
@@ -194,6 +194,7 @@ impl Memtable for PartitionTreeMemtable {
     ) -> Result<MemtableRanges> {
         let predicate = options.predicate;
         let sequence = options.sequence;
+        let read_column_ids = read_column_ids_from_projection(&self.tree.metadata, projection);
         let projection = projection.map(|ids| ids.to_vec());
         let builder = Box::new(PartitionTreeIterBuilder {
             tree: self.tree.clone(),
@@ -201,7 +202,16 @@ impl Memtable for PartitionTreeMemtable {
             predicate: predicate.predicate().cloned(),
             sequence,
         });
-        let context = Arc::new(MemtableRangeContext::new(self.id, builder, predicate));
+        let adapter_context = Arc::new(BatchToRecordBatchContext::new(
+            self.tree.metadata.clone(),
+            read_column_ids,
+        ));
+        let context = Arc::new(MemtableRangeContext::new_with_batch_to_record_batch(
+            self.id,
+            builder,
+            predicate,
+            Some(adapter_context),
+        ));
 
         let range_stats = self.stats();
         let range = MemtableRange::new(context, range_stats);
@@ -932,5 +942,115 @@ mod tests {
             .map(|c| (c.to_string(), c.to_string()))
             .collect::<HashMap<_, _>>();
         assert_eq!(kvs, expected);
+    }
+
+    #[test]
+    fn test_build_record_batch_iter_from_memtable() {
+        let metadata = Arc::new(memtable_util::metadata_with_primary_key(vec![1, 0], true));
+        let codec = Arc::new(DensePrimaryKeyCodec::new(&metadata));
+        let memtable = PartitionTreeMemtable::new(
+            1,
+            codec,
+            metadata.clone(),
+            None,
+            &PartitionTreeConfig::default(),
+        );
+
+        let kvs =
+            memtable_util::build_key_values(&metadata, "hello".to_string(), 42, &[1, 2, 3], 0);
+        memtable.write(&kvs).unwrap();
+
+        let read_column_ids: Vec<ColumnId> = metadata
+            .column_metadatas
+            .iter()
+            .map(|c| c.column_id)
+            .collect();
+        let ranges = memtable
+            .ranges(Some(&read_column_ids), RangesOptions::default())
+            .unwrap();
+        assert!(!ranges.ranges.is_empty());
+
+        let mut total_rows = 0;
+        for range in ranges.ranges.into_values() {
+            let mut iter = range.build_record_batch_iter(None, None).unwrap();
+            while let Some(rb) = iter.next().transpose().unwrap() {
+                total_rows += rb.num_rows();
+                let schema = rb.schema();
+                let column_names: Vec<_> =
+                    schema.fields().iter().map(|f| f.name().as_str()).collect();
+                assert_eq!(
+                    column_names,
+                    vec![
+                        "__table_id",
+                        "k0",
+                        "v0",
+                        "v1",
+                        "ts",
+                        "__primary_key",
+                        "__sequence",
+                        "__op_type",
+                    ]
+                );
+            }
+        }
+        assert_eq!(3, total_rows);
+    }
+
+    #[test]
+    fn test_build_record_batch_iter_with_time_range() {
+        let metadata = Arc::new(memtable_util::metadata_with_primary_key(vec![1, 0], true));
+        let codec = Arc::new(DensePrimaryKeyCodec::new(&metadata));
+        let memtable = PartitionTreeMemtable::new(
+            1,
+            codec,
+            metadata.clone(),
+            None,
+            &PartitionTreeConfig::default(),
+        );
+
+        let kvs = memtable_util::build_key_values(
+            &metadata,
+            "hello".to_string(),
+            42,
+            &[1, 2, 3, 4, 5],
+            0,
+        );
+        memtable.write(&kvs).unwrap();
+
+        let read_column_ids: Vec<ColumnId> = metadata
+            .column_metadatas
+            .iter()
+            .map(|c| c.column_id)
+            .collect();
+        let ranges = memtable
+            .ranges(Some(&read_column_ids), RangesOptions::default())
+            .unwrap();
+        assert!(!ranges.ranges.is_empty());
+
+        let time_range = (Timestamp::new_millisecond(2), Timestamp::new_millisecond(4));
+
+        let mut total_rows = 0;
+        let mut all_timestamps = Vec::new();
+        for range in ranges.ranges.into_values() {
+            let mut iter = range
+                .build_record_batch_iter(Some(time_range), None)
+                .unwrap();
+            while let Some(rb) = iter.next().transpose().unwrap() {
+                total_rows += rb.num_rows();
+                // ts column is at index 4 (after __table_id, k0, v0, v1)
+                let ts_col = rb
+                    .column_by_name("ts")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<datatypes::arrow::array::TimestampMillisecondArray>()
+                    .unwrap();
+                for i in 0..ts_col.len() {
+                    all_timestamps.push(ts_col.value(i));
+                }
+            }
+        }
+        assert_eq!(3, total_rows);
+        all_timestamps.sort();
+        assert_eq!(vec![2, 3, 4], all_timestamps);
     }
 }

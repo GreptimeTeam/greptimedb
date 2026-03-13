@@ -858,6 +858,12 @@ impl Procedure for RegionMigrationProcedure {
         true
     }
 
+    #[tracing::instrument(skip_all, fields(
+        state = %self.state.name(),
+        region_count = self.context.persistent_ctx.region_ids.len(),
+        from_peer = self.context.persistent_ctx.from_peer.id,
+        to_peer = self.context.persistent_ctx.to_peer.id,
+    ))]
     async fn execute(&mut self, ctx: &ProcedureContext) -> ProcedureResult<Status> {
         let state = &mut self.state;
 
@@ -1172,7 +1178,7 @@ mod tests {
         let from_peer = persistent_context.from_peer.clone();
         let to_peer = persistent_context.to_peer.clone();
         let region_id = persistent_context.region_ids[0];
-        let table_info = new_test_table_info(1024, vec![1]).into();
+        let table_info = new_test_table_info(1024);
         let region_routes = vec![RegionRoute {
             region: Region::new_test(region_id),
             leader_peer: Some(from_peer),
@@ -1211,7 +1217,7 @@ mod tests {
         let to_peer_id = persistent_context.to_peer.id;
         let from_peer = persistent_context.from_peer.clone();
         let region_id = persistent_context.region_ids[0];
-        let table_info = new_test_table_info(1024, vec![1]).into();
+        let table_info = new_test_table_info(1024);
         let region_routes = vec![RegionRoute {
             region: Region::new_test(region_id),
             leader_peer: Some(from_peer),
@@ -1299,7 +1305,7 @@ mod tests {
         let to_peer_id = persistent_context.to_peer.id;
         let from_peer = persistent_context.from_peer.clone();
         let region_id = persistent_context.region_ids[0];
-        let table_info = new_test_table_info(1024, vec![1]).into();
+        let table_info = new_test_table_info(1024);
         let region_routes = vec![RegionRoute {
             region: Region::new_test(region_id),
             leader_peer: Some(from_peer),
@@ -1419,7 +1425,7 @@ mod tests {
         let from_peer_id = persistent_context.from_peer.id;
         let from_peer = persistent_context.from_peer.clone();
         let region_id = persistent_context.region_ids[0];
-        let table_info = new_test_table_info(1024, vec![1]).into();
+        let table_info = new_test_table_info(1024);
         let region_routes = vec![RegionRoute {
             region: Region::new_test(region_id),
             leader_peer: Some(from_peer),

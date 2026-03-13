@@ -12,13 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::Duration;
 
 use common_meta::key::TableMetadataManagerRef;
 use common_procedure::ProcedureWithId;
 use common_telemetry::info;
 use common_test_util::recordbatch::check_output_stream;
+use common_test_util::temp_dir::create_temp_dir;
+use common_wal::config::DatanodeWalConfig;
 use futures::TryStreamExt as _;
 use itertools::Itertools;
 use meta_srv::gc::{BatchGcProcedure, GcSchedulerOptions, Region2Peers};
@@ -30,8 +33,11 @@ use crate::cluster::GreptimeDbClusterBuilder;
 use crate::test_util::{StorageType, TempDirGuard, execute_sql, get_test_store_config};
 use crate::tests::test_util::{MockInstanceBuilder, TestContext, wait_procedure};
 
+mod admin;
+mod repart;
+
 /// Helper function to get table route information for GC procedure
-async fn get_table_route(
+pub(super) async fn get_table_route(
     table_metadata_manager: &TableMetadataManagerRef,
     table_id: TableId,
 ) -> (Region2Peers, Vec<RegionId>) {
@@ -59,7 +65,7 @@ async fn get_table_route(
 }
 
 /// Helper function to list all SST files
-async fn list_sst_files(test_context: &TestContext) -> HashSet<String> {
+pub(super) async fn list_sst_files(test_context: &TestContext) -> HashSet<String> {
     let mut sst_files = HashSet::new();
 
     for datanode in test_context.datanodes().values() {
@@ -79,13 +85,18 @@ async fn list_sst_files(test_context: &TestContext) -> HashSet<String> {
     sst_files
 }
 
-async fn distributed_with_gc(store_type: &StorageType) -> (TestContext, TempDirGuard) {
+pub(super) async fn distributed_with_gc(store_type: &StorageType) -> (TestContext, TempDirGuard) {
     common_telemetry::init_default_ut_logging();
     let test_name = uuid::Uuid::new_v4().to_string();
     let (store_config, guard) = get_test_store_config(store_type);
 
-    let builder = GreptimeDbClusterBuilder::new(&test_name)
-        .await
+    let mut builder = GreptimeDbClusterBuilder::new(&test_name).await;
+    if matches!(store_type, StorageType::File) {
+        let home_dir = create_temp_dir("test_gc_data_home");
+        builder = builder.with_shared_home_dir(Arc::new(home_dir));
+    }
+
+    let builder = builder
         .with_metasrv_gc_config(GcSchedulerOptions {
             enable: true,
             ..Default::default()
@@ -96,6 +107,7 @@ async fn distributed_with_gc(store_type: &StorageType) -> (TestContext, TempDirG
             lingering_time: Some(Duration::ZERO),
             ..Default::default()
         })
+        .with_datanode_wal_config(DatanodeWalConfig::Noop)
         .with_store_config(store_config);
     (
         TestContext::new(MockInstanceBuilder::Distributed(builder)).await,
@@ -105,12 +117,11 @@ async fn distributed_with_gc(store_type: &StorageType) -> (TestContext, TempDirG
 
 #[tokio::test]
 async fn test_gc_basic_different_store() {
+    let _ = dotenv::dotenv();
     common_telemetry::init_default_ut_logging();
     let store_type = StorageType::build_storage_types_based_on_env();
+    info!("store type: {:?}", store_type);
     for store in store_type {
-        if store == StorageType::File {
-            continue; // no point in test gc in fs storage
-        }
         info!("Running GC test with storage type: {}", store);
         test_gc_basic(&store).await;
     }
@@ -190,18 +201,18 @@ async fn test_gc_basic(store_type: &StorageType) {
     assert_eq!(sst_files_after_compaction.len(), 5); // 4 old + 1 new
 
     // Step 5: Get table route information for GC procedure
-    let (region_routes, regions) =
+    let (_region_routes, regions) =
         get_table_route(metasrv.table_metadata_manager(), table_id).await;
 
     // Step 6: Create and execute BatchGcProcedure
     let procedure = BatchGcProcedure::new(
         metasrv.mailbox().clone(),
+        metasrv.table_metadata_manager().clone(),
         metasrv.options().grpc.server_addr.clone(),
         regions.clone(),
-        false, // full_file_listing
-        region_routes,
-        HashMap::new(),          // related_regions (empty for this simple test)
+        false,                   // full_file_listing
         Duration::from_secs(10), // timeout
+        Default::default(),
     );
 
     // Submit the procedure to the procedure manager

@@ -73,6 +73,8 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run cargo check
         run: cargo check --locked --workspace --all-targets
+      - name: Run cargo check (all features)
+        run: cargo check --locked --workspace --all-targets --all-features
 
   toml:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
@@ -117,7 +119,7 @@ jobs:
       - name: Build greptime binaries
         shell: bash
         # `cargo gc` will invoke `cargo build` with specified args
-        run: cargo gc -- --bin greptime --bin sqlness-runner --features "pg_kvbackend,mysql_kvbackend"
+        run: cargo gc -- --bin greptime --bin sqlness-runner --features "pg_kvbackend,mysql_kvbackend,vector_index"
       - name: Pack greptime binaries
         shell: bash
         run: |
@@ -314,6 +316,19 @@ jobs:
             minio: true
             kafka: true
             values: "with-remote-wal.yaml"
+        include:
+          - target: "fuzz_repartition_table"
+            mode:
+              name: "Local WAL mito table repartition"
+              minio: true
+              kafka: false
+              values: "with-minio-repartition-gc.yaml"
+          - target: "fuzz_repartition_metric_table"
+            mode:
+              name: "Local WAL metric table repartition"
+              minio: true
+              kafka: false
+              values: "with-minio-repartition-gc.yaml"
     steps:
       - name: Remove unused software
         run: |
@@ -427,6 +442,32 @@ jobs:
         with:
           name: fuzz-tests-kind-logs-${{ matrix.mode.name }}-${{ matrix.target }}
           path: /tmp/kind
+          retention-days: 3
+      - name: Collect monitor dumps
+        if: failure()
+        shell: bash
+        env:
+          GT_FUZZ_NS: my-greptimedb
+          GT_FUZZ_CLUSTER: my-greptimedb
+          GT_MONITOR_HTTP_LOCAL_PORT: 14000
+          GT_MONITOR_ARTIFACT_DIR: /tmp/fuzz-monitor-dumps
+        run: |
+          bash .github/scripts/collect-fuzz-monitor-artifacts.sh
+      - name: Upload monitor dumps
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-tests-monitor-dumps-${{ matrix.mode.name }}-${{ matrix.target }}
+          path: /tmp/fuzz-monitor-dumps
+          if-no-files-found: warn
+          retention-days: 3
+      - name: Upload CSV dumps
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-tests-csv-dumps-${{ matrix.mode.name }}-${{ matrix.target }}
+          path: /tmp/greptime-fuzz-dumps
+          if-no-files-found: warn
           retention-days: 3
       - name: Delete cluster
         if: success()
@@ -581,6 +622,24 @@ jobs:
         with:
           name: fuzz-tests-kind-logs-${{ matrix.mode.name }}-${{ matrix.target }}
           path: /tmp/kind
+          retention-days: 3
+      - name: Collect monitor dumps
+        if: failure()
+        shell: bash
+        env:
+          GT_FUZZ_NS: my-greptimedb
+          GT_FUZZ_CLUSTER: my-greptimedb
+          GT_MONITOR_HTTP_LOCAL_PORT: 14000
+          GT_MONITOR_ARTIFACT_DIR: /tmp/fuzz-monitor-dumps
+        run: |
+          bash .github/scripts/collect-fuzz-monitor-artifacts.sh          
+      - name: Upload monitor dumps
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-tests-monitor-dumps-${{ matrix.mode.name }}-${{ matrix.target }}
+          path: /tmp/fuzz-monitor-dumps
+          if-no-files-found: warn
           retention-days: 3
       - name: Delete cluster
         if: success()
@@ -844,6 +903,15 @@ jobs:
           flags: rust
           fail_ci_if_error: false
           verbose: true
+
+  run-multi-lang-tests:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    name: Run Multi-language SDK Tests
+    needs: build
+    uses: ./.github/workflows/run-multi-lang-tests.yml
+    with:
+      artifact-name: bins
+
 
   # compat:
   #   if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}

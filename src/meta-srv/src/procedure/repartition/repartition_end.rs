@@ -15,6 +15,7 @@
 use std::any::Any;
 
 use common_procedure::{Context as ProcedureContext, Status};
+use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
@@ -28,9 +29,13 @@ pub struct RepartitionEnd;
 impl State for RepartitionEnd {
     async fn next(
         &mut self,
-        _ctx: &mut Context,
+        ctx: &mut Context,
         _procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
+        info!(
+            "Repartition procedure finished, metrics: {}",
+            ctx.volatile_ctx.metrics
+        );
         Ok((Box::new(RepartitionEnd), Status::done()))
     }
 

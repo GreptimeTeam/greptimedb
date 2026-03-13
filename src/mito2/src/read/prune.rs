@@ -24,7 +24,7 @@ use snafu::ResultExt;
 
 use crate::error::{RecordBatchSnafu, Result};
 use crate::memtable::BoxedBatchIterator;
-use crate::read::last_row::RowGroupLastRowCachedReader;
+use crate::read::last_row::{FlatRowGroupLastRowCachedReader, RowGroupLastRowCachedReader};
 use crate::read::{Batch, BatchReader};
 use crate::sst::file::FileTimeRange;
 use crate::sst::parquet::file_range::FileRangeContextRef;
@@ -119,7 +119,7 @@ impl PruneReader {
     /// Prunes batches by the pushed down predicate.
     fn prune(&mut self, batch: Batch) -> Result<Option<Batch>> {
         // fast path
-        if self.context.filters().is_empty() {
+        if self.context.filters().is_empty() && !self.context.has_partition_filter() {
             return Ok(Some(batch));
         }
 
@@ -248,12 +248,14 @@ impl Iterator for PruneTimeIterator {
 
 pub enum FlatSource {
     RowGroup(FlatRowGroupReader),
+    LastRow(FlatRowGroupLastRowCachedReader),
 }
 
 impl FlatSource {
     fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
         match self {
             FlatSource::RowGroup(r) => r.next_batch(),
+            FlatSource::LastRow(r) => r.next_batch(),
         }
     }
 }
@@ -282,9 +284,21 @@ impl FlatPruneReader {
         }
     }
 
-    /// Merge metrics with the inner reader and return the merged metrics.
+    pub(crate) fn new_with_last_row_reader(
+        ctx: FileRangeContextRef,
+        reader: FlatRowGroupLastRowCachedReader,
+        skip_fields: bool,
+    ) -> Self {
+        Self {
+            context: ctx,
+            source: FlatSource::LastRow(reader),
+            metrics: Default::default(),
+            skip_fields,
+        }
+    }
+
+    /// Returns metrics.
     pub(crate) fn metrics(&self) -> ReaderMetrics {
-        // FlatRowGroupReader doesn't collect metrics, so just return our own
         self.metrics.clone()
     }
 
@@ -315,7 +329,7 @@ impl FlatPruneReader {
     /// Prunes batches by the pushed down predicate and returns RecordBatch.
     fn prune_flat(&mut self, record_batch: RecordBatch) -> Result<Option<RecordBatch>> {
         // fast path
-        if self.context.filters().is_empty() {
+        if self.context.filters().is_empty() && !self.context.has_partition_filter() {
             return Ok(Some(record_batch));
         }
 

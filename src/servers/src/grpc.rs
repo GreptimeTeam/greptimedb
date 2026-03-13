@@ -23,6 +23,7 @@ pub mod memory_limit;
 pub mod prom_query_gateway;
 pub mod region_server;
 
+use std::any::Any;
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -398,5 +399,9 @@ impl Server for GrpcServer {
 
     fn bind_addr(&self) -> Option<SocketAddr> {
         self.bind_addr
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }

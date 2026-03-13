@@ -138,7 +138,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::RegionNumber;
-use table::metadata::{RawTableInfo, TableId};
+use table::metadata::{TableId, TableInfo};
 use table::table_name::TableName;
 use table_info::{TableInfoKey, TableInfoManager, TableInfoValue};
 use table_name::{TableNameKey, TableNameManager, TableNameValue};
@@ -659,7 +659,13 @@ impl TableMetadataManager {
         let mut res = self.kv_backend.txn(txn).await?;
         let mut set = TxnOpGetResponseSet::from(&mut res.responses);
         let table_info_value = TxnOpGetResponseSet::decode_with(table_info_filter)(&mut set)?;
-        let table_route_value = TxnOpGetResponseSet::decode_with(table_route_filter)(&mut set)?;
+        let mut table_route_value = TxnOpGetResponseSet::decode_with(table_route_filter)(&mut set)?;
+        if let Some(table_route_value) = &mut table_route_value {
+            self.table_route_manager()
+                .table_route_storage()
+                .remap_route_address(table_route_value)
+                .await?;
+        }
         Ok((table_info_value, table_route_value))
     }
 
@@ -674,7 +680,7 @@ impl TableMetadataManager {
     ///
     pub async fn create_view_metadata(
         &self,
-        view_info: RawTableInfo,
+        view_info: TableInfo,
         raw_logical_plan: Vec<u8>,
         table_names: HashSet<TableName>,
         columns: Vec<String>,
@@ -747,12 +753,10 @@ impl TableMetadataManager {
     /// The caller MUST ensure it has the exclusive access to `TableNameKey`.
     pub async fn create_table_metadata(
         &self,
-        mut table_info: RawTableInfo,
+        table_info: TableInfo,
         table_route_value: TableRouteValue,
         region_wal_options: HashMap<RegionNumber, String>,
     ) -> Result<()> {
-        let region_numbers = table_route_value.region_numbers();
-        table_info.meta.region_numbers = region_numbers;
         let table_id = table_info.ident.table_id;
         let engine = table_info.meta.engine.clone();
 
@@ -836,7 +840,7 @@ impl TableMetadataManager {
     /// Creates metadata for multiple logical tables and return an error if different metadata exists.
     pub async fn create_logical_tables_metadata(
         &self,
-        tables_data: Vec<(RawTableInfo, TableRouteValue)>,
+        tables_data: Vec<(TableInfo, TableRouteValue)>,
     ) -> Result<()> {
         let len = tables_data.len();
         let mut txns = Vec::with_capacity(3 * len);
@@ -851,8 +855,7 @@ impl TableMetadataManager {
             on_create_table_route_failure: F2,
         }
         let mut on_failures = Vec::with_capacity(len);
-        for (mut table_info, table_route_value) in tables_data {
-            table_info.meta.region_numbers = table_route_value.region_numbers();
+        for (table_info, table_route_value) in tables_data {
             let table_id = table_info.ident.table_id;
 
             // Creates table name.
@@ -1121,7 +1124,7 @@ impl TableMetadataManager {
         &self,
         current_table_info_value: &DeserializedValueWithBytes<TableInfoValue>,
         region_distribution: Option<RegionDistribution>,
-        new_table_info: RawTableInfo,
+        new_table_info: TableInfo,
     ) -> Result<()> {
         let table_id = current_table_info_value.table_info.ident.table_id;
         let new_table_info_value = current_table_info_value.update(new_table_info);
@@ -1216,7 +1219,7 @@ impl TableMetadataManager {
 
     pub async fn batch_update_table_info_values(
         &self,
-        table_info_value_pairs: Vec<(DeserializedValueWithBytes<TableInfoValue>, RawTableInfo)>,
+        table_info_value_pairs: Vec<(DeserializedValueWithBytes<TableInfoValue>, TableInfo)>,
     ) -> Result<()> {
         let len = table_info_value_pairs.len();
         let mut txns = Vec::with_capacity(len);
@@ -1283,6 +1286,11 @@ impl TableMetadataManager {
             region_distribution(current_table_route_value.region_routes()?);
         let new_region_distribution = region_distribution(&new_region_routes);
 
+        let update_topic_region_txn = self.topic_region_manager.build_update_txn(
+            table_id,
+            &region_info.region_wal_options,
+            new_region_wal_options,
+        )?;
         let update_datanode_table_txn = self.datanode_table_manager().build_update_txn(
             table_id,
             region_info,
@@ -1294,13 +1302,16 @@ impl TableMetadataManager {
 
         // Updates the table_route.
         let new_table_route_value = current_table_route_value.update(new_region_routes)?;
-
         let (update_table_route_txn, on_update_table_route_failure) = self
             .table_route_manager()
             .table_route_storage()
             .build_update_txn(table_id, current_table_route_value, &new_table_route_value)?;
 
-        let txn = Txn::merge_all(vec![update_datanode_table_txn, update_table_route_txn]);
+        let txn = Txn::merge_all(vec![
+            update_datanode_table_txn,
+            update_table_route_txn,
+            update_topic_region_txn,
+        ]);
 
         let mut r = self.kv_backend.txn(txn).await?;
 
@@ -1472,28 +1483,31 @@ mod tests {
     use common_wal::options::{KafkaWalOptions, WalOptions};
     use futures::TryStreamExt;
     use store_api::storage::{RegionId, RegionNumber};
-    use table::metadata::{RawTableInfo, TableInfo};
+    use table::metadata::TableInfo;
     use table::table_name::TableName;
 
     use super::datanode_table::DatanodeTableKey;
     use super::test_utils;
+    use crate::ddl::allocator::wal_options::WalOptionsAllocator;
     use crate::ddl::test_util::create_table::test_create_table_task;
     use crate::ddl::utils::region_storage_path;
     use crate::error::Result;
     use crate::key::datanode_table::RegionInfo;
+    use crate::key::node_address::{NodeAddressKey, NodeAddressValue};
     use crate::key::table_info::TableInfoValue;
     use crate::key::table_name::TableNameKey;
     use crate::key::table_route::TableRouteValue;
+    use crate::key::topic_region::TopicRegionKey;
     use crate::key::{
-        DeserializedValueWithBytes, RegionDistribution, RegionRoleSet, TOPIC_REGION_PREFIX,
-        TableMetadataManager, ViewInfoValue,
+        DeserializedValueWithBytes, MetadataValue, RegionDistribution, RegionRoleSet,
+        TOPIC_REGION_PREFIX, TableMetadataManager, ViewInfoValue,
     };
     use crate::kv_backend::KvBackend;
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::peer::Peer;
     use crate::rpc::router::{LeaderState, Region, RegionRoute, region_distribution};
-    use crate::rpc::store::RangeRequest;
-    use crate::wal_options_allocator::{WalOptionsAllocator, allocate_region_wal_options};
+    use crate::rpc::store::{PutRequest, RangeRequest};
+    use crate::wal_provider::WalProvider;
 
     #[test]
     fn test_deserialized_value_with_bytes() {
@@ -1532,7 +1546,6 @@ mod tests {
             region: Region {
                 id: region_id.into(),
                 name: "r1".to_string(),
-                partition: None,
                 attrs: BTreeMap::new(),
                 partition_expr: Default::default(),
             },
@@ -1540,11 +1553,12 @@ mod tests {
             follower_peers: vec![],
             leader_state: None,
             leader_down_since: None,
+            write_route_policy: None,
         }
     }
 
-    fn new_test_table_info(region_numbers: impl Iterator<Item = u32>) -> TableInfo {
-        test_utils::new_test_table_info(10, region_numbers)
+    fn new_test_table_info() -> TableInfo {
+        test_utils::new_test_table_info(10)
     }
 
     fn new_test_table_names() -> HashSet<TableName> {
@@ -1564,7 +1578,7 @@ mod tests {
 
     async fn create_physical_table_metadata(
         table_metadata_manager: &TableMetadataManager,
-        table_info: RawTableInfo,
+        table_info: TableInfo,
         region_routes: Vec<RegionRoute>,
         region_wal_options: HashMap<RegionNumber, String>,
     ) -> Result<()> {
@@ -1602,12 +1616,10 @@ mod tests {
         let table_metadata_manager = TableMetadataManager::new(mem_kv.clone());
         let region_route = new_test_region_route();
         let region_routes = &vec![region_route.clone()];
-        let table_info: RawTableInfo =
-            new_test_table_info(region_routes.iter().map(|r| r.region.id.region_number())).into();
-        let wal_allocator = WalOptionsAllocator::RaftEngine;
-        let regions = (0..16).collect();
-        let region_wal_options =
-            allocate_region_wal_options(regions, &wal_allocator, false).unwrap();
+        let table_info = new_test_table_info();
+        let wal_provider = WalProvider::RaftEngine;
+        let regions: Vec<_> = (0..16).collect();
+        let region_wal_options = wal_provider.allocate(&regions, false).await.unwrap();
         create_physical_table_metadata(
             &table_metadata_manager,
             table_info.clone(),
@@ -1630,8 +1642,7 @@ mod tests {
         let table_metadata_manager = TableMetadataManager::new(mem_kv);
         let region_route = new_test_region_route();
         let region_routes = &vec![region_route.clone()];
-        let table_info: RawTableInfo =
-            new_test_table_info(region_routes.iter().map(|r| r.region.id.region_number())).into();
+        let table_info = new_test_table_info();
         let region_wal_options = create_mock_region_wal_options()
             .into_iter()
             .map(|(k, v)| (k, serde_json::to_string(&v).unwrap()))
@@ -1708,13 +1719,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_get_full_table_info_remaps_route_address() {
+        let mem_kv = Arc::new(MemoryKvBackend::default());
+        let table_metadata_manager = TableMetadataManager::new(mem_kv.clone());
+
+        let mut region_route = new_test_region_route();
+        region_route.follower_peers = vec![Peer::empty(3)];
+        let region_routes = vec![region_route];
+        let table_info = new_test_table_info();
+        let table_id = table_info.ident.table_id;
+
+        create_physical_table_metadata(
+            &table_metadata_manager,
+            table_info,
+            region_routes,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+        mem_kv
+            .put(PutRequest {
+                key: NodeAddressKey::with_datanode(2).to_string().into_bytes(),
+                value: NodeAddressValue::new(Peer::new(2, "new-a2"))
+                    .try_as_raw_value()
+                    .unwrap(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        mem_kv
+            .put(PutRequest {
+                key: NodeAddressKey::with_datanode(3).to_string().into_bytes(),
+                value: NodeAddressValue::new(Peer::new(3, "new-a3"))
+                    .try_as_raw_value()
+                    .unwrap(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let (_, table_route) = table_metadata_manager
+            .get_full_table_info(table_id)
+            .await
+            .unwrap();
+        let table_route = table_route.unwrap().into_inner();
+        let region_routes = table_route.region_routes().unwrap();
+
+        assert_eq!(
+            region_routes[0].leader_peer.as_ref().unwrap().addr,
+            "new-a2"
+        );
+        assert_eq!(region_routes[0].follower_peers[0].addr, "new-a3");
+    }
+
+    #[tokio::test]
     async fn test_create_logic_tables_metadata() {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let table_metadata_manager = TableMetadataManager::new(mem_kv);
         let region_route = new_test_region_route();
         let region_routes = vec![region_route.clone()];
-        let table_info: RawTableInfo =
-            new_test_table_info(region_routes.iter().map(|r| r.region.id.region_number())).into();
+        let table_info = new_test_table_info();
         let table_id = table_info.ident.table_id;
         let table_route_value = TableRouteValue::physical(region_routes.clone());
 
@@ -1776,12 +1841,10 @@ mod tests {
             let region_id = RegionId::new(table_id, regin_number);
             let region_route = new_region_route(region_id.as_u64(), 2);
             let region_routes = vec![region_route.clone()];
-            let table_info: RawTableInfo = test_utils::new_test_table_info_with_name(
+            let table_info = test_utils::new_test_table_info_with_name(
                 table_id,
                 &format!("my_table_{}", table_id),
-                region_routes.iter().map(|r| r.region.id.region_number()),
-            )
-            .into();
+            );
             let table_route_value = TableRouteValue::physical(region_routes.clone());
 
             tables_data.push((table_info, table_route_value));
@@ -1800,8 +1863,7 @@ mod tests {
         let table_metadata_manager = TableMetadataManager::new(mem_kv);
         let region_route = new_test_region_route();
         let region_routes = &vec![region_route.clone()];
-        let table_info: RawTableInfo =
-            new_test_table_info(region_routes.iter().map(|r| r.region.id.region_number())).into();
+        let table_info = new_test_table_info();
         let table_id = table_info.ident.table_id;
         let datanode_id = 2;
         let region_wal_options = create_mock_region_wal_options();
@@ -1907,8 +1969,7 @@ mod tests {
         let table_metadata_manager = TableMetadataManager::new(mem_kv);
         let region_route = new_test_region_route();
         let region_routes = vec![region_route.clone()];
-        let table_info: RawTableInfo =
-            new_test_table_info(region_routes.iter().map(|r| r.region.id.region_number())).into();
+        let table_info = new_test_table_info();
         let table_id = table_info.ident.table_id;
         // creates metadata.
         create_physical_table_metadata(
@@ -1984,8 +2045,7 @@ mod tests {
         let table_metadata_manager = TableMetadataManager::new(mem_kv);
         let region_route = new_test_region_route();
         let region_routes = vec![region_route.clone()];
-        let table_info: RawTableInfo =
-            new_test_table_info(region_routes.iter().map(|r| r.region.id.region_number())).into();
+        let table_info = new_test_table_info();
         let table_id = table_info.ident.table_id;
         // creates metadata.
         create_physical_table_metadata(
@@ -2047,7 +2107,6 @@ mod tests {
                 region: Region {
                     id: 1.into(),
                     name: "r1".to_string(),
-                    partition: None,
                     attrs: BTreeMap::new(),
                     partition_expr: Default::default(),
                 },
@@ -2055,12 +2114,12 @@ mod tests {
                 leader_state: Some(LeaderState::Downgrading),
                 follower_peers: vec![],
                 leader_down_since: Some(current_time_millis()),
+                write_route_policy: None,
             },
             RegionRoute {
                 region: Region {
                     id: 2.into(),
                     name: "r2".to_string(),
-                    partition: None,
                     attrs: BTreeMap::new(),
                     partition_expr: Default::default(),
                 },
@@ -2068,10 +2127,10 @@ mod tests {
                 leader_state: None,
                 follower_peers: vec![],
                 leader_down_since: None,
+                write_route_policy: None,
             },
         ];
-        let table_info: RawTableInfo =
-            new_test_table_info(region_routes.iter().map(|r| r.region.id.region_number())).into();
+        let table_info = new_test_table_info();
         let table_id = table_info.ident.table_id;
         let current_table_route_value = DeserializedValueWithBytes::from_inner(
             TableRouteValue::physical(region_routes.clone()),
@@ -2153,8 +2212,7 @@ mod tests {
         let table_metadata_manager = TableMetadataManager::new(mem_kv);
         let region_route = new_test_region_route();
         let region_routes = vec![region_route.clone()];
-        let table_info: RawTableInfo =
-            new_test_table_info(region_routes.iter().map(|r| r.region.id.region_number())).into();
+        let table_info = new_test_table_info();
         let table_id = table_info.ident.table_id;
         let engine = table_info.meta.engine.as_str();
         let region_storage_path =
@@ -2275,6 +2333,218 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_update_table_route_with_topic_region_mapping() {
+        let mem_kv = Arc::new(MemoryKvBackend::default());
+        let table_metadata_manager = TableMetadataManager::new(mem_kv.clone());
+        let region_route = new_test_region_route();
+        let region_routes = vec![region_route.clone()];
+        let table_info = new_test_table_info();
+        let table_id = table_info.ident.table_id;
+        let engine = table_info.meta.engine.as_str();
+        let region_storage_path =
+            region_storage_path(&table_info.catalog_name, &table_info.schema_name);
+
+        // Create initial metadata with Kafka WAL options
+        let old_region_wal_options: HashMap<RegionNumber, String> = vec![
+            (
+                1,
+                serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
+                    topic: "topic_1".to_string(),
+                }))
+                .unwrap(),
+            ),
+            (
+                2,
+                serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
+                    topic: "topic_2".to_string(),
+                }))
+                .unwrap(),
+            ),
+        ]
+        .into_iter()
+        .collect();
+
+        create_physical_table_metadata(
+            &table_metadata_manager,
+            table_info.clone(),
+            region_routes.clone(),
+            old_region_wal_options.clone(),
+        )
+        .await
+        .unwrap();
+
+        let current_table_route_value = DeserializedValueWithBytes::from_inner(
+            TableRouteValue::physical(region_routes.clone()),
+        );
+
+        // Verify initial topic region mappings exist
+        let region_id_1 = RegionId::new(table_id, 1);
+        let region_id_2 = RegionId::new(table_id, 2);
+        let topic_1_key = TopicRegionKey::new(region_id_1, "topic_1");
+        let topic_2_key = TopicRegionKey::new(region_id_2, "topic_2");
+        assert!(
+            table_metadata_manager
+                .topic_region_manager
+                .get(topic_1_key.clone())
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            table_metadata_manager
+                .topic_region_manager
+                .get(topic_2_key.clone())
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        // Test 1: Add new region with new topic
+        let new_region_routes = vec![
+            new_region_route(1, 1),
+            new_region_route(2, 2),
+            new_region_route(3, 3), // New region
+        ];
+        let new_region_wal_options: HashMap<RegionNumber, String> = vec![
+            (
+                1,
+                serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
+                    topic: "topic_1".to_string(), // Unchanged
+                }))
+                .unwrap(),
+            ),
+            (
+                2,
+                serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
+                    topic: "topic_2".to_string(), // Unchanged
+                }))
+                .unwrap(),
+            ),
+            (
+                3,
+                serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
+                    topic: "topic_3".to_string(), // New topic
+                }))
+                .unwrap(),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let current_table_route_value_updated = DeserializedValueWithBytes::from_inner(
+            current_table_route_value
+                .inner
+                .update(new_region_routes.clone())
+                .unwrap(),
+        );
+        table_metadata_manager
+            .update_table_route(
+                table_id,
+                RegionInfo {
+                    engine: engine.to_string(),
+                    region_storage_path: region_storage_path.clone(),
+                    region_options: HashMap::new(),
+                    region_wal_options: old_region_wal_options.clone(),
+                },
+                &current_table_route_value,
+                new_region_routes.clone(),
+                &HashMap::new(),
+                &new_region_wal_options,
+            )
+            .await
+            .unwrap();
+        // Verify new topic region mapping was created
+        let region_id_3 = RegionId::new(table_id, 3);
+        let topic_3_key = TopicRegionKey::new(region_id_3, "topic_3");
+        assert!(
+            table_metadata_manager
+                .topic_region_manager
+                .get(topic_3_key)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        // Test 2: Remove a region and change topic for another
+        let newer_region_routes = vec![
+            new_region_route(1, 1),
+            // Region 2 removed
+            // Region 3 now has different topic
+        ];
+        let newer_region_wal_options: HashMap<RegionNumber, String> = vec![
+            (
+                1,
+                serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
+                    topic: "topic_1".to_string(), // Unchanged
+                }))
+                .unwrap(),
+            ),
+            (
+                3,
+                serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
+                    topic: "topic_3_new".to_string(), // Changed topic
+                }))
+                .unwrap(),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        table_metadata_manager
+            .update_table_route(
+                table_id,
+                RegionInfo {
+                    engine: engine.to_string(),
+                    region_storage_path: region_storage_path.clone(),
+                    region_options: HashMap::new(),
+                    region_wal_options: new_region_wal_options.clone(),
+                },
+                &current_table_route_value_updated,
+                newer_region_routes.clone(),
+                &HashMap::new(),
+                &newer_region_wal_options,
+            )
+            .await
+            .unwrap();
+        // Verify region 2 mapping was deleted
+        let topic_2_key_new = TopicRegionKey::new(region_id_2, "topic_2");
+        assert!(
+            table_metadata_manager
+                .topic_region_manager
+                .get(topic_2_key_new)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        // Verify region 3 old topic mapping was deleted
+        let topic_3_key_old = TopicRegionKey::new(region_id_3, "topic_3");
+        assert!(
+            table_metadata_manager
+                .topic_region_manager
+                .get(topic_3_key_old)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        // Verify region 3 new topic mapping was created
+        let topic_3_key_new = TopicRegionKey::new(region_id_3, "topic_3_new");
+        assert!(
+            table_metadata_manager
+                .topic_region_manager
+                .get(topic_3_key_new)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        // Verify region 1 mapping still exists (unchanged)
+        assert!(
+            table_metadata_manager
+                .topic_region_manager
+                .get(topic_1_key)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
     async fn test_destroy_table_metadata() {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let table_metadata_manager = TableMetadataManager::new(mem_kv.clone());
@@ -2296,6 +2566,7 @@ mod tests {
                         follower_peers: vec![Peer::empty(5)],
                         leader_state: None,
                         leader_down_since: None,
+                        write_route_policy: None,
                     },
                     RegionRoute {
                         region: Region::new_test(RegionId::new(table_id, 2)),
@@ -2303,6 +2574,7 @@ mod tests {
                         follower_peers: vec![Peer::empty(4)],
                         leader_state: None,
                         leader_down_since: None,
+                        write_route_policy: None,
                     },
                     RegionRoute {
                         region: Region::new_test(RegionId::new(table_id, 3)),
@@ -2310,6 +2582,7 @@ mod tests {
                         follower_peers: vec![],
                         leader_state: None,
                         leader_down_since: None,
+                        write_route_policy: None,
                     },
                 ]),
                 serialized_options,
@@ -2353,6 +2626,7 @@ mod tests {
                         follower_peers: vec![Peer::empty(5)],
                         leader_state: None,
                         leader_down_since: None,
+                        write_route_policy: None,
                     },
                     RegionRoute {
                         region: Region::new_test(RegionId::new(table_id, 2)),
@@ -2360,6 +2634,7 @@ mod tests {
                         follower_peers: vec![Peer::empty(4)],
                         leader_state: None,
                         leader_down_since: None,
+                        write_route_policy: None,
                     },
                     RegionRoute {
                         region: Region::new_test(RegionId::new(table_id, 3)),
@@ -2367,6 +2642,7 @@ mod tests {
                         follower_peers: vec![],
                         leader_state: None,
                         leader_down_since: None,
+                        write_route_policy: None,
                     },
                 ]),
                 serialized_options,
@@ -2408,7 +2684,7 @@ mod tests {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let table_metadata_manager = TableMetadataManager::new(mem_kv);
 
-        let view_info: RawTableInfo = new_test_table_info(Vec::<u32>::new().into_iter()).into();
+        let view_info = new_test_table_info();
 
         let view_id = view_info.ident.table_id;
 

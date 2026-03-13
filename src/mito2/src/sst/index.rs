@@ -793,22 +793,24 @@ impl IndexBuildTask {
             )));
         }
 
-        let mut parquet_reader = self
+        let parquet_reader = self
             .access_layer
             .read_sst(self.file.clone()) // use the latest file handle instead of creating a new one
             .build()
             .await?;
 
-        // TODO(SNC123): optimize index batch
-        loop {
-            match parquet_reader.next_batch().await {
-                Ok(Some(mut batch)) => {
-                    indexer.update(&mut batch).await;
-                }
-                Ok(None) => break,
-                Err(e) => {
-                    indexer.abort().await;
-                    return Err(e);
+        if let Some(mut parquet_reader) = parquet_reader {
+            // TODO(SNC123): optimize index batch
+            loop {
+                match parquet_reader.next_batch().await {
+                    Ok(Some(mut batch)) => {
+                        indexer.update(&mut batch).await;
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        indexer.abort().await;
+                        return Err(e);
+                    }
                 }
             }
         }
@@ -1174,9 +1176,8 @@ pub(crate) fn decode_primary_keys_with_counts(
     let mut result: Vec<(CompositeValues, usize)> = Vec::new();
     let mut prev_key: Option<u32> = None;
 
-    for i in 0..keys.len() {
-        let current_key = keys.value(i);
-
+    let pk_indices = keys.values();
+    for &current_key in pk_indices.iter().take(keys.len()) {
         // Checks if current key is the same as previous key
         if let Some(prev) = prev_key
             && prev == current_key

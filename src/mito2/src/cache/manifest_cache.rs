@@ -55,6 +55,7 @@ impl ManifestCache {
         local_store: ObjectStore,
         capacity: ReadableSize,
         ttl: Option<Duration>,
+        recover_sync: bool,
     ) -> ManifestCache {
         let total_capacity = capacity.as_bytes();
 
@@ -67,8 +68,8 @@ impl ManifestCache {
 
         let cache = ManifestCache { local_store, index };
 
-        // Recovers the cache index from local store asynchronously
-        cache.recover(false).await;
+        // Recovers the cache index from local store.
+        cache.recover(recover_sync).await;
 
         cache
     }
@@ -186,7 +187,7 @@ impl ManifestCache {
                 .context(OpenDalSnafu)?;
             let file_size = meta.content_length() as u32;
             let key = entry.path().trim_start_matches(MANIFEST_DIR).to_string();
-            common_telemetry::info!("Manifest cache recover {}, size: {}", key, file_size);
+            common_telemetry::debug!("Manifest cache recover {}, size: {}", key, file_size);
             self.index.insert(key, IndexValue { file_size }).await;
             let size = i64::from(file_size);
             total_size += size;
@@ -483,7 +484,7 @@ mod tests {
         let dir = create_temp_dir("");
         let local_store = new_fs_store(dir.path().to_str().unwrap());
 
-        let cache = ManifestCache::new(local_store.clone(), ReadableSize::mb(10), None).await;
+        let cache = ManifestCache::new(local_store.clone(), ReadableSize::mb(10), None, true).await;
         let key = "region_1/manifest/00000000000000000007.json";
         let file_path = cache.cache_file_path(key);
 
@@ -527,7 +528,7 @@ mod tests {
 
         let dir = create_temp_dir("");
         let local_store = new_fs_store(dir.path().to_str().unwrap());
-        let cache = ManifestCache::new(local_store.clone(), ReadableSize::mb(10), None).await;
+        let cache = ManifestCache::new(local_store.clone(), ReadableSize::mb(10), None, true).await;
 
         // Write some manifest files with different paths
         let keys = [
@@ -559,10 +560,7 @@ mod tests {
         }
 
         // Create a new cache instance which will automatically recover from local store
-        let cache = ManifestCache::new(local_store.clone(), ReadableSize::mb(10), None).await;
-
-        // Wait for recovery to complete synchronously
-        cache.recover(true).await;
+        let cache = ManifestCache::new(local_store.clone(), ReadableSize::mb(10), None, true).await;
 
         // Check size.
         cache.index.run_pending_tasks().await;
@@ -580,7 +578,7 @@ mod tests {
     async fn test_cache_file_path() {
         let dir = create_temp_dir("");
         let local_store = new_fs_store(dir.path().to_str().unwrap());
-        let cache = ManifestCache::new(local_store, ReadableSize::mb(10), None).await;
+        let cache = ManifestCache::new(local_store, ReadableSize::mb(10), None, true).await;
 
         assert_eq!(
             "cache/object/manifest/region_1/manifest/00000000000000000007.json",

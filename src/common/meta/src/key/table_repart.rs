@@ -15,6 +15,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Display;
 
+use common_telemetry::debug;
+use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt as _, ResultExt, ensure};
 use store_api::storage::RegionId;
@@ -28,7 +30,9 @@ use crate::key::{
 };
 use crate::kv_backend::KvBackendRef;
 use crate::kv_backend::txn::Txn;
-use crate::rpc::store::BatchGetRequest;
+use crate::range_stream::{DEFAULT_PAGE_SIZE, PaginationStream};
+use crate::rpc::KeyValue;
+use crate::rpc::store::{BatchGetRequest, RangeRequest};
 
 /// The key stores table repartition metadata.
 /// Specifically, it records the relation between source and destination regions after a repartition operation is completed.
@@ -138,6 +142,13 @@ impl MetadataValue for TableRepartValue {
 pub type TableRepartValueDecodeResult =
     Result<Option<DeserializedValueWithBytes<TableRepartValue>>>;
 
+/// Decodes `KeyValue` to [TableRepartKey] and [TableRepartValue].
+pub fn table_repart_decoder(kv: KeyValue) -> Result<(TableRepartKey, TableRepartValue)> {
+    let key = TableRepartKey::from_bytes(&kv.key)?;
+    let value = TableRepartValue::try_from_raw_value(&kv.value)?;
+    Ok((key, value))
+}
+
 pub struct TableRepartManager {
     kv_backend: KvBackendRef,
 }
@@ -145,6 +156,25 @@ pub struct TableRepartManager {
 impl TableRepartManager {
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self { kv_backend }
+    }
+
+    /// Returns all table repartition entries.
+    pub async fn table_reparts(&self) -> Result<Vec<(TableId, TableRepartValue)>> {
+        let prefix = TableRepartKey::range_prefix();
+        let req = RangeRequest::new().with_prefix(prefix);
+        let stream = PaginationStream::new(
+            self.kv_backend.clone(),
+            req,
+            DEFAULT_PAGE_SIZE,
+            table_repart_decoder,
+        )
+        .into_stream();
+
+        let res = stream.try_collect::<Vec<_>>().await?;
+        Ok(res
+            .into_iter()
+            .map(|(key, value)| (key.table_id, value))
+            .collect())
     }
 
     /// Builds a create table repart transaction,
@@ -276,69 +306,89 @@ impl TableRepartManager {
 
     /// Updates mappings from src region to dst regions.
     /// Should be called once repartition is done.
-    pub async fn update_mappings(&self, src: RegionId, dst: &[RegionId]) -> Result<()> {
-        let table_id = src.table_id();
+    pub async fn update_mappings(
+        &self,
+        table_id: TableId,
+        region_mapping: &HashMap<RegionId, Vec<RegionId>>,
+    ) -> Result<()> {
+        let current = self.get_with_raw_bytes(table_id).await?;
+        let mut new_value = current
+            .as_ref()
+            .map(|c| c.inner.clone())
+            .unwrap_or_else(TableRepartValue::new);
 
-        // Get current table repart with raw bytes for CAS operation
-        let current_table_repart = self
-            .get_with_raw_bytes(table_id)
-            .await?
-            .context(crate::error::TableRepartNotFoundSnafu { table_id })?;
+        for (src, dsts) in region_mapping.iter() {
+            new_value.update_mappings(*src, dsts);
+        }
 
-        // Clone the current repart value and update mappings
-        let mut new_table_repart_value = current_table_repart.inner.clone();
-        new_table_repart_value.update_mappings(src, dst);
-
-        // Execute atomic update
-        let (txn, _) =
-            self.build_update_txn(table_id, &current_table_repart, &new_table_repart_value)?;
-
-        let result = self.kv_backend.txn(txn).await?;
-
-        ensure!(
-            result.succeeded,
-            crate::error::MetadataCorruptionSnafu {
-                err_msg: format!(
-                    "Failed to update mappings for table {}: CAS operation failed",
-                    table_id
-                ),
-            }
-        );
-
-        Ok(())
+        self.upsert_value(table_id, current, &new_value).await
     }
 
     /// Removes mappings from src region to dst regions.
     /// Should be called once files from src region are cleaned up in dst regions.
-    pub async fn remove_mappings(&self, src: RegionId, dsts: &[RegionId]) -> Result<()> {
-        let table_id = src.table_id();
-
-        // Get current table repart with raw bytes for CAS operation
-        let current_table_repart = self
+    pub async fn remove_mappings(
+        &self,
+        table_id: TableId,
+        region_mapping: &HashMap<RegionId, Vec<RegionId>>,
+    ) -> Result<()> {
+        let current = self
             .get_with_raw_bytes(table_id)
             .await?
             .context(crate::error::TableRepartNotFoundSnafu { table_id })?;
 
-        // Clone the current repart value and remove mappings
-        let mut new_table_repart_value = current_table_repart.inner.clone();
-        new_table_repart_value.remove_mappings(src, dsts);
+        let mut new_value = current.inner.clone();
+        for (src, dsts) in region_mapping.iter() {
+            new_value.remove_mappings(*src, dsts);
+        }
 
-        // Execute atomic update
-        let (txn, _) =
-            self.build_update_txn(table_id, &current_table_repart, &new_table_repart_value)?;
+        self.upsert_value(table_id, Some(current), &new_value).await
+    }
 
-        let result = self.kv_backend.txn(txn).await?;
+    /// Upserts the full repartition value with CAS semantics using the caller-provided snapshot.
+    /// If the value is empty and no existing repartition entry is present, it no-ops.
+    pub async fn upsert_value(
+        &self,
+        table_id: TableId,
+        current: Option<DeserializedValueWithBytes<TableRepartValue>>,
+        new_value: &TableRepartValue,
+    ) -> Result<()> {
+        if new_value.src_to_dst.is_empty() && current.is_none() {
+            // Nothing to persist and caller confirmed no existing entry.
+            return Ok(());
+        }
 
-        ensure!(
-            result.succeeded,
-            crate::error::MetadataCorruptionSnafu {
-                err_msg: format!(
-                    "Failed to remove mappings for table {}: CAS operation failed",
-                    table_id
-                ),
-            }
+        if let Some(current) = &current {
+            let (txn, _) = self.build_update_txn(table_id, current, new_value)?;
+            let result = self.kv_backend.txn(txn).await?;
+
+            ensure!(
+                result.succeeded,
+                crate::error::MetadataCorruptionSnafu {
+                    err_msg: format!(
+                        "Failed to update repartition mappings for table {}: CAS operation failed",
+                        table_id
+                    ),
+                }
+            );
+        } else {
+            let (txn, _) = self.build_create_txn(table_id, new_value)?;
+            let result = self.kv_backend.txn(txn).await?;
+
+            ensure!(
+                result.succeeded,
+                crate::error::MetadataCorruptionSnafu {
+                    err_msg: format!(
+                        "Failed to create repartition mappings for table {}: CAS operation failed",
+                        table_id
+                    ),
+                }
+            );
+        }
+
+        debug!(
+            "Upserted repartition value for table {}: current: {:?}, new: {:?}",
+            table_id, current, new_value
         );
-
         Ok(())
     }
 
@@ -714,7 +764,11 @@ mod tests {
         // Update mappings
         let src = RegionId::new(1024, 1);
         let dst = vec![RegionId::new(1024, 2), RegionId::new(1024, 3)];
-        manager.update_mappings(src, &dst).await.unwrap();
+        let region_mapping = HashMap::from([(src, dst)]);
+        manager
+            .update_mappings(1024, &region_mapping)
+            .await
+            .unwrap();
 
         // Verify update
         let retrieved = manager.get(1024).await.unwrap().unwrap();
@@ -747,7 +801,11 @@ mod tests {
 
         // Remove some mappings
         let to_remove = vec![RegionId::new(1024, 2), RegionId::new(1024, 3)];
-        manager.remove_mappings(src, &to_remove).await.unwrap();
+        let region_mapping = HashMap::from([(src, to_remove)]);
+        manager
+            .remove_mappings(1024, &region_mapping)
+            .await
+            .unwrap();
 
         // Verify removal
         let retrieved = manager.get(1024).await.unwrap().unwrap();
@@ -802,8 +860,9 @@ mod tests {
         let src = RegionId::new(1024, 1);
         let dst = vec![RegionId::new(1024, 2)];
 
-        // Try to update mappings on non-existent table
-        let result = manager.update_mappings(src, &dst).await;
+        // Try to remove mappings on non-existent table
+        let region_mapping = HashMap::from([(src, dst.clone())]);
+        let result = manager.remove_mappings(1024, &region_mapping).await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
@@ -811,14 +870,12 @@ mod tests {
             "{err_msg}"
         );
 
-        // Try to remove mappings on non-existent table
-        let result = manager.remove_mappings(src, &dst).await;
-        assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("Failed to find table repartition metadata for table id 1024"),
-            "{err_msg}"
-        );
+        // Try to update mappings on non-existent table
+        let region_mapping = HashMap::from([(src, dst)]);
+        manager
+            .update_mappings(1024, &region_mapping)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

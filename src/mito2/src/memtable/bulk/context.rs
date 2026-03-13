@@ -84,7 +84,7 @@ impl BulkIterContext {
 
         let dyn_filters = predicate
             .as_ref()
-            .map(|pred| pred.dyn_filters().clone())
+            .map(|pred| pred.dyn_filters().as_ref().clone())
             .unwrap_or_default();
 
         Ok(Self {
@@ -97,7 +97,9 @@ impl BulkIterContext {
                 codec,
                 // we don't need to compat batch since all batch in memtable have the same schema.
                 compat_batch: None,
+                compaction_projection_mapper: None,
                 pre_filter_mode,
+                partition_filter: None,
             },
             predicate,
         })

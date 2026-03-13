@@ -33,7 +33,7 @@ fn main() {
 async fn run() {
     let id = 2000u64;
     let config = ChannelConfig::new()
-        .timeout(Duration::from_secs(3))
+        .timeout(Some(Duration::from_secs(3)))
         .connect_timeout(Duration::from_secs(5))
         .tcp_nodelay(true);
     let channel_manager = ChannelManager::with_config(config, None);
@@ -44,7 +44,7 @@ async fn run() {
     // required only when the heartbeat_client is enabled
     meta_client.ask_leader().await.unwrap();
 
-    let (sender, mut receiver) = meta_client.heartbeat().await.unwrap();
+    let (sender, mut receiver, _config) = meta_client.heartbeat().await.unwrap();
 
     // send heartbeats
     let _handle = tokio::spawn(async move {

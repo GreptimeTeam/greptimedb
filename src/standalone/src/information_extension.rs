@@ -26,7 +26,7 @@ use common_procedure::{ProcedureInfo, ProcedureManagerRef};
 use common_query::request::QueryRequest;
 use common_stat::{ResourceStatImpl, ResourceStatRef};
 use datanode::region_server::RegionServer;
-use flow::StreamingEngine;
+use flow::FlowDualEngineRef;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
 use tokio::sync::RwLock;
@@ -35,7 +35,7 @@ pub struct StandaloneInformationExtension {
     region_server: RegionServer,
     procedure_manager: ProcedureManagerRef,
     start_time_ms: u64,
-    flow_streaming_engine: RwLock<Option<Arc<StreamingEngine>>>,
+    flow_engine: RwLock<Option<FlowDualEngineRef>>,
     resource_stat: ResourceStatRef,
 }
 
@@ -47,15 +47,15 @@ impl StandaloneInformationExtension {
             region_server,
             procedure_manager,
             start_time_ms: common_time::util::current_time_millis() as u64,
-            flow_streaming_engine: RwLock::new(None),
+            flow_engine: RwLock::new(None),
             resource_stat: Arc::new(resource_stat),
         }
     }
 
-    /// Set the flow streaming engine for the standalone instance.
-    pub async fn set_flow_streaming_engine(&self, flow_streaming_engine: Arc<StreamingEngine>) {
-        let mut guard = self.flow_streaming_engine.write().await;
-        *guard = Some(flow_streaming_engine);
+    /// Set the flow engine for the standalone instance.
+    pub async fn set_flow_engine(&self, flow_engine: FlowDualEngineRef) {
+        let mut guard = self.flow_engine.write().await;
+        *guard = Some(flow_engine);
     }
 }
 
@@ -144,7 +144,7 @@ impl InformationExtension for StandaloneInformationExtension {
 
     async fn flow_stats(&self) -> std::result::Result<Option<FlowStat>, Self::Error> {
         Ok(Some(
-            self.flow_streaming_engine
+            self.flow_engine
                 .read()
                 .await
                 .as_ref()

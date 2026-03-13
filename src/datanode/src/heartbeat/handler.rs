@@ -18,10 +18,14 @@ use common_meta::heartbeat::handler::{
     HandleControl, HeartbeatResponseHandler, HeartbeatResponseHandlerContext,
 };
 use common_meta::instruction::{Instruction, InstructionReply};
+use common_meta::kv_backend::KvBackendRef;
 use common_telemetry::error;
+use common_telemetry::tracing_context::FutureExt;
 use snafu::OptionExt;
 use store_api::storage::GcReport;
+use strum::AsRefStr;
 
+mod apply_staging_manifest;
 mod close_region;
 mod downgrade_region;
 mod enter_staging;
@@ -29,8 +33,11 @@ mod file_ref;
 mod flush_region;
 mod gc_worker;
 mod open_region;
+mod remap_manifest;
+mod sync_region;
 mod upgrade_region;
 
+use crate::heartbeat::handler::apply_staging_manifest::ApplyStagingManifestsHandler;
 use crate::heartbeat::handler::close_region::CloseRegionsHandler;
 use crate::heartbeat::handler::downgrade_region::DowngradeRegionsHandler;
 use crate::heartbeat::handler::enter_staging::EnterStagingRegionsHandler;
@@ -38,6 +45,8 @@ use crate::heartbeat::handler::file_ref::GetFileRefsHandler;
 use crate::heartbeat::handler::flush_region::FlushRegionsHandler;
 use crate::heartbeat::handler::gc_worker::GcRegionsHandler;
 use crate::heartbeat::handler::open_region::OpenRegionsHandler;
+use crate::heartbeat::handler::remap_manifest::RemapManifestHandler;
+use crate::heartbeat::handler::sync_region::SyncRegionHandler;
 use crate::heartbeat::handler::upgrade_region::UpgradeRegionsHandler;
 use crate::heartbeat::task_tracker::TaskTracker;
 use crate::region_server::RegionServer;
@@ -50,6 +59,7 @@ pub struct RegionHeartbeatResponseHandler {
     flush_tasks: TaskTracker<()>,
     open_region_parallelism: usize,
     gc_tasks: TaskTracker<GcReport>,
+    kv_backend: KvBackendRef,
 }
 
 #[async_trait::async_trait]
@@ -64,27 +74,29 @@ pub trait InstructionHandler: Send + Sync {
 
 #[derive(Clone)]
 pub struct HandlerContext {
-    region_server: RegionServer,
-    downgrade_tasks: TaskTracker<()>,
-    flush_tasks: TaskTracker<()>,
-    gc_tasks: TaskTracker<GcReport>,
+    pub region_server: RegionServer,
+    pub downgrade_tasks: TaskTracker<()>,
+    pub flush_tasks: TaskTracker<()>,
+    pub gc_tasks: TaskTracker<GcReport>,
+    pub kv_backend: KvBackendRef,
 }
 
 impl HandlerContext {
     #[cfg(test)]
-    pub fn new_for_test(region_server: RegionServer) -> Self {
+    pub fn new_for_test(region_server: RegionServer, kv_backend: KvBackendRef) -> Self {
         Self {
             region_server,
             downgrade_tasks: TaskTracker::new(),
             flush_tasks: TaskTracker::new(),
             gc_tasks: TaskTracker::new(),
+            kv_backend,
         }
     }
 }
 
 impl RegionHeartbeatResponseHandler {
     /// Returns the [RegionHeartbeatResponseHandler].
-    pub fn new(region_server: RegionServer) -> Self {
+    pub fn new(region_server: RegionServer, kv_backend: KvBackendRef) -> Self {
         Self {
             region_server,
             downgrade_tasks: TaskTracker::new(),
@@ -92,6 +104,7 @@ impl RegionHeartbeatResponseHandler {
             // Default to half of the number of CPUs.
             open_region_parallelism: (num_cpus::get() / 2).max(1),
             gc_tasks: TaskTracker::new(),
+            kv_backend,
         }
     }
 
@@ -128,11 +141,17 @@ impl RegionHeartbeatResponseHandler {
             Instruction::EnterStagingRegions(_) => {
                 Ok(Some(Box::new(EnterStagingRegionsHandler.into())))
             }
+            Instruction::SyncRegions(_) => Ok(Some(Box::new(SyncRegionHandler.into()))),
+            Instruction::RemapManifest(_) => Ok(Some(Box::new(RemapManifestHandler.into()))),
+            Instruction::ApplyStagingManifests(_) => {
+                Ok(Some(Box::new(ApplyStagingManifestsHandler.into())))
+            }
         }
     }
 }
 
 #[allow(clippy::enum_variant_names)]
+#[derive(AsRefStr)]
 pub enum InstructionHandlers {
     CloseRegions(CloseRegionsHandler),
     OpenRegions(OpenRegionsHandler),
@@ -142,6 +161,16 @@ pub enum InstructionHandlers {
     GetFileRefs(GetFileRefsHandler),
     GcRegions(GcRegionsHandler),
     EnterStagingRegions(EnterStagingRegionsHandler),
+    SyncRegions(SyncRegionHandler),
+    RemapManifest(RemapManifestHandler),
+    ApplyStagingManifests(ApplyStagingManifestsHandler),
+}
+
+impl InstructionHandlers {
+    // Returns the string representation of the instruction handler.
+    pub fn as_ref_str(&self) -> &str {
+        self.as_ref()
+    }
 }
 
 macro_rules! impl_from_handler {
@@ -164,7 +193,10 @@ impl_from_handler!(
     UpgradeRegionsHandler => UpgradeRegions,
     GetFileRefsHandler => GetFileRefs,
     GcRegionsHandler => GcRegions,
-    EnterStagingRegionsHandler => EnterStagingRegions
+    EnterStagingRegionsHandler => EnterStagingRegions,
+    SyncRegionHandler => SyncRegions,
+    RemapManifestHandler => RemapManifest,
+    ApplyStagingManifestsHandler => ApplyStagingManifests
 );
 
 macro_rules! dispatch_instr {
@@ -209,20 +241,23 @@ dispatch_instr!(
     UpgradeRegions => UpgradeRegions,
     GetFileRefs => GetFileRefs,
     GcRegions => GcRegions,
-    EnterStagingRegions => EnterStagingRegions
+    EnterStagingRegions => EnterStagingRegions,
+    SyncRegions => SyncRegions,
+    RemapManifest => RemapManifest,
+    ApplyStagingManifests => ApplyStagingManifests,
 );
 
 #[async_trait]
 impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
     fn is_acceptable(&self, ctx: &HeartbeatResponseHandlerContext) -> bool {
-        if let Some((_, instruction)) = ctx.incoming_message.as_ref() {
+        if let Some((_, _, instruction)) = ctx.incoming_message.as_ref() {
             return InstructionHandlers::is_acceptable(instruction);
         }
         false
     }
 
     async fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> MetaResult<HandleControl> {
-        let (meta, instruction) = ctx
+        let (meta, tracing_ctx, instruction) = ctx
             .incoming_message
             .take()
             .context(InvalidHeartbeatResponseSnafu)?;
@@ -234,9 +269,16 @@ impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
                 downgrade_tasks: self.downgrade_tasks.clone(),
                 flush_tasks: self.flush_tasks.clone(),
                 gc_tasks: self.gc_tasks.clone(),
+                kv_backend: self.kv_backend.clone(),
             };
+            let span = tracing_ctx.attach(tracing::info_span!(
+                "RegionHeartbeatResponseHandler::handle",
+                from = %meta.from,
+                to = %meta.to,
+                handler = %handler.as_ref_str(),
+            ));
             let _handle = common_runtime::spawn_global(async move {
-                let reply = handler.handle(&context, instruction).await;
+                let reply = handler.handle(&context, instruction).trace(span).await;
                 if let Some(reply) = reply
                     && let Err(e) = mailbox.send((meta, reply)).await
                 {
@@ -263,8 +305,9 @@ mod tests {
         HeartbeatMailbox, IncomingMessage, MailboxRef, MessageMeta,
     };
     use common_meta::instruction::{
-        DowngradeRegion, EnterStagingRegion, OpenRegion, UpgradeRegion,
+        DowngradeRegion, EnterStagingRegion, OpenRegion, StagingPartitionDirective, UpgradeRegion,
     };
+    use common_meta::kv_backend::memory::MemoryKvBackend;
     use mito2::config::MitoConfig;
     use mito2::engine::MITO_ENGINE_NAME;
     use mito2::test_util::{CreateRequestBuilder, TestEnv};
@@ -310,7 +353,9 @@ mod tests {
     fn test_is_acceptable() {
         common_telemetry::init_default_ut_logging();
         let region_server = mock_region_server();
-        let heartbeat_handler = RegionHeartbeatResponseHandler::new(region_server.clone());
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let heartbeat_handler =
+            RegionHeartbeatResponseHandler::new(region_server.clone(), kv_backend);
         let heartbeat_env = HeartbeatResponseTestEnv::new();
         let meta = MessageMeta::new_test(1, "test", "dn-1", "me-0");
 
@@ -319,15 +364,21 @@ mod tests {
         let storage_path = "test";
         let instruction = open_region_instruction(region_id, storage_path);
         assert!(
-            heartbeat_handler
-                .is_acceptable(&heartbeat_env.create_handler_ctx((meta.clone(), instruction)))
+            heartbeat_handler.is_acceptable(&heartbeat_env.create_handler_ctx((
+                meta.clone(),
+                Default::default(),
+                instruction
+            )))
         );
 
         // Close region
         let instruction = close_region_instruction(region_id);
         assert!(
-            heartbeat_handler
-                .is_acceptable(&heartbeat_env.create_handler_ctx((meta.clone(), instruction)))
+            heartbeat_handler.is_acceptable(&heartbeat_env.create_handler_ctx((
+                meta.clone(),
+                Default::default(),
+                instruction
+            )))
         );
 
         // Downgrade region
@@ -336,8 +387,11 @@ mod tests {
             flush_timeout: Some(Duration::from_secs(1)),
         }]);
         assert!(
-            heartbeat_handler
-                .is_acceptable(&heartbeat_env.create_handler_ctx((meta.clone(), instruction)))
+            heartbeat_handler.is_acceptable(&heartbeat_env.create_handler_ctx((
+                meta.clone(),
+                Default::default(),
+                instruction
+            )))
         );
 
         // Upgrade region
@@ -346,17 +400,24 @@ mod tests {
             ..Default::default()
         }]);
         assert!(
-            heartbeat_handler
-                .is_acceptable(&heartbeat_env.create_handler_ctx((meta.clone(), instruction)))
+            heartbeat_handler.is_acceptable(&heartbeat_env.create_handler_ctx((
+                meta.clone(),
+                Default::default(),
+                instruction
+            )))
         );
 
         // Enter staging region
         let instruction = Instruction::EnterStagingRegions(vec![EnterStagingRegion {
             region_id,
-            partition_expr: "".to_string(),
+            partition_directive: StagingPartitionDirective::UpdatePartitionExpr("".to_string()),
         }]);
         assert!(
-            heartbeat_handler.is_acceptable(&heartbeat_env.create_handler_ctx((meta, instruction)))
+            heartbeat_handler.is_acceptable(&heartbeat_env.create_handler_ctx((
+                meta,
+                Default::default(),
+                instruction
+            )))
         );
     }
 
@@ -389,7 +450,9 @@ mod tests {
         common_telemetry::init_default_ut_logging();
 
         let mut region_server = mock_region_server();
-        let heartbeat_handler = RegionHeartbeatResponseHandler::new(region_server.clone());
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let heartbeat_handler =
+            RegionHeartbeatResponseHandler::new(region_server.clone(), kv_backend);
 
         let mut engine_env = TestEnv::with_prefix("close-region").await;
         let engine = engine_env.create_engine(MitoConfig::default()).await;
@@ -410,7 +473,7 @@ mod tests {
             let meta = MessageMeta::new_test(1, "test", "dn-1", "me-0");
             let instruction = close_region_instruction(region_id);
 
-            let mut ctx = heartbeat_env.create_handler_ctx((meta, instruction));
+            let mut ctx = heartbeat_env.create_handler_ctx((meta, Default::default(), instruction));
             let control = heartbeat_handler.handle(&mut ctx).await.unwrap();
             assert_matches!(control, HandleControl::Continue);
 
@@ -437,7 +500,9 @@ mod tests {
         common_telemetry::init_default_ut_logging();
 
         let mut region_server = mock_region_server();
-        let heartbeat_handler = RegionHeartbeatResponseHandler::new(region_server.clone());
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let heartbeat_handler =
+            RegionHeartbeatResponseHandler::new(region_server.clone(), kv_backend);
 
         let mut engine_env = TestEnv::with_prefix("open-region").await;
         let engine = engine_env.create_engine(MitoConfig::default()).await;
@@ -465,7 +530,7 @@ mod tests {
             let meta = MessageMeta::new_test(1, "test", "dn-1", "me-0");
             let instruction = open_region_instruction(region_id, storage_path);
 
-            let mut ctx = heartbeat_env.create_handler_ctx((meta, instruction));
+            let mut ctx = heartbeat_env.create_handler_ctx((meta, Default::default(), instruction));
             let control = heartbeat_handler.handle(&mut ctx).await.unwrap();
             assert_matches!(control, HandleControl::Continue);
 
@@ -485,7 +550,9 @@ mod tests {
         common_telemetry::init_default_ut_logging();
 
         let mut region_server = mock_region_server();
-        let heartbeat_handler = RegionHeartbeatResponseHandler::new(region_server.clone());
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let heartbeat_handler =
+            RegionHeartbeatResponseHandler::new(region_server.clone(), kv_backend);
 
         let mut engine_env = TestEnv::with_prefix("open-not-exists-region").await;
         let engine = engine_env.create_engine(MitoConfig::default()).await;
@@ -498,7 +565,7 @@ mod tests {
         let meta = MessageMeta::new_test(1, "test", "dn-1", "me-0");
         let instruction = open_region_instruction(region_id, storage_path);
 
-        let mut ctx = heartbeat_env.create_handler_ctx((meta, instruction));
+        let mut ctx = heartbeat_env.create_handler_ctx((meta, Default::default(), instruction));
         let control = heartbeat_handler.handle(&mut ctx).await.unwrap();
         assert_matches!(control, HandleControl::Continue);
 
@@ -517,7 +584,9 @@ mod tests {
         common_telemetry::init_default_ut_logging();
 
         let mut region_server = mock_region_server();
-        let heartbeat_handler = RegionHeartbeatResponseHandler::new(region_server.clone());
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let heartbeat_handler =
+            RegionHeartbeatResponseHandler::new(region_server.clone(), kv_backend);
 
         let mut engine_env = TestEnv::with_prefix("downgrade-region").await;
         let engine = engine_env.create_engine(MitoConfig::default()).await;
@@ -544,7 +613,7 @@ mod tests {
                 flush_timeout: Some(Duration::from_secs(1)),
             }]);
 
-            let mut ctx = heartbeat_env.create_handler_ctx((meta, instruction));
+            let mut ctx = heartbeat_env.create_handler_ctx((meta, Default::default(), instruction));
             let control = heartbeat_handler.handle(&mut ctx).await.unwrap();
             assert_matches!(control, HandleControl::Continue);
 
@@ -562,7 +631,7 @@ mod tests {
             region_id: RegionId::new(2048, 1),
             flush_timeout: Some(Duration::from_secs(1)),
         }]);
-        let mut ctx = heartbeat_env.create_handler_ctx((meta, instruction));
+        let mut ctx = heartbeat_env.create_handler_ctx((meta, Default::default(), instruction));
         let control = heartbeat_handler.handle(&mut ctx).await.unwrap();
         assert_matches!(control, HandleControl::Continue);
 

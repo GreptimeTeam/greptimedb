@@ -21,10 +21,12 @@ use std::sync::Arc;
 
 use api::v1::{OpType, SemanticType};
 use common_telemetry::error;
+use datafusion::physical_plan::PhysicalExpr;
 use datafusion::physical_plan::expressions::DynamicFilterPhysicalExpr;
-use datatypes::arrow::array::{ArrayRef, BooleanArray};
+use datatypes::arrow::array::{Array as _, ArrayRef, BooleanArray};
 use datatypes::arrow::buffer::BooleanBuffer;
 use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::Schema;
 use mito_codec::row_converter::{CompositeValues, PrimaryKeyCodec};
 use parquet::arrow::arrow_reader::RowSelection;
@@ -36,15 +38,19 @@ use store_api::storage::{ColumnId, TimeSeriesRowSelector};
 use table::predicate::Predicate;
 
 use crate::error::{
-    ComputeArrowSnafu, DataTypeMismatchSnafu, DecodeSnafu, DecodeStatsSnafu, RecordBatchSnafu,
-    Result, StatsNotPresentSnafu,
+    ComputeArrowSnafu, DataTypeMismatchSnafu, DecodeSnafu, DecodeStatsSnafu,
+    EvalPartitionFilterSnafu, NewRecordBatchSnafu, RecordBatchSnafu, Result, StatsNotPresentSnafu,
+    UnexpectedSnafu,
 };
 use crate::read::Batch;
 use crate::read::compat::CompatBatch;
-use crate::read::last_row::RowGroupLastRowCachedReader;
+use crate::read::flat_projection::CompactionProjectionMapper;
+use crate::read::last_row::{FlatRowGroupLastRowCachedReader, RowGroupLastRowCachedReader};
 use crate::read::prune::{FlatPruneReader, PruneReader};
 use crate::sst::file::FileHandle;
-use crate::sst::parquet::flat_format::{DecodedPrimaryKeys, decode_primary_keys};
+use crate::sst::parquet::flat_format::{
+    DecodedPrimaryKeys, decode_primary_keys, time_index_column_index,
+};
 use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::reader::{
     FlatRowGroupReader, MaybeFilter, RowGroupReader, RowGroupReaderBuilder, SimpleFilterContext,
@@ -142,7 +148,7 @@ impl FileRange {
         );
 
         // not costly to create a predicate here since dynamic filters are wrapped in Arc
-        let pred = Predicate::new(vec![]).with_dyn_filters(self.context.base.dyn_filters.clone());
+        let pred = Predicate::with_dyn_filters(vec![], self.context.base.dyn_filters.clone());
 
         pred.prune_with_stats(&stats, prune_schema.arrow_schema())
             .first()
@@ -231,6 +237,7 @@ impl FileRange {
     /// Creates a flat reader that returns RecordBatch.
     pub(crate) async fn flat_reader(
         &self,
+        selector: Option<TimeSeriesRowSelector>,
         fetch_metrics: Option<&ParquetFetchMetrics>,
     ) -> Result<Option<FlatPruneReader>> {
         if !self.in_dynamic_filter_range() {
@@ -246,15 +253,47 @@ impl FileRange {
             )
             .await?;
 
+        let use_last_row_reader = if selector
+            .map(|s| s == TimeSeriesRowSelector::LastRow)
+            .unwrap_or(false)
+        {
+            // Only use LastRowReader if row group does not contain DELETE
+            // and all rows are selected.
+            let put_only = !self
+                .context
+                .contains_delete(self.row_group_idx)
+                .inspect_err(|e| {
+                    error!(e; "Failed to decode min value of op_type, fallback to FlatRowGroupReader");
+                })
+                .unwrap_or(true);
+            put_only && self.select_all()
+        } else {
+            false
+        };
+
         // Compute skip_fields once for this row group
         let skip_fields = self.context.should_skip_fields(self.row_group_idx);
 
-        let flat_row_group_reader = FlatRowGroupReader::new(self.context.clone(), parquet_reader);
-        let flat_prune_reader = FlatPruneReader::new_with_row_group_reader(
-            self.context.clone(),
-            flat_row_group_reader,
-            skip_fields,
-        );
+        let flat_prune_reader = if use_last_row_reader {
+            let flat_row_group_reader =
+                FlatRowGroupReader::new(self.context.clone(), parquet_reader);
+            let reader = FlatRowGroupLastRowCachedReader::new(
+                self.file_handle().file_id().file_id(),
+                self.row_group_idx,
+                self.context.reader_builder.cache_strategy().clone(),
+                self.context.read_format().projection_indices(),
+                flat_row_group_reader,
+            );
+            FlatPruneReader::new_with_last_row_reader(self.context.clone(), reader, skip_fields)
+        } else {
+            let flat_row_group_reader =
+                FlatRowGroupReader::new(self.context.clone(), parquet_reader);
+            FlatPruneReader::new_with_row_group_reader(
+                self.context.clone(),
+                flat_row_group_reader,
+                skip_fields,
+            )
+        };
 
         Ok(Some(flat_prune_reader))
     }
@@ -262,6 +301,11 @@ impl FileRange {
     /// Returns the helper to compat batches.
     pub(crate) fn compat_batch(&self) -> Option<&CompatBatch> {
         self.context.compat_batch()
+    }
+
+    /// Returns the helper to project batches.
+    pub(crate) fn compaction_projection_mapper(&self) -> Option<&CompactionProjectionMapper> {
+        self.context.compaction_projection_mapper()
     }
 
     /// Returns the file handle of the file range.
@@ -299,6 +343,11 @@ impl FileRangeContext {
         &self.base.filters
     }
 
+    /// Returns true if a partition filter is configured.
+    pub(crate) fn has_partition_filter(&self) -> bool {
+        self.base.partition_filter.is_some()
+    }
+
     /// Returns the format helper.
     pub(crate) fn read_format(&self) -> &ReadFormat {
         &self.base.read_format
@@ -314,6 +363,11 @@ impl FileRangeContext {
         self.base.compat_batch.as_ref()
     }
 
+    /// Returns the helper to project batches.
+    pub(crate) fn compaction_projection_mapper(&self) -> Option<&CompactionProjectionMapper> {
+        self.base.compaction_projection_mapper.as_ref()
+    }
+
     /// Sets the `CompatBatch` to the context.
     pub(crate) fn set_compat_batch(&mut self, compat: Option<CompatBatch>) {
         self.base.compat_batch = compat;
@@ -321,11 +375,13 @@ impl FileRangeContext {
 
     /// TRY THE BEST to perform pushed down predicate precisely on the input batch.
     /// Return the filtered batch. If the entire batch is filtered out, return None.
+    /// If a partition expr filter is configured, it is also applied.
     pub(crate) fn precise_filter(&self, input: Batch, skip_fields: bool) -> Result<Option<Batch>> {
         self.base.precise_filter(input, skip_fields)
     }
 
     /// Filters the input RecordBatch by the pushed down predicate and returns RecordBatch.
+    /// If a partition expr filter is configured, it is also applied.
     pub(crate) fn precise_filter_flat(
         &self,
         input: RecordBatch,
@@ -351,6 +407,12 @@ impl FileRangeContext {
         let metadata = self.reader_builder.parquet_metadata();
         row_group_contains_delete(metadata, row_group_index, self.reader_builder.file_path())
     }
+
+    /// Returns the estimated memory size of this context.
+    /// Mainly accounts for the parquet metadata size.
+    pub(crate) fn memory_size(&self) -> usize {
+        crate::cache::cache_size::parquet_meta_size(self.reader_builder.parquet_metadata())
+    }
 }
 
 /// Mode to pre-filter columns in a range.
@@ -365,12 +427,20 @@ pub enum PreFilterMode {
     SkipFields,
 }
 
+/// Context for partition expression filtering.
+pub(crate) struct PartitionFilterContext {
+    pub(crate) region_partition_physical_expr: Arc<dyn PhysicalExpr>,
+    /// Schema containing only columns referenced by the partition expression.
+    /// This is used to build a minimal RecordBatch for partition filter evaluation.
+    pub(crate) partition_schema: Arc<Schema>,
+}
+
 /// Common fields for a range to read and filter batches.
 pub(crate) struct RangeBase {
     /// Filters pushed down.
     pub(crate) filters: Vec<SimpleFilterContext>,
     /// Dynamic filter physical exprs.
-    pub(crate) dyn_filters: Arc<Vec<DynamicFilterPhysicalExpr>>,
+    pub(crate) dyn_filters: Vec<Arc<DynamicFilterPhysicalExpr>>,
     /// Helper to read the SST.
     pub(crate) read_format: ReadFormat,
     pub(crate) expected_metadata: Option<RegionMetadataRef>,
@@ -380,8 +450,26 @@ pub(crate) struct RangeBase {
     pub(crate) codec: Arc<dyn PrimaryKeyCodec>,
     /// Optional helper to compat batches.
     pub(crate) compat_batch: Option<CompatBatch>,
+    /// Optional helper to project batches.
+    pub(crate) compaction_projection_mapper: Option<CompactionProjectionMapper>,
     /// Mode to pre-filter columns.
     pub(crate) pre_filter_mode: PreFilterMode,
+    /// Partition filter.
+    pub(crate) partition_filter: Option<PartitionFilterContext>,
+}
+
+pub(crate) struct TagDecodeState {
+    decoded_pks: Option<DecodedPrimaryKeys>,
+    decoded_tag_cache: HashMap<ColumnId, ArrayRef>,
+}
+
+impl TagDecodeState {
+    pub(crate) fn new() -> Self {
+        Self {
+            decoded_pks: None,
+            decoded_tag_cache: HashMap::new(),
+        }
+    }
 }
 
 impl RangeBase {
@@ -481,9 +569,24 @@ impl RangeBase {
             mask = mask.bitand(&result);
         }
 
-        input.filter(&BooleanArray::from(mask).into())?;
+        if mask.count_set_bits() == 0 {
+            return Ok(None);
+        }
 
-        Ok(Some(input))
+        // Apply partition filter
+        if let Some(partition_filter) = &self.partition_filter {
+            let record_batch = self
+                .build_record_batch_for_pruning(&mut input, &partition_filter.partition_schema)?;
+            let partition_mask = self.evaluate_partition_filter(&record_batch, partition_filter)?;
+            mask = mask.bitand(&partition_mask);
+        }
+
+        if mask.count_set_bits() == 0 {
+            Ok(None)
+        } else {
+            input.filter(&BooleanArray::from(mask).into())?;
+            Ok(Some(input))
+        }
     }
 
     /// Filters the input RecordBatch by the pushed down predicate and returns RecordBatch.
@@ -498,12 +601,28 @@ impl RangeBase {
         input: RecordBatch,
         skip_fields: bool,
     ) -> Result<Option<RecordBatch>> {
-        let mask = self.compute_filter_mask_flat(&input, skip_fields)?;
+        let mut tag_decode_state = TagDecodeState::new();
+        let mask = self.compute_filter_mask_flat(&input, skip_fields, &mut tag_decode_state)?;
 
         // If mask is None, the entire batch is filtered out
-        let Some(mask) = mask else {
+        let Some(mut mask) = mask else {
             return Ok(None);
         };
+
+        // Apply partition filter
+        if let Some(partition_filter) = &self.partition_filter {
+            let record_batch = self.project_record_batch_for_pruning_flat(
+                &input,
+                &partition_filter.partition_schema,
+                &mut tag_decode_state,
+            )?;
+            let partition_mask = self.evaluate_partition_filter(&record_batch, partition_filter)?;
+            mask = mask.bitand(&partition_mask);
+        }
+
+        if mask.count_set_bits() == 0 {
+            return Ok(None);
+        }
 
         let filtered_batch =
             datatypes::arrow::compute::filter_record_batch(&input, &BooleanArray::from(mask))
@@ -517,6 +636,7 @@ impl RangeBase {
     }
 
     /// Computes the filter mask for the input RecordBatch based on pushed down predicates.
+    /// If a partition expr filter is configured, it is applied later in `precise_filter_flat` but **NOT** in this function.
     ///
     /// Returns `None` if the entire batch is filtered out, otherwise returns the boolean mask.
     ///
@@ -527,6 +647,7 @@ impl RangeBase {
         &self,
         input: &RecordBatch,
         skip_fields: bool,
+        tag_decode_state: &mut TagDecodeState,
     ) -> Result<Option<BooleanBuffer>> {
         let mut mask = BooleanBuffer::new_set(input.num_rows());
 
@@ -536,11 +657,7 @@ impl RangeBase {
             .context(crate::error::UnexpectedSnafu {
                 reason: "Expected flat format for precise_filter_flat",
             })?;
-
-        // Decodes primary keys once if we have any tag filters not in projection
-        let mut decoded_pks: Option<DecodedPrimaryKeys> = None;
-        // Cache decoded tag arrays by column id to avoid redundant decoding
-        let mut decoded_tag_cache: HashMap<ColumnId, ArrayRef> = HashMap::new();
+        let metadata = flat_format.metadata();
 
         // Run filter one by one and combine them result
         for filter_ctx in &self.filters {
@@ -557,59 +674,255 @@ impl RangeBase {
                 continue;
             }
 
-            // Get the column directly by its projected index
+            // Get the column directly by its projected index.
+            // If the column is missing and it's not a tag/time column, this filter is skipped.
+            // Assumes the projection indices align with the input batch schema.
             let column_idx = flat_format.projected_index_by_id(filter_ctx.column_id());
             if let Some(idx) = column_idx {
-                let column = &input.columns()[idx];
+                let column = &input.columns().get(idx).unwrap();
                 let result = filter.evaluate_array(column).context(RecordBatchSnafu)?;
                 mask = mask.bitand(&result);
             } else if filter_ctx.semantic_type() == SemanticType::Tag {
                 // Column not found in projection, it may be a tag column.
-                // Decodes primary keys if not already decoded.
-                if decoded_pks.is_none() {
-                    decoded_pks = Some(decode_primary_keys(self.codec.as_ref(), input)?);
-                }
-
-                let metadata = flat_format.metadata();
                 let column_id = filter_ctx.column_id();
 
-                // Check cache first
-                let tag_column = if let Some(cached_column) = decoded_tag_cache.get(&column_id) {
-                    cached_column.clone()
-                } else {
-                    // For dense encoding, we need pk_index. For sparse encoding, pk_index is None.
-                    let pk_index = if self.codec.encoding() == PrimaryKeyEncoding::Sparse {
-                        None
-                    } else {
-                        metadata.primary_key_index(column_id)
-                    };
-                    let column_index = metadata.column_index_by_id(column_id);
-
-                    if let (Some(column_index), Some(decoded)) =
-                        (column_index, decoded_pks.as_ref())
-                    {
-                        let column_metadata = &metadata.column_metadatas[column_index];
-                        let tag_column = decoded.get_tag_column(
-                            column_id,
-                            pk_index,
-                            &column_metadata.column_schema.data_type,
-                        )?;
-                        // Cache the decoded tag column
-                        decoded_tag_cache.insert(column_id, tag_column.clone());
-                        tag_column
-                    } else {
-                        continue;
-                    }
-                };
-
-                let result = filter
-                    .evaluate_array(&tag_column)
-                    .context(RecordBatchSnafu)?;
+                if let Some(tag_column) =
+                    self.maybe_decode_tag_column(metadata, column_id, input, tag_decode_state)?
+                {
+                    let result = filter
+                        .evaluate_array(&tag_column)
+                        .context(RecordBatchSnafu)?;
+                    mask = mask.bitand(&result);
+                }
+            } else if filter_ctx.semantic_type() == SemanticType::Timestamp {
+                let time_index_pos = time_index_column_index(input.num_columns());
+                let column = &input.columns()[time_index_pos];
+                let result = filter.evaluate_array(column).context(RecordBatchSnafu)?;
                 mask = mask.bitand(&result);
             }
             // Non-tag column not found in projection.
         }
 
         Ok(Some(mask))
+    }
+
+    /// Returns the decoded tag column for `column_id`, or `None` if it's not a tag.
+    fn maybe_decode_tag_column(
+        &self,
+        metadata: &RegionMetadataRef,
+        column_id: ColumnId,
+        input: &RecordBatch,
+        tag_decode_state: &mut TagDecodeState,
+    ) -> Result<Option<ArrayRef>> {
+        let Some(pk_index) = metadata.primary_key_index(column_id) else {
+            return Ok(None);
+        };
+
+        if let Some(cached_column) = tag_decode_state.decoded_tag_cache.get(&column_id) {
+            return Ok(Some(cached_column.clone()));
+        }
+
+        if tag_decode_state.decoded_pks.is_none() {
+            tag_decode_state.decoded_pks = Some(decode_primary_keys(self.codec.as_ref(), input)?);
+        }
+
+        let pk_index = if self.codec.encoding() == PrimaryKeyEncoding::Sparse {
+            None
+        } else {
+            Some(pk_index)
+        };
+        let Some(column_index) = metadata.column_index_by_id(column_id) else {
+            return Ok(None);
+        };
+        let Some(decoded) = tag_decode_state.decoded_pks.as_ref() else {
+            return Ok(None);
+        };
+
+        let column_metadata = &metadata.column_metadatas[column_index];
+        let tag_column = decoded.get_tag_column(
+            column_id,
+            pk_index,
+            &column_metadata.column_schema.data_type,
+        )?;
+        tag_decode_state
+            .decoded_tag_cache
+            .insert(column_id, tag_column.clone());
+
+        Ok(Some(tag_column))
+    }
+
+    /// Evaluates the partition filter against the input `RecordBatch`.
+    fn evaluate_partition_filter(
+        &self,
+        record_batch: &RecordBatch,
+        partition_filter: &PartitionFilterContext,
+    ) -> Result<BooleanBuffer> {
+        let columnar_value = partition_filter
+            .region_partition_physical_expr
+            .evaluate(record_batch)
+            .context(EvalPartitionFilterSnafu)?;
+        let array = columnar_value
+            .into_array(record_batch.num_rows())
+            .context(EvalPartitionFilterSnafu)?;
+        let boolean_array =
+            array
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .context(UnexpectedSnafu {
+                    reason: "Failed to downcast to BooleanArray".to_string(),
+                })?;
+
+        // also need to consider nulls in the partition filter result. If a value is null, it should be treated as false (filtered out).
+        let mut mask = boolean_array.values().clone();
+        if let Some(nulls) = boolean_array.nulls() {
+            mask = mask.bitand(nulls.inner());
+        }
+
+        Ok(mask)
+    }
+
+    /// Builds a `RecordBatch` from the input `Batch` matching the given schema.
+    ///
+    /// This is used for partition expression evaluation. The schema should only contain
+    /// the columns referenced by the partition expression to minimize overhead.
+    fn build_record_batch_for_pruning(
+        &self,
+        input: &mut Batch,
+        schema: &Arc<Schema>,
+    ) -> Result<RecordBatch> {
+        let arrow_schema = schema.arrow_schema();
+        let mut columns = Vec::with_capacity(arrow_schema.fields().len());
+
+        // Decode primary key if necessary.
+        if input.pk_values().is_none() {
+            input.set_pk_values(
+                self.codec
+                    .decode(input.primary_key())
+                    .context(DecodeSnafu)?,
+            );
+        }
+
+        for field in arrow_schema.fields() {
+            let metadata = self.read_format.metadata();
+            let column_id = metadata.column_by_name(field.name()).map(|c| c.column_id);
+
+            // Partition pruning schema should be a subset of the input batch schema.
+            let Some(column_id) = column_id else {
+                return UnexpectedSnafu {
+                    reason: format!(
+                        "Partition pruning schema expects column '{}' but it is missing in \
+                         region metadata",
+                        field.name()
+                    ),
+                }
+                .fail();
+            };
+
+            // 1. Check if it's a tag.
+            if let Some(pk_index) = metadata.primary_key_index(column_id) {
+                let pk_values = input.pk_values().unwrap();
+                let value = match pk_values {
+                    CompositeValues::Dense(v) => &v[pk_index].1,
+                    CompositeValues::Sparse(v) => v.get_or_null(column_id),
+                };
+                let concrete_type = ConcreteDataType::from_arrow_type(field.data_type());
+                let arrow_scalar = value
+                    .try_to_scalar_value(&concrete_type)
+                    .context(DataTypeMismatchSnafu)?;
+                let array = arrow_scalar
+                    .to_array_of_size(input.num_rows())
+                    .context(EvalPartitionFilterSnafu)?;
+                columns.push(array);
+            } else if metadata.time_index_column().column_id == column_id {
+                // 2. Check if it's the timestamp column.
+                columns.push(input.timestamps().to_arrow_array());
+            } else if let Some(field_index) = self
+                .read_format
+                .as_primary_key()
+                .and_then(|f| f.field_index_by_id(column_id))
+            {
+                // 3. Check if it's a field column.
+                columns.push(input.fields()[field_index].data.to_arrow_array());
+            } else {
+                return UnexpectedSnafu {
+                    reason: format!(
+                        "Partition pruning schema expects column '{}' (id {}) but it is not \
+                         present in input batch",
+                        field.name(),
+                        column_id
+                    ),
+                }
+                .fail();
+            }
+        }
+
+        RecordBatch::try_new(arrow_schema.clone(), columns).context(NewRecordBatchSnafu)
+    }
+
+    /// Projects the input `RecordBatch` to match the given schema.
+    ///
+    /// This is used for partition expression evaluation. The schema should only contain
+    /// the columns referenced by the partition expression to minimize overhead.
+    fn project_record_batch_for_pruning_flat(
+        &self,
+        input: &RecordBatch,
+        schema: &Arc<Schema>,
+        tag_decode_state: &mut TagDecodeState,
+    ) -> Result<RecordBatch> {
+        let arrow_schema = schema.arrow_schema();
+        let mut columns = Vec::with_capacity(arrow_schema.fields().len());
+
+        let flat_format = self
+            .read_format
+            .as_flat()
+            .context(crate::error::UnexpectedSnafu {
+                reason: "Expected flat format for precise_filter_flat",
+            })?;
+        let metadata = flat_format.metadata();
+
+        for field in arrow_schema.fields() {
+            let column_id = metadata.column_by_name(field.name()).map(|c| c.column_id);
+
+            let Some(column_id) = column_id else {
+                return UnexpectedSnafu {
+                    reason: format!(
+                        "Partition pruning schema expects column '{}' but it is missing in \
+                         region metadata",
+                        field.name()
+                    ),
+                }
+                .fail();
+            };
+
+            if let Some(idx) = flat_format.projected_index_by_id(column_id) {
+                columns.push(input.column(idx).clone());
+                continue;
+            }
+
+            if metadata.time_index_column().column_id == column_id {
+                let time_index_pos = time_index_column_index(input.num_columns());
+                columns.push(input.column(time_index_pos).clone());
+                continue;
+            }
+
+            if let Some(tag_column) =
+                self.maybe_decode_tag_column(metadata, column_id, input, tag_decode_state)?
+            {
+                columns.push(tag_column);
+                continue;
+            }
+
+            return UnexpectedSnafu {
+                reason: format!(
+                    "Partition pruning schema expects column '{}' (id {}) but it is not \
+                     present in projected record batch",
+                    field.name(),
+                    column_id
+                ),
+            }
+            .fail();
+        }
+
+        RecordBatch::try_new(arrow_schema.clone(), columns).context(NewRecordBatchSnafu)
     }
 }

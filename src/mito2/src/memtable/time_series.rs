@@ -51,9 +51,9 @@ use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::simple_bulk_memtable::SimpleBulkMemtable;
 use crate::memtable::stats::WriteMetrics;
 use crate::memtable::{
-    AllocTracker, BoxedBatchIterator, IterBuilder, KeyValues, MemScanMetrics, Memtable,
-    MemtableBuilder, MemtableId, MemtableRange, MemtableRangeContext, MemtableRanges, MemtableRef,
-    MemtableStats, RangesOptions,
+    AllocTracker, BatchToRecordBatchContext, BoxedBatchIterator, IterBuilder, KeyValues,
+    MemScanMetrics, Memtable, MemtableBuilder, MemtableId, MemtableRange, MemtableRangeContext,
+    MemtableRanges, MemtableRef, MemtableStats, RangesOptions, read_column_ids_from_projection,
 };
 use crate::metrics::{
     MEMTABLE_ACTIVE_FIELD_BUILDER_COUNT, MEMTABLE_ACTIVE_SERIES_COUNT, READ_ROWS_TOTAL,
@@ -146,11 +146,6 @@ impl TimeSeriesMemtable {
     ) -> Self {
         let row_codec = Arc::new(DensePrimaryKeyCodec::new(&region_metadata));
         let series_set = SeriesSet::new(region_metadata.clone(), row_codec.clone());
-        let dedup = if merge_mode == MergeMode::LastNonNull {
-            false
-        } else {
-            dedup
-        };
         Self {
             id,
             region_metadata,
@@ -288,9 +283,14 @@ impl Memtable for TimeSeriesMemtable {
                 .collect()
         };
 
-        let iter = self
-            .series_set
-            .iter_series(projection, filters, self.dedup, sequence, None)?;
+        let iter = self.series_set.iter_series(
+            projection,
+            filters,
+            self.dedup,
+            self.merge_mode,
+            sequence,
+            None,
+        )?;
 
         if self.merge_mode == MergeMode::LastNonNull {
             let iter = LastNonNullIter::new(iter);
@@ -307,6 +307,7 @@ impl Memtable for TimeSeriesMemtable {
     ) -> Result<MemtableRanges> {
         let predicate = options.predicate;
         let sequence = options.sequence;
+        let read_column_ids = read_column_ids_from_projection(&self.region_metadata, projection);
         let projection = if let Some(projection) = projection {
             projection.iter().copied().collect()
         } else {
@@ -323,7 +324,16 @@ impl Memtable for TimeSeriesMemtable {
             merge_mode: self.merge_mode,
             sequence,
         });
-        let context = Arc::new(MemtableRangeContext::new(self.id, builder, predicate));
+        let adapter_context = Arc::new(BatchToRecordBatchContext::new(
+            self.region_metadata.clone(),
+            read_column_ids,
+        ));
+        let context = Arc::new(MemtableRangeContext::new_with_batch_to_record_batch(
+            self.id,
+            builder,
+            predicate,
+            Some(adapter_context),
+        ));
 
         let range_stats = self.stats();
         let range = MemtableRange::new(context, range_stats);
@@ -468,6 +478,7 @@ impl SeriesSet {
         projection: HashSet<ColumnId>,
         predicate: Option<Predicate>,
         dedup: bool,
+        merge_mode: MergeMode,
         sequence: Option<SequenceRange>,
         mem_scan_metrics: Option<MemScanMetrics>,
     ) -> Result<Iter> {
@@ -487,6 +498,7 @@ impl SeriesSet {
             primary_key_datatypes,
             self.codec.clone(),
             dedup,
+            merge_mode,
             sequence,
             mem_scan_metrics,
         )
@@ -536,6 +548,7 @@ struct Iter {
     pk_datatypes: Vec<ConcreteDataType>,
     codec: Arc<DensePrimaryKeyCodec>,
     dedup: bool,
+    merge_mode: MergeMode,
     sequence: Option<SequenceRange>,
     metrics: Metrics,
     mem_scan_metrics: Option<MemScanMetrics>,
@@ -552,6 +565,7 @@ impl Iter {
         pk_datatypes: Vec<ConcreteDataType>,
         codec: Arc<DensePrimaryKeyCodec>,
         dedup: bool,
+        merge_mode: MergeMode,
         sequence: Option<SequenceRange>,
         mem_scan_metrics: Option<MemScanMetrics>,
     ) -> Result<Self> {
@@ -574,6 +588,7 @@ impl Iter {
             pk_datatypes,
             codec,
             dedup,
+            merge_mode,
             sequence,
             metrics: Metrics::default(),
             mem_scan_metrics,
@@ -648,7 +663,14 @@ impl Iterator for Iter {
 
             let values = series.compact(&self.metadata);
             let batch = values.and_then(|v| {
-                v.to_batch(primary_key, &self.metadata, &self.projection, self.dedup)
+                v.to_batch(
+                    primary_key,
+                    &self.metadata,
+                    &self.projection,
+                    self.sequence,
+                    self.dedup,
+                    self.merge_mode,
+                )
             });
 
             // Update metrics.
@@ -656,11 +678,6 @@ impl Iterator for Iter {
             self.metrics.num_rows += batch.as_ref().map(|b| b.num_rows()).unwrap_or(0);
             self.metrics.scan_cost += start.elapsed();
 
-            let mut batch = batch;
-            batch = batch.and_then(|mut batch| {
-                batch.filter_by_sequence(self.sequence)?;
-                Ok(batch)
-            });
             return Some(batch);
         }
         drop(map); // Explicitly drop the read lock
@@ -1126,14 +1143,16 @@ pub struct Values {
 }
 
 impl Values {
-    /// Converts [Values] to `Batch`, sorts the batch according to `timestamp, sequence` desc and
-    /// keeps only the latest row for the same timestamp.
+    /// Converts [Values] to `Batch`, applies the optional sequence filter, sorts the batch
+    /// according to `timestamp, sequence` desc, and applies dedup/merge according to `merge_mode`.
     pub fn to_batch(
         &self,
         primary_key: &[u8],
         metadata: &RegionMetadataRef,
         projection: &HashSet<ColumnId>,
+        sequence: Option<SequenceRange>,
         dedup: bool,
+        merge_mode: MergeMode,
     ) -> Result<Batch> {
         let builder = BatchBuilder::with_required_columns(
             primary_key.to_vec(),
@@ -1154,7 +1173,22 @@ impl Values {
             .collect();
 
         let mut batch = builder.with_fields(fields).build()?;
-        batch.sort(dedup)?;
+        // The sequence filter must be applied before dedup/merge to:
+        // - avoid dropping a timestamp when the newest row is out of range
+        // - avoid filling null fields from rows that should be excluded by the sequence filter.
+        batch.filter_by_sequence(sequence)?;
+
+        match (dedup, merge_mode) {
+            // append-only, keep duplicate rows.
+            (false, _) => batch.sort(false)?,
+            // keep the last row for each timestamp.
+            (true, MergeMode::LastRow) => batch.sort(true)?,
+            // keep the last non-null value for each field.
+            (true, MergeMode::LastNonNull) => {
+                batch.sort(false)?;
+                batch.merge_last_non_null()?;
+            }
+        }
         Ok(batch)
     }
 
@@ -1256,10 +1290,10 @@ impl IterBuilder for TimeSeriesIterBuilder {
             self.projection.clone(),
             self.predicate.clone(),
             self.dedup,
+            self.merge_mode,
             self.sequence,
             metrics,
         )?;
-
         if self.merge_mode == MergeMode::LastNonNull {
             let iter = LastNonNullIter::new(iter);
             Ok(Box::new(iter))
@@ -1465,7 +1499,9 @@ mod tests {
                 b"test",
                 &schema,
                 &[0, 1, 2, 3, 4].into_iter().collect(),
+                None,
                 true,
+                MergeMode::LastRow,
             )
             .unwrap();
         check_value(
@@ -1501,6 +1537,101 @@ mod tests {
                 ],
             ],
         )
+    }
+
+    #[test]
+    fn test_last_non_null_should_filter_by_sequence_before_merge_drop_ts() {
+        let schema = schema_for_test();
+        let projection: HashSet<_> = [0, 1, 2, 3, 4].into_iter().collect();
+
+        // Same timestamp, newest sequence is out of range. We should still keep the timestamp by
+        // using the latest row *within* the sequence range as the base row.
+        //
+        // Expect after filtering seq<=2:
+        // - base row: seq=2
+        // - v0 from seq=2, v1 filled from seq=1
+        let timestamp = Arc::new(TimestampMillisecondVector::from_vec(vec![1, 1, 1]));
+        let sequence = Arc::new(UInt64Vector::from_vec(vec![1, 2, 3]));
+        let op_type = Arc::new(UInt8Vector::from_vec(vec![OpType::Put as u8; 3]));
+        let fields = vec![
+            Arc::new(Int64Vector::from(vec![None, Some(10), None])) as Arc<_>,
+            Arc::new(Float64Vector::from(vec![Some(1.5), None, None])) as Arc<_>,
+        ];
+        let values = Values {
+            timestamp: timestamp as Arc<_>,
+            sequence,
+            op_type,
+            fields,
+        };
+
+        let batch = values
+            .to_batch(
+                b"test",
+                &schema,
+                &projection,
+                Some(SequenceRange::LtEq { max: 2 }),
+                true,
+                MergeMode::LastNonNull,
+            )
+            .unwrap();
+
+        check_value(
+            &batch,
+            vec![vec![
+                Value::Timestamp(Timestamp::new_millisecond(1)),
+                Value::UInt64(2),
+                Value::UInt8(OpType::Put as u8),
+                Value::Int64(10),
+                Value::Float64(OrderedFloat(1.5)),
+            ]],
+        );
+    }
+
+    #[test]
+    fn test_last_non_null_should_filter_by_sequence_before_merge_no_fill_from_out_of_range_row() {
+        let schema = schema_for_test();
+        let projection: HashSet<_> = [0, 1, 2, 3, 4].into_iter().collect();
+
+        // Same timestamp, older sequence is out of range. We must not fill null fields using rows
+        // that should be excluded by the sequence filter.
+        //
+        // Expect after filtering seq>1:
+        // - keep only seq=2 row, v0 stays NULL.
+        let timestamp = Arc::new(TimestampMillisecondVector::from_vec(vec![1, 1]));
+        let sequence = Arc::new(UInt64Vector::from_vec(vec![1, 2]));
+        let op_type = Arc::new(UInt8Vector::from_vec(vec![OpType::Put as u8; 2]));
+        let fields = vec![
+            Arc::new(Int64Vector::from(vec![Some(10), None])) as Arc<_>,
+            Arc::new(Float64Vector::from(vec![Some(1.0), Some(1.0)])) as Arc<_>,
+        ];
+        let values = Values {
+            timestamp: timestamp as Arc<_>,
+            sequence,
+            op_type,
+            fields,
+        };
+
+        let batch = values
+            .to_batch(
+                b"test",
+                &schema,
+                &projection,
+                Some(SequenceRange::Gt { min: 1 }),
+                true,
+                MergeMode::LastNonNull,
+            )
+            .unwrap();
+
+        check_value(
+            &batch,
+            vec![vec![
+                Value::Timestamp(Timestamp::new_millisecond(1)),
+                Value::UInt64(2),
+                Value::UInt8(OpType::Put as u8),
+                Value::Null,
+                Value::Float64(OrderedFloat(1.0)),
+            ]],
+        );
     }
 
     fn build_key_values(schema: &RegionMetadataRef, k0: String, k1: i64, len: usize) -> KeyValues {
@@ -1816,5 +1947,90 @@ mod tests {
         }
         assert_eq!(total_series, series_count);
         assert_eq!(total_series * rows_per_series, row_count);
+    }
+
+    #[test]
+    fn test_build_record_batch_iter_from_memtable() {
+        let schema = schema_for_test();
+        let memtable = TimeSeriesMemtable::new(schema.clone(), 1, None, true, MergeMode::LastRow);
+
+        let kvs = build_key_values(&schema, "test".to_string(), 1, 10);
+        memtable.write(&kvs).unwrap();
+
+        let read_column_ids: Vec<ColumnId> = schema
+            .column_metadatas
+            .iter()
+            .map(|c| c.column_id)
+            .collect();
+        let ranges = memtable
+            .ranges(Some(&read_column_ids), RangesOptions::default())
+            .unwrap();
+        assert_eq!(1, ranges.ranges.len());
+
+        let range = ranges.ranges.into_values().next().unwrap();
+        let mut iter = range.build_record_batch_iter(None, None).unwrap();
+        let rb = iter.next().transpose().unwrap().unwrap();
+        assert_eq!(10, rb.num_rows());
+        // k0, k1 (pk columns), v0, v1 (field columns), ts, __primary_key, __sequence, __op_type
+        let schema = rb.schema();
+        let column_names: Vec<_> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(
+            column_names,
+            vec![
+                "k0",
+                "k1",
+                "v0",
+                "v1",
+                "ts",
+                "__primary_key",
+                "__sequence",
+                "__op_type",
+            ]
+        );
+        assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn test_build_record_batch_iter_with_time_range() {
+        let schema = schema_for_test();
+        let memtable = TimeSeriesMemtable::new(schema.clone(), 1, None, true, MergeMode::LastRow);
+
+        let kvs = build_key_values(&schema, "test".to_string(), 1, 10);
+        memtable.write(&kvs).unwrap();
+
+        let read_column_ids: Vec<ColumnId> = schema
+            .column_metadatas
+            .iter()
+            .map(|c| c.column_id)
+            .collect();
+        let ranges = memtable
+            .ranges(Some(&read_column_ids), RangesOptions::default())
+            .unwrap();
+        assert_eq!(1, ranges.ranges.len());
+
+        let time_range = (Timestamp::new_millisecond(3), Timestamp::new_millisecond(7));
+
+        let range = ranges.ranges.into_values().next().unwrap();
+        let mut iter = range
+            .build_record_batch_iter(Some(time_range), None)
+            .unwrap();
+
+        let mut total_rows = 0;
+        let mut all_timestamps = Vec::new();
+        while let Some(rb) = iter.next().transpose().unwrap() {
+            total_rows += rb.num_rows();
+            let ts_col = rb
+                .column_by_name("ts")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<datatypes::arrow::array::TimestampMillisecondArray>()
+                .unwrap();
+            for i in 0..ts_col.len() {
+                all_timestamps.push(ts_col.value(i));
+            }
+        }
+        assert_eq!(5, total_rows);
+        all_timestamps.sort();
+        assert_eq!(vec![3, 4, 5, 6, 7], all_timestamps);
     }
 }

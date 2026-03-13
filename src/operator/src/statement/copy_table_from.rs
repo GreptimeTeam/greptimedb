@@ -33,6 +33,7 @@ use common_telemetry::{debug, tracing};
 use datafusion::datasource::physical_plan::{CsvSource, FileSource, JsonSource};
 use datafusion::parquet::arrow::ParquetRecordBatchStreamBuilder;
 use datafusion::parquet::arrow::arrow_reader::ArrowReaderMetadata;
+use datafusion_common::config::CsvOptions;
 use datafusion_expr::Expr;
 use datatypes::arrow::compute::can_cast_types;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, Schema, SchemaRef};
@@ -214,13 +215,15 @@ impl StatementExecutor {
                         .context(error::ProjectSchemaSnafu)?,
                 );
 
-                let csv_source = CsvSource::new(format.has_header, format.delimiter, b'"')
-                    .with_schema(schema.clone())
+                let options = CsvOptions::default()
+                    .with_has_header(format.has_header)
+                    .with_delimiter(format.delimiter);
+                let csv_source = CsvSource::new(schema.clone())
+                    .with_csv_options(options)
                     .with_batch_size(DEFAULT_BATCH_SIZE);
                 let stream = file_to_stream(
                     object_store,
                     path,
-                    schema.clone(),
                     csv_source,
                     Some(projection),
                     format.compression_type,
@@ -247,13 +250,11 @@ impl StatementExecutor {
                         .context(error::ProjectSchemaSnafu)?,
                 );
 
-                let json_source = JsonSource::new()
-                    .with_schema(schema.clone())
-                    .with_batch_size(DEFAULT_BATCH_SIZE);
+                let json_source =
+                    JsonSource::new(schema.clone()).with_batch_size(DEFAULT_BATCH_SIZE);
                 let stream = file_to_stream(
                     object_store,
                     path,
-                    schema.clone(),
                     json_source,
                     Some(projection),
                     format.compression_type,

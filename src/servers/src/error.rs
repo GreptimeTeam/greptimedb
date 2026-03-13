@@ -26,7 +26,6 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_telemetry::{error, warn};
-use common_time::Duration;
 use datafusion::error::DataFusionError;
 use datatypes::prelude::ConcreteDataType;
 use headers::ContentType;
@@ -446,6 +445,14 @@ pub enum Error {
         error: query::error::Error,
     },
 
+    #[snafu(display("Failed to infer parameter types"))]
+    InferParameterTypes {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: query::error::Error,
+    },
+
     #[snafu(display("{}", reason))]
     UnexpectedResult {
         reason: String,
@@ -640,9 +647,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Overflow while casting `{:?}` to Interval", val))]
-    DurationOverflow { val: Duration },
-
     #[snafu(display("Failed to handle otel-arrow request, error message: {}", err_msg))]
     HandleOtelArrowRequest {
         err_msg: String,
@@ -661,6 +665,13 @@ pub enum Error {
 
     #[snafu(display("Service suspended"))]
     Suspended {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(transparent)]
+    GreptimeProto {
+        source: api::error::Error,
         #[snafu(implicit)]
         location: Location,
     },
@@ -718,6 +729,7 @@ impl ErrorExt for Error {
             | InvalidPromRemoteRequest { .. }
             | InvalidFlightTicket { .. }
             | InvalidPrepareStatement { .. }
+            | InferParameterTypes { .. }
             | DataFrame { .. }
             | PreparedStmtTypeMismatch { .. }
             | TimePrecision { .. }
@@ -785,8 +797,6 @@ impl ErrorExt for Error {
 
             ConvertSqlValue { source, .. } => source.status_code(),
 
-            DurationOverflow { .. } => StatusCode::InvalidArguments,
-
             HandleOtelArrowRequest { .. } => StatusCode::Internal,
 
             Cancelled { .. } => StatusCode::Cancelled,
@@ -794,6 +804,8 @@ impl ErrorExt for Error {
             Suspended { .. } => StatusCode::Suspended,
 
             MemoryLimitExceeded { .. } => StatusCode::RateLimited,
+
+            GreptimeProto { source, .. } => source.status_code(),
         }
     }
 

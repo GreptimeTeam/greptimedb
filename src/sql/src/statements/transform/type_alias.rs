@@ -178,9 +178,9 @@ pub(crate) fn get_type_by_alias(data_type: &DataType) -> Option<DataType> {
         DataType::UInt16 => Some(DataType::SmallIntUnsigned(None)),
         DataType::UInt32 => Some(DataType::IntUnsigned(None)),
         DataType::UInt64 => Some(DataType::BigIntUnsigned(None)),
-        DataType::Float4 => Some(DataType::Float(None)),
+        DataType::Float4 => Some(DataType::Float(ExactNumberInfo::None)),
         DataType::Float8 => Some(DataType::Double(ExactNumberInfo::None)),
-        DataType::Float32 => Some(DataType::Float(None)),
+        DataType::Float32 => Some(DataType::Float(ExactNumberInfo::None)),
         DataType::Float64 => Some(DataType::Double(ExactNumberInfo::None)),
         DataType::Bool => Some(DataType::Boolean),
         DataType::Datetime(_) => Some(DataType::Timestamp(Some(6), TimezoneInfo::None)),
@@ -222,9 +222,9 @@ pub(crate) fn get_data_type_by_alias_name(name: &str) -> Option<DataType> {
         "UINT16" => Some(DataType::SmallIntUnsigned(None)),
         "UINT32" => Some(DataType::IntUnsigned(None)),
         "UINT64" => Some(DataType::BigIntUnsigned(None)),
-        "FLOAT4" => Some(DataType::Float(None)),
+        "FLOAT4" => Some(DataType::Float(ExactNumberInfo::None)),
         "FLOAT8" => Some(DataType::Double(ExactNumberInfo::None)),
-        "FLOAT32" => Some(DataType::Float(None)),
+        "FLOAT32" => Some(DataType::Float(ExactNumberInfo::None)),
         "FLOAT64" => Some(DataType::Double(ExactNumberInfo::None)),
         // String type alias
         "TINYTEXT" | "MEDIUMTEXT" | "LONGTEXT" => Some(DataType::Text),
@@ -256,7 +256,7 @@ mod tests {
         );
         assert_eq!(
             get_data_type_by_alias_name("float32"),
-            Some(DataType::Float(None))
+            Some(DataType::Float(ExactNumberInfo::None))
         );
         assert_eq!(
             get_data_type_by_alias_name("float8"),
@@ -264,7 +264,7 @@ mod tests {
         );
         assert_eq!(
             get_data_type_by_alias_name("float4"),
-            Some(DataType::Float(None))
+            Some(DataType::Float(ExactNumberInfo::None))
         );
         assert_eq!(
             get_data_type_by_alias_name("int8"),
@@ -370,7 +370,7 @@ mod tests {
         match &stmts[0] {
             Statement::Query(q) => assert_eq!(
                 format!(
-                    "SELECT arrow_cast(TIMESTAMP '2020-01-01 01:23:45.12345678', 'Timestamp({expected}, None)')"
+                    "SELECT arrow_cast(TIMESTAMP '2020-01-01 01:23:45.12345678', 'Timestamp({expected})')"
                 ),
                 q.to_string()
             ),
@@ -402,19 +402,19 @@ mod tests {
     #[test]
     fn test_transform_timestamp_alias() {
         // Timestamp[Second | Millisecond | Microsecond | Nanosecond]
-        test_timestamp_alias("TimestampSecond", "Second");
-        test_timestamp_alias("Timestamp_s", "Second");
-        test_timestamp_alias("TimestampMillisecond", "Millisecond");
-        test_timestamp_alias("Timestamp_ms", "Millisecond");
-        test_timestamp_alias("TimestampMicrosecond", "Microsecond");
-        test_timestamp_alias("Timestamp_us", "Microsecond");
-        test_timestamp_alias("TimestampNanosecond", "Nanosecond");
-        test_timestamp_alias("Timestamp_ns", "Nanosecond");
+        test_timestamp_alias("TimestampSecond", "s");
+        test_timestamp_alias("Timestamp_s", "s");
+        test_timestamp_alias("TimestampMillisecond", "ms");
+        test_timestamp_alias("Timestamp_ms", "ms");
+        test_timestamp_alias("TimestampMicrosecond", "µs");
+        test_timestamp_alias("Timestamp_us", "µs");
+        test_timestamp_alias("TimestampNanosecond", "ns");
+        test_timestamp_alias("Timestamp_ns", "ns");
         // Timestamp(precision)
-        test_timestamp_precision_type(0, "Second");
-        test_timestamp_precision_type(3, "Millisecond");
-        test_timestamp_precision_type(6, "Microsecond");
-        test_timestamp_precision_type(9, "Nanosecond");
+        test_timestamp_precision_type(0, "s");
+        test_timestamp_precision_type(3, "ms");
+        test_timestamp_precision_type(6, "µs");
+        test_timestamp_precision_type(9, "ns");
     }
 
     #[test]

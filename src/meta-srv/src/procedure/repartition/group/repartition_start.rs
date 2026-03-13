@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use common_meta::rpc::router::RegionRoute;
 use common_procedure::{Context as ProcedureContext, Status};
@@ -22,6 +22,8 @@ use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
 
 use crate::error::{self, Result};
+use crate::procedure::repartition::group::sync_region::SyncRegion;
+use crate::procedure::repartition::group::update_metadata::UpdateMetadata;
 use crate::procedure::repartition::group::{
     Context, GroupId, GroupPrepareResult, State, region_routes,
 };
@@ -35,13 +37,13 @@ fn ensure_region_route_expr_match(
     region_route: &RegionRoute,
     region_descriptor: &RegionDescriptor,
 ) -> Result<RegionRoute> {
-    let actual = &region_route.region.partition_expr;
+    let actual = region_route.region.partition_expr();
     let expected = region_descriptor
         .partition_expr
         .as_json_str()
         .context(error::SerializePartitionExprSnafu)?;
     ensure!(
-        actual == &expected,
+        actual == expected,
         error::PartitionExprMismatchSnafu {
             region_id: region_route.region.id,
             expected,
@@ -55,7 +57,6 @@ impl RepartitionStart {
     /// Ensures that both source and target regions are present in the region routes.
     ///
     /// Both source and target regions must be present in the region routes (target regions should be allocated before repartitioning).
-    #[allow(dead_code)]
     fn ensure_route_present(
         group_id: GroupId,
         region_routes: &[RegionRoute],
@@ -109,7 +110,7 @@ impl RepartitionStart {
             );
         }
         let central_region = sources[0].region_id;
-        let central_region_datanode_id = source_region_routes[0]
+        let central_region_datanode = source_region_routes[0]
             .leader_peer
             .as_ref()
             .context(error::UnexpectedSnafu {
@@ -118,20 +119,14 @@ impl RepartitionStart {
                     central_region
                 ),
             })?
-            .id;
+            .clone();
 
         Ok(GroupPrepareResult {
             source_routes: source_region_routes,
             target_routes: target_region_routes,
             central_region,
-            central_region_datanode_id,
+            central_region_datanode,
         })
-    }
-
-    #[allow(dead_code)]
-    fn next_state() -> (Box<dyn State>, Status) {
-        // TODO(weny): change it later.
-        (Box::new(RepartitionStart), Status::executing(true))
     }
 }
 
@@ -154,7 +149,10 @@ impl State for RepartitionStart {
         _procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
         if ctx.persistent_ctx.group_prepare_result.is_some() {
-            return Ok(Self::next_state());
+            return Ok((
+                Box::new(UpdateMetadata::ApplyStaging),
+                Status::executing(true),
+            ));
         }
         let table_id = ctx.persistent_ctx.table_id;
         let group_id = ctx.persistent_ctx.group_id;
@@ -174,7 +172,32 @@ impl State for RepartitionStart {
             ctx.persistent_ctx.targets.len()
         );
 
-        Ok(Self::next_state())
+        if ctx.persistent_ctx.sync_region {
+            let prepare_result = ctx.persistent_ctx.group_prepare_result.as_ref().unwrap();
+            let allocated_region_ids: HashSet<_> = ctx
+                .persistent_ctx
+                .allocated_region_ids
+                .iter()
+                .copied()
+                .collect();
+            let region_routes: Vec<_> = prepare_result
+                .target_routes
+                .iter()
+                .filter(|route| allocated_region_ids.contains(&route.region.id))
+                .cloned()
+                .collect();
+            if !region_routes.is_empty() {
+                return Ok((
+                    Box::new(SyncRegion { region_routes }),
+                    Status::executing(true),
+                ));
+            }
+        }
+
+        Ok((
+            Box::new(UpdateMetadata::ApplyStaging),
+            Status::executing(true),
+        ))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -280,5 +303,52 @@ mod tests {
         )
         .unwrap_err();
         assert_matches!(err, Error::RepartitionTargetRegionMissing { .. });
+    }
+
+    #[test]
+    fn test_ensure_route_present_legacy_partition_expr_source() {
+        let source_region = RegionDescriptor {
+            region_id: RegionId::new(1024, 1),
+            partition_expr: range_expr("x", 0, 100),
+        };
+        let target_region = RegionDescriptor {
+            region_id: RegionId::new(1024, 2),
+            partition_expr: range_expr("x", 0, 10),
+        };
+        let legacy_partition_expr = range_expr("x", 0, 100).as_json_str().unwrap();
+        let legacy_region_json = serde_json::json!({
+            "id": RegionId::new(1024, 1).as_u64(),
+            "name": "",
+            "partition": {
+                "column_list": ["x"],
+                "value_list": [legacy_partition_expr]
+            },
+            "partition_expr": "",
+            "attrs": {}
+        });
+
+        let region_routes = vec![
+            RegionRoute {
+                region: serde_json::from_value(legacy_region_json).unwrap(),
+                leader_peer: Some(Peer::empty(1)),
+                ..Default::default()
+            },
+            RegionRoute {
+                region: Region {
+                    id: RegionId::new(1024, 2),
+                    ..Default::default()
+                },
+                leader_peer: Some(Peer::empty(1)),
+                ..Default::default()
+            },
+        ];
+
+        let result = RepartitionStart::ensure_route_present(
+            Uuid::new_v4(),
+            &region_routes,
+            &[source_region],
+            &[target_region],
+        );
+        assert!(result.is_ok());
     }
 }

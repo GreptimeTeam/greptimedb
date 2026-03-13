@@ -32,10 +32,10 @@ use common_meta::rpc::router::{Region, RegionRoute};
 use common_telemetry::info;
 use common_wal::options::WalOptions;
 use datatypes::data_type::ConcreteDataType;
-use datatypes::schema::{ColumnSchema, RawSchema};
+use datatypes::schema::{ColumnSchema, Schema};
 use rand::Rng;
 use store_api::storage::RegionNumber;
-use table::metadata::{RawTableInfo, RawTableMeta, TableId, TableIdent, TableType};
+use table::metadata::{TableId, TableIdent, TableInfo, TableMeta, TableType};
 use table::table_name::TableName;
 
 use self::metadata::TableMetadataBencher;
@@ -132,7 +132,7 @@ impl Tool for BenchTableMetadata {
     }
 }
 
-fn create_table_info(table_id: TableId, table_name: TableName) -> RawTableInfo {
+fn create_table_info(table_id: TableId, table_name: TableName) -> TableInfo {
     let columns = 100;
     let mut column_schemas = Vec::with_capacity(columns);
     column_schemas.push(
@@ -153,8 +153,8 @@ fn create_table_info(table_id: TableId, table_name: TableName) -> RawTableInfo {
         ));
     }
 
-    let meta = RawTableMeta {
-        schema: RawSchema::new(column_schemas),
+    let meta = TableMeta {
+        schema: Arc::new(Schema::new(column_schemas)),
         engine: "mito".to_string(),
         created_on: chrono::DateTime::default(),
         updated_on: chrono::DateTime::default(),
@@ -162,12 +162,11 @@ fn create_table_info(table_id: TableId, table_name: TableName) -> RawTableInfo {
         next_column_id: columns as u32 + 1,
         value_indices: vec![],
         options: Default::default(),
-        region_numbers: (1..=100).collect(),
         partition_key_indices: vec![],
         column_ids: vec![],
     };
 
-    RawTableInfo {
+    TableInfo {
         ident: TableIdent {
             table_id,
             version: 1,
@@ -190,7 +189,6 @@ fn create_region_routes(regions: Vec<RegionNumber>) -> Vec<RegionRoute> {
             region: Region {
                 id: region_id.into(),
                 name: String::new(),
-                partition: None,
                 attrs: BTreeMap::new(),
                 partition_expr: Default::default(),
             },
@@ -201,6 +199,7 @@ fn create_region_routes(regions: Vec<RegionNumber>) -> Vec<RegionRoute> {
             follower_peers: vec![],
             leader_state: None,
             leader_down_since: None,
+            write_route_policy: None,
         });
     }
 

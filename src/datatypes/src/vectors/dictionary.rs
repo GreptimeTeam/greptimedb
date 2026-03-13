@@ -170,11 +170,12 @@ impl<K: ArrowDictionaryKeyType> Serializable for DictionaryVector<K> {
         // the value it refers to in the dictionary
         let mut result = Vec::with_capacity(self.len());
 
-        for i in 0..self.len() {
+        let keys = self.array.keys();
+        let key_values = &keys.values()[..self.len()];
+        for (i, &key) in key_values.iter().enumerate() {
             if self.is_null(i) {
                 result.push(JsonValue::Null);
             } else {
-                let key = self.array.keys().value(i);
                 let value = self.item_vector.get(key.as_usize());
                 let json_value = serde_json::to_value(value).context(error::SerializeSnafu)?;
                 result.push(json_value);
@@ -247,16 +248,9 @@ impl<K: ArrowDictionaryKeyType> VectorOp for DictionaryVector<K> {
         let mut replicated_keys = PrimitiveBuilder::new();
 
         let mut previous_offset = 0;
-        for (i, &offset) in offsets.iter().enumerate() {
-            let key = if i < self.len() {
-                if keys.is_valid(i) {
-                    Some(keys.value(i))
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
+        let mut key_iter = keys.iter().chain(std::iter::repeat(None));
+        for &offset in offsets {
+            let key = key_iter.next().unwrap();
 
             // repeat this key (offset - previous_offset) times
             let repeat_count = offset - previous_offset;

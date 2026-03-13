@@ -26,6 +26,7 @@ use common_meta::instruction::{CacheIdent, Instruction};
 use common_meta::key::MetadataKey;
 use common_meta::key::schema_name::{SchemaName, SchemaNameKey};
 use common_meta::key::table_info::TableInfoKey;
+use common_telemetry::tracing_context::TracingContext;
 use tokio::sync::mpsc;
 
 #[derive(Default)]
@@ -57,7 +58,11 @@ async fn handle_instruction(
     let response = HeartbeatResponse::default();
     let mut ctx: HeartbeatResponseHandlerContext =
         HeartbeatResponseHandlerContext::new(mailbox, response);
-    ctx.incoming_message = Some((test_message_meta(1, "hi", "foo", "bar"), instruction));
+    ctx.incoming_message = Some((
+        test_message_meta(1, "hi", "foo", "bar"),
+        TracingContext::new(),
+        instruction,
+    ));
     executor.handle(ctx).await.unwrap();
 }
 

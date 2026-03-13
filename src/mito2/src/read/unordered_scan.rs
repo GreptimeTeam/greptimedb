@@ -21,6 +21,7 @@ use std::time::Instant;
 use async_stream::{stream, try_stream};
 use common_error::ext::BoxedError;
 use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
+use common_telemetry::{tracing, warn};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::arrow::record_batch::RecordBatch;
@@ -33,7 +34,7 @@ use store_api::region_engine::{
 };
 
 use crate::error::{PartitionOutOfRangeSnafu, Result};
-use crate::read::range::RangeBuilderList;
+use crate::read::pruner::{PartitionPruner, Pruner};
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{
     PartitionMetrics, PartitionMetricsList, scan_file_ranges, scan_flat_file_ranges,
@@ -50,6 +51,8 @@ pub struct UnorderedScan {
     properties: ScannerProperties,
     /// Context of streams.
     stream_ctx: Arc<StreamContext>,
+    /// Shared pruner for file range building.
+    pruner: Arc<Pruner>,
     /// Metrics for each partition.
     metrics_list: PartitionMetricsList,
 }
@@ -63,14 +66,23 @@ impl UnorderedScan {
         let stream_ctx = Arc::new(StreamContext::unordered_scan_ctx(input));
         properties.partitions = vec![stream_ctx.partition_ranges()];
 
+        // Create the shared pruner with number of workers equal to CPU cores.
+        let num_workers = common_stat::get_total_cpu_cores().max(1);
+        let pruner = Arc::new(Pruner::new(stream_ctx.clone(), num_workers));
+
         Self {
             properties,
             stream_ctx,
+            pruner,
             metrics_list: PartitionMetricsList::default(),
         }
     }
 
     /// Scans the region and returns a stream.
+    #[tracing::instrument(
+        skip_all,
+        fields(region_id = %self.stream_ctx.input.mapper.metadata().region_id)
+    )]
     pub(crate) async fn build_stream(&self) -> Result<SendableRecordBatchStream, BoxedError> {
         let metrics_set = ExecutionPlanMetricsSet::new();
         let part_num = self.properties.num_partitions();
@@ -92,11 +104,18 @@ impl UnorderedScan {
     }
 
     /// Scans a [PartitionRange] by its `identifier` and returns a stream.
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            region_id = %stream_ctx.input.region_metadata().region_id,
+            part_range_id = part_range_id
+        )
+    )]
     fn scan_partition_range(
         stream_ctx: Arc<StreamContext>,
         part_range_id: usize,
         part_metrics: PartitionMetrics,
-        range_builder_list: Arc<RangeBuilderList>,
+        partition_pruner: Arc<PartitionPruner>,
     ) -> impl Stream<Item = Result<Batch>> {
         try_stream! {
             // Gets range meta.
@@ -118,7 +137,7 @@ impl UnorderedScan {
                         part_metrics.clone(),
                         *index,
                         "unordered_scan_files",
-                        range_builder_list.clone(),
+                        partition_pruner.clone(),
                     ).await?;
                     for await batch in stream {
                         yield batch?;
@@ -138,11 +157,18 @@ impl UnorderedScan {
     }
 
     /// Scans a [PartitionRange] by its `identifier` and returns a flat stream of RecordBatch.
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            region_id = %stream_ctx.input.region_metadata().region_id,
+            part_range_id = part_range_id
+        )
+    )]
     fn scan_flat_partition_range(
         stream_ctx: Arc<StreamContext>,
         part_range_id: usize,
         part_metrics: PartitionMetrics,
-        range_builder_list: Arc<RangeBuilderList>,
+        partition_pruner: Arc<PartitionPruner>,
     ) -> impl Stream<Item = Result<RecordBatch>> {
         try_stream! {
             // Gets range meta.
@@ -153,6 +179,7 @@ impl UnorderedScan {
                         stream_ctx.clone(),
                         part_metrics.clone(),
                         *index,
+                        range_meta.time_range,
                     );
                     for await record_batch in stream {
                         yield record_batch?;
@@ -163,7 +190,7 @@ impl UnorderedScan {
                         part_metrics.clone(),
                         *index,
                         "unordered_scan_files",
-                        range_builder_list.clone(),
+                        partition_pruner.clone(),
                     ).await?;
                     for await record_batch in stream {
                         yield record_batch?;
@@ -214,6 +241,13 @@ impl UnorderedScan {
         part_metrics
     }
 
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            region_id = %self.stream_ctx.input.mapper.metadata().region_id,
+            partition = partition
+        )
+    )]
     fn scan_partition_impl(
         &self,
         ctx: &QueryScanContext,
@@ -252,6 +286,13 @@ impl UnorderedScan {
         )))
     }
 
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            region_id = %self.stream_ctx.input.mapper.metadata().region_id,
+            partition = partition
+        )
+    )]
     fn scan_batch_in_partition(
         &self,
         partition: usize,
@@ -268,14 +309,17 @@ impl UnorderedScan {
         let stream_ctx = self.stream_ctx.clone();
         let part_ranges = self.properties.partitions[partition].clone();
         let distinguish_range = self.properties.distinguish_partition_range;
+        let pruner = self.pruner.clone();
+        // Initializes ref counts for the pruner.
+        // If we call scan_batch_in_partition() multiple times but don't read all batches from the stream,
+        // then the ref count won't be decremented.
+        // This is a rare case and keeping all remaining entries still uses less memory than a per partition cache.
+        pruner.add_partition_ranges(&part_ranges);
+        let partition_pruner = Arc::new(PartitionPruner::new(pruner, &part_ranges));
 
         let stream = try_stream! {
             part_metrics.on_first_poll();
 
-            let range_builder_list = Arc::new(RangeBuilderList::new(
-                stream_ctx.input.num_memtables(),
-                stream_ctx.input.num_files(),
-            ));
             // Scans each part.
             for part_range in part_ranges {
                 let mut metrics = ScannerMetrics::default();
@@ -290,7 +334,7 @@ impl UnorderedScan {
                     stream_ctx.clone(),
                     part_range.identifier,
                     part_metrics.clone(),
-                    range_builder_list.clone(),
+                    partition_pruner.clone(),
                 );
                 for await batch in stream {
                     let batch = batch?;
@@ -336,6 +380,13 @@ impl UnorderedScan {
         Ok(Box::pin(stream))
     }
 
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            region_id = %self.stream_ctx.input.mapper.metadata().region_id,
+            partition = partition
+        )
+    )]
     fn scan_flat_batch_in_partition(
         &self,
         partition: usize,
@@ -351,14 +402,17 @@ impl UnorderedScan {
 
         let stream_ctx = self.stream_ctx.clone();
         let part_ranges = self.properties.partitions[partition].clone();
+        let pruner = self.pruner.clone();
+        // Initializes ref counts for the pruner.
+        // If we call scan_batch_in_partition() multiple times but don't read all batches from the stream,
+        // then the ref count won't be decremented.
+        // This is a rare case and keeping all remaining entries still uses less memory than a per partition cache.
+        pruner.add_partition_ranges(&part_ranges);
+        let partition_pruner = Arc::new(PartitionPruner::new(pruner, &part_ranges));
 
         let stream = try_stream! {
             part_metrics.on_first_poll();
 
-            let range_builder_list = Arc::new(RangeBuilderList::new(
-                stream_ctx.input.num_memtables(),
-                stream_ctx.input.num_files(),
-            ));
             // Scans each part.
             for part_range in part_ranges {
                 let mut metrics = ScannerMetrics::default();
@@ -368,7 +422,7 @@ impl UnorderedScan {
                     stream_ctx.clone(),
                     part_range.identifier,
                     part_metrics.clone(),
-                    range_builder_list.clone(),
+                    partition_pruner.clone(),
                 );
                 for await record_batch in stream {
                     let record_batch = record_batch?;
@@ -417,7 +471,7 @@ impl RegionScanner for UnorderedScan {
 
     fn prepare(&mut self, request: PrepareRequest) -> Result<(), BoxedError> {
         self.properties.prepare(request);
-        // UnorderedScan only scans one row group per partition so the resource requirement won't be too high.
+
         Ok(())
     }
 
@@ -438,8 +492,14 @@ impl RegionScanner for UnorderedScan {
             .input
             .predicate_group()
             .predicate_without_region();
+        predicate.is_some()
+    }
 
-        predicate.map(|p| !p.exprs().is_empty()).unwrap_or(false)
+    fn add_dyn_filter_to_predicate(
+        &mut self,
+        filter_exprs: Vec<Arc<dyn datafusion::physical_plan::PhysicalExpr>>,
+    ) -> Vec<bool> {
+        self.stream_ctx.add_dyn_filter_to_predicate(filter_exprs)
     }
 
     fn set_logical_region(&mut self, logical_region: bool) {

@@ -24,7 +24,7 @@ use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
 use crate::sst::file::FileTimeRange;
 use crate::sst::index::IndexOutput;
 
-pub(crate) mod file_range;
+pub mod file_range;
 pub mod flat_format;
 pub mod format;
 pub(crate) mod helper;
@@ -115,7 +115,7 @@ mod tests {
     use object_store::ObjectStore;
     use parquet::arrow::AsyncArrowWriter;
     use parquet::basic::{Compression, Encoding, ZstdLevel};
-    use parquet::file::metadata::KeyValue;
+    use parquet::file::metadata::{KeyValue, PageIndexPolicy};
     use parquet::file::properties::WriterProperties;
     use store_api::codec::PrimaryKeyEncoding;
     use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
@@ -126,6 +126,7 @@ mod tests {
 
     use super::*;
     use crate::access_layer::{FilePathProvider, Metrics, RegionFilePathFactory, WriteType};
+    use crate::cache::test_util::assert_parquet_metadata_equal;
     use crate::cache::{CacheManager, CacheStrategy, PageKey};
     use crate::config::IndexConfig;
     use crate::read::{BatchBuilder, BatchReader, FlatSource};
@@ -143,9 +144,9 @@ mod tests {
         DEFAULT_WRITE_CONCURRENCY, FlatSchemaOptions, location, to_flat_sst_arrow_schema,
     };
     use crate::test_util::sst_util::{
-        assert_parquet_metadata_eq, build_test_binary_test_region_metadata, new_batch_by_range,
-        new_batch_with_binary, new_batch_with_custom_sequence, new_primary_key, new_source,
-        new_sparse_primary_key, sst_file_handle, sst_file_handle_with_file_id, sst_region_metadata,
+        build_test_binary_test_region_metadata, new_batch_by_range, new_batch_with_binary,
+        new_batch_with_custom_sequence, new_primary_key, new_source, new_sparse_primary_key,
+        sst_file_handle, sst_file_handle_with_file_id, sst_region_metadata,
         sst_region_metadata_with_encoding,
     };
     use crate::test_util::{TestEnv, check_reader_result};
@@ -233,7 +234,7 @@ mod tests {
             handle.clone(),
             object_store,
         );
-        let mut reader = builder.build().await.unwrap();
+        let mut reader = builder.build().await.unwrap().unwrap();
         check_reader_result(
             &mut reader,
             &[
@@ -297,7 +298,7 @@ mod tests {
         )
         .cache(cache.clone());
         for _ in 0..3 {
-            let mut reader = builder.build().await.unwrap();
+            let mut reader = builder.build().await.unwrap().unwrap();
             check_reader_result(
                 &mut reader,
                 &[
@@ -377,11 +378,12 @@ mod tests {
             PathType::Bare,
             handle.clone(),
             object_store,
-        );
-        let reader = builder.build().await.unwrap();
+        )
+        .page_index_policy(PageIndexPolicy::Optional);
+        let reader = builder.build().await.unwrap().unwrap();
         let reader_metadata = reader.parquet_metadata();
 
-        assert_parquet_metadata_eq(writer_metadata, reader_metadata)
+        assert_parquet_metadata_equal(writer_metadata, reader_metadata);
     }
 
     #[tokio::test]
@@ -433,7 +435,7 @@ mod tests {
             object_store,
         )
         .predicate(predicate);
-        let mut reader = builder.build().await.unwrap();
+        let mut reader = builder.build().await.unwrap().unwrap();
         check_reader_result(
             &mut reader,
             &[
@@ -485,7 +487,7 @@ mod tests {
             handle.clone(),
             object_store,
         );
-        let mut reader = builder.build().await.unwrap();
+        let mut reader = builder.build().await.unwrap().unwrap();
         check_reader_result(&mut reader, &[new_batch_by_range(&["a", "z"], 200, 230)]).await;
     }
 
@@ -539,7 +541,7 @@ mod tests {
             object_store,
         )
         .predicate(predicate);
-        let mut reader = builder.build().await.unwrap();
+        let mut reader = builder.build().await.unwrap().unwrap();
         check_reader_result(&mut reader, &[new_batch_by_range(&["b", "h"], 150, 200)]).await;
     }
 
@@ -626,7 +628,7 @@ mod tests {
             handle.clone(),
             object_store,
         );
-        let mut reader = builder.build().await.unwrap();
+        let mut reader = builder.build().await.unwrap().unwrap();
         check_reader_result(
             &mut reader,
             &[
@@ -692,7 +694,7 @@ mod tests {
                 file_handle,
                 object_store.clone(),
             );
-            let mut reader = builder.build().await.unwrap();
+            let mut reader = builder.build().await.unwrap().unwrap();
             while let Some(batch) = reader.next_batch().await.unwrap() {
                 rows_read += batch.num_rows();
             }
@@ -881,7 +883,11 @@ mod tests {
         .cache(CacheStrategy::EnableAll(cache.clone()));
 
         let mut metrics = ReaderMetrics::default();
-        let (context, selection) = builder.build_reader_input(&mut metrics).await.unwrap();
+        let (context, selection) = builder
+            .build_reader_input(&mut metrics)
+            .await
+            .unwrap()
+            .unwrap();
         let mut reader = ParquetReader::new(Arc::new(context), selection)
             .await
             .unwrap();
@@ -937,11 +943,8 @@ mod tests {
         .cache(CacheStrategy::EnableAll(cache.clone()));
 
         let mut metrics = ReaderMetrics::default();
-        let (context, selection) = builder.build_reader_input(&mut metrics).await.unwrap();
-        let mut reader = ParquetReader::new(Arc::new(context), selection)
-            .await
-            .unwrap();
-        check_reader_result(&mut reader, &[]).await;
+        let read_input = builder.build_reader_input(&mut metrics).await.unwrap();
+        assert!(read_input.is_none());
 
         assert_eq!(metrics.filter_metrics.rg_total, 4);
         assert_eq!(metrics.filter_metrics.rg_minmax_filtered, 2);
@@ -994,7 +997,11 @@ mod tests {
         .cache(CacheStrategy::EnableAll(cache.clone()));
 
         let mut metrics = ReaderMetrics::default();
-        let (context, selection) = builder.build_reader_input(&mut metrics).await.unwrap();
+        let (context, selection) = builder
+            .build_reader_input(&mut metrics)
+            .await
+            .unwrap()
+            .unwrap();
         let mut reader = ParquetReader::new(Arc::new(context), selection)
             .await
             .unwrap();
@@ -1180,7 +1187,7 @@ mod tests {
         .await;
 
         writer
-            .write_all_flat(flat_source, write_opts)
+            .write_all_flat(flat_source, None, write_opts)
             .await
             .unwrap()
             .remove(0)
@@ -1291,7 +1298,7 @@ mod tests {
         .await;
 
         let info = writer
-            .write_all_flat(flat_source, &write_opts)
+            .write_all_flat(flat_source, None, &write_opts)
             .await
             .unwrap()
             .remove(0);
@@ -1360,7 +1367,7 @@ mod tests {
             handle.clone(),
             object_store.clone(),
         );
-        let mut reader = builder.build().await.unwrap();
+        let mut reader = builder.build().await.unwrap().unwrap();
         let mut normal_batches = Vec::new();
         while let Some(batch) = reader.next_batch().await.unwrap() {
             normal_batches.push(batch);
@@ -1382,7 +1389,7 @@ mod tests {
             override_handle,
             object_store.clone(),
         );
-        let mut reader = builder.build().await.unwrap();
+        let mut reader = builder.build().await.unwrap().unwrap();
         let mut override_batches = Vec::new();
         while let Some(batch) = reader.next_batch().await.unwrap() {
             override_batches.push(batch);
@@ -1490,7 +1497,11 @@ mod tests {
         .cache(CacheStrategy::EnableAll(cache.clone()));
 
         let mut metrics = ReaderMetrics::default();
-        let (_context, selection) = builder.build_reader_input(&mut metrics).await.unwrap();
+        let (_context, selection) = builder
+            .build_reader_input(&mut metrics)
+            .await
+            .unwrap()
+            .unwrap();
 
         // Verify selection contains only RG 0 (tag_0="b", ts 0-100)
         assert_eq!(selection.row_group_count(), 1);
@@ -1589,7 +1600,11 @@ mod tests {
         .cache(CacheStrategy::EnableAll(cache.clone()));
 
         let mut metrics = ReaderMetrics::default();
-        let (_context, selection) = builder.build_reader_input(&mut metrics).await.unwrap();
+        let (_context, selection) = builder
+            .build_reader_input(&mut metrics)
+            .await
+            .unwrap()
+            .unwrap();
 
         // Verify selection contains RG 0 and RG 1
         assert_eq!(selection.row_group_count(), 2);
@@ -1690,7 +1705,11 @@ mod tests {
         .cache(CacheStrategy::EnableAll(cache.clone()));
 
         let mut metrics = ReaderMetrics::default();
-        let (_context, selection) = builder.build_reader_input(&mut metrics).await.unwrap();
+        let (_context, selection) = builder
+            .build_reader_input(&mut metrics)
+            .await
+            .unwrap()
+            .unwrap();
 
         // RG 0 has 50 matching rows (tag_0="b")
         assert_eq!(selection.row_group_count(), 1);
@@ -1793,7 +1812,11 @@ mod tests {
         .cache(CacheStrategy::EnableAll(cache.clone()));
 
         let mut metrics = ReaderMetrics::default();
-        let (_context, selection) = builder.build_reader_input(&mut metrics).await.unwrap();
+        let (_context, selection) = builder
+            .build_reader_input(&mut metrics)
+            .await
+            .unwrap()
+            .unwrap();
 
         // Verify selection contains RG 0 and RG 1
         assert_eq!(selection.row_group_count(), 2);
@@ -2053,7 +2076,11 @@ mod tests {
         .cache(CacheStrategy::EnableAll(cache.clone()));
 
         let mut metrics = ReaderMetrics::default();
-        let (_context, selection) = builder.build_reader_input(&mut metrics).await.unwrap();
+        let (_context, selection) = builder
+            .build_reader_input(&mut metrics)
+            .await
+            .unwrap()
+            .unwrap();
 
         // Verify selection contains RG 0 and RG 1 (text_bloom="hello world")
         assert_eq!(selection.row_group_count(), 2);
@@ -2098,7 +2125,11 @@ mod tests {
         .cache(CacheStrategy::EnableAll(cache.clone()));
 
         let mut metrics = ReaderMetrics::default();
-        let (_context, selection) = builder.build_reader_input(&mut metrics).await.unwrap();
+        let (_context, selection) = builder
+            .build_reader_input(&mut metrics)
+            .await
+            .unwrap()
+            .unwrap();
 
         // Verify selection contains RG 2 and RG 3 (text_tantivy="lazy dog")
         assert_eq!(selection.row_group_count(), 2);

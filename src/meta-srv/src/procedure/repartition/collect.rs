@@ -15,7 +15,7 @@
 use std::any::Any;
 
 use common_procedure::{Context as ProcedureContext, ProcedureId, Status, watcher};
-use common_telemetry::error;
+use common_telemetry::{error, info};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
@@ -64,9 +64,10 @@ impl Collect {
 impl State for Collect {
     async fn next(
         &mut self,
-        _ctx: &mut Context,
+        ctx: &mut Context,
         procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
+        let table_id = ctx.persistent_ctx.table_id;
         for procedure_meta in self.inflight_procedures.iter() {
             let procedure_id = procedure_meta.procedure_id;
             let group_id = procedure_meta.group_id;
@@ -93,8 +94,21 @@ impl State for Collect {
             }
         }
 
-        if !self.failed_procedures.is_empty() || !self.unknown_procedures.is_empty() {
+        let inflight = self.inflight_procedures.len();
+        let succeeded = self.succeeded_procedures.len();
+        let failed = self.failed_procedures.len();
+        let unknown = self.unknown_procedures.len();
+        info!(
+            "Collected repartition group results for table_id: {}, inflight: {}, succeeded: {}, failed: {}, unknown: {}",
+            table_id, inflight, succeeded, failed, unknown
+        );
+
+        if failed > 0 || unknown > 0 {
             // TODO(weny): retry the failed or unknown procedures.
+        }
+
+        if let Some(start_time) = ctx.volatile_ctx.dispatch_start_time.take() {
+            ctx.update_finish_groups_elapsed(start_time.elapsed());
         }
 
         Ok((Box::new(DeallocateRegion), Status::executing(true)))

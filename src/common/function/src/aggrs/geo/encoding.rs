@@ -152,9 +152,9 @@ impl DfAccumulator for JsonEncodePathAccumulator {
         let lng_array = lng_array.as_primitive::<Float64Type>();
 
         let mut coords = Vec::with_capacity(len);
-        for i in 0..len {
-            let lng = lng_array.value(i);
-            let lat = lat_array.value(i);
+        let lng_values = lng_array.values();
+        let lat_values = lat_array.values();
+        for (&lng, &lat) in lng_values.iter().zip(lat_values.iter()).take(len) {
             coords.push(vec![lng, lat]);
         }
 

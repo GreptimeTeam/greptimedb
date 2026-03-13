@@ -40,8 +40,8 @@ use crate::peer::{Peer, PeerResolver};
 use crate::region_keeper::MemoryRegionKeeper;
 use crate::region_registry::LeaderRegionRegistry;
 use crate::sequence::SequenceBuilder;
-use crate::wal_options_allocator::topic_pool::KafkaTopicPool;
-use crate::wal_options_allocator::{WalOptionsAllocator, build_kafka_topic_creator};
+use crate::wal_provider::topic_pool::KafkaTopicPool;
+use crate::wal_provider::{WalProvider, build_kafka_topic_creator};
 use crate::{DatanodeId, FlownodeId};
 
 #[async_trait::async_trait]
@@ -187,7 +187,7 @@ pub fn new_ddl_context_with_kv_backend(
                 .initial(1024)
                 .build(),
         ),
-        Arc::new(WalOptionsAllocator::default()),
+        Arc::new(WalProvider::default()),
     ));
     let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
     let flow_metadata_allocator =

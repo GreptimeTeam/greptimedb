@@ -321,10 +321,10 @@ mod tests {
             Ok(()),
             Ok(()),
             Err(
-                "Failed to merge JSON datatype: datatypes have conflict, this: Number(I64), that: String",
+                r#"Failed to merge JSON datatype: datatypes have conflict, this: "<Number>", that: "<String>""#,
             ),
             Err(
-                "Failed to merge JSON datatype: datatypes have conflict, this: Number(I64), that: Array[Bool]",
+                r#"Failed to merge JSON datatype: datatypes have conflict, this: "<Number>", that: ["<Bool>"]"#,
             ),
         ];
         let mut builder = JsonVectorBuilder::new(JsonNativeType::Null, 1);
@@ -396,12 +396,12 @@ mod tests {
         // test children builders:
         assert_eq!(builder.builders.len(), 6);
         let expect_types = [
-            r#"Json<Object{"list": Array[Number(I64)], "s": String}>"#,
-            r#"Json<Object{"float": Number(F64), "s": String}>"#,
-            r#"Json<Object{"float": Number(F64), "int": Number(I64)}>"#,
-            r#"Json<Object{"int": Number(I64), "object": Object{"hello": String, "timestamp": Number(I64)}}>"#,
-            r#"Json<Object{"nested": Object{"a": Object{"b": Object{"b": Object{"a": String}}}}, "object": Object{"timestamp": Number(I64)}}>"#,
-            r#"Json<Object{"nested": Object{"a": Object{"b": Object{"a": Object{"b": String}}}}, "object": Object{"timestamp": Number(I64)}}>"#,
+            r#"Json<{"list":["<Number>"],"s":"<String>"}>"#,
+            r#"Json<{"float":"<Number>","s":"<String>"}>"#,
+            r#"Json<{"float":"<Number>","int":"<Number>"}>"#,
+            r#"Json<{"int":"<Number>","object":{"hello":"<String>","timestamp":"<Number>"}}>"#,
+            r#"Json<{"nested":{"a":{"b":{"b":{"a":"<String>"}}}},"object":{"timestamp":"<Number>"}}>"#,
+            r#"Json<{"nested":{"a":{"b":{"a":{"b":"<String>"}}}},"object":{"timestamp":"<Number>"}}>"#,
         ];
         let expect_vectors = [
             r#"
@@ -456,7 +456,7 @@ mod tests {
         }
 
         // test final merged json type:
-        let expected = r#"Json<Object{"float": Number(F64), "int": Number(I64), "list": Array[Number(I64)], "nested": Object{"a": Object{"b": Object{"a": Object{"b": String}, "b": Object{"a": String}}}}, "object": Object{"hello": String, "timestamp": Number(I64)}, "s": String}>"#;
+        let expected = r#"Json<{"float":"<Number>","int":"<Number>","list":["<Number>"],"nested":{"a":{"b":{"a":{"b":"<String>"},"b":{"a":"<String>"}}}},"object":{"hello":"<String>","timestamp":"<Number>"},"s":"<String>"}>"#;
         assert_eq!(builder.data_type().to_string(), expected);
 
         // test final produced vector:

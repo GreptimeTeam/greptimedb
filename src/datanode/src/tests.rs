@@ -25,7 +25,7 @@ use common_runtime::Runtime;
 use common_runtime::runtime::{BuilderBuild, RuntimeTrait};
 use datafusion::catalog::TableFunction;
 use datafusion::dataframe::DataFrame;
-use datafusion_expr::{AggregateUDF, LogicalPlan};
+use datafusion_expr::{AggregateUDF, LogicalPlan, WindowUDF};
 use query::planner::LogicalPlanner;
 use query::query_engine::{DescribeResult, QueryEngineState};
 use query::{QueryEngine, QueryEngineContext};
@@ -84,6 +84,8 @@ impl QueryEngine for MockQueryEngine {
 
     fn register_table_function(&self, _func: Arc<TableFunction>) {}
 
+    fn register_window_function(&self, _func: WindowUDF) {}
+
     fn read_table(&self, _table: TableRef) -> query::error::Result<DataFrame> {
         unimplemented!()
     }
@@ -115,12 +117,17 @@ pub type MockSetReadonlyGracefullyHandler =
 pub type MockGetMetadataHandler =
     Box<dyn Fn(RegionId) -> Result<RegionMetadataRef, Error> + Send + Sync>;
 
+pub type MockSyncRegionHandler = Box<
+    dyn Fn(RegionId, SyncRegionFromRequest) -> Result<SyncRegionFromResponse, Error> + Send + Sync,
+>;
+
 pub struct MockRegionEngine {
     sender: Sender<(RegionId, RegionRequest)>,
     pub(crate) handle_request_delay: Option<Duration>,
     pub(crate) handle_request_mock_fn: Option<MockRequestHandler>,
     pub(crate) handle_set_readonly_gracefully_mock_fn: Option<MockSetReadonlyGracefullyHandler>,
     pub(crate) handle_get_metadata_mock_fn: Option<MockGetMetadataHandler>,
+    pub(crate) handle_sync_region_mock_fn: Option<MockSyncRegionHandler>,
     pub(crate) mock_role: Option<Option<RegionRole>>,
     engine: String,
 }
@@ -136,6 +143,7 @@ impl MockRegionEngine {
                 handle_request_mock_fn: None,
                 handle_set_readonly_gracefully_mock_fn: None,
                 handle_get_metadata_mock_fn: None,
+                handle_sync_region_mock_fn: None,
                 mock_role: None,
                 engine: engine.to_string(),
             }),
@@ -156,6 +164,7 @@ impl MockRegionEngine {
                 handle_request_mock_fn: Some(mock_fn),
                 handle_set_readonly_gracefully_mock_fn: None,
                 handle_get_metadata_mock_fn: None,
+                handle_sync_region_mock_fn: None,
                 mock_role: None,
                 engine: engine.to_string(),
             }),
@@ -176,6 +185,7 @@ impl MockRegionEngine {
                 handle_request_mock_fn: None,
                 handle_set_readonly_gracefully_mock_fn: None,
                 handle_get_metadata_mock_fn: Some(mock_fn),
+                handle_sync_region_mock_fn: None,
                 mock_role: None,
                 engine: engine.to_string(),
             }),
@@ -197,6 +207,7 @@ impl MockRegionEngine {
             handle_request_mock_fn: None,
             handle_set_readonly_gracefully_mock_fn: None,
             handle_get_metadata_mock_fn: None,
+            handle_sync_region_mock_fn: None,
             mock_role: None,
             engine: engine.to_string(),
         };
@@ -286,10 +297,14 @@ impl RegionEngine for MockRegionEngine {
 
     async fn sync_region(
         &self,
-        _region_id: RegionId,
-        _request: SyncRegionFromRequest,
+        region_id: RegionId,
+        request: SyncRegionFromRequest,
     ) -> Result<SyncRegionFromResponse, BoxedError> {
-        unimplemented!()
+        if let Some(mock_fn) = &self.handle_sync_region_mock_fn {
+            return mock_fn(region_id, request).map_err(BoxedError::new);
+        };
+
+        Ok(SyncRegionFromResponse::Mito { synced: true })
     }
 
     async fn remap_manifests(

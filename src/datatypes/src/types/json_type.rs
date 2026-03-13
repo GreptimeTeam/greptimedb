@@ -13,12 +13,13 @@
 // limitations under the License.
 
 use std::collections::BTreeMap;
-use std::fmt::{Display, Formatter};
+use std::fmt::{Debug, Display, Formatter};
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use arrow::datatypes::DataType as ArrowDataType;
 use common_base::bytes::Bytes;
+use regex::{Captures, Regex};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
@@ -134,24 +135,24 @@ impl From<&ConcreteDataType> for JsonNativeType {
 impl Display for JsonNativeType {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            JsonNativeType::Null => write!(f, "Null"),
-            JsonNativeType::Bool => write!(f, "Bool"),
-            JsonNativeType::Number(t) => {
-                write!(f, "Number({t:?})")
+            JsonNativeType::Null => write!(f, r#""<Null>""#),
+            JsonNativeType::Bool => write!(f, r#""<Bool>""#),
+            JsonNativeType::Number(_) => {
+                write!(f, r#""<Number>""#)
             }
-            JsonNativeType::String => write!(f, "String"),
+            JsonNativeType::String => write!(f, r#""<String>""#),
             JsonNativeType::Array(item_type) => {
-                write!(f, "Array[{}]", item_type)
+                write!(f, "[{}]", item_type)
             }
             JsonNativeType::Object(object) => {
                 write!(
                     f,
-                    "Object{{{}}}",
+                    "{{{}}}",
                     object
                         .iter()
-                        .map(|(k, v)| format!(r#""{k}": {v}"#))
+                        .map(|(k, v)| format!(r#""{k}":{v}"#))
                         .collect::<Vec<_>>()
-                        .join(", ")
+                        .join(",")
                 )
             }
         }
@@ -183,7 +184,11 @@ impl JsonType {
         }
     }
 
-    pub(crate) fn native_type(&self) -> &JsonNativeType {
+    pub fn is_native_type(&self) -> bool {
+        matches!(self.format, JsonFormat::Native(_))
+    }
+
+    pub fn native_type(&self) -> &JsonNativeType {
         match &self.format {
             JsonFormat::Jsonb => &JsonNativeType::String,
             JsonFormat::Native(x) => x.as_ref(),
@@ -385,6 +390,9 @@ impl Display for JsonType {
 
 /// Converts a json type value to string
 pub fn jsonb_to_string(val: &[u8]) -> Result<String> {
+    if val.is_empty() {
+        return Ok("".to_string());
+    }
     match jsonb::from_slice(val) {
         Ok(jsonb_value) => {
             let serialized = jsonb_value.to_string();
@@ -397,8 +405,81 @@ pub fn jsonb_to_string(val: &[u8]) -> Result<String> {
 /// Converts a json type value to serde_json::Value
 pub fn jsonb_to_serde_json(val: &[u8]) -> Result<serde_json::Value> {
     let json_string = jsonb_to_string(val)?;
-    serde_json::Value::from_str(json_string.as_str())
-        .context(DeserializeSnafu { json: json_string })
+    jsonb_string_to_serde_value(&json_string)
+}
+
+/// Attempts to deserialize a JSON text into `serde_json::Value`, with a best-effort
+/// fallback for Rust-style Unicode escape sequences.
+///
+/// This function is intended to be used on JSON strings produced from the internal
+/// JSONB representation (e.g. via [`jsonb_to_string`]). It first calls
+/// `serde_json::Value::from_str` directly. If that succeeds, the parsed value is
+/// returned as-is.
+///
+/// If the initial parse fails, the input is scanned for Rust-style Unicode code
+/// point escapes of the form `\\u{H...}` (a backslash, `u`, an opening brace,
+/// followed by 1–6 hexadecimal digits, and a closing brace). Each such escape is
+/// converted into JSON-compatible UTF‑16 escape sequences:
+///
+/// - For code points in the Basic Multilingual Plane (≤ `0xFFFF`), the escape is
+///   converted to a single JSON `\\uXXXX` sequence with four uppercase hex digits.
+/// - For code points above `0xFFFF` and less than Unicode max code point `0x10FFFF`,
+///   the code point is encoded as a UTF‑16 surrogate pair and emitted as two consecutive
+///   `\\uXXXX` sequences (as JSON format required).
+///
+/// After this normalization, the function retries parsing the resulting string as
+/// JSON and returns the deserialized value or a `DeserializeSnafu` error if it
+/// still cannot be parsed.
+fn jsonb_string_to_serde_value(json: &str) -> Result<serde_json::Value> {
+    match serde_json::Value::from_str(json) {
+        Ok(v) => Ok(v),
+        Err(e) => {
+            // If above deserialization is failed, the JSON string might contain some Rust chars
+            // that are somehow incorrectly represented as Unicode code point literal. For example,
+            // "\u{fe0f}". We have to convert them to JSON compatible format, like "\uFE0F", then
+            // try to deserialize the JSON string again.
+            if !e.is_syntax() || !e.to_string().contains("invalid escape") {
+                return Err(e).context(DeserializeSnafu { json });
+            }
+
+            static UNICODE_CODE_POINT_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
+                // Match literal "\u{...}" sequences, capturing 1–6 (code point range) hex digits
+                // inside braces.
+                Regex::new(r"\\u\{([0-9a-fA-F]{1,6})}").unwrap_or_else(|e| panic!("{}", e))
+            });
+
+            let v = UNICODE_CODE_POINT_PATTERN.replace_all(json, |caps: &Captures| {
+                // Extract the hex payload (without braces) and parse to a code point.
+                let hex = &caps[1];
+                let Ok(code) = u32::from_str_radix(hex, 16) else {
+                    // On parse failure, leave the original escape sequence unchanged.
+                    return caps[0].to_string();
+                };
+
+                if code <= 0xFFFF {
+                    // Basic Multilingual Plane: JSON can represent this directly as \uXXXX.
+                    format!("\\u{:04X}", code)
+                } else if code > 0x10FFFF {
+                    // Beyond max Unicode code point
+                    caps[0].to_string()
+                } else {
+                    // Supplementary planes: JSON needs UTF-16 surrogate pairs.
+                    // Convert the code point to a 20-bit value.
+                    let code = code - 0x10000;
+
+                    // High surrogate: top 10 bits, offset by 0xD800.
+                    let high = 0xD800 + ((code >> 10) & 0x3FF);
+
+                    // Low surrogate: bottom 10 bits, offset by 0xDC00.
+                    let low = 0xDC00 + (code & 0x3FF);
+
+                    // Emit two \uXXXX escapes in sequence.
+                    format!("\\u{:04X}\\u{:04X}", high, low)
+                }
+            });
+            serde_json::Value::from_str(&v).context(DeserializeSnafu { json })
+        }
+    }
 }
 
 /// Parses a string to a json type value
@@ -412,6 +493,49 @@ pub fn parse_string_to_jsonb(s: &str) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     use crate::json::JsonStructureSettings;
+
+    #[test]
+    fn test_jsonb_string_to_serde_value() -> Result<()> {
+        let valid_cases = vec![
+            (r#"{"data": "simple ascii"}"#, r#"{"data":"simple ascii"}"#),
+            (
+                r#"{"data": "Greek sigma: \u{03a3}"}"#,
+                r#"{"data":"Greek sigma: Σ"}"#,
+            ),
+            (
+                r#"{"data": "Joker card: \u{1f0df}"}"#,
+                r#"{"data":"Joker card: 🃟"}"#,
+            ),
+            (
+                r#"{"data": "BMP boundary: \u{ffff}"}"#,
+                r#"{"data":"BMP boundary: ￿"}"#,
+            ),
+            (
+                r#"{"data": "Supplementary min: \u{10000}"}"#,
+                r#"{"data":"Supplementary min: 𐀀"}"#,
+            ),
+            (
+                r#"{"data": "Supplementary max: \u{10ffff}"}"#,
+                r#"{"data":"Supplementary max: 􏿿"}"#,
+            ),
+        ];
+        for (input, expect) in valid_cases {
+            let v = jsonb_string_to_serde_value(input)?;
+            assert_eq!(v.to_string(), expect);
+        }
+
+        let invalid_cases = vec![
+            r#"{"data": "Invalid hex: \u{gggg}"}"#,
+            r#"{"data": "Beyond max Unicode code point: \u{110000}"}"#,
+            r#"{"data": "Out of range: \u{1100000}"}"#, // 7 digit
+            r#"{"data": "Empty braces: \u{}"}"#,
+        ];
+        for input in invalid_cases {
+            let result = jsonb_string_to_serde_value(input);
+            assert!(result.is_err());
+        }
+        Ok(())
+    }
 
     #[test]
     fn test_json_type_include() {
@@ -650,15 +774,16 @@ mod tests {
             "list": [1, 2, 3],
             "object": {"a": 1}
         }"#;
-        let expected = r#"Json<Object{"hello": String, "list": Array[Number(I64)], "object": Object{"a": Number(I64)}}>"#;
+        let expected =
+            r#"Json<{"hello":"<String>","list":["<Number>"],"object":{"a":"<Number>"}}>"#;
         test(json, json_type, Ok(expected))?;
 
         // cannot merge with other non-object json values:
         let jsons = [r#""s""#, "1", "[1]"];
         let expects = [
-            r#"Failed to merge JSON datatype: datatypes have conflict, this: Object{"hello": String, "list": Array[Number(I64)], "object": Object{"a": Number(I64)}}, that: String"#,
-            r#"Failed to merge JSON datatype: datatypes have conflict, this: Object{"hello": String, "list": Array[Number(I64)], "object": Object{"a": Number(I64)}}, that: Number(I64)"#,
-            r#"Failed to merge JSON datatype: datatypes have conflict, this: Object{"hello": String, "list": Array[Number(I64)], "object": Object{"a": Number(I64)}}, that: Array[Number(I64)]"#,
+            r#"Failed to merge JSON datatype: datatypes have conflict, this: {"hello":"<String>","list":["<Number>"],"object":{"a":"<Number>"}}, that: "<String>""#,
+            r#"Failed to merge JSON datatype: datatypes have conflict, this: {"hello":"<String>","list":["<Number>"],"object":{"a":"<Number>"}}, that: "<Number>""#,
+            r#"Failed to merge JSON datatype: datatypes have conflict, this: {"hello":"<String>","list":["<Number>"],"object":{"a":"<Number>"}}, that: ["<Number>"]"#,
         ];
         for (json, expect) in jsons.into_iter().zip(expects.into_iter()) {
             test(json, json_type, Err(expect))?;
@@ -670,7 +795,7 @@ mod tests {
             "float": 0.123,
             "no": 42
         }"#;
-        let expected = r#"Failed to merge JSON datatype: datatypes have conflict, this: String, that: Number(I64)"#;
+        let expected = r#"Failed to merge JSON datatype: datatypes have conflict, this: "<String>", that: "<Number>""#;
         test(json, json_type, Err(expected))?;
 
         // can merge with another json object:
@@ -679,7 +804,7 @@ mod tests {
             "float": 0.123,
             "int": 42
         }"#;
-        let expected = r#"Json<Object{"float": Number(F64), "hello": String, "int": Number(I64), "list": Array[Number(I64)], "object": Object{"a": Number(I64)}}>"#;
+        let expected = r#"Json<{"float":"<Number>","hello":"<String>","int":"<Number>","list":["<Number>"],"object":{"a":"<Number>"}}>"#;
         test(json, json_type, Ok(expected))?;
 
         // can merge with some complex nested json object:
@@ -689,7 +814,7 @@ mod tests {
             "float": 0.456,
             "int": 0
         }"#;
-        let expected = r#"Json<Object{"float": Number(F64), "hello": String, "int": Number(I64), "list": Array[Number(I64)], "object": Object{"a": Number(I64), "foo": String, "l": Array[String], "o": Object{"key": String}}}>"#;
+        let expected = r#"Json<{"float":"<Number>","hello":"<String>","int":"<Number>","list":["<Number>"],"object":{"a":"<Number>","foo":"<String>","l":["<String>"],"o":{"key":"<String>"}}}>"#;
         test(json, json_type, Ok(expected))?;
 
         Ok(())

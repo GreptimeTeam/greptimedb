@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 api.workspace = true
+arc-swap = "1.6"
 async-trait.workspace = true
 chrono.workspace = true
 common-base.workspace = true

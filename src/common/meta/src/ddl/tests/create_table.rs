@@ -162,7 +162,7 @@ async fn test_on_prepare_table_exists_err() {
         )
         .await
         .unwrap();
-    let mut procedure = CreateTableProcedure::new(task, ddl_context);
+    let mut procedure = CreateTableProcedure::new(task, ddl_context).unwrap();
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err, Error::TableAlreadyExists { .. });
     assert_eq!(err.status_code(), StatusCode::TableAlreadyExists);
@@ -185,7 +185,7 @@ async fn test_on_prepare_with_create_if_table_exists() {
         )
         .await
         .unwrap();
-    let mut procedure = CreateTableProcedure::new(task, ddl_context);
+    let mut procedure = CreateTableProcedure::new(task, ddl_context).unwrap();
     let status = procedure.on_prepare().await.unwrap();
     assert_matches!(status, Status::Done { output: Some(..) });
     let table_id = *status.downcast_output_ref::<u32>().unwrap();
@@ -198,7 +198,7 @@ async fn test_on_prepare_without_create_if_table_exists() {
     let ddl_context = new_ddl_context(node_manager);
     let mut task = test_create_table_task("foo");
     task.create_table.create_if_not_exists = true;
-    let mut procedure = CreateTableProcedure::new(task, ddl_context);
+    let mut procedure = CreateTableProcedure::new(task, ddl_context).unwrap();
     let status = procedure.on_prepare().await.unwrap();
     assert_matches!(
         status,
@@ -217,7 +217,7 @@ async fn test_on_datanode_create_regions_should_retry() {
     let ddl_context = new_ddl_context(node_manager);
     let task = test_create_table_task("foo");
     assert!(!task.create_table.create_if_not_exists);
-    let mut procedure = CreateTableProcedure::new(task, ddl_context);
+    let mut procedure = CreateTableProcedure::new(task, ddl_context).unwrap();
     procedure.on_prepare().await.unwrap();
     let ctx = ProcedureContext {
         procedure_id: ProcedureId::random(),
@@ -234,7 +234,7 @@ async fn test_on_datanode_create_regions_should_not_retry() {
     let ddl_context = new_ddl_context(node_manager);
     let task = test_create_table_task("foo");
     assert!(!task.create_table.create_if_not_exists);
-    let mut procedure = CreateTableProcedure::new(task, ddl_context);
+    let mut procedure = CreateTableProcedure::new(task, ddl_context).unwrap();
     procedure.on_prepare().await.unwrap();
     let ctx = ProcedureContext {
         procedure_id: ProcedureId::random(),
@@ -251,7 +251,7 @@ async fn test_on_create_metadata_error() {
     let ddl_context = new_ddl_context(node_manager);
     let task = test_create_table_task("foo");
     assert!(!task.create_table.create_if_not_exists);
-    let mut procedure = CreateTableProcedure::new(task.clone(), ddl_context.clone());
+    let mut procedure = CreateTableProcedure::new(task.clone(), ddl_context.clone()).unwrap();
     procedure.on_prepare().await.unwrap();
     let ctx = ProcedureContext {
         procedure_id: ProcedureId::random(),
@@ -284,7 +284,7 @@ async fn test_on_create_metadata() {
     let ddl_context = new_ddl_context(node_manager);
     let task = test_create_table_task("foo");
     assert!(!task.create_table.create_if_not_exists);
-    let mut procedure = CreateTableProcedure::new(task, ddl_context.clone());
+    let mut procedure = CreateTableProcedure::new(task, ddl_context.clone()).unwrap();
     procedure.on_prepare().await.unwrap();
     let ctx = ProcedureContext {
         procedure_id: ProcedureId::random(),
@@ -312,16 +312,16 @@ async fn test_memory_region_keeper_guard_dropped_on_procedure_done() {
     let ddl_context = new_ddl_context_with_kv_backend(node_manager, kv_backend);
 
     let task = test_create_table_task("foo");
-    let mut procedure = CreateTableProcedure::new(task, ddl_context.clone());
+    let mut procedure = CreateTableProcedure::new(task, ddl_context.clone()).unwrap();
 
     execute_procedure_until(&mut procedure, |p| {
-        p.creator.data.state == CreateTableState::CreateMetadata
+        p.data.state == CreateTableState::CreateMetadata
     })
     .await;
 
     // Ensure that after running to the state `CreateMetadata`(just past `DatanodeCreateRegions`),
     // the opening regions should be recorded:
-    let guards = &procedure.creator.opening_regions;
+    let guards = &procedure.opening_regions;
     assert_eq!(guards.len(), 1);
     let (datanode_id, region_id) = (0, RegionId::new(procedure.table_id(), 0));
     assert_eq!(guards[0].info(), (datanode_id, region_id));
@@ -334,7 +334,7 @@ async fn test_memory_region_keeper_guard_dropped_on_procedure_done() {
     execute_procedure_until_done(&mut procedure).await;
 
     // Ensure that when run to the end, the opening regions should be cleared:
-    let guards = &procedure.creator.opening_regions;
+    let guards = &procedure.opening_regions;
     assert!(guards.is_empty());
     assert!(
         !ddl_context

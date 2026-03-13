@@ -1,0 +1,493 @@
+-- Dynamic Filter Test: Combined Hash Join + TopK
+-- Tests dynamic filters with both hash join and TopK operators
+-- Test 3.1: Hash Join with TopK Subquery
+CREATE TABLE orders ("id" INT, customer_id INT, amount DOUBLE, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+CREATE TABLE customers (customer_id INT, "name" STRING, tier STRING, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+-- Insert test data
+INSERT INTO orders VALUES
+  (1, 1, 100.0, '2024-01-01 00:00:00'),
+  (2, 2, 200.0, '2024-01-02 00:00:00'),
+  (3, 3, 300.0, '2024-01-03 00:00:00'),
+  (4, 1, 150.0, '2024-01-04 00:00:00'),
+  (5, 2, 250.0, '2024-01-05 00:00:00'),
+  (6, 1, 175.0, '2024-01-06 00:00:00'),
+  (7, 3, 325.0, '2024-01-07 00:00:00'),
+  (8, 2, 225.0, '2024-01-08 00:00:00'),
+  (9, 1, 400.0, '2024-01-09 00:00:00'),
+  (10, 3, 500.0, '2024-01-10 00:00:00');
+
+Affected Rows: 10
+
+INSERT INTO customers VALUES
+  (1, 'Alice', 'gold', '2024-01-01 00:00:00'),
+  (2, 'Bob', 'silver', '2024-01-02 00:00:00'),
+  (3, 'Charlie', 'bronze', '2024-01-03 00:00:00');
+
+Affected Rows: 3
+
+-- Test: Hash join where probe side uses TopK
+-- This combines both dynamic filter sources: TopK generates filter on amount,
+-- and hash join generates filter on customer_id
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (=Hash.*) =REDACTED
+EXPLAIN SELECT top_orders."id", top_orders.amount, c."name", c.tier
+FROM (
+  SELECT "id", customer_id, amount, ts
+  FROM orders
+  ORDER BY amount DESC
+  LIMIT 5
+) top_orders
+JOIN customers c ON top_orders.customer_id = c.customer_id
+WHERE c.tier IN ('gold', 'bronze');
+
++---------------+-----------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                              |
++---------------+-----------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | Projection: top_orders.id, top_orders.amount, c.name, c.tier                                                                      |
+|               |   Inner Join: top_orders.customer_id = c.customer_id                                                                              |
+|               |     Projection: top_orders.id, top_orders.customer_id, top_orders.amount                                                          |
+|               |       MergeScan [is_placeholder=false, remote_input=[                                                                             |
+|               | SubqueryAlias: top_orders                                                                                                         |
+|               |   Limit: skip=0, fetch=5                                                                                                          |
+|               |     Sort: orders.amount DESC NULLS FIRST                                                                                          |
+|               |       Projection: orders.id, orders.customer_id, orders.amount, orders.ts                                                         |
+|               |         TableScan: orders                                                                                                         |
+|               | ]]                                                                                                                                |
+|               |     Filter: c.tier = Utf8("gold") OR c.tier = Utf8("bronze")                                                                      |
+|               |       Projection: c.customer_id, c.name, c.tier                                                                                   |
+|               |         MergeScan [is_placeholder=false, remote_input=[                                                                           |
+|               | SubqueryAlias: c                                                                                                                  |
+|               |   TableScan: customers                                                                                                            |
+|               | ]]                                                                                                                                |
+| physical_plan | HashJoinExec: mode=Partitioned, join_type=Inner, on=[(customer_id@1, customer_id@0)], projection=[id@0, amount@2, name@4, tier@5] |
+|               |   RepartitionExec: partitioning=REDACTED
+|               |     ProjectionExec: expr=[id@0 as id, customer_id@1 as customer_id, amount@2 as amount]                                           |
+|               |       MergeScanExec: REDACTED
+|               |   RepartitionExec: partitioning=REDACTED
+|               |     FilterExec: tier@2 = gold OR tier@2 = bronze                                                                                  |
+|               |       ProjectionExec: expr=[customer_id@0 as customer_id, name@1 as name, tier@2 as tier]                                         |
+|               |         MergeScanExec: REDACTED
+|               |                                                                                                                                   |
++---------------+-----------------------------------------------------------------------------------------------------------------------------------+
+
+-- SQLNESS REPLACE ("metrics_per_partition":\s*.*metrics=) "metrics_per_partition": REDACTED metrics=
+-- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
+-- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (=Hash.*) =REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE "(file_id|time_range_start|time_range_end)":"[^"]+" "$1":"REDACTED"
+-- SQLNESS REPLACE ("[a-z_]+":"[0-9\.]+(ns|us|µs|ms|s)") "DURATION": REDACTED
+-- SQLNESS REPLACE "(size|flat_format)":\s*(\d+|true|false) "$1":REDACTED
+-- SQLNESS REPLACE ,\s*filter=.*?metrics=  metrics=
+-- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+EXPLAIN ANALYZE VERBOSE SELECT top_orders."id", top_orders.amount, c."name", c.tier
+FROM (
+  SELECT "id", customer_id, amount, ts
+  FROM orders
+  ORDER BY amount DESC
+  LIMIT 5
+) top_orders
+JOIN customers c ON top_orders.customer_id = c.customer_id
+WHERE c.tier IN ('gold', 'bronze');
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(customer_id@1, customer_id@0)], projection=[id@0, amount@2, name@4, tier@5] metrics=REDACTED_|
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_ProjectionExec: expr=[id@0 as id, customer_id@1 as customer_id, amount@2 as amount] metrics=REDACTED_|
+|_|_|_MergeScanExec: REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_FilterExec: tier@2 = gold OR tier@2 = bronze metrics=REDACTED_|
+|_|_|_ProjectionExec: expr=[customer_id@0 as customer_id, name@1 as name, tier@2 as tier] metrics=REDACTED_|
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_SortPreservingMergeExec: [amount@2 DESC], fetch=5 metrics=REDACTED_|
+|_|_|_SortExec: TopK(fetch=5), expr=[amount@2 DESC], preserve_partitioning=[true] metrics=REDACTED_|
+|_|_|_SeqScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["id", "customer_id", "amount", "ts"], "dyn_filters": ["DynamicFilter [ empty ]"], "flat_format":REDACTED, "metrics_per_partition": REDACTED metrics=REDACTED |
+|_|_|_|
+| 1_| 0_|_CooperativeExec metrics=REDACTED_|
+|_|_|_SeqScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["customer_id", "name", "tier", "ts"], "flat_format":REDACTED, "metrics_per_partition": REDACTED metrics=REDACTED_|
+|_|_|_|
+|_|_| Total rows: REDACTED_|
++-+-+-+
+
+-- Verify correctness
+-- SQLNESS SORT_RESULT
+SELECT top_orders."id", top_orders.amount, c."name", c.tier
+FROM (
+  SELECT "id", customer_id, amount, ts
+  FROM orders
+  ORDER BY amount DESC
+  LIMIT 5
+) top_orders
+JOIN customers c ON top_orders.customer_id = c.customer_id
+WHERE c.tier IN ('gold', 'bronze');
+
++----+--------+---------+--------+
++----+--------+---------+--------+
++----+--------+---------+--------+
+| 10 | 500.0  | Charlie | bronze |
+| 3  | 300.0  | Charlie | bronze |
+| 7  | 325.0  | Charlie | bronze |
+| 9  | 400.0  | Alice   | gold   |
+| id | amount | name    | tier   |
+
+DROP TABLE orders;
+
+Affected Rows: 0
+
+DROP TABLE customers;
+
+Affected Rows: 0
+
+-- Test 3.2: TopK with Hash Join Subquery
+CREATE TABLE orders ("id" INT, customer_id INT, amount DOUBLE, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+CREATE TABLE customers (customer_id INT, "name" STRING, tier STRING, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+-- Insert test data
+INSERT INTO orders VALUES
+  (1, 1, 100.0, '2024-01-01 00:00:00'),
+  (2, 2, 200.0, '2024-01-02 00:00:00'),
+  (3, 3, 300.0, '2024-01-03 00:00:00'),
+  (4, 1, 150.0, '2024-01-04 00:00:00'),
+  (5, 2, 250.0, '2024-01-05 00:00:00'),
+  (6, 1, 175.0, '2024-01-06 00:00:00'),
+  (7, 3, 325.0, '2024-01-07 00:00:00'),
+  (8, 2, 225.0, '2024-01-08 00:00:00'),
+  (9, 1, 400.0, '2024-01-09 00:00:00'),
+  (10, 3, 500.0, '2024-01-10 00:00:00');
+
+Affected Rows: 10
+
+INSERT INTO customers VALUES
+  (1, 'Alice', 'gold', '2024-01-01 00:00:00'),
+  (2, 'Bob', 'silver', '2024-01-02 00:00:00'),
+  (3, 'Charlie', 'bronze', '2024-01-03 00:00:00');
+
+Affected Rows: 3
+
+-- Test: TopK where sorting side uses Hash Join
+-- Hash join produces customer info, then TopK sorts the joined results
+-- This tests that TopK dynamic filter works on hash join output
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (=Hash.*) =REDACTED
+EXPLAIN SELECT "id", customer_id, "name", tier, amount
+FROM (
+  SELECT o."id", o.customer_id, c."name", c.tier, o.amount
+  FROM orders o
+  JOIN customers c ON o.customer_id = c.customer_id
+  WHERE c.tier IN ('gold', 'silver')
+)
+ORDER BY amount DESC
+LIMIT 4;
+
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                   |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | Sort: o.amount DESC NULLS FIRST, fetch=4                                                                                                               |
+|               |   Projection: o.id, o.customer_id, c.name, c.tier, o.amount                                                                                            |
+|               |     Inner Join: o.customer_id = c.customer_id                                                                                                          |
+|               |       Projection: o.id, o.customer_id, o.amount                                                                                                        |
+|               |         MergeScan [is_placeholder=false, remote_input=[                                                                                                |
+|               | SubqueryAlias: o                                                                                                                                       |
+|               |   TableScan: orders                                                                                                                                    |
+|               | ]]                                                                                                                                                     |
+|               |       Filter: c.tier = Utf8("gold") OR c.tier = Utf8("silver")                                                                                         |
+|               |         Projection: c.customer_id, c.name, c.tier                                                                                                      |
+|               |           MergeScan [is_placeholder=false, remote_input=[                                                                                              |
+|               | SubqueryAlias: c                                                                                                                                       |
+|               |   TableScan: customers                                                                                                                                 |
+|               | ]]                                                                                                                                                     |
+| physical_plan | SortPreservingMergeExec: [amount@4 DESC], fetch=4                                                                                                      |
+|               |   SortExec: TopK(fetch=4), expr=[amount@4 DESC], preserve_partitioning=[true]                                                                          |
+|               |     ProjectionExec: expr=[id@0 as id, customer_id@1 as customer_id, name@3 as name, tier@4 as tier, amount@2 as amount]                                |
+|               |       HashJoinExec: mode=Partitioned, join_type=Inner, on=[(customer_id@1, customer_id@0)], projection=[id@0, customer_id@1, amount@2, name@4, tier@5] |
+|               |         RepartitionExec: partitioning=REDACTED
+|               |           ProjectionExec: expr=[id@0 as id, customer_id@1 as customer_id, amount@2 as amount]                                                          |
+|               |             MergeScanExec: REDACTED
+|               |         RepartitionExec: partitioning=REDACTED
+|               |           FilterExec: tier@2 = gold OR tier@2 = silver                                                                                                 |
+|               |             ProjectionExec: expr=[customer_id@0 as customer_id, name@1 as name, tier@2 as tier]                                                        |
+|               |               MergeScanExec: REDACTED
+|               |                                                                                                                                                        |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+-- SQLNESS REPLACE ("metrics_per_partition":\s*.*metrics=) "metrics_per_partition": REDACTED metrics=
+-- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
+-- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (=Hash.*) =REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE "(file_id|time_range_start|time_range_end)":"[^"]+" "$1":"REDACTED"
+-- SQLNESS REPLACE ("[a-z_]+":"[0-9\.]+(ns|us|µs|ms|s)") "DURATION": REDACTED
+-- SQLNESS REPLACE "(size|flat_format)":\s*(\d+|true|false) "$1":REDACTED
+-- SQLNESS REPLACE ,\s*filter=.*?metrics=  metrics=
+-- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+EXPLAIN ANALYZE VERBOSE SELECT "id", customer_id, "name", tier, amount
+FROM (
+  SELECT o."id", o.customer_id, c."name", c.tier, o.amount
+  FROM orders o
+  JOIN customers c ON o.customer_id = c.customer_id
+  WHERE c.tier IN ('gold', 'silver')
+)
+ORDER BY amount DESC
+LIMIT 4;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_SortPreservingMergeExec: [amount@4 DESC], fetch=4 metrics=REDACTED_|
+|_|_|_SortExec: TopK(fetch=4), expr=[amount@4 DESC], preserve_partitioning=[true] metrics=REDACTED_|
+|_|_|_ProjectionExec: expr=[id@0 as id, customer_id@1 as customer_id, name@3 as name, tier@4 as tier, amount@2 as amount] metrics=REDACTED_|
+|_|_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(customer_id@1, customer_id@0)], projection=[id@0, customer_id@1, amount@2, name@4, tier@5] metrics=REDACTED_|
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_ProjectionExec: expr=[id@0 as id, customer_id@1 as customer_id, amount@2 as amount] metrics=REDACTED_|
+|_|_|_MergeScanExec: REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_FilterExec: tier@2 = gold OR tier@2 = silver metrics=REDACTED_|
+|_|_|_ProjectionExec: expr=[customer_id@0 as customer_id, name@1 as name, tier@2 as tier] metrics=REDACTED_|
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_CooperativeExec metrics=REDACTED_|
+|_|_|_SeqScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["id", "customer_id", "amount", "ts"], "flat_format":REDACTED, "metrics_per_partition": REDACTED metrics=REDACTED |
+|_|_|_|
+| 1_| 0_|_CooperativeExec metrics=REDACTED_|
+|_|_|_SeqScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["customer_id", "name", "tier", "ts"], "flat_format":REDACTED, "metrics_per_partition": REDACTED metrics=REDACTED_|
+|_|_|_|
+|_|_| Total rows: REDACTED_|
++-+-+-+
+
+-- Verify correctness
+SELECT "id", customer_id, "name", tier, amount
+FROM (
+  SELECT o."id", o.customer_id, c."name", c.tier, o.amount
+  FROM orders o
+  JOIN customers c ON o.customer_id = c.customer_id
+  WHERE c.tier IN ('gold', 'silver')
+)
+ORDER BY amount DESC
+LIMIT 4;
+
++----+-------------+-------+--------+--------+
+| id | customer_id | name  | tier   | amount |
++----+-------------+-------+--------+--------+
+| 9  | 1           | Alice | gold   | 400.0  |
+| 5  | 2           | Bob   | silver | 250.0  |
+| 8  | 2           | Bob   | silver | 225.0  |
+| 2  | 2           | Bob   | silver | 200.0  |
++----+-------------+-------+--------+--------+
+
+DROP TABLE orders;
+
+Affected Rows: 0
+
+DROP TABLE customers;
+
+Affected Rows: 0
+
+-- Test 3.3: Multiple Dynamic Filters
+CREATE TABLE orders ("id" INT, customer_id INT, product_id INT, amount DOUBLE, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+CREATE TABLE customers (customer_id INT, "name" STRING, tier STRING, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+CREATE TABLE products (product_id INT, "name" STRING, "category" STRING, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+-- Insert test data
+INSERT INTO orders VALUES
+  (1, 1, 101, 100.0, '2024-01-01 00:00:00'),
+  (2, 2, 102, 200.0, '2024-01-02 00:00:00'),
+  (3, 3, 103, 300.0, '2024-01-03 00:00:00'),
+  (4, 1, 101, 150.0, '2024-01-04 00:00:00'),
+  (5, 2, 102, 250.0, '2024-01-05 00:00:00'),
+  (6, 1, 103, 175.0, '2024-01-06 00:00:00'),
+  (7, 3, 101, 325.0, '2024-01-07 00:00:00'),
+  (8, 2, 102, 225.0, '2024-01-08 00:00:00'),
+  (9, 1, 103, 400.0, '2024-01-09 00:00:00'),
+  (10, 3, 101, 500.0, '2024-01-10 00:00:00');
+
+Affected Rows: 10
+
+INSERT INTO customers VALUES
+  (1, 'Alice', 'gold', '2024-01-01 00:00:00'),
+  (2, 'Bob', 'silver', '2024-01-02 00:00:00'),
+  (3, 'Charlie', 'bronze', '2024-01-03 00:00:00');
+
+Affected Rows: 3
+
+INSERT INTO products VALUES
+  (101, 'Laptop', 'electronics', '2024-01-01 00:00:00'),
+  (102, 'Mouse', 'electronics', '2024-01-02 00:00:00'),
+  (103, 'Keyboard', 'electronics', '2024-01-03 00:00:00');
+
+Affected Rows: 3
+
+-- Test: Multiple hash joins producing dynamic filters
+-- This creates a chain: orders JOIN customers JOIN products
+-- Both hash joins can produce dynamic filters
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (=Hash.*) =REDACTED
+EXPLAIN SELECT o."id", o.amount, c."name", c.tier, p."name" as product_name, p."category"
+FROM orders o
+JOIN customers c ON o.customer_id = c.customer_id
+JOIN products p ON o.product_id = p.product_id
+WHERE c.tier IN ('gold', 'silver')
+  AND p."category" = 'electronics';
+
++---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                  |
++---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | Projection: o.id, o.amount, c.name, c.tier, p.name AS product_name, p.category                                                                        |
+|               |   Inner Join: o.product_id = p.product_id                                                                                                             |
+|               |     Projection: o.id, o.product_id, o.amount, c.name, c.tier                                                                                          |
+|               |       Inner Join: o.customer_id = c.customer_id                                                                                                       |
+|               |         Projection: o.id, o.customer_id, o.product_id, o.amount                                                                                       |
+|               |           MergeScan [is_placeholder=false, remote_input=[                                                                                             |
+|               | SubqueryAlias: o                                                                                                                                      |
+|               |   TableScan: orders                                                                                                                                   |
+|               | ]]                                                                                                                                                    |
+|               |         Filter: c.tier = Utf8("gold") OR c.tier = Utf8("silver")                                                                                      |
+|               |           Projection: c.customer_id, c.name, c.tier                                                                                                   |
+|               |             MergeScan [is_placeholder=false, remote_input=[                                                                                           |
+|               | SubqueryAlias: c                                                                                                                                      |
+|               |   TableScan: customers                                                                                                                                |
+|               | ]]                                                                                                                                                    |
+|               |     Filter: p.category = Utf8("electronics")                                                                                                          |
+|               |       Projection: p.product_id, p.name, p.category                                                                                                    |
+|               |         MergeScan [is_placeholder=false, remote_input=[                                                                                               |
+|               | SubqueryAlias: p                                                                                                                                      |
+|               |   TableScan: products                                                                                                                                 |
+|               | ]]                                                                                                                                                    |
+| physical_plan | ProjectionExec: expr=[id@0 as id, amount@1 as amount, name@2 as name, tier@3 as tier, name@4 as product_name, category@5 as category]                 |
+|               |   HashJoinExec: mode=Partitioned, join_type=Inner, on=[(product_id@1, product_id@0)], projection=[id@0, amount@2, name@3, tier@4, name@6, category@7] |
+|               |     RepartitionExec: partitioning=REDACTED
+|               |       HashJoinExec: mode=Partitioned, join_type=Inner, on=[(customer_id@1, customer_id@0)], projection=[id@0, product_id@2, amount@3, name@5, tier@6] |
+|               |         RepartitionExec: partitioning=REDACTED
+|               |           ProjectionExec: expr=[id@0 as id, customer_id@1 as customer_id, product_id@2 as product_id, amount@3 as amount]                             |
+|               |             MergeScanExec: REDACTED
+|               |         RepartitionExec: partitioning=REDACTED
+|               |           FilterExec: tier@2 = gold OR tier@2 = silver                                                                                                |
+|               |             ProjectionExec: expr=[customer_id@0 as customer_id, name@1 as name, tier@2 as tier]                                                       |
+|               |               MergeScanExec: REDACTED
+|               |     RepartitionExec: partitioning=REDACTED
+|               |       FilterExec: category@2 = electronics                                                                                                            |
+|               |         ProjectionExec: expr=[product_id@0 as product_id, name@1 as name, category@2 as category]                                                     |
+|               |           MergeScanExec: REDACTED
+|               |                                                                                                                                                       |
++---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+-- SQLNESS REPLACE ("metrics_per_partition":\s*.*metrics=) "metrics_per_partition": REDACTED metrics=
+-- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
+-- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (=Hash.*) =REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE "(file_id|time_range_start|time_range_end)":"[^"]+" "$1":"REDACTED"
+-- SQLNESS REPLACE ("[a-z_]+":"[0-9\.]+(ns|us|µs|ms|s)") "DURATION": REDACTED
+-- SQLNESS REPLACE "(size|flat_format)":\s*(\d+|true|false) "$1":REDACTED
+-- SQLNESS REPLACE ,\s*filter=.*?metrics=  metrics=
+-- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+EXPLAIN ANALYZE VERBOSE SELECT o."id", o.amount, c."name", c.tier, p."name" as product_name, p."category"
+FROM orders o
+JOIN customers c ON o.customer_id = c.customer_id
+JOIN products p ON o.product_id = p.product_id
+WHERE c.tier IN ('gold', 'silver')
+  AND p."category" = 'electronics';
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_ProjectionExec: expr=[id@0 as id, amount@1 as amount, name@2 as name, tier@3 as tier, name@4 as product_name, category@5 as category] metrics=REDACTED_|
+|_|_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(product_id@1, product_id@0)], projection=[id@0, amount@2, name@3, tier@4, name@6, category@7] metrics=REDACTED_|
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(customer_id@1, customer_id@0)], projection=[id@0, product_id@2, amount@3, name@5, tier@6] metrics=REDACTED_|
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_ProjectionExec: expr=[id@0 as id, customer_id@1 as customer_id, product_id@2 as product_id, amount@3 as amount] metrics=REDACTED_|
+|_|_|_MergeScanExec: REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_FilterExec: tier@2 = gold OR tier@2 = silver metrics=REDACTED_|
+|_|_|_ProjectionExec: expr=[customer_id@0 as customer_id, name@1 as name, tier@2 as tier] metrics=REDACTED_|
+|_|_|_MergeScanExec: REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_FilterExec: category@2 = electronics metrics=REDACTED_|
+|_|_|_ProjectionExec: expr=[product_id@0 as product_id, name@1 as name, category@2 as category] metrics=REDACTED_|
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_CooperativeExec metrics=REDACTED_|
+|_|_|_SeqScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["id", "customer_id", "product_id", "amount", "ts"], "flat_format":REDACTED, "metrics_per_partition": REDACTED metrics=REDACTED |
+|_|_|_|
+| 1_| 0_|_CooperativeExec metrics=REDACTED_|
+|_|_|_SeqScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["customer_id", "name", "tier", "ts"], "flat_format":REDACTED, "metrics_per_partition": REDACTED metrics=REDACTED_|
+|_|_|_|
+| 1_| 0_|_CooperativeExec metrics=REDACTED_|
+|_|_|_SeqScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["product_id", "name", "category", "ts"], "flat_format":REDACTED, "metrics_per_partition": REDACTED metrics=REDACTED_|
+|_|_|_|
+|_|_| Total rows: REDACTED_|
++-+-+-+
+
+-- Verify correctness
+-- SQLNESS SORT_RESULT
+SELECT o."id", o.amount, c."name", c.tier, p."name" as product_name, p."category"
+FROM orders o
+JOIN customers c ON o.customer_id = c.customer_id
+JOIN products p ON o.product_id = p.product_id
+WHERE c.tier IN ('gold', 'silver')
+  AND p."category" = 'electronics';
+
++----+--------+-------+--------+--------------+-------------+
++----+--------+-------+--------+--------------+-------------+
++----+--------+-------+--------+--------------+-------------+
+| 1  | 100.0  | Alice | gold   | Laptop       | electronics |
+| 2  | 200.0  | Bob   | silver | Mouse        | electronics |
+| 4  | 150.0  | Alice | gold   | Laptop       | electronics |
+| 5  | 250.0  | Bob   | silver | Mouse        | electronics |
+| 6  | 175.0  | Alice | gold   | Keyboard     | electronics |
+| 8  | 225.0  | Bob   | silver | Mouse        | electronics |
+| 9  | 400.0  | Alice | gold   | Keyboard     | electronics |
+| id | amount | name  | tier   | product_name | category    |
+
+DROP TABLE orders;
+
+Affected Rows: 0
+
+DROP TABLE customers;
+
+Affected Rows: 0
+
+DROP TABLE products;
+
+Affected Rows: 0
+

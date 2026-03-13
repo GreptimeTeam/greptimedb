@@ -24,7 +24,6 @@ use common_plugins::GREPTIME_EXEC_READ_COST;
 use common_query::request::QueryRequest;
 use common_recordbatch::adapter::RecordBatchMetrics;
 use common_telemetry::tracing_context::TracingContext;
-use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::execution::{SessionState, TaskContext};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::metrics::{
@@ -47,8 +46,10 @@ use session::context::QueryContextRef;
 use store_api::storage::RegionId;
 use table::table_name::TableName;
 use tokio::time::Instant;
+use tracing::{Instrument, Span};
 
 use crate::dist_plan::analyzer::AliasMapping;
+use crate::dist_plan::analyzer::utils::patch_batch_timezone;
 use crate::metrics::{MERGE_SCAN_ERRORS_TOTAL, MERGE_SCAN_POLL_ELAPSED, MERGE_SCAN_REGIONS};
 use crate::region_query::RegionQueryHandlerRef;
 
@@ -138,7 +139,7 @@ pub struct MergeScanExec {
     arrow_schema: ArrowSchemaRef,
     region_query_handler: RegionQueryHandlerRef,
     metric: ExecutionPlanMetricsSet,
-    properties: PlanProperties,
+    properties: Arc<PlanProperties>,
     /// Metrics from sub stages
     sub_stage_metrics: Arc<Mutex<HashMap<RegionId, RecordBatchMetrics>>>,
     /// Metrics for each partition
@@ -225,12 +226,12 @@ impl MergeScanExec {
             .collect();
         let partitioning = Partitioning::Hash(partition_exprs, target_partition);
 
-        let properties = PlanProperties::new(
+        let properties = Arc::new(PlanProperties::new(
             eq_properties,
             partitioning,
             EmissionType::Incremental,
             Boundedness::Bounded,
-        );
+        ));
         Ok(Self {
             table,
             regions,
@@ -284,6 +285,12 @@ impl MergeScanExec {
                 .step_by(target_partition)
                 .copied()
             {
+                let region_span = tracing_context.attach(tracing::info_span!(
+                    parent: &Span::current(),
+                    "merge_scan_region",
+                    region_id = %region_id,
+                    partition = partition
+                ));
                 let request = QueryRequest {
                     header: Some(RegionRequestHeader {
                         tracing_context: tracing_context.to_w3c(),
@@ -306,6 +313,7 @@ impl MergeScanExec {
 
                 let mut stream = region_query_handler
                     .do_get(read_preference, request)
+                    .instrument(region_span.clone())
                     .await
                     .map_err(|e| {
                         MERGE_SCAN_ERRORS_TOTAL.inc();
@@ -317,12 +325,12 @@ impl MergeScanExec {
 
                 let mut poll_duration = Duration::ZERO;
                 let mut poll_timer = Instant::now();
-                while let Some(batch) = stream.next().await {
+                while let Some(batch) = stream.next().instrument(region_span.clone()).await {
                     let poll_elapsed = poll_timer.elapsed();
                     poll_duration += poll_elapsed;
 
                     let batch = batch.map_err(|e| DataFusionError::External(Box::new(e)))?;
-                    let batch = RecordBatch::try_new(
+                    let batch = patch_batch_timezone(
                         arrow_schema.clone(),
                         batch.into_df_record_batch().columns().to_vec(),
                     )?;
@@ -445,12 +453,12 @@ impl MergeScanExec {
             arrow_schema: self.arrow_schema.clone(),
             region_query_handler: self.region_query_handler.clone(),
             metric: self.metric.clone(),
-            properties: PlanProperties::new(
+            properties: Arc::new(PlanProperties::new(
                 self.properties.eq_properties.clone(),
                 Partitioning::Hash(overlaps, self.target_partition),
                 self.properties.emission_type,
                 self.properties.boundedness,
-            ),
+            )),
             sub_stage_metrics: self.sub_stage_metrics.clone(),
             partition_metrics: self.partition_metrics.clone(),
             query_ctx: self.query_ctx.clone(),
@@ -576,7 +584,7 @@ impl ExecutionPlan for MergeScanExec {
         self.arrow_schema.clone()
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
     }
 

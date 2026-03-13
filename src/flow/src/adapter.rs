@@ -39,7 +39,6 @@ use query::QueryEngine;
 use query::options::QueryOptions;
 use serde::{Deserialize, Serialize};
 use servers::grpc::GrpcOptions;
-use servers::heartbeat_options::HeartbeatOptions;
 use servers::http::HttpOptions;
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -76,7 +75,6 @@ pub(crate) mod table_source;
 
 use crate::FrontendInvoker;
 use crate::error::Error;
-use crate::utils::StateReportHandler;
 
 // `GREPTIME_TIMESTAMP` is not used to distinguish when table is created automatically by flow
 pub const AUTO_CREATED_PLACEHOLDER_TS_COL: &str = "__ts_placeholder";
@@ -111,7 +109,6 @@ pub struct FlownodeOptions {
     pub meta_client: Option<MetaClientOptions>,
     pub logging: LoggingOptions,
     pub tracing: TracingOptions,
-    pub heartbeat: HeartbeatOptions,
     pub query: QueryOptions,
     pub user_provider: Option<String>,
     pub memory: MemoryOptions,
@@ -127,7 +124,6 @@ impl Default for FlownodeOptions {
             meta_client: None,
             logging: LoggingOptions::default(),
             tracing: TracingOptions::default(),
-            heartbeat: HeartbeatOptions::default(),
             // flownode's query option is set to 1 to throttle flow's query so
             // that it won't use too much cpu or memory
             query: QueryOptions {
@@ -181,8 +177,6 @@ pub struct StreamingEngine {
     ///
     /// So that a series of event like `inserts -> flush` can be handled correctly
     flush_lock: RwLock<()>,
-    /// receive a oneshot sender to send state size report
-    state_report_handler: RwLock<Option<StateReportHandler>>,
 }
 
 /// Building FlownodeManager
@@ -218,13 +212,7 @@ impl StreamingEngine {
             tick_manager,
             node_id,
             flush_lock: RwLock::new(()),
-            state_report_handler: RwLock::new(None),
         }
-    }
-
-    pub async fn with_state_report_handler(self, handler: StateReportHandler) -> Self {
-        *self.state_report_handler.write().await = Some(handler);
-        self
     }
 
     /// Create a flownode manager with one worker
@@ -488,13 +476,13 @@ impl StreamingEngine {
                 .await?
                 .unwrap();
             let meta = table_info.table_info.meta;
+            let schema = meta.schema.column_schemas().to_vec();
             let primary_keys = meta
                 .primary_key_indices
                 .into_iter()
-                .map(|i| meta.schema.column_schemas[i].name.clone())
+                .map(|i| schema[i].name.clone())
                 .collect_vec();
-            let schema = meta.schema.column_schemas;
-            let time_index = meta.schema.timestamp_index;
+            let time_index = meta.schema.timestamp_index();
             Ok(Some((primary_keys, time_index, schema)))
         } else {
             Ok(None)
@@ -557,37 +545,13 @@ impl StreamingEngine {
 
 /// Flow Runtime related methods
 impl StreamingEngine {
-    /// Start state report handler, which will receive a sender from HeartbeatTask to send state size report back
-    ///
-    /// if heartbeat task is shutdown, this future will exit too
-    async fn start_state_report_handler(self: Arc<Self>) -> Option<JoinHandle<()>> {
-        let state_report_handler = self.state_report_handler.write().await.take();
-        if let Some(mut handler) = state_report_handler {
-            let zelf = self.clone();
-            let handler = common_runtime::spawn_global(async move {
-                while let Some(ret_handler) = handler.recv().await {
-                    let state_report = zelf.gen_state_report().await;
-                    ret_handler.send(state_report).unwrap_or_else(|err| {
-                        common_telemetry::error!(err; "Send state size report error");
-                    });
-                }
-            });
-            Some(handler)
-        } else {
-            None
-        }
-    }
-
     /// run in common_runtime background runtime
     pub fn run_background(
         self: Arc<Self>,
         shutdown: Option<broadcast::Receiver<()>>,
     ) -> JoinHandle<()> {
         info!("Starting flownode manager's background task");
-        common_runtime::spawn_global(async move {
-            let _state_report_handler = self.clone().start_state_report_handler().await;
-            self.run(shutdown).await;
-        })
+        common_runtime::spawn_global(async move { self.run(shutdown).await })
     }
 
     /// log all flow errors

@@ -19,7 +19,7 @@ use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
 use strum::AsRefStr;
-use table::metadata::{RawTableInfo, TableId, TableType};
+use table::metadata::{TableId, TableInfo, TableType};
 use table::table_reference::TableReference;
 
 use crate::cache_invalidator::Context;
@@ -58,7 +58,7 @@ impl CreateViewProcedure {
         Ok(CreateViewProcedure { context, data })
     }
 
-    fn view_info(&self) -> &RawTableInfo {
+    fn view_info(&self) -> &TableInfo {
         &self.data.task.view_info
     }
 

@@ -15,6 +15,7 @@
 #![feature(assert_matches)]
 //! Structs and traits for partitioning rule.
 
+pub mod cache;
 pub mod checker;
 pub mod collider;
 pub mod error;
@@ -23,6 +24,7 @@ pub mod manager;
 pub mod multi_dim;
 pub mod overlap;
 pub mod partition;
+pub mod simplify;
 pub mod splitter;
 pub mod subtask;
 

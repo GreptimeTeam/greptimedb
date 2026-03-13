@@ -84,6 +84,7 @@ mod tests {
     use common_meta::heartbeat::handler::{HandleControl, HeartbeatResponseHandler};
     use common_meta::heartbeat::mailbox::MessageMeta;
     use common_meta::instruction::Instruction;
+    use common_meta::kv_backend::memory::MemoryKvBackend;
     use mito2::config::MitoConfig;
     use mito2::engine::MITO_ENGINE_NAME;
     use mito2::test_util::{CreateRequestBuilder, TestEnv};
@@ -113,7 +114,9 @@ mod tests {
         common_telemetry::init_default_ut_logging();
 
         let mut region_server = mock_region_server();
-        let heartbeat_handler = RegionHeartbeatResponseHandler::new(region_server.clone());
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let heartbeat_handler =
+            RegionHeartbeatResponseHandler::new(region_server.clone(), kv_backend);
         let mut engine_env = TestEnv::with_prefix("close-regions").await;
         let engine = engine_env.create_engine(MitoConfig::default()).await;
         region_server.register_engine(Arc::new(engine.clone()));
@@ -136,7 +139,7 @@ mod tests {
         let instruction =
             close_regions_instruction([region_id, region_id1, RegionId::new(1024, 3)]);
         let mut heartbeat_env = HeartbeatResponseTestEnv::new();
-        let mut ctx = heartbeat_env.create_handler_ctx((meta, instruction));
+        let mut ctx = heartbeat_env.create_handler_ctx((meta, Default::default(), instruction));
         let control = heartbeat_handler.handle(&mut ctx).await.unwrap();
         assert_matches!(control, HandleControl::Continue);
 

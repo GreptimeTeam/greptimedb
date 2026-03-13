@@ -34,7 +34,7 @@ use datafusion::physical_plan::{
     RecordBatchStream, SendableRecordBatchStream,
 };
 use datafusion_common::DFSchema;
-use datafusion_expr::EmptyRelation;
+use datafusion_expr::{EmptyRelation, col};
 use datatypes::arrow;
 use datatypes::arrow::array::{ArrayRef, Float64Array, TimestampMillisecondArray};
 use datatypes::arrow::datatypes::{DataType, Field, SchemaRef, TimeUnit};
@@ -107,7 +107,21 @@ impl UserDefinedLogicalNodeCore for Absent {
     }
 
     fn expressions(&self) -> Vec<Expr> {
-        vec![]
+        if self.unfix.is_some() {
+            return vec![];
+        }
+
+        vec![col(&self.time_index_column)]
+    }
+
+    fn necessary_children_exprs(&self, _output_columns: &[usize]) -> Option<Vec<Vec<usize>>> {
+        if self.unfix.is_some() {
+            return None;
+        }
+
+        let input_schema = self.input.schema();
+        let time_index_idx = input_schema.index_of_column_by_name(None, &self.time_index_column)?;
+        Some(vec![vec![time_index_idx]])
     }
 
     fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -224,12 +238,12 @@ impl Absent {
 
     pub fn to_execution_plan(&self, exec_input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
         let output_schema = Arc::new(self.output_schema.as_arrow().clone());
-        let properties = PlanProperties::new(
+        let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(output_schema.clone()),
             Partitioning::UnknownPartitioning(1),
             EmissionType::Incremental,
             Boundedness::Bounded,
-        );
+        ));
         Arc::new(AbsentExec {
             start: self.start,
             end: self.end,
@@ -309,7 +323,7 @@ pub struct AbsentExec {
     fake_labels: Vec<(String, String)>,
     output_schema: SchemaRef,
     input: Arc<dyn ExecutionPlan>,
-    properties: PlanProperties,
+    properties: Arc<PlanProperties>,
     metric: ExecutionPlanMetricsSet,
 }
 
@@ -322,7 +336,7 @@ impl ExecutionPlan for AbsentExec {
         self.output_schema.clone()
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
     }
 
@@ -610,12 +624,12 @@ mod tests {
             fake_labels: vec![],
             output_schema: output_schema.clone(),
             input: Arc::new(memory_exec),
-            properties: PlanProperties::new(
+            properties: Arc::new(PlanProperties::new(
                 EquivalenceProperties::new(output_schema.clone()),
                 Partitioning::UnknownPartitioning(1),
                 EmissionType::Incremental,
                 Boundedness::Bounded,
-            ),
+            )),
             metric: ExecutionPlanMetricsSet::new(),
         };
 
@@ -678,12 +692,12 @@ mod tests {
             fake_labels: vec![],
             output_schema: output_schema.clone(),
             input: Arc::new(memory_exec),
-            properties: PlanProperties::new(
+            properties: Arc::new(PlanProperties::new(
                 EquivalenceProperties::new(output_schema.clone()),
                 Partitioning::UnknownPartitioning(1),
                 EmissionType::Incremental,
                 Boundedness::Bounded,
-            ),
+            )),
             metric: ExecutionPlanMetricsSet::new(),
         };
 

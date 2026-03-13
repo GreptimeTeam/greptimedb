@@ -12,15 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Instant;
 
 use common_error::ext::BoxedError;
-use common_recordbatch::error::{ArrowComputeSnafu, ExternalSnafu};
+use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{DfRecordBatch, RecordBatch};
-use datatypes::compute;
 use futures::stream::BoxStream;
 use futures::{Stream, StreamExt};
 use snafu::ResultExt;
@@ -47,7 +47,7 @@ pub(crate) struct ConvertBatchStream {
     projection_mapper: Arc<ProjectionMapper>,
     cache_strategy: CacheStrategy,
     partition_metrics: PartitionMetrics,
-    buffer: Vec<DfRecordBatch>,
+    pending: VecDeque<RecordBatch>,
 }
 
 impl ConvertBatchStream {
@@ -62,7 +62,7 @@ impl ConvertBatchStream {
             projection_mapper,
             cache_strategy,
             partition_metrics,
-            buffer: Vec::new(),
+            pending: VecDeque::new(),
         }
     }
 
@@ -79,40 +79,36 @@ impl ConvertBatchStream {
                 }
             }
             ScanBatch::Series(series) => {
-                self.buffer.clear();
+                debug_assert!(
+                    self.pending.is_empty(),
+                    "ConvertBatchStream should not convert a new SeriesBatch when pending batches exist"
+                );
 
                 match series {
                     SeriesBatch::PrimaryKey(primary_key_batch) => {
-                        self.buffer.reserve(primary_key_batch.batches.len());
                         // Safety: Only primary key format returns this batch.
                         let mapper = self.projection_mapper.as_primary_key().unwrap();
 
                         for batch in primary_key_batch.batches {
-                            let record_batch = mapper.convert(&batch, &self.cache_strategy)?;
-                            self.buffer.push(record_batch.into_df_record_batch());
+                            self.pending
+                                .push_back(mapper.convert(&batch, &self.cache_strategy)?);
                         }
                     }
                     SeriesBatch::Flat(flat_batch) => {
-                        self.buffer.reserve(flat_batch.batches.len());
                         // Safety: Only flat format returns this batch.
                         let mapper = self.projection_mapper.as_flat().unwrap();
 
                         for batch in flat_batch.batches {
-                            let record_batch = mapper.convert(&batch)?;
-                            self.buffer.push(record_batch.into_df_record_batch());
+                            self.pending.push_back(mapper.convert(&batch)?);
                         }
                     }
                 }
 
                 let output_schema = self.projection_mapper.output_schema();
-                let record_batch =
-                    compute::concat_batches(output_schema.arrow_schema(), &self.buffer)
-                        .context(ArrowComputeSnafu)?;
-
-                Ok(RecordBatch::from_df_record_batch(
-                    output_schema,
-                    record_batch,
-                ))
+                Ok(self
+                    .pending
+                    .pop_front()
+                    .unwrap_or_else(|| RecordBatch::new_empty(output_schema)))
             }
             ScanBatch::RecordBatch(df_record_batch) => {
                 // Safety: Only flat format returns this batch.
@@ -128,6 +124,10 @@ impl Stream for ConvertBatchStream {
     type Item = common_recordbatch::error::Result<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if let Some(batch) = self.pending.pop_front() {
+            return Poll::Ready(Some(Ok(batch)));
+        }
+
         let batch = futures::ready!(self.inner.poll_next_unpin(cx));
         let Some(batch) = batch else {
             return Poll::Ready(None);

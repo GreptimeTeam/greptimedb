@@ -15,9 +15,9 @@
 use std::fmt::Display;
 
 use datafusion::arrow::datatypes::DataType;
-use datafusion::logical_expr::ColumnarValue;
-use datafusion::logical_expr_common::type_coercion::aggregates::{BINARYS, STRINGS};
+use datafusion::logical_expr::{Coercion, ColumnarValue, TypeSignatureClass};
 use datafusion_common::ScalarValue;
+use datafusion_common::types::{logical_binary, logical_string};
 use datafusion_expr::{ScalarFunctionArgs, Signature, TypeSignature, Volatility};
 
 use crate::function::Function;
@@ -49,8 +49,12 @@ impl Default for VectorDimFunction {
         Self {
             signature: Signature::one_of(
                 vec![
-                    TypeSignature::Uniform(1, STRINGS.to_vec()),
-                    TypeSignature::Uniform(1, BINARYS.to_vec()),
+                    TypeSignature::Coercible(vec![Coercion::new_exact(
+                        TypeSignatureClass::Native(logical_binary()),
+                    )]),
+                    TypeSignature::Coercible(vec![Coercion::new_exact(
+                        TypeSignatureClass::Native(logical_string()),
+                    )]),
                 ],
                 Volatility::Immutable,
             ),

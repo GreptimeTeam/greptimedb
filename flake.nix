@@ -15,6 +15,7 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
         buildInputs = with pkgs; [
+          libz.out
         ];
         lib = nixpkgs.lib;
         rustToolchain = fenix.packages.${system}.fromToolchainName {
@@ -43,6 +44,7 @@
             ])
             cargo-nextest
             cargo-llvm-cov
+            cargo-udeps
             taplo
             curl
             gnuplot ## for cargo bench
@@ -50,6 +52,10 @@
 
           buildInputs = buildInputs;
           NIX_HARDENING_ENABLE = "";
+          LD_LIBRARY_PATH = with pkgs; lib.makeLibraryPath [
+            stdenv.cc.cc.lib
+            libz
+          ];
         };
       });
 }

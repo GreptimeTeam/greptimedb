@@ -30,7 +30,7 @@ use common_function::handlers::{
 use common_query::Output;
 use datafusion::catalog::TableFunction;
 use datafusion::dataframe::DataFrame;
-use datafusion_expr::{AggregateUDF, LogicalPlan};
+use datafusion_expr::{AggregateUDF, LogicalPlan, WindowUDF};
 use datatypes::schema::Schema;
 pub use default_serializer::{DefaultPlanDecoder, DefaultSerializer};
 use partition::manager::PartitionRuleManagerRef;
@@ -88,6 +88,9 @@ pub trait QueryEngine: Send + Sync {
 
     /// Register table function
     fn register_table_function(&self, func: Arc<TableFunction>);
+
+    /// Register a window function (UDWF).
+    fn register_window_function(&self, func: WindowUDF);
 
     /// Create a DataFrame from a table.
     fn read_table(&self, table: TableRef) -> Result<DataFrame>;
@@ -171,6 +174,10 @@ fn register_functions(query_engine: &Arc<DatafusionQueryEngine>) {
 
     for table_function in FUNCTION_REGISTRY.table_functions() {
         query_engine.register_table_function(table_function);
+    }
+
+    for window_function in FUNCTION_REGISTRY.window_functions() {
+        query_engine.register_window_function(window_function);
     }
 }
 

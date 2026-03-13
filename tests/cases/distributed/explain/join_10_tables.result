@@ -117,67 +117,36 @@ limit 1;
 |_| ]]_|
 | physical_plan | SortPreservingMergeExec: [ts@0 DESC], fetch=1_|
 |_|_SortExec: TopK(fetch=1), expr=[ts@0 DESC], preserve_partitioning=[true]_|
-|_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_REDACTED
-|_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_REDACTED
-|_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_REDACTED
-|_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_REDACTED
-|_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_REDACTED
-|_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_REDACTED
-|_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_REDACTED
-|_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_REDACTED
-|_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_REDACTED
-|_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED
-|_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_FilterExec: vin@1 IS NOT NULL_|
-|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
-|_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED
-|_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_FilterExec: vin@1 IS NOT NULL_|
-|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
-|_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED
-|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
-|_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED
-|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
-|_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED
-|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
-|_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED
-|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
-|_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED
-|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
-|_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED
-|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
-|_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED
-|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
-|_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED
-|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+

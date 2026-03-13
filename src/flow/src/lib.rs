@@ -42,6 +42,7 @@ mod utils;
 #[cfg(test)]
 mod test_utils;
 
+pub use adapter::flownode_impl::FlowDualEngineRef;
 pub use adapter::{FlowConfig, FlowStreamingEngineRef, StreamingEngine};
 pub use batching_mode::frontend_client::{FrontendClient, GrpcQueryHandlerWithBoxedError};
 pub use engine::FlowAuthHeader;

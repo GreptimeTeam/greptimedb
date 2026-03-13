@@ -28,6 +28,7 @@ num = "0.4"
 num-traits = "0.2"
 ordered-float.workspace = true
 paste.workspace = true
+regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true

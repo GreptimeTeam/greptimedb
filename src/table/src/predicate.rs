@@ -14,7 +14,8 @@
 
 use std::sync::Arc;
 
-use common_telemetry::{error, warn};
+use arc_swap::ArcSwap;
+use common_telemetry::{debug, warn};
 use common_time::Timestamp;
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
@@ -53,14 +54,14 @@ macro_rules! return_none_if_utf8 {
 }
 
 /// Reference-counted pointer to a list of logical exprs and a list of dynamic filter physical exprs.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Predicate {
     /// logical exprs
     exprs: Arc<Vec<Expr>>,
     /// dynamic filter physical exprs, only useful if dynamic filtering is enabled
     ///
     /// They are usually from `TopK` or `Join` operators, and can dynamically filter data during query execution by using current runtime information to further reduce data scanning
-    dyn_filters: Arc<Vec<DynamicFilterPhysicalExpr>>,
+    dyn_filters: Arc<ArcSwap<Vec<Arc<DynamicFilterPhysicalExpr>>>>,
 }
 
 impl Predicate {
@@ -70,16 +71,31 @@ impl Predicate {
     pub fn new(exprs: Vec<Expr>) -> Self {
         Self {
             exprs: Arc::new(exprs),
-            dyn_filters: Arc::new(vec![]),
+            dyn_filters: Arc::new(ArcSwap::new(Arc::new(vec![]))),
         }
     }
 
-    /// Sets the dynamic filter physical exprs.
-    pub fn with_dyn_filters(self, dyn_filters: Arc<Vec<DynamicFilterPhysicalExpr>>) -> Self {
+    pub fn with_dyn_filters(
+        exprs: Vec<Expr>,
+        dyn_filters: Vec<Arc<DynamicFilterPhysicalExpr>>,
+    ) -> Self {
         Self {
-            exprs: self.exprs,
-            dyn_filters,
+            exprs: Arc::new(exprs),
+            dyn_filters: Arc::new(ArcSwap::new(Arc::new(dyn_filters))),
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.exprs.is_empty() && self.dyn_filters.load().is_empty()
+    }
+
+    /// Adds dynamic filter physical exprs to the existing list.
+    pub fn add_dyn_filters(&self, dyn_filters: Vec<Arc<DynamicFilterPhysicalExpr>>) {
+        self.dyn_filters.rcu(|existing| {
+            let mut new_filters = existing.as_ref().clone();
+            new_filters.extend(dyn_filters.clone());
+            Arc::new(new_filters)
+        });
     }
 
     /// Returns the logical exprs.
@@ -89,14 +105,15 @@ impl Predicate {
 
     /// Returns the dynamic filter physical exprs. Notice this return a live dynamic filters which
     /// can change during query execution.
-    pub fn dyn_filters(&self) -> &Arc<Vec<DynamicFilterPhysicalExpr>> {
-        &self.dyn_filters
+    pub fn dyn_filters(&self) -> Arc<Vec<Arc<DynamicFilterPhysicalExpr>>> {
+        self.dyn_filters.load_full()
     }
 
     /// Returns the dynamic filter as physical exprs. Notice this return a "snapshot" of
     /// dynamic filters at the time of calling this method.
     pub fn dyn_filter_phy_exprs(&self) -> error::Result<Vec<Arc<dyn PhysicalExpr>>> {
         self.dyn_filters
+            .load()
             .iter()
             .map(|e| e.current())
             .collect::<Result<Vec<_>, _>>()
@@ -157,7 +174,8 @@ impl Predicate {
                     }
                 },
                 Err(e) => {
-                    error!(e; "Failed to create predicate for expr");
+                    // since dynamic filter exprs could be complex, it's possible that `PruningPredicate::try_new` fails to prove anything from it. In that case, we just log it and skip pruning with this expr.
+                    debug!("Failed to create pruning predicate for expr: {e:?}");
                 }
             }
         }

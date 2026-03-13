@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, ensure};
 use store_api::storage::RegionId;
 use strum::AsRefStr;
-use table::metadata::{RawTableInfo, TableId};
+use table::metadata::{TableId, TableInfo};
 use table::table_name::TableName;
 use table::table_reference::TableReference;
 
@@ -226,7 +226,7 @@ impl TruncateTableData {
         self.task.table_name()
     }
 
-    fn table_info(&self) -> &RawTableInfo {
+    fn table_info(&self) -> &TableInfo {
         &self.table_info_value.table_info
     }
 

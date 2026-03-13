@@ -183,3 +183,26 @@ pub async fn gdump_status_handler() -> crate::error::Result<impl IntoResponse> {
         "The 'mem-prof' feature is disabled",
     ))
 }
+
+#[cfg(feature = "mem-prof")]
+#[axum_macros::debug_handler]
+pub async fn symbolicate_handler(
+    body: axum::body::Bytes,
+) -> crate::error::Result<impl IntoResponse> {
+    use snafu::ResultExt;
+
+    use crate::error::DumpProfileDataSnafu;
+
+    let flamegraph = common_mem_prof::symbolicate_jeheap(&body).context(DumpProfileDataSnafu)?;
+
+    Ok((StatusCode::OK, flamegraph))
+}
+
+#[cfg(not(feature = "mem-prof"))]
+#[axum_macros::debug_handler]
+pub async fn symbolicate_handler() -> crate::error::Result<impl IntoResponse> {
+    Ok((
+        StatusCode::NOT_IMPLEMENTED,
+        "The 'mem-prof' feature is disabled",
+    ))
+}

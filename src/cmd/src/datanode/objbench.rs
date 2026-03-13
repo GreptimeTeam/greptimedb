@@ -35,6 +35,7 @@ use mito2::sst::parquet::reader::ParquetReaderBuilder;
 use mito2::sst::parquet::{PARQUET_METADATA_KEY, WriteOptions};
 use mito2::worker::write_cache_from_config;
 use object_store::ObjectStore;
+use parquet::file::metadata::{FooterTail, KeyValue};
 use regex::Regex;
 use snafu::OptionExt;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
@@ -65,7 +66,13 @@ pub struct ObjbenchCommand {
     pub pprof_file: Option<PathBuf>,
 }
 
-fn parse_config(config_path: &PathBuf) -> error::Result<(StorageConfig, MitoConfig)> {
+pub(super) fn parse_config(
+    config_path: &PathBuf,
+) -> error::Result<(
+    StorageConfig,
+    MitoConfig,
+    common_wal::config::DatanodeWalConfig,
+)> {
     let cfg_str = std::fs::read_to_string(config_path).map_err(|e| {
         error::IllegalConfigSnafu {
             msg: format!("failed to read config {}: {e}", config_path.display()),
@@ -80,6 +87,7 @@ fn parse_config(config_path: &PathBuf) -> error::Result<(StorageConfig, MitoConf
         .build()
     })?;
 
+    let wal_config = store_cfg.wal;
     let storage_config = store_cfg.storage;
     let mito_engine_config = store_cfg
         .region_engine
@@ -95,7 +103,7 @@ fn parse_config(config_path: &PathBuf) -> error::Result<(StorageConfig, MitoConf
         .with_context(|| error::IllegalConfigSnafu {
             msg: format!("Engine config not found in {:?}", config_path),
         })?;
-    Ok((storage_config, mito_engine_config))
+    Ok((storage_config, mito_engine_config, wal_config))
 }
 
 impl ObjbenchCommand {
@@ -107,7 +115,7 @@ impl ObjbenchCommand {
         println!("{}", "Starting objbench with config:".cyan().bold());
 
         // Build object store from config
-        let (store_cfg, mut mito_engine_config) = parse_config(&self.config)?;
+        let (store_cfg, mut mito_engine_config, _wal_config) = parse_config(&self.config)?;
 
         let object_store = build_object_store(&store_cfg).await?;
         println!("{} Object store initialized", "✓".green());
@@ -207,6 +215,15 @@ impl ObjbenchCommand {
         .map_err(|e| {
             error::IllegalConfigSnafu {
                 msg: format!("build reader failed: {e:?}"),
+            }
+            .build()
+        })?;
+        let reader = reader.ok_or_else(|| {
+            error::IllegalConfigSnafu {
+                msg: format!(
+                    "build reader returned no readable rows for source file {}",
+                    src_handle.file_id()
+                ),
             }
             .build()
         })?;
@@ -463,7 +480,6 @@ fn extract_region_metadata(
     file_path: &str,
     meta: &parquet::file::metadata::ParquetMetaData,
 ) -> error::Result<RegionMetadataRef> {
-    use parquet::format::KeyValue;
     let kvs: Option<&Vec<KeyValue>> = meta.file_metadata().key_value_metadata();
     let Some(kvs) = kvs else {
         return Err(error::IllegalConfigSnafu {
@@ -490,7 +506,7 @@ fn extract_region_metadata(
     Ok(Arc::new(region))
 }
 
-async fn build_object_store(sc: &StorageConfig) -> error::Result<ObjectStore> {
+pub(super) async fn build_object_store(sc: &StorageConfig) -> error::Result<ObjectStore> {
     store::new_object_store(sc.store.clone(), &sc.data_home)
         .await
         .map_err(|e| {
@@ -608,7 +624,7 @@ async fn load_parquet_metadata(
     let buffer_len = buffer.len();
     let mut footer = [0; 8];
     footer.copy_from_slice(&buffer[buffer_len - FOOTER_SIZE..]);
-    let footer = ParquetMetaDataReader::decode_footer_tail(&footer)?;
+    let footer = FooterTail::try_new(&footer)?;
     let metadata_len = footer.metadata_length() as u64;
     if actual_size - (FOOTER_SIZE as u64) < metadata_len {
         return Err("invalid footer/metadata length".into());
@@ -685,7 +701,7 @@ mod tests {
     #[test]
     fn test_parse_config() {
         let path = "../../config/datanode.example.toml";
-        let (storage, engine) = parse_config(&PathBuf::from_str(path).unwrap()).unwrap();
+        let (storage, engine, _wal) = parse_config(&PathBuf::from_str(path).unwrap()).unwrap();
         assert_eq!(storage.data_home, "./greptimedb_data");
         assert_eq!(engine.index.staging_size, ReadableSize::gb(2));
     }

@@ -14,22 +14,18 @@
 
 //! Structs for partition ranges.
 
-use std::sync::{Arc, Mutex};
-
 use common_time::Timestamp;
 use smallvec::{SmallVec, smallvec};
 use store_api::region_engine::PartitionRange;
 use store_api::storage::TimeSeriesDistribution;
 
 use crate::cache::CacheStrategy;
-use crate::error::Result;
 use crate::memtable::{MemtableRange, MemtableStats};
 use crate::read::scan_region::ScanInput;
 use crate::sst::file::{FileHandle, FileTimeRange, overlaps};
 use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
 use crate::sst::parquet::file_range::{FileRange, FileRangeContextRef};
 use crate::sst::parquet::format::parquet_row_group_time_range;
-use crate::sst::parquet::reader::ReaderMetrics;
 use crate::sst::parquet::row_selection::RowGroupSelection;
 
 const ALL_ROW_GROUPS: i64 = -1;
@@ -57,7 +53,7 @@ pub struct RowGroupIndex {
 /// Meta data of a partition range.
 /// If the scanner is [UnorderedScan], each meta only has one row group or memtable.
 /// If the scanner is [SeqScan], each meta may have multiple row groups and memtables.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub(crate) struct RangeMeta {
     /// The time range of the range.
     pub(crate) time_range: FileTimeRange,
@@ -440,9 +436,21 @@ impl FileRangeBuilder {
             );
         }
     }
+
+    /// Returns the estimated memory size of this builder.
+    pub(crate) fn memory_size(&self) -> usize {
+        let context_size = self
+            .context
+            .as_ref()
+            .map(|ctx| ctx.memory_size())
+            .unwrap_or(0);
+        let selection_size = self.selection.mem_usage();
+        context_size + selection_size
+    }
 }
 
 /// Builder to create mem ranges.
+#[derive(Clone)]
 pub(crate) struct MemRangeBuilder {
     /// Ranges of a memtable.
     range: MemtableRange,
@@ -469,57 +477,6 @@ impl MemRangeBuilder {
     /// Returns the statistics of the memtable.
     pub(crate) fn stats(&self) -> &MemtableStats {
         &self.stats
-    }
-}
-
-/// List to manages the builders to create file ranges.
-/// Each scan partition should have its own list. Mutex inside this list is used to allow moving
-/// the list to different streams in the same partition.
-pub(crate) struct RangeBuilderList {
-    num_memtables: usize,
-    file_builders: Mutex<Vec<Option<Arc<FileRangeBuilder>>>>,
-}
-
-impl RangeBuilderList {
-    /// Creates a new [ReaderBuilderList] with the given number of memtables and files.
-    pub(crate) fn new(num_memtables: usize, num_files: usize) -> Self {
-        let file_builders = (0..num_files).map(|_| None).collect();
-        Self {
-            num_memtables,
-            file_builders: Mutex::new(file_builders),
-        }
-    }
-
-    /// Builds file ranges to read the row group at `index`.
-    pub(crate) async fn build_file_ranges(
-        &self,
-        input: &ScanInput,
-        index: RowGroupIndex,
-        reader_metrics: &mut ReaderMetrics,
-    ) -> Result<SmallVec<[FileRange; 2]>> {
-        let mut ranges = SmallVec::new();
-        let file_index = index.index - self.num_memtables;
-        let builder_opt = self.get_file_builder(file_index);
-        match builder_opt {
-            Some(builder) => builder.build_ranges(index.row_group_index, &mut ranges),
-            None => {
-                let file = &input.files[file_index];
-                let builder = input.prune_file(file, reader_metrics).await?;
-                builder.build_ranges(index.row_group_index, &mut ranges);
-                self.set_file_builder(file_index, Arc::new(builder));
-            }
-        }
-        Ok(ranges)
-    }
-
-    fn get_file_builder(&self, index: usize) -> Option<Arc<FileRangeBuilder>> {
-        let file_builders = self.file_builders.lock().unwrap();
-        file_builders[index].clone()
-    }
-
-    fn set_file_builder(&self, index: usize, builder: Arc<FileRangeBuilder>) {
-        let mut file_builders = self.file_builders.lock().unwrap();
-        file_builders[index] = Some(builder);
     }
 }
 

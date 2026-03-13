@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod builder;
+mod dashboard;
 mod grpc;
 mod influxdb;
 mod jaeger;
@@ -91,6 +92,7 @@ use sql::statements::tql::Tql;
 use sqlparser::ast::ObjectName;
 pub use standalone::StandaloneDatanodeManager;
 use table::requests::{OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM};
+use tracing::Span;
 
 use crate::error::{
     self, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExternalSnafu, InvalidSqlSnafu,
@@ -314,6 +316,7 @@ impl Instance {
             unreachable!()
         };
         query_interceptor.pre_execute(&stmt, Some(&plan), query_ctx.clone())?;
+
         self.statement_executor
             .exec_plan(plan, query_ctx.clone())
             .await
@@ -508,6 +511,7 @@ fn attach_timeout(output: Output, mut timeout: Duration) -> Result<Output> {
                 stream: s,
                 output_ordering: None,
                 metrics: Default::default(),
+                span: Span::current(),
             };
             Output::new(OutputData::Stream(Box::pin(stream)), output.meta)
         }
@@ -516,12 +520,9 @@ fn attach_timeout(output: Output, mut timeout: Duration) -> Result<Output> {
     Ok(output)
 }
 
-#[async_trait]
-impl SqlQueryHandler for Instance {
-    type Error = Error;
-
-    #[tracing::instrument(skip_all)]
-    async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
+impl Instance {
+    #[tracing::instrument(skip_all, name = "SqlQueryHandler::do_query")]
+    async fn do_query_inner(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
         if self.is_suspended() {
             return vec![error::SuspendedSnafu {}.fail()];
         }
@@ -587,7 +588,7 @@ impl SqlQueryHandler for Instance {
         }
     }
 
-    async fn do_exec_plan(
+    async fn do_exec_plan_inner(
         &self,
         stmt: Option<Statement>,
         plan: LogicalPlan,
@@ -650,8 +651,8 @@ impl SqlQueryHandler for Instance {
         }
     }
 
-    #[tracing::instrument(skip_all)]
-    async fn do_promql_query(
+    #[tracing::instrument(skip_all, name = "SqlQueryHandler::do_promql_query")]
+    async fn do_promql_query_inner(
         &self,
         query: &PromQuery,
         query_ctx: QueryContextRef,
@@ -669,7 +670,7 @@ impl SqlQueryHandler for Instance {
         vec![result]
     }
 
-    async fn do_describe(
+    async fn do_describe_inner(
         &self,
         stmt: Statement,
         query_ctx: QueryContextRef,
@@ -702,11 +703,68 @@ impl SqlQueryHandler for Instance {
         }
     }
 
-    async fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {
+    async fn is_valid_schema_inner(&self, catalog: &str, schema: &str) -> Result<bool> {
         self.catalog_manager
             .schema_exists(catalog, schema, None)
             .await
             .context(error::CatalogSnafu)
+    }
+}
+
+#[async_trait]
+impl SqlQueryHandler for Instance {
+    async fn do_query(
+        &self,
+        query: &str,
+        query_ctx: QueryContextRef,
+    ) -> Vec<server_error::Result<Output>> {
+        self.do_query_inner(query, query_ctx)
+            .await
+            .into_iter()
+            .map(|result| result.map_err(BoxedError::new).context(ExecuteQuerySnafu))
+            .collect()
+    }
+
+    async fn do_exec_plan(
+        &self,
+        stmt: Option<Statement>,
+        plan: LogicalPlan,
+        query_ctx: QueryContextRef,
+    ) -> server_error::Result<Output> {
+        self.do_exec_plan_inner(stmt, plan, query_ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(server_error::ExecutePlanSnafu)
+    }
+
+    async fn do_promql_query(
+        &self,
+        query: &PromQuery,
+        query_ctx: QueryContextRef,
+    ) -> Vec<server_error::Result<Output>> {
+        self.do_promql_query_inner(query, query_ctx)
+            .await
+            .into_iter()
+            .map(|result| result.map_err(BoxedError::new).context(ExecuteQuerySnafu))
+            .collect()
+    }
+
+    async fn do_describe(
+        &self,
+        stmt: Statement,
+        query_ctx: QueryContextRef,
+    ) -> server_error::Result<Option<DescribeResult>> {
+        self.do_describe_inner(stmt, query_ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(server_error::DescribeStatementSnafu)
+    }
+
+    async fn is_valid_schema(&self, catalog: &str, schema: &str) -> server_error::Result<bool> {
+        self.is_valid_schema_inner(catalog, schema)
+            .await
+            .map_err(BoxedError::new)
+            .context(server_error::CheckDatabaseValiditySnafu)
     }
 }
 

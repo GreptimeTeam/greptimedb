@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod json_get;
+mod json_get_rewriter;
 mod json_is;
 mod json_path_exists;
 mod json_path_match;
@@ -20,6 +21,7 @@ mod json_to_string;
 mod parse_json;
 
 use json_get::{JsonGetBool, JsonGetFloat, JsonGetInt, JsonGetObject, JsonGetString};
+use json_get_rewriter::JsonGetRewriter;
 use json_is::{
     JsonIsArray, JsonIsBool, JsonIsFloat, JsonIsInt, JsonIsNull, JsonIsObject, JsonIsString,
 };
@@ -27,6 +29,7 @@ use json_to_string::JsonToStringFunction;
 use parse_json::ParseJsonFunction;
 
 use crate::function_registry::FunctionRegistry;
+use crate::scalars::json::json_get::JsonGetWithType;
 
 pub(crate) struct JsonFunction;
 
@@ -40,6 +43,7 @@ impl JsonFunction {
         registry.register_scalar(JsonGetString::default());
         registry.register_scalar(JsonGetBool::default());
         registry.register_scalar(JsonGetObject::default());
+        registry.register_scalar(JsonGetWithType::default());
 
         registry.register_scalar(JsonIsNull::default());
         registry.register_scalar(JsonIsInt::default());
@@ -51,5 +55,7 @@ impl JsonFunction {
 
         registry.register_scalar(json_path_exists::JsonPathExistsFunction::default());
         registry.register_scalar(json_path_match::JsonPathMatchFunction::default());
+
+        registry.register_function_rewrite(JsonGetRewriter);
     }
 }

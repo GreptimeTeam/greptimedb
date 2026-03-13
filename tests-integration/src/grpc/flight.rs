@@ -35,7 +35,6 @@ mod test {
     use servers::grpc::builder::GrpcServerBuilder;
     use servers::grpc::greptime_handler::GreptimeRequestHandler;
     use servers::grpc::{FlightCompression, GrpcServerConfig};
-    use servers::query_handler::grpc::ServerGrpcQueryHandlerAdapter;
     use servers::server::Server;
 
     use crate::cluster::GreptimeDbClusterBuilder;
@@ -88,7 +87,7 @@ mod test {
 
         let runtime = common_runtime::global_runtime().clone();
         let greptime_request_handler = GreptimeRequestHandler::new(
-            ServerGrpcQueryHandlerAdapter::arc(db.frontend.instance.clone()),
+            db.frontend.instance.clone(),
             user_provider_from_option("static_user_provider:cmd:greptime_user=greptime_pwd").ok(),
             Some(runtime.clone()),
             FlightCompression::default(),

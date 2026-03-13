@@ -21,6 +21,7 @@ use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use common_telemetry::{info, warn};
+use parquet::file::metadata::PageIndexPolicy;
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
@@ -513,19 +514,26 @@ async fn edit_region(
             common_runtime::spawn_global(async move {
                 WRITE_CACHE_INFLIGHT_DOWNLOAD.add(1);
 
-                if write_cache
-                    .download(index_key, &remote_path, layer.object_store(), file_size)
-                    .await
-                    .is_ok()
-                {
+                let parquet_cached = write_cache
+                    .download_if_absent(index_key, &remote_path, layer.object_store(), file_size)
+                    .await;
+
+                if parquet_cached.is_ok() {
                     // Triggers the filling of the parquet metadata cache.
                     // The parquet file is already downloaded.
+                    let mut cache_metrics = Default::default();
                     let _ = write_cache
                         .file_cache()
-                        .get_parquet_meta_data(index_key)
+                        .get_parquet_meta_data(
+                            index_key,
+                            &mut cache_metrics,
+                            PageIndexPolicy::Optional,
+                        )
                         .await;
 
-                    listener.on_file_cache_filled(index_key.file_id);
+                    if matches!(parquet_cached, Ok(true)) {
+                        listener.on_file_cache_filled(index_key.file_id);
+                    }
                 }
                 if is_index_exist {
                     // also download puffin file

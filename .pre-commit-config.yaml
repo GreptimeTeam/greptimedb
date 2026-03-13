@@ -15,8 +15,11 @@ repos:
     rev: v1.0
     hooks:
     -    id: fmt
+         args: ["--", "--check"]
+         stages: [commit-msg]
     -    id: clippy
          args: ["--workspace", "--all-targets", "--all-features", "--", "-D", "warnings"]
-         stages: [pre-push]
+         stages: [commit-msg]
     -    id: cargo-check
          args: ["--workspace", "--all-targets", "--all-features"]
+         stages: [commit-msg]

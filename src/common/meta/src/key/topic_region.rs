@@ -243,13 +243,62 @@ impl TopicRegionManager {
         let topic_region_mapping = self.get_topic_region_mapping(table_id, &region_wal_options);
         let topic_region_keys = topic_region_mapping
             .iter()
-            .map(|(topic, region_id)| TopicRegionKey::new(*topic, region_id))
+            .map(|(region_id, topic)| TopicRegionKey::new(*region_id, topic))
             .collect::<Vec<_>>();
         let operations = topic_region_keys
             .into_iter()
             .map(|key| TxnOp::Put(key.to_bytes(), vec![]))
             .collect::<Vec<_>>();
         Ok(Txn::new().and_then(operations))
+    }
+
+    /// Build a update topic region mapping transaction.
+    pub fn build_update_txn(
+        &self,
+        table_id: TableId,
+        old_region_wal_options: &HashMap<RegionNumber, String>,
+        new_region_wal_options: &HashMap<RegionNumber, String>,
+    ) -> Result<Txn> {
+        let old_wal_options_parsed = parse_region_wal_options(old_region_wal_options)?;
+        let new_wal_options_parsed = parse_region_wal_options(new_region_wal_options)?;
+        let old_mapping = self.get_topic_region_mapping(table_id, &old_wal_options_parsed);
+        let new_mapping = self.get_topic_region_mapping(table_id, &new_wal_options_parsed);
+
+        // Convert to HashMap for easier lookup: RegionId -> Topic
+        let old_map: HashMap<RegionId, &str> = old_mapping.into_iter().collect();
+        let new_map: HashMap<RegionId, &str> = new_mapping.into_iter().collect();
+        let mut ops = Vec::new();
+
+        // Check for deletes (in old but not in new, or topic changed)
+        for (region_id, old_topic) in &old_map {
+            match new_map.get(region_id) {
+                Some(new_topic) if *new_topic == *old_topic => {
+                    // Same topic, do nothing (preserve checkpoint)
+                }
+                _ => {
+                    // Removed or topic changed -> Delete old
+                    let key = TopicRegionKey::new(*region_id, old_topic);
+                    ops.push(TxnOp::Delete(key.to_bytes()));
+                }
+            }
+        }
+
+        // Check for adds (in new but not in old, or topic changed)
+        for (region_id, new_topic) in &new_map {
+            match old_map.get(region_id) {
+                Some(old_topic) if *old_topic == *new_topic => {
+                    // Same topic, already handled (do nothing)
+                }
+                _ => {
+                    // New or topic changed -> Put new
+                    let key = TopicRegionKey::new(*region_id, new_topic);
+                    // Initialize with empty value (default TopicRegionValue)
+                    ops.push(TxnOp::Put(key.to_bytes(), vec![]));
+                }
+            }
+        }
+
+        Ok(Txn::new().and_then(ops))
     }
 
     /// Returns the map of [`RegionId`] to their corresponding topic [`TopicRegionValue`].
@@ -430,5 +479,421 @@ mod tests {
             topic_region_key.region_id,
             RegionId::from_u64(4410931412992)
         );
+    }
+
+    #[test]
+    fn test_build_create_txn() {
+        let kv_backend = Arc::new(MemoryKvBackend::default());
+        let manager = TopicRegionManager::new(kv_backend.clone());
+        let table_id = 1;
+        let region_wal_options = vec![
+            (
+                0,
+                WalOptions::Kafka(KafkaWalOptions {
+                    topic: "topic_0".to_string(),
+                }),
+            ),
+            (
+                1,
+                WalOptions::Kafka(KafkaWalOptions {
+                    topic: "topic_1".to_string(),
+                }),
+            ),
+            (2, WalOptions::RaftEngine), // Should be ignored
+        ]
+        .into_iter()
+        .map(|(num, opts)| (num, serde_json::to_string(&opts).unwrap()))
+        .collect::<HashMap<_, _>>();
+
+        let txn = manager
+            .build_create_txn(table_id, &region_wal_options)
+            .unwrap();
+
+        // Verify the transaction contains correct operations
+        // Should create mappings for region 0 and 1, but not region 2 (RaftEngine)
+        let ops = txn.req().success.clone();
+        assert_eq!(ops.len(), 2);
+
+        let keys: Vec<_> = ops
+            .iter()
+            .filter_map(|op| {
+                if let TxnOp::Put(key, _) = op {
+                    TopicRegionKey::from_bytes(key).ok()
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        assert_eq!(keys.len(), 2);
+        let region_ids: Vec<_> = keys.iter().map(|k| k.region_id).collect();
+        assert!(region_ids.contains(&RegionId::new(table_id, 0)));
+        assert!(region_ids.contains(&RegionId::new(table_id, 1)));
+        assert!(!region_ids.contains(&RegionId::new(table_id, 2)));
+
+        // Verify topics are correct
+        for key in keys {
+            match key.region_id.region_number() {
+                0 => assert_eq!(key.topic, "topic_0"),
+                1 => assert_eq!(key.topic, "topic_1"),
+                _ => panic!("Unexpected region number"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_build_update_txn_add_new_region() {
+        let kv_backend = Arc::new(MemoryKvBackend::default());
+        let manager = TopicRegionManager::new(kv_backend.clone());
+        let table_id = 1;
+        let old_region_wal_options = vec![(
+            0,
+            WalOptions::Kafka(KafkaWalOptions {
+                topic: "topic_0".to_string(),
+            }),
+        )]
+        .into_iter()
+        .map(|(num, opts)| (num, serde_json::to_string(&opts).unwrap()))
+        .collect::<HashMap<_, _>>();
+        let new_region_wal_options = vec![
+            (
+                0,
+                WalOptions::Kafka(KafkaWalOptions {
+                    topic: "topic_0".to_string(),
+                }),
+            ),
+            (
+                1,
+                WalOptions::Kafka(KafkaWalOptions {
+                    topic: "topic_1".to_string(),
+                }),
+            ),
+        ]
+        .into_iter()
+        .map(|(num, opts)| (num, serde_json::to_string(&opts).unwrap()))
+        .collect::<HashMap<_, _>>();
+        let txn = manager
+            .build_update_txn(table_id, &old_region_wal_options, &new_region_wal_options)
+            .unwrap();
+        let ops = txn.req().success.clone();
+        // Should only have Put for new region 1 (region 0 unchanged)
+        assert_eq!(ops.len(), 1);
+        if let TxnOp::Put(key, _) = &ops[0] {
+            let topic_key = TopicRegionKey::from_bytes(key).unwrap();
+            assert_eq!(topic_key.region_id, RegionId::new(table_id, 1));
+            assert_eq!(topic_key.topic, "topic_1");
+        } else {
+            panic!("Expected Put operation");
+        }
+    }
+
+    #[test]
+    fn test_build_update_txn_remove_region() {
+        let kv_backend = Arc::new(MemoryKvBackend::default());
+        let manager = TopicRegionManager::new(kv_backend.clone());
+        let table_id = 1;
+        let old_region_wal_options = vec![
+            (
+                0,
+                WalOptions::Kafka(KafkaWalOptions {
+                    topic: "topic_0".to_string(),
+                }),
+            ),
+            (
+                1,
+                WalOptions::Kafka(KafkaWalOptions {
+                    topic: "topic_1".to_string(),
+                }),
+            ),
+        ]
+        .into_iter()
+        .map(|(num, opts)| (num, serde_json::to_string(&opts).unwrap()))
+        .collect::<HashMap<_, _>>();
+        let new_region_wal_options = vec![(
+            0,
+            WalOptions::Kafka(KafkaWalOptions {
+                topic: "topic_0".to_string(),
+            }),
+        )]
+        .into_iter()
+        .map(|(num, opts)| (num, serde_json::to_string(&opts).unwrap()))
+        .collect::<HashMap<_, _>>();
+        let txn = manager
+            .build_update_txn(table_id, &old_region_wal_options, &new_region_wal_options)
+            .unwrap();
+        let ops = txn.req().success.clone();
+        // Should only have Delete for removed region 1 (region 0 unchanged)
+        assert_eq!(ops.len(), 1);
+        match &ops[0] {
+            TxnOp::Delete(key) => {
+                let topic_key = TopicRegionKey::from_bytes(key).unwrap();
+                assert_eq!(topic_key.region_id, RegionId::new(table_id, 1));
+                assert_eq!(topic_key.topic, "topic_1");
+            }
+            TxnOp::Put(_, _) | TxnOp::Get(_) => {
+                panic!("Expected Delete operation");
+            }
+        }
+    }
+
+    #[test]
+    fn test_build_update_txn_change_topic() {
+        let kv_backend = Arc::new(MemoryKvBackend::default());
+        let manager = TopicRegionManager::new(kv_backend.clone());
+        let table_id = 1;
+        let old_region_wal_options = vec![(
+            0,
+            WalOptions::Kafka(KafkaWalOptions {
+                topic: "topic_0".to_string(),
+            }),
+        )]
+        .into_iter()
+        .map(|(num, opts)| (num, serde_json::to_string(&opts).unwrap()))
+        .collect::<HashMap<_, _>>();
+        let new_region_wal_options = vec![(
+            0,
+            WalOptions::Kafka(KafkaWalOptions {
+                topic: "topic_0_new".to_string(),
+            }),
+        )]
+        .into_iter()
+        .map(|(num, opts)| (num, serde_json::to_string(&opts).unwrap()))
+        .collect::<HashMap<_, _>>();
+        let txn = manager
+            .build_update_txn(table_id, &old_region_wal_options, &new_region_wal_options)
+            .unwrap();
+        let ops = txn.req().success.clone();
+        // Should have Delete for old topic and Put for new topic
+        assert_eq!(ops.len(), 2);
+
+        let mut delete_found = false;
+        let mut put_found = false;
+        for op in ops {
+            match op {
+                TxnOp::Delete(key) => {
+                    let topic_key = TopicRegionKey::from_bytes(&key).unwrap();
+                    assert_eq!(topic_key.region_id, RegionId::new(table_id, 0));
+                    assert_eq!(topic_key.topic, "topic_0");
+                    delete_found = true;
+                }
+                TxnOp::Put(key, _) => {
+                    let topic_key = TopicRegionKey::from_bytes(&key).unwrap();
+                    assert_eq!(topic_key.region_id, RegionId::new(table_id, 0));
+                    assert_eq!(topic_key.topic, "topic_0_new");
+                    put_found = true;
+                }
+                TxnOp::Get(_) => {
+                    // Get operations shouldn't appear in this context
+                    panic!("Unexpected Get operation in update transaction");
+                }
+            }
+        }
+        assert!(delete_found, "Expected Delete operation for old topic");
+        assert!(put_found, "Expected Put operation for new topic");
+    }
+
+    #[test]
+    fn test_build_update_txn_no_change() {
+        let kv_backend = Arc::new(MemoryKvBackend::default());
+        let manager = TopicRegionManager::new(kv_backend.clone());
+        let table_id = 1;
+        let region_wal_options = vec![
+            (
+                0,
+                WalOptions::Kafka(KafkaWalOptions {
+                    topic: "topic_0".to_string(),
+                }),
+            ),
+            (
+                1,
+                WalOptions::Kafka(KafkaWalOptions {
+                    topic: "topic_1".to_string(),
+                }),
+            ),
+        ]
+        .into_iter()
+        .map(|(num, opts)| (num, serde_json::to_string(&opts).unwrap()))
+        .collect::<HashMap<_, _>>();
+        let txn = manager
+            .build_update_txn(table_id, &region_wal_options, &region_wal_options)
+            .unwrap();
+        // Should have no operations when nothing changes (preserves checkpoint)
+        let ops = txn.req().success.clone();
+        assert_eq!(ops.len(), 0);
+    }
+
+    #[test]
+    fn test_build_update_txn_mixed_scenarios() {
+        let kv_backend = Arc::new(MemoryKvBackend::default());
+        let manager = TopicRegionManager::new(kv_backend.clone());
+        let table_id = 1;
+        let old_region_wal_options = vec![
+            (
+                0,
+                WalOptions::Kafka(KafkaWalOptions {
+                    topic: "topic_0".to_string(),
+                }),
+            ),
+            (
+                1,
+                WalOptions::Kafka(KafkaWalOptions {
+                    topic: "topic_1".to_string(),
+                }),
+            ),
+            (
+                2,
+                WalOptions::Kafka(KafkaWalOptions {
+                    topic: "topic_2".to_string(),
+                }),
+            ),
+        ]
+        .into_iter()
+        .map(|(num, opts)| (num, serde_json::to_string(&opts).unwrap()))
+        .collect::<HashMap<_, _>>();
+        let new_region_wal_options = vec![
+            (
+                0,
+                WalOptions::Kafka(KafkaWalOptions {
+                    topic: "topic_0".to_string(), // Unchanged
+                }),
+            ),
+            (
+                1,
+                WalOptions::Kafka(KafkaWalOptions {
+                    topic: "topic_1_new".to_string(), // Topic changed
+                }),
+            ),
+            // Region 2 removed
+            (
+                3,
+                WalOptions::Kafka(KafkaWalOptions {
+                    topic: "topic_3".to_string(), // New region
+                }),
+            ),
+        ]
+        .into_iter()
+        .map(|(num, opts)| (num, serde_json::to_string(&opts).unwrap()))
+        .collect::<HashMap<_, _>>();
+        let txn = manager
+            .build_update_txn(table_id, &old_region_wal_options, &new_region_wal_options)
+            .unwrap();
+
+        let ops = txn.req().success.clone();
+        // Should have:
+        // - Delete for region 2 (removed)
+        // - Delete for region 1 old topic (topic changed)
+        // - Put for region 1 new topic (topic changed)
+        // - Put for region 3 (new)
+        // Region 0 unchanged, so no operation
+        assert_eq!(ops.len(), 4);
+
+        let mut delete_ops = 0;
+        let mut put_ops = 0;
+        let mut delete_region_2 = false;
+        let mut delete_region_1_old = false;
+        let mut put_region_1_new = false;
+        let mut put_region_3 = false;
+
+        for op in ops {
+            match op {
+                TxnOp::Delete(key) => {
+                    delete_ops += 1;
+                    let topic_key = TopicRegionKey::from_bytes(&key).unwrap();
+                    match topic_key.region_id.region_number() {
+                        1 => {
+                            assert_eq!(topic_key.topic, "topic_1");
+                            delete_region_1_old = true;
+                        }
+                        2 => {
+                            assert_eq!(topic_key.topic, "topic_2");
+                            delete_region_2 = true;
+                        }
+                        _ => panic!("Unexpected delete operation for region"),
+                    }
+                }
+                TxnOp::Put(key, _) => {
+                    put_ops += 1;
+                    let topic_key: TopicRegionKey<'_> = TopicRegionKey::from_bytes(&key).unwrap();
+                    match topic_key.region_id.region_number() {
+                        1 => {
+                            assert_eq!(topic_key.topic, "topic_1_new");
+                            put_region_1_new = true;
+                        }
+                        3 => {
+                            assert_eq!(topic_key.topic, "topic_3");
+                            put_region_3 = true;
+                        }
+                        _ => panic!("Unexpected put operation for region"),
+                    }
+                }
+                TxnOp::Get(_) => {
+                    panic!("Unexpected Get operation in update transaction");
+                }
+            }
+        }
+
+        assert_eq!(delete_ops, 2);
+        assert_eq!(put_ops, 2);
+        assert!(delete_region_2, "Expected delete for removed region 2");
+        assert!(
+            delete_region_1_old,
+            "Expected delete for region 1 old topic"
+        );
+        assert!(put_region_1_new, "Expected put for region 1 new topic");
+        assert!(put_region_3, "Expected put for new region 3");
+    }
+
+    #[test]
+    fn test_build_update_txn_with_raft_engine() {
+        let kv_backend = Arc::new(MemoryKvBackend::default());
+        let manager = TopicRegionManager::new(kv_backend.clone());
+        let table_id = 1;
+        let old_region_wal_options = vec![
+            (
+                0,
+                WalOptions::Kafka(KafkaWalOptions {
+                    topic: "topic_0".to_string(),
+                }),
+            ),
+            (1, WalOptions::RaftEngine), // Should be ignored
+        ]
+        .into_iter()
+        .map(|(num, opts)| (num, serde_json::to_string(&opts).unwrap()))
+        .collect::<HashMap<_, _>>();
+        let new_region_wal_options = vec![
+            (
+                0,
+                WalOptions::Kafka(KafkaWalOptions {
+                    topic: "topic_0".to_string(),
+                }),
+            ),
+            (
+                1,
+                WalOptions::Kafka(KafkaWalOptions {
+                    topic: "topic_1".to_string(), // Changed from RaftEngine to Kafka
+                }),
+            ),
+        ]
+        .into_iter()
+        .map(|(num, opts)| (num, serde_json::to_string(&opts).unwrap()))
+        .collect::<HashMap<_, _>>();
+        let txn = manager
+            .build_update_txn(table_id, &old_region_wal_options, &new_region_wal_options)
+            .unwrap();
+        let ops = txn.req().success.clone();
+        // Should only have Put for region 1 (new Kafka topic)
+        // Region 0 unchanged, so no operation
+        // Region 1 was RaftEngine before (not tracked), so only Put needed
+        assert_eq!(ops.len(), 1);
+        match &ops[0] {
+            TxnOp::Put(key, _) => {
+                let topic_key = TopicRegionKey::from_bytes(key).unwrap();
+                assert_eq!(topic_key.region_id, RegionId::new(table_id, 1));
+                assert_eq!(topic_key.topic, "topic_1");
+            }
+            TxnOp::Delete(_) | TxnOp::Get(_) => {
+                panic!("Expected Put operation for new Kafka region");
+            }
+        }
     }
 }

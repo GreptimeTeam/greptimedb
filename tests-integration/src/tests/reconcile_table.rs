@@ -437,7 +437,7 @@ async fn test_set_table_id() {
 
     let metasrv = test_context.metasrv();
     // Due to the table id 1024 already allocated, we need to jump to 1025.
-    metasrv.table_id_sequence().jump_to(1025).await.unwrap();
+    metasrv.table_id_allocator().jump_to(1025).await.unwrap();
 
     // We should able to create table now.
     let output = execute_sql(&test_context.frontend(), CREATE_MONITOR_TABLE_SQL).await;

@@ -16,6 +16,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use common_telemetry::error;
+use store_api::region_request::PathType;
 
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
@@ -67,8 +68,23 @@ impl fmt::Debug for LocalFilePurger {
     }
 }
 
-pub fn is_local_fs(sst_layer: &AccessLayerRef) -> bool {
-    sst_layer.object_store().info().scheme() == object_store::Scheme::Fs
+#[cfg(not(debug_assertions))]
+/// Whether to enable GC for the file purger.
+pub fn should_enable_gc(
+    global_gc_enabled: bool,
+    object_store_scheme: object_store::Scheme,
+) -> bool {
+    global_gc_enabled && object_store_scheme != object_store::Scheme::Fs
+}
+
+#[cfg(debug_assertions)]
+/// For debug build, we may use Fs as the object store scheme,
+/// so we need to enable GC for local file system.
+pub fn should_enable_gc(
+    global_gc_enabled: bool,
+    _object_store_scheme: object_store::Scheme,
+) -> bool {
+    global_gc_enabled
 }
 
 /// Creates a file purger based on the storage type of the access layer.
@@ -82,12 +98,18 @@ pub fn is_local_fs(sst_layer: &AccessLayerRef) -> bool {
 ///
 pub fn create_file_purger(
     gc_enabled: bool,
+    path_type: PathType,
     scheduler: SchedulerRef,
     sst_layer: AccessLayerRef,
     cache_manager: Option<CacheManagerRef>,
     file_ref_manager: FileReferenceManagerRef,
 ) -> FilePurgerRef {
-    if gc_enabled && !is_local_fs(&sst_layer) {
+    // Only enable GC for:
+    // - object store based storage
+    // - data or bare path type (metadata region doesn't need to be GCed)
+    if should_enable_gc(gc_enabled, sst_layer.object_store().info().scheme())
+        && matches!(path_type, PathType::Data | PathType::Bare)
+    {
         Arc::new(ObjectStoreFilePurger { file_ref_manager })
     } else {
         Arc::new(LocalFilePurger::new(scheduler, sst_layer, cache_manager))

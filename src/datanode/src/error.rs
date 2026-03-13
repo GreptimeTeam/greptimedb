@@ -201,6 +201,7 @@ pub enum Error {
     ShutdownServer {
         #[snafu(implicit)]
         location: Location,
+        #[snafu(source)]
         source: servers::error::Error,
     },
 
@@ -208,6 +209,7 @@ pub enum Error {
     ShutdownInstance {
         #[snafu(implicit)]
         location: Location,
+        #[snafu(source)]
         source: BoxedError,
     },
 
@@ -330,13 +332,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid arguments for GC: {}", msg))]
-    InvalidGcArgs {
-        msg: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to list SST entries from storage"))]
     ListStorageSsts {
         #[snafu(implicit)]
@@ -453,11 +448,9 @@ impl ErrorExt for Error {
 
             AsyncTaskExecute { source, .. } => source.status_code(),
 
-            CreateDir { .. }
-            | RemoveDir { .. }
-            | ShutdownInstance { .. }
-            | DataFusion { .. }
-            | InvalidGcArgs { .. } => StatusCode::Internal,
+            CreateDir { .. } | RemoveDir { .. } | ShutdownInstance { .. } | DataFusion { .. } => {
+                StatusCode::Internal
+            }
 
             RegionNotFound { .. } => StatusCode::RegionNotFound,
             RegionNotReady { .. } => StatusCode::RegionNotReady,

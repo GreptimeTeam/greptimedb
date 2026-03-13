@@ -22,6 +22,7 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use async_stream::try_stream;
+use common_telemetry::tracing;
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricBuilder, Time};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::timestamp::timestamp_array_to_primitive;
@@ -39,7 +40,8 @@ use crate::metrics::{
 };
 use crate::read::dedup::{DedupMetrics, DedupMetricsReport};
 use crate::read::merge::{MergeMetrics, MergeMetricsReport};
-use crate::read::range::{RangeBuilderList, RangeMeta, RowGroupIndex};
+use crate::read::pruner::PartitionPruner;
+use crate::read::range::{RangeMeta, RowGroupIndex};
 use crate::read::scan_region::StreamContext;
 use crate::read::{Batch, BoxedBatchStream, BoxedRecordBatchStream, ScannerMetrics, Source};
 use crate::sst::file::{FileTimeRange, RegionFileId};
@@ -114,6 +116,8 @@ pub(crate) struct ScanMetricsSet {
     scan_cost: Duration,
     /// Duration while waiting for `yield`.
     yield_cost: Duration,
+    /// Duration to convert [`Batch`]es.
+    convert_cost: Option<Time>,
     /// Duration of the scan.
     total_cost: Duration,
     /// Number of rows returned.
@@ -150,6 +154,8 @@ pub(crate) struct ScanMetricsSet {
     rg_minmax_filtered: usize,
     /// Number of row groups filtered by bloom filter index.
     rg_bloom_filtered: usize,
+    /// Number of row groups filtered by vector index.
+    rg_vector_filtered: usize,
     /// Number of rows in row group before filtering.
     rows_before_filter: usize,
     /// Number of rows in row group filtered by fulltext index.
@@ -158,8 +164,34 @@ pub(crate) struct ScanMetricsSet {
     rows_inverted_filtered: usize,
     /// Number of rows in row group filtered by bloom filter index.
     rows_bloom_filtered: usize,
+    /// Number of rows filtered by vector index.
+    rows_vector_filtered: usize,
+    /// Number of rows selected by vector index.
+    rows_vector_selected: usize,
     /// Number of rows filtered by precise filter.
     rows_precise_filtered: usize,
+    /// Number of index result cache hits for fulltext index.
+    fulltext_index_cache_hit: usize,
+    /// Number of index result cache misses for fulltext index.
+    fulltext_index_cache_miss: usize,
+    /// Number of index result cache hits for inverted index.
+    inverted_index_cache_hit: usize,
+    /// Number of index result cache misses for inverted index.
+    inverted_index_cache_miss: usize,
+    /// Number of index result cache hits for bloom filter index.
+    bloom_filter_cache_hit: usize,
+    /// Number of index result cache misses for bloom filter index.
+    bloom_filter_cache_miss: usize,
+    /// Number of index result cache hits for minmax pruning.
+    minmax_cache_hit: usize,
+    /// Number of index result cache misses for minmax pruning.
+    minmax_cache_miss: usize,
+    /// Number of pruner builder cache hits.
+    pruner_cache_hit: usize,
+    /// Number of pruner builder cache misses.
+    pruner_cache_miss: usize,
+    /// Duration spent waiting for pruner to build file ranges.
+    pruner_prune_cost: Duration,
     /// Number of record batches read from SST.
     num_sst_record_batches: usize,
     /// Number of batches decoded from SST.
@@ -182,6 +214,8 @@ pub(crate) struct ScanMetricsSet {
     distributor_scan_cost: Duration,
     /// Duration of the series distributor to yield.
     distributor_yield_cost: Duration,
+    /// Duration spent in divider operations.
+    distributor_divider_cost: Duration,
 
     /// Merge metrics.
     merge_metrics: MergeMetrics,
@@ -204,6 +238,15 @@ pub(crate) struct ScanMetricsSet {
     metadata_cache_metrics: Option<MetadataCacheMetrics>,
     /// Per-file scan metrics, only populated when explain_verbose is true.
     per_file_metrics: Option<HashMap<RegionFileId, FileScanMetrics>>,
+
+    /// Current memory usage for file range builders.
+    build_ranges_mem_size: isize,
+    /// Peak memory usage for file range builders.
+    build_ranges_peak_mem_size: isize,
+    /// Current number of file range builders.
+    num_range_builders: isize,
+    /// Peak number of file range builders.
+    num_peak_range_builders: isize,
 }
 
 /// Wrapper for file metrics that compares by total cost in reverse order.
@@ -242,6 +285,7 @@ impl fmt::Debug for ScanMetricsSet {
             build_reader_cost,
             scan_cost,
             yield_cost,
+            convert_cost,
             total_cost,
             num_rows,
             num_batches,
@@ -254,11 +298,25 @@ impl fmt::Debug for ScanMetricsSet {
             rg_inverted_filtered,
             rg_minmax_filtered,
             rg_bloom_filtered,
+            rg_vector_filtered,
             rows_before_filter,
             rows_fulltext_filtered,
             rows_inverted_filtered,
             rows_bloom_filtered,
+            rows_vector_filtered,
+            rows_vector_selected,
             rows_precise_filtered,
+            fulltext_index_cache_hit,
+            fulltext_index_cache_miss,
+            inverted_index_cache_hit,
+            inverted_index_cache_miss,
+            bloom_filter_cache_hit,
+            bloom_filter_cache_miss,
+            minmax_cache_hit,
+            minmax_cache_miss,
+            pruner_cache_hit,
+            pruner_cache_miss,
+            pruner_prune_cost,
             num_sst_record_batches,
             num_sst_batches,
             num_sst_rows,
@@ -269,6 +327,7 @@ impl fmt::Debug for ScanMetricsSet {
             num_distributor_batches,
             distributor_scan_cost,
             distributor_yield_cost,
+            distributor_divider_cost,
             merge_metrics,
             dedup_metrics,
             stream_eof,
@@ -282,6 +341,10 @@ impl fmt::Debug for ScanMetricsSet {
             fetch_metrics,
             metadata_cache_metrics,
             per_file_metrics,
+            build_ranges_mem_size: _,
+            build_ranges_peak_mem_size,
+            num_range_builders: _,
+            num_peak_range_builders,
         } = self;
 
         // Write core metrics
@@ -306,6 +369,12 @@ impl fmt::Debug for ScanMetricsSet {
             \"first_poll\":\"{first_poll:?}\""
         )?;
 
+        // Write convert_cost if present
+        if let Some(time) = convert_cost {
+            let duration = Duration::from_nanos(time.value() as u64);
+            write!(f, ", \"convert_cost\":\"{duration:?}\"")?;
+        }
+
         // Write non-zero filter counters
         if *rg_fulltext_filtered > 0 {
             write!(f, ", \"rg_fulltext_filtered\":{rg_fulltext_filtered}")?;
@@ -319,6 +388,9 @@ impl fmt::Debug for ScanMetricsSet {
         if *rg_bloom_filtered > 0 {
             write!(f, ", \"rg_bloom_filtered\":{rg_bloom_filtered}")?;
         }
+        if *rg_vector_filtered > 0 {
+            write!(f, ", \"rg_vector_filtered\":{rg_vector_filtered}")?;
+        }
         if *rows_fulltext_filtered > 0 {
             write!(f, ", \"rows_fulltext_filtered\":{rows_fulltext_filtered}")?;
         }
@@ -328,8 +400,59 @@ impl fmt::Debug for ScanMetricsSet {
         if *rows_bloom_filtered > 0 {
             write!(f, ", \"rows_bloom_filtered\":{rows_bloom_filtered}")?;
         }
+        if *rows_vector_filtered > 0 {
+            write!(f, ", \"rows_vector_filtered\":{rows_vector_filtered}")?;
+        }
+        if *rows_vector_selected > 0 {
+            write!(f, ", \"rows_vector_selected\":{rows_vector_selected}")?;
+        }
         if *rows_precise_filtered > 0 {
             write!(f, ", \"rows_precise_filtered\":{rows_precise_filtered}")?;
+        }
+        if *fulltext_index_cache_hit > 0 {
+            write!(
+                f,
+                ", \"fulltext_index_cache_hit\":{fulltext_index_cache_hit}"
+            )?;
+        }
+        if *fulltext_index_cache_miss > 0 {
+            write!(
+                f,
+                ", \"fulltext_index_cache_miss\":{fulltext_index_cache_miss}"
+            )?;
+        }
+        if *inverted_index_cache_hit > 0 {
+            write!(
+                f,
+                ", \"inverted_index_cache_hit\":{inverted_index_cache_hit}"
+            )?;
+        }
+        if *inverted_index_cache_miss > 0 {
+            write!(
+                f,
+                ", \"inverted_index_cache_miss\":{inverted_index_cache_miss}"
+            )?;
+        }
+        if *bloom_filter_cache_hit > 0 {
+            write!(f, ", \"bloom_filter_cache_hit\":{bloom_filter_cache_hit}")?;
+        }
+        if *bloom_filter_cache_miss > 0 {
+            write!(f, ", \"bloom_filter_cache_miss\":{bloom_filter_cache_miss}")?;
+        }
+        if *minmax_cache_hit > 0 {
+            write!(f, ", \"minmax_cache_hit\":{minmax_cache_hit}")?;
+        }
+        if *minmax_cache_miss > 0 {
+            write!(f, ", \"minmax_cache_miss\":{minmax_cache_miss}")?;
+        }
+        if *pruner_cache_hit > 0 {
+            write!(f, ", \"pruner_cache_hit\":{pruner_cache_hit}")?;
+        }
+        if *pruner_cache_miss > 0 {
+            write!(f, ", \"pruner_cache_miss\":{pruner_cache_miss}")?;
+        }
+        if !pruner_prune_cost.is_zero() {
+            write!(f, ", \"pruner_prune_cost\":\"{pruner_prune_cost:?}\"")?;
         }
 
         // Write non-zero distributor metrics
@@ -355,6 +478,12 @@ impl fmt::Debug for ScanMetricsSet {
             write!(
                 f,
                 ", \"distributor_yield_cost\":\"{distributor_yield_cost:?}\""
+            )?;
+        }
+        if !distributor_divider_cost.is_zero() {
+            write!(
+                f,
+                ", \"distributor_divider_cost\":\"{distributor_divider_cost:?}\""
             )?;
         }
 
@@ -419,6 +548,12 @@ impl fmt::Debug for ScanMetricsSet {
                 let total_cost =
                     metrics.build_part_cost + metrics.build_reader_cost + metrics.scan_cost;
 
+                // If the file has been pruned by a pruner, the build part cost may be zero.
+                // If we didn't read any ranges from it, we don't output the file.
+                if total_cost.is_zero() && metrics.num_ranges == 0 {
+                    continue;
+                }
+
                 if heap.len() < 10 {
                     // Haven't reached 10 yet, just push
                     heap.push(CompareCostReverse {
@@ -455,7 +590,12 @@ impl fmt::Debug for ScanMetricsSet {
             write!(f, "}}")?;
         }
 
-        write!(f, ", \"stream_eof\":{stream_eof}}}")
+        write!(
+            f,
+            ", \"build_ranges_peak_mem_size\":{build_ranges_peak_mem_size}, \
+             \"num_peak_range_builders\":{num_peak_range_builders}, \
+             \"stream_eof\":{stream_eof}}}"
+        )
     }
 }
 impl ScanMetricsSet {
@@ -465,27 +605,25 @@ impl ScanMetricsSet {
         self
     }
 
+    /// Attaches the `convert_cost` to the metrics set.
+    fn with_convert_cost(mut self, time: Time) -> Self {
+        self.convert_cost = Some(time);
+        self
+    }
+
     /// Merges the local scanner metrics.
     fn merge_scanner_metrics(&mut self, other: &ScannerMetrics) {
         let ScannerMetrics {
-            prepare_scan_cost,
-            build_reader_cost,
             scan_cost,
             yield_cost,
             num_batches,
             num_rows,
-            num_mem_ranges,
-            num_file_ranges,
         } = other;
 
-        self.prepare_scan_cost += *prepare_scan_cost;
-        self.build_reader_cost += *build_reader_cost;
         self.scan_cost += *scan_cost;
         self.yield_cost += *yield_cost;
         self.num_rows += *num_rows;
         self.num_batches += *num_batches;
-        self.num_mem_ranges += *num_mem_ranges;
-        self.num_file_ranges += *num_file_ranges;
     }
 
     /// Merges the local reader metrics.
@@ -499,11 +637,25 @@ impl ScanMetricsSet {
                     rg_inverted_filtered,
                     rg_minmax_filtered,
                     rg_bloom_filtered,
+                    rg_vector_filtered,
                     rows_total,
                     rows_fulltext_filtered,
                     rows_inverted_filtered,
                     rows_bloom_filtered,
+                    rows_vector_filtered,
+                    rows_vector_selected,
                     rows_precise_filtered,
+                    fulltext_index_cache_hit,
+                    fulltext_index_cache_miss,
+                    inverted_index_cache_hit,
+                    inverted_index_cache_miss,
+                    bloom_filter_cache_hit,
+                    bloom_filter_cache_miss,
+                    minmax_cache_hit,
+                    minmax_cache_miss,
+                    pruner_cache_hit,
+                    pruner_cache_miss,
+                    pruner_prune_cost,
                     inverted_index_apply_metrics,
                     bloom_filter_apply_metrics,
                     fulltext_index_apply_metrics,
@@ -514,6 +666,8 @@ impl ScanMetricsSet {
             scan_cost,
             metadata_cache_metrics,
             fetch_metrics,
+            metadata_mem_size,
+            num_range_builders,
         } = other;
 
         self.build_parts_cost += *build_cost;
@@ -524,12 +678,27 @@ impl ScanMetricsSet {
         self.rg_inverted_filtered += *rg_inverted_filtered;
         self.rg_minmax_filtered += *rg_minmax_filtered;
         self.rg_bloom_filtered += *rg_bloom_filtered;
+        self.rg_vector_filtered += *rg_vector_filtered;
 
         self.rows_before_filter += *rows_total;
         self.rows_fulltext_filtered += *rows_fulltext_filtered;
         self.rows_inverted_filtered += *rows_inverted_filtered;
         self.rows_bloom_filtered += *rows_bloom_filtered;
+        self.rows_vector_filtered += *rows_vector_filtered;
+        self.rows_vector_selected += *rows_vector_selected;
         self.rows_precise_filtered += *rows_precise_filtered;
+
+        self.fulltext_index_cache_hit += *fulltext_index_cache_hit;
+        self.fulltext_index_cache_miss += *fulltext_index_cache_miss;
+        self.inverted_index_cache_hit += *inverted_index_cache_hit;
+        self.inverted_index_cache_miss += *inverted_index_cache_miss;
+        self.bloom_filter_cache_hit += *bloom_filter_cache_hit;
+        self.bloom_filter_cache_miss += *bloom_filter_cache_miss;
+        self.minmax_cache_hit += *minmax_cache_hit;
+        self.minmax_cache_miss += *minmax_cache_miss;
+        self.pruner_cache_hit += *pruner_cache_hit;
+        self.pruner_cache_miss += *pruner_cache_miss;
+        self.pruner_prune_cost += *pruner_prune_cost;
 
         self.num_sst_record_batches += *num_record_batches;
         self.num_sst_batches += *num_batches;
@@ -559,6 +728,18 @@ impl ScanMetricsSet {
         self.metadata_cache_metrics
             .get_or_insert_with(MetadataCacheMetrics::default)
             .merge_from(metadata_cache_metrics);
+
+        // Track memory usage and update peak.
+        self.build_ranges_mem_size += *metadata_mem_size;
+        if self.build_ranges_mem_size > self.build_ranges_peak_mem_size {
+            self.build_ranges_peak_mem_size = self.build_ranges_mem_size;
+        }
+
+        // Track number of builders and update peak.
+        self.num_range_builders += *num_range_builders;
+        if self.num_range_builders > self.num_peak_range_builders {
+            self.num_peak_range_builders = self.num_range_builders;
+        }
     }
 
     /// Merges per-file metrics.
@@ -581,6 +762,7 @@ impl ScanMetricsSet {
             num_batches,
             scan_cost,
             yield_cost,
+            divider_cost,
         } = distributor_metrics;
 
         self.num_series_send_timeout += *num_series_send_timeout;
@@ -589,6 +771,7 @@ impl ScanMetricsSet {
         self.num_distributor_batches += *num_batches;
         self.distributor_scan_cost += *scan_cost;
         self.distributor_yield_cost += *yield_cost;
+        self.distributor_divider_cost += *divider_cost;
     }
 
     /// Observes metrics.
@@ -605,6 +788,11 @@ impl ScanMetricsSet {
         READ_STAGE_ELAPSED
             .with_label_values(&["yield"])
             .observe(self.yield_cost.as_secs_f64());
+        if let Some(time) = &self.convert_cost {
+            READ_STAGE_ELAPSED
+                .with_label_values(&["convert"])
+                .observe(Duration::from_nanos(time.value() as u64).as_secs_f64());
+        }
         READ_STAGE_ELAPSED
             .with_label_values(&["total"])
             .observe(self.total_cost.as_secs_f64());
@@ -630,6 +818,10 @@ impl ScanMetricsSet {
         READ_ROW_GROUPS_TOTAL
             .with_label_values(&["bloom_filter_index_filtered"])
             .inc_by(self.rg_bloom_filtered as u64);
+        #[cfg(feature = "vector_index")]
+        READ_ROW_GROUPS_TOTAL
+            .with_label_values(&["vector_index_filtered"])
+            .inc_by(self.rg_vector_filtered as u64);
 
         PRECISE_FILTER_ROWS_TOTAL
             .with_label_values(&["parquet"])
@@ -646,6 +838,10 @@ impl ScanMetricsSet {
         READ_ROWS_IN_ROW_GROUP_TOTAL
             .with_label_values(&["bloom_filter_index_filtered"])
             .inc_by(self.rows_bloom_filtered as u64);
+        #[cfg(feature = "vector_index")]
+        READ_ROWS_IN_ROW_GROUP_TOTAL
+            .with_label_values(&["vector_index_filtered"])
+            .inc_by(self.rows_vector_filtered as u64);
     }
 }
 
@@ -721,21 +917,19 @@ impl Drop for PartitionMetricsInner {
 
         if self.explain_verbose {
             common_telemetry::info!(
-                "{} finished, region_id: {}, partition: {}, scan_metrics: {:?}, convert_batch_costs: {}",
+                "{} finished, region_id: {}, partition: {}, scan_metrics: {:?}",
                 self.scanner_type,
                 self.region_id,
                 self.partition,
                 metrics,
-                self.convert_cost,
             );
         } else {
             common_telemetry::debug!(
-                "{} finished, region_id: {}, partition: {}, scan_metrics: {:?}, convert_batch_costs: {}",
+                "{} finished, region_id: {}, partition: {}, scan_metrics: {:?}",
                 self.scanner_type,
                 self.region_id,
                 self.partition,
                 metrics,
-                self.convert_cost,
             );
         }
     }
@@ -782,7 +976,10 @@ impl PartitionMetrics {
         let partition_str = partition.to_string();
         let in_progress_scan = IN_PROGRESS_SCAN.with_label_values(&[scanner_type, &partition_str]);
         in_progress_scan.inc();
-        let metrics = ScanMetricsSet::default().with_prepare_scan_cost(query_start.elapsed());
+        let convert_cost = MetricBuilder::new(metrics_set).subset_time("convert_cost", partition);
+        let metrics = ScanMetricsSet::default()
+            .with_prepare_scan_cost(query_start.elapsed())
+            .with_convert_cost(convert_cost.clone());
         let inner = PartitionMetricsInner {
             region_id,
             partition,
@@ -797,7 +994,7 @@ impl PartitionMetrics {
                 .subset_time("build_reader_cost", partition),
             scan_cost: MetricBuilder::new(metrics_set).subset_time("scan_cost", partition),
             yield_cost: MetricBuilder::new(metrics_set).subset_time("yield_cost", partition),
-            convert_cost: MetricBuilder::new(metrics_set).subset_time("convert_cost", partition),
+            convert_cost,
             elapsed_compute: MetricBuilder::new(metrics_set).elapsed_compute(partition),
         };
         Self(Arc::new(inner))
@@ -849,9 +1046,6 @@ impl PartitionMetrics {
 
     /// Merges [ScannerMetrics], `build_reader_cost`, `scan_cost` and `yield_cost`.
     pub(crate) fn merge_metrics(&self, metrics: &ScannerMetrics) {
-        self.0
-            .build_reader_cost
-            .add_duration(metrics.build_reader_cost);
         self.0.scan_cost.add_duration(metrics.scan_cost);
         self.record_elapsed_compute(metrics.scan_cost);
         self.0.yield_cost.add_duration(metrics.yield_cost);
@@ -931,9 +1125,20 @@ pub(crate) struct SeriesDistributorMetrics {
     pub(crate) scan_cost: Duration,
     /// Duration of the series distributor to yield.
     pub(crate) yield_cost: Duration,
+    /// Duration spent in divider operations.
+    pub(crate) divider_cost: Duration,
 }
 
 /// Scans memtable ranges at `index`.
+#[tracing::instrument(
+    skip_all,
+    fields(
+        region_id = %stream_ctx.input.region_metadata().region_id,
+        file_or_mem_index = %index.index,
+        row_group_index = %index.row_group_index,
+        source = "mem"
+    )
+)]
 pub(crate) fn scan_mem_ranges(
     stream_ctx: Arc<StreamContext>,
     part_metrics: PartitionMetrics,
@@ -964,10 +1169,19 @@ pub(crate) fn scan_mem_ranges(
 }
 
 /// Scans memtable ranges at `index` using flat format that returns RecordBatch.
+#[tracing::instrument(
+    skip_all,
+    fields(
+        region_id = %stream_ctx.input.region_metadata().region_id,
+        row_group_index = %index.index,
+        source = "mem_flat"
+    )
+)]
 pub(crate) fn scan_flat_mem_ranges(
     stream_ctx: Arc<StreamContext>,
     part_metrics: PartitionMetrics,
     index: RowGroupIndex,
+    time_range: FileTimeRange,
 ) -> impl Stream<Item = Result<RecordBatch>> {
     try_stream! {
         let ranges = stream_ctx.input.build_mem_ranges(index);
@@ -975,7 +1189,7 @@ pub(crate) fn scan_flat_mem_ranges(
         for range in ranges {
             let build_reader_start = Instant::now();
             let mem_scan_metrics = Some(MemScanMetrics::default());
-            let mut iter = range.build_record_batch_iter(mem_scan_metrics.clone())?;
+            let mut iter = range.build_record_batch_iter(Some(time_range), mem_scan_metrics.clone())?;
             part_metrics.inc_build_reader_cost(build_reader_start.elapsed());
 
             while let Some(record_batch) = iter.next().transpose()? {
@@ -1072,19 +1286,27 @@ fn new_filter_metrics(explain_verbose: bool) -> ReaderFilterMetrics {
 }
 
 /// Scans file ranges at `index`.
+#[tracing::instrument(
+    skip_all,
+    fields(
+        region_id = %stream_ctx.input.region_metadata().region_id,
+        row_group_index = %index.index,
+        source = read_type
+    )
+)]
 pub(crate) async fn scan_file_ranges(
     stream_ctx: Arc<StreamContext>,
     part_metrics: PartitionMetrics,
     index: RowGroupIndex,
     read_type: &'static str,
-    range_builder: Arc<RangeBuilderList>,
+    partition_pruner: Arc<PartitionPruner>,
 ) -> Result<impl Stream<Item = Result<Batch>>> {
     let mut reader_metrics = ReaderMetrics {
         filter_metrics: new_filter_metrics(part_metrics.explain_verbose()),
         ..Default::default()
     };
-    let ranges = range_builder
-        .build_file_ranges(&stream_ctx.input, index, &mut reader_metrics)
+    let ranges = partition_pruner
+        .build_file_ranges(index, &part_metrics, &mut reader_metrics)
         .await?;
     part_metrics.inc_num_file_ranges(ranges.len());
     part_metrics.merge_reader_metrics(&reader_metrics, None);
@@ -1117,19 +1339,27 @@ pub(crate) async fn scan_file_ranges(
 }
 
 /// Scans file ranges at `index` using flat reader that returns RecordBatch.
+#[tracing::instrument(
+    skip_all,
+    fields(
+        region_id = %stream_ctx.input.region_metadata().region_id,
+        row_group_index = %index.index,
+        source = read_type
+    )
+)]
 pub(crate) async fn scan_flat_file_ranges(
     stream_ctx: Arc<StreamContext>,
     part_metrics: PartitionMetrics,
     index: RowGroupIndex,
     read_type: &'static str,
-    range_builder: Arc<RangeBuilderList>,
+    partition_pruner: Arc<PartitionPruner>,
 ) -> Result<impl Stream<Item = Result<RecordBatch>>> {
     let mut reader_metrics = ReaderMetrics {
         filter_metrics: new_filter_metrics(part_metrics.explain_verbose()),
         ..Default::default()
     };
-    let ranges = range_builder
-        .build_file_ranges(&stream_ctx.input, index, &mut reader_metrics)
+    let ranges = partition_pruner
+        .build_file_ranges(index, &part_metrics, &mut reader_metrics)
         .await?;
     part_metrics.inc_num_file_ranges(ranges.len());
     part_metrics.merge_reader_metrics(&reader_metrics, None);
@@ -1162,6 +1392,10 @@ pub(crate) async fn scan_flat_file_ranges(
 }
 
 /// Build the stream of scanning the input [`FileRange`]s.
+#[tracing::instrument(
+    skip_all,
+    fields(read_type = read_type, range_count = ranges.len())
+)]
 pub fn build_file_range_scan_stream(
     stream_ctx: Arc<StreamContext>,
     part_metrics: PartitionMetrics,
@@ -1222,6 +1456,10 @@ pub fn build_file_range_scan_stream(
 }
 
 /// Build the stream of scanning the input [`FileRange`]s using flat reader that returns RecordBatch.
+#[tracing::instrument(
+    skip_all,
+    fields(read_type = read_type, range_count = ranges.len())
+)]
 pub fn build_flat_file_range_scan_stream(
     _stream_ctx: Arc<StreamContext>,
     part_metrics: PartitionMetrics,
@@ -1241,7 +1479,7 @@ pub fn build_flat_file_range_scan_stream(
         };
         for range in ranges {
             let build_reader_start = Instant::now();
-            let Some(mut reader) = range.flat_reader(fetch_metrics.as_deref()).await? else{continue};
+            let Some(mut reader) = range.flat_reader(_stream_ctx.input.series_row_selector, fetch_metrics.as_deref()).await? else{continue};
             let build_cost = build_reader_start.elapsed();
             part_metrics.inc_build_reader_cost(build_cost);
 
@@ -1253,7 +1491,16 @@ pub fn build_flat_file_range_scan_stream(
                     })
                 })
                 .transpose()?;
+
+            let mapper = range.compaction_projection_mapper();
             while let Some(record_batch) = reader.next_batch()? {
+                let record_batch = if let Some(mapper) = mapper {
+                    let batch = mapper.project(record_batch)?;
+                    batch
+                } else {
+                    record_batch
+                };
+
                 if let Some(flat_compat) = may_compat {
                     let batch = flat_compat.compat(record_batch)?;
                     yield batch;
@@ -1328,19 +1575,45 @@ pub(crate) async fn maybe_scan_other_ranges(
     }
 }
 
+/// Build the stream of scanning the extension range in flat format denoted by the [`RowGroupIndex`].
+#[cfg(feature = "enterprise")]
+pub(crate) async fn scan_flat_extension_range(
+    context: Arc<StreamContext>,
+    index: RowGroupIndex,
+    partition_metrics: PartitionMetrics,
+) -> Result<BoxedRecordBatchStream> {
+    use snafu::ResultExt;
+
+    let range = context.input.extension_range(index.index);
+    let reader = range.flat_reader(context.as_ref());
+    let stream = reader
+        .read(context, partition_metrics, index)
+        .await
+        .context(crate::error::ScanExternalRangeSnafu)?;
+    Ok(stream)
+}
+
 pub(crate) async fn maybe_scan_flat_other_ranges(
     context: &Arc<StreamContext>,
     index: RowGroupIndex,
     metrics: &PartitionMetrics,
 ) -> Result<BoxedRecordBatchStream> {
-    let _ = context;
-    let _ = index;
-    let _ = metrics;
-
-    crate::error::UnexpectedSnafu {
-        reason: "no other ranges scannable in flat format",
+    #[cfg(feature = "enterprise")]
+    {
+        scan_flat_extension_range(context.clone(), index, metrics.clone()).await
     }
-    .fail()
+
+    #[cfg(not(feature = "enterprise"))]
+    {
+        let _ = context;
+        let _ = index;
+        let _ = metrics;
+
+        crate::error::UnexpectedSnafu {
+            reason: "no other ranges scannable in flat format",
+        }
+        .fail()
+    }
 }
 
 /// A stream wrapper that splits record batches from an inner stream.

@@ -21,6 +21,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use common_base::readable_size::ReadableSize;
+use common_telemetry::tracing::{Span, info_span};
 use common_time::util::format_nanoseconds_human_readable;
 use datafusion::arrow::compute::cast;
 use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
@@ -218,6 +219,7 @@ pub struct RecordBatchStreamAdapter {
     metrics_2: Metrics,
     /// Display plan and metrics in verbose mode.
     explain_verbose: bool,
+    span: Span,
 }
 
 /// Json encoded metrics. Contains metric from a whole plan tree.
@@ -238,22 +240,21 @@ impl RecordBatchStreamAdapter {
             metrics: None,
             metrics_2: Metrics::Unavailable,
             explain_verbose: false,
+            span: Span::current(),
         })
     }
 
-    pub fn try_new_with_metrics_and_df_plan(
-        stream: DfSendableRecordBatchStream,
-        metrics: BaselineMetrics,
-        df_plan: Arc<dyn ExecutionPlan>,
-    ) -> Result<Self> {
+    pub fn try_new_with_span(stream: DfSendableRecordBatchStream, span: Span) -> Result<Self> {
         let schema =
             Arc::new(Schema::try_from(stream.schema()).context(error::SchemaConversionSnafu)?);
+        let subspan = info_span!(parent: &span, "RecordBatchStreamAdapter");
         Ok(Self {
             schema,
             stream,
-            metrics: Some(metrics),
-            metrics_2: Metrics::Unresolved(df_plan),
+            metrics: None,
+            metrics_2: Metrics::Unavailable,
             explain_verbose: false,
+            span: subspan,
         })
     }
 
@@ -300,6 +301,8 @@ impl Stream for RecordBatchStreamAdapter {
             .map(|m| m.elapsed_compute().clone())
             .unwrap_or_default();
         let _guard = timer.timer();
+        let poll_span = info_span!(parent: &self.span, "poll_next");
+        let _entered = poll_span.enter();
         match Pin::new(&mut self.stream).poll_next(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Some(df_record_batch)) => {

@@ -177,6 +177,7 @@ mod tests {
     use std::sync::{Arc, RwLock};
 
     use common_meta::instruction::{FlushErrorStrategy, FlushRegions};
+    use common_meta::kv_backend::memory::MemoryKvBackend;
     use mito2::engine::MITO_ENGINE_NAME;
     use store_api::storage::RegionId;
 
@@ -201,7 +202,8 @@ mod tests {
                 });
             mock_region_server.register_test_region(*region_id, mock_engine);
         }
-        let handler_context = HandlerContext::new_for_test(mock_region_server);
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let handler_context = HandlerContext::new_for_test(mock_region_server, kv_backend);
 
         // Async hint mode
         let flush_instruction = FlushRegions::async_batch(region_ids.clone());
@@ -238,7 +240,8 @@ mod tests {
                 }))
             });
         mock_region_server.register_test_region(region_id, mock_engine);
-        let handler_context = HandlerContext::new_for_test(mock_region_server);
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let handler_context = HandlerContext::new_for_test(mock_region_server, kv_backend);
 
         let flush_instruction = FlushRegions::sync_single(region_id);
         let reply = FlushRegionsHandler
@@ -273,7 +276,8 @@ mod tests {
                 }))
             });
         mock_region_server.register_test_region(region_ids[0], mock_engine);
-        let handler_context = HandlerContext::new_for_test(mock_region_server);
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let handler_context = HandlerContext::new_for_test(mock_region_server, kv_backend);
 
         // Sync batch with fail-fast strategy
         let flush_instruction =
@@ -304,7 +308,8 @@ mod tests {
                 }))
             });
         mock_region_server.register_test_region(region_ids[0], mock_engine);
-        let handler_context = HandlerContext::new_for_test(mock_region_server);
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let handler_context = HandlerContext::new_for_test(mock_region_server, kv_backend);
 
         // Sync batch with try-all strategy
         let flush_instruction =

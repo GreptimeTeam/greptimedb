@@ -428,7 +428,7 @@ impl Accumulator for CountHashAccumulator {
             &self.random_state,
             &mut self.batch_hashes,
         )?;
-        for hash in hashes.as_slice() {
+        for hash in hashes {
             self.values.insert(*hash);
         }
         Ok(())
@@ -453,8 +453,8 @@ impl Accumulator for CountHashAccumulator {
                 );
             };
             let hash_array = inner_array.as_any().downcast_ref::<UInt64Array>().unwrap();
-            for i in 0..hash_array.len() {
-                self.values.insert(hash_array.value(i));
+            for &hash in hash_array.values().iter().take(hash_array.len()) {
+                self.values.insert(hash);
             }
         }
         Ok(())

@@ -12,11 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::time::Duration;
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use store_api::region_engine::SyncRegionFromRequest;
 use store_api::storage::{FileRefsManifest, GcReport, RegionId, RegionNumber};
 use strum::Display;
 use table::metadata::TableId;
@@ -432,11 +433,11 @@ where
 pub struct GetFileRefs {
     /// List of region IDs to get file references from active FileHandles (in-memory).
     pub query_regions: Vec<RegionId>,
-    /// Mapping from the source region ID (where to read the manifest) to
-    /// the target region IDs (whose file references to look for).
-    /// Key: The region ID of the manifest.
-    /// Value: The list of region IDs to find references for in that manifest.
-    pub related_regions: HashMap<RegionId, Vec<RegionId>>,
+    /// Mapping from the src region IDs (whose file references to look for) to
+    /// the dst region IDs (where to read the manifests).
+    /// Key: The source region IDs (where files originally came from).
+    /// Value: The set of destination region IDs (whose manifests need to be read).
+    pub related_regions: HashMap<RegionId, HashSet<RegionId>>,
 }
 
 impl Display for GetFileRefs {
@@ -517,15 +518,155 @@ impl Display for GcRegionsReply {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EnterStagingRegion {
     pub region_id: RegionId,
-    pub partition_expr: String,
+    #[serde(
+        alias = "partition_expr",
+        deserialize_with = "deserialize_enter_staging_partition_directive",
+        serialize_with = "serialize_enter_staging_partition_directive"
+    )]
+    pub partition_directive: StagingPartitionDirective,
 }
 
 impl Display for EnterStagingRegion {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "EnterStagingRegion(region_id={}, partition_expr={})",
-            self.region_id, self.partition_expr
+            "EnterStagingRegion(region_id={}, partition_directive={})",
+            self.region_id, self.partition_directive
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StagingPartitionDirective {
+    UpdatePartitionExpr(String),
+    RejectAllWrites,
+}
+
+impl StagingPartitionDirective {
+    /// Returns the partition expression carried by this directive, if any.
+    pub fn as_partition_expr(&self) -> Option<&str> {
+        match self {
+            Self::UpdatePartitionExpr(expr) => Some(expr),
+            Self::RejectAllWrites => None,
+        }
+    }
+}
+
+impl Display for StagingPartitionDirective {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UpdatePartitionExpr(expr) => write!(f, "UpdatePartitionExpr({})", expr),
+            Self::RejectAllWrites => write!(f, "RejectAllWrites"),
+        }
+    }
+}
+
+fn serialize_enter_staging_partition_directive<S>(
+    rule: &StagingPartitionDirective,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match rule {
+        StagingPartitionDirective::UpdatePartitionExpr(expr) => serializer.serialize_str(expr),
+        StagingPartitionDirective::RejectAllWrites => {
+            #[derive(Serialize)]
+            struct RejectAllWritesSer<'a> {
+                r#type: &'a str,
+            }
+
+            RejectAllWritesSer {
+                r#type: "reject_all_writes",
+            }
+            .serialize(serializer)
+        }
+    }
+}
+
+fn deserialize_enter_staging_partition_directive<'de, D>(
+    deserializer: D,
+) -> std::result::Result<StagingPartitionDirective, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Compat {
+        Legacy(String),
+        TypeTagged { r#type: String },
+    }
+
+    match Compat::deserialize(deserializer)? {
+        Compat::Legacy(expr) => Ok(StagingPartitionDirective::UpdatePartitionExpr(expr)),
+        Compat::TypeTagged { r#type } if r#type == "reject_all_writes" => {
+            Ok(StagingPartitionDirective::RejectAllWrites)
+        }
+        Compat::TypeTagged { r#type } => Err(serde::de::Error::custom(format!(
+            "Unknown enter staging partition directive type: {}",
+            r#type
+        ))),
+    }
+}
+
+/// Instruction payload for syncing a region from a manifest or another region.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SyncRegion {
+    /// Region id to sync.
+    pub region_id: RegionId,
+    /// Request to sync the region.
+    pub request: SyncRegionFromRequest,
+}
+
+impl Display for SyncRegion {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "SyncRegion(region_id={}, request={:?})",
+            self.region_id, self.request
+        )
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RemapManifest {
+    pub region_id: RegionId,
+    /// Regions to remap manifests from.
+    pub input_regions: Vec<RegionId>,
+    /// For each old region, which new regions should receive its files
+    pub region_mapping: HashMap<RegionId, Vec<RegionId>>,
+    /// New partition expressions for the new regions.
+    pub new_partition_exprs: HashMap<RegionId, String>,
+}
+
+impl Display for RemapManifest {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "RemapManifest(region_id={}, input_regions={:?}, region_mapping={:?}, new_partition_exprs={:?})",
+            self.region_id, self.input_regions, self.region_mapping, self.new_partition_exprs
+        )
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ApplyStagingManifest {
+    /// The region ID to apply the staging manifest to.
+    pub region_id: RegionId,
+    /// The partition expression of the staging region.
+    pub partition_expr: String,
+    /// The region that stores the staging manifests in its staging blob storage.
+    pub central_region_id: RegionId,
+    /// The relative path to the staging manifest within the central region's staging blob storage.
+    pub manifest_path: String,
+}
+
+impl Display for ApplyStagingManifest {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "ApplyStagingManifest(region_id={}, partition_expr={}, central_region_id={}, manifest_path={})",
+            self.region_id, self.partition_expr, self.central_region_id, self.manifest_path
         )
     }
 }
@@ -559,6 +700,13 @@ pub enum Instruction {
     Suspend,
     /// Makes regions enter staging state.
     EnterStagingRegions(Vec<EnterStagingRegion>),
+    /// Syncs regions.
+    SyncRegions(Vec<SyncRegion>),
+    /// Remaps manifests for a region.
+    RemapManifest(RemapManifest),
+
+    /// Applies staging manifests for a region.
+    ApplyStagingManifests(Vec<ApplyStagingManifest>),
 }
 
 impl Instruction {
@@ -619,6 +767,13 @@ impl Instruction {
     pub fn into_enter_staging_regions(self) -> Option<Vec<EnterStagingRegion>> {
         match self {
             Self::EnterStagingRegions(enter_staging) => Some(enter_staging),
+            _ => None,
+        }
+    }
+
+    pub fn into_sync_regions(self) -> Option<Vec<SyncRegion>> {
+        match self {
+            Self::SyncRegions(sync_regions) => Some(sync_regions),
             _ => None,
         }
     }
@@ -718,7 +873,7 @@ where
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct EnterStagingRegionReply {
     pub region_id: RegionId,
-    /// Returns true if the region is under the new region rule.
+    /// Returns true if the region has entered staging with the target directive.
     pub ready: bool,
     /// Indicates whether the region exists.
     pub exists: bool,
@@ -735,6 +890,73 @@ impl EnterStagingRegionsReply {
     pub fn new(replies: Vec<EnterStagingRegionReply>) -> Self {
         Self { replies }
     }
+}
+
+/// Reply for a single region sync request.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
+pub struct SyncRegionReply {
+    /// Region id of the synced region.
+    pub region_id: RegionId,
+    /// Returns true if the region is successfully synced and ready.
+    pub ready: bool,
+    /// Indicates whether the region exists.
+    pub exists: bool,
+    /// Return error message if any during the operation.
+    pub error: Option<String>,
+}
+
+/// Reply for a batch of region sync requests.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
+pub struct SyncRegionsReply {
+    pub replies: Vec<SyncRegionReply>,
+}
+
+impl SyncRegionsReply {
+    pub fn new(replies: Vec<SyncRegionReply>) -> Self {
+        Self { replies }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
+pub struct RemapManifestReply {
+    /// Returns false if the region does not exist.
+    pub exists: bool,
+    /// A map from region IDs to their corresponding remapped manifest paths.
+    pub manifest_paths: HashMap<RegionId, String>,
+    /// Return error if any during the operation.
+    pub error: Option<String>,
+}
+
+impl Display for RemapManifestReply {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "RemapManifestReply(manifest_paths={:?}, error={:?})",
+            self.manifest_paths, self.error
+        )
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
+pub struct ApplyStagingManifestsReply {
+    pub replies: Vec<ApplyStagingManifestReply>,
+}
+
+impl ApplyStagingManifestsReply {
+    pub fn new(replies: Vec<ApplyStagingManifestReply>) -> Self {
+        Self { replies }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
+pub struct ApplyStagingManifestReply {
+    pub region_id: RegionId,
+    /// Returns true if the region is ready to serve reads and writes.
+    pub ready: bool,
+    /// Indicates whether the region exists.
+    pub exists: bool,
+    /// Return error if any during the operation.
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
@@ -758,6 +980,9 @@ pub enum InstructionReply {
     GetFileRefs(GetFileRefsReply),
     GcRegions(GcRegionsReply),
     EnterStagingRegions(EnterStagingRegionsReply),
+    SyncRegions(SyncRegionsReply),
+    RemapManifest(RemapManifestReply),
+    ApplyStagingManifests(ApplyStagingManifestsReply),
 }
 
 impl Display for InstructionReply {
@@ -781,6 +1006,15 @@ impl Display for InstructionReply {
                     reply.replies
                 )
             }
+            Self::SyncRegions(reply) => {
+                write!(f, "InstructionReply::SyncRegions({:?})", reply.replies)
+            }
+            Self::RemapManifest(reply) => write!(f, "InstructionReply::RemapManifest({})", reply),
+            Self::ApplyStagingManifests(reply) => write!(
+                f,
+                "InstructionReply::ApplyStagingManifests({:?})",
+                reply.replies
+            ),
         }
     }
 }
@@ -826,6 +1060,27 @@ impl InstructionReply {
         match self {
             Self::EnterStagingRegions(reply) => reply.replies,
             _ => panic!("Expected EnterStagingRegion reply"),
+        }
+    }
+
+    pub fn expect_sync_regions_reply(self) -> Vec<SyncRegionReply> {
+        match self {
+            Self::SyncRegions(reply) => reply.replies,
+            _ => panic!("Expected SyncRegion reply"),
+        }
+    }
+
+    pub fn expect_remap_manifest_reply(self) -> RemapManifestReply {
+        match self {
+            Self::RemapManifest(reply) => reply,
+            _ => panic!("Expected RemapManifest reply"),
+        }
+    }
+
+    pub fn expect_apply_staging_manifests_reply(self) -> Vec<ApplyStagingManifestReply> {
+        match self {
+            Self::ApplyStagingManifests(reply) => reply.replies,
+            _ => panic!("Expected ApplyStagingManifest reply"),
         }
     }
 }
@@ -1029,6 +1284,31 @@ mod tests {
                 error: None,
             }));
         assert_eq!(upgrade_region_instruction_reply, upgrade_region_reply);
+    }
+
+    #[test]
+    fn test_enter_staging_partition_rule_compatibility() {
+        let legacy = r#"{"region_id":4398046511105,"partition_expr":"{\"Expr\":{\"lhs\":{\"Column\":\"x\"},\"op\":\"GtEq\",\"rhs\":{\"Value\":{\"Int32\":0}}}}"}"#;
+        let enter: EnterStagingRegion = serde_json::from_str(legacy).unwrap();
+        assert_eq!(enter.region_id, RegionId::new(1024, 1));
+        assert_eq!(
+            enter.partition_directive,
+            StagingPartitionDirective::UpdatePartitionExpr(
+                "{\"Expr\":{\"lhs\":{\"Column\":\"x\"},\"op\":\"GtEq\",\"rhs\":{\"Value\":{\"Int32\":0}}}}"
+                    .to_string()
+            )
+        );
+
+        let serialized = serde_json::to_string(&enter).unwrap();
+        assert!(serialized.contains("\"partition_directive\":\""));
+        assert!(!serialized.contains("partition_expr"));
+
+        let reject = r#"{"region_id":4398046511105,"partition_expr":{"type":"reject_all_writes"}}"#;
+        let enter: EnterStagingRegion = serde_json::from_str(reject).unwrap();
+        assert_eq!(
+            enter.partition_directive,
+            StagingPartitionDirective::RejectAllWrites
+        );
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -81,6 +81,13 @@ pub trait PeerAllocator: Send + Sync {
 
 pub type PeerAllocatorRef = Arc<dyn PeerAllocator>;
 
+#[async_trait::async_trait]
+impl<T: PeerAllocator + ?Sized> PeerAllocator for Arc<T> {
+    async fn alloc(&self, num: usize) -> Result<Vec<Peer>, Error> {
+        T::alloc(self, num).await
+    }
+}
+
 pub struct NoopPeerAllocator;
 
 #[async_trait::async_trait]

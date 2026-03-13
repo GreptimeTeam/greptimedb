@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -76,7 +76,12 @@ async fn test_full_file_listing_first_time_gc() {
 
     // First GC - should use full listing since region has never been GC'd
     let reports = scheduler
-        .process_datanode_gc(peer.clone(), vec![(table_id, mock_candidate(region_id))])
+        .process_datanode_gc(
+            peer.clone(),
+            vec![(table_id, mock_candidate(region_id))],
+            HashSet::new(),
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -143,7 +148,12 @@ async fn test_full_file_listing_interval_enforcement() {
 
     // First GC - should use full listing
     let reports1 = scheduler
-        .process_datanode_gc(peer.clone(), vec![(table_id, mock_candidate(region_id))])
+        .process_datanode_gc(
+            peer.clone(),
+            vec![(table_id, mock_candidate(region_id))],
+            HashSet::new(),
+            HashMap::new(),
+        )
         .await
         .unwrap();
     assert_eq!(reports1.deleted_files.len(), 1);
@@ -164,7 +174,12 @@ async fn test_full_file_listing_interval_enforcement() {
 
     // Second GC - should use full listing again since interval has passed
     let _reports2 = scheduler
-        .process_datanode_gc(peer.clone(), vec![(table_id, mock_candidate(region_id))])
+        .process_datanode_gc(
+            peer.clone(),
+            vec![(table_id, mock_candidate(region_id))],
+            HashSet::new(),
+            HashMap::new(),
+        )
         .await
         .unwrap();
 
@@ -233,7 +248,12 @@ async fn test_full_file_listing_no_interval_passed() {
 
     // First GC - should use full listing
     let reports1 = scheduler
-        .process_datanode_gc(peer.clone(), vec![(table_id, mock_candidate(region_id))])
+        .process_datanode_gc(
+            peer.clone(),
+            vec![(table_id, mock_candidate(region_id))],
+            HashSet::new(),
+            HashMap::new(),
+        )
         .await
         .unwrap();
     assert_eq!(reports1.deleted_files.len(), 1);
@@ -251,7 +271,12 @@ async fn test_full_file_listing_no_interval_passed() {
 
     // Second GC immediately - should NOT use full listing since interval hasn't passed
     let reports2 = scheduler
-        .process_datanode_gc(peer.clone(), vec![(table_id, mock_candidate(region_id))])
+        .process_datanode_gc(
+            peer.clone(),
+            vec![(table_id, mock_candidate(region_id))],
+            HashSet::new(),
+            HashMap::new(),
+        )
         .await
         .unwrap();
     assert_eq!(reports2.deleted_files.len(), 1);

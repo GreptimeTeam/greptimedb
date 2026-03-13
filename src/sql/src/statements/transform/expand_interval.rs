@@ -111,10 +111,11 @@ impl TransformRule for ExpandIntervalTransformRule {
             Expr::Cast {
                 expr: cast_exp,
                 data_type,
+                array,
                 kind,
                 format,
             } => {
-                if DataType::Interval == *data_type {
+                if matches!(data_type, DataType::Interval { .. }) {
                     match &**cast_exp {
                         Expr::Value(ValueWithSpan {
                             value: Value::SingleQuotedString(value),
@@ -129,7 +130,8 @@ impl TransformRule for ExpandIntervalTransformRule {
                             *expr = Expr::Cast {
                                 kind: kind.clone(),
                                 expr: single_quoted_string_expr(interval_value),
-                                data_type: DataType::Interval,
+                                data_type: data_type.clone(),
+                                array: *array,
                                 format: std::mem::take(format),
                             }
                         }
@@ -392,7 +394,11 @@ mod tests {
 
         let mut cast_to_interval_expr = Expr::Cast {
             expr: single_quoted_string_expr("3y2mon".to_string()),
-            data_type: DataType::Interval,
+            data_type: DataType::Interval {
+                fields: None,
+                precision: None,
+            },
+            array: false,
             format: None,
             kind: sqlparser::ast::CastKind::Cast,
         };
@@ -407,7 +413,11 @@ mod tests {
                 expr: Box::new(Expr::Value(
                     Value::SingleQuotedString("3 years 2 months".to_string()).into()
                 )),
-                data_type: DataType::Interval,
+                data_type: DataType::Interval {
+                    fields: None,
+                    precision: None,
+                },
+                array: false,
                 format: None,
             }
         );
@@ -415,6 +425,7 @@ mod tests {
         let mut cast_to_i64_expr = Expr::Cast {
             expr: single_quoted_string_expr("5".to_string()),
             data_type: DataType::Int64,
+            array: false,
             format: None,
             kind: sqlparser::ast::CastKind::Cast,
         };
@@ -425,6 +436,7 @@ mod tests {
             Expr::Cast {
                 expr: single_quoted_string_expr("5".to_string()),
                 data_type: DataType::Int64,
+                array: false,
                 format: None,
                 kind: sqlparser::ast::CastKind::Cast,
             }

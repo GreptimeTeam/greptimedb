@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// TODO(discord9): remove this once gc scheduler is fully merged
-#![allow(unused)]
-
 use std::collections::{HashMap, HashSet};
 
 use common_meta::peer::Peer;
@@ -22,6 +19,7 @@ use store_api::storage::RegionId;
 
 mod candidate;
 mod ctx;
+mod dropped;
 mod handler;
 #[cfg(test)]
 mod mock;
@@ -29,11 +27,14 @@ mod options;
 mod procedure;
 mod scheduler;
 mod tracker;
+mod util;
 
 pub use options::GcSchedulerOptions;
 pub use procedure::BatchGcProcedure;
-pub(crate) use scheduler::{GcScheduler, GcTickerRef};
+pub use scheduler::{Event, GcJobReport, GcScheduler, GcTickerRef};
 
+/// Mapping from region ID to its associated peers (leader and followers).
 pub type Region2Peers = HashMap<RegionId, (Peer, Vec<Peer>)>;
 
+/// Mapping from leader peer to the set of region IDs it is responsible for.
 pub(crate) type Peer2Regions = HashMap<Peer, HashSet<RegionId>>;

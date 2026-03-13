@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::cluster_server::ClusterServer;
+use api::v1::meta::config_server::ConfigServer;
 use api::v1::meta::heartbeat_server::HeartbeatServer;
 use api::v1::meta::procedure_service_server::ProcedureServiceServer;
 use api::v1::meta::store_server::StoreServer;
@@ -125,13 +126,15 @@ pub async fn mock(
         let router =
             add_compressed_service!(router, ProcedureServiceServer::from_arc(service.clone()));
         let router = add_compressed_service!(router, ClusterServer::from_arc(service.clone()));
+        let router = add_compressed_service!(router, ConfigServer::from_arc(service.clone()));
         router
             .serve_with_incoming(futures::stream::iter(vec![Ok::<_, std::io::Error>(server)]))
             .await
     });
 
     let config = ChannelConfig::new()
-        .timeout(Duration::from_secs(10))
+        // Use an long timeout to prevent test failures due to slow operations (e.g., when testing with S3).
+        .timeout(Some(Duration::from_secs(60)))
         .connect_timeout(Duration::from_secs(10))
         .tcp_nodelay(true);
     let channel_manager = ChannelManager::with_config(config, None);

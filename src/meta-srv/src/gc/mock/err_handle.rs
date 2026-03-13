@@ -64,6 +64,7 @@ async fn test_gc_regions_failure_handling() {
             region_id,
             HashSet::from([FileRef::new(region_id, FileId::random(), None)]),
         )]),
+        cross_region_refs: HashMap::new(),
     };
 
     let ctx = Arc::new(
@@ -92,19 +93,30 @@ async fn test_gc_regions_failure_handling() {
     let report = scheduler.handle_tick().await.unwrap();
 
     // Validate the report shows the failure handling
-    assert_eq!(
-        report.per_datanode_reports.len(),
-        1,
-        "Should process 1 datanode despite failure"
-    );
-    assert_eq!(
-        report.failed_datanodes.len(),
-        0,
-        "Should have 0 failed datanodes (failure handled via need_retry_regions)"
-    );
+    // Check the report shows the failure handling
+    let datanode_report = match &report {
+        crate::gc::scheduler::GcJobReport::PerDatanode {
+            per_datanode_reports,
+            failed_datanodes,
+        } => {
+            assert_eq!(
+                per_datanode_reports.len(),
+                1,
+                "Should process 1 datanode despite failure"
+            );
+            assert_eq!(
+                failed_datanodes.len(),
+                0,
+                "Should have 0 failed datanodes (failure handled via need_retry_regions)"
+            );
+            per_datanode_reports.values().next().unwrap()
+        }
+        crate::gc::scheduler::GcJobReport::Combined { .. } => {
+            panic!("expected per-datanode report");
+        }
+    };
 
     // Check that the region is in need_retry_regions due to the failure
-    let datanode_report = report.per_datanode_reports.values().next().unwrap();
     assert_eq!(
         datanode_report.need_retry_regions.len(),
         1,
@@ -120,10 +132,6 @@ async fn test_gc_regions_failure_handling() {
         *ctx.get_table_to_region_stats_calls.lock().unwrap(),
         1,
         "Expected 1 call to get_table_to_region_stats"
-    );
-    assert!(
-        *ctx.get_file_references_calls.lock().unwrap() >= 1,
-        "Expected at least 1 call to get_file_references"
     );
     assert!(
         *ctx.gc_regions_calls.lock().unwrap() >= 1,
@@ -183,19 +191,25 @@ async fn test_get_file_references_failure() {
 
     // Validate the report shows the expected results
     // In the new implementation, even if get_file_references fails, we still create a datanode report
-    assert_eq!(
-        report.per_datanode_reports.len(),
-        1,
-        "Should process 1 datanode"
-    );
-    assert_eq!(
-        report.failed_datanodes.len(),
-        0,
-        "Should have 0 failed datanodes (failure handled gracefully)"
-    );
+    let datanode_report = match &report {
+        crate::gc::scheduler::GcJobReport::PerDatanode {
+            per_datanode_reports,
+            failed_datanodes,
+        } => {
+            assert_eq!(per_datanode_reports.len(), 1, "Should process 1 datanode");
+            assert_eq!(
+                failed_datanodes.len(),
+                0,
+                "Should have 0 failed datanodes (failure handled gracefully)"
+            );
+            per_datanode_reports.values().next().unwrap()
+        }
+        crate::gc::scheduler::GcJobReport::Combined { .. } => {
+            panic!("expected per-datanode report");
+        }
+    };
 
     // The region should be processed but may have empty results due to file refs failure
-    let datanode_report = report.per_datanode_reports.values().next().unwrap();
     // The current implementation still processes the region even with file refs failure
     // and creates an empty entry in deleted_files
     assert!(
@@ -205,13 +219,6 @@ async fn test_get_file_references_failure() {
     assert!(
         datanode_report.deleted_files[&region_id].is_empty(),
         "Should have empty deleted files due to file refs failure"
-    );
-
-    // Should still attempt to get file references (may be called multiple times due to retry logic)
-    assert!(
-        *ctx.get_file_references_calls.lock().unwrap() >= 1,
-        "Expected at least 1 call to get_file_references, got {}",
-        *ctx.get_file_references_calls.lock().unwrap()
     );
 }
 
@@ -255,42 +262,22 @@ async fn test_get_table_route_failure() {
         last_tracker_cleanup: Arc::new(tokio::sync::Mutex::new(Instant::now())),
     };
 
-    // Get candidates first
-    let stats = &ctx
-        .table_to_region_stats
-        .lock()
-        .unwrap()
-        .clone()
-        .unwrap_or_default();
-    let candidates = scheduler.select_gc_candidates(stats).await.unwrap();
+    // Test the full workflow to trigger table route failure during aggregation
+    // The table route failure should cause the entire GC cycle to fail
+    let result = scheduler.handle_tick().await;
 
-    // Convert table-based candidates to datanode-based candidates
-    let datanode_to_candidates = HashMap::from([(
-        Peer::new(1, ""),
-        candidates
-            .into_iter()
-            .flat_map(|(table_id, candidates)| candidates.into_iter().map(move |c| (table_id, c)))
-            .collect(),
-    )]);
-
-    // This should handle table route failure gracefully
-    let report = scheduler
-        .parallel_process_datanodes(datanode_to_candidates)
-        .await;
-
-    // Should process the datanode but handle route error gracefully
-    assert_eq!(
-        report.per_datanode_reports.len(),
-        0,
-        "Expected 0 datanode report"
-    );
-    assert_eq!(
-        report.failed_datanodes.len(),
-        1,
-        "Expected 1 failed datanodes (route error handled gracefully)"
-    );
+    // The table route failure should be propagated as an error
     assert!(
-        report.failed_datanodes.contains_key(&1),
-        "Failed datanodes should contain the datanode with route error"
+        result.is_err(),
+        "Expected table route failure to propagate as error"
+    );
+
+    // Verify the error message contains our simulated failure
+    let error = result.unwrap_err();
+    let error_msg = format!("{}", error);
+    assert!(
+        error_msg.contains("Simulated table route failure for testing"),
+        "Error message should contain our simulated failure: {}",
+        error_msg
     );
 }

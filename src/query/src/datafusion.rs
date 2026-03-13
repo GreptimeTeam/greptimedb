@@ -38,7 +38,7 @@ use datafusion::physical_plan::analyze::AnalyzeExec;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion_common::ResolvedTableReference;
 use datafusion_expr::{
-    AggregateUDF, DmlStatement, LogicalPlan as DfLogicalPlan, LogicalPlan, WriteOp,
+    AggregateUDF, DmlStatement, LogicalPlan as DfLogicalPlan, LogicalPlan, WindowUDF, WriteOp,
 };
 use datatypes::prelude::VectorRef;
 use datatypes::schema::Schema;
@@ -48,6 +48,7 @@ use snafu::{OptionExt, ResultExt, ensure};
 use sqlparser::ast::AnalyzeFormat;
 use table::TableRef;
 use table::requests::{DeleteRequest, InsertRequest};
+use tracing::Span;
 
 use crate::analyze::DistAnalyzeExec;
 pub use crate::datafusion::planner::DfContextProviderAdapter;
@@ -315,18 +316,15 @@ impl DatafusionQueryEngine {
             return state
                 .create_physical_plan(logical_plan)
                 .await
-                .context(error::DatafusionSnafu)
-                .map_err(BoxedError::new)
-                .context(QueryExecutionSnafu);
+                .map_err(Into::into);
         }
 
         // analyze first
-        let analyzed_plan = state
-            .analyzer()
-            .execute_and_check(logical_plan.clone(), state.config_options(), |_, _| {})
-            .context(error::DatafusionSnafu)
-            .map_err(BoxedError::new)
-            .context(QueryExecutionSnafu)?;
+        let analyzed_plan = state.analyzer().execute_and_check(
+            logical_plan.clone(),
+            state.config_options(),
+            |_, _| {},
+        )?;
 
         logger.after_analyze = Some(analyzed_plan.clone());
 
@@ -340,10 +338,7 @@ impl DatafusionQueryEngine {
         } else {
             state
                 .optimizer()
-                .optimize(analyzed_plan, state, |_, _| {})
-                .context(error::DatafusionSnafu)
-                .map_err(BoxedError::new)
-                .context(QueryExecutionSnafu)?
+                .optimize(analyzed_plan, state, |_, _| {})?
         };
 
         common_telemetry::debug!("Create physical plan, optimized plan: {optimized_plan}");
@@ -370,19 +365,10 @@ impl DatafusionQueryEngine {
         // Optimized by extension rules
         let optimized_plan = self
             .state
-            .optimize_by_extension_rules(plan.clone(), context)
-            .context(error::DatafusionSnafu)
-            .map_err(BoxedError::new)
-            .context(QueryExecutionSnafu)?;
+            .optimize_by_extension_rules(plan.clone(), context)?;
 
         // Optimized by datafusion optimizer
-        let optimized_plan = self
-            .state
-            .session_state()
-            .optimize(&optimized_plan)
-            .context(error::DatafusionSnafu)
-            .map_err(BoxedError::new)
-            .context(QueryExecutionSnafu)?;
+        let optimized_plan = self.state.session_state().optimize(&optimized_plan)?;
 
         Ok(optimized_plan)
     }
@@ -514,12 +500,12 @@ impl QueryEngine for DatafusionQueryEngine {
         self.state.register_table_function(func);
     }
 
+    fn register_window_function(&self, func: WindowUDF) {
+        self.state.register_window_function(func);
+    }
+
     fn read_table(&self, table: TableRef) -> Result<DataFrame> {
-        self.state
-            .read_table(table)
-            .context(error::DatafusionSnafu)
-            .map_err(BoxedError::new)
-            .context(QueryExecutionSnafu)
+        self.state.read_table(table).map_err(Into::into)
     }
 
     fn engine_context(&self, query_ctx: QueryContextRef) -> QueryEngineContext {
@@ -542,7 +528,8 @@ impl QueryEngine for DatafusionQueryEngine {
         }
 
         // configure execution options
-        state.config_mut().options_mut().execution.time_zone = query_ctx.timezone().to_string();
+        state.config_mut().options_mut().execution.time_zone =
+            Some(query_ctx.timezone().to_string());
 
         // usually it's impossible to have both `set variable` set by sql client and
         // hint in header by grpc client, so only need to deal with them separately
@@ -606,6 +593,7 @@ impl QueryExecutor for DatafusionQueryEngine {
 
         let exec_timer = metrics::EXEC_PLAN_ELAPSED.start_timer();
         let task_ctx = ctx.build_task_ctx();
+        let span = Span::current();
 
         match plan.properties().output_partitioning().partition_count() {
             0 => {
@@ -617,12 +605,8 @@ impl QueryExecutor for DatafusionQueryEngine {
                 Ok(Box::pin(EmptyRecordBatchStream::new(schema)))
             }
             1 => {
-                let df_stream = plan
-                    .execute(0, task_ctx)
-                    .context(error::DatafusionSnafu)
-                    .map_err(BoxedError::new)
-                    .context(QueryExecutionSnafu)?;
-                let mut stream = RecordBatchStreamAdapter::try_new(df_stream)
+                let df_stream = plan.execute(0, task_ctx)?;
+                let mut stream = RecordBatchStreamAdapter::try_new_with_span(df_stream, span)
                     .context(error::ConvertDfRecordBatchStreamSnafu)
                     .map_err(BoxedError::new)
                     .context(QueryExecutionSnafu)?;
@@ -650,12 +634,8 @@ impl QueryExecutor for DatafusionQueryEngine {
                         .output_partitioning()
                         .partition_count()
                 );
-                let df_stream = merged_plan
-                    .execute(0, task_ctx)
-                    .context(error::DatafusionSnafu)
-                    .map_err(BoxedError::new)
-                    .context(QueryExecutionSnafu)?;
-                let mut stream = RecordBatchStreamAdapter::try_new(df_stream)
+                let df_stream = merged_plan.execute(0, task_ctx)?;
+                let mut stream = RecordBatchStreamAdapter::try_new_with_span(df_stream, span)
                     .context(error::ConvertDfRecordBatchStreamSnafu)
                     .map_err(BoxedError::new)
                     .context(QueryExecutionSnafu)?;
@@ -678,23 +658,124 @@ impl QueryExecutor for DatafusionQueryEngine {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use api::v1::SemanticType;
     use arrow::array::{ArrayRef, UInt64Array};
+    use arrow_schema::SortOptions;
     use catalog::RegisterTableRequest;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, NUMBERS_TABLE_ID};
-    use common_recordbatch::util;
+    use common_error::ext::BoxedError;
+    use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream, util};
+    use datafusion::physical_plan::display::{DisplayAs, DisplayFormatType};
+    use datafusion::physical_plan::expressions::PhysicalSortExpr;
+    use datafusion::physical_plan::joins::{HashJoinExec, JoinOn, PartitionMode};
+    use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+    use datafusion::physical_plan::{ExecutionPlan, PhysicalExpr};
     use datafusion::prelude::{col, lit};
+    use datafusion_common::{JoinType, NullEquality};
+    use datafusion_physical_expr::expressions::Column;
     use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::ColumnSchema;
+    use datatypes::schema::{ColumnSchema, SchemaRef};
     use datatypes::vectors::{Helper, UInt32Vector, VectorRef};
     use session::context::{QueryContext, QueryContextBuilder};
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
+    use store_api::region_engine::{
+        PartitionRange, PrepareRequest, QueryScanContext, RegionScanner, ScannerProperties,
+    };
+    use store_api::storage::{RegionId, ScanRequest};
     use table::table::numbers::{NUMBERS_TABLE_NAME, NumbersTable};
+    use table::table::scan::RegionScanExec;
 
     use super::*;
     use crate::options::QueryOptions;
     use crate::parser::QueryLanguageParser;
+    use crate::part_sort::PartSortExec;
     use crate::query_engine::{QueryEngineFactory, QueryEngineRef};
+
+    #[derive(Debug)]
+    struct RecordingScanner {
+        schema: SchemaRef,
+        metadata: RegionMetadataRef,
+        properties: ScannerProperties,
+        update_calls: Arc<AtomicUsize>,
+        last_filter_len: Arc<AtomicUsize>,
+    }
+
+    impl RecordingScanner {
+        fn new(
+            schema: SchemaRef,
+            metadata: RegionMetadataRef,
+            update_calls: Arc<AtomicUsize>,
+            last_filter_len: Arc<AtomicUsize>,
+        ) -> Self {
+            Self {
+                schema,
+                metadata,
+                properties: ScannerProperties::default(),
+                update_calls,
+                last_filter_len,
+            }
+        }
+    }
+
+    impl RegionScanner for RecordingScanner {
+        fn name(&self) -> &str {
+            "RecordingScanner"
+        }
+
+        fn properties(&self) -> &ScannerProperties {
+            &self.properties
+        }
+
+        fn schema(&self) -> SchemaRef {
+            self.schema.clone()
+        }
+
+        fn metadata(&self) -> RegionMetadataRef {
+            self.metadata.clone()
+        }
+
+        fn prepare(&mut self, request: PrepareRequest) -> std::result::Result<(), BoxedError> {
+            self.properties.prepare(request);
+            Ok(())
+        }
+
+        fn scan_partition(
+            &self,
+            _ctx: &QueryScanContext,
+            _metrics_set: &ExecutionPlanMetricsSet,
+            _partition: usize,
+        ) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
+            Ok(Box::pin(EmptyRecordBatchStream::new(self.schema.clone())))
+        }
+
+        fn has_predicate_without_region(&self) -> bool {
+            true
+        }
+
+        fn add_dyn_filter_to_predicate(
+            &mut self,
+            filter_exprs: Vec<Arc<dyn PhysicalExpr>>,
+        ) -> Vec<bool> {
+            self.update_calls.fetch_add(1, Ordering::Relaxed);
+            self.last_filter_len
+                .store(filter_exprs.len(), Ordering::Relaxed);
+            vec![true; filter_exprs.len()]
+        }
+
+        fn set_logical_region(&mut self, logical_region: bool) {
+            self.properties.set_logical_region(logical_region);
+        }
+    }
+
+    impl DisplayAs for RecordingScanner {
+        fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "RecordingScanner")
+        }
+    }
 
     async fn create_test_engine() -> QueryEngineRef {
         let catalog_manager = catalog::memory::new_memory_catalog_manager().unwrap();
@@ -846,5 +927,180 @@ mod tests {
             "Limit: skip=0, fetch=20\n  Aggregate: groupBy=[[]], aggr=[[sum(CAST(numbers.number AS UInt64))]]\n    TableScan: numbers projection=[number]",
             format!("{}", logical_plan.display_indent())
         );
+    }
+
+    #[tokio::test]
+    async fn test_topk_dynamic_filter_pushdown_reaches_region_scan() {
+        let engine = create_test_engine().await;
+        let engine = engine
+            .as_any()
+            .downcast_ref::<DatafusionQueryEngine>()
+            .unwrap();
+        let engine_ctx = engine.engine_context(QueryContext::arc());
+        let state = engine_ctx.state();
+
+        let schema = Arc::new(datatypes::schema::Schema::new(vec![ColumnSchema::new(
+            "ts",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )]));
+
+        let mut metadata_builder = RegionMetadataBuilder::new(RegionId::new(1024, 1));
+        metadata_builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                )
+                .with_time_index(true),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 1,
+            })
+            .primary_key(vec![]);
+        let metadata = Arc::new(metadata_builder.build().unwrap());
+
+        let update_calls = Arc::new(AtomicUsize::new(0));
+        let last_filter_len = Arc::new(AtomicUsize::new(0));
+        let scanner = Box::new(RecordingScanner::new(
+            schema,
+            metadata,
+            update_calls.clone(),
+            last_filter_len.clone(),
+        ));
+        let scan = Arc::new(RegionScanExec::new(scanner, ScanRequest::default(), None).unwrap());
+
+        let sort_expr = PhysicalSortExpr {
+            expr: Arc::new(Column::new("ts", 0)),
+            options: SortOptions {
+                descending: true,
+                ..Default::default()
+            },
+        };
+        let partition_ranges: Vec<Vec<PartitionRange>> = vec![vec![]];
+        let mut plan: Arc<dyn ExecutionPlan> =
+            Arc::new(PartSortExec::try_new(sort_expr, Some(3), partition_ranges, scan).unwrap());
+
+        for optimizer in state.physical_optimizers() {
+            plan = optimizer.optimize(plan, state.config_options()).unwrap();
+        }
+
+        assert!(update_calls.load(Ordering::Relaxed) > 0);
+        assert!(last_filter_len.load(Ordering::Relaxed) > 0);
+    }
+
+    #[tokio::test]
+    async fn test_join_dynamic_filter_pushdown_reaches_region_scan() {
+        let engine = create_test_engine().await;
+        let engine = engine
+            .as_any()
+            .downcast_ref::<DatafusionQueryEngine>()
+            .unwrap();
+        let engine_ctx = engine.engine_context(QueryContext::arc());
+        let state = engine_ctx.state();
+
+        assert!(
+            state
+                .config_options()
+                .optimizer
+                .enable_join_dynamic_filter_pushdown
+        );
+
+        let schema = Arc::new(datatypes::schema::Schema::new(vec![ColumnSchema::new(
+            "ts",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )]));
+
+        let mut left_metadata_builder = RegionMetadataBuilder::new(RegionId::new(2048, 1));
+        left_metadata_builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                )
+                .with_time_index(true),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 1,
+            })
+            .primary_key(vec![]);
+        let left_metadata = Arc::new(left_metadata_builder.build().unwrap());
+
+        let mut right_metadata_builder = RegionMetadataBuilder::new(RegionId::new(2048, 2));
+        right_metadata_builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                )
+                .with_time_index(true),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 1,
+            })
+            .primary_key(vec![]);
+        let right_metadata = Arc::new(right_metadata_builder.build().unwrap());
+
+        let left_update_calls = Arc::new(AtomicUsize::new(0));
+        let left_last_filter_len = Arc::new(AtomicUsize::new(0));
+        let right_update_calls = Arc::new(AtomicUsize::new(0));
+        let right_last_filter_len = Arc::new(AtomicUsize::new(0));
+
+        let left_scan = Arc::new(
+            RegionScanExec::new(
+                Box::new(RecordingScanner::new(
+                    schema.clone(),
+                    left_metadata,
+                    left_update_calls.clone(),
+                    left_last_filter_len.clone(),
+                )),
+                ScanRequest::default(),
+                None,
+            )
+            .unwrap(),
+        );
+        let right_scan = Arc::new(
+            RegionScanExec::new(
+                Box::new(RecordingScanner::new(
+                    schema,
+                    right_metadata,
+                    right_update_calls.clone(),
+                    right_last_filter_len.clone(),
+                )),
+                ScanRequest::default(),
+                None,
+            )
+            .unwrap(),
+        );
+
+        let on: JoinOn = vec![(
+            Arc::new(Column::new("ts", 0)) as Arc<dyn PhysicalExpr>,
+            Arc::new(Column::new("ts", 0)) as Arc<dyn PhysicalExpr>,
+        )];
+
+        let mut plan: Arc<dyn ExecutionPlan> = Arc::new(
+            HashJoinExec::try_new(
+                left_scan,
+                right_scan,
+                on,
+                None,
+                &JoinType::Inner,
+                None,
+                PartitionMode::CollectLeft,
+                NullEquality::NullEqualsNull,
+                false,
+            )
+            .unwrap(),
+        );
+
+        for optimizer in state.physical_optimizers() {
+            plan = optimizer.optimize(plan, state.config_options()).unwrap();
+        }
+
+        assert!(left_update_calls.load(Ordering::Relaxed) > 0);
+        assert_eq!(0, left_last_filter_len.load(Ordering::Relaxed));
+        assert!(right_update_calls.load(Ordering::Relaxed) > 0);
+        assert!(right_last_filter_len.load(Ordering::Relaxed) > 0);
     }
 }

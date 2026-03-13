@@ -33,6 +33,8 @@ pub enum StringSizeType {
     Utf8,
     /// Large UTF8 strings (up to 2^63 bytes)
     LargeUtf8,
+    /// A view into string data (Arrow `Utf8View`)
+    Utf8View,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
@@ -94,6 +96,11 @@ impl StringType {
         Self::with_size(StringSizeType::LargeUtf8)
     }
 
+    /// Create a StringType for view strings
+    pub fn utf8_view() -> Self {
+        Self::with_size(StringSizeType::Utf8View)
+    }
+
     /// Get the size type
     pub fn size_type(&self) -> StringSizeType {
         self.size_type
@@ -104,12 +111,20 @@ impl StringType {
         matches!(self.size_type, StringSizeType::LargeUtf8)
     }
 
+    pub fn is_view(&self) -> bool {
+        matches!(self.size_type, StringSizeType::Utf8View)
+    }
+
     pub fn arc() -> DataTypeRef {
         Arc::new(Self::new())
     }
 
     pub fn large_arc() -> DataTypeRef {
         Arc::new(Self::large_utf8())
+    }
+
+    pub fn view_arc() -> DataTypeRef {
+        Arc::new(Self::utf8_view())
     }
 }
 
@@ -130,6 +145,7 @@ impl DataType for StringType {
         match self.size_type {
             StringSizeType::Utf8 => ArrowDataType::Utf8,
             StringSizeType::LargeUtf8 => ArrowDataType::LargeUtf8,
+            StringSizeType::Utf8View => ArrowDataType::Utf8View,
         }
     }
 
@@ -139,6 +155,7 @@ impl DataType for StringType {
             StringSizeType::LargeUtf8 => {
                 Box::new(StringVectorBuilder::with_large_capacity(capacity))
             }
+            StringSizeType::Utf8View => Box::new(StringVectorBuilder::with_view_capacity(capacity)),
         }
     }
 

@@ -166,6 +166,8 @@ pub struct SubmitRegionMigrationTaskResult {
     pub peer_conflict: Vec<RegionId>,
     /// Regions whose table is not found.
     pub table_not_found: Vec<RegionId>,
+    /// Regions whose table exists but region route is not found (e.g., removed after repartition).
+    pub region_not_found: Vec<RegionId>,
     /// Regions still pending migration.
     pub migrating: Vec<RegionId>,
     /// Regions that have been submitted for migration.
@@ -396,6 +398,7 @@ impl RegionMigrationManager {
             leader_changed,
             peer_conflict,
             mut table_not_found,
+            region_not_found,
             pending,
         } = analyze_region_migration_task(&task, &self.context_factory.table_metadata_manager)
             .await?;
@@ -405,6 +408,7 @@ impl RegionMigrationManager {
                 leader_changed,
                 peer_conflict,
                 table_not_found,
+                region_not_found,
                 migrating: migrating_region_ids,
                 submitted: vec![],
                 procedure_id: None,
@@ -445,6 +449,7 @@ impl RegionMigrationManager {
                 leader_changed,
                 peer_conflict,
                 table_not_found,
+                region_not_found,
                 migrating: migrating_region_ids,
                 submitted: vec![],
                 procedure_id: None,
@@ -460,6 +465,7 @@ impl RegionMigrationManager {
             leader_changed,
             peer_conflict,
             table_not_found,
+            region_not_found,
             migrating: migrating_region_ids,
             submitted: submitting_region_ids,
             procedure_id: Some(procedure_id),
@@ -698,7 +704,7 @@ mod test {
             trigger_reason: RegionMigrationTriggerReason::Manual,
         };
 
-        let table_info = new_test_table_info(1024, vec![1]).into();
+        let table_info = new_test_table_info(1024);
         let region_routes = vec![RegionRoute {
             region: Region::new_test(RegionId::new(1024, 2)),
             leader_peer: Some(Peer::empty(3)),
@@ -726,7 +732,7 @@ mod test {
             trigger_reason: RegionMigrationTriggerReason::Manual,
         };
 
-        let table_info = new_test_table_info(1024, vec![1]).into();
+        let table_info = new_test_table_info(1024);
         let region_routes = vec![RegionRoute {
             region: Region::new_test(RegionId::new(1024, 1)),
             leader_peer: Some(Peer::empty(3)),
@@ -758,7 +764,7 @@ mod test {
             trigger_reason: RegionMigrationTriggerReason::Manual,
         };
 
-        let table_info = new_test_table_info(1024, vec![1]).into();
+        let table_info = new_test_table_info(1024);
         let region_routes = vec![RegionRoute {
             region: Region::new_test(region_id),
             leader_peer: Some(Peer::empty(3)),
@@ -792,7 +798,7 @@ mod test {
             trigger_reason: RegionMigrationTriggerReason::Manual,
         };
 
-        let table_info = new_test_table_info(1024, vec![1]).into();
+        let table_info = new_test_table_info(1024);
         let region_routes = vec![RegionRoute {
             region: Region::new_test(RegionId::new(1024, 1)),
             leader_peer: Some(Peer::empty(2)),
@@ -822,7 +828,7 @@ mod test {
 
         let err = manager
             .verify_table_route(
-                &TableRouteValue::Logical(LogicalTableRouteValue::new(0, vec![])),
+                &TableRouteValue::Logical(LogicalTableRouteValue::new(0)),
                 &task,
             )
             .unwrap_err();
@@ -864,7 +870,7 @@ mod test {
             timeout: Duration::from_millis(1000),
             trigger_reason: RegionMigrationTriggerReason::Manual,
         };
-        let table_info = new_test_table_info(1024, vec![1]).into();
+        let table_info = new_test_table_info(1024);
         let region_routes = vec![RegionRoute {
             region: Region::new_test(region_id),
             leader_peer: Some(Peer::empty(2)),
@@ -897,7 +903,7 @@ mod test {
             trigger_reason: RegionMigrationTriggerReason::Manual,
         };
 
-        let table_info = new_test_table_info(1024, vec![1]).into();
+        let table_info = new_test_table_info(1024);
         let region_routes = vec![RegionRoute {
             region: Region::new_test(RegionId::new(1024, 1)),
             leader_peer: Some(Peer::empty(3)),
@@ -930,7 +936,7 @@ mod test {
             trigger_reason: RegionMigrationTriggerReason::Manual,
         };
 
-        let table_info = new_test_table_info(1024, vec![1]).into();
+        let table_info = new_test_table_info(1024);
         let region_routes = vec![RegionRoute {
             region: Region::new_test(region_id),
             leader_peer: Some(Peer::empty(3)),
@@ -974,7 +980,7 @@ mod test {
                 task.trigger_reason,
             ),
         );
-        let table_info = new_test_table_info(1024, vec![1]).into();
+        let table_info = new_test_table_info(1024);
         let region_routes = vec![RegionRoute {
             region: Region::new_test(RegionId::new(1024, 2)),
             leader_peer: Some(Peer::empty(1)),

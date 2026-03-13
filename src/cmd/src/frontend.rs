@@ -20,6 +20,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
 use catalog::information_extension::DistributedInformationExtension;
+use catalog::information_schema::InformationExtensionRef;
 use catalog::kvbackend::{
     CachedKvBackendBuilder, CatalogManagerConfiguratorRef, KvBackendCatalogManagerBuilder,
     MetaKvBackend,
@@ -47,9 +48,12 @@ use frontend::heartbeat::HeartbeatTask;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
 use meta_client::{MetaClientOptions, MetaClientRef, MetaClientType};
+use plugins::PluginOptions;
 use plugins::frontend::context::{
     CatalogManagerConfigureContext, DistributedCatalogManagerConfigureContext,
 };
+use plugins::frontend::setup_frontend_dynamic_plugins;
+use plugins::options::PluginOptionsDeserializerImpl;
 use servers::addrs;
 use servers::grpc::GrpcOptions;
 use servers::tls::{TlsMode, TlsOption, merge_tls_option};
@@ -369,6 +373,14 @@ impl StartCommand {
         .await
         .context(error::MetaClientInitSnafu)?;
 
+        let meta_config: Vec<PluginOptions> = meta_client
+            .pull_config(PluginOptionsDeserializerImpl)
+            .await
+            .context(error::MetaClientInitSnafu)?;
+        setup_frontend_dynamic_plugins(meta_config, &mut plugins)
+            .await
+            .context(error::StartFrontendSnafu)?;
+
         // TODO(discord9): add helper function to ease the creation of cache registry&such
         let cached_meta_backend =
             CachedKvBackendBuilder::new(Arc::new(MetaKvBackend::new(meta_client.clone())))
@@ -412,6 +424,7 @@ impl StartCommand {
             meta_client.clone(),
             client.clone(),
         ));
+        plugins.insert::<InformationExtensionRef>(information_extension.clone());
 
         let process_manager = Arc::new(ProcessManager::new(
             addrs::resolve_addr(&opts.grpc.bind_addr, Some(&opts.grpc.server_addr)),

@@ -22,7 +22,7 @@ use datafusion::arrow::array::{Array, Float64Array, TimestampMillisecondArray, U
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::stats::Precision;
-use datafusion::common::{ColumnStatistics, DFSchema, DFSchemaRef};
+use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{EmptyRelation, Expr, LogicalPlan, UserDefinedLogicalNodeCore};
@@ -33,6 +33,7 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream, Statistics,
 };
+use datafusion_expr::col;
 use datatypes::arrow::compute;
 use datatypes::arrow::error::Result as ArrowResult;
 use futures::{Stream, StreamExt, ready};
@@ -84,7 +85,37 @@ impl UserDefinedLogicalNodeCore for InstantManipulate {
     }
 
     fn expressions(&self) -> Vec<Expr> {
-        vec![]
+        if self.unfix.is_some() {
+            return vec![];
+        }
+
+        let mut exprs = vec![col(&self.time_index_column)];
+        if let Some(field) = &self.field_column {
+            exprs.push(col(field));
+        }
+        exprs
+    }
+
+    fn necessary_children_exprs(&self, output_columns: &[usize]) -> Option<Vec<Vec<usize>>> {
+        if self.unfix.is_some() {
+            return None;
+        }
+
+        let input_schema = self.input.schema();
+        if output_columns.is_empty() {
+            let indices = (0..input_schema.fields().len()).collect::<Vec<_>>();
+            return Some(vec![indices]);
+        }
+
+        let mut required = output_columns.to_vec();
+        required.push(input_schema.index_of_column_by_name(None, &self.time_index_column)?);
+        if let Some(field) = &self.field_column {
+            required.push(input_schema.index_of_column_by_name(None, field)?);
+        }
+
+        required.sort_unstable();
+        required.dedup();
+        Some(vec![required])
     }
 
     fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -262,7 +293,7 @@ impl ExecutionPlan for InstantManipulateExec {
         self.input.schema()
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         self.input.properties()
     }
 
@@ -357,10 +388,7 @@ impl ExecutionPlan for InstantManipulateExec {
             num_rows: Precision::Inexact(estimated_row_num.floor() as _),
             total_byte_size: estimated_total_bytes,
             // TODO(ruihang): support this column statistics
-            column_statistics: vec![
-                ColumnStatistics::new_unknown();
-                self.schema().flattened_fields().len()
-            ],
+            column_statistics: Statistics::unknown_column(&self.schema()),
         })
     }
 
@@ -437,11 +465,12 @@ impl Stream for InstantManipulateStream {
 }
 
 impl InstantManipulateStream {
-    // refer to Go version: https://github.com/prometheus/prometheus/blob/e934d0f01158a1d55fa0ebb035346b195fcc1260/promql/engine.go#L1571
-    // and the function `vectorSelectorSingle`
+    // Refer to Prometheus `vectorSelectorSingle` / lookback semantics.
+    //
+    // Prometheus `v3.9.1` uses a start-exclusive lookback window:
+    //   (eval_ts - lookback_delta, eval_ts]
+    // i.e. a sample at exactly `eval_ts - lookback_delta` is considered too old.
     pub fn manipulate(&self, input: RecordBatch) -> DataFusionResult<RecordBatch> {
-        let mut take_indices = vec![];
-
         let ts_column = input
             .column(self.time_index)
             .as_any()
@@ -465,13 +494,23 @@ impl InstantManipulateStream {
         // Optimize iteration range based on actual data bounds
         let first_ts = ts_column.value(0);
         let last_ts = ts_column.value(ts_column.len() - 1);
-        let last_useful = last_ts + self.lookback_delta;
+        // A sample at `t` is eligible for eval time `eval_ts` iff:
+        //   t > eval_ts - lookback_delta  <=>  eval_ts < t + lookback_delta.
+        // Therefore the last eval timestamp for which the last sample is still eligible is:
+        //   last_ts + lookback_delta - 1 (millisecond granularity).
+        let last_useful = if self.lookback_delta > 0 {
+            last_ts + self.lookback_delta - 1
+        } else {
+            last_ts
+        };
 
         let max_start = first_ts.max(self.start);
         let min_end = last_useful.min(self.end);
 
         let aligned_start = self.start + (max_start - self.start) / self.interval * self.interval;
         let aligned_end = self.end - (self.end - min_end) / self.interval * self.interval;
+
+        let mut take_indices = vec![];
 
         let mut cursor = 0;
 
@@ -503,21 +542,21 @@ impl InstantManipulateStream {
             if cursor == ts_column.len() {
                 cursor -= 1;
                 // short cut this loop
-                if ts_column.value(cursor) + self.lookback_delta < expected_ts {
+                if ts_column.value(cursor) + self.lookback_delta <= expected_ts {
                     break;
                 }
             }
 
             // then examine the value
             let curr_ts = ts_column.value(cursor);
-            if curr_ts + self.lookback_delta < expected_ts {
+            if curr_ts + self.lookback_delta <= expected_ts {
                 continue;
             }
             if curr_ts > expected_ts {
                 // exceeds current expected timestamp, examine the previous value
                 if let Some(prev_cursor) = cursor.checked_sub(1) {
                     let prev_ts = ts_column.value(prev_cursor);
-                    if prev_ts + self.lookback_delta >= expected_ts {
+                    if prev_ts + self.lookback_delta > expected_ts {
                         // only use the point in the time range
                         if let Some(field_column) = &field_column
                             && field_column.value(prev_cursor).is_nan()
@@ -570,6 +609,8 @@ impl InstantManipulateStream {
 
 #[cfg(test)]
 mod test {
+    use datafusion::common::ToDFSchema;
+    use datafusion::logical_expr::{EmptyRelation, LogicalPlan};
     use datafusion::prelude::SessionContext;
 
     use super::*;
@@ -611,6 +652,30 @@ mod test {
         assert_eq!(result_literal, expected);
     }
 
+    #[test]
+    fn pruning_should_keep_time_and_field_columns_for_exec() {
+        let df_schema = prepare_test_data().schema().to_dfschema_ref().unwrap();
+        let input = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: df_schema,
+        });
+        let plan = InstantManipulate::new(
+            0,
+            0,
+            0,
+            0,
+            TIME_INDEX_COLUMN.to_string(),
+            Some("value".to_string()),
+            input,
+        );
+
+        // Simulate a parent projection requesting only the `path` column.
+        let output_columns = [2usize];
+        let required = plan.necessary_children_exprs(&output_columns).unwrap();
+        let required = &required[0];
+        assert_eq!(required.as_slice(), &[0, 1, 2]);
+    }
+
     #[tokio::test]
     async fn lookback_10s_interval_30s() {
         let expected = String::from(
@@ -637,17 +702,11 @@ mod test {
             \n| timestamp           | value | path |\
             \n+---------------------+-------+------+\
             \n| 1970-01-01T00:00:00 | 1.0   | foo  |\
-            \n| 1970-01-01T00:00:10 | 1.0   | foo  |\
             \n| 1970-01-01T00:00:30 | 1.0   | foo  |\
-            \n| 1970-01-01T00:00:40 | 1.0   | foo  |\
             \n| 1970-01-01T00:01:00 | 1.0   | foo  |\
-            \n| 1970-01-01T00:01:10 | 1.0   | foo  |\
             \n| 1970-01-01T00:01:30 | 1.0   | foo  |\
-            \n| 1970-01-01T00:01:40 | 1.0   | foo  |\
             \n| 1970-01-01T00:02:00 | 1.0   | foo  |\
-            \n| 1970-01-01T00:02:10 | 1.0   | foo  |\
             \n| 1970-01-01T00:03:00 | 1.0   | foo  |\
-            \n| 1970-01-01T00:03:10 | 1.0   | foo  |\
             \n| 1970-01-01T00:04:00 | 1.0   | foo  |\
             \n| 1970-01-01T00:04:10 | 1.0   | foo  |\
             \n| 1970-01-01T00:04:40 | 1.0   | foo  |\
@@ -668,9 +727,7 @@ mod test {
             \n| 1970-01-01T00:01:00 | 1.0   | foo  |\
             \n| 1970-01-01T00:01:30 | 1.0   | foo  |\
             \n| 1970-01-01T00:02:00 | 1.0   | foo  |\
-            \n| 1970-01-01T00:02:30 | 1.0   | foo  |\
             \n| 1970-01-01T00:03:00 | 1.0   | foo  |\
-            \n| 1970-01-01T00:03:30 | 1.0   | foo  |\
             \n| 1970-01-01T00:04:00 | 1.0   | foo  |\
             \n| 1970-01-01T00:04:30 | 1.0   | foo  |\
             \n| 1970-01-01T00:05:00 | 1.0   | foo  |\
@@ -700,11 +757,9 @@ mod test {
             \n| 1970-01-01T00:02:00 | 1.0   | foo  |\
             \n| 1970-01-01T00:02:10 | 1.0   | foo  |\
             \n| 1970-01-01T00:02:20 | 1.0   | foo  |\
-            \n| 1970-01-01T00:02:30 | 1.0   | foo  |\
             \n| 1970-01-01T00:03:00 | 1.0   | foo  |\
             \n| 1970-01-01T00:03:10 | 1.0   | foo  |\
             \n| 1970-01-01T00:03:20 | 1.0   | foo  |\
-            \n| 1970-01-01T00:03:30 | 1.0   | foo  |\
             \n| 1970-01-01T00:04:00 | 1.0   | foo  |\
             \n| 1970-01-01T00:04:10 | 1.0   | foo  |\
             \n| 1970-01-01T00:04:20 | 1.0   | foo  |\
@@ -801,7 +856,6 @@ mod test {
             \n| timestamp           | value | path |\
             \n+---------------------+-------+------+\
             \n| 1970-01-01T00:00:00 | 1.0   | foo  |\
-            \n| 1970-01-01T00:00:10 | 1.0   | foo  |\
             \n| 1970-01-01T00:00:30 | 1.0   | foo  |\
             \n+---------------------+-------+------+",
         );
@@ -833,7 +887,6 @@ mod test {
             \n+---------------------+-------+------+\
             \n| 1970-01-01T00:03:10 | 1.0   | foo  |\
             \n| 1970-01-01T00:03:20 | 1.0   | foo  |\
-            \n| 1970-01-01T00:03:30 | 1.0   | foo  |\
             \n| 1970-01-01T00:04:00 | 1.0   | foo  |\
             \n| 1970-01-01T00:04:10 | 1.0   | foo  |\
             \n| 1970-01-01T00:04:20 | 1.0   | foo  |\
@@ -853,11 +906,8 @@ mod test {
             \n| timestamp           | value |\
             \n+---------------------+-------+\
             \n| 1970-01-01T00:00:00 | 0.0   |\
-            \n| 1970-01-01T00:00:10 | 0.0   |\
             \n| 1970-01-01T00:01:00 | 6.0   |\
-            \n| 1970-01-01T00:01:10 | 6.0   |\
             \n| 1970-01-01T00:02:00 | 12.0  |\
-            \n| 1970-01-01T00:02:10 | 12.0  |\
             \n+---------------------+-------+",
         );
         do_normalize_test(0, 300_000, 10_000, 10_000, expected, true).await;

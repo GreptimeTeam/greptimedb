@@ -120,7 +120,8 @@ mod tests {
             matches!(f.signature(),
                          Signature {
                              type_signature: TypeSignature::OneOf(sigs),
-                             volatility: Volatility::Immutable
+                             volatility: Volatility::Immutable,
+                             ..
                          } if  sigs.len() == 15),
             "{:?}",
             f.signature()

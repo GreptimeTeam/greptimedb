@@ -31,7 +31,6 @@ pub fn test_table_info(
         .next_column_id(0)
         .options(Default::default())
         .created_on(Default::default())
-        .region_numbers(vec![1])
         .build()
         .unwrap();
 

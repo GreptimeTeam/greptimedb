@@ -1,0 +1,28 @@
+tracing:
+  enabled: true
+  endpoint: "http://my-greptimedb-monitor-standalone.my-greptimedb:4000/v1/otlp/v1/traces"
+  sampleRatio: "1.0"
+
+monitoring:
+  enabled: true
+  standalone:
+    base:
+      main:
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+      datanodeStorage:
+        fs:
+          storageSize: 5Gi
+  vector:
+    resources:
+      requests:
+        cpu: "50m"
+        memory: "64Mi"
+      limits:
+        cpu: "500m"
+        memory: "256Mi"

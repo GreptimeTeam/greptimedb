@@ -65,6 +65,8 @@ mod scan_test;
 #[cfg(test)]
 mod set_role_state_test;
 #[cfg(test)]
+mod skip_wal_test;
+#[cfg(test)]
 mod staging_test;
 #[cfg(test)]
 mod sync_test;
@@ -78,10 +80,12 @@ mod remap_manifests_test;
 
 #[cfg(test)]
 mod apply_staging_manifest_test;
+#[cfg(test)]
+mod partition_filter_test;
 mod puffin_index;
 
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -94,7 +98,7 @@ use common_meta::key::SchemaMetadataManagerRef;
 use common_recordbatch::{MemoryPermit, QueryMemoryTracker, SendableRecordBatchStream};
 use common_stat::get_total_memory_bytes;
 use common_telemetry::{info, tracing, warn};
-use common_wal::options::{WAL_OPTIONS_KEY, WalOptions};
+use common_wal::options::WalOptions;
 use futures::future::{join_all, try_join_all};
 use futures::stream::{self, Stream, StreamExt};
 use object_store::manager::ObjectStoreManagerRef;
@@ -140,9 +144,12 @@ use crate::read::scan_region::{ScanRegion, Scanner};
 use crate::read::stream::ScanBatchStream;
 use crate::region::MitoRegionRef;
 use crate::region::opener::PartitionExprFetcherRef;
+use crate::region::options::parse_wal_options;
 use crate::request::{RegionEditRequest, WorkerRequest};
 use crate::sst::file::{FileMeta, RegionFileId, RegionIndexId};
 use crate::sst::file_ref::FileReferenceManagerRef;
+use crate::sst::index::intermediate::IntermediateManager;
+use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::wal::entry_distributor::{
     DEFAULT_ENTRY_RECEIVER_BUFFER_SIZE, build_wal_entry_distributor_and_receivers,
 };
@@ -299,11 +306,27 @@ impl MitoEngine {
         self.inner.workers.gc_limiter()
     }
 
+    pub fn object_store_manager(&self) -> &ObjectStoreManagerRef {
+        self.inner.workers.object_store_manager()
+    }
+
+    pub fn puffin_manager_factory(&self) -> &PuffinManagerFactory {
+        self.inner.workers.puffin_manager_factory()
+    }
+
+    pub fn intermediate_manager(&self) -> &IntermediateManager {
+        self.inner.workers.intermediate_manager()
+    }
+
+    pub fn schema_metadata_manager(&self) -> &SchemaMetadataManagerRef {
+        self.inner.workers.schema_metadata_manager()
+    }
+
     /// Get all tmp ref files for given region ids, excluding files that's already in manifest.
     pub async fn get_snapshot_of_file_refs(
         &self,
         file_handle_regions: impl IntoIterator<Item = RegionId>,
-        manifest_regions: HashMap<RegionId, Vec<RegionId>>,
+        related_regions: HashMap<RegionId, HashSet<RegionId>>,
     ) -> Result<FileRefsManifest> {
         let file_ref_mgr = self.file_ref_manager();
 
@@ -315,15 +338,30 @@ impl MitoEngine {
             .filter_map(|region_id| self.find_region(region_id))
             .collect();
 
-        let related_regions: Vec<(MitoRegionRef, Vec<RegionId>)> = manifest_regions
-            .into_iter()
-            .filter_map(|(related_region, queries)| {
-                self.find_region(related_region).map(|r| (r, queries))
-            })
-            .collect();
+        let dst_region_to_src_regions: Vec<(MitoRegionRef, HashSet<RegionId>)> = {
+            let dst2src = related_regions
+                .into_iter()
+                .flat_map(|(src, dsts)| dsts.into_iter().map(move |dst| (dst, src)))
+                .fold(
+                    HashMap::<RegionId, HashSet<RegionId>>::new(),
+                    |mut acc, (k, v)| {
+                        let entry = acc.entry(k).or_default();
+                        entry.insert(v);
+                        acc
+                    },
+                );
+            let mut dst_region_to_src_regions = Vec::with_capacity(dst2src.len());
+            for (dst_region, srcs) in dst2src {
+                let Some(dst_region) = self.find_region(dst_region) else {
+                    continue;
+                };
+                dst_region_to_src_regions.push((dst_region, srcs));
+            }
+            dst_region_to_src_regions
+        };
 
         file_ref_mgr
-            .get_snapshot_of_file_refs(query_regions, related_regions)
+            .get_snapshot_of_file_refs(query_regions, dst_region_to_src_regions)
             .await
     }
 
@@ -393,6 +431,7 @@ impl MitoEngine {
     }
 
     /// Scans a region.
+    #[tracing::instrument(skip_all, fields(region_id = %region_id))]
     fn scan_region(&self, region_id: RegionId, request: ScanRequest) -> Result<ScanRegion> {
         self.inner.scan_region(region_id, request)
     }
@@ -445,6 +484,11 @@ impl MitoEngine {
 
     pub fn find_region(&self, region_id: RegionId) -> Option<MitoRegionRef> {
         self.inner.workers.get_region(region_id)
+    }
+
+    /// Returns all regions.
+    pub fn regions(&self) -> Vec<MitoRegionRef> {
+        self.inner.workers.all_regions().collect()
     }
 
     fn encode_manifest_info_to_extensions(
@@ -683,12 +727,7 @@ fn prepare_batch_open_requests(
     let mut topic_to_regions: HashMap<String, Vec<(RegionId, RegionOpenRequest)>> = HashMap::new();
     let mut remaining_regions: Vec<(RegionId, RegionOpenRequest)> = Vec::new();
     for (region_id, request) in requests {
-        let options = if let Some(options) = request.options.get(WAL_OPTIONS_KEY) {
-            serde_json::from_str(options).context(SerdeJsonSnafu)?
-        } else {
-            WalOptions::RaftEngine
-        };
-        match options {
+        match parse_wal_options(&request.options).context(SerdeJsonSnafu)? {
             WalOptions::Kafka(options) => {
                 topic_to_regions
                     .entry(options.topic)
@@ -972,6 +1011,7 @@ impl EngineInner {
     }
 
     /// Handles the scan `request` and returns a [ScanRegion].
+    #[tracing::instrument(skip_all, fields(region_id = %region_id))]
     fn scan_region(&self, region_id: RegionId, request: ScanRequest) -> Result<ScanRegion> {
         let query_start = Instant::now();
         // Reading a region doesn't need to go through the region worker thread.
@@ -1084,6 +1124,18 @@ impl EngineInner {
     }
 }
 
+fn map_batch_responses(responses: Vec<(RegionId, Result<AffectedRows>)>) -> BatchResponses {
+    responses
+        .into_iter()
+        .map(|(region_id, response)| {
+            (
+                region_id,
+                response.map(RegionResponse::new).map_err(BoxedError::new),
+            )
+        })
+        .collect()
+}
+
 #[async_trait]
 impl RegionEngine for MitoEngine {
     fn name(&self) -> &str {
@@ -1100,17 +1152,7 @@ impl RegionEngine for MitoEngine {
         self.inner
             .handle_batch_open_requests(parallelism, requests)
             .await
-            .map(|responses| {
-                responses
-                    .into_iter()
-                    .map(|(region_id, response)| {
-                        (
-                            region_id,
-                            response.map(RegionResponse::new).map_err(BoxedError::new),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            })
+            .map(map_batch_responses)
             .map_err(BoxedError::new)
     }
 
@@ -1123,17 +1165,7 @@ impl RegionEngine for MitoEngine {
         self.inner
             .handle_batch_catchup_requests(parallelism, requests)
             .await
-            .map(|responses| {
-                responses
-                    .into_iter()
-                    .map(|(region_id, response)| {
-                        (
-                            region_id,
-                            response.map(RegionResponse::new).map_err(BoxedError::new),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            })
+            .map(map_batch_responses)
             .map_err(BoxedError::new)
     }
 

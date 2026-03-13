@@ -29,7 +29,7 @@ use store_api::metric_engine_consts::{
 use store_api::storage::consts::{PRIMARY_KEY_COLUMN_NAME, ReservedColumnId};
 use store_api::storage::{ColumnId, TableId};
 
-use crate::error::{EncodePrimaryKeySnafu, Result};
+use crate::error::{EncodePrimaryKeySnafu, Result, TableIdCountMismatchSnafu};
 
 /// A row modifier modifies [`Rows`].
 ///
@@ -42,6 +42,22 @@ pub struct RowModifier {
     codec: SparsePrimaryKeyCodec,
 }
 
+/// Table id input for row modification.
+#[derive(Clone, Copy)]
+pub(crate) enum TableIdInput<'a> {
+    Single(TableId),
+    Batch(&'a [TableId]),
+}
+
+impl<'a> TableIdInput<'a> {
+    fn table_id_for_row(&self, row_idx: usize) -> TableId {
+        match self {
+            TableIdInput::Single(table_id) => *table_id,
+            TableIdInput::Batch(table_ids) => table_ids[row_idx],
+        }
+    }
+}
+
 impl Default for RowModifier {
     fn default() -> Self {
         Self {
@@ -51,22 +67,24 @@ impl Default for RowModifier {
 }
 
 impl RowModifier {
-    /// Modify rows with the given primary key encoding.
+    /// Modify rows with the given primary key encoding and table ids.
     pub(crate) fn modify_rows(
         &self,
         iter: RowsIter,
-        table_id: TableId,
+        table_ids: TableIdInput<'_>,
         encoding: PrimaryKeyEncoding,
     ) -> Result<Rows> {
+        let row_count = iter.rows.rows.len();
+        Self::validate_table_id_count(table_ids, row_count)?;
         match encoding {
-            PrimaryKeyEncoding::Sparse => self.modify_rows_sparse(iter, table_id),
-            PrimaryKeyEncoding::Dense => self.modify_rows_dense(iter, table_id),
+            PrimaryKeyEncoding::Sparse => self.modify_rows_sparse(iter, table_ids),
+            PrimaryKeyEncoding::Dense => self.modify_rows_dense(iter, table_ids),
         }
     }
 
     /// Modifies rows with sparse primary key encoding.
     /// It replaces the primary key columns with the encoded primary key column(`__primary_key`).
-    fn modify_rows_sparse(&self, mut iter: RowsIter, table_id: TableId) -> Result<Rows> {
+    fn modify_rows_sparse(&self, mut iter: RowsIter, table_ids: TableIdInput<'_>) -> Result<Rows> {
         let num_column = iter.rows.schema.len();
         let num_primary_key_column = iter.index.num_primary_key_column;
         // num_output_column = remaining columns(fields columns + timestamp column) + 1 (encoded primary key column)
@@ -74,14 +92,15 @@ impl RowModifier {
 
         let mut buffer = vec![];
 
-        for mut iter in iter.iter_mut() {
-            let (table_id, tsid) = Self::fill_internal_columns(table_id, &iter);
+        for (row_index, mut row_iter) in iter.iter_mut().enumerate() {
+            let table_id = table_ids.table_id_for_row(row_index);
+            let (table_id_value, tsid) = Self::fill_internal_columns(table_id, &row_iter);
             let mut values = Vec::with_capacity(num_output_column);
             buffer.clear();
             let internal_columns = [
                 (
                     ReservedColumnId::table_id(),
-                    api::helper::pb_value_to_value_ref(&table_id, None),
+                    api::helper::pb_value_to_value_ref(&table_id_value, None),
                 ),
                 (
                     ReservedColumnId::tsid(),
@@ -92,13 +111,13 @@ impl RowModifier {
                 .encode_to_vec(internal_columns.into_iter(), &mut buffer)
                 .context(EncodePrimaryKeySnafu)?;
             self.codec
-                .encode_to_vec(iter.primary_keys(), &mut buffer)
+                .encode_to_vec(row_iter.primary_keys(), &mut buffer)
                 .context(EncodePrimaryKeySnafu)?;
 
             values.push(ValueData::BinaryValue(buffer.clone()).into());
-            values.extend(iter.remaining());
+            values.extend(row_iter.remaining());
             // Replace the row with the encoded row
-            *iter.row = Row { values };
+            *row_iter.row = Row { values };
         }
 
         // Update the schema
@@ -118,7 +137,7 @@ impl RowModifier {
 
     /// Modifies rows with dense primary key encoding.
     /// It adds two columns(`__table_id`, `__tsid`) to the row.
-    fn modify_rows_dense(&self, mut iter: RowsIter, table_id: TableId) -> Result<Rows> {
+    fn modify_rows_dense(&self, mut iter: RowsIter, table_ids: TableIdInput<'_>) -> Result<Rows> {
         // add table_name column
         iter.rows.schema.push(ColumnSchema {
             column_name: DATA_SCHEMA_TABLE_ID_COLUMN_NAME.to_string(),
@@ -135,13 +154,27 @@ impl RowModifier {
             datatype_extension: None,
             options: None,
         });
-        for iter in iter.iter_mut() {
-            let (table_id, tsid) = Self::fill_internal_columns(table_id, &iter);
-            iter.row.values.push(table_id);
-            iter.row.values.push(tsid);
+        for (row_index, row_iter) in iter.iter_mut().enumerate() {
+            let table_id = table_ids.table_id_for_row(row_index);
+            let (table_id_value, tsid) = Self::fill_internal_columns(table_id, &row_iter);
+            row_iter.row.values.push(table_id_value);
+            row_iter.row.values.push(tsid);
         }
 
         Ok(iter.rows)
+    }
+
+    fn validate_table_id_count(table_ids: TableIdInput<'_>, row_count: usize) -> Result<()> {
+        if let TableIdInput::Batch(table_ids) = table_ids
+            && table_ids.len() != row_count
+        {
+            return TableIdCountMismatchSnafu {
+                expected: row_count,
+                actual: table_ids.len(),
+            }
+            .fail();
+        }
+        Ok(())
     }
 
     /// Fills internal columns of a row with table name and a hash of tag values.
@@ -389,8 +422,10 @@ mod tests {
     use std::collections::HashMap;
 
     use api::v1::{Row, Rows};
+    use store_api::codec::PrimaryKeyEncoding;
 
     use super::*;
+    use crate::error::Error;
 
     fn test_schema() -> Vec<ColumnSchema> {
         vec![
@@ -436,7 +471,13 @@ mod tests {
             rows: vec![row],
         };
         let rows_iter = RowsIter::new(rows, &name_to_column_id);
-        let result = encoder.modify_rows_sparse(rows_iter, table_id).unwrap();
+        let result = encoder
+            .modify_rows(
+                rows_iter,
+                TableIdInput::Single(table_id),
+                PrimaryKeyEncoding::Sparse,
+            )
+            .unwrap();
         assert_eq!(result.rows[0].values.len(), 1);
         let encoded_primary_key = vec![
             128, 0, 0, 4, 1, 0, 0, 4, 1, 128, 0, 0, 3, 1, 37, 196, 242, 181, 117, 224, 7, 137, 0,
@@ -505,7 +546,13 @@ mod tests {
             rows: vec![row],
         };
         let rows_iter = RowsIter::new(rows, &name_to_column_id);
-        let result = encoder.modify_rows_dense(rows_iter, table_id).unwrap();
+        let result = encoder
+            .modify_rows(
+                rows_iter,
+                TableIdInput::Single(table_id),
+                PrimaryKeyEncoding::Dense,
+            )
+            .unwrap();
         assert_eq!(
             result.rows[0].values[0],
             ValueData::StringValue("greptimedb".to_string()).into()
@@ -520,6 +567,34 @@ mod tests {
             ValueData::U64Value(2721566936019240841).into()
         );
         assert_eq!(result.schema, expected_dense_schema());
+    }
+
+    #[test]
+    fn test_table_id_count_mismatch() {
+        let name_to_column_id = test_name_to_column_id();
+        let encoder = RowModifier::default();
+        let schema = test_schema();
+        let rows = Rows {
+            schema,
+            rows: vec![test_row("a", "b"), test_row("c", "d")],
+        };
+        let rows_iter = RowsIter::new(rows, &name_to_column_id);
+        let table_ids = [1025];
+        let err = encoder
+            .modify_rows(
+                rows_iter,
+                TableIdInput::Batch(&table_ids),
+                PrimaryKeyEncoding::Dense,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            Error::TableIdCountMismatch {
+                expected: 2,
+                actual: 1,
+                ..
+            }
+        ));
     }
 
     #[test]

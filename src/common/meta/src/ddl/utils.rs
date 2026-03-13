@@ -467,7 +467,10 @@ pub fn extract_column_metadatas(
         ensure!(
             column_metadata == first_column_metadatas,
             MetadataCorruptionSnafu {
-                err_msg: "The table column metadata schemas from datanodes are not the same."
+                err_msg: format!(
+                    "The table column metadata schemas from datanodes are not the same. First: {:?}, Current: {:?}",
+                    first_column_metadatas, column_metadata,
+                ),
             }
         );
     }

@@ -24,8 +24,9 @@ use datatypes::arrow::datatypes::TimestampMillisecondType;
 use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::AlterKind::SetRegionOptions;
 use store_api::region_request::{
-    PathType, RegionAlterRequest, RegionCompactRequest, RegionDeleteRequest, RegionFlushRequest,
-    RegionOpenRequest, RegionRequest, SetRegionOption,
+    EnterStagingRequest, PathType, RegionAlterRequest, RegionCompactRequest, RegionDeleteRequest,
+    RegionFlushRequest, RegionOpenRequest, RegionRequest, SetRegionOption,
+    StagingPartitionDirective,
 };
 use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::Notify;
@@ -100,7 +101,11 @@ pub(crate) async fn delete_and_flush(
     let result = engine
         .handle_request(
             region_id,
-            RegionRequest::Delete(RegionDeleteRequest { rows, hint: None }),
+            RegionRequest::Delete(RegionDeleteRequest {
+                rows,
+                hint: None,
+                partition_expr_version: None,
+            }),
         )
         .await
         .unwrap();
@@ -532,8 +537,8 @@ async fn test_compaction_region_with_overlapping_delete_all_with_format(flat_for
         .unwrap();
     // Flush 4 SSTs for compaction.
     put_and_flush(&engine, region_id, &column_schemas, 0..1200).await; // window 3600
-    put_and_flush(&engine, region_id, &column_schemas, 0..2400).await; // window 3600
-    put_and_flush(&engine, region_id, &column_schemas, 0..3600).await; // window 3600
+    put_and_flush(&engine, region_id, &column_schemas, 1200..2400).await; // window 3600
+    put_and_flush(&engine, region_id, &column_schemas, 2400..3600).await; // window 3600
     delete_and_flush(&engine, region_id, &column_schemas, 0..10800).await; // window 10800
     tokio::time::sleep(Duration::from_millis(2)).await;
     compact(&engine, region_id).await;
@@ -642,6 +647,76 @@ async fn test_readonly_during_compaction_with_format(flat_format: bool) {
 
     let vec = collect_stream_ts(stream).await;
     assert_eq!((0..20).map(|v| v * 1000).collect::<Vec<_>>(), vec);
+}
+
+#[tokio::test]
+async fn test_enter_staging_deferred_by_inflight_compaction() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::new().await;
+    let listener = Arc::new(CompactionListener::default());
+    let engine = env
+        .create_engine_with(
+            MitoConfig {
+                max_background_purges: 1,
+                ..Default::default()
+            },
+            None,
+            Some(listener.clone()),
+            None,
+        )
+        .await;
+
+    let region_id = RegionId::new(2048, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let request = CreateRequestBuilder::new()
+        .insert_option("compaction.type", "twcs")
+        .build();
+    let column_schemas = request
+        .column_metadatas
+        .iter()
+        .map(column_metadata_to_column_schema)
+        .collect::<Vec<_>>();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    put_and_flush(&engine, region_id, &column_schemas, 0..10).await;
+    put_and_flush(&engine, region_id, &column_schemas, 5..20).await;
+
+    listener.wait_handle_finished().await;
+
+    let engine_cloned = engine.clone();
+    let enter_staging = tokio::spawn(async move {
+        engine_cloned
+            .handle_request(
+                region_id,
+                RegionRequest::EnterStaging(EnterStagingRequest {
+                    partition_directive: StagingPartitionDirective::RejectAllWrites,
+                }),
+            )
+            .await
+            .unwrap();
+    });
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!enter_staging.is_finished());
+
+    listener.wake();
+    enter_staging.await.unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    assert!(region.is_staging());
 }
 
 #[tokio::test]

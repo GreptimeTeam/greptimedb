@@ -19,10 +19,10 @@ use api::v1::region::{CreateRequests, RegionRequest, RegionRequestHeader, region
 use common_telemetry::debug;
 use common_telemetry::tracing_context::TracingContext;
 use store_api::storage::{RegionId, TableId};
-use table::metadata::RawTableInfo;
+use table::metadata::TableInfo;
 
 use crate::ddl::create_logical_tables::CreateLogicalTablesProcedure;
-use crate::ddl::create_table_template::{
+use crate::ddl::create_table::template::{
     CreateRequestBuilder, build_template, build_template_from_raw_table_info,
 };
 use crate::ddl::utils::region_storage_path;
@@ -95,11 +95,11 @@ pub fn create_region_request_builder(
     Ok(CreateRequestBuilder::new(template, Some(physical_table_id)))
 }
 
-/// Builds a [CreateRequestBuilder] from a [RawTableInfo].
+/// Builds a [CreateRequestBuilder] from a [TableInfo].
 ///
-/// Note: **This method is only used for creating logical tables.**
+/// Note: This function is primarily intended for creating logical tables or allocating placeholder regions.
 pub fn create_region_request_builder_from_raw_table_info(
-    raw_table_info: &RawTableInfo,
+    raw_table_info: &TableInfo,
     physical_table_id: TableId,
 ) -> Result<CreateRequestBuilder> {
     let template = build_template_from_raw_table_info(raw_table_info)?;

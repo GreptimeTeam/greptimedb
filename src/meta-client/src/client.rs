@@ -13,7 +13,8 @@
 // limitations under the License.
 
 mod ask_leader;
-mod heartbeat;
+mod config;
+pub mod heartbeat;
 mod load_balance;
 mod procedure;
 
@@ -23,6 +24,7 @@ mod util;
 
 use std::fmt::Debug;
 use std::sync::Arc;
+use std::time::Duration;
 
 use api::v1::meta::{
     MetasrvNodeInfo, ProcedureDetailResponse, ReconcileRequest, ReconcileResponse, Role,
@@ -46,26 +48,30 @@ use common_meta::range_stream::PaginationStream;
 use common_meta::rpc::KeyValue;
 use common_meta::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use common_meta::rpc::procedure::{
-    AddRegionFollowerRequest, AddTableFollowerRequest, ManageRegionFollowerRequest,
-    MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
-    RemoveRegionFollowerRequest, RemoveTableFollowerRequest,
+    AddRegionFollowerRequest, AddTableFollowerRequest, GcRegionsRequest, GcResponse,
+    GcTableRequest, ManageRegionFollowerRequest, MigrateRegionRequest, MigrateRegionResponse,
+    ProcedureStateResponse, RemoveRegionFollowerRequest, RemoveTableFollowerRequest,
 };
 use common_meta::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
     BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
     DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
 };
+use common_options::plugin_options::PluginOptionsDeserializer;
 use common_telemetry::info;
+use config::Client as ConfigClient;
 use futures::TryStreamExt;
-use heartbeat::Client as HeartbeatClient;
+use heartbeat::{Client as HeartbeatClient, HeartbeatConfig};
 use procedure::Client as ProcedureClient;
+use serde::de::DeserializeOwned;
 use snafu::{OptionExt, ResultExt};
 use store::Client as StoreClient;
 
 pub use self::heartbeat::{HeartbeatSender, HeartbeatStream};
+use crate::client::ask_leader::{LeaderProviderFactoryImpl, LeaderProviderFactoryRef};
 use crate::error::{
-    ConvertMetaRequestSnafu, ConvertMetaResponseSnafu, Error, GetFlowStatSnafu, NotStartedSnafu,
-    Result,
+    ConvertMetaConfigSnafu, ConvertMetaRequestSnafu, ConvertMetaResponseSnafu, Error,
+    GetFlowStatSnafu, NotStartedSnafu, Result,
 };
 
 pub type Id = u64;
@@ -73,6 +79,7 @@ pub type Id = u64;
 const DEFAULT_ASK_LEADER_MAX_RETRY: usize = 3;
 const DEFAULT_SUBMIT_DDL_MAX_RETRY: usize = 3;
 const DEFAULT_CLUSTER_CLIENT_MAX_RETRY: usize = 3;
+const DEFAULT_DDL_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug, Default)]
 pub struct MetaClientBuilder {
@@ -85,6 +92,8 @@ pub struct MetaClientBuilder {
     region_follower: Option<RegionFollowerClientRef>,
     channel_manager: Option<ChannelManager>,
     ddl_channel_manager: Option<ChannelManager>,
+    /// The default ddl timeout for each request.
+    ddl_timeout: Option<Duration>,
     heartbeat_channel_manager: Option<ChannelManager>,
 }
 
@@ -165,6 +174,13 @@ impl MetaClientBuilder {
         }
     }
 
+    pub fn ddl_timeout(self, timeout: Duration) -> Self {
+        Self {
+            ddl_timeout: Some(timeout),
+            ..self
+        }
+    }
+
     pub fn heartbeat_channel_manager(self, channel_manager: ChannelManager) -> Self {
         Self {
             heartbeat_channel_manager: Some(channel_manager),
@@ -180,67 +196,91 @@ impl MetaClientBuilder {
     }
 
     pub fn build(self) -> MetaClient {
-        let mut client = if let Some(mgr) = self.channel_manager {
-            MetaClient::with_channel_manager(self.id, mgr)
-        } else {
-            MetaClient::new(self.id)
-        };
+        let mgr = self.channel_manager.unwrap_or_default();
+        let heartbeat_channel_manager = self
+            .heartbeat_channel_manager
+            .clone()
+            .unwrap_or_else(|| mgr.clone());
 
-        let mgr = client.channel_manager.clone();
-
-        if self.enable_heartbeat {
+        let heartbeat = self.enable_heartbeat.then(|| {
             if self.heartbeat_channel_manager.is_some() {
                 info!("Enable heartbeat channel using the heartbeat channel manager.");
             }
-            let mgr = self.heartbeat_channel_manager.unwrap_or(mgr.clone());
-            client.heartbeat = Some(HeartbeatClient::new(
-                self.id,
-                self.role,
-                mgr,
-                DEFAULT_ASK_LEADER_MAX_RETRY,
-            ));
-        }
 
-        if self.enable_store {
-            client.store = Some(StoreClient::new(self.id, self.role, mgr.clone()));
-        }
-
-        if self.enable_procedure {
+            HeartbeatClient::new(self.id, self.role, heartbeat_channel_manager.clone())
+        });
+        let config = self
+            .enable_heartbeat
+            .then(|| ConfigClient::new(self.id, self.role, mgr.clone()));
+        let store = self
+            .enable_store
+            .then(|| StoreClient::new(self.id, self.role, mgr.clone()));
+        let procedure = self.enable_procedure.then(|| {
             let mgr = self.ddl_channel_manager.unwrap_or(mgr.clone());
-            client.procedure = Some(ProcedureClient::new(
+            ProcedureClient::new(
                 self.id,
                 self.role,
                 mgr,
                 DEFAULT_SUBMIT_DDL_MAX_RETRY,
-            ));
-        }
+                self.ddl_timeout.unwrap_or(DEFAULT_DDL_TIMEOUT),
+            )
+        });
+        let cluster = self
+            .enable_access_cluster_info
+            .then(|| ClusterClient::new(mgr.clone(), DEFAULT_CLUSTER_CLIENT_MAX_RETRY));
+        let region_follower = self.region_follower.clone();
 
-        if self.enable_access_cluster_info {
-            client.cluster = Some(ClusterClient::new(
+        MetaClient {
+            id: self.id,
+            channel_manager: mgr.clone(),
+            leader_provider_factory: Arc::new(LeaderProviderFactoryImpl::new(
                 self.id,
                 self.role,
-                mgr,
-                DEFAULT_CLUSTER_CLIENT_MAX_RETRY,
-            ))
+                DEFAULT_ASK_LEADER_MAX_RETRY,
+                heartbeat_channel_manager,
+            )),
+            heartbeat,
+            config,
+            store,
+            procedure,
+            cluster,
+            region_follower,
         }
-
-        if let Some(region_follower) = self.region_follower {
-            client.region_follower = Some(region_follower);
-        }
-
-        client
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct MetaClient {
     id: Id,
     channel_manager: ChannelManager,
+    leader_provider_factory: LeaderProviderFactoryRef,
     heartbeat: Option<HeartbeatClient>,
+    config: Option<ConfigClient>,
     store: Option<StoreClient>,
     procedure: Option<ProcedureClient>,
     cluster: Option<ClusterClient>,
     region_follower: Option<RegionFollowerClientRef>,
+}
+
+impl MetaClient {
+    pub fn new(id: Id, role: Role) -> Self {
+        Self {
+            id,
+            channel_manager: ChannelManager::default(),
+            leader_provider_factory: Arc::new(LeaderProviderFactoryImpl::new(
+                id,
+                role,
+                DEFAULT_ASK_LEADER_MAX_RETRY,
+                ChannelManager::default(),
+            )),
+            heartbeat: None,
+            config: None,
+            store: None,
+            procedure: None,
+            cluster: None,
+            region_follower: None,
+        }
+    }
 }
 
 pub type RegionFollowerClientRef = Arc<dyn RegionFollowerClient>;
@@ -342,6 +382,28 @@ impl ProcedureExecutor for MetaClient {
         pid: &str,
     ) -> MetaResult<ProcedureStateResponse> {
         self.query_procedure_state(pid)
+            .await
+            .map_err(BoxedError::new)
+            .context(meta_error::ExternalSnafu)
+    }
+
+    async fn gc_regions(
+        &self,
+        _ctx: &ExecutorContext,
+        request: GcRegionsRequest,
+    ) -> MetaResult<GcResponse> {
+        self.gc_regions(request)
+            .await
+            .map_err(BoxedError::new)
+            .context(meta_error::ExternalSnafu)
+    }
+
+    async fn gc_table(
+        &self,
+        _ctx: &ExecutorContext,
+        request: GcTableRequest,
+    ) -> MetaResult<GcResponse> {
+        self.gc_table(request)
             .await
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)
@@ -498,21 +560,6 @@ fn decode_stats(kv: KeyValue) -> MetaResult<DatanodeStatValue> {
 }
 
 impl MetaClient {
-    pub fn new(id: Id) -> Self {
-        Self {
-            id,
-            ..Default::default()
-        }
-    }
-
-    pub fn with_channel_manager(id: Id, channel_manager: ChannelManager) -> Self {
-        Self {
-            id,
-            channel_manager,
-            ..Default::default()
-        }
-    }
-
     pub async fn start<U, A>(&mut self, urls: A) -> Result<()>
     where
         U: AsRef<str>,
@@ -520,29 +567,10 @@ impl MetaClient {
     {
         info!("MetaClient channel config: {:?}", self.channel_config());
 
-        if let Some(client) = &mut self.region_follower {
-            let urls = urls.as_ref().iter().map(|u| u.as_ref()).collect::<Vec<_>>();
-            client.start(&urls).await?;
-            info!("Region follower client started");
-        }
-        if let Some(client) = &mut self.heartbeat {
-            client.start(urls.clone()).await?;
-            info!("Heartbeat client started");
-        }
-        if let Some(client) = &mut self.store {
-            client.start(urls.clone()).await?;
-            info!("Store client started");
-        }
-        if let Some(client) = &mut self.procedure {
-            client.start(urls.clone()).await?;
-            info!("DDL client started");
-        }
-        if let Some(client) = &mut self.cluster {
-            client.start(urls).await?;
-            info!("Cluster client started");
-        }
+        let urls = urls.as_ref().iter().map(|u| u.as_ref()).collect::<Vec<_>>();
+        let leader_provider = self.leader_provider_factory.create(&urls);
 
-        Ok(())
+        self.start_with(leader_provider, urls).await
     }
 
     /// Start the client with a [LeaderProvider] and other Metasrv peers' addresses.
@@ -562,6 +590,11 @@ impl MetaClient {
 
         if let Some(client) = &self.heartbeat {
             info!("Starting heartbeat client ...");
+            client.start_with(leader_provider.clone()).await?;
+        }
+
+        if let Some(client) = &self.config {
+            info!("Starting config client ...");
             client.start_with(leader_provider.clone()).await?;
         }
 
@@ -588,13 +621,27 @@ impl MetaClient {
         self.heartbeat_client()?.ask_leader().await
     }
 
+    pub async fn pull_config<T, U>(&self, deserializer: T) -> Result<U>
+    where
+        T: PluginOptionsDeserializer<U>,
+        U: DeserializeOwned,
+    {
+        let res = self.config_client()?.pull_config().await?;
+        let v = deserializer
+            .deserialize(&res.payload)
+            .context(ConvertMetaConfigSnafu)?;
+        Ok(v)
+    }
+
     /// Returns a heartbeat bidirectional streaming: (sender, receiver), the
     /// other end is the leader of `metasrv`.
     ///
     /// The `datanode` needs to use the sender to continuously send heartbeat
     /// packets (some self-state data), and the receiver can receive a response
     /// from "metasrv" (which may contain some scheduling instructions).
-    pub async fn heartbeat(&self) -> Result<(HeartbeatSender, HeartbeatStream)> {
+    ///
+    /// Returns the heartbeat sender, stream, and configuration received from Metasrv.
+    pub async fn heartbeat(&self) -> Result<(HeartbeatSender, HeartbeatStream, HeartbeatConfig)> {
         self.heartbeat_client()?.heartbeat().await
     }
 
@@ -690,6 +737,16 @@ impl MetaClient {
         self.procedure_client()?.reconcile(request).await
     }
 
+    /// Manually trigger GC for specific regions.
+    pub async fn gc_regions(&self, request: GcRegionsRequest) -> Result<GcResponse> {
+        self.procedure_client()?.gc_regions(request).await
+    }
+
+    /// Manually trigger GC for a table (all its regions).
+    pub async fn gc_table(&self, request: GcTableRequest) -> Result<GcResponse> {
+        self.procedure_client()?.gc_table(request).await
+    }
+
     /// Submit a DDL task
     pub async fn submit_ddl_task(
         &self,
@@ -708,6 +765,12 @@ impl MetaClient {
     pub fn heartbeat_client(&self) -> Result<HeartbeatClient> {
         self.heartbeat.clone().context(NotStartedSnafu {
             name: "heartbeat_client",
+        })
+    }
+
+    pub fn config_client(&self) -> Result<ConfigClient> {
+        self.config.clone().context(NotStartedSnafu {
+            name: "config_client",
         })
     }
 
@@ -873,7 +936,7 @@ mod tests {
     #[tokio::test]
     async fn test_heartbeat() {
         let tc = new_client("test_heartbeat").await;
-        let (sender, mut receiver) = tc.client.heartbeat().await.unwrap();
+        let (sender, mut receiver, _config) = tc.client.heartbeat().await.unwrap();
         // send heartbeats
 
         let request_sent = Arc::new(AtomicUsize::new(0));

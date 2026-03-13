@@ -21,7 +21,7 @@ use regex::Regex;
 use session::ReadPreference;
 use session::context::Channel::Postgres;
 use session::context::QueryContextRef;
-use session::session_config::{PGByteaOutputValue, PGDateOrder, PGDateTimeStyle};
+use session::session_config::{PGByteaOutputValue, PGDateOrder, PGDateTimeStyle, PGIntervalStyle};
 use snafu::{OptionExt, ResultExt, ensure};
 use sql::ast::{Expr, Ident, Value};
 use sql::statements::set_variables::SetVariables;
@@ -277,6 +277,25 @@ pub fn set_allow_query_fallback(exprs: Vec<Expr>, ctx: QueryContextRef) -> Resul
         }
         .fail(),
     }
+}
+
+pub fn set_intervalstyle(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
+    let Some((var_value, [])) = exprs.split_first() else {
+        return NotSupportedSnafu {
+            feat: "Set variable value must have one and only one value for intervalstyle",
+        }
+        .fail();
+    };
+    let Expr::Value(value) = var_value else {
+        return NotSupportedSnafu {
+            feat: "Set variable value must be a value",
+        }
+        .fail();
+    };
+    ctx.configuration_parameter().set_pg_intervalstyle_format(
+        PGIntervalStyle::try_from(&value.value).context(InvalidConfigValueSnafu)?,
+    );
+    Ok(())
 }
 
 pub fn set_datestyle(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {

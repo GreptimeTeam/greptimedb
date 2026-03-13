@@ -23,7 +23,7 @@ use common_telemetry::tracing;
 use promql_parser::label::{MatchOp, Matcher, Matchers};
 use query::promql;
 use query::promql::planner::PromPlanner;
-use servers::prom_store::{DATABASE_LABEL, SCHEMA_LABEL};
+use servers::prom_store::is_database_selection_label;
 use servers::prometheus;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
@@ -112,7 +112,7 @@ impl Instance {
         let table_schema = matchers
             .iter()
             .find_map(|m| {
-                if (m.name == SCHEMA_LABEL || m.name == DATABASE_LABEL) && m.op == MatchOp::Equal {
+                if is_database_selection_label(&m.name) && m.op == MatchOp::Equal {
                     Some(m.value.clone())
                 } else {
                     None

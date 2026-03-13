@@ -12,18 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
 use std::time::Instant;
 
 use common_telemetry::{error, info, warn};
 use store_api::logstore::LogStore;
-use store_api::region_request::EnterStagingRequest;
+use store_api::region_request::{EnterStagingRequest, StagingPartitionDirective};
 use store_api::storage::RegionId;
 
 use crate::error::{RegionNotFoundSnafu, Result, StagingPartitionExprMismatchSnafu};
 use crate::flush::FlushReason;
-use crate::manifest::action::{RegionChange, RegionMetaAction, RegionMetaActionList};
-use crate::region::{MitoRegionRef, RegionLeaderState};
+use crate::manifest::action::{RegionMetaAction, RegionMetaActionList, RegionPartitionExprChange};
+use crate::region::{MitoRegionRef, RegionLeaderState, StagingPartitionInfo};
 use crate::request::{
     BackgroundNotify, DdlRequest, EnterStagingResult, OptionOutputTx, SenderDdlRequest,
     WorkerRequest, WorkerRequestWithTime,
@@ -34,21 +33,27 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) async fn handle_enter_staging_request(
         &mut self,
         region_id: RegionId,
-        partition_expr: String,
+        partition_directive: StagingPartitionDirective,
         mut sender: OptionOutputTx,
     ) {
         let Some(region) = self.regions.writable_region_or(region_id, &mut sender) else {
             return;
         };
 
-        // If the region is already in staging mode, verify the partition expr matches.
+        // If the region is already in staging mode, verify the partition directive matches.
         if region.is_staging() {
-            let staging_partition_expr = region.staging_partition_expr.lock().unwrap().clone();
-            // If the partition expr mismatch, return error.
-            if staging_partition_expr.as_ref() != Some(&partition_expr) {
+            let staging_partition_info = region.staging_partition_info.lock().unwrap().clone();
+            // If the partition directive mismatches, return error.
+            if staging_partition_info
+                .as_ref()
+                .map(|info| &info.partition_directive)
+                != Some(&partition_directive)
+            {
                 sender.send(Err(StagingPartitionExprMismatchSnafu {
-                    manifest_expr: staging_partition_expr,
-                    request_expr: partition_expr,
+                    manifest_expr: staging_partition_info
+                        .as_ref()
+                        .and_then(|info| info.partition_expr().map(ToString::to_string)),
+                    request_expr: format!("{:?}", partition_directive),
                 }
                 .build()));
                 return;
@@ -85,16 +90,35 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 .add_ddl_request_to_pending(SenderDdlRequest {
                     region_id,
                     sender,
-                    request: DdlRequest::EnterStaging(EnterStagingRequest { partition_expr }),
+                    request: DdlRequest::EnterStaging(EnterStagingRequest {
+                        partition_directive: partition_directive.clone(),
+                    }),
                 });
 
             return;
         }
 
-        self.handle_enter_staging(region, partition_expr, sender);
+        if self.compaction_scheduler.is_compacting(region_id) {
+            // Safety: region is compacting, add ddl request to pending queue.
+            self.compaction_scheduler
+                .add_ddl_request_to_pending(SenderDdlRequest {
+                    region_id,
+                    sender,
+                    request: DdlRequest::EnterStaging(EnterStagingRequest {
+                        partition_directive,
+                    }),
+                });
+
+            return;
+        }
+
+        self.handle_enter_staging(region, partition_directive, sender);
     }
 
-    async fn enter_staging(region: &MitoRegionRef, partition_expr: String) -> Result<()> {
+    async fn enter_staging(
+        region: &MitoRegionRef,
+        partition_directive: &StagingPartitionDirective,
+    ) -> Result<()> {
         let now = Instant::now();
         // First step: clear all staging manifest files.
         {
@@ -117,15 +141,26 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             );
         }
 
-        // Second step: write new staging manifest.
-        let mut new_meta = (*region.metadata()).clone();
-        new_meta.partition_expr = Some(partition_expr.clone());
-        let sst_format = region.version().options.sst_format.unwrap_or_default();
-        let change = RegionChange {
-            metadata: Arc::new(new_meta),
-            sst_format,
+        let partition_expr = match partition_directive {
+            StagingPartitionDirective::UpdatePartitionExpr(partition_expr) => {
+                partition_expr.clone()
+            }
+            StagingPartitionDirective::RejectAllWrites => {
+                info!(
+                    "Enter staging with reject all writes, region_id: {}",
+                    region.region_id
+                );
+                // Rejects all writes just a memory flag, no need to write new staging manifest.
+                return Ok(());
+            }
         };
-        let action_list = RegionMetaActionList::with_action(RegionMetaAction::Change(change));
+
+        // Second step: write new staging manifest.
+        let change = RegionPartitionExprChange {
+            partition_expr: Some(partition_expr.clone()),
+        };
+        let action_list =
+            RegionMetaActionList::with_action(RegionMetaAction::PartitionExprChange(change));
         region
             .manifest_ctx
             .update_manifest(RegionLeaderState::EnteringStaging, action_list, true)
@@ -137,7 +172,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     fn handle_enter_staging(
         &self,
         region: MitoRegionRef,
-        partition_expr: String,
+        partition_directive: StagingPartitionDirective,
         sender: OptionOutputTx,
     ) {
         if let Err(e) = region.set_entering_staging() {
@@ -149,7 +184,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let request_sender = self.sender.clone();
         common_runtime::spawn_global(async move {
             let now = Instant::now();
-            let result = Self::enter_staging(&region, partition_expr.clone()).await;
+            let result = Self::enter_staging(&region, &partition_directive).await;
             match result {
                 Ok(_) => {
                     info!(
@@ -181,7 +216,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     region_id: region.region_id,
                     sender,
                     result,
-                    partition_expr,
+                    partition_directive,
                 }),
             };
             listener
@@ -221,12 +256,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         if enter_staging_result.result.is_ok() {
             info!(
-                "Updating region {} staging partition expr to {}",
-                region.region_id, enter_staging_result.partition_expr
+                "Updating region {} staging partition directive to {:?}",
+                region.region_id, enter_staging_result.partition_directive
             );
-            Self::update_region_staging_partition_expr(
+            Self::update_region_staging_partition_info(
                 &region,
-                enter_staging_result.partition_expr,
+                enter_staging_result.partition_directive,
             );
             region.switch_state_to_staging(RegionLeaderState::EnteringStaging);
         } else {
@@ -240,9 +275,14 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             .await;
     }
 
-    fn update_region_staging_partition_expr(region: &MitoRegionRef, partition_expr: String) {
-        let mut staging_partition_expr = region.staging_partition_expr.lock().unwrap();
-        debug_assert!(staging_partition_expr.is_none());
-        *staging_partition_expr = Some(partition_expr);
+    fn update_region_staging_partition_info(
+        region: &MitoRegionRef,
+        partition_directive: StagingPartitionDirective,
+    ) {
+        let mut staging_partition_info = region.staging_partition_info.lock().unwrap();
+        debug_assert!(staging_partition_info.is_none());
+        *staging_partition_info = Some(StagingPartitionInfo::from_partition_directive(
+            partition_directive,
+        ));
     }
 }

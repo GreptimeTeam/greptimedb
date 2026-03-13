@@ -257,6 +257,9 @@ impl FlatReadFormat {
     }
 
     /// Gets the projection in the flat format.
+    ///
+    /// When `skip_auto_convert` is enabled (primary-key format read), this returns the
+    /// primary-key format projection so filter/prune can resolve projected indices.
     pub(crate) fn format_projection(&self) -> &FormatProjection {
         match &self.parquet_adapter {
             ParquetAdapter::Flat(p) => &p.format_projection,
@@ -393,20 +396,29 @@ impl ParquetPrimaryKeyToFlat {
         let id_to_index = sst_column_id_indices(&metadata);
         let sst_column_num =
             flat_sst_arrow_schema_column_num(&metadata, &FlatSchemaOptions::default());
-        // Computes the format projection for the new format.
-        let format_projection = FormatProjection::compute_format_projection(
-            &id_to_index,
-            sst_column_num,
-            column_ids.iter().copied(),
-        );
-        let codec = build_primary_key_codec(&metadata);
-        let convert_format = if skip_auto_convert {
-            None
-        } else {
-            FlatConvertFormat::new(Arc::clone(&metadata), &format_projection, codec)
-        };
 
+        let codec = build_primary_key_codec(&metadata);
         let format = PrimaryKeyReadFormat::new(metadata.clone(), column_ids.iter().copied());
+        let (convert_format, format_projection) = if skip_auto_convert {
+            (
+                None,
+                FormatProjection {
+                    projection_indices: format.projection_indices().to_vec(),
+                    column_id_to_projected_index: format.field_id_to_projected_index().clone(),
+                },
+            )
+        } else {
+            // Computes the format projection for the new format.
+            let format_projection = FormatProjection::compute_format_projection(
+                &id_to_index,
+                sst_column_num,
+                column_ids.iter().copied(),
+            );
+            (
+                FlatConvertFormat::new(Arc::clone(&metadata), &format_projection, codec),
+                format_projection,
+            )
+        };
 
         Self {
             format,
@@ -563,9 +575,8 @@ pub(crate) fn decode_primary_keys(
 
     // The parquet reader may read the whole dictionary page into the dictionary values, so
     // we may decode many primary keys not in this batch if we decode the values array directly.
-    for i in 0..keys.len() {
-        let current_key = keys.value(i);
-
+    let pk_indices = keys.values();
+    for &current_key in pk_indices.iter().take(keys.len()) {
         // Check if current key is the same as previous key
         if let Some(prev) = prev_key
             && prev == current_key

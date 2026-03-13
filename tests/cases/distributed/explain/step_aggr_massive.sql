@@ -232,7 +232,7 @@ WHERE
       AND fid < 3000000
     )
   )
-  AND time >= now()
+  AND time >= 0
 GROUP BY
   env,
   service_name,
@@ -424,7 +424,7 @@ WHERE
       AND fid < 3000000
     )
   )
-  AND time >= now()
+  AND time >= 0
 GROUP BY
   env,
   service_name,
@@ -443,7 +443,7 @@ SELECT
 from
   base_table
 where
-  time >= now();
+  time >= 0;
 
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
@@ -460,6 +460,6 @@ SELECT
 from
   base_table
 where
-  time >= now();
+  time >= 0;
 
 DROP TABLE base_table;

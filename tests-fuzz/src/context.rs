@@ -23,6 +23,8 @@ use crate::error::{self, Result};
 use crate::generator::Random;
 use crate::ir::alter_expr::{AlterTableOperation, AlterTableOption};
 use crate::ir::create_expr::{ColumnOption, PartitionDef};
+use crate::ir::partition_expr::SimplePartitions;
+use crate::ir::repartition_expr::RepartitionExpr;
 use crate::ir::{AlterTableExpr, Column, CreateTableExpr, Ident};
 
 pub type TableContextRef = Arc<TableContext>;
@@ -170,6 +172,39 @@ impl TableContext {
         }
     }
 
+    pub fn repartition(mut self, expr: RepartitionExpr) -> Result<TableContext> {
+        match expr {
+            RepartitionExpr::Split(split) => {
+                let partition_def = self.partition.as_mut().expect("expected partition def");
+                let insert_pos = partition_def
+                    .exprs
+                    .iter()
+                    .position(|expr| expr == &split.target)
+                    .unwrap();
+                partition_def.exprs[insert_pos] = split.into[0].clone();
+                partition_def
+                    .exprs
+                    .insert(insert_pos + 1, split.into[1].clone());
+            }
+            RepartitionExpr::Merge(merge) => {
+                let partition_def = self.partition.as_mut().expect("expected partition def");
+                let removed_idx = partition_def
+                    .exprs
+                    .iter()
+                    .position(|expr| expr == &merge.targets[0])
+                    .unwrap();
+                let mut partitions = SimplePartitions::from_exprs(
+                    partition_def.columns[0].clone(),
+                    &partition_def.exprs,
+                )?;
+                partitions.remove_bound(removed_idx)?;
+                partition_def.exprs = partitions.generate()?;
+            }
+        }
+
+        Ok(self)
+    }
+
     pub fn generate_unique_column_name<R: Rng>(
         &self,
         rng: &mut R,
@@ -200,10 +235,16 @@ mod tests {
     use common_query::AddColumnLocation;
     use common_time::Duration;
     use datatypes::data_type::ConcreteDataType;
+    use datatypes::value::Value;
+    use rand::SeedableRng;
 
     use super::TableContext;
+    use crate::generator::Generator;
+    use crate::generator::create_expr::CreateTableExprGeneratorBuilder;
     use crate::ir::alter_expr::{AlterTableOperation, AlterTableOption, Ttl};
     use crate::ir::create_expr::ColumnOption;
+    use crate::ir::partition_expr::SimplePartitions;
+    use crate::ir::repartition_expr::{MergePartitionExpr, RepartitionExpr, SplitPartitionExpr};
     use crate::ir::{AlterTableExpr, Column, Ident};
 
     #[test]
@@ -295,5 +336,90 @@ mod tests {
         };
         let table_ctx = table_ctx.alter(expr).unwrap();
         assert_eq!(table_ctx.table_options.len(), 0);
+    }
+
+    #[test]
+    fn test_apply_split_partition_expr() {
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0);
+        let expr = CreateTableExprGeneratorBuilder::default()
+            .columns(10)
+            .partition(10)
+            .if_not_exists(true)
+            .engine("mito2")
+            .build()
+            .unwrap()
+            .generate(&mut rng)
+            .unwrap();
+        let mut table_ctx = TableContext::from(&expr);
+        // "age < 10"
+        // "age >= 10 AND age < 20"
+        // "age >= 20" (SPLIT) INTO (age >= 20 AND age < 30, age >= 30)
+        let partitions = SimplePartitions::new(
+            table_ctx.partition.as_ref().unwrap().columns[0].clone(),
+            vec![Value::from(10), Value::from(20)],
+        )
+        .generate()
+        .unwrap();
+        // "age < 10"
+        // "age >= 10 AND age < 20"
+        // "age >= 20" AND age < 30"
+        // "age >= 30"
+        let expected_exprs = SimplePartitions::new(
+            table_ctx.partition.as_ref().unwrap().columns[0].clone(),
+            vec![Value::from(10), Value::from(20), Value::from(30)],
+        )
+        .generate()
+        .unwrap();
+        table_ctx.partition.as_mut().unwrap().exprs = partitions.clone();
+        let table_ctx = table_ctx
+            .repartition(RepartitionExpr::Split(SplitPartitionExpr {
+                table_name: expr.table_name.clone(),
+                target: partitions.last().unwrap().clone(),
+                into: vec![expected_exprs[2].clone(), expected_exprs[3].clone()],
+            }))
+            .unwrap();
+        let partition_def = table_ctx.partition.as_ref().unwrap();
+        assert_eq!(partition_def.exprs, expected_exprs);
+    }
+
+    #[test]
+    fn test_apply_merge_partition_expr() {
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0);
+        let expr = CreateTableExprGeneratorBuilder::default()
+            .columns(10)
+            .partition(10)
+            .if_not_exists(true)
+            .engine("mito2")
+            .build()
+            .unwrap()
+            .generate(&mut rng)
+            .unwrap();
+        let mut table_ctx = TableContext::from(&expr);
+        // "age < 10"
+        // "age >= 10 AND age < 20" (MERGE)
+        // "age >= 20" (MERGE)
+        let partitions = SimplePartitions::new(
+            table_ctx.partition.as_ref().unwrap().columns[0].clone(),
+            vec![Value::from(10), Value::from(20)],
+        )
+        .generate()
+        .unwrap();
+        // "age < 10"
+        // "age >= 10
+        let expected_exprs = SimplePartitions::new(
+            table_ctx.partition.as_ref().unwrap().columns[0].clone(),
+            vec![Value::from(10)],
+        )
+        .generate()
+        .unwrap();
+        table_ctx.partition.as_mut().unwrap().exprs = partitions.clone();
+        let table_ctx = table_ctx
+            .repartition(RepartitionExpr::Merge(MergePartitionExpr {
+                table_name: expr.table_name.clone(),
+                targets: vec![partitions[1].clone(), partitions[2].clone()],
+            }))
+            .unwrap();
+        let partition_def = table_ctx.partition.as_ref().unwrap();
+        assert_eq!(partition_def.exprs, expected_exprs);
     }
 }

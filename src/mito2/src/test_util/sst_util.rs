@@ -23,7 +23,6 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SkippingIndexOptions};
 use datatypes::value::ValueRef;
 use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt, SortField};
-use parquet::file::metadata::ParquetMetaData;
 use store_api::metadata::{
     ColumnMetadata, RegionMetadata, RegionMetadataBuilder, RegionMetadataRef,
 };
@@ -275,30 +274,6 @@ pub fn new_batch_with_binary(tags: &[&str], start: usize, end: usize) -> Batch {
         .push_field_array(1, Arc::new(BinaryArray::from_iter_values(field)))
         .unwrap();
     builder.build().unwrap()
-}
-
-/// ParquetMetaData doesn't implement `PartialEq` trait, check internal fields manually
-pub fn assert_parquet_metadata_eq(a: Arc<ParquetMetaData>, b: Arc<ParquetMetaData>) {
-    macro_rules! assert_metadata {
-            ( $a:expr, $b:expr, $($method:ident,)+ ) => {
-                $(
-                    assert_eq!($a.$method(), $b.$method());
-                )+
-            }
-        }
-
-    assert_metadata!(
-        a.file_metadata(),
-        b.file_metadata(),
-        version,
-        num_rows,
-        created_by,
-        key_value_metadata,
-        schema_descr,
-        column_orders,
-    );
-
-    assert_metadata!(a, b, row_groups, column_index, offset_index,);
 }
 
 /// Creates a new region metadata for testing SSTs with binary datatype.

@@ -76,7 +76,6 @@ impl NumbersTable {
             primary_key_indices: vec![0],
             value_indices: vec![],
             engine,
-            region_numbers: vec![0],
             next_column_id: 1,
             options: Default::default(),
             created_on: Default::default(),

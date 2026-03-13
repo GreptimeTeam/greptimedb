@@ -75,6 +75,11 @@ pub const VALID_TABLE_OPTION_KEYS: [&str; 12] = [
     OTLP_METRIC_COMPAT_KEY,
 ];
 
+pub const DDL_TIMEOUT: &str = "timeout";
+pub const DDL_WAIT: &str = "wait";
+
+pub const VALID_DDL_OPTION_KEYS: [&str; 2] = [DDL_TIMEOUT, DDL_WAIT];
+
 // Valid option keys when creating a db.
 static VALID_DB_OPT_KEYS: Lazy<HashSet<&str>> = Lazy::new(|| {
     let mut set = HashSet::new();
@@ -115,7 +120,7 @@ pub fn validate_table_option(key: &str) -> bool {
         return true;
     }
 
-    VALID_TABLE_OPTION_KEYS.contains(&key)
+    VALID_TABLE_OPTION_KEYS.contains(&key) || VALID_DDL_OPTION_KEYS.contains(&key)
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

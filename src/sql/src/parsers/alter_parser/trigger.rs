@@ -572,7 +572,7 @@ mod tests {
             query_interval,
         } = alter.operation.trigger_on.unwrap();
         let DurationExpr { duration, raw_expr } = query_interval;
-        assert_eq!(query.to_string(), "(SELECT * FROM test_table)");
+        assert_eq!(query.to_string(), "SELECT * FROM test_table");
         assert_eq!(raw_expr, "'5 minute'::INTERVAL");
         assert_eq!(duration, Duration::from_secs(300));
         assert!(alter.operation.rename.is_none());

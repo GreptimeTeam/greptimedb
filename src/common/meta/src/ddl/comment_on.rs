@@ -12,18 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use chrono::Utc;
 use common_catalog::format_full_table_name;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status};
 use common_telemetry::tracing::info;
-use datatypes::schema::COMMENT_KEY as COLUMN_COMMENT_KEY;
+use datatypes::schema::{COMMENT_KEY as COLUMN_COMMENT_KEY, Schema};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::TableId;
 use strum::AsRefStr;
-use table::metadata::RawTableInfo;
+use table::metadata::TableInfo;
 use table::requests::COMMENT_KEY as TABLE_COMMENT_KEY;
 use table::table_name::TableName;
 
@@ -146,7 +148,7 @@ impl CommentOnProcedure {
                 .table_info
                 .meta
                 .schema
-                .column_schemas
+                .column_schemas()
                 .iter()
                 .any(|col| &col.name == column_name);
 
@@ -175,7 +177,7 @@ impl CommentOnProcedure {
                     .table_info
                     .meta
                     .schema
-                    .column_schemas
+                    .column_schemas()
                     .iter()
                     .find(|col| &col.name == column_name)
                     .unwrap(); // Safe: validated above
@@ -276,16 +278,18 @@ impl CommentOnProcedure {
         let mut new_table_info = table_info_value.table_info.clone();
 
         let column_name = self.data.column_name.as_ref().unwrap();
-        let column_schema = new_table_info
-            .meta
-            .schema
-            .column_schemas
+        let mut column_schemas = new_table_info.meta.schema.column_schemas().to_vec();
+        let column_schema = column_schemas
             .iter_mut()
             .find(|col| &col.name == column_name)
             .unwrap(); // Safe: validated in prepare
 
         update_column_comment_metadata(column_schema, self.data.comment.clone());
 
+        new_table_info.meta.schema = Arc::new(Schema::new_with_version(
+            column_schemas,
+            new_table_info.meta.schema.version(),
+        ));
         self.update_table_info(table_info_value, new_table_info)
             .await?;
 
@@ -328,7 +332,7 @@ impl CommentOnProcedure {
     async fn update_table_info(
         &self,
         current_table_info: &DeserializedValueWithBytes<TableInfoValue>,
-        new_table_info: RawTableInfo,
+        new_table_info: TableInfo,
     ) -> Result<()> {
         let table_id = current_table_info.table_info.ident.table_id;
         let new_table_info_value = current_table_info.update(new_table_info);

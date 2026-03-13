@@ -13,60 +13,75 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
 use common_meta::instruction::{self, GcRegions, GetFileRefs, GetFileRefsReply, InstructionReply};
-use common_meta::lock_key::RegionLock;
+use common_meta::key::TableMetadataManagerRef;
+use common_meta::key::table_repart::TableRepartValue;
+use common_meta::key::table_route::PhysicalTableRouteValue;
+use common_meta::lock_key::{RegionLock, TableLock};
 use common_meta::peer::Peer;
 use common_procedure::error::ToJsonSnafu;
 use common_procedure::{
     Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
     Result as ProcedureResult, Status,
 };
+use common_telemetry::tracing::Instrument as _;
+use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{debug, error, info, warn};
+use futures::future::join_all;
 use itertools::Itertools as _;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt as _;
 use store_api::storage::{FileRefsManifest, GcReport, RegionId};
+use table::metadata::TableId;
 
-use crate::error::{self, Result, SerializeToJsonSnafu};
-use crate::gc::Region2Peers;
+use crate::error::{self, KvBackendSnafu, Result, SerializeToJsonSnafu, TableMetadataManagerSnafu};
+use crate::gc::util::table_route_to_region;
+use crate::gc::{Peer2Regions, Region2Peers};
 use crate::handler::HeartbeatMailbox;
-use crate::service::mailbox::{Channel, MailboxRef};
+use crate::metrics::{METRIC_META_GC_DATANODE_CALLS_TOTAL, METRIC_META_GC_FAILED_REGIONS_TOTAL};
+use crate::service::mailbox::{Channel, MailboxReceiver, MailboxRef};
 
-/// Helper function to send GetFileRefs instruction and wait for reply.
-async fn send_get_file_refs(
+async fn send_get_file_refs_inner(
     mailbox: &MailboxRef,
     server_addr: &str,
     peer: &Peer,
     instruction: GetFileRefs,
     timeout: Duration,
-) -> Result<GetFileRefsReply> {
+) -> Result<MailboxReceiver> {
     let instruction = instruction::Instruction::GetFileRefs(instruction);
+    let tracing_ctx = TracingContext::from_current_span();
     let msg = MailboxMessage::json_message(
         &format!("Get file references: {}", instruction),
         &format!("Metasrv@{}", server_addr),
         &format!("Datanode-{}@{}", peer.id, peer.addr),
         common_time::util::current_time_millis(),
         &instruction,
+        Some(tracing_ctx.to_w3c()),
     )
     .with_context(|_| SerializeToJsonSnafu {
         input: instruction.to_string(),
     })?;
 
-    let mailbox_rx = mailbox
+    mailbox
         .send(&Channel::Datanode(peer.id), msg, timeout)
-        .await?;
+        .await
+}
 
+async fn recv_get_file_refs_reply(
+    peer: &Peer,
+    mailbox_rx: MailboxReceiver,
+) -> Result<GetFileRefsReply> {
     let reply = match mailbox_rx.await {
         Ok(reply_msg) => HeartbeatMailbox::json_reply(&reply_msg)?,
         Err(e) => {
             error!(
-                "Failed to receive reply from datanode {} for GetFileRefs: {}",
-                peer, e
+                e; "Failed to receive reply from datanode {} for GetFileRefs instruction",
+                peer,
             );
             return Err(e);
         }
@@ -83,37 +98,45 @@ async fn send_get_file_refs(
     Ok(reply)
 }
 
-/// Helper function to send GcRegions instruction and wait for reply.
-async fn send_gc_regions(
+async fn send_gc_regions_inner(
     mailbox: &MailboxRef,
     peer: &Peer,
-    gc_regions: GcRegions,
+    gc_regions: &GcRegions,
     server_addr: &str,
     timeout: Duration,
     description: &str,
-) -> Result<GcReport> {
+) -> Result<MailboxReceiver> {
     let instruction = instruction::Instruction::GcRegions(gc_regions.clone());
+    let tracing_ctx = TracingContext::from_current_span();
     let msg = MailboxMessage::json_message(
         &format!("{}: {}", description, instruction),
         &format!("Metasrv@{}", server_addr),
         &format!("Datanode-{}@{}", peer.id, peer.addr),
         common_time::util::current_time_millis(),
         &instruction,
+        Some(tracing_ctx.to_w3c()),
     )
     .with_context(|_| SerializeToJsonSnafu {
         input: instruction.to_string(),
     })?;
 
-    let mailbox_rx = mailbox
+    mailbox
         .send(&Channel::Datanode(peer.id), msg, timeout)
-        .await?;
+        .await
+}
 
+async fn recv_gc_regions_reply(
+    peer: &Peer,
+    gc_regions: &GcRegions,
+    description: &str,
+    mailbox_rx: MailboxReceiver,
+) -> Result<GcReport> {
     let reply = match mailbox_rx.await {
         Ok(reply_msg) => HeartbeatMailbox::json_reply(&reply_msg)?,
         Err(e) => {
             error!(
-                "Failed to receive reply from datanode {} for {}: {}",
-                peer, description, e
+                e; "Failed to receive reply from datanode {} for {}",
+                peer, description
             );
             return Err(e);
         }
@@ -132,8 +155,8 @@ async fn send_gc_regions(
         Ok(report) => Ok(report),
         Err(e) => {
             error!(
-                "Datanode {} reported error during GC for regions {:?}: {}",
-                peer, gc_regions, e
+                e; "Datanode {} reported error during GC for regions {:?}",
+                peer, gc_regions
             );
             error::UnexpectedSnafu {
                 violated: format!(
@@ -146,54 +169,106 @@ async fn send_gc_regions(
     }
 }
 
-/// TODO(discord9): another procedure which do both get file refs and gc regions.
-pub struct GcRegionProcedure {
+/// Procedure to perform get file refs then batch GC for multiple regions,
+/// it holds locks for all regions during the whole procedure.
+pub struct BatchGcProcedure {
     mailbox: MailboxRef,
-    data: GcRegionData,
+    table_metadata_manager: TableMetadataManagerRef,
+    data: BatchGcData,
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct GcRegionData {
+pub struct BatchGcData {
+    state: State,
+    /// Meta server address
     server_addr: String,
-    peer: Peer,
-    gc_regions: GcRegions,
-    description: String,
+    /// The regions to be GC-ed
+    regions: Vec<RegionId>,
+    full_file_listing: bool,
+    region_routes: Region2Peers,
+    /// Routes assigned by the scheduler for regions missing from table routes.
+    #[serde(default)]
+    region_routes_override: Region2Peers,
+    /// Related regions (e.g., for shared files after repartition).
+    /// The source regions (where those files originally came from) are used as the key, and the destination regions (where files are currently stored) are used as the value.
+    related_regions: HashMap<RegionId, HashSet<RegionId>>,
+    /// Acquired file references (Populated in Acquiring state)
+    file_refs: FileRefsManifest,
+    /// mailbox timeout duration
     timeout: Duration,
+    gc_report: Option<GcReport>,
 }
 
-impl GcRegionProcedure {
-    pub const TYPE_NAME: &'static str = "metasrv-procedure::GcRegionProcedure";
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum State {
+    /// Initial state
+    Start,
+    /// Fetching file references from datanodes
+    Acquiring,
+    /// Sending GC instruction to the target datanode
+    Gcing,
+    /// Updating region repartition info in kvbackend after GC based on the GC result
+    UpdateRepartition,
+}
+
+impl BatchGcProcedure {
+    pub const TYPE_NAME: &'static str = "metasrv-procedure::BatchGcProcedure";
 
     pub fn new(
         mailbox: MailboxRef,
+        table_metadata_manager: TableMetadataManagerRef,
         server_addr: String,
-        peer: Peer,
-        gc_regions: GcRegions,
-        description: String,
+        regions: Vec<RegionId>,
+        full_file_listing: bool,
         timeout: Duration,
+        region_routes_override: Region2Peers,
     ) -> Self {
         Self {
             mailbox,
-            data: GcRegionData {
-                peer,
+            table_metadata_manager,
+            data: BatchGcData {
+                state: State::Start,
                 server_addr,
-                gc_regions,
-                description,
+                regions,
+                full_file_listing,
                 timeout,
+                region_routes: HashMap::new(),
+                region_routes_override,
+                related_regions: HashMap::new(),
+                file_refs: FileRefsManifest::default(),
+                gc_report: None,
             },
         }
     }
 
-    async fn send_gc_instr(&self) -> Result<GcReport> {
-        send_gc_regions(
-            &self.mailbox,
-            &self.data.peer,
-            self.data.gc_regions.clone(),
-            &self.data.server_addr,
-            self.data.timeout,
-            &self.data.description,
-        )
-        .await
+    /// Test-only constructor to jump directly into the repartition update state.
+    /// Intended for integration tests that validate `cleanup_region_repartition` without
+    /// running the full batch GC state machine.
+    #[cfg(feature = "mock")]
+    pub fn new_update_repartition_for_test(
+        mailbox: MailboxRef,
+        table_metadata_manager: TableMetadataManagerRef,
+        server_addr: String,
+        regions: Vec<RegionId>,
+        file_refs: FileRefsManifest,
+        timeout: Duration,
+    ) -> Self {
+        Self {
+            mailbox,
+            table_metadata_manager,
+            data: BatchGcData {
+                state: State::UpdateRepartition,
+                server_addr,
+                regions,
+                full_file_listing: false,
+                timeout,
+                region_routes: HashMap::new(),
+                region_routes_override: HashMap::new(),
+                related_regions: HashMap::new(),
+                file_refs,
+                gc_report: Some(GcReport::default()),
+            },
+        }
     }
 
     pub fn cast_result(res: Arc<dyn Any>) -> Result<GcReport> {
@@ -207,121 +282,279 @@ impl GcRegionProcedure {
             .build()
         })
     }
-}
 
-#[async_trait::async_trait]
-impl Procedure for GcRegionProcedure {
-    fn type_name(&self) -> &str {
-        Self::TYPE_NAME
-    }
-
-    async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
-        // Send GC instruction to the datanode. This procedure only handle lock&send, results or other kind of
-        // errors will be reported back via the oneshot channel.
-        let reply = self
-            .send_gc_instr()
+    async fn get_table_route(
+        &self,
+        table_id: TableId,
+    ) -> Result<(TableId, PhysicalTableRouteValue)> {
+        self.table_metadata_manager
+            .table_route_manager()
+            .get_physical_table_route(table_id)
             .await
-            .map_err(ProcedureError::external)?;
-
-        Ok(Status::done_with_output(reply))
+            .context(TableMetadataManagerSnafu)
     }
 
-    fn dump(&self) -> ProcedureResult<String> {
-        serde_json::to_string(&self.data).context(ToJsonSnafu)
-    }
+    /// Return related regions for the given regions.
+    /// The returned map uses the input region as key, and all other regions
+    /// from the same table as values (excluding the input region itself).
+    async fn find_related_regions(
+        &self,
+        regions: &[RegionId],
+    ) -> Result<HashMap<RegionId, HashSet<RegionId>>> {
+        let table_ids: HashSet<TableId> = regions.iter().map(|r| r.table_id()).collect();
+        let table_ids = table_ids.into_iter().collect::<Vec<_>>();
 
-    /// Read lock all regions involved in this GC procedure.
-    /// So i.e. region migration won't happen during GC and cause race conditions.
-    ///
-    /// only read lock the regions not catatlog/schema because it can run concurrently with other procedures(i.e. drop database/table)
-    /// TODO:(discord9): integration test to verify this
-    fn lock_key(&self) -> LockKey {
-        let lock_key: Vec<_> = self
-            .data
-            .gc_regions
-            .regions
-            .iter()
-            .sorted() // sort to have a deterministic lock order
-            .map(|id| RegionLock::Read(*id).into())
-            .collect();
+        let table_routes = self
+            .table_metadata_manager
+            .table_route_manager()
+            .batch_get_physical_table_routes(&table_ids)
+            .await
+            .context(TableMetadataManagerSnafu)?;
 
-        LockKey::new(lock_key)
-    }
-}
-
-/// Procedure to perform get file refs then batch GC for multiple regions, should only be used by admin function
-/// for triggering manual gc, as it holds locks for too long and for all regions during the procedure.
-pub struct BatchGcProcedure {
-    mailbox: MailboxRef,
-    data: BatchGcData,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct BatchGcData {
-    state: State,
-    server_addr: String,
-    /// The regions to be GC-ed
-    regions: Vec<RegionId>,
-    full_file_listing: bool,
-    region_routes: Region2Peers,
-    /// Related regions (e.g., for shared files). Map: RegionId -> List of related RegionIds.
-    related_regions: HashMap<RegionId, Vec<RegionId>>,
-    /// Acquired file references (Populated in Acquiring state)
-    file_refs: FileRefsManifest,
-    /// mailbox timeout duration
-    timeout: Duration,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum State {
-    /// Initial state
-    Start,
-    /// Fetching file references from datanodes
-    Acquiring,
-    /// Sending GC instruction to the target datanode
-    Gcing,
-}
-
-impl BatchGcProcedure {
-    pub const TYPE_NAME: &'static str = "metasrv-procedure::BatchGcProcedure";
-
-    pub fn new(
-        mailbox: MailboxRef,
-        server_addr: String,
-        regions: Vec<RegionId>,
-        full_file_listing: bool,
-        region_routes: Region2Peers,
-        related_regions: HashMap<RegionId, Vec<RegionId>>,
-        timeout: Duration,
-    ) -> Self {
-        Self {
-            mailbox,
-            data: BatchGcData {
-                state: State::Start,
-                server_addr,
-                regions,
-                full_file_listing,
-                region_routes,
-                related_regions,
-                file_refs: FileRefsManifest::default(),
-                timeout,
-            },
+        if table_routes.len() != table_ids.len() {
+            // batch_get_physical_table_routes returns a subset on misses; treat that as error
+            for table_id in &table_ids {
+                if !table_routes.contains_key(table_id) {
+                    // indicate is a logical table id
+                    return error::InvalidArgumentsSnafu {
+                    err_msg: format!(
+                        "Unexpected logical table route: table {} resolved to physical table regions",
+                        table_id
+                    ),
+                }
+                    .fail();
+                }
+            }
         }
+
+        let mut table_all_regions: HashMap<TableId, HashSet<RegionId>> = HashMap::new();
+        for (table_id, table_route) in table_routes {
+            let all_regions: HashSet<RegionId> = table_route
+                .region_routes
+                .iter()
+                .map(|r| r.region.id)
+                .collect();
+
+            table_all_regions.insert(table_id, all_regions);
+        }
+
+        let mut related_regions: HashMap<RegionId, HashSet<RegionId>> = HashMap::new();
+        for region_id in regions {
+            let table_id = region_id.table_id();
+            if let Some(all_regions) = table_all_regions.get(&table_id) {
+                let mut related: HashSet<RegionId> = all_regions.clone();
+                related.remove(region_id);
+                related_regions.insert(*region_id, related);
+            } else {
+                related_regions.insert(*region_id, Default::default());
+            }
+        }
+
+        Ok(related_regions)
+    }
+
+    /// Clean up region repartition info in kvbackend after GC
+    /// according to cross reference in `FileRefsManifest`.
+    async fn cleanup_region_repartition(&self, procedure_ctx: &ProcedureContext) -> Result<()> {
+        let mut cross_refs_grouped: HashMap<TableId, HashMap<RegionId, HashSet<RegionId>>> =
+            HashMap::new();
+        for (src_region, dst_regions) in &self.data.file_refs.cross_region_refs {
+            cross_refs_grouped
+                .entry(src_region.table_id())
+                .or_default()
+                .entry(*src_region)
+                .or_default()
+                .extend(dst_regions.iter().copied());
+        }
+
+        let mut tmp_refs_grouped: HashMap<TableId, HashSet<RegionId>> = HashMap::new();
+        for (src_region, refs) in &self.data.file_refs.file_refs {
+            if refs.is_empty() {
+                continue;
+            }
+
+            tmp_refs_grouped
+                .entry(src_region.table_id())
+                .or_default()
+                .insert(*src_region);
+        }
+
+        let repart_mgr = self.table_metadata_manager.table_repart_manager();
+
+        let mut table_ids: HashSet<TableId> = cross_refs_grouped
+            .keys()
+            .copied()
+            .chain(tmp_refs_grouped.keys().copied())
+            .collect();
+        table_ids.extend(self.data.regions.iter().map(|r| r.table_id()));
+
+        for table_id in table_ids {
+            let table_lock = TableLock::Write(table_id).into();
+            let _guard = procedure_ctx.provider.acquire_lock(&table_lock).await;
+
+            let cross_refs = cross_refs_grouped
+                .get(&table_id)
+                .cloned()
+                .unwrap_or_default();
+            let tmp_refs = tmp_refs_grouped.get(&table_id).cloned().unwrap_or_default();
+
+            let current = repart_mgr
+                .get_with_raw_bytes(table_id)
+                .await
+                .context(KvBackendSnafu)?;
+
+            let mut new_value = current
+                .as_ref()
+                .map(|v| (**v).clone())
+                .unwrap_or_else(TableRepartValue::new);
+
+            // We only touch regions involved in this GC batch for the current table to avoid
+            // clobbering unrelated repart entries. Start from the batch regions of this table.
+            let batch_src_regions: HashSet<RegionId> = self
+                .data
+                .regions
+                .iter()
+                .copied()
+                .filter(|r| r.table_id() == table_id)
+                .collect();
+
+            // Merge targets: only the batch regions of this table. This avoids touching unrelated
+            // repart entries; we just reconcile mappings for regions involved in the current GC
+            // cycle for this table.
+            let all_src_regions: HashSet<RegionId> = batch_src_regions;
+
+            for src_region in all_src_regions {
+                let cross_dst = cross_refs.get(&src_region);
+                let has_tmp_ref = tmp_refs.contains(&src_region);
+
+                if let Some(dst_regions) = cross_dst {
+                    let mut set = BTreeSet::new();
+                    set.extend(dst_regions.iter().copied());
+                    new_value.src_to_dst.insert(src_region, set);
+                } else if has_tmp_ref {
+                    // Keep a tombstone entry with an empty set so dropped regions that still
+                    // have tmp refs are preserved; removing it would lose the repartition trace.
+                    new_value.src_to_dst.insert(src_region, BTreeSet::new());
+                } else {
+                    new_value.src_to_dst.remove(&src_region);
+                }
+            }
+
+            // If there is no repartition info to persist, skip creating/updating the key
+            if new_value.src_to_dst.is_empty() && current.is_none() {
+                continue;
+            }
+
+            repart_mgr
+                .upsert_value(table_id, current, &new_value)
+                .await
+                .context(KvBackendSnafu)?;
+        }
+
+        Ok(())
+    }
+
+    /// Discover region routes for the given regions.
+    async fn discover_route_for_regions(
+        &self,
+        regions: &[RegionId],
+    ) -> Result<(Region2Peers, Peer2Regions)> {
+        let mut region_to_peer = HashMap::new();
+        let mut peer_to_regions = HashMap::new();
+
+        // Group regions by table ID for batch processing
+        let mut table_to_regions: HashMap<TableId, Vec<RegionId>> = HashMap::new();
+        for region_id in regions {
+            let table_id = region_id.table_id();
+            table_to_regions
+                .entry(table_id)
+                .or_default()
+                .push(*region_id);
+        }
+
+        // Process each table's regions together for efficiency
+        for (table_id, table_regions) in table_to_regions {
+            match self.get_table_route(table_id).await {
+                Ok((_phy_table_id, table_route)) => {
+                    table_route_to_region(
+                        &table_route,
+                        &table_regions,
+                        &mut region_to_peer,
+                        &mut peer_to_regions,
+                    );
+                }
+                Err(e) => {
+                    // Continue with other tables instead of failing completely
+                    // TODO(discord9): consider failing here instead
+                    warn!(
+                        "Failed to get table route for table {}: {}, skipping its regions",
+                        table_id, e
+                    );
+                    continue;
+                }
+            }
+        }
+
+        Ok((region_to_peer, peer_to_regions))
+    }
+
+    /// Set region routes and related regions for GC procedure
+    async fn set_routes_and_related_regions(&mut self) -> Result<()> {
+        let related_regions = self.find_related_regions(&self.data.regions).await?;
+
+        self.data.related_regions = related_regions.clone();
+
+        // Discover routes for all regions involved in GC, including both the
+        // primary GC regions and their related regions.
+        let mut regions_set: HashSet<RegionId> = self.data.regions.iter().cloned().collect();
+
+        regions_set.extend(related_regions.keys().cloned());
+        regions_set.extend(related_regions.values().flat_map(|v| v.iter()).cloned());
+
+        let regions_to_discover = regions_set.into_iter().collect_vec();
+
+        let (mut region_to_peer, _) = self
+            .discover_route_for_regions(&regions_to_discover)
+            .await?;
+
+        for (region_id, route) in &self.data.region_routes_override {
+            region_to_peer
+                .entry(*region_id)
+                .or_insert_with(|| route.clone());
+        }
+
+        self.data.region_routes = region_to_peer;
+
+        Ok(())
     }
 
     /// Get file references from all datanodes that host the regions
-    async fn get_file_references(&self) -> Result<FileRefsManifest> {
-        use std::collections::{HashMap, HashSet};
+    async fn get_file_references(&mut self) -> Result<FileRefsManifest> {
+        let region_count = self.data.regions.len();
+        self.set_routes_and_related_regions()
+            .instrument(common_telemetry::tracing::info_span!(
+                "meta_gc_procedure_prepare_routes",
+                region_count = region_count
+            ))
+            .await?;
 
         let query_regions = &self.data.regions;
         let related_regions = &self.data.related_regions;
         let region_routes = &self.data.region_routes;
         let timeout = self.data.timeout;
+        let dropped_regions = self
+            .data
+            .region_routes_override
+            .keys()
+            .collect::<HashSet<_>>();
 
         // Group regions by datanode to minimize RPC calls
         let mut datanode2query_regions: HashMap<Peer, Vec<RegionId>> = HashMap::new();
 
         for region_id in query_regions {
+            if dropped_regions.contains(region_id) {
+                continue;
+            }
             if let Some((leader, followers)) = region_routes.get(region_id) {
                 datanode2query_regions
                     .entry(leader.clone())
@@ -344,48 +577,112 @@ impl BatchGcProcedure {
             }
         }
 
-        let mut datanode2related_regions: HashMap<Peer, HashMap<RegionId, Vec<RegionId>>> =
+        let mut datanode2related_regions: HashMap<Peer, HashMap<RegionId, HashSet<RegionId>>> =
             HashMap::new();
-        for (related_region, queries) in related_regions {
-            if let Some((leader, _followers)) = region_routes.get(related_region) {
-                datanode2related_regions
-                    .entry(leader.clone())
-                    .or_default()
-                    .insert(*related_region, queries.clone());
-            } // since read from manifest, no need to send to followers
+        for (src_region, dst_regions) in related_regions {
+            for dst_region in dst_regions {
+                if let Some((leader, _followers)) = region_routes.get(dst_region) {
+                    datanode2related_regions
+                        .entry(leader.clone())
+                        .or_default()
+                        .entry(*src_region)
+                        .or_default()
+                        .insert(*dst_region);
+                } // since read from manifest, no need to send to followers
+            }
         }
 
         // Send GetFileRefs instructions to each datanode
         let mut all_file_refs: HashMap<RegionId, HashSet<_>> = HashMap::new();
         let mut all_manifest_versions = HashMap::new();
+        let mut all_cross_region_refs = HashMap::new();
 
-        for (peer, regions) in datanode2query_regions {
+        let mut peers = HashSet::new();
+        peers.extend(datanode2query_regions.keys().cloned());
+        peers.extend(datanode2related_regions.keys().cloned());
+
+        let mailbox = &self.mailbox;
+        let server_addr = &self.data.server_addr;
+        let mut tasks = Vec::new();
+
+        for peer in peers {
+            let regions = datanode2query_regions.remove(&peer).unwrap_or_default();
             let related_regions_for_peer =
                 datanode2related_regions.remove(&peer).unwrap_or_default();
 
-            let instruction = GetFileRefs {
-                query_regions: regions.clone(),
-                related_regions: related_regions_for_peer,
-            };
+            if regions.is_empty() && related_regions_for_peer.is_empty() {
+                continue;
+            }
 
-            let reply = send_get_file_refs(
-                &self.mailbox,
-                &self.data.server_addr,
-                &peer,
-                instruction,
-                timeout,
-            )
-            .await?;
+            tasks.push(async move {
+                let instruction = GetFileRefs {
+                    query_regions: regions.clone(),
+                    related_regions: related_regions_for_peer.clone(),
+                };
+
+                let reply =
+                    send_get_file_refs_inner(mailbox, server_addr, &peer, instruction, timeout)
+                        .await;
+
+                (peer, regions, related_regions_for_peer, reply)
+            });
+        }
+
+        let mut recv_tasks = Vec::new();
+        // store error to make sure metrics doesn't ignore other peers
+        let mut first_error = None;
+        let mut record_get_file_refs_error = |e| {
+            METRIC_META_GC_DATANODE_CALLS_TOTAL
+                .with_label_values(&["get_file_refs", "error"])
+                .inc();
+            if first_error.is_none() {
+                first_error = Some(e);
+            }
+        };
+        for (peer, regions, related_regions_for_peer, reply) in join_all(tasks).await {
+            match reply {
+                Ok(mailbox_rx) => {
+                    recv_tasks.push(async move {
+                        let reply = recv_get_file_refs_reply(&peer, mailbox_rx).await;
+                        (peer, regions, related_regions_for_peer, reply)
+                    });
+                }
+                Err(e) => record_get_file_refs_error(e),
+            }
+        }
+
+        let replies = join_all(recv_tasks).await;
+
+        for (peer, regions, related_regions_for_peer, reply) in replies {
+            let reply = match reply {
+                Ok(reply) => reply,
+                Err(e) => {
+                    record_get_file_refs_error(e);
+                    continue;
+                }
+            };
+            debug!(
+                "Got file references from datanode: {:?}, query_regions: {:?}, related_regions: {:?}, reply: {:?}",
+                peer, regions, related_regions_for_peer, reply
+            );
 
             if !reply.success {
-                return error::UnexpectedSnafu {
+                METRIC_META_GC_DATANODE_CALLS_TOTAL
+                    .with_label_values(&["get_file_refs", "error"])
+                    .inc();
+                let err = error::UnexpectedSnafu {
                     violated: format!(
                         "Failed to get file references from datanode {}: {:?}",
                         peer, reply.error
                     ),
                 }
-                .fail();
+                .build();
+                record_get_file_refs_error(err);
+                continue;
             }
+            METRIC_META_GC_DATANODE_CALLS_TOTAL
+                .with_label_values(&["get_file_refs", "success"])
+                .inc();
 
             // Merge the file references from this datanode
             for (region_id, file_refs) in reply.file_refs_manifest.file_refs {
@@ -400,17 +697,29 @@ impl BatchGcProcedure {
                 let entry = all_manifest_versions.entry(region_id).or_insert(version);
                 *entry = (*entry).min(version);
             }
+
+            for (region_id, related_region_ids) in reply.file_refs_manifest.cross_region_refs {
+                let entry = all_cross_region_refs
+                    .entry(region_id)
+                    .or_insert_with(HashSet::new);
+                entry.extend(related_region_ids);
+            }
+        }
+
+        if let Some(e) = first_error {
+            return Err(e);
         }
 
         Ok(FileRefsManifest {
             file_refs: all_file_refs,
             manifest_version: all_manifest_versions,
+            cross_region_refs: all_cross_region_refs,
         })
     }
 
     /// Send GC instruction to all datanodes that host the regions,
     /// returns regions that need retry.
-    async fn send_gc_instructions(&self) -> Result<Vec<RegionId>> {
+    async fn send_gc_instructions(&self) -> Result<GcReport> {
         let regions = &self.data.regions;
         let region_routes = &self.data.region_routes;
         let file_refs = &self.data.file_refs;
@@ -418,6 +727,7 @@ impl BatchGcProcedure {
 
         // Group regions by datanode
         let mut datanode2regions: HashMap<Peer, Vec<RegionId>> = HashMap::new();
+        let mut all_report = GcReport::default();
 
         for region_id in regions {
             if let Some((leader, _followers)) = region_routes.get(region_id) {
@@ -436,24 +746,80 @@ impl BatchGcProcedure {
         }
 
         let mut all_need_retry = HashSet::new();
-        // Send GC instructions to each datanode
-        for (peer, regions_for_peer) in datanode2regions {
-            let gc_regions = GcRegions {
-                regions: regions_for_peer.clone(),
-                // file_refs_manifest can be large; cloning for each datanode is acceptable here since this is an admin-only operation.
-                file_refs_manifest: file_refs.clone(),
-                full_file_listing: self.data.full_file_listing,
-            };
+        let mailbox = &self.mailbox;
+        let server_addr = self.data.server_addr.as_str();
+        let full_file_listing = self.data.full_file_listing;
+        let tasks = datanode2regions
+            .into_iter()
+            .map(|(peer, regions_for_peer)| {
+                let gc_regions = GcRegions {
+                    regions: regions_for_peer.clone(),
+                    // file_refs_manifest could be somewhere large. But still intentionally clone per datanode here:
+                    // this path is admin-triggered or scheduler-triggered, peer count is expected to be bounded, and
+                    // and abnormal manifest growth should be addressed at the source
+                    file_refs_manifest: file_refs.clone(),
+                    full_file_listing,
+                };
+                let region_count = gc_regions.regions.len() as u64;
 
-            let report = send_gc_regions(
-                &self.mailbox,
-                &peer,
-                gc_regions,
-                self.data.server_addr.as_str(),
-                timeout,
-                "Batch GC",
-            )
-            .await?;
+                async move {
+                    let report = send_gc_regions_inner(
+                        mailbox,
+                        &peer,
+                        &gc_regions,
+                        server_addr,
+                        timeout,
+                        "Batch GC",
+                    )
+                    .await;
+
+                    (peer, gc_regions, region_count, report)
+                }
+            });
+
+        let mut recv_tasks = Vec::new();
+        let mut first_error = None;
+        let mut record_gc_error = |e, region_count| {
+            METRIC_META_GC_DATANODE_CALLS_TOTAL
+                .with_label_values(&["gc_regions", "error"])
+                .inc();
+            if region_count > 0 {
+                METRIC_META_GC_FAILED_REGIONS_TOTAL.inc_by(region_count);
+            }
+            if first_error.is_none() {
+                first_error = Some(e);
+            }
+        };
+        for (peer, gc_regions, region_count, report) in join_all(tasks).await {
+            match report {
+                Ok(mailbox_rx) => {
+                    recv_tasks.push(async move {
+                        let report =
+                            recv_gc_regions_reply(&peer, &gc_regions, "Batch GC", mailbox_rx).await;
+                        (peer, region_count, report)
+                    });
+                }
+                Err(e) => record_gc_error(e, region_count),
+            }
+        }
+
+        for (peer, region_count, report) in join_all(recv_tasks).await {
+            let report = match report {
+                Ok(report) => {
+                    METRIC_META_GC_DATANODE_CALLS_TOTAL
+                        .with_label_values(&["gc_regions", "success"])
+                        .inc();
+                    let need_retry_count = report.need_retry_regions.len() as u64;
+                    if need_retry_count > 0 {
+                        METRIC_META_GC_FAILED_REGIONS_TOTAL.inc_by(need_retry_count);
+                    }
+                    report
+                }
+                Err(e) => {
+                    record_gc_error(e, region_count);
+                    continue;
+                }
+            };
 
             let success = report.deleted_files.keys().collect_vec();
             let need_retry = report.need_retry_regions.iter().cloned().collect_vec();
@@ -469,10 +835,19 @@ impl BatchGcProcedure {
                     peer, success, need_retry
                 );
             }
-            all_need_retry.extend(report.need_retry_regions);
+            all_need_retry.extend(report.need_retry_regions.clone());
+            all_report.merge(report);
         }
 
-        Ok(all_need_retry.into_iter().collect())
+        if let Some(e) = first_error {
+            return Err(e);
+        }
+
+        if !all_need_retry.is_empty() {
+            warn!("Regions need retry after batch GC: {:?}", all_need_retry);
+        }
+
+        Ok(all_report)
     }
 }
 
@@ -482,44 +857,133 @@ impl Procedure for BatchGcProcedure {
         Self::TYPE_NAME
     }
 
-    async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
+    async fn execute(&mut self, ctx: &ProcedureContext) -> ProcedureResult<Status> {
         match self.data.state {
             State::Start => {
+                let _regions_span = common_telemetry::tracing::debug_span!(
+                    "meta_gc_procedure_regions",
+                    state = "start",
+                    regions = ?self.data.regions
+                )
+                .entered();
+                info!(
+                    "Batch GC procedure transitioning from Start to Acquiring for {} regions",
+                    self.data.regions.len()
+                );
                 // Transition to Acquiring state
                 self.data.state = State::Acquiring;
                 Ok(Status::executing(false))
             }
             State::Acquiring => {
+                let region_count = self.data.regions.len();
+                let full_file_listing = self.data.full_file_listing;
+                let regions = self.data.regions.clone();
+                info!(
+                    "Batch GC procedure acquiring file references for {} regions",
+                    region_count
+                );
                 // Get file references from all datanodes
-                match self.get_file_references().await {
+                match self
+                    .get_file_references()
+                    .instrument(common_telemetry::tracing::debug_span!(
+                        "meta_gc_procedure_regions",
+                        state = "acquiring",
+                        regions = ?regions
+                    ))
+                    .instrument(common_telemetry::tracing::info_span!(
+                        "meta_gc_procedure_get_file_references",
+                        region_count = region_count,
+                        full_file_listing = full_file_listing
+                    ))
+                    .await
+                {
                     Ok(file_refs) => {
+                        info!(
+                            "Batch GC procedure acquired file references for {} regions",
+                            file_refs.file_refs.len()
+                        );
                         self.data.file_refs = file_refs;
                         self.data.state = State::Gcing;
                         Ok(Status::executing(false))
                     }
                     Err(e) => {
-                        error!("Failed to get file references: {}", e);
+                        error!(e; "Failed to get file references");
                         Err(ProcedureError::external(e))
                     }
                 }
             }
             State::Gcing => {
+                info!(
+                    "Batch GC procedure sending GC instructions for {} regions",
+                    self.data.regions.len()
+                );
                 // Send GC instructions to all datanodes
                 // TODO(discord9): handle need-retry regions
-                match self.send_gc_instructions().await {
-                    Ok(_) => {
+                match self
+                    .send_gc_instructions()
+                    .instrument(common_telemetry::tracing::debug_span!(
+                        "meta_gc_procedure_regions",
+                        state = "gcing",
+                        regions = ?self.data.regions
+                    ))
+                    .instrument(common_telemetry::tracing::info_span!(
+                        "meta_gc_procedure_send_gc_instructions",
+                        region_count = self.data.regions.len(),
+                        full_file_listing = self.data.full_file_listing
+                    ))
+                    .await
+                {
+                    Ok(report) => {
                         info!(
-                            "Batch GC completed successfully for regions {:?}",
-                            self.data.regions
+                            "Batch GC procedure received GC report, retry region count: {}",
+                            report.need_retry_regions.len()
                         );
-                        Ok(Status::done())
+                        self.data.state = State::UpdateRepartition;
+                        self.data.gc_report = Some(report);
+                        Ok(Status::executing(false))
                     }
                     Err(e) => {
-                        error!("Failed to send GC instructions: {}", e);
+                        error!(e; "Failed to send GC instructions");
                         Err(ProcedureError::external(e))
                     }
                 }
             }
+            State::UpdateRepartition => match self
+                .cleanup_region_repartition(ctx)
+                .instrument(common_telemetry::tracing::debug_span!(
+                    "meta_gc_procedure_regions",
+                    state = "update_repartition",
+                    regions = ?self.data.regions
+                ))
+                .instrument(common_telemetry::tracing::info_span!(
+                    "meta_gc_procedure_update_repartition",
+                    region_count = self.data.regions.len()
+                ))
+                .await
+            {
+                Ok(()) => {
+                    debug!(
+                        "Cleanup region repartition info completed successfully for regions {:?}",
+                        self.data.regions
+                    );
+                    info!(
+                        "Batch GC completed successfully for regions {:?}",
+                        self.data.regions
+                    );
+                    let Some(report) = self.data.gc_report.take() else {
+                        return common_procedure::error::UnexpectedSnafu {
+                            err_msg: "GC report should be present after GC completion".to_string(),
+                        }
+                        .fail();
+                    };
+                    info!("GC report: {:?}", report);
+                    Ok(Status::done_with_output(report))
+                }
+                Err(e) => {
+                    error!(e; "Failed to cleanup region repartition info");
+                    Err(ProcedureError::external(e))
+                }
+            },
         }
     }
 

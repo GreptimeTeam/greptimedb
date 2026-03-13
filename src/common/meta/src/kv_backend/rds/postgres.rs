@@ -1105,7 +1105,7 @@ mod tests {
     #[tokio::test]
     async fn test_pg_put() {
         maybe_skip_postgres_integration_test!();
-        let kv_backend = build_pg_kv_backend("put_test").await.unwrap();
+        let kv_backend = build_pg_kv_backend("put-test").await.unwrap();
         let prefix = b"put/";
         prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
         test_kv_put_with_prefix(&kv_backend, prefix.to_vec()).await;
@@ -1115,7 +1115,7 @@ mod tests {
     #[tokio::test]
     async fn test_pg_range() {
         maybe_skip_postgres_integration_test!();
-        let kv_backend = build_pg_kv_backend("range_test").await.unwrap();
+        let kv_backend = build_pg_kv_backend("range-test").await.unwrap();
         let prefix = b"range/";
         prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
         test_kv_range_with_prefix(&kv_backend, prefix.to_vec()).await;
@@ -1125,7 +1125,7 @@ mod tests {
     #[tokio::test]
     async fn test_pg_range_2() {
         maybe_skip_postgres_integration_test!();
-        let kv_backend = build_pg_kv_backend("range2_test").await.unwrap();
+        let kv_backend = build_pg_kv_backend("range2-test").await.unwrap();
         let prefix = b"range2/";
         test_kv_range_2_with_prefix(&kv_backend, prefix.to_vec()).await;
         unprepare_kv(&kv_backend, prefix).await;
@@ -1134,7 +1134,7 @@ mod tests {
     #[tokio::test]
     async fn test_pg_all_range() {
         maybe_skip_postgres_integration_test!();
-        let kv_backend = build_pg_kv_backend("simple_range_test").await.unwrap();
+        let kv_backend = build_pg_kv_backend("simple_range-test").await.unwrap();
         let prefix = b"";
         prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
         test_simple_kv_range(&kv_backend).await;
@@ -1144,7 +1144,7 @@ mod tests {
     #[tokio::test]
     async fn test_pg_batch_get() {
         maybe_skip_postgres_integration_test!();
-        let kv_backend = build_pg_kv_backend("batch_get_test").await.unwrap();
+        let kv_backend = build_pg_kv_backend("batch_get-test").await.unwrap();
         let prefix = b"batch_get/";
         prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
         test_kv_batch_get_with_prefix(&kv_backend, prefix.to_vec()).await;
@@ -1154,7 +1154,7 @@ mod tests {
     #[tokio::test]
     async fn test_pg_batch_delete() {
         maybe_skip_postgres_integration_test!();
-        let kv_backend = build_pg_kv_backend("batch_delete_test").await.unwrap();
+        let kv_backend = build_pg_kv_backend("batch_delete-test").await.unwrap();
         let prefix = b"batch_delete/";
         prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
         test_kv_delete_range_with_prefix(&kv_backend, prefix.to_vec()).await;
@@ -1164,7 +1164,7 @@ mod tests {
     #[tokio::test]
     async fn test_pg_batch_delete_with_prefix() {
         maybe_skip_postgres_integration_test!();
-        let kv_backend = build_pg_kv_backend("batch_delete_with_prefix_test")
+        let kv_backend = build_pg_kv_backend("batch_delete_with_prefix-test")
             .await
             .unwrap();
         let prefix = b"batch_delete/";
@@ -1176,7 +1176,7 @@ mod tests {
     #[tokio::test]
     async fn test_pg_delete_range() {
         maybe_skip_postgres_integration_test!();
-        let kv_backend = build_pg_kv_backend("delete_range_test").await.unwrap();
+        let kv_backend = build_pg_kv_backend("delete_range-test").await.unwrap();
         let prefix = b"delete_range/";
         prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
         test_kv_delete_range_with_prefix(&kv_backend, prefix.to_vec()).await;
@@ -1186,7 +1186,7 @@ mod tests {
     #[tokio::test]
     async fn test_pg_compare_and_put() {
         maybe_skip_postgres_integration_test!();
-        let kv_backend = build_pg_kv_backend("compare_and_put_test").await.unwrap();
+        let kv_backend = build_pg_kv_backend("compare_and_put-test").await.unwrap();
         let prefix = b"compare_and_put/";
         let kv_backend = Arc::new(kv_backend);
         test_kv_compare_and_put_with_prefix(kv_backend.clone(), prefix.to_vec()).await;
@@ -1195,7 +1195,7 @@ mod tests {
     #[tokio::test]
     async fn test_pg_txn() {
         maybe_skip_postgres_integration_test!();
-        let kv_backend = build_pg_kv_backend("txn_test").await.unwrap();
+        let kv_backend = build_pg_kv_backend("txn-test").await.unwrap();
         test_txn_one_compare_op(&kv_backend).await;
         text_txn_multi_compare_op(&kv_backend).await;
         test_txn_compare_equal(&kv_backend).await;

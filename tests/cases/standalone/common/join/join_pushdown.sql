@@ -2,7 +2,7 @@
 
 CREATE TABLE events_push(event_id INTEGER, user_id INTEGER, event_type VARCHAR, "value" INTEGER, ts TIMESTAMP TIME INDEX);
 
-CREATE TABLE users_push(user_id INTEGER, user_name VARCHAR, region VARCHAR, ts TIMESTAMP TIME INDEX);
+CREATE TABLE users_push(user_id INTEGER, user_name VARCHAR, "region" VARCHAR, ts TIMESTAMP TIME INDEX);
 
 INSERT INTO events_push VALUES (1, 100, 'click', 1, 1000), (2, 100, 'view', 2, 2000), (3, 200, 'click', 1, 3000), (4, 300, 'purchase', 5, 4000);
 

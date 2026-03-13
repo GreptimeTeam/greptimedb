@@ -14,7 +14,7 @@
 
 use object_store::ObjectStore;
 use object_store::services::Fs;
-use object_store::util::DefaultLoggingInterceptor;
+use object_store::util::with_instrument_layers;
 use snafu::ResultExt;
 
 use crate::error::{BuildBackendSnafu, Result};
@@ -23,11 +23,6 @@ pub fn build_fs_backend(root: &str) -> Result<ObjectStore> {
     let builder = Fs::default();
     let object_store = ObjectStore::new(builder.root(root))
         .context(BuildBackendSnafu)?
-        .layer(object_store::layers::LoggingLayer::new(
-            DefaultLoggingInterceptor,
-        ))
-        .layer(object_store::layers::TracingLayer)
-        .layer(object_store::layers::build_prometheus_metrics_layer(true))
         .finish();
-    Ok(object_store)
+    Ok(with_instrument_layers(object_store, true))
 }

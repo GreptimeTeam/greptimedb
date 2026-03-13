@@ -122,10 +122,6 @@ impl Event for SlowQueryEvent {
         }])
     }
 
-    fn json_payload(&self) -> Result<String> {
-        Ok("".to_string())
-    }
-
     fn as_any(&self) -> &dyn Any {
         self
     }

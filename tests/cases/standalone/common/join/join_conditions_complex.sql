@@ -1,9 +1,9 @@
 -- Migrated from DuckDB test: test/sql/join/ complex condition tests
 -- Tests complex join conditions and predicates
 
-CREATE TABLE sales_reps(rep_id INTEGER, "name" VARCHAR, region VARCHAR, quota INTEGER, ts TIMESTAMP TIME INDEX);
+CREATE TABLE sales_reps(rep_id INTEGER, "name" VARCHAR, "region" VARCHAR, quota INTEGER, ts TIMESTAMP TIME INDEX);
 
-CREATE TABLE customer_accounts(account_id INTEGER, account_name VARCHAR, region VARCHAR, rep_id INTEGER, revenue INTEGER, ts TIMESTAMP TIME INDEX);
+CREATE TABLE customer_accounts(account_id INTEGER, account_name VARCHAR, "region" VARCHAR, rep_id INTEGER, revenue INTEGER, ts TIMESTAMP TIME INDEX);
 
 INSERT INTO sales_reps VALUES
 (1, 'Tom', 'North', 100000, 1000), (2, 'Sarah', 'South', 150000, 2000),

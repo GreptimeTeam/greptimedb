@@ -52,7 +52,8 @@ use crate::metadata::{
 use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use crate::metrics;
 use crate::mito_engine_options::{
-    SST_FORMAT_KEY, TTL_KEY, TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM,
+    APPEND_MODE_KEY, SST_FORMAT_KEY, TTL_KEY, TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW,
+    TWCS_TRIGGER_FILE_NUM,
 };
 use crate::path_utils::table_dir;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
@@ -204,7 +205,11 @@ fn make_region_puts(inserts: InsertRequests) -> Result<Vec<(RegionId, RegionRequ
             r.rows.map(|rows| {
                 (
                     region_id,
-                    RegionRequest::Put(RegionPutRequest { rows, hint: None }),
+                    RegionRequest::Put(RegionPutRequest {
+                        rows,
+                        hint: None,
+                        partition_expr_version: r.partition_expr_version.map(|v| v.value),
+                    }),
                 )
             })
         })
@@ -221,7 +226,11 @@ fn make_region_deletes(deletes: DeleteRequests) -> Result<Vec<(RegionId, RegionR
             r.rows.map(|rows| {
                 (
                     region_id,
-                    RegionRequest::Delete(RegionDeleteRequest { rows, hint: None }),
+                    RegionRequest::Delete(RegionDeleteRequest {
+                        rows,
+                        hint: None,
+                        partition_expr_version: r.partition_expr_version.map(|v| v.value),
+                    }),
                 )
             })
         })
@@ -271,6 +280,8 @@ fn parse_region_drop(drop: DropRequest) -> Result<(RegionId, RegionDropRequest)>
         region_id,
         RegionDropRequest {
             fast_path: drop.fast_path,
+            force: drop.force,
+            partial_drop: drop.partial_drop,
         },
     ))
 }
@@ -394,6 +405,7 @@ fn make_region_truncate(truncate: TruncateRequest) -> Result<Vec<(RegionId, Regi
 /// Convert [BulkInsertRequest] to [RegionRequest] and group by [RegionId].
 fn make_region_bulk_inserts(request: BulkInsertRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
     let region_id = request.region_id.into();
+    let partition_expr_version = request.partition_expr_version.map(|v| v.value);
     let Some(Body::ArrowIpc(request)) = request.body else {
         return Ok(vec![]);
     };
@@ -413,6 +425,7 @@ fn make_region_bulk_inserts(request: BulkInsertRequest) -> Result<Vec<(RegionId,
             region_id,
             payload,
             raw_data: request,
+            partition_expr_version,
         }),
     )])
 }
@@ -443,6 +456,8 @@ pub struct RegionPutRequest {
     pub rows: Rows,
     /// Write hint.
     pub hint: Option<WriteHint>,
+    /// Partition expression version for the region.
+    pub partition_expr_version: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -459,6 +474,8 @@ pub struct RegionDeleteRequest {
     pub rows: Rows,
     /// Write hint.
     pub hint: Option<WriteHint>,
+    /// Partition expression version for the region.
+    pub partition_expr_version: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -534,7 +551,17 @@ impl RegionCreateRequest {
 
 #[derive(Debug, Clone)]
 pub struct RegionDropRequest {
+    /// Enables fast-path drop optimizations for logical regions.
+    /// Only applicable to the Metric Engine; ignored by others.
     pub fast_path: bool,
+
+    /// Forces the drop of a physical region and all its associated logical regions.
+    /// Only relevant for physical regions managed by the Metric Engine.
+    pub force: bool,
+
+    /// If true, indicates that only a portion of the region is being dropped, and files may still be referenced by other regions.
+    /// This is used to prevent deletion of files that are still in use by other regions.
+    pub partial_drop: bool,
 }
 
 /// Open region request.
@@ -1290,6 +1317,8 @@ pub enum SetRegionOption {
     Twsc(String, String),
     // Modifying the SST format.
     Format(String),
+    // Modifying the append mode.
+    AppendMode(bool),
 }
 
 impl TryFrom<&PbOption> for SetRegionOption {
@@ -1308,6 +1337,12 @@ impl TryFrom<&PbOption> for SetRegionOption {
                 Ok(Self::Twsc(key.clone(), value.clone()))
             }
             SST_FORMAT_KEY => Ok(Self::Format(value.clone())),
+            APPEND_MODE_KEY => {
+                let append_mode = value
+                    .parse::<bool>()
+                    .map_err(|_| InvalidSetRegionOptionRequestSnafu { key, value }.build())?;
+                Ok(Self::AppendMode(append_mode))
+            }
             _ => InvalidSetRegionOptionRequestSnafu { key, value }.fail(),
         }
     }
@@ -1432,6 +1467,7 @@ pub struct RegionBulkInsertsRequest {
     pub region_id: RegionId,
     pub payload: DfRecordBatch,
     pub raw_data: ArrowIpc,
+    pub partition_expr_version: Option<u64>,
 }
 
 impl RegionBulkInsertsRequest {
@@ -1440,26 +1476,51 @@ impl RegionBulkInsertsRequest {
     }
 }
 
-/// Request to stage a region with a new region rule(partition expression).
+/// Request to stage a region with a new partition directive.
 ///
 /// This request transitions a region into the staging mode.
-/// It first flushes the memtable for the old region rule if it is not empty,
-/// then enters the staging mode with the new region rule.
+/// It first flushes the memtable for the old partition expression if it is not
+/// empty, then enters the staging mode with the new directive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StagingPartitionDirective {
+    UpdatePartitionExpr(String),
+    RejectAllWrites,
+}
+
+impl StagingPartitionDirective {
+    /// Returns the partition expression carried by this directive, if any.
+    pub fn partition_expr(&self) -> Option<&str> {
+        match self {
+            Self::UpdatePartitionExpr(expr) => Some(expr),
+            Self::RejectAllWrites => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct EnterStagingRequest {
-    /// The partition expression of the staging region.
-    pub partition_expr: String,
+    /// The staging partition directive of the region.
+    pub partition_directive: StagingPartitionDirective,
+}
+
+impl EnterStagingRequest {
+    /// Builds an enter-staging request with a partition expression directive.
+    pub fn with_partition_expr(partition_expr: String) -> Self {
+        Self {
+            partition_directive: StagingPartitionDirective::UpdatePartitionExpr(partition_expr),
+        }
+    }
 }
 
 /// This request is used as part of the region repartition.
 ///
-/// After a region has entered staging mode with a new region rule (partition
+/// After a region has entered staging mode with a new partition expression
 /// expression) and a separate process (for example, `remap_manifests`) has
 /// generated the new file assignments for the staging region, this request
 /// applies that generated manifest to the region.
 ///
 /// In practice, this means:
-/// - The `partition_expr` identifies the staging region rule that the manifest
+/// - The `partition_expr` identifies the staging partition expression that the manifest
 ///   was generated for.
 /// - `central_region_id` specifies which region holds the staging blob storage
 ///   where the manifest was written during the `remap_manifests` operation.

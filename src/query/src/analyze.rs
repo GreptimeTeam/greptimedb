@@ -49,7 +49,7 @@ const PLAN: &str = "plan";
 pub struct DistAnalyzeExec {
     input: Arc<dyn ExecutionPlan>,
     schema: SchemaRef,
-    properties: PlanProperties,
+    properties: Arc<PlanProperties>,
     verbose: bool,
     format: AnalyzeFormat,
 }
@@ -62,7 +62,7 @@ impl DistAnalyzeExec {
             Field::new(NODE, DataType::UInt32, true),
             Field::new(PLAN, DataType::Utf8, true),
         ]));
-        let properties = Self::compute_properties(&input, schema.clone());
+        let properties = Arc::new(Self::compute_properties(&input, schema.clone()));
         Self {
             input,
             schema,
@@ -108,7 +108,7 @@ impl ExecutionPlan for DistAnalyzeExec {
         self
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
     }
 
@@ -255,9 +255,9 @@ fn metrics_to_string(metrics: RecordBatchMetrics, format: AnalyzeFormat) -> DfRe
     match format {
         AnalyzeFormat::JSON => Ok(JsonMetrics::from_record_batch_metrics(metrics).to_string()),
         AnalyzeFormat::TEXT => Ok(metrics.to_string()),
-        AnalyzeFormat::GRAPHVIZ => Err(DataFusionError::NotImplemented(
-            "GRAPHVIZ format is not supported for metrics output".to_string(),
-        )),
+        format => Err(DataFusionError::NotImplemented(format!(
+            "AnalyzeFormat {format}",
+        ))),
     }
 }
 

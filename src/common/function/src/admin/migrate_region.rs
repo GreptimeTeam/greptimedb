@@ -145,7 +145,8 @@ mod tests {
         assert!(matches!(f.signature(),
                          datafusion_expr::Signature {
                              type_signature: datafusion_expr::TypeSignature::OneOf(sigs),
-                             volatility: datafusion_expr::Volatility::Immutable
+                             volatility: datafusion_expr::Volatility::Immutable,
+                             ..
                          } if sigs.len() == 2));
     }
 

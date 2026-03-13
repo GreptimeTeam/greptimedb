@@ -44,6 +44,7 @@ TQL ANALYZE ('1970-01-01T00:00:00'::timestamp, '1970-01-01T00:00:00'::timestamp 
 -- SQLNESS REPLACE (Duration.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (flat_format.*) REDACTED
 TQL ANALYZE VERBOSE (0, 10, '5s') test;
 
 DROP TABLE test;
@@ -89,6 +90,7 @@ TQL ANALYZE FORMAT JSON (0, 10, '5s') test;
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (Duration.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (flat_format.*) REDACTED
 TQL ANALYZE VERBOSE FORMAT JSON (0, 10, '5s') test;
 
 -- analyze with TEXT format (should be same as default)

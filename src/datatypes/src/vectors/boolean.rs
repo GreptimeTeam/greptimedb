@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::borrow::Borrow;
 use std::sync::Arc;
 
 use arrow::array::{Array, ArrayBuilder, ArrayIter, ArrayRef, BooleanArray, BooleanBuilder};
@@ -69,8 +68,8 @@ impl From<Vec<Option<bool>>> for BooleanVector {
     }
 }
 
-impl<Ptr: Borrow<Option<bool>>> FromIterator<Ptr> for BooleanVector {
-    fn from_iter<I: IntoIterator<Item = Ptr>>(iter: I) -> Self {
+impl FromIterator<Option<bool>> for BooleanVector {
+    fn from_iter<T: IntoIterator<Item = Option<bool>>>(iter: T) -> Self {
         BooleanVector {
             array: BooleanArray::from_iter(iter),
         }
@@ -303,7 +302,7 @@ mod tests {
     #[test]
     fn test_boolean_vector_from_iter() {
         let input = vec![Some(false), Some(true), Some(false), Some(true)];
-        let vec = input.iter().collect::<BooleanVector>();
+        let vec = input.iter().cloned().collect::<BooleanVector>();
         assert_eq!(4, vec.len());
         for (i, v) in input.into_iter().enumerate() {
             assert_eq!(v, vec.get_data(i), "Failed at {i}")

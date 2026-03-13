@@ -348,6 +348,8 @@ impl HeartbeatHandlerGroup {
                 err_msg: format!("invalid role: {:?}", req.header),
             })?;
 
+        let is_handshake = ctx.is_handshake;
+
         for NameCachedHandler { name, handler } in self.handlers.iter() {
             if !handler.is_acceptable(role) {
                 continue;
@@ -363,10 +365,26 @@ impl HeartbeatHandlerGroup {
         }
         let header = std::mem::take(&mut acc.header);
         let mailbox_message = acc.take_mailbox_message();
+
+        // Populate heartbeat_config during handshake
+        let heartbeat_config = if is_handshake {
+            let config = ctx.heartbeat_options_for(role).into();
+
+            info!(
+                "Handshake with {:?} node, sending config: {:?}",
+                role, config
+            );
+
+            Some(config)
+        } else {
+            None
+        };
+
         let res = HeartbeatResponse {
             header,
             region_lease: acc.region_lease,
             mailbox_message,
+            heartbeat_config,
         };
         Ok(res)
     }
@@ -492,7 +510,6 @@ impl Mailbox for HeartbeatMailbox {
         let deadline = Instant::now() + timeout;
         self.timeouts.insert(message_id, deadline);
         self.timeout_notify.notify_one();
-
         let deregister_signal_receiver = self.pushers.push(pusher_id, msg).await?;
 
         Ok(MailboxReceiver::new(

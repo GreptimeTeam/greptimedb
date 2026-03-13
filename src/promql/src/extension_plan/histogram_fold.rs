@@ -25,7 +25,7 @@ use datafusion::arrow::compute::{SortOptions, concat_batches};
 use datafusion::arrow::datatypes::{DataType, Float64Type, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::stats::Precision;
-use datafusion::common::{ColumnStatistics, DFSchema, DFSchemaRef, Statistics};
+use datafusion::common::{DFSchema, DFSchemaRef, Statistics};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::TaskContext;
 use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore};
@@ -40,10 +40,17 @@ use datafusion::physical_plan::{
     Partitioning, PhysicalExpr, PlanProperties, RecordBatchStream, SendableRecordBatchStream,
 };
 use datafusion::prelude::{Column, Expr};
+use datafusion_expr::{EmptyRelation, col};
 use datatypes::prelude::{ConcreteDataType, DataType as GtDataType};
 use datatypes::value::{OrderedF64, Value, ValueRef};
 use datatypes::vectors::{Helper, MutableVector, VectorRef};
 use futures::{Stream, StreamExt, ready};
+use greptime_proto::substrait_extension as pb;
+use prost::Message;
+use snafu::ResultExt;
+
+use crate::error::{DeserializeSnafu, Result};
+use crate::extension_plan::{resolve_column_name, serialize_column_index};
 
 /// `HistogramFold` will fold the conventional (non-native) histogram ([1]) for later
 /// computing.
@@ -72,6 +79,14 @@ pub struct HistogramFold {
     field_column: String,
     quantile: OrderedF64,
     output_schema: DFSchemaRef,
+    unfix: Option<UnfixIndices>,
+}
+
+#[derive(Debug, PartialEq, Eq, Hash, PartialOrd)]
+struct UnfixIndices {
+    pub le_column_idx: u64,
+    pub ts_column_idx: u64,
+    pub field_column_idx: u64,
 }
 
 impl UserDefinedLogicalNodeCore for HistogramFold {
@@ -88,7 +103,53 @@ impl UserDefinedLogicalNodeCore for HistogramFold {
     }
 
     fn expressions(&self) -> Vec<Expr> {
-        vec![]
+        if self.unfix.is_some() {
+            return vec![];
+        }
+
+        let mut exprs = vec![
+            col(&self.le_column),
+            col(&self.ts_column),
+            col(&self.field_column),
+        ];
+        exprs.extend(self.input.schema().fields().iter().filter_map(|f| {
+            let name = f.name();
+            if name != &self.le_column && name != &self.ts_column && name != &self.field_column {
+                Some(col(name))
+            } else {
+                None
+            }
+        }));
+        exprs
+    }
+
+    fn necessary_children_exprs(&self, output_columns: &[usize]) -> Option<Vec<Vec<usize>>> {
+        if self.unfix.is_some() {
+            return None;
+        }
+
+        let input_schema = self.input.schema();
+        let le_column_index = input_schema.index_of_column_by_name(None, &self.le_column)?;
+
+        if output_columns.is_empty() {
+            let indices = (0..input_schema.fields().len()).collect::<Vec<_>>();
+            return Some(vec![indices]);
+        }
+
+        let mut necessary_indices = output_columns
+            .iter()
+            .map(|&output_column| {
+                if output_column < le_column_index {
+                    output_column
+                } else {
+                    output_column + 1
+                }
+            })
+            .collect::<Vec<_>>();
+        necessary_indices.push(le_column_index);
+        necessary_indices.sort_unstable();
+        necessary_indices.dedup();
+        Some(vec![necessary_indices])
     }
 
     fn fmt_for_explain(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -104,16 +165,49 @@ impl UserDefinedLogicalNodeCore for HistogramFold {
         _exprs: Vec<Expr>,
         inputs: Vec<LogicalPlan>,
     ) -> DataFusionResult<Self> {
-        Ok(Self {
-            le_column: self.le_column.clone(),
-            ts_column: self.ts_column.clone(),
-            input: inputs.into_iter().next().unwrap(),
-            field_column: self.field_column.clone(),
-            quantile: self.quantile,
-            // This method cannot return error. Otherwise we should re-calculate
-            // the output schema
-            output_schema: self.output_schema.clone(),
-        })
+        if inputs.is_empty() {
+            return Err(DataFusionError::Internal(
+                "HistogramFold must have at least one input".to_string(),
+            ));
+        }
+
+        let input: LogicalPlan = inputs.into_iter().next().unwrap();
+        let input_schema = input.schema();
+
+        if let Some(unfix) = &self.unfix {
+            let le_column =
+                resolve_column_name(unfix.le_column_idx, input_schema, "HistogramFold", "le")?;
+            let ts_column =
+                resolve_column_name(unfix.ts_column_idx, input_schema, "HistogramFold", "ts")?;
+            let field_column = resolve_column_name(
+                unfix.field_column_idx,
+                input_schema,
+                "HistogramFold",
+                "field",
+            )?;
+
+            let output_schema = Self::convert_schema(input_schema, &le_column)?;
+
+            Ok(Self {
+                le_column,
+                ts_column,
+                input,
+                field_column,
+                quantile: self.quantile,
+                output_schema,
+                unfix: None,
+            })
+        } else {
+            Ok(Self {
+                le_column: self.le_column.clone(),
+                ts_column: self.ts_column.clone(),
+                input,
+                field_column: self.field_column.clone(),
+                quantile: self.quantile,
+                output_schema: self.output_schema.clone(),
+                unfix: None,
+            })
+        }
     }
 }
 
@@ -135,6 +229,7 @@ impl HistogramFold {
             field_column,
             quantile: quantile.into(),
             output_schema,
+            unfix: None,
         })
     }
 
@@ -201,7 +296,7 @@ impl HistogramFold {
         )) as _);
 
         let output_schema: SchemaRef = self.output_schema.inner().clone();
-        let properties = PlanProperties::new(
+        let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(output_schema.clone()),
             Partitioning::Hash(
                 partition_exprs.clone(),
@@ -209,7 +304,7 @@ impl HistogramFold {
             ),
             EmissionType::Incremental,
             Boundedness::Bounded,
-        );
+        ));
         Arc::new(HistogramFoldExec {
             le_column_index,
             field_column_index,
@@ -243,6 +338,44 @@ impl HistogramFold {
             new_fields,
             HashMap::new(),
         )?))
+    }
+
+    pub fn serialize(&self) -> Vec<u8> {
+        let le_column_idx = serialize_column_index(self.input.schema(), &self.le_column);
+        let ts_column_idx = serialize_column_index(self.input.schema(), &self.ts_column);
+        let field_column_idx = serialize_column_index(self.input.schema(), &self.field_column);
+
+        pb::HistogramFold {
+            le_column_idx,
+            ts_column_idx,
+            field_column_idx,
+            quantile: self.quantile.into(),
+        }
+        .encode_to_vec()
+    }
+
+    pub fn deserialize(bytes: &[u8]) -> Result<Self> {
+        let pb_histogram_fold = pb::HistogramFold::decode(bytes).context(DeserializeSnafu)?;
+        let placeholder_plan = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: Arc::new(DFSchema::empty()),
+        });
+
+        let unfix = UnfixIndices {
+            le_column_idx: pb_histogram_fold.le_column_idx,
+            ts_column_idx: pb_histogram_fold.ts_column_idx,
+            field_column_idx: pb_histogram_fold.field_column_idx,
+        };
+
+        Ok(Self {
+            le_column: String::new(),
+            ts_column: String::new(),
+            input: placeholder_plan,
+            field_column: String::new(),
+            quantile: pb_histogram_fold.quantile.into(),
+            output_schema: Arc::new(DFSchema::empty()),
+            unfix: Some(unfix),
+        })
     }
 }
 
@@ -283,7 +416,7 @@ pub struct HistogramFoldExec {
     partition_exprs: Vec<Arc<dyn PhysicalExpr>>,
     quantile: f64,
     metric: ExecutionPlanMetricsSet,
-    properties: PlanProperties,
+    properties: Arc<PlanProperties>,
 }
 
 impl ExecutionPlan for HistogramFoldExec {
@@ -291,7 +424,7 @@ impl ExecutionPlan for HistogramFoldExec {
         self
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
     }
 
@@ -353,7 +486,7 @@ impl ExecutionPlan for HistogramFoldExec {
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
         assert!(!children.is_empty());
         let new_input = children[0].clone();
-        let properties = PlanProperties::new(
+        let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(self.output_schema.clone()),
             Partitioning::Hash(
                 self.partition_exprs.clone(),
@@ -361,7 +494,7 @@ impl ExecutionPlan for HistogramFoldExec {
             ),
             EmissionType::Incremental,
             Boundedness::Bounded,
-        );
+        ));
         Ok(Arc::new(Self {
             input: new_input,
             metric: self.metric.clone(),
@@ -421,11 +554,7 @@ impl ExecutionPlan for HistogramFoldExec {
         Ok(Statistics {
             num_rows: Precision::Absent,
             total_byte_size: Precision::Absent,
-            column_statistics: vec![
-                ColumnStatistics::new_unknown();
-                // plus one more for the removed column by function `convert_schema`
-                self.schema().flattened_fields().len() + 1
-            ],
+            column_statistics: Statistics::unknown_column(&self.schema()),
         })
     }
 
@@ -998,10 +1127,25 @@ mod test {
     use datafusion::common::ToDFSchema;
     use datafusion::datasource::memory::MemorySourceConfig;
     use datafusion::datasource::source::DataSourceExec;
+    use datafusion::logical_expr::EmptyRelation;
     use datafusion::prelude::SessionContext;
     use datatypes::arrow_array::StringArray;
+    use futures::FutureExt;
 
     use super::*;
+
+    fn project_batch(batch: &RecordBatch, indices: &[usize]) -> RecordBatch {
+        let fields = indices
+            .iter()
+            .map(|&idx| batch.schema().field(idx).clone())
+            .collect::<Vec<_>>();
+        let columns = indices
+            .iter()
+            .map(|&idx| batch.column(idx).clone())
+            .collect::<Vec<_>>();
+        let schema = Arc::new(Schema::new(fields));
+        RecordBatch::try_new(schema, columns).unwrap()
+    }
 
     fn prepare_test_data() -> DataSourceExec {
         let schema = Arc::new(Schema::new(vec![
@@ -1097,7 +1241,7 @@ mod test {
     type PlanPropsResult = (
         Vec<Arc<dyn PhysicalExpr>>,
         Vec<Arc<dyn PhysicalExpr>>,
-        PlanProperties,
+        Arc<PlanProperties>,
     );
 
     fn build_test_plan_properties(
@@ -1138,7 +1282,7 @@ mod test {
             Boundedness::Bounded,
         );
 
-        (tag_columns, partition_exprs, properties)
+        (tag_columns, partition_exprs, Arc::new(properties))
     }
 
     #[tokio::test]
@@ -1188,6 +1332,100 @@ mod test {
 +--------+-------------------+",
         );
         assert_eq!(result_literal, expected);
+    }
+
+    #[tokio::test]
+    async fn pruning_should_keep_le_column_for_exec() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("ts", DataType::Timestamp(TimeUnit::Millisecond, None), true),
+            Field::new("le", DataType::Utf8, true),
+            Field::new("val", DataType::Float64, true),
+        ]));
+        let df_schema = schema.clone().to_dfschema_ref().unwrap();
+        let input = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: df_schema,
+        });
+        let plan = HistogramFold::new(
+            "le".to_string(),
+            "val".to_string(),
+            "ts".to_string(),
+            0.5,
+            input,
+        )
+        .unwrap();
+
+        let output_columns = [0usize, 1usize];
+        let required = plan.necessary_children_exprs(&output_columns).unwrap();
+        let required = &required[0];
+        assert_eq!(required.as_slice(), &[0, 1, 2]);
+
+        let input_batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![0, 0])),
+                Arc::new(StringArray::from(vec!["0.1", "+Inf"])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+            ],
+        )
+        .unwrap();
+        let projected = project_batch(&input_batch, required);
+        let projected_schema = projected.schema();
+        let memory_exec = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![projected]], projected_schema, None).unwrap(),
+        )));
+
+        let fold_exec = plan.to_execution_plan(memory_exec);
+        let session_context = SessionContext::default();
+        let output_batches =
+            datafusion::physical_plan::collect(fold_exec, session_context.task_ctx())
+                .await
+                .unwrap();
+        assert_eq!(output_batches.len(), 1);
+
+        let output_batch = &output_batches[0];
+        assert_eq!(output_batch.num_rows(), 1);
+
+        let ts = output_batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap();
+        assert_eq!(ts.values(), &[0i64]);
+
+        let values = output_batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert!((values.value(0) - 0.1).abs() < 1e-12);
+
+        // Simulate the pre-fix pruning behavior: omit the `le` column from the child input.
+        let le_index = 1usize;
+        let broken_required = output_columns
+            .iter()
+            .map(|&output_column| {
+                if output_column < le_index {
+                    output_column
+                } else {
+                    output_column + 1
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let broken = project_batch(&input_batch, &broken_required);
+        let broken_schema = broken.schema();
+        let broken_exec = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![broken]], broken_schema, None).unwrap(),
+        )));
+        let broken_fold_exec = plan.to_execution_plan(broken_exec);
+        let session_context = SessionContext::default();
+        let broken_result = std::panic::AssertUnwindSafe(async {
+            datafusion::physical_plan::collect(broken_fold_exec, session_context.task_ctx()).await
+        })
+        .catch_unwind()
+        .await;
+        assert!(broken_result.is_err());
     }
 
     #[test]
@@ -1500,5 +1738,46 @@ mod test {
         let counters = [f64::NAN, 1.0, 2.0, 3.0, 3.0];
         let result = HistogramFoldStream::evaluate_row(0.5, &bucket, &counters).unwrap();
         assert!((result - 1.5).abs() < 1e-10, "{result}");
+    }
+
+    fn build_empty_relation(schema: &Arc<Schema>) -> LogicalPlan {
+        LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: schema.clone().to_dfschema_ref().unwrap(),
+        })
+    }
+
+    #[tokio::test]
+    async fn encode_decode_histogram_fold() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("ts", DataType::Int64, false),
+            Field::new("le", DataType::Utf8, false),
+            Field::new("val", DataType::Float64, false),
+        ]));
+        let input_plan = build_empty_relation(&schema);
+        let plan_node = HistogramFold::new(
+            "le".to_string(),
+            "val".to_string(),
+            "ts".to_string(),
+            0.8,
+            input_plan.clone(),
+        )
+        .unwrap();
+
+        let bytes = plan_node.serialize();
+
+        let histogram_fold = HistogramFold::deserialize(&bytes).unwrap();
+        // need fix
+        let histogram_fold = histogram_fold
+            .with_exprs_and_inputs(vec![], vec![input_plan])
+            .unwrap();
+
+        assert_eq!(histogram_fold.le_column, "le");
+        assert_eq!(histogram_fold.ts_column, "ts");
+        assert_eq!(histogram_fold.field_column, "val");
+        assert_eq!(histogram_fold.quantile, OrderedF64::from(0.8));
+        assert_eq!(histogram_fold.output_schema.fields().len(), 2);
+        assert_eq!(histogram_fold.output_schema.field(0).name(), "ts");
+        assert_eq!(histogram_fold.output_schema.field(1).name(), "val");
     }
 }

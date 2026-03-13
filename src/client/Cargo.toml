@@ -48,7 +48,3 @@ tonic.workspace = true
 [dev-dependencies]
 common-grpc-expr.workspace = true
 tracing = "0.1"
-
-[dev-dependencies.substrait_proto]
-package = "substrait"
-version = "0.37"

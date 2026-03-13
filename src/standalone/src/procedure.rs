@@ -13,13 +13,21 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::time::Duration;
 
+use common_error::ext::BoxedError;
+use common_meta::ddl::DdlContext;
+use common_meta::ddl_manager::RepartitionProcedureFactory;
 use common_meta::key::runtime_switch::RuntimeSwitchManager;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::state_store::KvStateStore;
-use common_procedure::ProcedureManagerRef;
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::options::ProcedureConfig;
+use common_procedure::{BoxedProcedure, ProcedureManagerRef};
+use store_api::storage::TableId;
+use table::table_name::TableName;
+
+use crate::error::NoSupportRepartitionProcedureSnafu;
 
 /// Builds the procedure manager.
 pub fn build_procedure_manager(
@@ -42,4 +50,34 @@ pub fn build_procedure_manager(
         Some(runtime_switch_manager),
         None,
     ))
+}
+
+/// No-op implementation of [`RepartitionProcedureFactory`] for standalone mode.
+///
+/// In standalone deployments, repartition operations are not supported, so
+/// this factory always returns a `NoSupportRepartitionProcedure` error
+/// from [`RepartitionProcedureFactory::create`] and performs no registration
+/// work in [`RepartitionProcedureFactory::register_loaders`].
+pub struct StandaloneRepartitionProcedureFactory;
+
+impl RepartitionProcedureFactory for StandaloneRepartitionProcedureFactory {
+    fn create(
+        &self,
+        _ddl_ctx: &DdlContext,
+        _table_name: TableName,
+        _table_id: TableId,
+        _from_exprs: Vec<String>,
+        _to_exprs: Vec<String>,
+        _timeout: Option<Duration>,
+    ) -> std::result::Result<BoxedProcedure, BoxedError> {
+        Err(BoxedError::new(NoSupportRepartitionProcedureSnafu.build()))
+    }
+
+    fn register_loaders(
+        &self,
+        _ddl_ctx: &DdlContext,
+        _procedure_manager: &ProcedureManagerRef,
+    ) -> std::result::Result<(), BoxedError> {
+        Ok(())
+    }
 }

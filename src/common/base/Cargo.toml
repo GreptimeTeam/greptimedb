@@ -11,6 +11,7 @@ testing = []
 workspace = true
 
 [dependencies]
+ahash.workspace = true
 anymap2 = "0.13"
 async-trait.workspace = true
 bitvec = "1.0"

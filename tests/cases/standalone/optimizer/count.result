@@ -138,7 +138,6 @@ select count(1) from count_where_bug where `tag` = 'b';
 | 1_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[count(Int64(1))] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[count(Int64(1))] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_UnorderedScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
 |_|_|_|
 |_|_| Total rows: 1_|
@@ -180,7 +179,6 @@ select count(1) from count_where_bug where ts > '2024-09-06T06:00:04Z';
 | 1_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[count(Int64(1))] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[count(Int64(1))] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_UnorderedScan: region=REDACTED, "partition_count":REDACTED REDACTED
 |_|_|_|
 |_|_| Total rows: 1_|
@@ -220,9 +218,7 @@ select count(1) from count_where_bug where num != 3;
 | 1_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[count(Int64(1))] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[count(Int64(1))] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: num@1 != 3, projection=[ts@0] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_UnorderedScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
 |_|_|_|
 |_|_| Total rows: 1_|
@@ -282,7 +278,6 @@ select count(1) from count_where_bug;
 | 0_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[count(Int64(1))] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[count(Int64(1))] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[{count[count]:REDACTED} as __count_state(count_where_bug.ts)] REDACTED
@@ -318,13 +313,11 @@ select count(1) from count_where_bug where `tag` = 'b';
 | 0_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[count(Int64(1))] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[count(Int64(1))] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[__count_state(count_where_bug.ts)] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[__count_state(count_where_bug.ts)] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_UnorderedScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
 |_|_|_|
 |_|_| Total rows: 1_|
@@ -346,13 +339,11 @@ select count(1) from count_where_bug where `tag` = 'b';
 | 0_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[count(Int64(1))] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[count(Int64(1))] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[__count_state(count_where_bug.ts)] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[__count_state(count_where_bug.ts)] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_UnorderedScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
 |_|_|_|
 |_|_| Total rows: 1_|
@@ -384,19 +375,16 @@ select count(1) from count_where_bug where ts > '2024-09-06T06:00:04Z';
 | 0_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[count(Int64(1))] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[count(Int64(1))] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[__count_state(count_where_bug.ts)] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[__count_state(count_where_bug.ts)] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_UnorderedScan: region=REDACTED, "partition_count":REDACTED REDACTED
 |_|_|_|
 | 1_| 1_|_AggregateExec: mode=Final, gby=[], aggr=[__count_state(count_where_bug.ts)] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[__count_state(count_where_bug.ts)] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_UnorderedScan: region=REDACTED, "partition_count":REDACTED REDACTED
 |_|_|_|
 |_|_| Total rows: 1_|
@@ -426,23 +414,18 @@ select count(1) from count_where_bug where num != 3;
 | 0_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[count(Int64(1))] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[count(Int64(1))] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[__count_state(count_where_bug.ts)] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[__count_state(count_where_bug.ts)] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: num@1 != 3, projection=[ts@0] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_UnorderedScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
 |_|_|_|
 | 1_| 1_|_AggregateExec: mode=Final, gby=[], aggr=[__count_state(count_where_bug.ts)] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[__count_state(count_where_bug.ts)] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: num@1 != 3, projection=[ts@0] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_UnorderedScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
 |_|_|_|
 |_|_| Total rows: 1_|

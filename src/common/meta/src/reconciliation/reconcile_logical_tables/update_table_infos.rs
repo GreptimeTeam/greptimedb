@@ -20,7 +20,7 @@ use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 use store_api::metadata::ColumnMetadata;
 use store_api::storage::TableId;
-use table::metadata::RawTableInfo;
+use table::metadata::TableInfo;
 use table::table_name::TableName;
 use table::table_reference::TableReference;
 
@@ -138,8 +138,8 @@ impl UpdateTableInfos {
     fn build_new_table_info(
         table_id: TableId,
         column_metadatas: &[ColumnMetadata],
-        table_info: &RawTableInfo,
-    ) -> Result<RawTableInfo> {
+        table_info: &TableInfo,
+    ) -> Result<TableInfo> {
         let table_ref = table_info.table_ref();
         let table_meta = build_table_meta_from_column_metadatas(
             table_id,

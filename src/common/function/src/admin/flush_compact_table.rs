@@ -331,7 +331,8 @@ mod tests {
                     assert!(matches!(f.signature(),
                                      datafusion_expr::Signature {
                                          type_signature: datafusion_expr::TypeSignature::Uniform(1, valid_types),
-                                         volatility: datafusion_expr::Volatility::Immutable
+                                         volatility: datafusion_expr::Volatility::Immutable,
+                                         ..
                                      } if valid_types == &vec![ArrowDataType::Utf8]));
                 }
 

@@ -25,7 +25,6 @@ use meta_client::MetaClientOptions;
 use query::options::QueryOptions;
 use serde::{Deserialize, Serialize};
 use servers::grpc::GrpcOptions;
-use servers::heartbeat_options::HeartbeatOptions;
 use servers::http::HttpOptions;
 use servers::server::ServerHandlers;
 use snafu::ResultExt;
@@ -45,7 +44,6 @@ pub struct FrontendOptions {
     pub node_id: Option<String>,
     pub default_timezone: Option<String>,
     pub default_column_prefix: Option<String>,
-    pub heartbeat: HeartbeatOptions,
     /// Maximum total memory for all concurrent write request bodies and messages (HTTP, gRPC, Flight).
     /// Set to 0 to disable the limit. Default: "0" (unlimited)
     pub max_in_flight_write_bytes: ReadableSize,
@@ -82,7 +80,6 @@ impl Default for FrontendOptions {
             node_id: None,
             default_timezone: None,
             default_column_prefix: None,
-            heartbeat: HeartbeatOptions::frontend_default(),
             max_in_flight_write_bytes: ReadableSize(0),
             write_bytes_exhausted_policy: OnExhaustedPolicy::default(),
             http: HttpOptions::default(),
@@ -210,6 +207,10 @@ mod tests {
                 let mut requests = request.into_inner();
                 let suspend = self.suspend.clone();
                 async move {
+                    // Make the heartbeat interval short in unit tests to reduce the waiting time.
+                    // Only the handshake response needs to populate it (as metasrv does).
+                    let heartbeat_interval_ms = Duration::from_millis(200).as_millis() as u64;
+                    let mut is_handshake = true;
                     while let Some(request) = requests.next().await {
                         if let Err(e) = request {
                             let _ = tx.send(Err(e)).await;
@@ -223,9 +224,16 @@ mod tests {
                                 )),
                                 ..Default::default()
                             });
+                        let heartbeat_config =
+                            is_handshake.then_some(api::v1::meta::HeartbeatConfig {
+                                heartbeat_interval_ms,
+                                retry_interval_ms: heartbeat_interval_ms,
+                            });
+                        is_handshake = false;
                         let response = HeartbeatResponse {
                             header: Some(ResponseHeader::success()),
                             mailbox_message,
+                            heartbeat_config,
                             ..Default::default()
                         };
 
@@ -379,6 +387,21 @@ mod tests {
         }
     }
 
+    async fn wait_for_suspend_state(frontend: &Frontend, expected: bool) {
+        let check = || frontend.instance.is_suspended() == expected;
+        if check() {
+            return;
+        }
+
+        tokio::time::timeout(Duration::from_secs(5), async move {
+            while !check() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_suspend_frontend() -> Result<()> {
         common_telemetry::init_default_ut_logging();
@@ -406,10 +429,6 @@ mod tests {
                 ..Default::default()
             },
             meta_client: Some(meta_client_options.clone()),
-            heartbeat: HeartbeatOptions {
-                interval: Duration::from_secs(1),
-                ..Default::default()
-            },
             ..Default::default()
         };
 
@@ -419,8 +438,6 @@ mod tests {
         let meta_client = create_meta_client(&meta_client_options, server.clone()).await;
         let frontend = create_frontend(&options, meta_client).await?;
 
-        let frontend_heartbeat_interval = options.heartbeat.interval;
-        tokio::time::sleep(frontend_heartbeat_interval).await;
         // initial state: not suspend:
         assert!(!frontend.instance.is_suspended());
         verify_suspend_state_by_http(&frontend, Ok(r#"[{"records":{"schema":{"column_schemas":[{"name":"Int64(1)","data_type":"Int64"}]},"rows":[[1]],"total_rows":1}}]"#)).await;
@@ -437,7 +454,7 @@ mod tests {
 
         // make heartbeat server returned "suspend" instruction,
         server.suspend.store(true, Ordering::Relaxed);
-        tokio::time::sleep(frontend_heartbeat_interval).await;
+        wait_for_suspend_state(&frontend, true).await;
         // ... then the frontend is suspended:
         assert!(frontend.instance.is_suspended());
         verify_suspend_state_by_http(
@@ -453,7 +470,7 @@ mod tests {
 
         // make heartbeat server NOT returned "suspend" instruction,
         server.suspend.store(false, Ordering::Relaxed);
-        tokio::time::sleep(frontend_heartbeat_interval).await;
+        wait_for_suspend_state(&frontend, false).await;
         // ... then frontend's suspend state is cleared:
         assert!(!frontend.instance.is_suspended());
         verify_suspend_state_by_http(&frontend, Ok(r#"[{"records":{"schema":{"column_schemas":[{"name":"Int64(1)","data_type":"Int64"}]},"rows":[[1]],"total_rows":1}}]"#)).await;

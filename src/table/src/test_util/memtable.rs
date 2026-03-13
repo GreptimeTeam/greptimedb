@@ -27,7 +27,7 @@ use futures::Stream;
 use futures::task::{Context, Poll};
 use snafu::prelude::*;
 use store_api::data_source::DataSource;
-use store_api::storage::{RegionNumber, ScanRequest};
+use store_api::storage::ScanRequest;
 
 use crate::error::{SchemaConversionSnafu, TableProjectionSnafu};
 use crate::metadata::{
@@ -39,21 +39,16 @@ pub struct MemTable;
 
 impl MemTable {
     pub fn table(table_name: impl Into<String>, recordbatch: RecordBatch) -> TableRef {
-        Self::new_with_region(table_name, recordbatch, vec![0])
+        Self::new_with_region(table_name, recordbatch)
     }
 
-    pub fn new_with_region(
-        table_name: impl Into<String>,
-        recordbatch: RecordBatch,
-        regions: Vec<RegionNumber>,
-    ) -> TableRef {
+    pub fn new_with_region(table_name: impl Into<String>, recordbatch: RecordBatch) -> TableRef {
         Self::new_with_catalog(
             table_name,
             recordbatch,
             1,
             DEFAULT_CATALOG_NAME.to_string(),
             DEFAULT_SCHEMA_NAME.to_string(),
-            regions,
         )
     }
 
@@ -63,7 +58,6 @@ impl MemTable {
         table_id: TableId,
         catalog_name: String,
         schema_name: String,
-        regions: Vec<RegionNumber>,
     ) -> TableRef {
         let schema = recordbatch.schema.clone();
 
@@ -75,7 +69,6 @@ impl MemTable {
             .next_column_id(0)
             .options(Default::default())
             .created_on(Default::default())
-            .region_numbers(regions)
             .build()
             .unwrap();
 

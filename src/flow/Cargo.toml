@@ -79,7 +79,7 @@ tokio.workspace = true
 tonic.workspace = true
 
 [dev-dependencies]
-catalog.workspace = true
+catalog = { workspace = true, features = ["testing"] }
 common-catalog.workspace = true
 pretty_assertions.workspace = true
 prost.workspace = true

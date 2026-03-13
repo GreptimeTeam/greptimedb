@@ -26,7 +26,7 @@ use common_error::ext::BoxedError;
 use common_recordbatch::{EmptyRecordBatchStream, MemoryPermit, SendableRecordBatchStream};
 use common_time::Timestamp;
 use datafusion_physical_plan::metrics::ExecutionPlanMetricsSet;
-use datafusion_physical_plan::{DisplayAs, DisplayFormatType};
+use datafusion_physical_plan::{DisplayAs, DisplayFormatType, PhysicalExpr};
 use datatypes::schema::SchemaRef;
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
@@ -451,6 +451,15 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
     /// Check if there is any predicate exclude region partition exprs that may be executed in this scanner.
     fn has_predicate_without_region(&self) -> bool;
 
+    /// Add the given dynamic filter expressions to the predicate of the scanner.
+    /// Returns a vector of booleans indicating which filter expressions were applied.
+    /// true indicates the filter expression was applied(will be use by scanner to prune by stat for row group),
+    /// false otherwise.
+    fn add_dyn_filter_to_predicate(
+        &mut self,
+        filter_exprs: Vec<Arc<dyn PhysicalExpr>>,
+    ) -> Vec<bool>;
+
     /// Sets whether the scanner is reading a logical region.
     fn set_logical_region(&mut self, logical_region: bool);
 }
@@ -638,7 +647,7 @@ impl RegionStatistic {
 }
 
 /// Request to sync the region from a manifest or a region.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum SyncRegionFromRequest {
     /// Syncs the region using manifest information.
     /// Used in leader-follower manifest sync scenarios.
@@ -994,6 +1003,13 @@ impl RegionScanner for SinglePartitionScanner {
 
     fn has_predicate_without_region(&self) -> bool {
         false
+    }
+
+    fn add_dyn_filter_to_predicate(
+        &mut self,
+        filter_exprs: Vec<Arc<dyn datafusion_physical_plan::PhysicalExpr>>,
+    ) -> Vec<bool> {
+        vec![false; filter_exprs.len()]
     }
 
     fn metadata(&self) -> RegionMetadataRef {

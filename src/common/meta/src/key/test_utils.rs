@@ -19,11 +19,7 @@ use datatypes::schema::{ColumnSchema, SchemaBuilder};
 use store_api::storage::TableId;
 use table::metadata::{TableInfo, TableInfoBuilder, TableMetaBuilder};
 
-pub fn new_test_table_info_with_name<I: IntoIterator<Item = u32>>(
-    table_id: TableId,
-    table_name: &str,
-    region_numbers: I,
-) -> TableInfo {
+pub fn new_test_table_info_with_name(table_id: TableId, table_name: &str) -> TableInfo {
     let column_schemas = vec![
         ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), true),
         ColumnSchema::new(
@@ -45,7 +41,6 @@ pub fn new_test_table_info_with_name<I: IntoIterator<Item = u32>>(
         .primary_key_indices(vec![0])
         .engine("engine")
         .next_column_id(3)
-        .region_numbers(region_numbers.into_iter().collect::<Vec<_>>())
         .build()
         .unwrap();
     TableInfoBuilder::default()
@@ -56,9 +51,6 @@ pub fn new_test_table_info_with_name<I: IntoIterator<Item = u32>>(
         .build()
         .unwrap()
 }
-pub fn new_test_table_info<I: IntoIterator<Item = u32>>(
-    table_id: TableId,
-    region_numbers: I,
-) -> TableInfo {
-    new_test_table_info_with_name(table_id, "mytable", region_numbers)
+pub fn new_test_table_info(table_id: TableId) -> TableInfo {
+    new_test_table_info_with_name(table_id, "mytable")
 }

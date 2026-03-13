@@ -25,7 +25,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use common_catalog::consts::MITO_ENGINE;
 use common_meta::datanode::{RegionManifestInfo, RegionStat};
+use common_meta::key::table_repart::TableRepartValue;
 use common_meta::key::table_route::PhysicalTableRouteValue;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{Region, RegionRoute};
@@ -36,10 +38,10 @@ use store_api::storage::{FileRefsManifest, GcReport, RegionId};
 use table::metadata::TableId;
 use tokio::sync::mpsc::Sender;
 
-use crate::error::{Result, UnexpectedSnafu};
+use crate::error::Result;
+use crate::gc::Region2Peers;
 use crate::gc::candidate::GcCandidate;
 use crate::gc::ctx::SchedulerCtx;
-use crate::gc::handler::Region2Peers;
 use crate::gc::options::GcSchedulerOptions;
 use crate::gc::scheduler::{Event, GcScheduler};
 
@@ -48,13 +50,16 @@ pub const TEST_REGION_SIZE_200MB: u64 = 200_000_000;
 /// Helper function to create an empty GcReport for the given region IDs
 pub fn new_empty_report_with(region_ids: impl IntoIterator<Item = RegionId>) -> GcReport {
     let mut deleted_files = HashMap::new();
+    let mut processed_regions = HashSet::new();
     for region_id in region_ids {
         deleted_files.insert(region_id, vec![]);
+        processed_regions.insert(region_id);
     }
     GcReport {
         deleted_files,
         deleted_indexes: HashMap::new(),
         need_retry_regions: HashSet::new(),
+        processed_regions,
     }
 }
 
@@ -62,17 +67,16 @@ pub fn new_empty_report_with(region_ids: impl IntoIterator<Item = RegionId>) -> 
 #[derive(Debug, Default)]
 pub struct MockSchedulerCtx {
     pub table_to_region_stats: Arc<Mutex<Option<HashMap<TableId, Vec<RegionStat>>>>>,
+    pub table_reparts: Arc<Mutex<HashMap<TableId, TableRepartValue>>>,
     pub table_routes: Arc<Mutex<HashMap<TableId, (TableId, PhysicalTableRouteValue)>>>,
     pub file_refs: Arc<Mutex<Option<FileRefsManifest>>>,
     pub gc_reports: Arc<Mutex<HashMap<RegionId, GcReport>>>,
     pub candidates: Arc<Mutex<Option<HashMap<TableId, Vec<GcCandidate>>>>>,
     pub get_table_to_region_stats_calls: Arc<Mutex<usize>>,
-    pub get_file_references_calls: Arc<Mutex<usize>>,
     pub gc_regions_calls: Arc<Mutex<usize>>,
     // Error injection fields for testing
     pub get_table_to_region_stats_error: Arc<Mutex<Option<crate::error::Error>>>,
     pub get_table_route_error: Arc<Mutex<Option<crate::error::Error>>>,
-    pub get_file_references_error: Arc<Mutex<Option<crate::error::Error>>>,
     pub gc_regions_error: Arc<Mutex<Option<crate::error::Error>>>,
     // Retry testing fields
     pub gc_regions_retry_count: Arc<Mutex<HashMap<RegionId, usize>>>,
@@ -107,6 +111,12 @@ impl MockSchedulerCtx {
         self
     }
 
+    #[allow(dead_code)]
+    pub fn with_table_reparts(self, table_reparts: HashMap<TableId, TableRepartValue>) -> Self {
+        *self.table_reparts.lock().unwrap() = table_reparts;
+        self
+    }
+
     /// Set an error to be returned by `get_table_to_region_stats`
     #[allow(dead_code)]
     pub fn with_get_table_to_region_stats_error(self, error: crate::error::Error) -> Self {
@@ -119,55 +129,10 @@ impl MockSchedulerCtx {
         *self.get_table_route_error.lock().unwrap() = Some(error);
     }
 
-    /// Set an error to be returned by `get_file_references`
-    #[allow(dead_code)]
-    pub fn with_get_file_references_error(self, error: crate::error::Error) -> Self {
-        *self.get_file_references_error.lock().unwrap() = Some(error);
-        self
-    }
-
     /// Set an error to be returned by `gc_regions`
     pub fn with_gc_regions_error(self, error: crate::error::Error) -> Self {
         *self.gc_regions_error.lock().unwrap() = Some(error);
         self
-    }
-
-    /// Set a sequence of errors to be returned by `gc_regions` for retry testing
-    pub fn set_gc_regions_error_sequence(&self, errors: Vec<crate::error::Error>) {
-        *self.gc_regions_error_sequence.lock().unwrap() = errors;
-    }
-
-    /// Set success after a specific number of retries for a region
-    pub fn set_gc_regions_success_after_retries(&self, region_id: RegionId, retries: usize) {
-        self.gc_regions_success_after_retries
-            .lock()
-            .unwrap()
-            .insert(region_id, retries);
-    }
-
-    /// Get the retry count for a specific region
-    pub fn get_retry_count(&self, region_id: RegionId) -> usize {
-        self.gc_regions_retry_count
-            .lock()
-            .unwrap()
-            .get(&region_id)
-            .copied()
-            .unwrap_or(0)
-    }
-
-    /// Reset all retry tracking
-    pub fn reset_retry_tracking(&self) {
-        *self.gc_regions_retry_count.lock().unwrap() = HashMap::new();
-        *self.gc_regions_error_sequence.lock().unwrap() = Vec::new();
-        *self.gc_regions_success_after_retries.lock().unwrap() = HashMap::new();
-    }
-
-    /// Set an error to be returned for a specific region
-    pub fn set_gc_regions_error_for_region(&self, region_id: RegionId, error: crate::error::Error) {
-        self.gc_regions_per_region_errors
-            .lock()
-            .unwrap()
-            .insert(region_id, error);
     }
 
     /// Clear per-region errors
@@ -195,6 +160,16 @@ impl SchedulerCtx for MockSchedulerCtx {
             .unwrap_or_default())
     }
 
+    async fn get_table_reparts(&self) -> Result<Vec<(TableId, TableRepartValue)>> {
+        Ok(self
+            .table_reparts
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(table_id, value)| (*table_id, value.clone()))
+            .collect())
+    }
+
     async fn get_table_route(
         &self,
         table_id: TableId,
@@ -213,41 +188,30 @@ impl SchedulerCtx for MockSchedulerCtx {
             .unwrap_or_else(|| (table_id, PhysicalTableRouteValue::default())))
     }
 
-    async fn get_file_references(
+    async fn batch_get_table_route(
         &self,
-        query_regions: &[RegionId],
-        _related_regions: HashMap<RegionId, Vec<RegionId>>,
-        region_to_peer: &Region2Peers,
-        _timeout: Duration,
-    ) -> Result<FileRefsManifest> {
-        *self.get_file_references_calls.lock().unwrap() += 1;
-
-        // Check if we should return an injected error
-        if let Some(error) = self.get_file_references_error.lock().unwrap().take() {
-            return Err(error);
+        table_ids: &[TableId],
+    ) -> Result<HashMap<TableId, PhysicalTableRouteValue>> {
+        let mut result = HashMap::new();
+        for &table_id in table_ids {
+            let route = self
+                .table_routes
+                .lock()
+                .unwrap()
+                .get(&table_id)
+                .cloned()
+                .unwrap_or_else(|| (table_id, PhysicalTableRouteValue::default()));
+            result.insert(table_id, route.1);
         }
-        if query_regions
-            .iter()
-            .any(|region_id| !region_to_peer.contains_key(region_id))
-        {
-            UnexpectedSnafu {
-                violated: format!(
-                    "region_to_peer{region_to_peer:?} does not contain all region_ids requested: {:?}",
-                    query_regions
-                ),
-            }.fail()?;
-        }
-
-        Ok(self.file_refs.lock().unwrap().clone().unwrap_or_default())
+        Ok(result)
     }
 
     async fn gc_regions(
         &self,
-        _peer: Peer,
         region_ids: &[RegionId],
-        _file_refs_manifest: &FileRefsManifest,
         _full_file_listing: bool,
         _timeout: Duration,
+        _region_routes_override: Region2Peers,
     ) -> Result<GcReport> {
         *self.gc_regions_calls.lock().unwrap() += 1;
 
@@ -446,7 +410,7 @@ fn mock_region_stat(
         },
         rcus: 0,
         wcus: 0,
-        engine: "mito".to_string(),
+        engine: MITO_ENGINE.to_string(),
         num_rows: 0,
         memtable_size: 0,
         manifest_size: 0,

@@ -381,6 +381,7 @@ fn extract_field_from_attr_and_combine_schema(
 
         if let Some(index) = select_schema.index.get(key) {
             let column_schema = &select_schema.schema[*index];
+            let column_schema: ColumnSchema = column_schema.clone().try_into()?;
             // datatype of the same column name should be the same
             ensure!(
                 column_schema.datatype == schema.datatype,
@@ -393,7 +394,7 @@ fn extract_field_from_attr_and_combine_schema(
             );
             extracted_values[*index] = value;
         } else {
-            select_schema.schema.push(schema);
+            select_schema.schema.push(schema.into());
             select_schema
                 .index
                 .insert(key.clone(), select_schema.schema.len() - 1);
@@ -480,7 +481,7 @@ fn parse_export_logs_service_request_to_rows(
     let mut parse_ctx = ParseContext::new(select_info);
     let mut rows = parse_resource(&mut parse_ctx, request.resource_logs)?;
 
-    schemas.extend(parse_ctx.select_schema.schema);
+    schemas.extend(parse_ctx.select_schema.column_schemas()?);
 
     rows.iter_mut().for_each(|row| {
         row.values.resize(schemas.len(), GreptimeValue::default());

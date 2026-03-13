@@ -36,7 +36,6 @@ use common_wal::config::kafka::{DatanodeKafkaConfig, MetasrvKafkaConfig};
 use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
 use datatypes::arrow::array::AsArray;
 use datatypes::arrow::datatypes::UInt64Type;
-use frontend::error::Result as FrontendResult;
 use frontend::instance::Instance;
 use futures::future::BoxFuture;
 use meta_srv::error;
@@ -52,6 +51,7 @@ use meta_srv::procedure::region_migration::{
 };
 use meta_srv::selector::{Selector, SelectorOptions};
 use sea_query::{Expr, Iden, Order, PostgresQueryBuilder, Query};
+use servers::error::Result as ServerResult;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{QueryContext, QueryContextRef};
 use store_api::storage::RegionId;
@@ -1258,7 +1258,7 @@ async fn query_procedure_by_sql(instance: &Arc<Instance>, pid: &str) -> String {
     column.value(0).to_string()
 }
 
-async fn insert_values(instance: &Arc<Instance>, ts: u64) -> Vec<FrontendResult<Output>> {
+async fn insert_values(instance: &Arc<Instance>, ts: u64) -> Vec<ServerResult<Output>> {
     let query_ctx = QueryContext::arc();
 
     let mut results = Vec::new();
@@ -1279,7 +1279,7 @@ async fn run_sql(
     instance: &Arc<Instance>,
     sql: &str,
     query_ctx: QueryContextRef,
-) -> FrontendResult<Output> {
+) -> ServerResult<Output> {
     info!("Run SQL: {sql}");
     instance.do_query(sql, query_ctx).await.remove(0)
 }

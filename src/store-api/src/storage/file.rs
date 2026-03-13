@@ -95,8 +95,15 @@ impl FileRef {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileRefsManifest {
     pub file_refs: HashMap<RegionId, HashSet<FileRef>>,
-    /// Manifest version when this manifest is read for it's files
+    /// Manifest version when this manifest is read for its files
     pub manifest_version: HashMap<RegionId, ManifestVersion>,
+    /// Cross-region file ownership mapping.
+    ///
+    /// Key is the source/original region id (before repartition); value is the set of
+    /// target/destination region ids (after repartition) that currently hold files
+    /// originally coming from that source region.
+    ///
+    pub cross_region_refs: HashMap<RegionId, HashSet<RegionId>>,
 }
 
 #[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,6 +114,8 @@ pub struct GcReport {
     pub deleted_indexes: HashMap<RegionId, Vec<(FileId, IndexVersion)>>,
     /// Regions that need retry in next gc round, usually because their tmp ref files are outdated
     pub need_retry_regions: HashSet<RegionId>,
+    /// Regions successfully processed in this GC run
+    pub processed_regions: HashSet<RegionId>,
 }
 
 impl GcReport {
@@ -119,6 +128,7 @@ impl GcReport {
             deleted_files,
             deleted_indexes,
             need_retry_regions,
+            processed_regions: HashSet::new(),
         }
     }
 
@@ -132,7 +142,17 @@ impl GcReport {
             );
             *self_files = dedup.into_iter().collect();
         }
+        for (region, files) in other.deleted_indexes {
+            let self_files = self.deleted_indexes.entry(region).or_default();
+            let dedup: HashSet<(FileId, IndexVersion)> = HashSet::from_iter(
+                std::mem::take(self_files)
+                    .into_iter()
+                    .chain(files.iter().cloned()),
+            );
+            *self_files = dedup.into_iter().collect();
+        }
         self.need_retry_regions.extend(other.need_retry_regions);
+        self.processed_regions.extend(other.processed_regions);
         // Remove regions that have succeeded from need_retry_regions
         self.need_retry_regions
             .retain(|region| !self.deleted_files.contains_key(region));
@@ -179,6 +199,8 @@ mod tests {
             .insert(r1, [FileRef::new(r1, FileId::random(), None)].into());
         manifest.manifest_version.insert(r0, 10);
         manifest.manifest_version.insert(r1, 20);
+        manifest.cross_region_refs.insert(r0, [r1].into());
+        manifest.cross_region_refs.insert(r1, [r0].into());
 
         let json = serde_json::to_string(&manifest).unwrap();
         let parsed: FileRefsManifest = serde_json::from_str(&json).unwrap();

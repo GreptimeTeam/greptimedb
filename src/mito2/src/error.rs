@@ -413,6 +413,14 @@ pub enum Error {
         error: datatypes::arrow::error::ArrowError,
     },
 
+    #[snafu(display("Failed to evaluate partition filter"))]
+    EvalPartitionFilter {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: datafusion::error::DataFusionError,
+    },
+
     #[snafu(display("Failed to compute vector"))]
     ComputeVector {
         #[snafu(implicit)]
@@ -448,9 +456,14 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to delete SST file, file id: {}", file_id))]
-    DeleteSst {
-        file_id: FileId,
+    #[snafu(display(
+        "Failed to batch delete SST files, region id: {}, file ids: {:?}",
+        region_id,
+        file_ids
+    ))]
+    DeleteSsts {
+        region_id: RegionId,
+        file_ids: Vec<FileId>,
         #[snafu(source)]
         error: object_store::Error,
         #[snafu(implicit)]
@@ -460,6 +473,15 @@ pub enum Error {
     #[snafu(display("Failed to delete index file, file id: {}", file_id))]
     DeleteIndex {
         file_id: FileId,
+        #[snafu(source)]
+        error: object_store::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to batch delete index files, file ids: {:?}", file_ids))]
+    DeleteIndexes {
+        file_ids: Vec<FileId>,
         #[snafu(source)]
         error: object_store::Error,
         #[snafu(implicit)]
@@ -554,13 +576,15 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Region {} is in {:?} state, expect: Leader or Leader(Downgrading)",
+        "Partition expr version mismatch for region {}: request {}, expected {}",
         region_id,
-        state
+        request_version,
+        expected_version
     ))]
-    FlushableRegionState {
+    PartitionExprVersionMismatch {
         region_id: RegionId,
-        state: RegionRoleState,
+        request_version: u64,
+        expected_version: u64,
         #[snafu(implicit)]
         location: Location,
     },
@@ -599,14 +623,6 @@ pub enum Error {
         error: ArrowError,
         #[snafu(implicit)]
         location: Location,
-    },
-
-    #[snafu(display("Invalid file metadata"))]
-    ConvertMetaData {
-        #[snafu(implicit)]
-        location: Location,
-        #[snafu(source)]
-        error: parquet::errors::ParquetError,
     },
 
     #[snafu(display("Column not found, column: {column}"))]
@@ -648,6 +664,14 @@ pub enum Error {
     #[snafu(display("Failed to apply bloom filter index"))]
     ApplyBloomFilterIndex {
         source: index::bloom_filter::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "vector_index")]
+    #[snafu(display("Failed to apply vector index: {}", reason))]
+    ApplyVectorIndex {
+        reason: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -1201,6 +1225,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to prune file"))]
+    PruneFile {
+        source: Arc<Error>,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -1255,6 +1286,7 @@ impl ErrorExt for Error {
             | InvalidScanIndex { .. }
             | InvalidMeta { .. }
             | InvalidRequest { .. }
+            | PartitionExprVersionMismatch { .. }
             | FillDefault { .. }
             | ConvertColumnDataType { .. }
             | ColumnNotFound { .. }
@@ -1276,9 +1308,9 @@ impl ErrorExt for Error {
             | Join { .. }
             | WorkerStopped { .. }
             | Recv { .. }
-            | ConvertMetaData { .. }
             | DecodeWal { .. }
             | ComputeArrow { .. }
+            | EvalPartitionFilter { .. }
             | BiErrors { .. }
             | StopScheduler { .. }
             | ComputeVector { .. }
@@ -1303,7 +1335,9 @@ impl ErrorExt for Error {
             PrimaryKeyLengthMismatch { .. } => StatusCode::InvalidArguments,
             InvalidSender { .. } => StatusCode::InvalidArguments,
             InvalidSchedulerState { .. } => StatusCode::InvalidArguments,
-            DeleteSst { .. } | DeleteIndex { .. } => StatusCode::StorageUnavailable,
+            DeleteSsts { .. } | DeleteIndex { .. } | DeleteIndexes { .. } => {
+                StatusCode::StorageUnavailable
+            }
             FlushRegion { source, .. } | BuildIndexAsync { source, .. } => source.status_code(),
             RegionDropped { .. } => StatusCode::Cancelled,
             RegionClosed { .. } => StatusCode::Cancelled,
@@ -1313,7 +1347,6 @@ impl ErrorExt for Error {
             CompatReader { .. } => StatusCode::Unexpected,
             InvalidRegionRequest { source, .. } => source.status_code(),
             RegionState { .. } | UpdateManifest { .. } => StatusCode::RegionNotReady,
-            FlushableRegionState { .. } => StatusCode::RegionNotReady,
             JsonOptions { .. } => StatusCode::InvalidArguments,
             EmptyRegionDir { .. } | EmptyManifestDir { .. } => StatusCode::RegionNotFound,
             ArrowReader { .. } => StatusCode::StorageUnavailable,
@@ -1324,6 +1357,8 @@ impl ErrorExt for Error {
             | PushIndexValue { source, .. }
             | ApplyInvertedIndex { source, .. }
             | IndexFinish { source, .. } => source.status_code(),
+            #[cfg(feature = "vector_index")]
+            ApplyVectorIndex { .. } => StatusCode::Internal,
             PuffinReadBlob { source, .. }
             | PuffinAddBlob { source, .. }
             | PuffinInitStager { source, .. }
@@ -1383,6 +1418,8 @@ impl ErrorExt for Error {
             InconsistentTimestampLength { .. } => StatusCode::InvalidArguments,
 
             TooManyFilesToRead { .. } | TooManyGcJobs { .. } => StatusCode::RateLimited,
+
+            PruneFile { source, .. } => source.status_code(),
         }
     }
 

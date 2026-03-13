@@ -24,19 +24,21 @@ use api::v1::SemanticType;
 use common_error::ext::BoxedError;
 use common_recordbatch::SendableRecordBatchStream;
 use common_recordbatch::filter::SimpleFilterEvaluator;
+use common_telemetry::tracing::Instrument;
 use common_telemetry::{debug, error, tracing, warn};
 use common_time::range::TimestampRange;
+use datafusion::physical_plan::expressions::DynamicFilterPhysicalExpr;
 use datafusion_common::Column;
 use datafusion_expr::Expr;
 use datafusion_expr::utils::expr_to_columns;
 use futures::StreamExt;
 use partition::expr::PartitionExpr;
 use smallvec::SmallVec;
-use snafu::ResultExt;
+use snafu::{OptionExt as _, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{PartitionRange, RegionScannerRef};
 use store_api::storage::{
-    RegionId, ScanRequest, SequenceRange, TimeSeriesDistribution, TimeSeriesRowSelector,
+    ColumnId, RegionId, ScanRequest, SequenceRange, TimeSeriesDistribution, TimeSeriesRowSelector,
 };
 use table::predicate::{Predicate, build_time_range_predicate};
 use tokio::sync::{Semaphore, mpsc};
@@ -45,7 +47,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheStrategy;
 use crate::config::{DEFAULT_MAX_CONCURRENT_SCAN_FILES, DEFAULT_SCAN_CHANNEL_SIZE};
-use crate::error::{InvalidPartitionExprSnafu, Result};
+use crate::error::{InvalidPartitionExprSnafu, InvalidRequestSnafu, Result};
 #[cfg(feature = "enterprise")]
 use crate::extension::{BoxedExtensionRange, BoxedExtensionRangeProvider};
 use crate::memtable::{MemtableRange, RangesOptions};
@@ -69,11 +71,15 @@ use crate::sst::index::fulltext_index::applier::FulltextIndexApplierRef;
 use crate::sst::index::fulltext_index::applier::builder::FulltextIndexApplierBuilder;
 use crate::sst::index::inverted_index::applier::InvertedIndexApplierRef;
 use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
+#[cfg(feature = "vector_index")]
+use crate::sst::index::vector_index::applier::{VectorIndexApplier, VectorIndexApplierRef};
 use crate::sst::parquet::file_range::PreFilterMode;
 use crate::sst::parquet::reader::ReaderMetrics;
 
 /// Parallel scan channel size for flat format.
 const FLAT_SCAN_CHANNEL_SIZE: usize = 2;
+#[cfg(feature = "vector_index")]
+const VECTOR_INDEX_OVERFETCH_MULTIPLIER: usize = 2;
 
 /// A scanner scans a region and returns a [SendableRecordBatchStream].
 pub(crate) enum Scanner {
@@ -319,6 +325,7 @@ impl ScanRegion {
     }
 
     /// Returns a [Scanner] to scan the region.
+    #[tracing::instrument(skip_all, fields(region_id = %self.region_id()))]
     pub(crate) async fn scanner(self) -> Result<Scanner> {
         if self.use_series_scan() {
             self.series_scan().await.map(Scanner::Series)
@@ -332,7 +339,11 @@ impl ScanRegion {
     }
 
     /// Returns a [RegionScanner] to scan the region.
-    #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
+    #[tracing::instrument(
+        level = tracing::Level::DEBUG,
+        skip_all,
+        fields(region_id = %self.region_id())
+    )]
     pub(crate) async fn region_scanner(self) -> Result<RegionScannerRef> {
         if self.use_series_scan() {
             self.series_scan()
@@ -348,18 +359,21 @@ impl ScanRegion {
     }
 
     /// Scan sequentially.
+    #[tracing::instrument(skip_all, fields(region_id = %self.region_id()))]
     pub(crate) async fn seq_scan(self) -> Result<SeqScan> {
         let input = self.scan_input().await?.with_compaction(false);
         Ok(SeqScan::new(input))
     }
 
     /// Unordered scan.
+    #[tracing::instrument(skip_all, fields(region_id = %self.region_id()))]
     pub(crate) async fn unordered_scan(self) -> Result<UnorderedScan> {
         let input = self.scan_input().await?;
         Ok(UnorderedScan::new(input))
     }
 
     /// Scans by series.
+    #[tracing::instrument(skip_all, fields(region_id = %self.region_id()))]
     pub(crate) async fn series_scan(self) -> Result<SeriesScan> {
         let input = self.scan_input().await?;
         Ok(SeriesScan::new(input))
@@ -386,21 +400,37 @@ impl ScanRegion {
 
     /// Returns true if the region use flat format.
     fn use_flat_format(&self) -> bool {
-        self.version.options.sst_format.unwrap_or_default() == FormatType::Flat
+        self.request.force_flat_format
+            || self.version.options.sst_format.unwrap_or_default() == FormatType::Flat
     }
 
     /// Creates a scan input.
+    #[tracing::instrument(skip_all, fields(region_id = %self.region_id()))]
     async fn scan_input(mut self) -> Result<ScanInput> {
         let sst_min_sequence = self.request.sst_min_sequence.and_then(NonZeroU64::new);
         let time_range = self.build_time_range_predicate();
         let predicate = PredicateGroup::new(&self.version.metadata, &self.request.filters)?;
         let flat_format = self.use_flat_format();
 
+        let read_column_ids = match &self.request.projection {
+            Some(p) => self.build_read_column_ids(p, &predicate)?,
+            None => self
+                .version
+                .metadata
+                .column_metadatas
+                .iter()
+                .map(|col| col.column_id)
+                .collect(),
+        };
+
         // The mapper always computes projected column ids as the schema of SSTs may change.
         let mapper = match &self.request.projection {
-            Some(p) => {
-                ProjectionMapper::new(&self.version.metadata, p.iter().copied(), flat_format)?
-            }
+            Some(p) => ProjectionMapper::new_with_read_columns(
+                &self.version.metadata,
+                p.iter().copied(),
+                flat_format,
+                read_column_ids.clone(),
+            )?,
             None => ProjectionMapper::all(&self.version.metadata, flat_format)?,
         };
 
@@ -448,7 +478,7 @@ impl ScanRegion {
                 continue;
             }
             let ranges_in_memtable = m.ranges(
-                Some(mapper.column_ids()),
+                Some(read_column_ids.as_slice()),
                 RangesOptions::default()
                     .with_predicate(predicate.clone())
                     .with_sequence(SequenceRange::new(
@@ -488,7 +518,16 @@ impl ScanRegion {
             self.build_fulltext_index_applier(&non_field_filters),
             self.build_fulltext_index_applier(&field_filters),
         ];
-        let predicate = PredicateGroup::new(&self.version.metadata, &self.request.filters)?;
+        #[cfg(feature = "vector_index")]
+        let vector_index_applier = self.build_vector_index_applier();
+        #[cfg(feature = "vector_index")]
+        let vector_index_k = self.request.vector_search.as_ref().map(|search| {
+            if self.request.filters.is_empty() {
+                search.k
+            } else {
+                search.k.saturating_mul(VECTOR_INDEX_OVERFETCH_MULTIPLIER)
+            }
+        });
 
         if flat_format {
             // The batch is already large enough so we use a small channel size here.
@@ -513,6 +552,10 @@ impl ScanRegion {
             .with_series_row_selector(self.request.series_row_selector)
             .with_distribution(self.request.distribution)
             .with_flat_format(flat_format);
+        #[cfg(feature = "vector_index")]
+        let input = input
+            .with_vector_index_applier(vector_index_applier)
+            .with_vector_index_k(vector_index_k);
 
         #[cfg(feature = "enterprise")]
         let input = if let Some(provider) = self.extension_range_provider {
@@ -541,6 +584,72 @@ impl ScanRegion {
             .expect("Time index must have timestamp-compatible type")
             .unit();
         build_time_range_predicate(&time_index.column_schema.name, unit, &self.request.filters)
+    }
+
+    /// Return all columns id to read according to the projection and filters.
+    fn build_read_column_ids(
+        &self,
+        projection: &[usize],
+        predicate: &PredicateGroup,
+    ) -> Result<Vec<ColumnId>> {
+        let metadata = &self.version.metadata;
+        // use Vec for read_column_ids to keep the order of columns.
+        let mut read_column_ids = Vec::new();
+        let mut seen = HashSet::new();
+
+        for idx in projection {
+            let column =
+                metadata
+                    .column_metadatas
+                    .get(*idx)
+                    .with_context(|| InvalidRequestSnafu {
+                        region_id: metadata.region_id,
+                        reason: format!("projection index {} is out of bound", idx),
+                    })?;
+            seen.insert(column.column_id);
+            // keep the projection order
+            read_column_ids.push(column.column_id);
+        }
+
+        if projection.is_empty() {
+            let time_index = metadata.time_index_column().column_id;
+            if seen.insert(time_index) {
+                read_column_ids.push(time_index);
+            }
+        }
+
+        let mut extra_names = HashSet::new();
+        let mut columns = HashSet::new();
+
+        for expr in &self.request.filters {
+            columns.clear();
+            if expr_to_columns(expr, &mut columns).is_err() {
+                continue;
+            }
+            extra_names.extend(columns.iter().map(|column| column.name.clone()));
+        }
+
+        if let Some(expr) = predicate.region_partition_expr() {
+            expr.collect_column_names(&mut extra_names);
+        }
+
+        if !extra_names.is_empty() {
+            for column in &metadata.column_metadatas {
+                if extra_names.contains(column.column_schema.name.as_str())
+                    && !seen.contains(&column.column_id)
+                {
+                    read_column_ids.push(column.column_id);
+                }
+                extra_names.remove(column.column_schema.name.as_str());
+            }
+            if !extra_names.is_empty() {
+                warn!(
+                    "Some columns in filters are not found in region {}: {:?}",
+                    metadata.region_id, extra_names
+                );
+            }
+        }
+        Ok(read_column_ids)
     }
 
     /// Partitions filters into two groups: non-field filters and field filters.
@@ -657,6 +766,31 @@ impl ScanRegion {
         .flatten()
         .map(Arc::new)
     }
+
+    /// Build the vector index applier from vector search request.
+    #[cfg(feature = "vector_index")]
+    fn build_vector_index_applier(&self) -> Option<VectorIndexApplierRef> {
+        let vector_search = self.request.vector_search.as_ref()?;
+
+        let file_cache = self.cache_strategy.write_cache().map(|w| w.file_cache());
+        let puffin_metadata_cache = self.cache_strategy.puffin_metadata_cache().cloned();
+        let vector_index_cache = self.cache_strategy.vector_index_cache().cloned();
+
+        let applier = VectorIndexApplier::new(
+            self.access_layer.table_dir().to_string(),
+            self.access_layer.path_type(),
+            self.access_layer.object_store().clone(),
+            self.access_layer.puffin_manager_factory().clone(),
+            vector_search.column_id,
+            vector_search.query_vector.clone(),
+            vector_search.metric,
+        )
+        .with_file_cache(file_cache)
+        .with_puffin_metadata_cache(puffin_metadata_cache)
+        .with_vector_index_cache(vector_index_cache);
+
+        Some(Arc::new(applier))
+    }
 }
 
 /// Returns true if the time range of a SST `file` matches the `predicate`.
@@ -676,6 +810,10 @@ pub struct ScanInput {
     access_layer: AccessLayerRef,
     /// Maps projected Batches to RecordBatches.
     pub(crate) mapper: Arc<ProjectionMapper>,
+    /// Column ids to read from memtables and SSTs.
+    /// Notice this is different from the columns in `mapper` which are projected columns.
+    /// But this read columns might also include non-projected columns needed for filtering.
+    pub(crate) read_column_ids: Vec<ColumnId>,
     /// Time range filter for time index.
     time_range: Option<TimestampRange>,
     /// Predicate to push down.
@@ -698,6 +836,12 @@ pub struct ScanInput {
     inverted_index_appliers: [Option<InvertedIndexApplierRef>; 2],
     bloom_filter_index_appliers: [Option<BloomFilterIndexApplierRef>; 2],
     fulltext_index_appliers: [Option<FulltextIndexApplierRef>; 2],
+    /// Vector index applier for KNN search.
+    #[cfg(feature = "vector_index")]
+    pub(crate) vector_index_applier: Option<VectorIndexApplierRef>,
+    /// Over-fetched k for vector index scan.
+    #[cfg(feature = "vector_index")]
+    pub(crate) vector_index_k: Option<usize>,
     /// Start time of the query.
     pub(crate) query_start: Option<Instant>,
     /// The region is using append mode.
@@ -724,6 +868,7 @@ impl ScanInput {
     pub(crate) fn new(access_layer: AccessLayerRef, mapper: ProjectionMapper) -> ScanInput {
         ScanInput {
             access_layer,
+            read_column_ids: mapper.column_ids().to_vec(),
             mapper: Arc::new(mapper),
             time_range: None,
             predicate: PredicateGroup::default(),
@@ -737,6 +882,10 @@ impl ScanInput {
             inverted_index_appliers: [None, None],
             bloom_filter_index_appliers: [None, None],
             fulltext_index_appliers: [None, None],
+            #[cfg(feature = "vector_index")]
+            vector_index_applier: None,
+            #[cfg(feature = "vector_index")]
+            vector_index_k: None,
             query_start: None,
             append_mode: false,
             filter_deleted: true,
@@ -843,6 +992,25 @@ impl ScanInput {
         self
     }
 
+    /// Sets vector index applier for KNN search.
+    #[cfg(feature = "vector_index")]
+    #[must_use]
+    pub(crate) fn with_vector_index_applier(
+        mut self,
+        applier: Option<VectorIndexApplierRef>,
+    ) -> Self {
+        self.vector_index_applier = applier;
+        self
+    }
+
+    /// Sets over-fetched k for vector index scan.
+    #[cfg(feature = "vector_index")]
+    #[must_use]
+    pub(crate) fn with_vector_index_k(mut self, k: Option<usize>) -> Self {
+        self.vector_index_k = k;
+        self
+    }
+
     /// Sets start time of the query.
     #[must_use]
     pub(crate) fn with_start_time(mut self, now: Option<Instant>) -> Self {
@@ -907,6 +1075,13 @@ impl ScanInput {
     /// Scans sources in parallel.
     ///
     /// # Panics if the input doesn't allow parallel scan.
+    #[tracing::instrument(
+        skip(self, sources, semaphore),
+        fields(
+            region_id = %self.region_metadata().region_id,
+            source_count = sources.len()
+        )
+    )]
     pub(crate) fn create_parallel_sources(
         &self,
         sources: Vec<Source>,
@@ -956,6 +1131,13 @@ impl ScanInput {
     }
 
     /// Prunes a file to scan and returns the builder to build readers.
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            region_id = %self.region_metadata().region_id,
+            file_id = %file.file_id()
+        )
+    )]
     pub async fn prune_file(
         &self,
         file: &FileHandle,
@@ -964,15 +1146,23 @@ impl ScanInput {
         let predicate = self.predicate_for_file(file);
         let filter_mode = pre_filter_mode(self.append_mode, self.merge_mode);
         let decode_pk_values = !self.compaction && self.mapper.has_tags();
-        let res = self
+        let reader = self
             .access_layer
             .read_sst(file.clone())
             .predicate(predicate)
-            .projection(Some(self.mapper.column_ids().to_vec()))
+            .projection(Some(self.read_column_ids.clone()))
             .cache(self.cache_strategy.clone())
             .inverted_index_appliers(self.inverted_index_appliers.clone())
             .bloom_filter_index_appliers(self.bloom_filter_index_appliers.clone())
-            .fulltext_index_appliers(self.fulltext_index_appliers.clone())
+            .fulltext_index_appliers(self.fulltext_index_appliers.clone());
+        #[cfg(feature = "vector_index")]
+        let reader = {
+            let mut reader = reader;
+            reader =
+                reader.vector_index_applier(self.vector_index_applier.clone(), self.vector_index_k);
+            reader
+        };
+        let res = reader
             .expected_metadata(Some(self.mapper.metadata().clone()))
             .flat_format(self.flat_format)
             .compaction(self.compaction)
@@ -980,7 +1170,7 @@ impl ScanInput {
             .decode_primary_key_values(decode_pk_values)
             .build_reader_input(reader_metrics)
             .await;
-        let (mut file_range_ctx, selection) = match res {
+        let read_input = match res {
             Ok(x) => x,
             Err(e) => {
                 if e.is_object_not_found() && self.ignore_file_not_found {
@@ -990,6 +1180,10 @@ impl ScanInput {
                     return Err(e);
                 }
             }
+        };
+
+        let Some((mut file_range_ctx, selection)) = read_input else {
+            return Ok(FileRangeBuilder::default());
         };
 
         let need_compat = !compat::has_same_columns_and_pk_encoding(
@@ -1021,38 +1215,58 @@ impl ScanInput {
     }
 
     /// Scans the input source in another task and sends batches to the sender.
+    #[tracing::instrument(
+        skip(self, input, semaphore, sender),
+        fields(region_id = %self.region_metadata().region_id)
+    )]
     pub(crate) fn spawn_scan_task(
         &self,
         mut input: Source,
         semaphore: Arc<Semaphore>,
         sender: mpsc::Sender<Result<Batch>>,
     ) {
-        common_runtime::spawn_global(async move {
-            loop {
-                // We release the permit before sending result to avoid the task waiting on
-                // the channel with the permit held.
-                let maybe_batch = {
-                    // Safety: We never close the semaphore.
-                    let _permit = semaphore.acquire().await.unwrap();
-                    input.next_batch().await
-                };
-                match maybe_batch {
-                    Ok(Some(batch)) => {
-                        let _ = sender.send(Ok(batch)).await;
-                    }
-                    Ok(None) => break,
-                    Err(e) => {
-                        let _ = sender.send(Err(e)).await;
-                        break;
+        let region_id = self.region_metadata().region_id;
+        let span = tracing::info_span!(
+            "ScanInput::parallel_scan_task",
+            region_id = %region_id,
+            stream_kind = "batch"
+        );
+        common_runtime::spawn_global(
+            async move {
+                loop {
+                    // We release the permit before sending result to avoid the task waiting on
+                    // the channel with the permit held.
+                    let maybe_batch = {
+                        // Safety: We never close the semaphore.
+                        let _permit = semaphore.acquire().await.unwrap();
+                        input.next_batch().await
+                    };
+                    match maybe_batch {
+                        Ok(Some(batch)) => {
+                            let _ = sender.send(Ok(batch)).await;
+                        }
+                        Ok(None) => break,
+                        Err(e) => {
+                            let _ = sender.send(Err(e)).await;
+                            break;
+                        }
                     }
                 }
             }
-        });
+            .instrument(span),
+        );
     }
 
     /// Scans flat sources (RecordBatch streams) in parallel.
     ///
     /// # Panics if the input doesn't allow parallel scan.
+    #[tracing::instrument(
+        skip(self, sources, semaphore),
+        fields(
+            region_id = %self.region_metadata().region_id,
+            source_count = sources.len()
+        )
+    )]
     pub(crate) fn create_parallel_flat_sources(
         &self,
         sources: Vec<BoxedRecordBatchStream>,
@@ -1076,33 +1290,46 @@ impl ScanInput {
     }
 
     /// Spawns a task to scan a flat source (RecordBatch stream) asynchronously.
+    #[tracing::instrument(
+        skip(self, input, semaphore, sender),
+        fields(region_id = %self.region_metadata().region_id)
+    )]
     pub(crate) fn spawn_flat_scan_task(
         &self,
         mut input: BoxedRecordBatchStream,
         semaphore: Arc<Semaphore>,
         sender: mpsc::Sender<Result<RecordBatch>>,
     ) {
-        common_runtime::spawn_global(async move {
-            loop {
-                // We release the permit before sending result to avoid the task waiting on
-                // the channel with the permit held.
-                let maybe_batch = {
-                    // Safety: We never close the semaphore.
-                    let _permit = semaphore.acquire().await.unwrap();
-                    input.next().await
-                };
-                match maybe_batch {
-                    Some(Ok(batch)) => {
-                        let _ = sender.send(Ok(batch)).await;
+        let region_id = self.region_metadata().region_id;
+        let span = tracing::info_span!(
+            "ScanInput::parallel_scan_task",
+            region_id = %region_id,
+            stream_kind = "flat"
+        );
+        common_runtime::spawn_global(
+            async move {
+                loop {
+                    // We release the permit before sending result to avoid the task waiting on
+                    // the channel with the permit held.
+                    let maybe_batch = {
+                        // Safety: We never close the semaphore.
+                        let _permit = semaphore.acquire().await.unwrap();
+                        input.next().await
+                    };
+                    match maybe_batch {
+                        Some(Ok(batch)) => {
+                            let _ = sender.send(Ok(batch)).await;
+                        }
+                        Some(Err(e)) => {
+                            let _ = sender.send(Err(e)).await;
+                            break;
+                        }
+                        None => break,
                     }
-                    Some(Err(e)) => {
-                        let _ = sender.send(Err(e)).await;
-                        break;
-                    }
-                    None => break,
                 }
             }
-        });
+            .instrument(span),
+        );
     }
 
     pub(crate) fn total_rows(&self) -> usize {
@@ -1349,11 +1576,24 @@ impl StreamContext {
                         .collect();
                     write!(f, ", \"projection\": {:?}", names)?;
                 }
-                if let Some(predicate) = &self.input.predicate.predicate()
-                    && !predicate.exprs().is_empty()
-                {
-                    let exprs: Vec<_> = predicate.exprs().iter().map(|e| e.to_string()).collect();
-                    write!(f, ", \"filters\": {:?}", exprs)?;
+                if let Some(predicate) = &self.input.predicate.predicate() {
+                    if !predicate.exprs().is_empty() {
+                        let exprs: Vec<_> =
+                            predicate.exprs().iter().map(|e| e.to_string()).collect();
+                        write!(f, ", \"filters\": {:?}", exprs)?;
+                    }
+                    if !predicate.dyn_filters().is_empty() {
+                        let dyn_filters: Vec<_> = predicate
+                            .dyn_filters()
+                            .iter()
+                            .map(|f| format!("{}", f))
+                            .collect();
+                        write!(f, ", \"dyn_filters\": {:?}", dyn_filters)?;
+                    }
+                }
+                #[cfg(feature = "vector_index")]
+                if let Some(vector_index_k) = self.input.vector_index_k {
+                    write!(f, ", \"vector_index_k\": {}", vector_index_k)?;
                 }
                 if !self.input.files.is_empty() {
                     write!(f, ", \"files\": ")?;
@@ -1361,6 +1601,7 @@ impl StreamContext {
                         .entries(self.input.files.iter().map(|file| FileWrapper { file }))
                         .finish()?;
                 }
+                write!(f, ", \"flat_format\": {}", self.input.flat_format)?;
 
                 #[cfg(feature = "enterprise")]
                 self.format_extension_ranges(f)?;
@@ -1371,6 +1612,31 @@ impl StreamContext {
 
         write!(f, "{:?}", InputWrapper { input: &self.input })
     }
+
+    /// Add new dynamic filters to the predicates.
+    /// Safe after stream creation; in-flight reads may still observe an older snapshot.
+    pub(crate) fn add_dyn_filter_to_predicate(
+        self: &Arc<Self>,
+        filter_exprs: Vec<Arc<dyn datafusion::physical_plan::PhysicalExpr>>,
+    ) -> Vec<bool> {
+        let mut supported = Vec::with_capacity(filter_exprs.len());
+        let filter_expr = filter_exprs
+            .into_iter()
+            .filter_map(|expr| {
+                if let Ok(dyn_filter) = (expr as Arc<dyn std::any::Any + Send + Sync + 'static>)
+                .downcast::<datafusion::physical_plan::expressions::DynamicFilterPhysicalExpr>()
+            {
+                supported.push(true);
+                Some(dyn_filter)
+            } else {
+                supported.push(false);
+                None
+            }
+            })
+            .collect();
+        self.input.predicate.add_dyn_filters(filter_expr);
+        supported
+    }
 }
 
 /// Predicates to evaluate.
@@ -1379,9 +1645,9 @@ impl StreamContext {
 pub struct PredicateGroup {
     time_filters: Option<Arc<Vec<SimpleFilterEvaluator>>>,
     /// Predicate that includes request filters and region partition expr (if any).
-    predicate_all: Option<Predicate>,
+    predicate_all: Predicate,
     /// Predicate that only includes request filters.
-    predicate_without_region: Option<Predicate>,
+    predicate_without_region: Predicate,
     /// Region partition expression restored from metadata.
     region_partition_expr: Option<PartitionExpr>,
 }
@@ -1423,16 +1689,8 @@ impl PredicateGroup {
             Some(Arc::new(time_filters))
         };
 
-        let predicate_all = if combined_exprs.is_empty() {
-            None
-        } else {
-            Some(Predicate::new(combined_exprs))
-        };
-        let predicate_without_region = if exprs.is_empty() {
-            None
-        } else {
-            Some(Predicate::new(exprs.to_vec()))
-        };
+        let predicate_all = Predicate::new(combined_exprs);
+        let predicate_without_region = Predicate::new(exprs.to_vec());
 
         Ok(Self {
             time_filters,
@@ -1449,12 +1707,26 @@ impl PredicateGroup {
 
     /// Returns predicate of all exprs (including region partition expr if present).
     pub(crate) fn predicate(&self) -> Option<&Predicate> {
-        self.predicate_all.as_ref()
+        if self.predicate_all.is_empty() {
+            None
+        } else {
+            Some(&self.predicate_all)
+        }
     }
 
     /// Returns predicate that excludes region partition expr.
     pub(crate) fn predicate_without_region(&self) -> Option<&Predicate> {
-        self.predicate_without_region.as_ref()
+        if self.predicate_without_region.is_empty() {
+            None
+        } else {
+            Some(&self.predicate_without_region)
+        }
+    }
+
+    /// Add dynamic filters in the predicates.
+    pub(crate) fn add_dyn_filters(&self, dyn_filters: Vec<Arc<DynamicFilterPhysicalExpr>>) {
+        self.predicate_all.add_dyn_filters(dyn_filters.clone());
+        self.predicate_without_region.add_dyn_filters(dyn_filters);
     }
 
     /// Returns the region partition expr from metadata, if any.
@@ -1482,5 +1754,191 @@ impl PredicateGroup {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use datafusion::physical_plan::expressions::lit as physical_lit;
+    use datafusion_expr::{col, lit};
+    use store_api::storage::ScanRequest;
+
+    use super::*;
+    use crate::memtable::time_partition::TimePartitions;
+    use crate::region::options::RegionOptions;
+    use crate::region::version::VersionBuilder;
+    use crate::sst::FormatType;
+    use crate::test_util::memtable_util::{EmptyMemtableBuilder, metadata_with_primary_key};
+    use crate::test_util::scheduler_util::SchedulerEnv;
+
+    fn new_version(metadata: RegionMetadataRef) -> VersionRef {
+        let mutable = Arc::new(TimePartitions::new(
+            metadata.clone(),
+            Arc::new(EmptyMemtableBuilder::default()),
+            0,
+            None,
+        ));
+        Arc::new(VersionBuilder::new(metadata, mutable).build())
+    }
+
+    fn new_version_with_sst_format(
+        metadata: RegionMetadataRef,
+        sst_format: Option<FormatType>,
+    ) -> VersionRef {
+        let mutable = Arc::new(TimePartitions::new(
+            metadata.clone(),
+            Arc::new(EmptyMemtableBuilder::default()),
+            0,
+            None,
+        ));
+        let options = RegionOptions {
+            sst_format,
+            ..Default::default()
+        };
+        Arc::new(
+            VersionBuilder::new(metadata, mutable)
+                .options(options)
+                .build(),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_build_read_column_ids_includes_filters() {
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let version = new_version(metadata.clone());
+        let env = SchedulerEnv::new().await;
+        let request = ScanRequest {
+            projection: Some(vec![4]),
+            filters: vec![
+                col("v0").gt(lit(1)),
+                col("ts").gt(lit(0)),
+                col("k0").eq(lit("foo")),
+            ],
+            ..Default::default()
+        };
+        let scan_region = ScanRegion::new(
+            version,
+            env.access_layer.clone(),
+            request,
+            CacheStrategy::Disabled,
+        );
+        let predicate =
+            PredicateGroup::new(metadata.as_ref(), &scan_region.request.filters).unwrap();
+        let projection = scan_region.request.projection.as_ref().unwrap();
+        let read_ids = scan_region
+            .build_read_column_ids(projection, &predicate)
+            .unwrap();
+        assert_eq!(vec![4, 0, 2, 3], read_ids);
+    }
+
+    #[tokio::test]
+    async fn test_build_read_column_ids_empty_projection() {
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let version = new_version(metadata.clone());
+        let env = SchedulerEnv::new().await;
+        let request = ScanRequest {
+            projection: Some(vec![]),
+            ..Default::default()
+        };
+        let scan_region = ScanRegion::new(
+            version,
+            env.access_layer.clone(),
+            request,
+            CacheStrategy::Disabled,
+        );
+        let predicate =
+            PredicateGroup::new(metadata.as_ref(), &scan_region.request.filters).unwrap();
+        let projection = scan_region.request.projection.as_ref().unwrap();
+        let read_ids = scan_region
+            .build_read_column_ids(projection, &predicate)
+            .unwrap();
+        // Empty projection should still read the time index column (id 2 in this test schema).
+        assert_eq!(vec![2], read_ids);
+    }
+
+    #[tokio::test]
+    async fn test_build_read_column_ids_keeps_projection_order() {
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let version = new_version(metadata.clone());
+        let env = SchedulerEnv::new().await;
+        let request = ScanRequest {
+            projection: Some(vec![4, 1]),
+            filters: vec![col("v0").gt(lit(1))],
+            ..Default::default()
+        };
+        let scan_region = ScanRegion::new(
+            version,
+            env.access_layer.clone(),
+            request,
+            CacheStrategy::Disabled,
+        );
+        let predicate =
+            PredicateGroup::new(metadata.as_ref(), &scan_region.request.filters).unwrap();
+        let projection = scan_region.request.projection.as_ref().unwrap();
+        let read_ids = scan_region
+            .build_read_column_ids(projection, &predicate)
+            .unwrap();
+        // Projection order preserved, extra columns appended in schema order.
+        assert_eq!(vec![4, 1, 3], read_ids);
+    }
+
+    #[tokio::test]
+    async fn test_use_flat_format_honors_request_override() {
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let env = SchedulerEnv::new().await;
+
+        let primary_key_version =
+            new_version_with_sst_format(metadata.clone(), Some(FormatType::PrimaryKey));
+        let request = ScanRequest::default();
+        let scan_region = ScanRegion::new(
+            primary_key_version.clone(),
+            env.access_layer.clone(),
+            request,
+            CacheStrategy::Disabled,
+        );
+        assert!(!scan_region.use_flat_format());
+
+        let request = ScanRequest {
+            force_flat_format: true,
+            ..Default::default()
+        };
+        let scan_region = ScanRegion::new(
+            primary_key_version,
+            env.access_layer.clone(),
+            request,
+            CacheStrategy::Disabled,
+        );
+        assert!(scan_region.use_flat_format());
+
+        let flat_version = new_version_with_sst_format(metadata, Some(FormatType::Flat));
+        let request = ScanRequest::default();
+        let scan_region = ScanRegion::new(
+            flat_version,
+            env.access_layer.clone(),
+            request,
+            CacheStrategy::Disabled,
+        );
+        assert!(scan_region.use_flat_format());
+    }
+
+    #[test]
+    fn test_update_dyn_filters_with_empty_base_predicates() {
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let predicate_group = PredicateGroup::new(metadata.as_ref(), &[]).unwrap();
+        assert!(predicate_group.predicate().is_none());
+        assert!(predicate_group.predicate_without_region().is_none());
+
+        let dyn_filter = Arc::new(DynamicFilterPhysicalExpr::new(vec![], physical_lit(false)));
+        predicate_group.add_dyn_filters(vec![dyn_filter]);
+
+        let predicate_all = predicate_group.predicate().unwrap();
+        assert!(predicate_all.exprs().is_empty());
+        assert_eq!(1, predicate_all.dyn_filters().len());
+
+        let predicate_without_region = predicate_group.predicate_without_region().unwrap();
+        assert!(predicate_without_region.exprs().is_empty());
+        assert_eq!(1, predicate_without_region.dyn_filters().len());
     }
 }

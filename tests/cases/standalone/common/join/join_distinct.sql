@@ -1,6 +1,6 @@
 -- Tests joins with DISTINCT operations
 
-CREATE TABLE products_dist(prod_id INTEGER, prod_name VARCHAR, category VARCHAR, ts TIMESTAMP TIME INDEX);
+CREATE TABLE products_dist(prod_id INTEGER, prod_name VARCHAR, "category" VARCHAR, ts TIMESTAMP TIME INDEX);
 
 CREATE TABLE sales_dist(sale_id INTEGER, prod_id INTEGER, customer VARCHAR, ts TIMESTAMP TIME INDEX);
 

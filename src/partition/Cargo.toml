@@ -10,6 +10,7 @@ workspace = true
 [dependencies]
 api.workspace = true
 async-trait.workspace = true
+common-base.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
 common-meta.workspace = true
@@ -19,9 +20,9 @@ datafusion-expr.workspace = true
 datafusion-physical-expr.workspace = true
 datatypes.workspace = true
 itertools.workspace = true
+moka = { workspace = true, features = ["future"] }
 serde.workspace = true
 serde_json.workspace = true
-session.workspace = true
 snafu.workspace = true
 sql.workspace = true
 sqlparser.workspace = true
@@ -29,7 +30,7 @@ store-api.workspace = true
 table.workspace = true
 
 [dev-dependencies]
-criterion = "0.5"
+criterion.workspace = true
 rand = "0.8"
 
 [[bench]]

@@ -68,7 +68,7 @@ pub fn test_basic_schema() -> SchemaRef {
     Arc::new(schema)
 }
 
-pub fn csv_basic_schema() -> SchemaRef {
+pub fn basic_schema_with_time_format() -> SchemaRef {
     let schema = Schema::new(vec![
         Field::new("num", DataType::Int64, false),
         Field::new("str", DataType::Utf8, false),
@@ -80,7 +80,6 @@ pub fn csv_basic_schema() -> SchemaRef {
 }
 
 pub(crate) fn scan_config(
-    file_schema: SchemaRef,
     limit: Option<usize>,
     filename: &str,
     file_source: Arc<dyn FileSource>,
@@ -89,7 +88,7 @@ pub(crate) fn scan_config(
     let filename = &filename.replace('\\', "/");
     let file_group = FileGroup::new(vec![PartitionedFile::new(filename.clone(), 4096)]);
 
-    FileScanConfigBuilder::new(ObjectStoreUrl::local_filesystem(), file_schema, file_source)
+    FileScanConfigBuilder::new(ObjectStoreUrl::local_filesystem(), file_source)
         .with_file_group(file_group)
         .with_limit(limit)
         .build()
@@ -98,18 +97,19 @@ pub(crate) fn scan_config(
 pub async fn setup_stream_to_json_test(origin_path: &str, threshold: impl Fn(usize) -> usize) {
     let store = test_store("/");
 
-    let schema = test_basic_schema();
+    let schema = basic_schema_with_time_format();
 
     let json_opener = JsonOpener::new(
         test_util::TEST_BATCH_SIZE,
         schema.clone(),
         FileCompressionType::UNCOMPRESSED,
         Arc::new(object_store_opendal::OpendalStore::new(store.clone())),
+        true,
     );
 
     let size = store.read(origin_path).await.unwrap().len();
 
-    let config = scan_config(schema, None, origin_path, Arc::new(JsonSource::new()));
+    let config = scan_config(None, origin_path, Arc::new(JsonSource::new(schema)));
     let stream = FileStream::new(
         &config,
         0,
@@ -149,19 +149,19 @@ pub async fn setup_stream_to_csv_test(
 ) {
     let store = test_store("/");
 
-    let schema = csv_basic_schema();
+    let schema = basic_schema_with_time_format();
 
-    let csv_source = CsvSource::new(true, b',', b'"')
-        .with_schema(schema.clone())
-        .with_batch_size(TEST_BATCH_SIZE);
-    let config = scan_config(schema, None, origin_path, csv_source.clone());
+    let csv_source = CsvSource::new(schema).with_batch_size(TEST_BATCH_SIZE);
+    let config = scan_config(None, origin_path, csv_source.clone());
     let size = store.read(origin_path).await.unwrap().len();
 
-    let csv_opener = csv_source.create_file_opener(
-        Arc::new(object_store_opendal::OpendalStore::new(store.clone())),
-        &config,
-        0,
-    );
+    let csv_opener = csv_source
+        .create_file_opener(
+            Arc::new(object_store_opendal::OpendalStore::new(store.clone())),
+            &config,
+            0,
+        )
+        .unwrap();
     let stream = FileStream::new(&config, 0, csv_opener, &ExecutionPlanMetricsSet::new()).unwrap();
 
     let (tmp_store, dir) = test_tmp_store("test_stream_to_csv");

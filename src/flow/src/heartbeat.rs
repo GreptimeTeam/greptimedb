@@ -30,7 +30,6 @@ use common_telemetry::{debug, error, info, warn};
 use greptime_proto::v1::meta::NodeInfo;
 use meta_client::client::{HeartbeatSender, HeartbeatStream, MetaClient};
 use servers::addrs;
-use servers::heartbeat_options::HeartbeatOptions;
 use snafu::ResultExt;
 use tokio::sync::mpsc;
 use tokio::time::Duration;
@@ -64,8 +63,6 @@ pub struct HeartbeatTask {
     node_epoch: u64,
     peer_addr: String,
     meta_client: Arc<MetaClient>,
-    report_interval: Duration,
-    retry_interval: Duration,
     resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
     running: Arc<AtomicBool>,
     query_stat_size: Option<SizeReportSender>,
@@ -81,7 +78,6 @@ impl HeartbeatTask {
     pub fn new(
         opts: &FlownodeOptions,
         meta_client: Arc<MetaClient>,
-        heartbeat_opts: HeartbeatOptions,
         resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
         resource_stat: ResourceStatRef,
     ) -> Self {
@@ -90,8 +86,6 @@ impl HeartbeatTask {
             node_epoch: common_time::util::current_time_millis() as u64,
             peer_addr: addrs::resolve_addr(&opts.grpc.bind_addr, Some(&opts.grpc.server_addr)),
             meta_client,
-            report_interval: heartbeat_opts.interval,
-            retry_interval: heartbeat_opts.retry_interval,
             resp_handler_executor,
             running: Arc::new(AtomicBool::new(false)),
             query_stat_size: None,
@@ -113,22 +107,26 @@ impl HeartbeatTask {
     }
 
     async fn create_streams(&self) -> Result<(), Error> {
-        info!("Start to establish the heartbeat connection to metasrv.");
-        let (req_sender, resp_stream) = self
+        info!("Establishing heartbeat connection to Metasrv...");
+
+        let (req_sender, resp_stream, config) = self
             .meta_client
             .heartbeat()
             .await
             .map_err(BoxedError::new)
             .context(ExternalSnafu)?;
 
-        info!("Flownode's heartbeat connection has been established with metasrv");
+        info!(
+            "Heartbeat started for flownode {}, Metasrv config: {}",
+            self.node_id, config
+        );
 
         let (outgoing_tx, outgoing_rx) = mpsc::channel(16);
         let mailbox = Arc::new(HeartbeatMailbox::new(outgoing_tx));
 
-        self.start_handle_resp_stream(resp_stream, mailbox);
+        self.start_handle_resp_stream(resp_stream, mailbox, config.retry_interval);
 
-        self.start_heartbeat_report(req_sender, outgoing_rx);
+        self.start_heartbeat_report(req_sender, outgoing_rx, config.interval);
 
         Ok(())
     }
@@ -217,8 +215,8 @@ impl HeartbeatTask {
         &self,
         req_sender: HeartbeatSender,
         mut outgoing_rx: mpsc::Receiver<OutgoingMessage>,
+        report_interval: Duration,
     ) {
-        let report_interval = self.report_interval;
         let node_epoch = self.node_epoch;
         let self_peer = Some(Peer {
             id: self.node_id,
@@ -277,9 +275,13 @@ impl HeartbeatTask {
         });
     }
 
-    fn start_handle_resp_stream(&self, mut resp_stream: HeartbeatStream, mailbox: MailboxRef) {
+    fn start_handle_resp_stream(
+        &self,
+        mut resp_stream: HeartbeatStream,
+        mailbox: MailboxRef,
+        retry_interval: Duration,
+    ) {
         let capture_self = self.clone();
-        let retry_interval = self.retry_interval;
 
         let _handle = common_runtime::spawn_hb(async move {
             loop {

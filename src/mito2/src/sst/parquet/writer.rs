@@ -55,7 +55,6 @@ use crate::sst::file::RegionFileId;
 use crate::sst::index::{IndexOutput, Indexer, IndexerBuilder};
 use crate::sst::parquet::flat_format::{FlatWriteFormat, time_index_column_index};
 use crate::sst::parquet::format::PrimaryKeyWriteFormat;
-use crate::sst::parquet::helper::parse_parquet_metadata;
 use crate::sst::parquet::{PARQUET_METADATA_KEY, SstInfo, WriteOptions};
 use crate::sst::{
     DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY, FlatSchemaOptions, SeriesEstimator,
@@ -205,14 +204,12 @@ where
             }
             current_writer.flush().await.context(WriteParquetSnafu)?;
 
-            let file_meta = current_writer.close().await.context(WriteParquetSnafu)?;
+            let parquet_metadata = current_writer.close().await.context(WriteParquetSnafu)?;
             let file_size = self.bytes_written.load(Ordering::Relaxed) as u64;
 
             // Safety: num rows > 0 so we must have min/max.
             let time_range = stats.time_range.unwrap();
 
-            // convert FileMetaData to ParquetMetaData
-            let parquet_metadata = parse_parquet_metadata(file_meta)?;
             let max_row_group_uncompressed_size: u64 = parquet_metadata
                 .row_groups()
                 .iter()
@@ -324,9 +321,12 @@ where
     pub async fn write_all_flat(
         &mut self,
         source: FlatSource,
+        override_sequence: Option<SequenceNumber>,
         opts: &WriteOptions,
     ) -> Result<SstInfoArray> {
-        let res = self.write_all_flat_without_cleaning(source, opts).await;
+        let res = self
+            .write_all_flat_without_cleaning(source, override_sequence, opts)
+            .await;
         if res.is_err() {
             // Clean tmp files explicitly on failure.
             let file_id = self.current_file;
@@ -340,6 +340,7 @@ where
     async fn write_all_flat_without_cleaning(
         &mut self,
         mut source: FlatSource,
+        override_sequence: Option<SequenceNumber>,
         opts: &WriteOptions,
     ) -> Result<SstInfoArray> {
         let mut results = smallvec![];
@@ -347,7 +348,7 @@ where
             self.metadata.clone(),
             &FlatSchemaOptions::from_encoding(self.metadata.primary_key_encoding),
         )
-        .with_override_sequence(None);
+        .with_override_sequence(override_sequence);
         let mut stats = SourceStats::default();
 
         while let Some(record_batch) = self

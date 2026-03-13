@@ -14,7 +14,7 @@
 
 //! some utils for helping with batching mode
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use catalog::CatalogManagerRef;
@@ -28,7 +28,7 @@ use datafusion_common::tree_node::{
 };
 use datafusion_common::{DFSchema, DataFusionError, ScalarValue};
 use datafusion_expr::{Distinct, LogicalPlan, Projection};
-use datatypes::schema::SchemaRef;
+use datatypes::schema::{ColumnSchema, SchemaRef};
 use query::QueryEngineRef;
 use query::parser::{DEFAULT_LOOKBACK_STRING, PromQuery, QueryLanguageParser, QueryStatement};
 use session::context::QueryContextRef;
@@ -38,7 +38,7 @@ use sql::statements::statement::Statement;
 use sql::statements::tql::Tql;
 use table::TableRef;
 
-use crate::adapter::AUTO_CREATED_PLACEHOLDER_TS_COL;
+use crate::adapter::{AUTO_CREATED_PLACEHOLDER_TS_COL, AUTO_CREATED_UPDATE_AT_TS_COL};
 use crate::df_optimizer::apply_df_optimizer;
 use crate::error::{DatafusionSnafu, ExternalSnafu, InvalidQuerySnafu, TableNotFoundSnafu};
 use crate::{Error, TableName};
@@ -143,10 +143,16 @@ pub(crate) async fn gen_plan_with_matching_schema(
     query_ctx: QueryContextRef,
     engine: QueryEngineRef,
     sink_table_schema: SchemaRef,
+    primary_key_indices: &[usize],
+    allow_partial: bool,
 ) -> Result<LogicalPlan, Error> {
     let plan = sql_to_df_plan(query_ctx.clone(), engine.clone(), sql, false).await?;
 
-    let mut add_auto_column = ColumnMatcherRewriter::new(sink_table_schema);
+    let mut add_auto_column = ColumnMatcherRewriter::new(
+        sink_table_schema,
+        primary_key_indices.to_vec(),
+        allow_partial,
+    );
     let plan = plan
         .clone()
         .rewrite(&mut add_auto_column)
@@ -271,18 +277,26 @@ impl TreeNodeVisitor<'_> for FindGroupByFinalName {
 pub struct ColumnMatcherRewriter {
     pub schema: SchemaRef,
     pub is_rewritten: bool,
+    pub primary_key_indices: Vec<usize>,
+    pub allow_partial: bool,
 }
 
 impl ColumnMatcherRewriter {
-    pub fn new(schema: SchemaRef) -> Self {
+    pub fn new(schema: SchemaRef, primary_key_indices: Vec<usize>, allow_partial: bool) -> Self {
         Self {
             schema,
             is_rewritten: false,
+            primary_key_indices,
+            allow_partial,
         }
     }
 
     /// modify the exprs in place so that it matches the schema and some auto columns are added
     fn modify_project_exprs(&mut self, mut exprs: Vec<Expr>) -> DfResult<Vec<Expr>> {
+        if self.allow_partial {
+            return self.modify_project_exprs_with_partial(exprs);
+        }
+
         let all_names = self
             .schema
             .column_schemas()
@@ -367,6 +381,105 @@ impl ColumnMatcherRewriter {
             )));
         }
         Ok(exprs)
+    }
+
+    fn modify_project_exprs_with_partial(&mut self, exprs: Vec<Expr>) -> DfResult<Vec<Expr>> {
+        let table_col_cnt = self.schema.column_schemas().len();
+        let query_col_cnt = exprs.len();
+
+        if query_col_cnt > table_col_cnt {
+            return Err(DataFusionError::Plan(format!(
+                "Expect query column count <= table column count, found {} query columns {:?}, {} table columns {:?}",
+                query_col_cnt,
+                exprs,
+                table_col_cnt,
+                self.schema.column_schemas()
+            )));
+        }
+
+        let name_to_expr: HashMap<String, Expr> = exprs
+            .clone()
+            .into_iter()
+            .map(|e| (e.qualified_name().1, e))
+            .collect();
+
+        let required_columns = self.required_columns_for_partial();
+        let missing: Vec<_> = required_columns
+            .iter()
+            .filter(|name| !name_to_expr.contains_key(*name))
+            .cloned()
+            .collect();
+        if !missing.is_empty() {
+            return Err(DataFusionError::Plan(format!(
+                "Column(s) {:?} required by sink table are missing from flow output when merge_mode=last_non_null",
+                missing
+            )));
+        }
+
+        let placeholder_ts_expr =
+            datafusion::logical_expr::lit(ScalarValue::TimestampMillisecond(Some(0), None))
+                .alias(AUTO_CREATED_PLACEHOLDER_TS_COL);
+
+        let timestamp_index = self.schema.timestamp_index();
+        let mut remap = name_to_expr;
+        let mut new_exprs = Vec::with_capacity(table_col_cnt);
+
+        for (idx, col_schema) in self.schema.column_schemas().iter().enumerate() {
+            let col_name = col_schema.name.clone();
+            if let Some(expr) = remap.remove(&col_name) {
+                let expr = if expr.qualified_name().1 == col_name {
+                    expr
+                } else {
+                    expr.alias(col_name.clone())
+                };
+                new_exprs.push(expr);
+                continue;
+            }
+
+            if col_name == AUTO_CREATED_PLACEHOLDER_TS_COL && timestamp_index == Some(idx) {
+                new_exprs.push(placeholder_ts_expr.clone());
+                continue;
+            }
+
+            if col_name == AUTO_CREATED_UPDATE_AT_TS_COL && col_schema.data_type.is_timestamp() {
+                new_exprs.push(datafusion::prelude::now().alias(&col_name));
+                continue;
+            }
+
+            new_exprs.push(Self::null_expr(col_schema));
+        }
+
+        if !remap.is_empty() {
+            let extra: Vec<_> = remap.keys().cloned().collect();
+            return Err(DataFusionError::Plan(format!(
+                "Flow output has extra column(s) {:?} not found in sink schema when merge_mode=last_non_null",
+                extra
+            )));
+        }
+
+        Ok(new_exprs)
+    }
+
+    fn null_expr(col_schema: &ColumnSchema) -> Expr {
+        Expr::Literal(ScalarValue::Null, None).alias(col_schema.name.clone())
+    }
+
+    fn required_columns_for_partial(&self) -> HashSet<String> {
+        let mut required = HashSet::new();
+        for idx in &self.primary_key_indices {
+            if let Some(col) = self.schema.column_schemas().get(*idx) {
+                required.insert(col.name.clone());
+            }
+        }
+
+        if let Some(ts_idx) = self.schema.timestamp_index()
+            && let Some(col) = self.schema.column_schemas().get(ts_idx)
+            && col.name != AUTO_CREATED_PLACEHOLDER_TS_COL
+        {
+            required.insert(col.name.clone());
+        }
+
+        required
     }
 }
 
@@ -721,7 +834,8 @@ mod test {
         let ctx = QueryContext::arc();
         for (before, after, column_schemas) in testcases {
             let schema = Arc::new(Schema::new(column_schemas));
-            let mut add_auto_column_rewriter = ColumnMatcherRewriter::new(schema);
+            let mut add_auto_column_rewriter =
+                ColumnMatcherRewriter::new(schema, Vec::new(), false);
 
             let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), before, false)
                 .await

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::env;
 use std::net::TcpListener;
 use std::ops::RangeInclusive;
@@ -51,6 +51,7 @@ use frontend::frontend::{Frontend, FrontendOptions};
 use frontend::instance::Instance as FeInstance;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
+use futures::TryStreamExt;
 use hyper_util::rt::TokioIo;
 use meta_client::client::MetaClientBuilder;
 use meta_srv::cluster::MetaPeerClientRef;
@@ -59,12 +60,14 @@ use meta_srv::gc::GcSchedulerOptions;
 use meta_srv::metasrv::{Metasrv, MetasrvOptions, SelectorRef};
 use meta_srv::mocks::MockInfo;
 use mito2::gc::GcConfig;
+use mito2::region::MitoRegionRef;
 use object_store::config::ObjectStoreConfig;
 use rand::Rng;
 use servers::grpc::GrpcOptions;
 use servers::grpc::flight::FlightCraftWrapper;
 use servers::grpc::region_server::RegionServerRequestHandler;
 use servers::server::ServerHandlers;
+use store_api::storage::RegionId;
 use tempfile::TempDir;
 use tonic::codec::CompressionEncoding;
 use tonic::transport::Server;
@@ -89,6 +92,67 @@ pub struct GreptimeDbCluster {
 impl GreptimeDbCluster {
     pub fn fe_instance(&self) -> &Arc<FeInstance> {
         &self.frontend.instance
+    }
+
+    /// List all SST files from all datanodes.
+    pub async fn list_sst_files_from_all_datanodes(&self) -> BTreeSet<String> {
+        let mut sst_files = BTreeSet::new();
+
+        for datanode in self.datanode_instances.values() {
+            let region_server = datanode.region_server();
+            let mito = region_server.mito_engine().unwrap();
+            let all_files = mito
+                .all_ssts_from_storage()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|e| e.file_path)
+                .collect::<Vec<_>>();
+            sst_files.extend(all_files);
+        }
+
+        sst_files
+    }
+
+    /// List all SST files from the manifests of all datanodes.
+    pub async fn list_sst_files_from_manifests(&self) -> BTreeSet<String> {
+        let mut sst_files = BTreeSet::new();
+
+        for datanode in self.datanode_instances.values() {
+            let region_server = datanode.region_server();
+            let mito = region_server.mito_engine().unwrap();
+            let all_files = mito
+                .all_ssts_from_manifest()
+                .await
+                .into_iter()
+                .flat_map(|e| {
+                    if e.index_file_path.is_some() {
+                        vec![e.file_path, e.index_file_path.unwrap()]
+                    } else {
+                        vec![e.file_path]
+                    }
+                })
+                .collect::<BTreeSet<_>>();
+
+            sst_files.extend(all_files);
+        }
+
+        sst_files
+    }
+
+    pub async fn list_all_regions(&self) -> HashMap<RegionId, MitoRegionRef> {
+        let mut regions = HashMap::new();
+
+        for datanode in self.datanode_instances.values() {
+            let region_server = datanode.region_server();
+            let mito = region_server.mito_engine().unwrap();
+            for region in mito.regions() {
+                regions.insert(region.region_id(), region);
+            }
+        }
+
+        regions
     }
 }
 
@@ -200,7 +264,7 @@ impl GreptimeDbClusterBuilder {
         guards: Vec<TestGuard>,
     ) -> GreptimeDbCluster {
         let datanodes = datanode_options.len();
-        let channel_config = ChannelConfig::new().timeout(Duration::from_secs(20));
+        let channel_config = ChannelConfig::new().timeout(Some(Duration::from_secs(20)));
         let datanode_clients = Arc::new(NodeClients::new(channel_config));
 
         let opt = MetasrvOptions {

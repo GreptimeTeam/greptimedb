@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::memory::MemoryKvBackend;
@@ -24,7 +26,7 @@ use uuid::Uuid;
 
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::metasrv::MetasrvInfo;
-use crate::procedure::repartition::group::{Context, PersistentContext};
+use crate::procedure::repartition::group::{Context, PersistentContext, VolatileContext};
 use crate::procedure::repartition::plan::RegionDescriptor;
 use crate::procedure::test_util::MailboxContext;
 
@@ -70,6 +72,8 @@ impl TestingEnv {
             cache_invalidator,
             mailbox: self.mailbox_ctx.mailbox().clone(),
             server_addr: self.server_addr.clone(),
+            start_time: Instant::now(),
+            volatile_ctx: VolatileContext::default(),
         }
     }
 }
@@ -87,9 +91,17 @@ pub fn new_persistent_context(
 ) -> PersistentContext {
     PersistentContext {
         group_id: Uuid::new_v4(),
+        catalog_name: "test_catalog".to_string(),
+        schema_name: "test_schema".to_string(),
         table_id,
         sources,
         targets,
+        region_mapping: HashMap::new(),
         group_prepare_result: None,
+        staging_manifest_paths: HashMap::new(),
+        sync_region: false,
+        allocated_region_ids: vec![],
+        pending_deallocate_region_ids: vec![],
+        timeout: Duration::from_secs(120),
     }
 }

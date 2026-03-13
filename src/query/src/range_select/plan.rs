@@ -414,7 +414,7 @@ impl RangeSelect {
                 .iter()
                 .map(|i| {
                     let f = schema_before_project.qualified_field(*i);
-                    (f.0.cloned(), Arc::new(f.1.clone()))
+                    (f.0.cloned(), f.1.clone())
                 })
                 .collect();
             Arc::new(DFSchema::new_with_metadata(
@@ -688,12 +688,12 @@ impl RangeSelect {
             schema_before_project.clone()
         };
         let by = self.create_physical_expr_list(false, &self.by, input_dfschema, session_state)?;
-        let cache = PlanProperties::new(
+        let cache = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(schema.clone()),
             Partitioning::UnknownPartitioning(1),
             EmissionType::Incremental,
             Boundedness::Bounded,
-        );
+        ));
         Ok(Arc::new(RangeSelectExec {
             input: exec_input,
             range_exec,
@@ -760,7 +760,7 @@ pub struct RangeSelectExec {
     metric: ExecutionPlanMetricsSet,
     schema_project: Option<Vec<usize>>,
     schema_before_project: SchemaRef,
-    cache: PlanProperties,
+    cache: Arc<PlanProperties>,
 }
 
 impl DisplayAs for RangeSelectExec {
@@ -801,7 +801,7 @@ impl ExecutionPlan for RangeSelectExec {
         vec![Distribution::SinglePartition]
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.cache
     }
 
@@ -1340,12 +1340,12 @@ mod test {
             Field::new(TIME_INDEX_COLUMN, TimestampMillisecondType::DATA_TYPE, true),
             Field::new("host", DataType::Utf8, true),
         ]));
-        let cache = PlanProperties::new(
+        let cache = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(schema.clone()),
             Partitioning::UnknownPartitioning(1),
             EmissionType::Incremental,
             Boundedness::Bounded,
-        );
+        ));
         let input_schema = memory_exec.schema().clone();
         let range_select_exec = Arc::new(RangeSelectExec {
             input: memory_exec,

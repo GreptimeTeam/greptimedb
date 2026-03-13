@@ -69,6 +69,7 @@ mod tests {
 
         let select = sqlparser::ast::Select {
             distinct: None,
+            select_modifiers: None,
             top: None,
             projection: vec![sqlparser::ast::SelectItem::Wildcard(
                 WildcardAdditionalOptions::default(),
@@ -103,9 +104,10 @@ mod tests {
             top_before_distinct: false,
             prewhere: None,
             window_before_qualify: false,
-            connect_by: None,
+            connect_by: vec![],
             select_token: AttachedToken::empty(),
             flavor: SelectFlavor::Standard,
+            optimizer_hint: None,
         };
 
         let sp_query = Box::new(

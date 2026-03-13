@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use common_error::ext::BoxedError;
 use common_meta::rpc::router::RegionRoute;
-use common_telemetry::error;
+use common_telemetry::{error, info};
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{self, Result};
@@ -29,7 +29,6 @@ impl UpdateMetadata {
     /// Abort:
     /// - Source region not found.
     /// - Target region not found.
-    #[allow(dead_code)]
     fn rollback_staging_region_routes(
         group_id: GroupId,
         source_routes: &[RegionRoute],
@@ -51,6 +50,7 @@ impl UpdateMetadata {
             )?;
             region_route.region.partition_expr = source.region.partition_expr.clone();
             region_route.clear_leader_staging();
+            region_route.clear_ignore_all_writes();
         }
 
         for target in target_routes {
@@ -74,7 +74,6 @@ impl UpdateMetadata {
     /// - Target region not found.
     /// - Failed to update the table route.
     /// - Central region datanode table value not found.
-    #[allow(dead_code)]
     pub(crate) async fn rollback_staging_regions(&self, ctx: &mut Context) -> Result<()> {
         let table_id = ctx.persistent_ctx.table_id;
         let group_id = ctx.persistent_ctx.group_id;
@@ -88,6 +87,13 @@ impl UpdateMetadata {
             &prepare_result.target_routes,
             region_routes,
         )?;
+
+        let source_count = prepare_result.source_routes.len();
+        let target_count = prepare_result.target_routes.len();
+        info!(
+            "Rollback staging regions for repartition, table_id: {}, group_id: {}, sources: {}, targets: {}",
+            table_id, group_id, source_count, target_count
+        );
 
         if let Err(err) = ctx
             .update_table_route(&current_table_route_value, new_region_routes)
@@ -120,15 +126,19 @@ mod tests {
         let group_id = Uuid::new_v4();
         let table_id = 1024;
         let region_routes = vec![
-            RegionRoute {
-                region: Region {
-                    id: RegionId::new(table_id, 1),
-                    partition_expr: range_expr("x", 0, 100).as_json_str().unwrap(),
+            {
+                let mut route = RegionRoute {
+                    region: Region {
+                        id: RegionId::new(table_id, 1),
+                        partition_expr: range_expr("x", 0, 100).as_json_str().unwrap(),
+                        ..Default::default()
+                    },
+                    leader_peer: Some(Peer::empty(1)),
+                    leader_state: Some(LeaderState::Staging),
                     ..Default::default()
-                },
-                leader_peer: Some(Peer::empty(1)),
-                leader_state: Some(LeaderState::Staging),
-                ..Default::default()
+                };
+                route.set_ignore_all_writes();
+                route
             },
             RegionRoute {
                 region: Region {
@@ -177,11 +187,13 @@ mod tests {
         )
         .unwrap();
         assert!(!new_region_routes[0].is_leader_staging());
+        assert!(!new_region_routes[0].is_ignore_all_writes());
         assert_eq!(
             new_region_routes[0].region.partition_expr,
             range_expr("x", 0, 20).as_json_str().unwrap(),
         );
         assert!(!new_region_routes[1].is_leader_staging());
+        assert!(!new_region_routes[1].is_ignore_all_writes());
         assert!(new_region_routes[2].is_leader_downgrading());
     }
 }

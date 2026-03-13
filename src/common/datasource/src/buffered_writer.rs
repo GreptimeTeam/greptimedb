@@ -14,7 +14,7 @@
 
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
-use datafusion::parquet::format::FileMetaData;
+use parquet::file::metadata::ParquetMetaData;
 
 use crate::error::Result;
 
@@ -24,5 +24,5 @@ pub trait DfRecordBatchEncoder {
 
 #[async_trait]
 pub trait ArrowWriterCloser {
-    async fn close(mut self) -> Result<FileMetaData>;
+    async fn close(mut self) -> Result<ParquetMetaData>;
 }

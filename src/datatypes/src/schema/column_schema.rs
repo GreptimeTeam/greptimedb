@@ -62,6 +62,13 @@ pub const COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY: &str = "granularity";
 pub const COLUMN_SKIPPING_INDEX_OPT_KEY_FALSE_POSITIVE_RATE: &str = "false_positive_rate";
 pub const COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE: &str = "type";
 
+/// Keys used in VECTOR index options
+pub const COLUMN_VECTOR_INDEX_OPT_KEY_ENGINE: &str = "engine";
+pub const COLUMN_VECTOR_INDEX_OPT_KEY_METRIC: &str = "metric";
+pub const COLUMN_VECTOR_INDEX_OPT_KEY_CONNECTIVITY: &str = "connectivity";
+pub const COLUMN_VECTOR_INDEX_OPT_KEY_EXPANSION_ADD: &str = "expansion_add";
+pub const COLUMN_VECTOR_INDEX_OPT_KEY_EXPANSION_SEARCH: &str = "expansion_search";
+
 pub const DEFAULT_GRANULARITY: u32 = 10240;
 
 pub const DEFAULT_FALSE_POSITIVE_RATE: f64 = 0.01;

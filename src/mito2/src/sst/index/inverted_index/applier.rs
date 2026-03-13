@@ -192,6 +192,10 @@ impl InvertedIndexApplier {
     /// * `file_id` - The region file ID to apply predicates to
     /// * `file_size_hint` - Optional hint for file size to avoid extra metadata reads
     /// * `metrics` - Optional mutable reference to collect metrics on demand
+    #[tracing::instrument(
+        skip_all,
+        fields(file_id = %file_id)
+    )]
     pub async fn apply(
         &self,
         file_id: RegionIndexId,

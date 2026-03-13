@@ -231,7 +231,12 @@ impl ElectionPgClient {
     }
 
     async fn reset_client(&mut self) -> Result<()> {
-        self.current = None;
+        if let Some(client) = self.current.take() {
+            // Remove the connection from deadpool and drop it,
+            // forcing TCP close and backend termination.
+            let inner = deadpool::managed::Object::<deadpool_postgres::Manager>::take(client);
+            drop(inner);
+        }
         self.maybe_init_client().await
     }
 

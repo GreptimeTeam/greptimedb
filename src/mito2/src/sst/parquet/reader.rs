@@ -14,26 +14,31 @@
 
 //! Parquet reader.
 
-use std::collections::VecDeque;
+#[cfg(feature = "vector_index")]
+use std::collections::BTreeSet;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use api::v1::SemanticType;
 use async_trait::async_trait;
 use common_recordbatch::filter::SimpleFilterEvaluator;
-use common_telemetry::{debug, warn};
+use common_telemetry::{debug, tracing, warn};
 use datafusion_expr::Expr;
 use datatypes::arrow::array::ArrayRef;
+use datatypes::arrow::datatypes::Field;
 use datatypes::arrow::error::ArrowError;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
+use datatypes::prelude::DataType;
 use mito_codec::row_converter::build_primary_key_codec;
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, RowSelection};
 use parquet::arrow::{FieldLevels, ProjectionMask, parquet_to_arrow_field_levels};
-use parquet::file::metadata::ParquetMetaData;
-use parquet::format::KeyValue;
+use parquet::file::metadata::{KeyValue, PageIndexPolicy, ParquetMetaData};
+use partition::expr::PartitionExpr;
 use snafu::{OptionExt, ResultExt};
+use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::region_request::PathType;
 use store_api::storage::{ColumnId, FileId};
@@ -41,14 +46,17 @@ use table::predicate::Predicate;
 
 use crate::cache::CacheStrategy;
 use crate::cache::index::result_cache::PredicateKey;
+#[cfg(feature = "vector_index")]
+use crate::error::ApplyVectorIndexSnafu;
 use crate::error::{
     ArrowReaderSnafu, InvalidMetadataSnafu, InvalidParquetSnafu, ReadDataPartSnafu,
-    ReadParquetSnafu, Result,
+    ReadParquetSnafu, Result, SerializePartitionExprSnafu,
 };
 use crate::metrics::{
     PRECISE_FILTER_ROWS_TOTAL, READ_ROW_GROUPS_TOTAL, READ_ROWS_IN_ROW_GROUP_TOTAL,
     READ_ROWS_TOTAL, READ_STAGE_ELAPSED,
 };
+use crate::read::flat_projection::CompactionProjectionMapper;
 use crate::read::prune::{PruneReader, Source};
 use crate::read::{Batch, BatchReader};
 use crate::sst::file::FileHandle;
@@ -61,8 +69,11 @@ use crate::sst::index::fulltext_index::applier::{
 use crate::sst::index::inverted_index::applier::{
     InvertedIndexApplierRef, InvertedIndexApplyMetrics,
 };
+#[cfg(feature = "vector_index")]
+use crate::sst::index::vector_index::applier::VectorIndexApplierRef;
 use crate::sst::parquet::file_range::{
-    FileRangeContext, FileRangeContextRef, PreFilterMode, RangeBase, row_group_contains_delete,
+    FileRangeContext, FileRangeContextRef, PartitionFilterContext, PreFilterMode, RangeBase,
+    row_group_contains_delete,
 };
 use crate::sst::parquet::format::{ReadFormat, need_override_sequence};
 use crate::sst::parquet::metadata::MetadataLoader;
@@ -70,10 +81,12 @@ use crate::sst::parquet::row_group::{InMemoryRowGroup, ParquetFetchMetrics};
 use crate::sst::parquet::row_selection::RowGroupSelection;
 use crate::sst::parquet::stats::RowGroupPruningStats;
 use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, PARQUET_METADATA_KEY};
+use crate::sst::tag_maybe_to_dictionary_field;
 
 const INDEX_TYPE_FULLTEXT: &str = "fulltext";
 const INDEX_TYPE_INVERTED: &str = "inverted";
 const INDEX_TYPE_BLOOM: &str = "bloom filter";
+const INDEX_TYPE_VECTOR: &str = "vector";
 
 macro_rules! handle_index_error {
     ($err:expr, $file_handle:expr, $index_type:expr) => {
@@ -117,6 +130,12 @@ pub struct ParquetReaderBuilder {
     inverted_index_appliers: [Option<InvertedIndexApplierRef>; 2],
     bloom_filter_index_appliers: [Option<BloomFilterIndexApplierRef>; 2],
     fulltext_index_appliers: [Option<FulltextIndexApplierRef>; 2],
+    /// Vector index applier for KNN search.
+    #[cfg(feature = "vector_index")]
+    vector_index_applier: Option<VectorIndexApplierRef>,
+    /// Over-fetched k for vector index scan.
+    #[cfg(feature = "vector_index")]
+    vector_index_k: Option<usize>,
     /// Expected metadata of the region while reading the SST.
     /// This is usually the latest metadata of the region. The reader use
     /// it get the correct column id of a column by name.
@@ -129,6 +148,7 @@ pub struct ParquetReaderBuilder {
     pre_filter_mode: PreFilterMode,
     /// Whether to decode primary key values eagerly when reading primary key format SSTs.
     decode_primary_key_values: bool,
+    page_index_policy: PageIndexPolicy,
 }
 
 impl ParquetReaderBuilder {
@@ -150,11 +170,16 @@ impl ParquetReaderBuilder {
             inverted_index_appliers: [None, None],
             bloom_filter_index_appliers: [None, None],
             fulltext_index_appliers: [None, None],
+            #[cfg(feature = "vector_index")]
+            vector_index_applier: None,
+            #[cfg(feature = "vector_index")]
+            vector_index_k: None,
             expected_metadata: None,
             flat_format: false,
             compaction: false,
             pre_filter_mode: PreFilterMode::All,
             decode_primary_key_values: false,
+            page_index_policy: Default::default(),
         }
     }
 
@@ -211,6 +236,19 @@ impl ParquetReaderBuilder {
         self
     }
 
+    /// Attaches the vector index applier to the builder.
+    #[cfg(feature = "vector_index")]
+    #[must_use]
+    pub(crate) fn vector_index_applier(
+        mut self,
+        applier: Option<VectorIndexApplierRef>,
+        k: Option<usize>,
+    ) -> Self {
+        self.vector_index_applier = applier;
+        self.vector_index_k = k;
+        self
+    }
+
     /// Attaches the expected metadata to the builder.
     #[must_use]
     pub fn expected_metadata(mut self, expected_metadata: Option<RegionMetadataRef>) -> Self {
@@ -246,23 +284,54 @@ impl ParquetReaderBuilder {
         self
     }
 
+    #[must_use]
+    pub fn page_index_policy(mut self, page_index_policy: PageIndexPolicy) -> Self {
+        self.page_index_policy = page_index_policy;
+        self
+    }
+
     /// Builds a [ParquetReader].
     ///
     /// This needs to perform IO operation.
-    pub async fn build(&self) -> Result<ParquetReader> {
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            region_id = %self.file_handle.region_id(),
+            file_id = %self.file_handle.file_id()
+        )
+    )]
+    pub async fn build(&self) -> Result<Option<ParquetReader>> {
         let mut metrics = ReaderMetrics::default();
 
-        let (context, selection) = self.build_reader_input(&mut metrics).await?;
-        ParquetReader::new(Arc::new(context), selection).await
+        let Some((context, selection)) = self.build_reader_input(&mut metrics).await? else {
+            return Ok(None);
+        };
+        ParquetReader::new(Arc::new(context), selection)
+            .await
+            .map(Some)
     }
 
     /// Builds a [FileRangeContext] and collects row groups to read.
     ///
     /// This needs to perform IO operation.
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            region_id = %self.file_handle.region_id(),
+            file_id = %self.file_handle.file_id()
+        )
+    )]
     pub(crate) async fn build_reader_input(
         &self,
         metrics: &mut ReaderMetrics,
-    ) -> Result<(FileRangeContext, RowGroupSelection)> {
+    ) -> Result<Option<(FileRangeContext, RowGroupSelection)>> {
+        self.build_reader_input_inner(metrics).await
+    }
+
+    async fn build_reader_input_inner(
+        &self,
+        metrics: &mut ReaderMetrics,
+    ) -> Result<Option<(FileRangeContext, RowGroupSelection)>> {
         let start = Instant::now();
 
         let file_path = self.file_handle.file_path(&self.table_dir, self.path_type);
@@ -270,12 +339,48 @@ impl ParquetReaderBuilder {
 
         // Loads parquet metadata of the file.
         let (parquet_meta, cache_miss) = self
-            .read_parquet_metadata(&file_path, file_size, &mut metrics.metadata_cache_metrics)
+            .read_parquet_metadata(
+                &file_path,
+                file_size,
+                &mut metrics.metadata_cache_metrics,
+                self.page_index_policy,
+            )
             .await?;
         // Decodes region metadata.
         let key_value_meta = parquet_meta.file_metadata().key_value_metadata();
-        // Gets the metadata stored in the SST.
         let region_meta = Arc::new(Self::get_region_metadata(&file_path, key_value_meta)?);
+        let region_partition_expr_str = self
+            .expected_metadata
+            .as_ref()
+            .and_then(|meta| meta.partition_expr.as_ref())
+            .map(|expr| expr.as_str());
+        let (_, is_same_region_partition) = Self::is_same_region_partition(
+            region_partition_expr_str,
+            self.file_handle.meta_ref().partition_expr.as_ref(),
+        )?;
+        // Skip auto convert when:
+        // - compaction is enabled
+        // - region partition expr is same with file partition expr (no need to auto convert)
+        let skip_auto_convert = self.compaction && is_same_region_partition;
+
+        // Build a compaction projection helper when:
+        // - compaction is enabled
+        // - region partition expr differs from file partition expr
+        // - flat format is enabled
+        // - primary key encoding is sparse
+        //
+        // This is applied after row-group filtering to align batches with flat output schema
+        // before compat handling.
+        let compaction_projection_mapper = if self.compaction
+            && !is_same_region_partition
+            && self.flat_format
+            && region_meta.primary_key_encoding == PrimaryKeyEncoding::Sparse
+        {
+            Some(CompactionProjectionMapper::try_new(&region_meta)?)
+        } else {
+            None
+        };
+
         let mut read_format = if let Some(column_ids) = &self.projection {
             ReadFormat::new(
                 region_meta.clone(),
@@ -283,7 +388,7 @@ impl ParquetReaderBuilder {
                 self.flat_format,
                 Some(parquet_meta.file_metadata().schema_descr().num_columns()),
                 &file_path,
-                self.compaction,
+                skip_auto_convert,
             )?
         } else {
             // Lists all column ids to read, we always use the expected metadata if possible.
@@ -299,7 +404,7 @@ impl ParquetReaderBuilder {
                 self.flat_format,
                 Some(parquet_meta.file_metadata().schema_descr().num_columns()),
                 &file_path,
-                self.compaction,
+                skip_auto_convert,
             )?
         };
         if self.decode_primary_key_values {
@@ -310,21 +415,14 @@ impl ParquetReaderBuilder {
                 .set_override_sequence(self.file_handle.meta_ref().sequence.map(|x| x.get()));
         }
 
-        // Computes the projection mask.
-        let parquet_schema_desc = parquet_meta.file_metadata().schema_descr();
-        let indices = read_format.projection_indices();
-        // Now we assumes we don't have nested schemas.
-        // TODO(yingwen): Revisit this if we introduce nested types such as JSON type.
-        let projection_mask = ProjectionMask::roots(parquet_schema_desc, indices.iter().copied());
-
-        // Computes the field levels.
-        let hint = Some(read_format.arrow_schema().fields());
-        let field_levels =
-            parquet_to_arrow_field_levels(parquet_schema_desc, projection_mask.clone(), hint)
-                .context(ReadDataPartSnafu)?;
         let selection = self
             .row_groups_to_read(&read_format, &parquet_meta, &mut metrics.filter_metrics)
             .await;
+
+        if selection.is_empty() {
+            metrics.build_cost += start.elapsed();
+            return Ok(None);
+        }
 
         // Trigger background download if metadata had a cache miss and selection is not empty
         if cache_miss && !selection.is_empty() {
@@ -347,6 +445,19 @@ impl ParquetReaderBuilder {
             .as_ref()
             .map(|meta| meta.schema.clone())
             .unwrap_or_else(|| region_meta.schema.clone());
+
+        // Computes the projection mask.
+        let parquet_schema_desc = parquet_meta.file_metadata().schema_descr();
+        let indices = read_format.projection_indices();
+        // Now we assumes we don't have nested schemas.
+        // TODO(yingwen): Revisit this if we introduce nested types such as JSON type.
+        let projection_mask = ProjectionMask::roots(parquet_schema_desc, indices.iter().copied());
+
+        // Computes the field levels.
+        let hint = Some(read_format.arrow_schema().fields());
+        let field_levels =
+            parquet_to_arrow_field_levels(parquet_schema_desc, projection_mask.clone(), hint)
+                .context(ReadDataPartSnafu)?;
 
         let reader_builder = RowGroupReaderBuilder {
             file_handle: self.file_handle.clone(),
@@ -375,12 +486,14 @@ impl ParquetReaderBuilder {
         };
 
         let dyn_filters = if let Some(predicate) = &self.predicate {
-            predicate.dyn_filters().clone()
+            predicate.dyn_filters().as_ref().clone()
         } else {
-            Arc::new(vec![])
+            vec![]
         };
 
         let codec = build_primary_key_codec(read_format.metadata());
+
+        let partition_filter = self.build_partition_filter(&read_format, &prune_schema)?;
 
         let context = FileRangeContext::new(
             reader_builder,
@@ -392,13 +505,98 @@ impl ParquetReaderBuilder {
                 prune_schema,
                 codec,
                 compat_batch: None,
+                compaction_projection_mapper,
                 pre_filter_mode: self.pre_filter_mode,
+                partition_filter,
             },
         );
 
         metrics.build_cost += start.elapsed();
 
-        Ok((context, selection))
+        Ok(Some((context, selection)))
+    }
+
+    fn is_same_region_partition(
+        region_partition_expr_str: Option<&str>,
+        file_partition_expr: Option<&PartitionExpr>,
+    ) -> Result<(Option<PartitionExpr>, bool)> {
+        let region_partition_expr = match region_partition_expr_str {
+            Some(expr_str) => crate::region::parse_partition_expr(Some(expr_str))?,
+            None => None,
+        };
+
+        let is_same = region_partition_expr.as_ref() == file_partition_expr;
+        Ok((region_partition_expr, is_same))
+    }
+
+    /// Compare partition expressions from expected metadata and file metadata,
+    /// and build a partition filter if they differ.
+    fn build_partition_filter(
+        &self,
+        read_format: &ReadFormat,
+        prune_schema: &Arc<datatypes::schema::Schema>,
+    ) -> Result<Option<PartitionFilterContext>> {
+        let region_partition_expr_str = self
+            .expected_metadata
+            .as_ref()
+            .and_then(|meta| meta.partition_expr.as_ref());
+        let file_partition_expr_ref = self.file_handle.meta_ref().partition_expr.as_ref();
+
+        let (region_partition_expr, is_same_region_partition) = Self::is_same_region_partition(
+            region_partition_expr_str.map(|s| s.as_str()),
+            file_partition_expr_ref,
+        )?;
+
+        if is_same_region_partition {
+            return Ok(None);
+        }
+
+        let Some(region_partition_expr) = region_partition_expr else {
+            return Ok(None);
+        };
+
+        // Collect columns referenced by the partition expression.
+        let mut referenced_columns = HashSet::new();
+        region_partition_expr.collect_column_names(&mut referenced_columns);
+
+        // Build a partition_schema containing only referenced columns.
+        let is_flat = read_format.as_flat().is_some();
+        let partition_schema = Arc::new(datatypes::schema::Schema::new(
+            prune_schema
+                .column_schemas()
+                .iter()
+                .filter(|col| referenced_columns.contains(&col.name))
+                .map(|col| {
+                    if is_flat
+                        && let Some(column_meta) = read_format.metadata().column_by_name(&col.name)
+                        && column_meta.semantic_type == SemanticType::Tag
+                        && col.data_type.is_string()
+                    {
+                        let field = Arc::new(Field::new(
+                            &col.name,
+                            col.data_type.as_arrow_type(),
+                            col.is_nullable(),
+                        ));
+                        let dict_field = tag_maybe_to_dictionary_field(&col.data_type, &field);
+                        let mut column = col.clone();
+                        column.data_type =
+                            ConcreteDataType::from_arrow_type(dict_field.data_type());
+                        return column;
+                    }
+
+                    col.clone()
+                })
+                .collect::<Vec<_>>(),
+        ));
+
+        let region_partition_physical_expr = region_partition_expr
+            .try_as_physical_expr(partition_schema.arrow_schema())
+            .context(SerializePartitionExprSnafu)?;
+
+        Ok(Some(PartitionFilterContext {
+            region_partition_physical_expr,
+            partition_schema,
+        }))
     }
 
     /// Decodes region metadata from key value.
@@ -435,6 +633,7 @@ impl ParquetReaderBuilder {
         file_path: &str,
         file_size: u64,
         cache_metrics: &mut MetadataCacheMetrics,
+        page_index_policy: PageIndexPolicy,
     ) -> Result<(Arc<ParquetMetaData>, bool)> {
         let start = Instant::now();
         let _t = READ_STAGE_ELAPSED
@@ -445,7 +644,7 @@ impl ParquetReaderBuilder {
         // Tries to get from cache with metrics tracking.
         if let Some(metadata) = self
             .cache_strategy
-            .get_parquet_meta_data(file_id, cache_metrics)
+            .get_parquet_meta_data(file_id, cache_metrics, page_index_policy)
             .await
         {
             cache_metrics.metadata_load_cost += start.elapsed();
@@ -453,8 +652,10 @@ impl ParquetReaderBuilder {
         }
 
         // Cache miss, load metadata directly.
-        let metadata_loader = MetadataLoader::new(self.object_store.clone(), file_path, file_size);
-        let metadata = metadata_loader.load().await?;
+        let mut metadata_loader =
+            MetadataLoader::new(self.object_store.clone(), file_path, file_size);
+        metadata_loader.with_page_index_policy(page_index_policy);
+        let metadata = metadata_loader.load(cache_metrics).await?;
 
         let metadata = Arc::new(metadata);
         // Cache the metadata.
@@ -466,6 +667,13 @@ impl ParquetReaderBuilder {
     }
 
     /// Computes row groups to read, along with their respective row selections.
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            region_id = %self.file_handle.region_id(),
+            file_id = %self.file_handle.file_id()
+        )
+    )]
     async fn row_groups_to_read(
         &self,
         read_format: &ReadFormat,
@@ -488,15 +696,14 @@ impl ParquetReaderBuilder {
         metrics.rg_total += num_row_groups;
         metrics.rows_total += num_rows as usize;
 
-        let mut output = RowGroupSelection::new(row_group_size, num_rows as _);
-
         // Compute skip_fields once for all pruning operations
         let skip_fields = self.compute_skip_fields(parquet_meta);
 
-        self.prune_row_groups_by_minmax(
+        let mut output = self.row_groups_by_minmax(
             read_format,
             parquet_meta,
-            &mut output,
+            row_group_size,
+            num_rows as usize,
             metrics,
             skip_fields,
         );
@@ -551,6 +758,19 @@ impl ParquetReaderBuilder {
             )
             .await;
         }
+        #[cfg(feature = "vector_index")]
+        {
+            self.prune_row_groups_by_vector_index(
+                row_group_size,
+                num_row_groups,
+                &mut output,
+                metrics,
+            )
+            .await;
+            if output.is_empty() {
+                return output;
+            }
+        }
         output
     }
 
@@ -585,11 +805,13 @@ impl ParquetReaderBuilder {
                 && all_required_row_groups_searched(output, result)
             {
                 apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_FULLTEXT);
+                metrics.fulltext_index_cache_hit += 1;
                 pruned = true;
                 continue;
             }
 
             // Slow path: apply the index from the file.
+            metrics.fulltext_index_cache_miss += 1;
             let file_size_hint = self.file_handle.meta_ref().index_file_size();
             let apply_res = index_applier
                 .apply_fine(
@@ -657,11 +879,13 @@ impl ParquetReaderBuilder {
                 && all_required_row_groups_searched(output, result)
             {
                 apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_INVERTED);
+                metrics.inverted_index_cache_hit += 1;
                 pruned = true;
                 continue;
             }
 
             // Slow path: apply the index from the file.
+            metrics.inverted_index_cache_miss += 1;
             let file_size_hint = self.file_handle.meta_ref().index_file_size();
             let apply_res = index_applier
                 .apply(
@@ -725,11 +949,13 @@ impl ParquetReaderBuilder {
                 && all_required_row_groups_searched(output, result)
             {
                 apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_BLOOM);
+                metrics.bloom_filter_cache_hit += 1;
                 pruned = true;
                 continue;
             }
 
             // Slow path: apply the index from the file.
+            metrics.bloom_filter_cache_miss += 1;
             let file_size_hint = self.file_handle.meta_ref().index_file_size();
             let rgs = parquet_meta.row_groups().iter().enumerate().map(|(i, rg)| {
                 (
@@ -778,6 +1004,49 @@ impl ParquetReaderBuilder {
         pruned
     }
 
+    /// Prunes row groups by vector index results.
+    #[cfg(feature = "vector_index")]
+    async fn prune_row_groups_by_vector_index(
+        &self,
+        row_group_size: usize,
+        num_row_groups: usize,
+        output: &mut RowGroupSelection,
+        metrics: &mut ReaderFilterMetrics,
+    ) {
+        let Some(applier) = &self.vector_index_applier else {
+            return;
+        };
+        let Some(k) = self.vector_index_k else {
+            return;
+        };
+        if !self.file_handle.meta_ref().vector_index_available() {
+            return;
+        }
+
+        let file_size_hint = self.file_handle.meta_ref().index_file_size();
+        let apply_res = applier
+            .apply_with_k(self.file_handle.index_id(), Some(file_size_hint), k)
+            .await;
+        let row_ids = match apply_res {
+            Ok(res) => res.row_offsets,
+            Err(err) => {
+                handle_index_error!(err, self.file_handle, INDEX_TYPE_VECTOR);
+                return;
+            }
+        };
+
+        let selection = match vector_selection_from_offsets(row_ids, row_group_size, num_row_groups)
+        {
+            Ok(selection) => selection,
+            Err(err) => {
+                handle_index_error!(err, self.file_handle, INDEX_TYPE_VECTOR);
+                return;
+            }
+        };
+        metrics.rows_vector_selected += selection.row_count();
+        apply_selection_and_update_metrics(output, &selection, metrics, INDEX_TYPE_VECTOR);
+    }
+
     async fn prune_row_groups_by_fulltext_bloom(
         &self,
         row_group_size: usize,
@@ -808,11 +1077,13 @@ impl ParquetReaderBuilder {
                 && all_required_row_groups_searched(output, result)
             {
                 apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_FULLTEXT);
+                metrics.fulltext_index_cache_hit += 1;
                 pruned = true;
                 continue;
             }
 
             // Slow path: apply the index from the file.
+            metrics.fulltext_index_cache_miss += 1;
             let file_size_hint = self.file_handle.meta_ref().index_file_size();
             let rgs = parquet_meta.row_groups().iter().enumerate().map(|(i, rg)| {
                 (
@@ -881,20 +1152,59 @@ impl ParquetReaderBuilder {
         }
     }
 
-    /// Prunes row groups by min-max index.
-    fn prune_row_groups_by_minmax(
+    /// Computes row groups selection after min-max pruning.
+    fn row_groups_by_minmax(
         &self,
         read_format: &ReadFormat,
         parquet_meta: &ParquetMetaData,
-        output: &mut RowGroupSelection,
+        row_group_size: usize,
+        total_row_count: usize,
         metrics: &mut ReaderFilterMetrics,
         skip_fields: bool,
-    ) -> bool {
+    ) -> RowGroupSelection {
         let Some(predicate) = &self.predicate else {
-            return false;
+            return RowGroupSelection::new(row_group_size, total_row_count);
         };
 
-        let row_groups_before = output.row_group_count();
+        let file_id = self.file_handle.file_id().file_id();
+        let index_result_cache = self.cache_strategy.index_result_cache();
+        let cached_minmax_key =
+            if index_result_cache.is_some() && predicate.dyn_filters().is_empty() {
+                // Cache min-max pruning results keyed by predicate expressions. This avoids repeatedly
+                // building row-group pruning stats for identical predicates across queries.
+                let mut exprs = predicate
+                    .exprs()
+                    .iter()
+                    .map(|expr| format!("{expr:?}"))
+                    .collect::<Vec<_>>();
+                exprs.sort();
+                let schema_version = self
+                    .expected_metadata
+                    .as_ref()
+                    .map(|meta| meta.schema_version)
+                    .unwrap_or_else(|| read_format.metadata().schema_version);
+                Some(PredicateKey::new_minmax(
+                    Arc::new(exprs),
+                    schema_version,
+                    skip_fields,
+                ))
+            } else {
+                None
+            };
+
+        if let Some(index_result_cache) = index_result_cache
+            && let Some(predicate_key) = cached_minmax_key.as_ref()
+        {
+            if let Some(result) = index_result_cache.get(predicate_key, file_id) {
+                metrics.minmax_cache_hit += 1;
+                let num_row_groups = parquet_meta.num_row_groups();
+                metrics.rg_minmax_filtered +=
+                    num_row_groups.saturating_sub(result.row_group_count());
+                return (*result).clone();
+            }
+
+            metrics.minmax_cache_miss += 1;
+        }
 
         let region_meta = read_format.metadata();
         let row_groups = parquet_meta.row_groups();
@@ -913,20 +1223,26 @@ impl ParquetReaderBuilder {
         // Here we use the schema of the SST to build the physical expression. If the column
         // in the SST doesn't have the same column id as the column in the expected metadata,
         // we will get a None statistics for that column.
-        predicate
-            .prune_with_stats(&stats, prune_schema)
-            .iter()
-            .zip(0..parquet_meta.num_row_groups())
-            .for_each(|(mask, row_group)| {
-                if !*mask {
-                    output.remove_row_group(row_group);
-                }
-            });
+        let mask = predicate.prune_with_stats(&stats, prune_schema);
+        let output = RowGroupSelection::from_full_row_group_ids(
+            mask.iter()
+                .enumerate()
+                .filter_map(|(row_group, keep)| keep.then_some(row_group)),
+            row_group_size,
+            total_row_count,
+        );
 
-        let row_groups_after = output.row_group_count();
-        metrics.rg_minmax_filtered += row_groups_before - row_groups_after;
+        metrics.rg_minmax_filtered += parquet_meta
+            .num_row_groups()
+            .saturating_sub(output.row_group_count());
 
-        true
+        if let Some(index_result_cache) = index_result_cache
+            && let Some(predicate_key) = cached_minmax_key
+        {
+            index_result_cache.put(predicate_key, file_id, Arc::new(output.clone()));
+        }
+
+        output
     }
 
     fn apply_index_result_and_update_cache(
@@ -945,7 +1261,6 @@ impl ParquetReaderBuilder {
         }
     }
 }
-
 fn apply_selection_and_update_metrics(
     output: &mut RowGroupSelection,
     result: &RowGroupSelection,
@@ -960,6 +1275,29 @@ fn apply_selection_and_update_metrics(
     metrics.update_index_metrics(index_type, row_group_count, row_count);
 
     *output = intersection;
+}
+
+#[cfg(feature = "vector_index")]
+fn vector_selection_from_offsets(
+    row_offsets: Vec<u64>,
+    row_group_size: usize,
+    num_row_groups: usize,
+) -> Result<RowGroupSelection> {
+    let mut row_ids = BTreeSet::new();
+    for offset in row_offsets {
+        let row_id = u32::try_from(offset).map_err(|_| {
+            ApplyVectorIndexSnafu {
+                reason: format!("Row offset {} exceeds u32::MAX", offset),
+            }
+            .build()
+        })?;
+        row_ids.insert(row_id);
+    }
+    Ok(RowGroupSelection::from_row_ids(
+        row_ids,
+        row_group_size,
+        num_row_groups,
+    ))
 }
 
 fn all_required_row_groups_searched(
@@ -987,6 +1325,8 @@ pub(crate) struct ReaderFilterMetrics {
     pub(crate) rg_minmax_filtered: usize,
     /// Number of row groups filtered by bloom filter index.
     pub(crate) rg_bloom_filtered: usize,
+    /// Number of row groups filtered by vector index.
+    pub(crate) rg_vector_filtered: usize,
 
     /// Number of rows in row group before filtering.
     pub(crate) rows_total: usize,
@@ -996,8 +1336,29 @@ pub(crate) struct ReaderFilterMetrics {
     pub(crate) rows_inverted_filtered: usize,
     /// Number of rows in row group filtered by bloom filter index.
     pub(crate) rows_bloom_filtered: usize,
+    /// Number of rows filtered by vector index.
+    pub(crate) rows_vector_filtered: usize,
+    /// Number of rows selected by vector index.
+    pub(crate) rows_vector_selected: usize,
     /// Number of rows filtered by precise filter.
     pub(crate) rows_precise_filtered: usize,
+
+    /// Number of index result cache hits for fulltext index.
+    pub(crate) fulltext_index_cache_hit: usize,
+    /// Number of index result cache misses for fulltext index.
+    pub(crate) fulltext_index_cache_miss: usize,
+    /// Number of index result cache hits for inverted index.
+    pub(crate) inverted_index_cache_hit: usize,
+    /// Number of index result cache misses for inverted index.
+    pub(crate) inverted_index_cache_miss: usize,
+    /// Number of index result cache hits for bloom filter index.
+    pub(crate) bloom_filter_cache_hit: usize,
+    /// Number of index result cache misses for bloom filter index.
+    pub(crate) bloom_filter_cache_miss: usize,
+    /// Number of index result cache hits for minmax pruning.
+    pub(crate) minmax_cache_hit: usize,
+    /// Number of index result cache misses for minmax pruning.
+    pub(crate) minmax_cache_miss: usize,
 
     /// Optional metrics for inverted index applier.
     pub(crate) inverted_index_apply_metrics: Option<InvertedIndexApplyMetrics>,
@@ -1005,6 +1366,13 @@ pub(crate) struct ReaderFilterMetrics {
     pub(crate) bloom_filter_apply_metrics: Option<BloomFilterIndexApplyMetrics>,
     /// Optional metrics for fulltext index applier.
     pub(crate) fulltext_index_apply_metrics: Option<FulltextIndexApplyMetrics>,
+
+    /// Number of pruner builder cache hits.
+    pub(crate) pruner_cache_hit: usize,
+    /// Number of pruner builder cache misses.
+    pub(crate) pruner_cache_miss: usize,
+    /// Duration spent waiting for pruner to build file ranges.
+    pub(crate) pruner_prune_cost: Duration,
 }
 
 impl ReaderFilterMetrics {
@@ -1015,12 +1383,28 @@ impl ReaderFilterMetrics {
         self.rg_inverted_filtered += other.rg_inverted_filtered;
         self.rg_minmax_filtered += other.rg_minmax_filtered;
         self.rg_bloom_filtered += other.rg_bloom_filtered;
+        self.rg_vector_filtered += other.rg_vector_filtered;
 
         self.rows_total += other.rows_total;
         self.rows_fulltext_filtered += other.rows_fulltext_filtered;
         self.rows_inverted_filtered += other.rows_inverted_filtered;
         self.rows_bloom_filtered += other.rows_bloom_filtered;
+        self.rows_vector_filtered += other.rows_vector_filtered;
+        self.rows_vector_selected += other.rows_vector_selected;
         self.rows_precise_filtered += other.rows_precise_filtered;
+
+        self.fulltext_index_cache_hit += other.fulltext_index_cache_hit;
+        self.fulltext_index_cache_miss += other.fulltext_index_cache_miss;
+        self.inverted_index_cache_hit += other.inverted_index_cache_hit;
+        self.inverted_index_cache_miss += other.inverted_index_cache_miss;
+        self.bloom_filter_cache_hit += other.bloom_filter_cache_hit;
+        self.bloom_filter_cache_miss += other.bloom_filter_cache_miss;
+        self.minmax_cache_hit += other.minmax_cache_hit;
+        self.minmax_cache_miss += other.minmax_cache_miss;
+
+        self.pruner_cache_hit += other.pruner_cache_hit;
+        self.pruner_cache_miss += other.pruner_cache_miss;
+        self.pruner_prune_cost += other.pruner_prune_cost;
 
         // Merge optional applier metrics
         if let Some(other_metrics) = &other.inverted_index_apply_metrics {
@@ -1057,6 +1441,9 @@ impl ReaderFilterMetrics {
         READ_ROW_GROUPS_TOTAL
             .with_label_values(&["bloom_filter_index_filtered"])
             .inc_by(self.rg_bloom_filtered as u64);
+        READ_ROW_GROUPS_TOTAL
+            .with_label_values(&["vector_index_filtered"])
+            .inc_by(self.rg_vector_filtered as u64);
 
         PRECISE_FILTER_ROWS_TOTAL
             .with_label_values(&["parquet"])
@@ -1073,6 +1460,9 @@ impl ReaderFilterMetrics {
         READ_ROWS_IN_ROW_GROUP_TOTAL
             .with_label_values(&["bloom_filter_index_filtered"])
             .inc_by(self.rows_bloom_filtered as u64);
+        READ_ROWS_IN_ROW_GROUP_TOTAL
+            .with_label_values(&["vector_index_filtered"])
+            .inc_by(self.rows_vector_filtered as u64);
     }
 
     fn update_index_metrics(&mut self, index_type: &str, row_group_count: usize, row_count: usize) {
@@ -1089,8 +1479,64 @@ impl ReaderFilterMetrics {
                 self.rg_bloom_filtered += row_group_count;
                 self.rows_bloom_filtered += row_count;
             }
+            INDEX_TYPE_VECTOR => {
+                self.rg_vector_filtered += row_group_count;
+                self.rows_vector_filtered += row_count;
+            }
             _ => {}
         }
+    }
+}
+
+#[cfg(all(test, feature = "vector_index"))]
+mod vector_index_tests {
+    use super::*;
+
+    #[test]
+    fn test_vector_selection_from_offsets() {
+        let row_group_size = 4;
+        let num_row_groups = 3;
+        let selection =
+            vector_selection_from_offsets(vec![0, 1, 5, 9], row_group_size, num_row_groups)
+                .unwrap();
+
+        assert_eq!(selection.row_group_count(), 3);
+        assert_eq!(selection.row_count(), 4);
+        assert!(selection.contains_non_empty_row_group(0));
+        assert!(selection.contains_non_empty_row_group(1));
+        assert!(selection.contains_non_empty_row_group(2));
+    }
+
+    #[test]
+    fn test_vector_selection_from_offsets_out_of_range() {
+        let row_group_size = 4;
+        let num_row_groups = 2;
+        let selection = vector_selection_from_offsets(
+            vec![0, 7, u64::from(u32::MAX) + 1],
+            row_group_size,
+            num_row_groups,
+        );
+        assert!(selection.is_err());
+    }
+
+    #[test]
+    fn test_vector_selection_updates_metrics() {
+        let row_group_size = 4;
+        let total_rows = 8;
+        let mut output = RowGroupSelection::new(row_group_size, total_rows);
+        let selection = vector_selection_from_offsets(vec![1], row_group_size, 2).unwrap();
+        let mut metrics = ReaderFilterMetrics::default();
+
+        apply_selection_and_update_metrics(
+            &mut output,
+            &selection,
+            &mut metrics,
+            INDEX_TYPE_VECTOR,
+        );
+
+        assert_eq!(metrics.rg_vector_filtered, 1);
+        assert_eq!(metrics.rows_vector_filtered, 7);
+        assert_eq!(output.row_count(), 1);
     }
 }
 
@@ -1105,6 +1551,10 @@ pub(crate) struct MetadataCacheMetrics {
     pub(crate) cache_miss: usize,
     /// Duration to load parquet metadata.
     pub(crate) metadata_load_cost: Duration,
+    /// Number of read operations performed.
+    pub(crate) num_reads: usize,
+    /// Total bytes read from storage.
+    pub(crate) bytes_read: u64,
 }
 
 impl std::fmt::Debug for MetadataCacheMetrics {
@@ -1114,6 +1564,8 @@ impl std::fmt::Debug for MetadataCacheMetrics {
             file_cache_hit,
             cache_miss,
             metadata_load_cost,
+            num_reads,
+            bytes_read,
         } = self;
 
         if self.is_empty() {
@@ -1132,6 +1584,12 @@ impl std::fmt::Debug for MetadataCacheMetrics {
         if *cache_miss > 0 {
             write!(f, ", \"cache_miss\":{}", cache_miss)?;
         }
+        if *num_reads > 0 {
+            write!(f, ", \"num_reads\":{}", num_reads)?;
+        }
+        if *bytes_read > 0 {
+            write!(f, ", \"bytes_read\":{}", bytes_read)?;
+        }
 
         write!(f, "}}")
     }
@@ -1149,6 +1607,8 @@ impl MetadataCacheMetrics {
         self.file_cache_hit += other.file_cache_hit;
         self.cache_miss += other.cache_miss;
         self.metadata_load_cost += other.metadata_load_cost;
+        self.num_reads += other.num_reads;
+        self.bytes_read += other.bytes_read;
     }
 }
 
@@ -1171,6 +1631,10 @@ pub struct ReaderMetrics {
     pub(crate) metadata_cache_metrics: MetadataCacheMetrics,
     /// Optional metrics for page/row group fetch operations.
     pub(crate) fetch_metrics: Option<Arc<ParquetFetchMetrics>>,
+    /// Memory size of metadata loaded for building file ranges.
+    pub(crate) metadata_mem_size: isize,
+    /// Number of file range builders created.
+    pub(crate) num_range_builders: isize,
 }
 
 impl ReaderMetrics {
@@ -1191,6 +1655,8 @@ impl ReaderMetrics {
                 self.fetch_metrics = Some(other_fetch.clone());
             }
         }
+        self.metadata_mem_size += other.metadata_mem_size;
+        self.num_range_builders += other.num_range_builders;
     }
 
     /// Reports total rows.
@@ -1420,6 +1886,13 @@ pub struct ParquetReader {
 
 #[async_trait]
 impl BatchReader for ParquetReader {
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            region_id = %self.context.reader_builder().file_handle.region_id(),
+            file_id = %self.context.reader_builder().file_handle.file_id()
+        )
+    )]
     async fn next_batch(&mut self) -> Result<Option<Batch>> {
         let ReaderState::Readable(reader) = &mut self.reader_state else {
             return Ok(None);
@@ -1491,6 +1964,13 @@ impl Drop for ParquetReader {
 
 impl ParquetReader {
     /// Creates a new reader.
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            region_id = %context.reader_builder().file_handle.region_id(),
+            file_id = %context.reader_builder().file_handle.file_id()
+        )
+    )]
     pub(crate) async fn new(
         context: FileRangeContextRef,
         mut selection: RowGroupSelection,
@@ -1704,5 +2184,114 @@ impl FlatRowGroupReader {
             }
             None => Ok(None),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::any::Any;
+    use std::fmt::{Debug, Formatter};
+    use std::sync::{Arc, LazyLock};
+
+    use datafusion::arrow::datatypes::DataType;
+    use datafusion_common::ScalarValue;
+    use datafusion_expr::expr::ScalarFunction;
+    use datafusion_expr::{
+        ColumnarValue, Expr, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
+    };
+    use datatypes::arrow::array::{ArrayRef, Int64Array};
+    use datatypes::arrow::record_batch::RecordBatch;
+    use object_store::services::Memory;
+    use parquet::arrow::ArrowWriter;
+    use store_api::region_request::PathType;
+    use table::predicate::Predicate;
+
+    use super::*;
+    use crate::sst::parquet::metadata::MetadataLoader;
+    use crate::test_util::sst_util::{sst_file_handle, sst_region_metadata};
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_minmax_predicate_key_not_built_when_index_result_cache_disabled() {
+        #[derive(Eq, PartialEq, Hash)]
+        struct PanicDebugUdf;
+
+        impl Debug for PanicDebugUdf {
+            fn fmt(&self, _f: &mut Formatter<'_>) -> std::fmt::Result {
+                panic!("minmax predicate key should not format exprs when cache is disabled");
+            }
+        }
+
+        impl ScalarUDFImpl for PanicDebugUdf {
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+
+            fn name(&self) -> &str {
+                "panic_debug_udf"
+            }
+
+            fn signature(&self) -> &Signature {
+                static SIGNATURE: LazyLock<Signature> =
+                    LazyLock::new(|| Signature::variadic_any(Volatility::Immutable));
+                &SIGNATURE
+            }
+
+            fn return_type(&self, _arg_types: &[DataType]) -> datafusion_common::Result<DataType> {
+                Ok(DataType::Int64)
+            }
+
+            fn invoke_with_args(
+                &self,
+                _args: ScalarFunctionArgs,
+            ) -> datafusion_common::Result<ColumnarValue> {
+                Ok(ColumnarValue::Scalar(ScalarValue::Int64(Some(1))))
+            }
+        }
+
+        let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let file_handle = sst_file_handle(0, 1);
+        let table_dir = "test_table".to_string();
+        let path_type = PathType::Bare;
+        let file_path = file_handle.file_path(&table_dir, path_type);
+
+        let col = Arc::new(Int64Array::from_iter_values([1, 2, 3])) as ArrayRef;
+        let batch = RecordBatch::try_from_iter([("col", col)]).unwrap();
+        let mut parquet_bytes = Vec::new();
+        let mut writer = ArrowWriter::try_new(&mut parquet_bytes, batch.schema(), None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        let file_size = parquet_bytes.len() as u64;
+        object_store.write(&file_path, parquet_bytes).await.unwrap();
+
+        let region_metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
+        let read_format =
+            ReadFormat::new(region_metadata, None, false, None, &file_path, false).unwrap();
+
+        let mut cache_metrics = MetadataCacheMetrics::default();
+        let loader = MetadataLoader::new(object_store.clone(), &file_path, file_size);
+        let parquet_meta = loader.load(&mut cache_metrics).await.unwrap();
+
+        let udf = Arc::new(ScalarUDF::new_from_impl(PanicDebugUdf));
+        let predicate = Predicate::new(vec![Expr::ScalarFunction(ScalarFunction::new_udf(
+            udf,
+            vec![],
+        ))]);
+        let builder = ParquetReaderBuilder::new(table_dir, path_type, file_handle, object_store)
+            .predicate(Some(predicate))
+            .cache(CacheStrategy::Disabled);
+
+        let row_group_size = parquet_meta.row_group(0).num_rows() as usize;
+        let total_row_count = parquet_meta.file_metadata().num_rows() as usize;
+        let mut metrics = ReaderFilterMetrics::default();
+        let selection = builder.row_groups_by_minmax(
+            &read_format,
+            &parquet_meta,
+            row_group_size,
+            total_row_count,
+            &mut metrics,
+            false,
+        );
+
+        assert!(!selection.is_empty());
     }
 }

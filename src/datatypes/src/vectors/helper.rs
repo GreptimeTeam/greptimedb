@@ -170,10 +170,11 @@ impl Helper {
             ScalarValue::List(array) => {
                 let item_type = Arc::new(ConcreteDataType::try_from(&array.value_type())?);
                 let mut builder = ListVectorBuilder::with_type_capacity(item_type.clone(), 1);
-                let values = ScalarValue::convert_array_to_scalar_vec(array.as_ref())
-                    .context(ConvertArrowArrayToScalarsSnafu)?
+                let scalar_values = ScalarValue::convert_array_to_scalar_vec(array.as_ref())
+                    .context(ConvertArrowArrayToScalarsSnafu)?;
+                let values = scalar_values
                     .into_iter()
-                    .flatten()
+                    .flat_map(|v| v.unwrap_or_else(|| vec![ScalarValue::Null]))
                     .map(ScalarValue::try_into)
                     .collect::<Result<Vec<Value>>>()?;
                 builder.push(Some(ListValueRef::Ref {
@@ -255,7 +256,8 @@ impl Helper {
             | ScalarValue::Utf8View(_)
             | ScalarValue::BinaryView(_)
             | ScalarValue::Map(_)
-            | ScalarValue::Date64(_) => {
+            | ScalarValue::Date64(_)
+            | ScalarValue::RunEndEncoded(_, _, _) => {
                 return error::ConversionSnafu {
                     from: format!("Unsupported scalar value: {value}"),
                 }
@@ -274,10 +276,10 @@ impl Helper {
         Ok(match array.as_ref().data_type() {
             ArrowDataType::Null => Arc::new(NullVector::try_from_arrow_array(array)?),
             ArrowDataType::Boolean => Arc::new(BooleanVector::try_from_arrow_array(array)?),
-            ArrowDataType::Binary => Arc::new(BinaryVector::try_from_arrow_array(array)?),
-            ArrowDataType::LargeBinary
-            | ArrowDataType::FixedSizeBinary(_)
-            | ArrowDataType::BinaryView => {
+            ArrowDataType::Binary | ArrowDataType::BinaryView => {
+                Arc::new(BinaryVector::try_from_arrow_array(array)?)
+            }
+            ArrowDataType::LargeBinary | ArrowDataType::FixedSizeBinary(_) => {
                 let array = arrow::compute::cast(array.as_ref(), &ArrowDataType::Binary)
                     .context(crate::error::ArrowComputeSnafu)?;
                 Arc::new(BinaryVector::try_from_arrow_array(array)?)
@@ -292,11 +294,7 @@ impl Helper {
             ArrowDataType::UInt64 => Arc::new(UInt64Vector::try_from_arrow_array(array)?),
             ArrowDataType::Float32 => Arc::new(Float32Vector::try_from_arrow_array(array)?),
             ArrowDataType::Float64 => Arc::new(Float64Vector::try_from_arrow_array(array)?),
-            ArrowDataType::Utf8 => Arc::new(StringVector::try_from_arrow_array(array)?),
-            ArrowDataType::LargeUtf8 => Arc::new(StringVector::try_from_arrow_array(array)?),
-            ArrowDataType::Utf8View => {
-                let array = arrow::compute::cast(array.as_ref(), &ArrowDataType::Utf8)
-                    .context(crate::error::ArrowComputeSnafu)?;
+            ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 | ArrowDataType::Utf8View => {
                 Arc::new(StringVector::try_from_arrow_array(array)?)
             }
             ArrowDataType::Date32 => Arc::new(DateVector::try_from_arrow_array(array)?),

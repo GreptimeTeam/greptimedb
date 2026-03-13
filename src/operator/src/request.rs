@@ -23,7 +23,8 @@ use common_meta::peer::Peer;
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{debug, error, info};
 use futures_util::future;
-use partition::manager::{PartitionInfo, PartitionRuleManagerRef};
+use partition::cache::PhysicalPartitionInfo;
+use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
 use snafu::prelude::*;
 use store_api::storage::RegionId;
@@ -63,16 +64,17 @@ impl Requester {
         request: FlushTableRequest,
         ctx: QueryContextRef,
     ) -> Result<AffectedRows> {
-        let partitions = self
-            .get_table_partitions(
+        let partitions = &self
+            .get_table_partition_info(
                 &request.catalog_name,
                 &request.schema_name,
                 &request.table_name,
             )
-            .await?;
+            .await?
+            .partitions;
 
         let requests = partitions
-            .into_iter()
+            .iter()
             .map(|partition| {
                 RegionRequestBody::Flush(FlushRequest {
                     region_id: partition.id.into(),
@@ -96,16 +98,17 @@ impl Requester {
         request: BuildIndexTableRequest,
         ctx: QueryContextRef,
     ) -> Result<AffectedRows> {
-        let partitions = self
-            .get_table_partitions(
+        let partitions = &self
+            .get_table_partition_info(
                 &request.catalog_name,
                 &request.schema_name,
                 &request.table_name,
             )
-            .await?;
+            .await?
+            .partitions;
 
         let requests = partitions
-            .into_iter()
+            .iter()
             .map(|partition| {
                 RegionRequestBody::BuildIndex(BuildIndexRequest {
                     region_id: partition.id.into(),
@@ -133,16 +136,17 @@ impl Requester {
         request: CompactTableRequest,
         ctx: QueryContextRef,
     ) -> Result<AffectedRows> {
-        let partitions = self
-            .get_table_partitions(
+        let partitions = &self
+            .get_table_partition_info(
                 &request.catalog_name,
                 &request.schema_name,
                 &request.table_name,
             )
-            .await?;
+            .await?
+            .partitions;
 
         let requests = partitions
-            .into_iter()
+            .iter()
             .map(|partition| {
                 RegionRequestBody::Compact(CompactRequest {
                     region_id: partition.id.into(),
@@ -251,12 +255,12 @@ impl Requester {
             .context(FindRegionLeaderSnafu)
     }
 
-    async fn get_table_partitions(
+    async fn get_table_partition_info(
         &self,
         catalog: &str,
         schema: &str,
         table_name: &str,
-    ) -> Result<Vec<PartitionInfo>> {
+    ) -> Result<Arc<PhysicalPartitionInfo>> {
         let table = self
             .catalog_manager
             .table(catalog, schema, table_name, None)
@@ -269,7 +273,7 @@ impl Requester {
         let table_info = table.table_info();
 
         self.partition_manager
-            .find_table_partitions(table_info.ident.table_id)
+            .find_physical_partition_info(table_info.ident.table_id)
             .await
             .with_context(|_| FindTablePartitionRuleSnafu {
                 table_name: common_catalog::format_full_table_name(catalog, schema, table_name),

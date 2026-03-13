@@ -641,6 +641,8 @@ mod tests {
 
     use super::*;
 
+    const MOCK_AZBLOB_ACCOUNT_KEY_B64: &str = "dGVzdC1rZXk=";
+
     // ==================== Basic Success Cases ====================
 
     #[tokio::test]
@@ -722,8 +724,6 @@ mod tests {
             "test-root",
             "--gcs-scope",
             "test-scope",
-            "--gcs-credential-path",
-            "/path/to/credential",
             "--gcs-credential",
             "test-credential-content",
             "--gcs-endpoint",
@@ -748,7 +748,7 @@ mod tests {
             "test-root",
             "--gcs-scope",
             "test-scope",
-            // No credential_path or credential
+            // No credential
             // No endpoint (optional)
         ]);
 
@@ -770,7 +770,7 @@ mod tests {
             "--azblob-account-name",
             "test-account",
             "--azblob-account-key",
-            "test-key",
+            MOCK_AZBLOB_ACCOUNT_KEY_B64,
             "--azblob-endpoint",
             "https://account.blob.core.windows.net",
         ]);
@@ -794,7 +794,7 @@ mod tests {
             "--azblob-account-name",
             "test-account",
             "--azblob-account-key",
-            "test-key",
+            MOCK_AZBLOB_ACCOUNT_KEY_B64,
             "--azblob-endpoint",
             "https://account.blob.core.windows.net",
             "--azblob-sas-token",
@@ -899,67 +899,6 @@ mod tests {
     }
 
     // ==================== Gap 2: Empty string vs missing tests ====================
-
-    #[tokio::test]
-    async fn test_export_command_build_with_s3_empty_access_key() {
-        // Test S3 with empty access key ID (empty string, not missing)
-        let cmd = ExportCommand::parse_from([
-            "export",
-            "--addr",
-            "127.0.0.1:4000",
-            "--s3",
-            "--s3-bucket",
-            "test-bucket",
-            "--s3-root",
-            "test-root",
-            "--s3-access-key-id",
-            "", // Empty string
-            "--s3-secret-access-key",
-            "test-secret",
-            "--s3-region",
-            "us-west-2",
-        ]);
-
-        let result = cmd.build().await;
-        assert!(result.is_err());
-        if let Err(err) = result {
-            assert!(
-                err.to_string().contains("S3 access key ID must be set"),
-                "Actual error: {}",
-                err
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn test_export_command_build_with_s3_missing_secret_key() {
-        // Test S3 with empty secret access key
-        let cmd = ExportCommand::parse_from([
-            "export",
-            "--addr",
-            "127.0.0.1:4000",
-            "--s3",
-            "--s3-bucket",
-            "test-bucket",
-            "--s3-root",
-            "test-root",
-            "--s3-access-key-id",
-            "test-key",
-            // Missing --s3-secret-access-key
-            "--s3-region",
-            "us-west-2",
-        ]);
-
-        let result = cmd.build().await;
-        assert!(result.is_err());
-        if let Err(err) = result {
-            assert!(
-                err.to_string().contains("S3 secret access key must be set"),
-                "Actual error: {}",
-                err
-            );
-        }
-    }
 
     #[tokio::test]
     async fn test_export_command_build_with_s3_empty_root() {
@@ -1120,8 +1059,6 @@ mod tests {
             "", // Empty root
             "--gcs-scope",
             "test-scope",
-            "--gcs-credential-path",
-            "/path/to/credential",
             "--gcs-credential",
             "test-credential",
             "--gcs-endpoint",
@@ -1154,7 +1091,7 @@ mod tests {
             "--azblob-account-name",
             "", // Empty account name
             "--azblob-account-key",
-            "test-key",
+            MOCK_AZBLOB_ACCOUNT_KEY_B64,
             "--azblob-endpoint",
             "https://account.blob.core.windows.net",
         ]);
@@ -1278,7 +1215,7 @@ mod tests {
             "test-root",
             "--gcs-scope",
             "test-scope",
-            // No credential_path, credential, or endpoint
+            // No credential, or endpoint
         ]);
 
         let result = cmd.build().await;
@@ -1300,7 +1237,7 @@ mod tests {
             "--azblob-account-name",
             "test-account",
             "--azblob-account-key",
-            "test-key",
+            MOCK_AZBLOB_ACCOUNT_KEY_B64,
             "--azblob-endpoint",
             "https://account.blob.core.windows.net",
             // No sas_token

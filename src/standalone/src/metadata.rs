@@ -17,11 +17,12 @@ use std::sync::Arc;
 use common_config::KvBackendConfig;
 use common_error::ext::BoxedError;
 use common_meta::kv_backend::KvBackendRef;
-use common_telemetry::info;
+use common_telemetry::{debug, info};
 use log_store::raft_engine::RaftEngineBackend;
-use snafu::ResultExt;
+use snafu::{ResultExt, ensure};
+use url::Url;
 
-use crate::error::{OpenMetadataKvBackendSnafu, Result};
+use crate::error::{InvalidUrlSchemeSnafu, OpenMetadataKvBackendSnafu, ParseUrlSnafu, Result};
 
 /// Builds the metadata kvbackend.
 pub fn build_metadata_kvbackend(dir: String, config: KvBackendConfig) -> Result<KvBackendRef> {
@@ -34,4 +35,34 @@ pub fn build_metadata_kvbackend(dir: String, config: KvBackendConfig) -> Result<
         .context(OpenMetadataKvBackendSnafu)?;
 
     Ok(Arc::new(kv_backend))
+}
+
+/// Builds the metadata kvbackend from a list of URLs.
+pub fn build_metadata_kv_from_url(url: &str) -> Result<KvBackendRef> {
+    debug!("Building metadata kvbackend from url: {}", url);
+    let url = Url::parse(url).context(ParseUrlSnafu { url })?;
+    ensure!(
+        url.scheme() == "raftengine",
+        InvalidUrlSchemeSnafu {
+            scheme: url.scheme(),
+        }
+    );
+
+    let path = normalize_raftengine_path(url.path());
+    build_metadata_kvbackend(path, Default::default())
+}
+
+fn normalize_raftengine_path(path: &str) -> String {
+    if cfg!(windows) {
+        let mut path = path.replace('\\', "/");
+        if let Some(stripped) = path.strip_prefix('/') {
+            let bytes = stripped.as_bytes();
+            if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+                path = stripped.to_string();
+            }
+        }
+        path
+    } else {
+        path.to_string()
+    }
 }

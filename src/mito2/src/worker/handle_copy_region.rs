@@ -31,7 +31,7 @@ impl<S> RegionWorkerLoop<S> {
         let region_id = request.region_id;
         let source_region_id = request.source_region_id;
         let sender = request.sender;
-        let region = match self.regions.writable_region(region_id) {
+        let region = match self.regions.writable_non_staging_region(region_id) {
             Ok(region) => region,
             Err(e) => {
                 let _ = sender.send(Err(e));

@@ -22,6 +22,8 @@ use async_stream::try_stream;
 use common_error::ext::BoxedError;
 use common_recordbatch::util::ChainedRecordBatchStream;
 use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
+use common_telemetry::tracing::{self, Instrument};
+use common_telemetry::warn;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::arrow::array::BinaryArray;
@@ -42,7 +44,7 @@ use crate::error::{
     Error, InvalidSenderSnafu, PartitionOutOfRangeSnafu, Result, ScanMultiTimesSnafu,
     ScanSeriesSnafu, TooManyFilesToReadSnafu,
 };
-use crate::read::range::RangeBuilderList;
+use crate::read::pruner::{PartitionPruner, Pruner};
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{PartitionMetrics, PartitionMetricsList, SeriesDistributorMetrics};
 use crate::read::seq_scan::{SeqScan, build_flat_sources, build_sources};
@@ -67,6 +69,8 @@ pub struct SeriesScan {
     properties: ScannerProperties,
     /// Context of streams.
     stream_ctx: Arc<StreamContext>,
+    /// Shared pruner for file range building.
+    pruner: Arc<Pruner>,
     /// Receivers of each partition.
     receivers: Mutex<ReceiverList>,
     /// Metrics for each partition.
@@ -83,14 +87,26 @@ impl SeriesScan {
         let stream_ctx = Arc::new(StreamContext::seq_scan_ctx(input));
         properties.partitions = vec![stream_ctx.partition_ranges()];
 
+        // Create the shared pruner with number of workers equal to CPU cores.
+        let num_workers = common_stat::get_total_cpu_cores().max(1);
+        let pruner = Arc::new(Pruner::new(stream_ctx.clone(), num_workers));
+
         Self {
             properties,
             stream_ctx,
+            pruner,
             receivers: Mutex::new(Vec::new()),
             metrics_list: Arc::new(PartitionMetricsList::default()),
         }
     }
 
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            region_id = %self.stream_ctx.input.mapper.metadata().region_id,
+            partition = partition
+        )
+    )]
     fn scan_partition_impl(
         &self,
         ctx: &QueryScanContext,
@@ -122,6 +138,13 @@ impl SeriesScan {
         )))
     }
 
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            region_id = %self.stream_ctx.input.mapper.metadata().region_id,
+            partition = partition
+        )
+    )]
     fn scan_batch_in_partition(
         &self,
         ctx: &QueryScanContext,
@@ -183,6 +206,10 @@ impl SeriesScan {
     }
 
     /// Starts the distributor if the receiver list is empty.
+    #[tracing::instrument(
+        skip(self, metrics_set, metrics_list),
+        fields(region_id = %self.stream_ctx.input.mapper.metadata().region_id)
+    )]
     fn maybe_start_distributor(
         &self,
         metrics_set: &ExecutionPlanMetricsSet,
@@ -198,18 +225,28 @@ impl SeriesScan {
             stream_ctx: self.stream_ctx.clone(),
             semaphore: Some(Arc::new(Semaphore::new(self.properties.num_partitions()))),
             partitions: self.properties.partitions.clone(),
+            pruner: self.pruner.clone(),
             senders,
             metrics_set: metrics_set.clone(),
             metrics_list: metrics_list.clone(),
         };
-        common_runtime::spawn_global(async move {
-            distributor.execute().await;
-        });
+        let region_id = distributor.stream_ctx.input.mapper.metadata().region_id;
+        let span = tracing::info_span!("SeriesScan::distributor", region_id = %region_id);
+        common_runtime::spawn_global(
+            async move {
+                distributor.execute().await;
+            }
+            .instrument(span),
+        );
 
         *rx_list = receivers;
     }
 
     /// Scans the region and returns a stream.
+    #[tracing::instrument(
+        skip_all,
+        fields(region_id = %self.stream_ctx.input.mapper.metadata().region_id)
+    )]
     pub(crate) async fn build_stream(&self) -> Result<SendableRecordBatchStream, BoxedError> {
         let part_num = self.properties.num_partitions();
         let metrics_set = ExecutionPlanMetricsSet::default();
@@ -324,7 +361,14 @@ impl RegionScanner for SeriesScan {
             .input
             .predicate_group()
             .predicate_without_region();
-        predicate.map(|p| !p.exprs().is_empty()).unwrap_or(false)
+        predicate.is_some()
+    }
+
+    fn add_dyn_filter_to_predicate(
+        &mut self,
+        filter_exprs: Vec<Arc<dyn datafusion::physical_plan::PhysicalExpr>>,
+    ) -> Vec<bool> {
+        self.stream_ctx.add_dyn_filter_to_predicate(filter_exprs)
     }
 
     fn set_logical_region(&mut self, logical_region: bool) {
@@ -375,6 +419,8 @@ struct SeriesDistributor {
     semaphore: Option<Arc<Semaphore>>,
     /// Partition ranges to scan.
     partitions: Vec<Vec<PartitionRange>>,
+    /// Shared pruner for file range building.
+    pruner: Arc<Pruner>,
     /// Senders of all partitions.
     senders: SenderList,
     /// Metrics set to report.
@@ -388,6 +434,10 @@ struct SeriesDistributor {
 
 impl SeriesDistributor {
     /// Executes the distributor.
+    #[tracing::instrument(
+        skip_all,
+        fields(region_id = %self.stream_ctx.input.mapper.metadata().region_id)
+    )]
     async fn execute(&mut self) {
         let result = if self.stream_ctx.input.flat_format {
             self.scan_partitions_flat().await
@@ -401,7 +451,23 @@ impl SeriesDistributor {
     }
 
     /// Scans all parts in flat format using FlatSeriesBatchDivider.
+    #[tracing::instrument(
+        skip_all,
+        fields(region_id = %self.stream_ctx.input.mapper.metadata().region_id)
+    )]
     async fn scan_partitions_flat(&mut self) -> Result<()> {
+        // Initialize reference counts for all partition ranges.
+        for partition_ranges in &self.partitions {
+            self.pruner.add_partition_ranges(partition_ranges);
+        }
+
+        // Create PartitionPruner covering all partitions
+        let all_partition_ranges: Vec<_> = self.partitions.iter().flatten().cloned().collect();
+        let partition_pruner = Arc::new(PartitionPruner::new(
+            self.pruner.clone(),
+            &all_partition_ranges,
+        ));
+
         let part_metrics = new_partition_metrics(
             &self.stream_ctx,
             false,
@@ -410,11 +476,10 @@ impl SeriesDistributor {
             &self.metrics_list,
         );
         part_metrics.on_first_poll();
+        // Start fetch time before building sources so scan cost contains
+        // build part cost.
+        let mut fetch_start = Instant::now();
 
-        let range_builder_list = Arc::new(RangeBuilderList::new(
-            self.stream_ctx.input.num_memtables(),
-            self.stream_ctx.input.num_files(),
-        ));
         // Scans all parts.
         let mut sources = Vec::with_capacity(self.partitions.len());
         for partition in &self.partitions {
@@ -425,7 +490,7 @@ impl SeriesDistributor {
                     part_range,
                     false,
                     &part_metrics,
-                    range_builder_list.clone(),
+                    partition_pruner.clone(),
                     &mut sources,
                     self.semaphore.clone(),
                 )
@@ -442,7 +507,6 @@ impl SeriesDistributor {
         )
         .await?;
         let mut metrics = SeriesDistributorMetrics::default();
-        let mut fetch_start = Instant::now();
 
         let mut divider = FlatSeriesBatchDivider::default();
         while let Some(record_batch) = reader.try_next().await? {
@@ -457,7 +521,10 @@ impl SeriesDistributor {
             }
 
             // Use divider to split series
-            if let Some(series_batch) = divider.push(record_batch) {
+            let divider_start = Instant::now();
+            let series_batch = divider.push(record_batch);
+            metrics.divider_cost += divider_start.elapsed();
+            if let Some(series_batch) = series_batch {
                 let yield_start = Instant::now();
                 self.senders
                     .send_batch(SeriesBatch::Flat(series_batch))
@@ -468,7 +535,10 @@ impl SeriesDistributor {
         }
 
         // Send any remaining batch in the divider
-        if let Some(series_batch) = divider.finish() {
+        let divider_start = Instant::now();
+        let series_batch = divider.finish();
+        metrics.divider_cost += divider_start.elapsed();
+        if let Some(series_batch) = series_batch {
             let yield_start = Instant::now();
             self.senders
                 .send_batch(SeriesBatch::Flat(series_batch))
@@ -487,7 +557,23 @@ impl SeriesDistributor {
     }
 
     /// Scans all parts.
+    #[tracing::instrument(
+        skip_all,
+        fields(region_id = %self.stream_ctx.input.mapper.metadata().region_id)
+    )]
     async fn scan_partitions(&mut self) -> Result<()> {
+        // Initialize reference counts for all partition ranges.
+        for partition_ranges in &self.partitions {
+            self.pruner.add_partition_ranges(partition_ranges);
+        }
+
+        // Create PartitionPruner covering all partitions
+        let all_partition_ranges: Vec<_> = self.partitions.iter().flatten().cloned().collect();
+        let partition_pruner = Arc::new(PartitionPruner::new(
+            self.pruner.clone(),
+            &all_partition_ranges,
+        ));
+
         let part_metrics = new_partition_metrics(
             &self.stream_ctx,
             false,
@@ -496,11 +582,10 @@ impl SeriesDistributor {
             &self.metrics_list,
         );
         part_metrics.on_first_poll();
+        // Start fetch time before building sources so scan cost contains
+        // build part cost.
+        let mut fetch_start = Instant::now();
 
-        let range_builder_list = Arc::new(RangeBuilderList::new(
-            self.stream_ctx.input.num_memtables(),
-            self.stream_ctx.input.num_files(),
-        ));
         // Scans all parts.
         let mut sources = Vec::with_capacity(self.partitions.len());
         for partition in &self.partitions {
@@ -511,7 +596,7 @@ impl SeriesDistributor {
                     part_range,
                     false,
                     &part_metrics,
-                    range_builder_list.clone(),
+                    partition_pruner.clone(),
                     &mut sources,
                     self.semaphore.clone(),
                 )
@@ -528,7 +613,6 @@ impl SeriesDistributor {
         )
         .await?;
         let mut metrics = SeriesDistributorMetrics::default();
-        let mut fetch_start = Instant::now();
 
         let mut current_series = PrimaryKeySeriesBatch::default();
         while let Some(batch) = reader.next_batch().await? {

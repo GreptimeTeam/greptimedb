@@ -57,6 +57,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Partition rule manager error"))]
+    PartitionRuleManager {
+        source: partition::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Table not found: {}", table))]
     TableNotFound {
         table: String,
@@ -324,6 +331,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to get VECTOR index options"))]
+    GetVectorIndexOptions {
+        source: datatypes::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display(
         "Column schema mismatch in CTE {}, original: {:?}, expected: {:?}",
         cte_name,
@@ -396,6 +410,7 @@ impl ErrorExt for Error {
             QueryAccessDenied { .. } => StatusCode::AccessDenied,
             Catalog { source, .. } => source.status_code(),
             CreateRecordBatch { source, .. } => source.status_code(),
+            PartitionRuleManager { source, .. } => source.status_code(),
             QueryExecution { source, .. } | QueryPlan { source, .. } => source.status_code(),
             PlanSql { error, .. } => {
                 datafusion_status_code::<Self>(error, Some(StatusCode::PlanQuery))
@@ -416,6 +431,7 @@ impl ErrorExt for Error {
 
             GetFulltextOptions { source, .. }
             | GetSkippingIndexOptions { source, .. }
+            | GetVectorIndexOptions { source, .. }
             | Datatypes { source, .. } => source.status_code(),
         }
     }

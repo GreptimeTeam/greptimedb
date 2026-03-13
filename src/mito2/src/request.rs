@@ -39,8 +39,8 @@ use store_api::region_engine::{
 use store_api::region_request::{
     AffectedRows, ApplyStagingManifestRequest, EnterStagingRequest, RegionAlterRequest,
     RegionBuildIndexRequest, RegionBulkInsertsRequest, RegionCatchupRequest, RegionCloseRequest,
-    RegionCompactRequest, RegionCreateRequest, RegionFlushRequest, RegionOpenRequest,
-    RegionRequest, RegionTruncateRequest,
+    RegionCompactRequest, RegionCreateRequest, RegionDropRequest, RegionFlushRequest,
+    RegionOpenRequest, RegionRequest, RegionTruncateRequest, StagingPartitionDirective,
 };
 use store_api::storage::{FileId, RegionId};
 use tokio::sync::oneshot::{self, Receiver, Sender};
@@ -50,6 +50,7 @@ use crate::error::{
     FlushRegionSnafu, InvalidPartitionExprSnafu, InvalidRequestSnafu, MissingPartitionExprSnafu,
     Result, UnexpectedSnafu,
 };
+use crate::flush::FlushReason;
 use crate::manifest::action::{RegionEdit, TruncateKind};
 use crate::memtable::MemtableId;
 use crate::memtable::bulk::part::BulkPart;
@@ -77,6 +78,8 @@ pub struct WriteRequest {
     pub hint: Option<WriteHint>,
     /// Region metadata on the time of this request is created.
     pub(crate) region_metadata: Option<RegionMetadataRef>,
+    /// Partition expression version for the region.
+    pub partition_expr_version: Option<u64>,
 }
 
 impl WriteRequest {
@@ -133,12 +136,18 @@ impl WriteRequest {
             has_null,
             hint: None,
             region_metadata,
+            partition_expr_version: None,
         })
     }
 
     /// Sets the write hint.
     pub fn with_hint(mut self, hint: Option<WriteHint>) -> Self {
         self.hint = hint;
+        self
+    }
+
+    pub fn with_partition_expr_version(mut self, partition_expr_version: Option<u64>) -> Self {
+        self.partition_expr_version = partition_expr_version;
         self
     }
 
@@ -544,6 +553,7 @@ pub(crate) struct SenderBulkRequest {
     pub(crate) region_id: RegionId,
     pub(crate) request: BulkPart,
     pub(crate) region_metadata: RegionMetadataRef,
+    pub(crate) partition_expr_version: Option<u64>,
 }
 
 /// Request sent to a worker with timestamp
@@ -656,7 +666,8 @@ impl WorkerRequest {
             RegionRequest::Put(v) => {
                 let mut write_request =
                     WriteRequest::new(region_id, OpType::Put, v.rows, region_metadata.clone())?
-                        .with_hint(v.hint);
+                        .with_hint(v.hint)
+                        .with_partition_expr_version(v.partition_expr_version);
                 if write_request.primary_key_encoding() == PrimaryKeyEncoding::Dense
                     && let Some(region_metadata) = &region_metadata
                 {
@@ -670,7 +681,8 @@ impl WorkerRequest {
             RegionRequest::Delete(v) => {
                 let mut write_request =
                     WriteRequest::new(region_id, OpType::Delete, v.rows, region_metadata.clone())?
-                        .with_hint(v.hint);
+                        .with_hint(v.hint)
+                        .with_partition_expr_version(v.partition_expr_version);
                 if write_request.primary_key_encoding() == PrimaryKeyEncoding::Dense
                     && let Some(region_metadata) = &region_metadata
                 {
@@ -686,10 +698,10 @@ impl WorkerRequest {
                 sender: sender.into(),
                 request: DdlRequest::Create(v),
             }),
-            RegionRequest::Drop(_) => WorkerRequest::Ddl(SenderDdlRequest {
+            RegionRequest::Drop(v) => WorkerRequest::Ddl(SenderDdlRequest {
                 region_id,
                 sender: sender.into(),
-                request: DdlRequest::Drop,
+                request: DdlRequest::Drop(v),
             }),
             RegionRequest::Open(v) => WorkerRequest::Ddl(SenderDdlRequest {
                 region_id,
@@ -844,7 +856,7 @@ impl WorkerRequest {
 #[derive(Debug)]
 pub(crate) enum DdlRequest {
     Create(RegionCreateRequest),
-    Drop,
+    Drop(RegionDropRequest),
     Open((RegionOpenRequest, Option<WalEntryReceiver>)),
     Close(RegionCloseRequest),
     Alter(RegionAlterRequest),
@@ -914,6 +926,8 @@ pub(crate) struct FlushFinished {
     pub(crate) memtables_to_remove: SmallVec<[MemtableId; 2]>,
     /// Whether the region is in staging mode.
     pub(crate) is_staging: bool,
+    /// Reason for flush.
+    pub(crate) flush_reason: FlushReason,
 }
 
 impl FlushFinished {
@@ -1043,8 +1057,8 @@ pub(crate) struct RegionChangeResult {
 pub(crate) struct EnterStagingResult {
     /// Region id.
     pub(crate) region_id: RegionId,
-    /// The new partition expression to apply.
-    pub(crate) partition_expr: String,
+    /// The new staging partition directive to apply.
+    pub(crate) partition_directive: StagingPartitionDirective,
     /// Result sender.
     pub(crate) sender: OptionOutputTx,
     /// Result from the manifest manager.

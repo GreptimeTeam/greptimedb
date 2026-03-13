@@ -14,10 +14,14 @@
 
 use common_meta::instruction::{
     EnterStagingRegion, EnterStagingRegionReply, EnterStagingRegionsReply, InstructionReply,
+    StagingPartitionDirective as InstructionStagingPartitionDirective,
 };
 use common_telemetry::{error, warn};
 use futures::future::join_all;
-use store_api::region_request::{EnterStagingRequest, RegionRequest};
+use store_api::region_request::{
+    EnterStagingRequest, RegionRequest,
+    StagingPartitionDirective as RequestStagingPartitionDirective,
+};
 
 use crate::heartbeat::handler::{HandlerContext, InstructionHandler};
 
@@ -48,7 +52,7 @@ impl EnterStagingRegionsHandler {
         ctx: &HandlerContext,
         EnterStagingRegion {
             region_id,
-            partition_expr,
+            partition_directive,
         }: EnterStagingRegion,
     ) -> EnterStagingRegionReply {
         let Some(writable) = ctx.region_server.is_region_leader(region_id) else {
@@ -70,11 +74,24 @@ impl EnterStagingRegionsHandler {
             };
         }
 
+        common_telemetry::info!("Datanode received enter staging region: {}", region_id);
+
+        let partition_directive = match partition_directive {
+            InstructionStagingPartitionDirective::UpdatePartitionExpr(expr) => {
+                RequestStagingPartitionDirective::UpdatePartitionExpr(expr)
+            }
+            InstructionStagingPartitionDirective::RejectAllWrites => {
+                RequestStagingPartitionDirective::RejectAllWrites
+            }
+        };
+
         match ctx
             .region_server
             .handle_request(
                 region_id,
-                RegionRequest::EnterStaging(EnterStagingRequest { partition_expr }),
+                RegionRequest::EnterStaging(EnterStagingRequest {
+                    partition_directive,
+                }),
             )
             .await
         {
@@ -85,7 +102,7 @@ impl EnterStagingRegionsHandler {
                 error: None,
             },
             Err(err) => {
-                error!(err; "Failed to enter staging region");
+                error!(err; "Failed to enter staging region, region_id: {}", region_id);
                 EnterStagingRegionReply {
                     region_id,
                     ready: false,
@@ -101,7 +118,10 @@ impl EnterStagingRegionsHandler {
 mod tests {
     use std::sync::Arc;
 
-    use common_meta::instruction::EnterStagingRegion;
+    use common_meta::instruction::{
+        EnterStagingRegion, StagingPartitionDirective as InstructionStagingPartitionDirective,
+    };
+    use common_meta::kv_backend::memory::MemoryKvBackend;
     use mito2::config::MitoConfig;
     use mito2::engine::MITO_ENGINE_NAME;
     use mito2::test_util::{CreateRequestBuilder, TestEnv};
@@ -122,14 +142,17 @@ mod tests {
         let mut mock_region_server = mock_region_server();
         let (mock_engine, _) = MockRegionEngine::new(MITO_ENGINE_NAME);
         mock_region_server.register_engine(mock_engine);
-        let handler_context = HandlerContext::new_for_test(mock_region_server);
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let handler_context = HandlerContext::new_for_test(mock_region_server, kv_backend);
         let region_id = RegionId::new(1024, 1);
         let replies = EnterStagingRegionsHandler
             .handle(
                 &handler_context,
                 vec![EnterStagingRegion {
                     region_id,
-                    partition_expr: "".to_string(),
+                    partition_directive: InstructionStagingPartitionDirective::UpdatePartitionExpr(
+                        "".to_string(),
+                    ),
                 }],
             )
             .await
@@ -151,13 +174,16 @@ mod tests {
                 region_engine.handle_request_mock_fn = Some(Box::new(|_, _| Ok(0)));
             });
         mock_region_server.register_test_region(region_id, mock_engine);
-        let handler_context = HandlerContext::new_for_test(mock_region_server);
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let handler_context = HandlerContext::new_for_test(mock_region_server, kv_backend);
         let replies = EnterStagingRegionsHandler
             .handle(
                 &handler_context,
                 vec![EnterStagingRegion {
                     region_id,
-                    partition_expr: "".to_string(),
+                    partition_directive: InstructionStagingPartitionDirective::UpdatePartitionExpr(
+                        "".to_string(),
+                    ),
                 }],
             )
             .await
@@ -189,13 +215,16 @@ mod tests {
         region_server.register_engine(Arc::new(engine.clone()));
         prepare_region(&region_server).await;
 
-        let handler_context = HandlerContext::new_for_test(region_server);
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let handler_context = HandlerContext::new_for_test(region_server, kv_backend);
         let replies = EnterStagingRegionsHandler
             .handle(
                 &handler_context,
                 vec![EnterStagingRegion {
                     region_id,
-                    partition_expr: PARTITION_EXPR.to_string(),
+                    partition_directive: InstructionStagingPartitionDirective::UpdatePartitionExpr(
+                        PARTITION_EXPR.to_string(),
+                    ),
                 }],
             )
             .await
@@ -212,7 +241,9 @@ mod tests {
                 &handler_context,
                 vec![EnterStagingRegion {
                     region_id,
-                    partition_expr: PARTITION_EXPR.to_string(),
+                    partition_directive: InstructionStagingPartitionDirective::UpdatePartitionExpr(
+                        PARTITION_EXPR.to_string(),
+                    ),
                 }],
             )
             .await
@@ -229,7 +260,9 @@ mod tests {
                 &handler_context,
                 vec![EnterStagingRegion {
                     region_id,
-                    partition_expr: "".to_string(),
+                    partition_directive: InstructionStagingPartitionDirective::UpdatePartitionExpr(
+                        "".to_string(),
+                    ),
                 }],
             )
             .await
@@ -239,5 +272,33 @@ mod tests {
         assert!(reply.exists);
         assert!(reply.error.is_some());
         assert!(!reply.ready);
+    }
+
+    #[tokio::test]
+    async fn test_enter_staging_reject_all_writes() {
+        let mut region_server = mock_region_server();
+        let region_id = RegionId::new(1024, 1);
+        let mut engine_env = TestEnv::new().await;
+        let engine = engine_env.create_engine(MitoConfig::default()).await;
+        region_server.register_engine(Arc::new(engine.clone()));
+        prepare_region(&region_server).await;
+
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let handler_context = HandlerContext::new_for_test(region_server, kv_backend);
+        let replies = EnterStagingRegionsHandler
+            .handle(
+                &handler_context,
+                vec![EnterStagingRegion {
+                    region_id,
+                    partition_directive: InstructionStagingPartitionDirective::RejectAllWrites,
+                }],
+            )
+            .await
+            .unwrap();
+        let replies = replies.expect_enter_staging_regions_reply();
+        let reply = &replies[0];
+        assert!(reply.exists);
+        assert!(reply.ready);
+        assert!(reply.error.is_none());
     }
 }

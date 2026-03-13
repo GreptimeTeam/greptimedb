@@ -8,7 +8,7 @@ license.workspace = true
 default = []
 test = ["common-test-util", "rstest", "rstest_reuse", "rskafka"]
 enterprise = []
-vector_index = ["dep:usearch", "dep:roaring", "index/vector_index"]
+vector_index = ["dep:roaring", "index/vector_index"]
 
 [lints]
 workspace = true
@@ -86,14 +86,13 @@ tokio.workspace = true
 tokio-stream.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
-usearch = { version = "2.21", default-features = false, features = ["fp16lib"], optional = true }
 uuid.workspace = true
 
 [dev-dependencies]
 common-function.workspace = true
 common-meta = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
-criterion = { version = "0.4", features = ["async", "async_tokio"] }
+criterion = { workspace = true, features = ["async", "async_tokio"] }
 dotenv.workspace = true
 log-store.workspace = true
 mito-codec = { workspace = true, features = ["testing"] }

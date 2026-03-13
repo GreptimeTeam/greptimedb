@@ -411,7 +411,7 @@ pub async fn handle_get_services(
 
     // Record the query time histogram.
     let _timer = METRIC_JAEGER_QUERY_ELAPSED
-        .with_label_values(&[&db, "/api/services"])
+        .with_label_values(&[db.as_str(), "/api/services"])
         .start_timer();
 
     match handler.get_services(query_ctx).await {
@@ -464,7 +464,7 @@ pub async fn handle_get_trace(
 
     // Record the query time histogram.
     let _timer = METRIC_JAEGER_QUERY_ELAPSED
-        .with_label_values(&[&db, "/api/traces"])
+        .with_label_values(&[db.as_str(), "/api/traces"])
         .start_timer();
 
     // Convert start time and end time from microseconds to nanoseconds.
@@ -541,7 +541,7 @@ pub async fn handle_find_traces(
 
     // Record the query time histogram.
     let _timer = METRIC_JAEGER_QUERY_ELAPSED
-        .with_label_values(&[&db, "/api/traces"])
+        .with_label_values(&[db.as_str(), "/api/traces"])
         .start_timer();
 
     match QueryTraceParams::from_jaeger_query_params(query_params) {
@@ -597,7 +597,7 @@ pub async fn handle_get_operations(
 
         // Record the query time histogram.
         let _timer = METRIC_JAEGER_QUERY_ELAPSED
-            .with_label_values(&[&db, "/api/operations"])
+            .with_label_values(&[db.as_str(), "/api/operations"])
             .start_timer();
 
         match handler
@@ -671,7 +671,7 @@ pub async fn handle_get_operations_by_service(
 
     // Record the query time histogram.
     let _timer = METRIC_JAEGER_QUERY_ELAPSED
-        .with_label_values(&[&db, "/api/services"])
+        .with_label_values(&[db.as_str(), "/api/services"])
         .start_timer();
 
     match handler.get_operations(query_ctx, &service_name, None).await {

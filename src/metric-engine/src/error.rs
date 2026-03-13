@@ -240,6 +240,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Table id count mismatch. Expect {}, got {}", expected, actual))]
+    TableIdCountMismatch {
+        expected: usize,
+        actual: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Alter request to physical region is forbidden"))]
     ForbiddenPhysicalAlter {
         #[snafu(implicit)]
@@ -249,6 +257,14 @@ pub enum Error {
     #[snafu(display("Invalid region metadata"))]
     InvalidMetadata {
         source: store_api::metadata::MetadataError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid request for region {}, reason: {}", region_id, reason))]
+    InvalidRequest {
+        reason: String,
+        region_id: RegionId,
         #[snafu(implicit)]
         location: Location,
     },
@@ -368,6 +384,7 @@ impl ErrorExt for Error {
             | MissingRegionOption { .. }
             | ConflictRegionOption { .. }
             | ColumnTypeMismatch { .. }
+            | TableIdCountMismatch { .. }
             | PhysicalRegionBusy { .. }
             | MultipleFieldColumn { .. }
             | NoFieldColumn { .. }
@@ -376,7 +393,8 @@ impl ErrorExt for Error {
             | UnexpectedRequest { .. }
             | UnsupportedAlterKind { .. }
             | UnsupportedRemapManifestsRequest { .. }
-            | UnsupportedSyncRegionFromRequest { .. } => StatusCode::InvalidArguments,
+            | UnsupportedSyncRegionFromRequest { .. }
+            | InvalidRequest { .. } => StatusCode::InvalidArguments,
 
             ForbiddenPhysicalAlter { .. }
             | UnsupportedRegionRequest { .. }

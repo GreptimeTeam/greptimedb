@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::io;
 use std::time::Duration;
 
 use arrow::array::{Array, AsArray};
@@ -124,7 +125,7 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
     pub async fn try_write_one(
         self,
         output: Result<Output>,
-    ) -> Result<Option<MysqlResultWriter<'a, W>>> {
+    ) -> io::Result<Option<MysqlResultWriter<'a, W>>> {
         // We don't support sending multiple query result because the RowWriter's lifetime is bound to
         // a local variable.
         match output {
@@ -168,7 +169,7 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
         w: QueryResultWriter<'a, W>,
         rows: usize,
         session: &SessionRef,
-    ) -> Result<QueryResultWriter<'a, W>> {
+    ) -> io::Result<QueryResultWriter<'a, W>> {
         let warnings = session.warnings_count() as u16;
 
         let next_writer = w
@@ -185,7 +186,7 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
         mut query_result: QueryResult,
         writer: QueryResultWriter<'a, W>,
         query_context: QueryContextRef,
-    ) -> Result<()> {
+    ) -> io::Result<()> {
         match create_mysql_column_def(&query_result.schema) {
             Ok(column_def) => {
                 // The RowWriter's lifetime is bound to `column_def` thus we can't use finish_one()
@@ -194,13 +195,18 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                 while let Some(record_batch) = query_result.stream.next().await {
                     match record_batch {
                         Ok(record_batch) => {
-                            Self::write_recordbatch(
+                            if let Err(e) = Self::write_recordbatch(
                                 &mut row_writer,
                                 record_batch,
                                 query_context.clone(),
                                 &query_result.schema,
                             )
-                            .await?
+                            .await
+                            {
+                                let (kind, err) = handle_err(e, query_context);
+                                row_writer.finish_error(kind, &err.as_bytes()).await?;
+                                return Ok(());
+                            }
                         }
                         Err(e) => {
                             let (kind, err) = handle_err(e, query_context);
@@ -280,41 +286,12 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                         let array = column.as_primitive::<Float64Type>();
                         row_writer.write_col(array.value(i))?;
                     }
-                    DataType::Utf8 => {
-                        let array = column.as_string::<i32>();
-                        row_writer.write_col(array.value(i))?;
+                    DataType::Utf8 | DataType::Utf8View | DataType::LargeUtf8 => {
+                        let v = datatypes::arrow_array::string_array_value(column, i);
+                        row_writer.write_col(v)?;
                     }
-                    DataType::Utf8View => {
-                        let array = column.as_string_view();
-                        row_writer.write_col(array.value(i))?;
-                    }
-                    DataType::LargeUtf8 => {
-                        let array = column.as_string::<i64>();
-                        row_writer.write_col(array.value(i))?;
-                    }
-                    DataType::Binary => {
-                        let array = column.as_binary::<i32>();
-                        let v = array.value(i);
-                        if let ConcreteDataType::Json(_) = &schema.column_schemas()[j].data_type {
-                            let s = jsonb_to_string(v).context(ConvertSqlValueSnafu)?;
-                            row_writer.write_col(s)?;
-                        } else {
-                            row_writer.write_col(v)?;
-                        }
-                    }
-                    DataType::BinaryView => {
-                        let array = column.as_binary_view();
-                        let v = array.value(i);
-                        if let ConcreteDataType::Json(_) = &schema.column_schemas()[j].data_type {
-                            let s = jsonb_to_string(v).context(ConvertSqlValueSnafu)?;
-                            row_writer.write_col(s)?;
-                        } else {
-                            row_writer.write_col(v)?;
-                        }
-                    }
-                    DataType::LargeBinary => {
-                        let array = column.as_binary::<i64>();
-                        let v = array.value(i);
+                    DataType::Binary | DataType::BinaryView | DataType::LargeBinary => {
+                        let v = datatypes::arrow_array::binary_array_value(column, i);
                         if let ConcreteDataType::Json(_) = &schema.column_schemas()[j].data_type {
                             let s = jsonb_to_string(v).context(ConvertSqlValueSnafu)?;
                             row_writer.write_col(s)?;
@@ -354,11 +331,7 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                             datatypes::arrow_array::duration_array_value(column, i).into();
                         row_writer.write_col(v)?;
                     }
-                    DataType::List(_) => {
-                        let v = ScalarValue::try_from_array(column, i).context(DataFusionSnafu)?;
-                        row_writer.write_col(v.to_string())?;
-                    }
-                    DataType::Struct(_) => {
+                    DataType::List(_) | DataType::Struct(_) => {
                         let v = ScalarValue::try_from_array(column, i).context(DataFusionSnafu)?;
                         row_writer.write_col(v.to_string())?;
                     }
@@ -389,7 +362,7 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
         error: impl ErrorExt,
         w: QueryResultWriter<'a, W>,
         query_context: QueryContextRef,
-    ) -> Result<()> {
+    ) -> io::Result<()> {
         METRIC_ERROR_COUNTER
             .with_label_values(&[METRIC_ERROR_COUNTER_LABEL_MYSQL])
             .inc();

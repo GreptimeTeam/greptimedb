@@ -8,7 +8,8 @@ license.workspace = true
 workspace = true
 
 [features]
-enterprise = []
+enterprise = ["sql/enterprise"]
+vector_index = []
 
 [dependencies]
 ahash.workspace = true
@@ -74,7 +75,6 @@ substrait.workspace = true
 table.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-unescaper = "0.1"
 uuid.workspace = true
 
 [dev-dependencies]

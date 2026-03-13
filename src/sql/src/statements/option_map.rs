@@ -90,6 +90,9 @@ impl OptionMap {
         self.options.len() + self.secrets.len()
     }
 
+    /// Convert the option map to a string map.
+    ///
+    /// Notes: Not all values can be converted to a string, refer to [OptionValue::expr_as_string] for more details.
     pub fn to_str_map(&self) -> HashMap<&str, &str> {
         let mut map = HashMap::with_capacity(self.len());
         map.extend(
@@ -105,6 +108,9 @@ impl OptionMap {
         map
     }
 
+    /// Convert the option map to a string map.
+    ///
+    /// Notes: Not all values can be converted to a string, refer to [OptionValue::expr_as_string] for more details.
     pub fn into_map(self) -> HashMap<String, String> {
         let mut map = HashMap::with_capacity(self.len());
         map.extend(

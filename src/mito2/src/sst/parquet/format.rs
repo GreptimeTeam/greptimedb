@@ -488,6 +488,11 @@ impl PrimaryKeyReadFormat {
         &self.projection_indices
     }
 
+    /// Gets the field id to projected index.
+    pub(crate) fn field_id_to_projected_index(&self) -> &HashMap<ColumnId, usize> {
+        &self.field_id_to_projected_index
+    }
+
     /// Creates a sequence array to override.
     pub(crate) fn new_override_sequence_array(&self, length: usize) -> Option<ArrayRef> {
         self.override_sequence
@@ -899,7 +904,7 @@ impl PrimaryKeyReadFormat {
 }
 
 /// Compute offsets of different primary keys in the array.
-fn primary_key_offsets(pk_dict_array: &PrimaryKeyArray) -> Result<Vec<usize>> {
+pub(crate) fn primary_key_offsets(pk_dict_array: &PrimaryKeyArray) -> Result<Vec<usize>> {
     if pk_dict_array.is_empty() {
         return Ok(Vec::new());
     }

@@ -12,14 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
 use api::v1::meta::heartbeat_client::HeartbeatClient;
 use api::v1::meta::{HeartbeatRequest, HeartbeatResponse, RequestHeader, Role};
 use common_grpc::channel_manager::ChannelManager;
+use common_meta::distributed_time_constants::BASE_HEARTBEAT_INTERVAL;
 use common_meta::util;
-use common_telemetry::info;
 use common_telemetry::tracing_context::TracingContext;
+use common_telemetry::{info, warn};
 use snafu::{OptionExt, ResultExt, ensure};
 use tokio::sync::{RwLock, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
@@ -27,10 +30,55 @@ use tonic::Streaming;
 use tonic::codec::CompressionEncoding;
 use tonic::transport::Channel;
 
-use crate::client::ask_leader::AskLeader;
 use crate::client::{Id, LeaderProviderRef};
 use crate::error;
 use crate::error::{InvalidResponseHeaderSnafu, Result};
+
+/// Heartbeat configuration received from Metasrv during handshake.
+#[derive(Debug, Clone, Copy)]
+pub struct HeartbeatConfig {
+    pub interval: Duration,
+    pub retry_interval: Duration,
+}
+
+impl Default for HeartbeatConfig {
+    fn default() -> Self {
+        Self {
+            interval: BASE_HEARTBEAT_INTERVAL,
+            retry_interval: BASE_HEARTBEAT_INTERVAL,
+        }
+    }
+}
+
+impl fmt::Display for HeartbeatConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "interval={:?}, retry={:?}",
+            self.interval, self.retry_interval
+        )
+    }
+}
+
+impl HeartbeatConfig {
+    /// Extract configuration from HeartbeatResponse.
+    pub fn from_response(res: &HeartbeatResponse) -> Self {
+        if let Some(cfg) = &res.heartbeat_config {
+            // Metasrv provided complete configuration
+            Self {
+                interval: Duration::from_millis(cfg.heartbeat_interval_ms),
+                retry_interval: Duration::from_millis(cfg.retry_interval_ms),
+            }
+        } else {
+            let fallback = Self::default();
+            warn!(
+                "Metasrv didn't provide heartbeat_config, using default: {}",
+                fallback
+            );
+            fallback
+        }
+    }
+}
 
 pub struct HeartbeatSender {
     id: Id,
@@ -100,23 +148,9 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(id: Id, role: Role, channel_manager: ChannelManager, max_retry: usize) -> Self {
-        let inner = Arc::new(RwLock::new(Inner::new(
-            id,
-            role,
-            channel_manager,
-            max_retry,
-        )));
+    pub fn new(id: Id, role: Role, channel_manager: ChannelManager) -> Self {
+        let inner = Arc::new(RwLock::new(Inner::new(id, role, channel_manager)));
         Self { inner }
-    }
-
-    pub async fn start<U, A>(&mut self, urls: A) -> Result<()>
-    where
-        U: AsRef<str>,
-        A: AsRef<[U]>,
-    {
-        let mut inner = self.inner.write().await;
-        inner.start(urls)
     }
 
     /// Start the client with a [LeaderProvider].
@@ -130,7 +164,9 @@ impl Client {
         inner.ask_leader().await
     }
 
-    pub async fn heartbeat(&mut self) -> Result<(HeartbeatSender, HeartbeatStream)> {
+    pub async fn heartbeat(
+        &mut self,
+    ) -> Result<(HeartbeatSender, HeartbeatStream, HeartbeatConfig)> {
         let inner = self.inner.read().await;
         inner.ask_leader().await?;
         inner.heartbeat().await
@@ -143,17 +179,15 @@ struct Inner {
     role: Role,
     channel_manager: ChannelManager,
     leader_provider: Option<LeaderProviderRef>,
-    max_retry: usize,
 }
 
 impl Inner {
-    fn new(id: Id, role: Role, channel_manager: ChannelManager, max_retry: usize) -> Self {
+    fn new(id: Id, role: Role, channel_manager: ChannelManager) -> Self {
         Self {
             id,
             role,
             channel_manager,
             leader_provider: None,
-            max_retry,
         }
     }
 
@@ -168,26 +202,6 @@ impl Inner {
         Ok(())
     }
 
-    fn start<U, A>(&mut self, urls: A) -> Result<()>
-    where
-        U: AsRef<str>,
-        A: AsRef<[U]>,
-    {
-        let peers = urls
-            .as_ref()
-            .iter()
-            .map(|url| url.as_ref().to_string())
-            .collect::<Vec<_>>();
-        let ask_leader = AskLeader::new(
-            self.id,
-            self.role,
-            peers,
-            self.channel_manager.clone(),
-            self.max_retry,
-        );
-        self.start_with(Arc::new(ask_leader))
-    }
-
     async fn ask_leader(&self) -> Result<String> {
         let Some(leader_provider) = self.leader_provider.as_ref() else {
             return error::IllegalGrpcClientStateSnafu {
@@ -198,7 +212,7 @@ impl Inner {
         leader_provider.ask_leader().await
     }
 
-    async fn heartbeat(&self) -> Result<(HeartbeatSender, HeartbeatStream)> {
+    async fn heartbeat(&self) -> Result<(HeartbeatSender, HeartbeatStream, HeartbeatConfig)> {
         ensure!(
             self.is_started(),
             error::IllegalGrpcClientStateSnafu {
@@ -245,14 +259,18 @@ impl Inner {
             .map_err(error::Error::from)?
             .context(error::CreateHeartbeatStreamSnafu)?;
 
+        // Extract heartbeat configuration from handshake response
+        let config = HeartbeatConfig::from_response(&res);
+
         info!(
-            "Success to create heartbeat stream to server: {}, response: {:#?}",
-            leader_addr, res
+            "Handshake successful with Metasrv at {}, received config: {}",
+            leader_addr, config
         );
 
         Ok((
             HeartbeatSender::new(self.id, self.role, sender),
             HeartbeatStream::new(self.id, stream),
+            config,
         ))
     }
 
@@ -277,15 +295,20 @@ impl Inner {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::client::AskLeader;
 
     #[tokio::test]
     async fn test_already_start() {
-        let mut client = Client::new(0, Role::Datanode, ChannelManager::default(), 3);
-        client
-            .start(&["127.0.0.1:1000", "127.0.0.1:1001"])
-            .await
-            .unwrap();
-        let res = client.start(&["127.0.0.1:1002"]).await;
+        let client = Client::new(0, Role::Datanode, ChannelManager::default());
+        let leader_provider = Arc::new(AskLeader::new(
+            0,
+            Role::Datanode,
+            vec!["127.0.0.1:1000".to_string(), "127.0.0.1:1001".to_string()],
+            ChannelManager::default(),
+            3,
+        ));
+        client.start_with(leader_provider.clone()).await.unwrap();
+        let res = client.start_with(leader_provider).await;
         assert!(res.is_err());
         assert!(matches!(
             res.err(),

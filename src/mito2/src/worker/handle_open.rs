@@ -28,7 +28,7 @@ use table::requests::STORAGE_KEY;
 use crate::error::{
     ObjectStoreNotFoundSnafu, OpenDalSnafu, OpenRegionSnafu, RegionNotFoundSnafu, Result,
 };
-use crate::region::opener::RegionOpener;
+use crate::region::opener::{RegionOpener, sanitize_open_request_options};
 use crate::request::OptionOutputTx;
 use crate::sst::location::region_dir_from_table_dir;
 use crate::wal::entry_distributor::WalEntryReceiver;
@@ -73,7 +73,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) async fn handle_open_request(
         &mut self,
         region_id: RegionId,
-        request: RegionOpenRequest,
+        mut request: RegionOpenRequest,
         wal_entry_receiver: Option<WalEntryReceiver>,
         sender: OptionOutputTx,
     ) {
@@ -92,6 +92,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         }
         info!("Try to open region {}, worker: {}", region_id, self.id);
+        sanitize_open_request_options(&mut request.options);
 
         // Open region from specific region dir.
         let opener = match RegionOpener::new(

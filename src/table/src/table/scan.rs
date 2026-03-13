@@ -30,7 +30,7 @@ use datafusion::error::Result as DfResult;
 use datafusion::execution::context::TaskContext;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::filter_pushdown::{
-    ChildPushdownResult, FilterPushdownPhase, FilterPushdownPropagation,
+    ChildPushdownResult, FilterPushdownPhase, FilterPushdownPropagation, PushedDown,
 };
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
@@ -44,6 +44,7 @@ use datafusion_physical_expr::{EquivalenceProperties, Partitioning, PhysicalSort
 use datatypes::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use datatypes::compute::SortOptions;
 use futures::{Stream, StreamExt};
+use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 use store_api::region_engine::{
     PartitionRange, PrepareRequest, QueryScanContext, RegionScannerRef,
 };
@@ -52,13 +53,14 @@ use store_api::storage::{ScanRequest, TimeSeriesDistribution};
 use crate::table::metrics::StreamMetrics;
 
 /// A plan to read multiple partitions from a region of a table.
+#[derive(Clone)]
 pub struct RegionScanExec {
     scanner: Arc<Mutex<RegionScannerRef>>,
     arrow_schema: ArrowSchemaRef,
     /// The expected output ordering for the plan.
     output_ordering: Option<Vec<PhysicalSortExpr>>,
     metric: ExecutionPlanMetricsSet,
-    properties: PlanProperties,
+    properties: Arc<PlanProperties>,
     append_mode: bool,
     total_rows: usize,
     is_partition_set: bool,
@@ -116,7 +118,7 @@ impl RegionScanExec {
                 |col| Some(Arc::new(Column::new_with_schema(col, &arrow_schema).ok()?) as _),
             )
             .collect::<Vec<_>>();
-        let mut pk_sort_columns: Vec<PhysicalSortExpr> = pk_names
+        let pk_sort_columns: Vec<PhysicalSortExpr> = pk_names
             .iter()
             .filter_map(|col| {
                 Some(PhysicalSortExpr::new(
@@ -146,21 +148,46 @@ impl RegionScanExec {
 
         let eq_props = match request.distribution {
             Some(TimeSeriesDistribution::PerSeries) => {
-                if let Some(ts) = ts_col {
-                    pk_sort_columns.push(ts);
+                let mut orderings = Vec::with_capacity(2);
+
+                let mut pk_time_ordering = pk_sort_columns.clone();
+                if let Some(ts) = ts_col.clone() {
+                    pk_time_ordering.push(ts);
                 }
-                EquivalenceProperties::new_with_orderings(
-                    arrow_schema.clone(),
-                    vec![pk_sort_columns],
-                )
+                orderings.push(pk_time_ordering);
+
+                // Metric engine physical tables keep tag columns alongside `__tsid`. When `__tsid`
+                // is present, the scan output is also ordered by `(__tsid, time index)` which can
+                // help eliminate redundant sorts for promql plans (e.g. SeriesDivide).
+                //
+                // `pk_time_ordering` and the potential `(__tsid, time index)` ordering are actually
+                // the same thing, thus present in one `OrderingEquivalenceClass`.
+                if let (Ok(tsid_col), Some(ts)) = (
+                    Column::new_with_schema(DATA_SCHEMA_TSID_COLUMN_NAME, &arrow_schema),
+                    ts_col.clone(),
+                ) {
+                    orderings.push(vec![
+                        PhysicalSortExpr::new(
+                            Arc::new(tsid_col) as _,
+                            SortOptions {
+                                descending: false,
+                                nulls_first: true,
+                            },
+                        ),
+                        ts,
+                    ]);
+                }
+
+                EquivalenceProperties::new_with_orderings(arrow_schema.clone(), orderings)
             }
             Some(TimeSeriesDistribution::TimeWindowed) => {
-                if let Some(ts_col) = ts_col {
-                    pk_sort_columns.insert(0, ts_col);
+                let mut pk_time_ordering = pk_sort_columns.clone();
+                if let Some(ts) = ts_col.clone() {
+                    pk_time_ordering.insert(0, ts);
                 }
                 EquivalenceProperties::new_with_orderings(
                     arrow_schema.clone(),
-                    vec![pk_sort_columns],
+                    vec![pk_time_ordering],
                 )
             }
             None => EquivalenceProperties::new(arrow_schema.clone()),
@@ -168,19 +195,24 @@ impl RegionScanExec {
 
         let partitioning = match request.distribution {
             Some(TimeSeriesDistribution::PerSeries) => {
-                Partitioning::Hash(pk_columns.clone(), num_output_partition)
+                match Column::new_with_schema(DATA_SCHEMA_TSID_COLUMN_NAME, &arrow_schema) {
+                    Ok(tsid_col) => {
+                        Partitioning::Hash(vec![Arc::new(tsid_col) as _], num_output_partition)
+                    }
+                    Err(_) => Partitioning::Hash(pk_columns.clone(), num_output_partition),
+                }
             }
             Some(TimeSeriesDistribution::TimeWindowed) | None => {
                 Partitioning::UnknownPartitioning(num_output_partition)
             }
         };
 
-        let properties = PlanProperties::new(
+        let properties = Arc::new(PlanProperties::new(
             eq_props,
             partitioning,
             EmissionType::Incremental,
             Boundedness::Bounded,
-        );
+        ));
         let append_mode = scanner_props.append_mode();
         let total_rows = scanner_props.total_rows();
         Ok(Self {
@@ -238,7 +270,7 @@ impl RegionScanExec {
             warn!("Setting partition ranges more than once for RegionScanExec");
         }
 
-        let mut properties = self.properties.clone();
+        let mut properties = self.properties.as_ref().clone();
         let new_partitioning = match properties.partitioning {
             Partitioning::Hash(ref columns, _) => {
                 Partitioning::Hash(columns.clone(), target_partitions)
@@ -261,7 +293,7 @@ impl RegionScanExec {
             arrow_schema: self.arrow_schema.clone(),
             output_ordering: self.output_ordering.clone(),
             metric: self.metric.clone(),
-            properties,
+            properties: Arc::new(properties),
             append_mode: self.append_mode,
             total_rows: self.total_rows,
             is_partition_set: true,
@@ -318,7 +350,7 @@ impl ExecutionPlan for RegionScanExec {
         self.arrow_schema.clone()
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
     }
 
@@ -339,8 +371,11 @@ impl ExecutionPlan for RegionScanExec {
         context: Arc<TaskContext>,
     ) -> datafusion_common::Result<DfSendableRecordBatchStream> {
         let tracing_context = TracingContext::from_json(context.session_id().as_str());
-        let span =
-            tracing_context.attach(common_telemetry::tracing::info_span!("read_from_region"));
+        let span = tracing_context.attach(common_telemetry::tracing::info_span!(
+            "read_from_region",
+            partition = partition
+        ));
+        let enter = span.enter();
 
         let ctx = QueryScanContext {
             explain_verbose: self.explain_verbose,
@@ -358,6 +393,7 @@ impl ExecutionPlan for RegionScanExec {
             stream
         };
 
+        drop(enter);
         let stream_metrics = StreamMetrics::new(&self.metric, partition);
         Ok(Box::pin(StreamWithMetricWrapper {
             stream,
@@ -409,8 +445,27 @@ impl ExecutionPlan for RegionScanExec {
         child_pushdown_result: ChildPushdownResult,
         _config: &datafusion::config::ConfigOptions,
     ) -> DfResult<FilterPushdownPropagation<Arc<dyn ExecutionPlan>>> {
-        // TODO(discord9): use the pushdown result to update the scanner's predicate
-        Ok(FilterPushdownPropagation::if_all(child_pushdown_result))
+        let parent_filters = child_pushdown_result
+            .parent_filters
+            .into_iter()
+            .map(|f| f.filter)
+            .collect::<Vec<_>>();
+
+        let supported = self
+            .scanner
+            .lock()
+            .unwrap()
+            .add_dyn_filter_to_predicate(parent_filters);
+        // datafusion api require to clone self after mutate, even though we are only mutate inside mutex
+        let new_self = Arc::new(self.clone());
+
+        Ok(FilterPushdownPropagation {
+            filters: supported
+                .into_iter()
+                .map(|s| if s { PushedDown::Yes } else { PushedDown::No })
+                .collect(),
+            updated_node: Some(new_self),
+        })
     }
 }
 

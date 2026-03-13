@@ -30,7 +30,7 @@ use axum::{Router, middleware, routing};
 use common_base::Plugins;
 use common_base::readable_size::ReadableSize;
 use common_recordbatch::RecordBatch;
-use common_telemetry::{debug, error, info};
+use common_telemetry::{error, info};
 use common_time::Timestamp;
 use common_time::timestamp::TimeUnit;
 use datatypes::data_type::DataType;
@@ -38,7 +38,6 @@ use datatypes::schema::SchemaRef;
 use event::{LogState, LogValidatorRef};
 use futures::FutureExt;
 use http::{HeaderValue, Method};
-use prost::DecodeError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use snafu::{ResultExt, ensure};
@@ -79,7 +78,7 @@ use crate::metrics_handler::MetricsHandler;
 use crate::prometheus_handler::PrometheusHandlerRef;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::query_handler::{
-    InfluxdbLineProtocolHandlerRef, JaegerQueryHandlerRef, LogQueryHandlerRef,
+    DashboardHandlerRef, InfluxdbLineProtocolHandlerRef, JaegerQueryHandlerRef, LogQueryHandlerRef,
     OpenTelemetryProtocolHandlerRef, OpentsdbProtocolHandlerRef, PipelineHandlerRef,
     PromStoreProtocolHandlerRef,
 };
@@ -114,6 +113,7 @@ use result::HttpOutputWriter;
 pub(crate) use timeout::DynamicTimeoutLayer;
 
 mod client_ip;
+use crate::prom_remote_write::validation::PromValidationMode;
 mod hints;
 mod read_preference;
 #[cfg(any(test, feature = "testing"))]
@@ -164,35 +164,6 @@ pub struct HttpOptions {
     pub cors_allowed_origins: Vec<String>,
 
     pub enable_cors: bool,
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PromValidationMode {
-    /// Force UTF8 validation
-    Strict,
-    /// Allow lossy UTF8 strings
-    Lossy,
-    /// Do not validate UTF8 strings.
-    Unchecked,
-}
-
-impl PromValidationMode {
-    /// Decodes provided bytes to [String] with optional UTF-8 validation.
-    pub fn decode_string(&self, bytes: &[u8]) -> std::result::Result<String, DecodeError> {
-        let result = match self {
-            PromValidationMode::Strict => match String::from_utf8(bytes.to_vec()) {
-                Ok(s) => s,
-                Err(e) => {
-                    debug!("Invalid UTF-8 string value: {:?}, error: {:?}", bytes, e);
-                    return Err(DecodeError::new("invalid utf-8"));
-                }
-            },
-            PromValidationMode::Lossy => String::from_utf8_lossy(bytes).to_string(),
-            PromValidationMode::Unchecked => unsafe { String::from_utf8_unchecked(bytes.to_vec()) },
-        };
-        Ok(result)
-    }
 }
 
 impl Default for HttpOptions {
@@ -536,6 +507,11 @@ pub struct GreptimeOptionsConfigState {
     pub greptime_config_options: String,
 }
 
+#[derive(Clone)]
+pub struct DashboardState {
+    pub handler: DashboardHandlerRef,
+}
+
 pub struct HttpServerBuilder {
     options: HttpOptions,
     plugins: Plugins,
@@ -732,6 +708,16 @@ impl HttpServerBuilder {
         }
     }
 
+    pub fn with_dashboard_handler(self, handler: DashboardHandlerRef) -> Self {
+        Self {
+            router: self.router.nest(
+                &format!("/{HTTP_API_VERSION}/dashboards"),
+                HttpServer::route_dashboard(handler),
+            ),
+            ..self
+        }
+    }
+
     pub fn with_extra_router(self, router: Router) -> Self {
         Self {
             router: self.router.merge(router),
@@ -914,6 +900,7 @@ impl HttpServer {
                         Router::new()
                             .route("/cpu", routing::post(pprof::pprof_handler))
                             .route("/mem", routing::post(mem_prof::mem_prof_handler))
+                            .route("/mem/symbol", routing::post(mem_prof::symbolicate_handler))
                             .route(
                                 "/mem/activate",
                                 routing::post(mem_prof::activate_heap_prof_handler),
@@ -1198,6 +1185,26 @@ impl HttpServer {
             )
             .with_state(handler)
     }
+
+    #[cfg(feature = "dashboard")]
+    fn route_dashboard<S>(handler: DashboardHandlerRef) -> Router<S> {
+        use crate::http::dashboard::{add_dashboard, delete_dashboard, list_dashboards};
+
+        Router::new()
+            .route("/", routing::get(list_dashboards))
+            .route("/{dashboard_name}", routing::post(add_dashboard))
+            .route("/{dashboard_name}", routing::delete(delete_dashboard))
+            .layer(
+                ServiceBuilder::new()
+                    .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
+            )
+            .with_state(DashboardState { handler })
+    }
+
+    #[cfg(not(feature = "dashboard"))]
+    fn route_dashboard<S>(handler: DashboardHandlerRef) -> Router<S> {
+        Router::new().with_state(DashboardState { handler })
+    }
 }
 
 pub const HTTP_SERVER: &str = "HTTP_SERVER";
@@ -1290,6 +1297,10 @@ impl Server for HttpServer {
     fn bind_addr(&self) -> Option<SocketAddr> {
         self.bind_addr
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 #[cfg(test)]
@@ -1318,9 +1329,9 @@ mod test {
     use tokio::time::Instant;
 
     use super::*;
-    use crate::error::Error;
     use crate::http::test_helpers::TestClient;
-    use crate::query_handler::sql::{ServerSqlQueryHandlerAdapter, SqlQueryHandler};
+    use crate::prom_remote_write::validation::validate_label_name;
+    use crate::query_handler::sql::SqlQueryHandler;
 
     struct DummyInstance {
         _tx: mpsc::Sender<(String, Vec<u8>)>,
@@ -1328,17 +1339,11 @@ mod test {
 
     #[async_trait]
     impl SqlQueryHandler for DummyInstance {
-        type Error = Error;
-
         async fn do_query(&self, _: &str, _: QueryContextRef) -> Vec<Result<Output>> {
             unimplemented!()
         }
 
-        async fn do_promql_query(
-            &self,
-            _: &PromQuery,
-            _: QueryContextRef,
-        ) -> Vec<std::result::Result<Output, Self::Error>> {
+        async fn do_promql_query(&self, _: &PromQuery, _: QueryContextRef) -> Vec<Result<Output>> {
             unimplemented!()
         }
 
@@ -1347,7 +1352,7 @@ mod test {
             _stmt: Option<Statement>,
             _plan: LogicalPlan,
             _query_ctx: QueryContextRef,
-        ) -> std::result::Result<Output, Self::Error> {
+        ) -> Result<Output> {
             unimplemented!()
         }
 
@@ -1378,9 +1383,8 @@ mod test {
 
     fn make_test_app_custom(tx: mpsc::Sender<(String, Vec<u8>)>, options: HttpOptions) -> Router {
         let instance = Arc::new(DummyInstance { _tx: tx });
-        let sql_instance = ServerSqlQueryHandlerAdapter::arc(instance.clone());
         let server = HttpServerBuilder::new(options)
-            .with_sql_handler(sql_instance)
+            .with_sql_handler(instance.clone())
             .build();
         server.build(server.make_app()).unwrap().route(
             "/test/timeout",
@@ -1756,5 +1760,79 @@ mod test {
         assert_eq!(ResponseFormat::Json.as_str(), "json");
         assert_eq!(ResponseFormat::Null.as_str(), "null");
         assert_eq!(ResponseFormat::default().as_str(), "greptimedb_v1");
+    }
+
+    #[test]
+    fn test_decode_label_name_strict() {
+        let strict = PromValidationMode::Strict;
+
+        // Valid Prometheus label names
+        assert!(strict.decode_label_name(b"__name__").is_ok());
+        assert!(strict.decode_label_name(b"job").is_ok());
+        assert!(strict.decode_label_name(b"instance").is_ok());
+        assert!(strict.decode_label_name(b"_private").is_ok());
+        assert!(strict.decode_label_name(b"label_with_underscores").is_ok());
+        assert!(strict.decode_label_name(b"abc123").is_ok());
+        assert!(strict.decode_label_name(b"A").is_ok());
+        assert!(strict.decode_label_name(b"_").is_ok());
+
+        // Invalid: starts with digit
+        assert!(strict.decode_label_name(b"0abc").is_err());
+        assert!(strict.decode_label_name(b"123").is_err());
+
+        // Invalid: contains special characters
+        assert!(strict.decode_label_name(b"label-name").is_err());
+        assert!(strict.decode_label_name(b"label.name").is_err());
+        assert!(strict.decode_label_name(b"label name").is_err());
+        assert!(strict.decode_label_name(b"label/name").is_err());
+
+        // Invalid: empty
+        assert!(strict.decode_label_name(b"").is_err());
+
+        // Invalid: non-ASCII UTF-8
+        assert!(strict.decode_label_name("ラベル".as_bytes()).is_err());
+
+        // Invalid UTF-8 bytes should fail
+        assert!(strict.decode_label_name(&[0xff, 0xfe]).is_err());
+    }
+
+    #[test]
+    fn test_decode_label_name_lossy() {
+        let lossy = PromValidationMode::Lossy;
+
+        // Label name validation is always enforced.
+        assert!(lossy.decode_label_name(b"__name__").is_ok());
+        assert!(lossy.decode_label_name(b"label-name").is_err());
+        assert!(lossy.decode_label_name(b"0abc").is_err());
+
+        // Invalid UTF-8 bytes fail the label-name byte check.
+        assert!(lossy.decode_label_name(&[0xff, 0xfe]).is_err());
+    }
+
+    #[test]
+    fn test_decode_label_name_unchecked() {
+        let unchecked = PromValidationMode::Unchecked;
+
+        // Label name validation is always enforced.
+        assert!(unchecked.decode_label_name(b"__name__").is_ok());
+        assert!(unchecked.decode_label_name(b"label-name").is_err());
+        assert!(unchecked.decode_label_name(b"0abc").is_err());
+    }
+
+    #[test]
+    fn test_is_valid_prom_label_name_bytes() {
+        assert!(validate_label_name(b"__name__"));
+        assert!(validate_label_name(b"job"));
+        assert!(validate_label_name(b"_"));
+        assert!(validate_label_name(b"A"));
+        assert!(validate_label_name(b"abc123"));
+        assert!(validate_label_name(b"_leading_underscore"));
+
+        assert!(!validate_label_name(b""));
+        assert!(!validate_label_name(b"0starts_with_digit"));
+        assert!(!validate_label_name(b"has-dash"));
+        assert!(!validate_label_name(b"has.dot"));
+        assert!(!validate_label_name(b"has space"));
+        assert!(!validate_label_name(&[0xff, 0xfe]));
     }
 }

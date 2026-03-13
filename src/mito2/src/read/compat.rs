@@ -1418,6 +1418,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_compat_reader_projection_read_superset() {
+        let reader_meta = Arc::new(new_metadata(
+            &[
+                (
+                    0,
+                    SemanticType::Timestamp,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                ),
+                (1, SemanticType::Tag, ConcreteDataType::string_datatype()),
+                (2, SemanticType::Field, ConcreteDataType::int64_datatype()),
+            ],
+            &[1],
+        ));
+        let expect_meta = Arc::new(new_metadata(
+            &[
+                (
+                    0,
+                    SemanticType::Timestamp,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                ),
+                (1, SemanticType::Tag, ConcreteDataType::string_datatype()),
+                (3, SemanticType::Field, ConcreteDataType::int64_datatype()),
+                (2, SemanticType::Field, ConcreteDataType::int64_datatype()),
+                (4, SemanticType::Field, ConcreteDataType::int64_datatype()),
+            ],
+            &[1],
+        ));
+        // Output: tag_1, field_3, field_2. Read also includes field_4.
+        let mapper = ProjectionMapper::new_with_read_columns(
+            &expect_meta,
+            [1, 3, 2].into_iter(),
+            false,
+            vec![1, 3, 2, 4],
+        )
+        .unwrap();
+        let k1 = encode_key(&[Some("a")]);
+        let source_reader = VecBatchReader::new(&[new_batch(&k1, &[(2, false)], 1000, 3)]);
+
+        let mut compat_reader = CompatReader::new(&mapper, reader_meta, source_reader).unwrap();
+        check_reader_result(
+            &mut compat_reader,
+            &[new_batch(&k1, &[(3, true), (2, false), (4, true)], 1000, 3)],
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn test_compat_reader_different_pk_encoding() {
         let mut reader_meta = new_metadata(
             &[
@@ -1552,6 +1599,100 @@ mod tests {
         let expected_schema =
             to_flat_sst_arrow_schema(&expected_metadata, &FlatSchemaOptions::default());
 
+        let expected_columns: Vec<ArrayRef> = vec![
+            tag_dict_array.clone(),
+            Arc::new(Int64Array::from(vec![100, 200])),
+            Arc::new(Int64Array::from(vec![None::<i64>, None::<i64>])),
+            Arc::new(TimestampMillisecondArray::from_iter_values([1000, 2000])),
+            build_flat_test_pk_array(&[&k1, &k1]),
+            Arc::new(UInt64Array::from_iter_values([1, 2])),
+            Arc::new(UInt8Array::from_iter_values([
+                OpType::Put as u8,
+                OpType::Put as u8,
+            ])),
+        ];
+        let expected_batch = RecordBatch::try_new(expected_schema, expected_columns).unwrap();
+
+        assert_eq!(expected_batch, result);
+    }
+
+    #[test]
+    fn test_flat_compat_batch_with_read_projection_superset() {
+        let actual_metadata = Arc::new(new_metadata(
+            &[
+                (
+                    0,
+                    SemanticType::Timestamp,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                ),
+                (1, SemanticType::Tag, ConcreteDataType::string_datatype()),
+                (2, SemanticType::Field, ConcreteDataType::int64_datatype()),
+            ],
+            &[1],
+        ));
+
+        let expected_metadata = Arc::new(new_metadata(
+            &[
+                (
+                    0,
+                    SemanticType::Timestamp,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                ),
+                (1, SemanticType::Tag, ConcreteDataType::string_datatype()),
+                (2, SemanticType::Field, ConcreteDataType::int64_datatype()),
+                // Adds a new field.
+                (3, SemanticType::Field, ConcreteDataType::int64_datatype()),
+            ],
+            &[1],
+        ));
+
+        // Output projection: tag_1, field_2. Read also includes field_3.
+        let mapper = FlatProjectionMapper::new_with_read_columns(
+            &expected_metadata,
+            vec![1, 2],
+            vec![1, 2, 3],
+        )
+        .unwrap();
+        let read_format = FlatReadFormat::new(
+            actual_metadata.clone(),
+            [1, 2, 3].into_iter(),
+            None,
+            "test",
+            false,
+        )
+        .unwrap();
+        let format_projection = read_format.format_projection();
+
+        let compat_batch =
+            FlatCompatBatch::try_new(&mapper, &actual_metadata, format_projection, false)
+                .unwrap()
+                .unwrap();
+
+        let mut tag_builder = StringDictionaryBuilder::<UInt32Type>::new();
+        tag_builder.append_value("tag1");
+        tag_builder.append_value("tag1");
+        let tag_dict_array = Arc::new(tag_builder.finish());
+
+        let k1 = encode_key(&[Some("tag1")]);
+        let input_columns: Vec<ArrayRef> = vec![
+            tag_dict_array.clone(),
+            Arc::new(Int64Array::from(vec![100, 200])),
+            Arc::new(TimestampMillisecondArray::from_iter_values([1000, 2000])),
+            build_flat_test_pk_array(&[&k1, &k1]),
+            Arc::new(UInt64Array::from_iter_values([1, 2])),
+            Arc::new(UInt8Array::from_iter_values([
+                OpType::Put as u8,
+                OpType::Put as u8,
+            ])),
+        ];
+        let input_schema =
+            to_flat_sst_arrow_schema(&actual_metadata, &FlatSchemaOptions::default());
+        let input_batch = RecordBatch::try_new(input_schema, input_columns).unwrap();
+
+        let result = compat_batch.compat(input_batch).unwrap();
+
+        let expected_schema =
+            to_flat_sst_arrow_schema(&expected_metadata, &FlatSchemaOptions::default());
         let expected_columns: Vec<ArrayRef> = vec![
             tag_dict_array.clone(),
             Arc::new(Int64Array::from(vec![100, 200])),

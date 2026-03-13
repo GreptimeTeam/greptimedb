@@ -1,6 +1,6 @@
 -- Migrated from DuckDB test: Multiple window aggregate tests
 -- Tests window aggregate functions
-CREATE TABLE sales(region VARCHAR, "quarter" INTEGER, amount INTEGER, ts TIMESTAMP TIME INDEX);
+CREATE TABLE sales("region" VARCHAR, "quarter" INTEGER, amount INTEGER, ts TIMESTAMP TIME INDEX);
 
 Affected Rows: 0
 

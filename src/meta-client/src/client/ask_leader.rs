@@ -34,7 +34,7 @@ use crate::error::Result;
 
 pub type LeaderProviderRef = Arc<dyn LeaderProvider>;
 
-/// Provide [MetaClient] a Metasrv leader's address.
+/// Provide [`MetaClient`] a Metasrv leader's address.
 #[async_trait]
 pub trait LeaderProvider: Debug + Send + Sync {
     /// Get the leader of the Metasrv. If it returns `None`, or the leader is outdated,
@@ -43,6 +43,13 @@ pub trait LeaderProvider: Debug + Send + Sync {
 
     /// Find the current leader of the Metasrv.
     async fn ask_leader(&self) -> Result<String>;
+}
+
+pub type LeaderProviderFactoryRef = Arc<dyn LeaderProviderFactory>;
+
+/// A factory for creating [`LeaderProvider`] instances.
+pub trait LeaderProviderFactory: Send + Sync + Debug {
+    fn create(&self, peers: &[&str]) -> LeaderProviderRef;
 }
 
 #[derive(Debug)]
@@ -204,5 +211,37 @@ impl LeaderProvider for AskLeader {
 
     async fn ask_leader(&self) -> Result<String> {
         self.ask_leader().await
+    }
+}
+
+/// A factory for creating [`LeaderProvider`] instances.
+#[derive(Clone, Debug)]
+pub struct LeaderProviderFactoryImpl {
+    id: Id,
+    role: Role,
+    max_retry: usize,
+    channel_manager: ChannelManager,
+}
+
+impl LeaderProviderFactoryImpl {
+    pub fn new(id: Id, role: Role, max_retry: usize, channel_manager: ChannelManager) -> Self {
+        Self {
+            id,
+            role,
+            max_retry,
+            channel_manager,
+        }
+    }
+}
+
+impl LeaderProviderFactory for LeaderProviderFactoryImpl {
+    fn create(&self, peers: &[&str]) -> LeaderProviderRef {
+        Arc::new(AskLeader::new(
+            self.id,
+            self.role,
+            peers.iter().map(|p| p.to_string()).collect::<Vec<_>>(),
+            self.channel_manager.clone(),
+            self.max_retry,
+        ))
     }
 }

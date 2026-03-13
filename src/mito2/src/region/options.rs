@@ -39,6 +39,16 @@ use crate::sst::FormatType;
 
 const DEFAULT_INDEX_SEGMENT_ROW_COUNT: usize = 1024;
 
+pub(crate) fn parse_wal_options(
+    options_map: &HashMap<String, String>,
+) -> std::result::Result<WalOptions, serde_json::Error> {
+    options_map
+        .get(WAL_OPTIONS_KEY)
+        .map_or(Ok(WalOptions::default()), |encoded_wal_options| {
+            serde_json::from_str(encoded_wal_options)
+        })
+}
+
 /// Mode to handle duplicate rows while merging.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString)]
 #[serde(rename_all = "snake_case")]
@@ -134,13 +144,7 @@ impl TryFrom<&HashMap<String, String>> for RegionOptions {
             CompactionOptions::default()
         };
 
-        // Tries to decode the wal options from the map or sets to the default if there's none wal options in the map.
-        let wal_options = options_map.get(WAL_OPTIONS_KEY).map_or_else(
-            || Ok(WalOptions::default()),
-            |encoded_wal_options| {
-                serde_json::from_str(encoded_wal_options).context(JsonOptionsSnafu)
-            },
-        )?;
+        let wal_options = parse_wal_options(options_map).context(JsonOptionsSnafu)?;
 
         let index_options: IndexOptions = serde_json::from_str(&json).context(JsonOptionsSnafu)?;
         let memtable = if validate_enum_options(options_map, "memtable.type")? {

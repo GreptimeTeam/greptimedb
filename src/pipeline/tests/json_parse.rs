@@ -52,7 +52,7 @@ transform:
 
     // check schema
     assert_eq!(output.schema[0].column_name, "commit");
-    let type_id: i32 = ColumnDataType::Binary.into();
+    let type_id: i32 = ColumnDataType::Json.into();
     assert_eq!(output.schema[0].datatype, type_id);
 
     // check value
@@ -91,7 +91,7 @@ transform:
 
     // check schema
     assert_eq!(output.schema[0].column_name, "commit_json");
-    let type_id: i32 = ColumnDataType::Binary.into();
+    let type_id: i32 = ColumnDataType::Json.into();
     assert_eq!(output.schema[0].datatype, type_id);
 
     // check value
@@ -160,7 +160,7 @@ transform:
 
     // check schema
     assert_eq!(output.schema[0].column_name, "commit");
-    let type_id: i32 = ColumnDataType::Binary.into();
+    let type_id: i32 = ColumnDataType::Json.into();
     assert_eq!(output.schema[0].datatype, type_id);
 
     // check value

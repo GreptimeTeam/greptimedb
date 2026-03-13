@@ -744,6 +744,18 @@ impl RegionSupervisor {
                 result.migrating
             );
         }
+        if !result.region_not_found.is_empty() {
+            let detecting_regions = result
+                .region_not_found
+                .iter()
+                .map(|region_id| (from_peer_id, *region_id))
+                .collect::<Vec<_>>();
+            self.deregister_failure_detectors(detecting_regions).await;
+            info!(
+                "Region route not found, removed failover detectors for regions: {:?}",
+                result.region_not_found
+            );
+        }
         if !result.table_not_found.is_empty() {
             let detecting_regions = result
                 .table_not_found
@@ -1070,7 +1082,7 @@ pub(crate) mod tests {
         let mut test_create_logical_table_task = test_create_logical_table_task("my_logical_table");
         test_create_logical_table_task.set_table_id(logical_table_id);
         let table_info = test_create_logical_table_task.table_info;
-        let table_route = LogicalTableRouteValue::new(1024, vec![RegionId::new(1025, 0)]);
+        let table_route = LogicalTableRouteValue::new(1024);
         let table_route_value = TableRouteValue::Logical(table_route);
         table_metadata_manager
             .create_table_metadata(table_info, table_route_value, HashMap::new())
@@ -1206,6 +1218,34 @@ pub(crate) mod tests {
         supervisor.failover_counts.insert(detecting_region, 1);
         let result = SubmitRegionMigrationTaskResult {
             table_not_found: vec![region_id],
+            ..Default::default()
+        };
+        supervisor
+            .handle_submit_region_migration_task_result(
+                1,
+                2,
+                Duration::from_millis(1000),
+                RegionMigrationTriggerReason::Manual,
+                result,
+            )
+            .await
+            .unwrap();
+        assert!(!supervisor.failure_detector.contains(&detecting_region));
+        assert!(supervisor.failover_counts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_handle_submit_region_migration_task_result_region_not_found() {
+        common_telemetry::init_default_ut_logging();
+        let (mut supervisor, _) = new_test_supervisor();
+        let region_id = RegionId::new(1, 1);
+        let detecting_region = (1, region_id);
+        supervisor
+            .register_failure_detectors(vec![detecting_region])
+            .await;
+        supervisor.failover_counts.insert(detecting_region, 1);
+        let result = SubmitRegionMigrationTaskResult {
+            region_not_found: vec![region_id],
             ..Default::default()
         };
         supervisor

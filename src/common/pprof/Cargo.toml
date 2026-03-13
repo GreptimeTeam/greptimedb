@@ -7,7 +7,6 @@ license.workspace = true
 [dependencies]
 common-error.workspace = true
 common-macro.workspace = true
-prost.workspace = true
 snafu.workspace = true
 tokio.workspace = true
 

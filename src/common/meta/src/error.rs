@@ -104,6 +104,20 @@ pub enum Error {
         source: common_procedure::error::Error,
     },
 
+    #[snafu(display("Failed to register repartition procedure loader"))]
+    RegisterRepartitionProcedureLoader {
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to create repartition procedure"))]
+    CreateRepartitionProcedure {
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to submit procedure"))]
     SubmitProcedure {
         #[snafu(implicit)]
@@ -185,13 +199,6 @@ pub enum Error {
         err_msg: String,
         #[snafu(implicit)]
         location: Location,
-    },
-
-    #[snafu(display("Failed to convert RawTableInfo into TableInfo"))]
-    ConvertRawTableInfo {
-        #[snafu(implicit)]
-        location: Location,
-        source: datatypes::Error,
     },
 
     #[snafu(display("Primary key '{key}' not found when creating region request"))]
@@ -860,13 +867,6 @@ pub enum Error {
         source: common_procedure::error::Error,
     },
 
-    #[snafu(display("Failed to parse timezone"))]
-    InvalidTimeZone {
-        #[snafu(implicit)]
-        location: Location,
-        #[snafu(source)]
-        error: common_time::error::Error,
-    },
     #[snafu(display("Invalid file path: {}", file_path))]
     InvalidFilePath {
         #[snafu(implicit)]
@@ -1099,7 +1099,6 @@ impl ErrorExt for Error {
             | BuildTableMeta { .. }
             | TableRouteNotFound { .. }
             | TableRepartNotFound { .. }
-            | ConvertRawTableInfo { .. }
             | RegionOperatingRace { .. }
             | EncodeWalOptions { .. }
             | BuildKafkaClient { .. }
@@ -1134,7 +1133,6 @@ impl ErrorExt for Error {
             | InvalidSetDatabaseOption { .. }
             | InvalidUnsetDatabaseOption { .. }
             | InvalidTopicNamePrefix { .. }
-            | InvalidTimeZone { .. }
             | InvalidFileExtension { .. }
             | InvalidFileName { .. }
             | InvalidFlowRequestBody { .. }
@@ -1170,6 +1168,8 @@ impl ErrorExt for Error {
             PutPoison { source, .. } => source.status_code(),
             ConvertColumnDef { source, .. } => source.status_code(),
             ProcedureStateReceiver { source, .. } => source.status_code(),
+            RegisterRepartitionProcedureLoader { source, .. } => source.status_code(),
+            CreateRepartitionProcedure { source, .. } => source.status_code(),
 
             ParseProcedureId { .. }
             | InvalidNumTopics { .. }

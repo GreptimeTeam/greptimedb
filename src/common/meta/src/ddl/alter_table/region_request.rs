@@ -19,10 +19,10 @@ use api::v1::region::{
     AddColumn, AddColumns, DropColumn, DropColumns, RegionColumnDef, alter_request,
 };
 use snafu::OptionExt;
-use table::metadata::RawTableInfo;
+use table::metadata::TableInfo;
 
 use crate::ddl::alter_table::AlterTableProcedure;
-use crate::error::{InvalidProtoMsgSnafu, Result};
+use crate::error::{self, InvalidProtoMsgSnafu, Result};
 
 impl AlterTableProcedure {
     /// Makes alter kind proto that all regions can reuse.
@@ -43,7 +43,7 @@ impl AlterTableProcedure {
 /// It always adds column if not exists and drops column if exists.
 /// It skips the column if it already exists in the table.
 fn create_proto_alter_kind(
-    table_info: &RawTableInfo,
+    table_info: &TableInfo,
     alter_kind: &Kind,
 ) -> Result<Option<alter_request::Kind>> {
     match alter_kind {
@@ -52,7 +52,7 @@ fn create_proto_alter_kind(
             let existing_columns: HashSet<_> = table_info
                 .meta
                 .schema
-                .column_schemas
+                .column_schemas()
                 .iter()
                 .map(|col| &col.name)
                 .collect();
@@ -112,6 +112,10 @@ fn create_proto_alter_kind(
         Kind::UnsetIndexes(v) => Ok(Some(alter_request::Kind::UnsetIndexes(v.clone()))),
         Kind::DropDefaults(v) => Ok(Some(alter_request::Kind::DropDefaults(v.clone()))),
         Kind::SetDefaults(v) => Ok(Some(alter_request::Kind::SetDefaults(v.clone()))),
+        Kind::Repartition(_) => error::UnexpectedSnafu {
+            err_msg: "Repartition operation should be handled through DdlManager and not converted to AlterTableRequest",
+        }
+        .fail()?,
     }
 }
 
@@ -197,6 +201,7 @@ mod tests {
                     follower_peers: vec![],
                     leader_state: None,
                     leader_down_since: None,
+                    write_route_policy: None,
                 }]),
                 HashMap::new(),
             )

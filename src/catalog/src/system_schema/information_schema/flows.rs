@@ -36,6 +36,11 @@ use datatypes::vectors::{
 };
 use futures::TryStreamExt;
 use snafu::{OptionExt, ResultExt};
+use sql::ast::Ident;
+use sql::dialect::GreptimeDbDialect;
+use sql::parser::ParserContext;
+use sql::statements::create::{CreateFlow, SqlOrTql};
+use sql::statements::statement::Statement;
 use store_api::storage::{ScanRequest, TableId};
 
 use crate::CatalogManager;
@@ -119,6 +124,51 @@ impl InformationSchemaFlows {
             .map(|(name, ty, nullable)| ColumnSchema::new(name, ty, nullable))
             .collect(),
         ))
+    }
+
+    /// Generates the CREATE FLOW statement for the flow_definition column
+    pub(crate) fn generate_show_create_flow(flow_info: &FlowInfoValue) -> Result<String> {
+        let mut parser_ctx = ParserContext::new(&GreptimeDbDialect {}, flow_info.raw_sql())
+            .map_err(BoxedError::new)
+            .context(InternalSnafu)?;
+
+        let query = parser_ctx
+            .parse_statement()
+            .map_err(BoxedError::new)
+            .context(InternalSnafu)?;
+
+        let raw_query = match &query {
+            Statement::Tql(_) => flow_info.raw_sql().clone(),
+            _ => query.to_string(),
+        };
+
+        let query = Box::new(
+            SqlOrTql::try_from_statement(query, &raw_query)
+                .map_err(BoxedError::new)
+                .context(InternalSnafu)?,
+        );
+
+        let comment = if flow_info.comment().is_empty() {
+            None
+        } else {
+            Some(flow_info.comment().clone())
+        };
+
+        let stmt = CreateFlow {
+            flow_name: sql::ast::ObjectName::from(vec![Ident::new(flow_info.flow_name())]),
+            sink_table_name: sql::ast::ObjectName::from(vec![
+                Ident::new(&flow_info.sink_table_name().schema_name),
+                Ident::new(&flow_info.sink_table_name().table_name),
+            ]),
+            or_replace: false,
+            if_not_exists: true,
+            expire_after: flow_info.expire_after(),
+            eval_interval: flow_info.eval_interval(),
+            comment,
+            query,
+        };
+
+        Ok(stmt.to_string())
     }
 
     fn builder(&self) -> InformationSchemaFlowsBuilder {
@@ -291,7 +341,10 @@ impl InformationSchemaFlowsBuilder {
                 .and_then(|state| state.state_size.get(&flow_id).map(|v| *v as u64)),
         );
         self.table_catalogs.push(Some(flow_info.catalog_name()));
-        self.raw_sqls.push(Some(flow_info.raw_sql()));
+        self.raw_sqls
+            .push(Some(&InformationSchemaFlows::generate_show_create_flow(
+                &flow_info,
+            )?));
         self.comments.push(Some(flow_info.comment()));
         self.expire_afters.push(flow_info.expire_after());
         self.source_table_id_groups.push(Some(
@@ -327,19 +380,14 @@ impl InformationSchemaFlowsBuilder {
             }));
 
         let mut source_table_names = vec![];
-        let catalog_name = self.catalog_name.clone();
         let catalog_manager = self
             .catalog_manager
             .upgrade()
             .context(UpgradeWeakCatalogManagerRefSnafu)?;
-        for schema_name in catalog_manager.schema_names(&catalog_name, None).await? {
-            source_table_names.extend(
-                catalog_manager
-                    .tables_by_ids(&catalog_name, &schema_name, flow_info.source_table_ids())
-                    .await?
-                    .into_iter()
-                    .map(|table| table.table_info().full_table_name()),
-            );
+        for table_id in flow_info.source_table_ids() {
+            if let Some(table_info) = catalog_manager.table_info_by_id(*table_id).await? {
+                source_table_names.push(table_info.full_table_name());
+            }
         }
 
         let source_table_names = source_table_names.join(",");
