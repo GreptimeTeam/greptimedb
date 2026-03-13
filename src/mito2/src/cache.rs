@@ -78,12 +78,12 @@ const SELECTOR_RESULT_TYPE: &str = "selector_result";
 pub(crate) struct CachedSstMeta {
     parquet_metadata: Arc<ParquetMetaData>,
     region_metadata: RegionMetadataRef,
-    region_metadata_size_hint: usize,
+    region_metadata_weight: usize,
 }
 
 impl CachedSstMeta {
     pub(crate) fn try_new(file_path: &str, parquet_metadata: ParquetMetaData) -> Result<Self> {
-        let (region_metadata, region_metadata_size_hint) = {
+        let (region_metadata, region_metadata_weight) = {
             let file_metadata = parquet_metadata.file_metadata();
             let key_values = file_metadata
                 .key_value_metadata()
@@ -109,14 +109,18 @@ impl CachedSstMeta {
                 store_api::metadata::RegionMetadata::from_json(json)
                     .context(InvalidMetadataSnafu)?,
             );
-            (region_metadata, json.len())
+            // Keep the previous JSON-byte floor and charge the decoded structures as well.
+            (
+                region_metadata.clone(),
+                region_metadata.estimated_size().max(json.len()),
+            )
         };
         let parquet_metadata = Arc::new(strip_region_metadata_from_parquet(parquet_metadata));
 
         Ok(Self {
             parquet_metadata,
             region_metadata,
-            region_metadata_size_hint,
+            region_metadata_weight,
         })
     }
 
@@ -877,8 +881,7 @@ impl CacheManagerBuilder {
 
 fn meta_cache_weight(k: &SstMetaKey, v: &Arc<CachedSstMeta>) -> u32 {
     // We ignore the size of `Arc`.
-    (k.estimated_size() + parquet_meta_size(&v.parquet_metadata) + v.region_metadata_size_hint)
-        as u32
+    (k.estimated_size() + parquet_meta_size(&v.parquet_metadata) + v.region_metadata_weight) as u32
 }
 
 fn vector_cache_weight(_k: &(ConcreteDataType, Value), v: &VectorRef) -> u32 {
@@ -1055,15 +1058,20 @@ type SelectorResultCache = Cache<SelectorResultKey, Arc<SelectorResultValue>>;
 mod tests {
     use std::sync::Arc;
 
+    use api::v1::SemanticType;
     use api::v1::index::{BloomFilterMeta, InvertedIndexMetas};
+    use datatypes::schema::ColumnSchema;
     use datatypes::vectors::Int64Vector;
     use puffin::file_metadata::FileMetadata;
+    use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
     use store_api::storage::ColumnId;
 
     use super::*;
     use crate::cache::index::bloom_filter_index::Tag;
     use crate::cache::index::result_cache::PredicateKey;
-    use crate::cache::test_util::{parquet_meta, sst_parquet_meta};
+    use crate::cache::test_util::{
+        parquet_meta, sst_parquet_meta, sst_parquet_meta_with_region_metadata,
+    };
     use crate::sst::parquet::row_selection::RowGroupSelection;
 
     #[tokio::test]
@@ -1138,6 +1146,25 @@ mod tests {
                 .get_parquet_meta_data(file_id, &mut metrics, Default::default())
                 .await
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn test_meta_cache_weight_accounts_for_decoded_region_metadata() {
+        let region_metadata = Arc::new(wide_region_metadata(128));
+        let json_len = region_metadata.to_json().unwrap().len();
+        let metadata = sst_parquet_meta_with_region_metadata(region_metadata.clone());
+        let cached = Arc::new(
+            CachedSstMeta::try_new("test.parquet", Arc::unwrap_or_clone(metadata)).unwrap(),
+        );
+        let key = SstMetaKey(region_metadata.region_id, FileId::random());
+
+        assert!(cached.region_metadata_weight > json_len);
+        assert_eq!(
+            meta_cache_weight(&key, &cached) as usize,
+            key.estimated_size()
+                + parquet_meta_size(&cached.parquet_metadata)
+                + cached.region_metadata_weight
         );
     }
 
@@ -1279,5 +1306,46 @@ mod tests {
         );
         assert!(result_cache.get(&predicate, index_id.file_id()).is_none());
         assert!(puffin_metadata_cache.get_metadata(&file_id_str).is_none());
+    }
+
+    fn wide_region_metadata(column_count: u32) -> RegionMetadata {
+        let region_id = RegionId::new(1024, 7);
+        let mut builder = RegionMetadataBuilder::new(region_id);
+        let mut primary_key = Vec::new();
+
+        for column_id in 0..column_count {
+            let semantic_type = if column_id < 32 {
+                primary_key.push(column_id);
+                SemanticType::Tag
+            } else {
+                SemanticType::Field
+            };
+            let mut column_schema = ColumnSchema::new(
+                format!("wide_column_{column_id}"),
+                ConcreteDataType::string_datatype(),
+                true,
+            );
+            column_schema
+                .mut_metadata()
+                .insert(format!("cache_key_{column_id}"), "cache_value".repeat(4));
+            builder.push_column_metadata(ColumnMetadata {
+                column_schema,
+                semantic_type,
+                column_id,
+            });
+        }
+
+        builder.push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            semantic_type: SemanticType::Timestamp,
+            column_id: column_count,
+        });
+        builder.primary_key(primary_key);
+
+        builder.build().unwrap()
     }
 }

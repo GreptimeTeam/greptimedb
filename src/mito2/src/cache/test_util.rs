@@ -46,6 +46,15 @@ pub(crate) fn sst_parquet_meta() -> (Arc<ParquetMetaData>, RegionMetadataRef) {
     (builder.metadata().clone(), region_metadata)
 }
 
+/// Returns parquet metadata for an SST parquet file with custom region metadata.
+pub(crate) fn sst_parquet_meta_with_region_metadata(
+    region_metadata: RegionMetadataRef,
+) -> Arc<ParquetMetaData> {
+    let file_data = parquet_file_data_with_region_metadata(&region_metadata);
+    let builder = ParquetRecordBatchReaderBuilder::try_new(Bytes::from(file_data)).unwrap();
+    builder.metadata().clone()
+}
+
 /// Write a test parquet file to a buffer
 fn parquet_file_data() -> Vec<u8> {
     parquet_file_data_inner(None)
