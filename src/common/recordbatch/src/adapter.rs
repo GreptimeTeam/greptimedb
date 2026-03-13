@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use common_base::readable_size::ReadableSize;
-use common_telemetry::tracing::{Span, debug_span};
+use common_telemetry::tracing::{Span, info_span};
 use common_time::util::format_nanoseconds_human_readable;
 use datafusion::arrow::compute::cast;
 use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
@@ -247,7 +247,7 @@ impl RecordBatchStreamAdapter {
     pub fn try_new_with_span(stream: DfSendableRecordBatchStream, span: Span) -> Result<Self> {
         let schema =
             Arc::new(Schema::try_from(stream.schema()).context(error::SchemaConversionSnafu)?);
-        let subspan = debug_span!(parent: &span, "RecordBatchStreamAdapter");
+        let subspan = info_span!(parent: &span, "RecordBatchStreamAdapter");
         Ok(Self {
             schema,
             stream,
@@ -301,13 +301,15 @@ impl Stream for RecordBatchStreamAdapter {
             .map(|m| m.elapsed_compute().clone())
             .unwrap_or_default();
         let _guard = timer.timer();
-        let poll_span = debug_span!(parent: &self.span, "poll_next");
+        let poll_span = info_span!(parent: &self.span, "poll_next");
         let _entered = poll_span.enter();
         match Pin::new(&mut self.stream).poll_next(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Some(df_record_batch)) => {
                 let df_record_batch = df_record_batch?;
-                if let Metrics::Unresolved(df_plan) = &self.metrics_2 {
+                if let Metrics::Unresolved(df_plan) | Metrics::PartialResolved(df_plan, _) =
+                    &self.metrics_2
+                {
                     let mut metric_collector = MetricCollector::new(self.explain_verbose);
                     accept(df_plan.as_ref(), &mut metric_collector).unwrap();
                     self.metrics_2 = Metrics::PartialResolved(
@@ -460,6 +462,7 @@ fn format_bytes_human_readable(bytes: usize) -> String {
     format!("{}", ReadableSize(bytes as u64))
 }
 
+/// Only display `plan_metrics` with indent `  ` (2 spaces).
 impl Display for RecordBatchMetrics {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for metric in &self.plan_metrics {
