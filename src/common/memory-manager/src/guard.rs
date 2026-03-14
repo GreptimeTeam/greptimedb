@@ -43,13 +43,17 @@ pub(crate) enum GuardState<M: MemoryMetrics> {
 impl<M: MemoryMetrics> GuardState<M> {
     fn release(self) {
         match self {
-            GuardState::Released => None,
+            GuardState::Released => {}
             GuardState::Unlimited {
                 quota,
                 granted_bytes,
-            } => Some(quota.release_bytes(granted_bytes)),
-            GuardState::Limited { quota, permit } => Some(quota.release_permit(permit)),
-        };
+            } => {
+                quota.sub_in_use(granted_bytes);
+            }
+            GuardState::Limited { quota, permit } => {
+                quota.release_permit(permit);
+            }
+        }
     }
 }
 
@@ -240,7 +244,8 @@ impl<M: MemoryMetrics> MemoryGuard<M> {
                     return false;
                 }
 
-                *granted_bytes -= quota.release_bytes(bytes);
+                quota.sub_in_use(bytes);
+                *granted_bytes = granted_bytes.saturating_sub(bytes);
                 true
             }
             GuardState::Limited { quota, permit } => {

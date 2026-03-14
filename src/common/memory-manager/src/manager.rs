@@ -244,11 +244,9 @@ impl<M: MemoryMetrics> MemoryQuota<M> {
         self.metrics.set_in_use(bytes as i64);
     }
 
-    pub(crate) fn release_permit(&self, permit: OwnedSemaphorePermit) -> u64 {
-        let bytes = self.permits_to_bytes(permit.num_permits() as u32);
+    pub(crate) fn release_permit(&self, permit: OwnedSemaphorePermit) {
         drop(permit);
         self.update_in_use_metric();
-        bytes
     }
 }
 
@@ -289,10 +287,5 @@ impl<M: MemoryMetrics> UnlimitedMemoryQuota<M> {
         );
         let new_total = previous.saturating_sub(bytes);
         self.metrics.set_in_use(new_total as i64);
-    }
-
-    pub(crate) fn release_bytes(&self, bytes: u64) -> u64 {
-        self.sub_in_use(bytes);
-        bytes
     }
 }
