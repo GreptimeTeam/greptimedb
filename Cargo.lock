@@ -2585,7 +2585,6 @@ version = "1.0.0-rc.1"
 dependencies = [
  "common-error",
  "common-macro",
- "common-telemetry",
  "humantime",
  "serde",
  "snafu 0.8.6",

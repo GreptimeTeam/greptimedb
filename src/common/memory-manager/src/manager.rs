@@ -261,7 +261,7 @@ impl<M: MemoryMetrics> UnlimitedMemoryQuota<M> {
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 Some(current.saturating_add(bytes))
             })
-            .expect("saturating_add update must succeed");
+            .unwrap();
         let new_total = previous.saturating_add(bytes);
         debug_assert!(
             new_total >= previous,
@@ -280,7 +280,7 @@ impl<M: MemoryMetrics> UnlimitedMemoryQuota<M> {
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 Some(current.saturating_sub(bytes))
             })
-            .expect("saturating_sub update must succeed");
+            .unwrap();
         debug_assert!(
             previous >= bytes,
             "unlimited memory usage counter underflowed: current={previous}, release={bytes}"
