@@ -405,18 +405,12 @@ pub fn jsonb_to_string(val: &[u8]) -> Result<String> {
 /// Converts a json type value to serde_json::Value
 pub fn jsonb_to_serde_json(val: &[u8]) -> Result<serde_json::Value> {
     let json_string = jsonb_to_string(val)?;
-    let normalized = fix_unicode_point(&json_string)?;
-    serde_json::Value::from_str(&normalized).context(DeserializeSnafu { json: normalized })
+    serde_json::Value::from_str(&json_string).context(DeserializeSnafu { json: json_string })
 }
 
 /// Normalizes a JSON string by converting Rust-style Unicode escape sequences to JSON-compatible format.
 ///
-/// This function is intended to be used on JSON strings produced from the internal
-/// JSONB representation (e.g. via [`jsonb_to_string`]). It first calls
-/// `serde_json::Value::from_str` to check if the string is valid. If that succeeds,
-/// the original string is returned as-is.
-///
-/// If the initial parse fails, the input is scanned for Rust-style Unicode code
+/// The input is scanned for Rust-style Unicode code
 /// point escapes of the form `\\u{H...}` (a backslash, `u`, an opening brace,
 /// followed by 1–6 hexadecimal digits, and a closing brace). Each such escape is
 /// converted into JSON-compatible UTF‑16 escape sequences:
@@ -427,8 +421,7 @@ pub fn jsonb_to_serde_json(val: &[u8]) -> Result<serde_json::Value> {
 ///   the code point is encoded as a UTF‑16 surrogate pair and emitted as two consecutive
 ///   `\\uXXXX` sequences (as JSON format required).
 ///
-/// After this normalization, the function returns the normalized string, or a
-/// `DeserializeSnafu` error if the parse failed for reasons other than invalid escape sequences.
+/// After this normalization, the function returns the normalized string
 fn fix_unicode_point(json: &str) -> Result<String> {
     static UNICODE_CODE_POINT_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
         // Match literal "\u{...}" sequences, capturing 1–6 (code point range) hex digits
