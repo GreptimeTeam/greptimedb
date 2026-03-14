@@ -915,6 +915,7 @@ impl PromPlanner {
                 .time_index_column
                 .clone()
                 .expect("time index should be set in `setup_context`"),
+            self.ctx.tag_columns.clone(),
             self.ctx.field_columns.first().cloned(),
             normalize,
         );
