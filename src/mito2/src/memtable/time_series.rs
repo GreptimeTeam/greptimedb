@@ -51,9 +51,10 @@ use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::simple_bulk_memtable::SimpleBulkMemtable;
 use crate::memtable::stats::WriteMetrics;
 use crate::memtable::{
-    AllocTracker, BatchToRecordBatchContext, BoxedBatchIterator, IterBuilder, KeyValues,
-    MemScanMetrics, Memtable, MemtableBuilder, MemtableId, MemtableRange, MemtableRangeContext,
-    MemtableRanges, MemtableRef, MemtableStats, RangesOptions, read_column_ids_from_projection,
+    AllocTracker, BatchToRecordBatchContext, BoxedBatchIterator, BoxedRecordBatchIterator,
+    IterBuilder, KeyValues, MemScanMetrics, Memtable, MemtableBuilder, MemtableId, MemtableRange,
+    MemtableRangeContext, MemtableRanges, MemtableRef, MemtableStats, RangesOptions,
+    read_column_ids_from_projection,
 };
 use crate::metrics::{
     MEMTABLE_ACTIVE_FIELD_BUILDER_COUNT, MEMTABLE_ACTIVE_SERIES_COUNT, READ_ROWS_TOTAL,
@@ -283,6 +284,10 @@ impl Memtable for TimeSeriesMemtable {
                 .map(|c| c.column_id)
                 .collect()
         };
+        let adapter_context = Arc::new(BatchToRecordBatchContext::new(
+            self.region_metadata.clone(),
+            read_column_ids,
+        ));
         let builder = Box::new(TimeSeriesIterBuilder {
             series_set: self.series_set.clone(),
             projection,
@@ -290,11 +295,8 @@ impl Memtable for TimeSeriesMemtable {
             dedup: self.dedup,
             merge_mode: self.merge_mode,
             sequence,
+            batch_to_record_batch: adapter_context.clone(),
         });
-        let adapter_context = Arc::new(BatchToRecordBatchContext::new(
-            self.region_metadata.clone(),
-            read_column_ids,
-        ));
         let context = Arc::new(MemtableRangeContext::new_with_batch_to_record_batch(
             self.id,
             builder,
@@ -1249,6 +1251,7 @@ struct TimeSeriesIterBuilder {
     dedup: bool,
     sequence: Option<SequenceRange>,
     merge_mode: MergeMode,
+    batch_to_record_batch: Arc<BatchToRecordBatchContext>,
 }
 
 impl IterBuilder for TimeSeriesIterBuilder {
@@ -1267,6 +1270,14 @@ impl IterBuilder for TimeSeriesIterBuilder {
         } else {
             Ok(Box::new(iter))
         }
+    }
+
+    fn build_record_batch(
+        &self,
+        metrics: Option<MemScanMetrics>,
+    ) -> Result<BoxedRecordBatchIterator> {
+        let iter = self.build(metrics)?;
+        Ok(self.batch_to_record_batch.adapt_iter(iter))
     }
 }
 
@@ -2013,5 +2024,266 @@ mod tests {
         assert_eq!(5, total_rows);
         all_timestamps.sort();
         assert_eq!(vec![3, 4, 5, 6, 7], all_timestamps);
+    }
+
+    /// Helper to create a TimeSeriesIterBuilder from a memtable and schema.
+    fn build_iter_builder(
+        schema: &RegionMetadataRef,
+        memtable: &TimeSeriesMemtable,
+        projection: Option<&[ColumnId]>,
+        dedup: bool,
+        merge_mode: MergeMode,
+        sequence: Option<SequenceRange>,
+    ) -> TimeSeriesIterBuilder {
+        let read_column_ids = read_column_ids_from_projection(schema, projection);
+        let field_projection = if let Some(projection) = projection {
+            projection.iter().copied().collect()
+        } else {
+            schema.field_columns().map(|c| c.column_id).collect()
+        };
+        let adapter_context = Arc::new(BatchToRecordBatchContext::new(
+            schema.clone(),
+            read_column_ids,
+        ));
+        TimeSeriesIterBuilder {
+            series_set: memtable.series_set.clone(),
+            projection: field_projection,
+            predicate: None,
+            dedup,
+            merge_mode,
+            sequence,
+            batch_to_record_batch: adapter_context,
+        }
+    }
+
+    #[test]
+    fn test_iter_builder_build_record_batch_basic() {
+        let schema = schema_for_test();
+        let memtable = TimeSeriesMemtable::new(schema.clone(), 1, None, true, MergeMode::LastRow);
+
+        let kvs = build_key_values(&schema, "hello".to_string(), 42, 10);
+        memtable.write(&kvs).unwrap();
+
+        let builder = build_iter_builder(&schema, &memtable, None, true, MergeMode::LastRow, None);
+
+        let mut iter = builder.build_record_batch(None).unwrap();
+        let rb = iter.next().transpose().unwrap().unwrap();
+        assert_eq!(10, rb.num_rows());
+
+        let rb_schema = rb.schema();
+        let col_names: Vec<_> = rb_schema
+            .fields()
+            .iter()
+            .map(|f| f.name().as_str())
+            .collect();
+        assert_eq!(
+            col_names,
+            vec![
+                "k0",
+                "k1",
+                "v0",
+                "v1",
+                "ts",
+                "__primary_key",
+                "__sequence",
+                "__op_type",
+            ]
+        );
+
+        assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn test_iter_builder_build_record_batch_with_projection() {
+        let schema = schema_for_test();
+        let memtable = TimeSeriesMemtable::new(schema.clone(), 1, None, true, MergeMode::LastRow);
+
+        let kvs = build_key_values(&schema, "test".to_string(), 1, 5);
+        memtable.write(&kvs).unwrap();
+
+        // Project only field v0 (column_id=3) and ts (column_id=2).
+        let projection = vec![2, 3];
+        let builder = build_iter_builder(
+            &schema,
+            &memtable,
+            Some(&projection),
+            true,
+            MergeMode::LastRow,
+            None,
+        );
+
+        let mut iter = builder.build_record_batch(None).unwrap();
+        let rb = iter.next().transpose().unwrap().unwrap();
+        assert_eq!(5, rb.num_rows());
+
+        let rb_schema = rb.schema();
+        let col_names: Vec<_> = rb_schema
+            .fields()
+            .iter()
+            .map(|f| f.name().as_str())
+            .collect();
+        // Only projected columns + internal columns.
+        assert_eq!(
+            col_names,
+            vec!["v0", "ts", "__primary_key", "__sequence", "__op_type",]
+        );
+
+        assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn test_iter_builder_build_record_batch_multiple_series() {
+        let schema = schema_for_test();
+        let memtable = TimeSeriesMemtable::new(schema.clone(), 1, None, true, MergeMode::LastRow);
+
+        let kvs_a = build_key_values(&schema, "aaa".to_string(), 1, 3);
+        let kvs_b = build_key_values(&schema, "bbb".to_string(), 2, 4);
+        memtable.write(&kvs_a).unwrap();
+        memtable.write(&kvs_b).unwrap();
+
+        let builder = build_iter_builder(&schema, &memtable, None, true, MergeMode::LastRow, None);
+
+        let iter = builder.build_record_batch(None).unwrap();
+        let mut total_rows = 0;
+        for rb in iter {
+            let rb = rb.unwrap();
+            total_rows += rb.num_rows();
+            assert_eq!(8, rb.num_columns());
+        }
+        assert_eq!(7, total_rows);
+    }
+
+    #[test]
+    fn test_iter_builder_build_record_batch_dedup() {
+        let schema = schema_for_test();
+        let memtable = TimeSeriesMemtable::new(schema.clone(), 1, None, true, MergeMode::LastRow);
+
+        // Write same data twice — dedup should keep only one copy per timestamp.
+        let kvs = build_key_values(&schema, "dup".to_string(), 10, 5);
+        memtable.write(&kvs).unwrap();
+        memtable.write(&kvs).unwrap();
+
+        let builder = build_iter_builder(&schema, &memtable, None, true, MergeMode::LastRow, None);
+
+        let iter = builder.build_record_batch(None).unwrap();
+        let total_rows: usize = iter.map(|rb| rb.unwrap().num_rows()).sum();
+        assert_eq!(5, total_rows);
+    }
+
+    #[test]
+    fn test_iter_builder_build_record_batch_no_dedup() {
+        let schema = schema_for_test();
+        let memtable = TimeSeriesMemtable::new(schema.clone(), 1, None, false, MergeMode::LastRow);
+
+        let kvs = build_key_values(&schema, "dup".to_string(), 10, 5);
+        memtable.write(&kvs).unwrap();
+        memtable.write(&kvs).unwrap();
+
+        let builder = build_iter_builder(&schema, &memtable, None, false, MergeMode::LastRow, None);
+
+        let iter = builder.build_record_batch(None).unwrap();
+        let total_rows: usize = iter.map(|rb| rb.unwrap().num_rows()).sum();
+        assert_eq!(10, total_rows);
+    }
+
+    #[test]
+    fn test_iter_builder_build_record_batch_with_sequence_filter() {
+        let schema = schema_for_test();
+        let memtable = TimeSeriesMemtable::new(schema.clone(), 1, None, true, MergeMode::LastRow);
+
+        // build_key_values creates a mutation with base sequence=0.
+        // Each row gets sequence = base + row_index, so 5 rows get sequences 0,1,2,3,4.
+        let kvs = build_key_values(&schema, "seq".to_string(), 1, 5);
+        memtable.write(&kvs).unwrap();
+
+        // Filter to sequence > 4 — should yield no rows.
+        let builder = build_iter_builder(
+            &schema,
+            &memtable,
+            None,
+            true,
+            MergeMode::LastRow,
+            Some(SequenceRange::Gt { min: 4 }),
+        );
+
+        let iter = builder.build_record_batch(None).unwrap();
+        let total_rows: usize = iter.map(|rb| rb.unwrap().num_rows()).sum();
+        assert_eq!(0, total_rows);
+
+        // Filter to sequence <= 2 — should yield 3 rows (sequences 0, 1, 2).
+        let builder = build_iter_builder(
+            &schema,
+            &memtable,
+            None,
+            true,
+            MergeMode::LastRow,
+            Some(SequenceRange::LtEq { max: 2 }),
+        );
+
+        let iter = builder.build_record_batch(None).unwrap();
+        let total_rows: usize = iter.map(|rb| rb.unwrap().num_rows()).sum();
+        assert_eq!(3, total_rows);
+    }
+
+    #[test]
+    fn test_iter_builder_build_record_batch_data_correctness() {
+        use datatypes::arrow::array::{
+            Float64Array, Int64Array, TimestampMillisecondArray, UInt8Array,
+        };
+
+        let schema = schema_for_test();
+        let memtable = TimeSeriesMemtable::new(schema.clone(), 1, None, true, MergeMode::LastRow);
+
+        let kvs = build_key_values(&schema, "check".to_string(), 7, 3);
+        memtable.write(&kvs).unwrap();
+
+        let builder = build_iter_builder(&schema, &memtable, None, true, MergeMode::LastRow, None);
+
+        let mut iter = builder.build_record_batch(None).unwrap();
+        let rb = iter.next().transpose().unwrap().unwrap();
+        assert_eq!(3, rb.num_rows());
+
+        // Verify timestamp values.
+        let ts_col = rb
+            .column_by_name("ts")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap();
+        let timestamps: Vec<_> = (0..ts_col.len()).map(|i| ts_col.value(i)).collect();
+        assert_eq!(vec![0, 1, 2], timestamps);
+
+        // Verify field v0 values.
+        let v0_col = rb
+            .column_by_name("v0")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let v0_values: Vec<_> = (0..v0_col.len()).map(|i| v0_col.value(i)).collect();
+        assert_eq!(vec![0, 1, 2], v0_values);
+
+        // Verify field v1 values.
+        let v1_col = rb
+            .column_by_name("v1")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        let v1_values: Vec<_> = (0..v1_col.len()).map(|i| v1_col.value(i)).collect();
+        assert_eq!(vec![0.0, 1.0, 2.0], v1_values);
+
+        // Verify op_type is all Put (1).
+        let op_col = rb
+            .column_by_name("__op_type")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<UInt8Array>()
+            .unwrap();
+        for i in 0..op_col.len() {
+            assert_eq!(OpType::Put as u8, op_col.value(i));
+        }
+
+        assert!(iter.next().is_none());
     }
 }
