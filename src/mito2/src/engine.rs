@@ -129,8 +129,8 @@ use crate::cache::{CacheManagerRef, CacheStrategy};
 use crate::config::MitoConfig;
 use crate::engine::puffin_index::{IndexEntryContext, collect_index_entries_from_puffin};
 use crate::error::{
-    InvalidRequestSnafu, JoinSnafu, MitoManifestInfoSnafu, RecvSnafu, RegionNotFoundSnafu, Result,
-    SerdeJsonSnafu, SerializeColumnMetadataSnafu,
+    IncrementalQueryStaleSnafu, InvalidRequestSnafu, JoinSnafu, MitoManifestInfoSnafu, RecvSnafu,
+    RegionNotFoundSnafu, Result, SerdeJsonSnafu, SerializeColumnMetadataSnafu,
 };
 #[cfg(feature = "enterprise")]
 use crate::extension::BoxedExtensionRangeProviderFactory;
@@ -1017,6 +1017,19 @@ impl EngineInner {
         // Reading a region doesn't need to go through the region worker thread.
         let region = self.find_region(region_id)?;
         let version = region.version();
+
+        if let Some(given_seq) = request.memtable_min_sequence {
+            let min_readable_seq = version.flushed_sequence;
+            ensure!(
+                given_seq >= min_readable_seq,
+                IncrementalQueryStaleSnafu {
+                    region_id,
+                    given_seq,
+                    min_readable_seq,
+                }
+            );
+        }
+
         // Get cache.
         let cache_manager = self.workers.cache_manager();
 
