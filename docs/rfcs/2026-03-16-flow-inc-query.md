@@ -13,8 +13,7 @@ When incremental reads are stale or correctness cannot be proven, Flow falls bac
 
 # Motivation
 
-Flow batching currently still need to repeatedly compute old data in the same time window, so having the chance to do incremental query 
-could be useful for flow's performance.
+Flow batching still needs to repeatedly compute old data in the same time window, so incremental query can improve Flow performance.
 
 # Goals
 
@@ -60,12 +59,13 @@ Behavior:
 
 - if `given_seq < min_readable_seq`, return stale error
 - if `given_seq == min_readable_seq`, query is valid and reads `seq > given_seq`
+- if `given_seq > min_readable_seq`, query is also valid and reads `seq > given_seq`
 
 ## 4) Watermark return
 
 Extend query metrics with optional per-region watermark map:
 
-- `region_latest_sequences: Vec<(u64, u64)>`
+- `region_latest_sequences: Vec<(region_id: u64, latest_sequence: u64)>`
 
 Rules:
 
@@ -105,10 +105,25 @@ stateDiagram-v2
     Incremental --> [*]: Flow stops
 ```
 
+### Fallback Policy
+
+Fallback to full mode is deterministic and is triggered by any of the following:
+
+1. `IncrementalQueryStale` is returned.
+2. Incremental query fails with execution errors.
+3. Incremental query succeeds but watermark is absent or incomplete for participating regions.
+
+Policy behavior:
+
+1. Do not advance any checkpoint in the failed/incomplete round.
+2. Switch to full mode for the affected flow/window in the next round.
+3. Return to incremental mode only after a full query succeeds with a complete correctness watermark map.
+
 # Distributed and Compatibility Requirements
 
 1. Distributed path must preserve region-level snapshot/read-bound semantics end-to-end.
 2. `snapshot_seqs` transport and `flow.*` options must both be carried correctly.
+   - `snapshot_seqs` means the per-region snapshot upper-bound map: `region_id -> sequence`.
 3. New metrics fields must be backward-compatible (old clients ignore unknown fields).
 
 # Rollout Plan
