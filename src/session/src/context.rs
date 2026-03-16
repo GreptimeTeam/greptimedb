@@ -433,6 +433,10 @@ impl QueryContext {
         self.snapshot_seqs.read().unwrap().clone()
     }
 
+    pub fn sst_min_sequences(&self) -> HashMap<u64, u64> {
+        self.sst_min_sequences.read().unwrap().clone()
+    }
+
     pub fn get_snapshot(&self, region_id: u64) -> Option<u64> {
         self.snapshot_seqs.read().unwrap().get(&region_id).cloned()
     }
@@ -669,6 +673,8 @@ impl ConfigurationVariables {
 
 #[cfg(test)]
 mod test {
+    use std::collections::HashMap;
+
     use common_catalog::consts::DEFAULT_CATALOG_NAME;
 
     use super::*;
@@ -703,5 +709,31 @@ mod test {
 
         let context = QueryContext::with(DEFAULT_CATALOG_NAME, "test");
         assert_eq!("test", context.get_db_string());
+    }
+
+    #[test]
+    fn test_api_query_context_roundtrip_with_sequences() {
+        let api_ctx = api::v1::QueryContext {
+            current_catalog: "c1".to_string(),
+            current_schema: "s1".to_string(),
+            timezone: "UTC".to_string(),
+            extensions: HashMap::from([("flow.return_region_seq".to_string(), "true".to_string())]),
+            channel: Channel::Grpc as u32,
+            snapshot_seqs: Some(api::v1::SnapshotSequences {
+                snapshot_seqs: HashMap::from([(1, 100)]),
+                sst_min_sequences: HashMap::from([(1, 90)]),
+            }),
+            explain: None,
+        };
+
+        let session_ctx: QueryContext = api_ctx.clone().into();
+        let roundtrip_api: api::v1::QueryContext = session_ctx.into();
+
+        assert_eq!(roundtrip_api.current_catalog, api_ctx.current_catalog);
+        assert_eq!(roundtrip_api.current_schema, api_ctx.current_schema);
+        assert_eq!(roundtrip_api.timezone, api_ctx.timezone);
+        assert_eq!(roundtrip_api.extensions, api_ctx.extensions);
+        assert_eq!(roundtrip_api.channel, api_ctx.channel);
+        assert_eq!(roundtrip_api.snapshot_seqs, api_ctx.snapshot_seqs);
     }
 }
