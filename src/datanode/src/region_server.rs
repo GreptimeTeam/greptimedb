@@ -17,8 +17,10 @@ mod catalog;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::ops::Deref;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use api::region::RegionResponse;
@@ -36,7 +38,8 @@ use common_error::status_code::StatusCode;
 use common_meta::datanode::TopicStatsReporter;
 use common_query::OutputData;
 use common_query::request::QueryRequest;
-use common_recordbatch::SendableRecordBatchStream;
+use common_recordbatch::adapter::RecordBatchMetrics;
+use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use common_runtime::Runtime;
 use common_telemetry::tracing::{self, info_span};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
@@ -45,6 +48,7 @@ use dashmap::DashMap;
 use datafusion::datasource::TableProvider;
 use datafusion_common::tree_node::TreeNode;
 use either::Either;
+use futures_util::Stream;
 use futures_util::future::try_join_all;
 use metric_engine::engine::MetricEngine;
 use mito2::engine::{MITO_ENGINE_NAME, MitoEngine};
@@ -53,6 +57,7 @@ use query::QueryEngineRef;
 pub use query::dummy_catalog::{
     DummyCatalogList, DummyTableProviderFactory, TableProviderFactoryRef,
 };
+use query::options::{FLOW_INCREMENTAL_AFTER_SEQS, FLOW_RETURN_REGION_SEQ};
 use serde_json;
 use servers::error::{
     self as servers_error, ExecuteGrpcRequestSnafu, Result as ServerResult, SuspendedSnafu,
@@ -256,6 +261,20 @@ impl RegionServer {
         };
 
         let region_id = RegionId::from_u64(request.region_id);
+        let should_return_region_seq = should_return_region_seq(&query_ctx);
+        let region_latest_seq = if should_return_region_seq {
+            let engine = self
+                .find_engine(region_id)?
+                .context(RegionNotFoundSnafu { region_id })?;
+            Some(
+                engine
+                    .get_committed_sequence(region_id)
+                    .await
+                    .with_context(|_| HandleRegionRequestSnafu { region_id })?,
+            )
+        } else {
+            None
+        };
         let catalog_list = Arc::new(NameAwareCatalogList::new(
             self.clone(),
             region_id,
@@ -278,7 +297,8 @@ impl RegionServer {
             .await
             .context(DecodeLogicalPlanSnafu)?;
 
-        self.inner
+        let stream = self
+            .inner
             .handle_read(
                 QueryRequest {
                     header: request.header,
@@ -287,7 +307,14 @@ impl RegionServer {
                 },
                 query_ctx,
             )
-            .await
+            .await?;
+
+        if let Some(seq) = region_latest_seq {
+            Ok(Box::pin(RegionWatermarkStream::new(stream, region_id, seq))
+                as SendableRecordBatchStream)
+        } else {
+            Ok(stream)
+        }
     }
 
     #[tracing::instrument(skip_all)]
@@ -745,6 +772,143 @@ impl RegionServer {
 
     pub(crate) fn suspend_state(&self) -> Arc<AtomicBool> {
         self.suspend.clone()
+    }
+}
+
+fn should_return_region_seq(query_ctx: &QueryContext) -> bool {
+    query_ctx
+        .extension(FLOW_RETURN_REGION_SEQ)
+        .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+        || query_ctx.extension(FLOW_INCREMENTAL_AFTER_SEQS).is_some()
+}
+
+struct RegionWatermarkStream {
+    stream: SendableRecordBatchStream,
+    region_latest_sequence: (u64, u64),
+    finished: AtomicBool,
+}
+
+impl RegionWatermarkStream {
+    fn new(stream: SendableRecordBatchStream, region_id: RegionId, latest_sequence: u64) -> Self {
+        Self {
+            stream,
+            region_latest_sequence: (region_id.as_u64(), latest_sequence),
+            finished: AtomicBool::new(false),
+        }
+    }
+
+    fn merged_metrics(&self, mut metrics: RecordBatchMetrics) -> RecordBatchMetrics {
+        let region_latest_sequences = metrics.region_latest_sequences.get_or_insert_with(Vec::new);
+        if let Some((_, seq)) = region_latest_sequences
+            .iter_mut()
+            .find(|(region_id, _)| *region_id == self.region_latest_sequence.0)
+        {
+            *seq = self.region_latest_sequence.1;
+        } else {
+            region_latest_sequences.push(self.region_latest_sequence);
+        }
+        metrics
+    }
+}
+
+impl RecordBatchStream for RegionWatermarkStream {
+    fn name(&self) -> &str {
+        self.stream.name()
+    }
+
+    fn schema(&self) -> datatypes::schema::SchemaRef {
+        self.stream.schema()
+    }
+
+    fn output_ordering(&self) -> Option<&[OrderOption]> {
+        self.stream.output_ordering()
+    }
+
+    fn metrics(&self) -> Option<RecordBatchMetrics> {
+        let base = self.stream.metrics();
+        if !self.finished.load(Ordering::Relaxed) {
+            return base;
+        }
+
+        Some(self.merged_metrics(base.unwrap_or_default()))
+    }
+}
+
+impl Stream for RegionWatermarkStream {
+    type Item = common_recordbatch::error::Result<RecordBatch>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match Pin::new(&mut self.stream).poll_next(cx) {
+            Poll::Ready(None) => {
+                self.finished.store(true, Ordering::Relaxed);
+                Poll::Ready(None)
+            }
+            other => other,
+        }
+    }
+}
+
+#[cfg(test)]
+mod watermark_tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use common_recordbatch::{RecordBatch, RecordBatches};
+    use datatypes::prelude::{ConcreteDataType, VectorRef};
+    use datatypes::schema::{ColumnSchema, Schema};
+    use datatypes::vectors::Int32Vector;
+    use futures_util::StreamExt;
+    use session::context::QueryContextBuilder;
+
+    use super::*;
+
+    #[test]
+    fn test_should_return_region_seq() {
+        let ctx = QueryContextBuilder::default()
+            .extensions(HashMap::from([(
+                FLOW_RETURN_REGION_SEQ.to_string(),
+                "true".to_string(),
+            )]))
+            .build();
+        assert!(should_return_region_seq(&ctx));
+
+        let ctx = QueryContextBuilder::default()
+            .extensions(HashMap::from([(
+                FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+                r#"{"1":10}"#.to_string(),
+            )]))
+            .build();
+        assert!(should_return_region_seq(&ctx));
+
+        let ctx = QueryContextBuilder::default().build();
+        assert!(!should_return_region_seq(&ctx));
+    }
+
+    #[tokio::test]
+    async fn test_region_watermark_stream_only_sets_terminal_metrics() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "v",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+        let values: VectorRef = Arc::new(Int32Vector::from_slice([1, 2]));
+        let batch = RecordBatch::new(schema.clone(), vec![values]).unwrap();
+        let stream = RecordBatches::try_new(schema, vec![batch])
+            .unwrap()
+            .as_stream();
+
+        let region_id = RegionId::new(42, 7);
+        let wrapped = RegionWatermarkStream::new(stream, region_id, 99);
+        let mut pinned = Box::pin(wrapped);
+
+        assert!(pinned.as_ref().get_ref().metrics().is_none());
+        while pinned.next().await.is_some() {}
+
+        let metrics = pinned.as_ref().get_ref().metrics().unwrap();
+        assert_eq!(
+            metrics.region_latest_sequences,
+            Some(vec![(region_id.as_u64(), 99)])
+        );
     }
 }
 

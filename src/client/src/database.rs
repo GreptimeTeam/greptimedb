@@ -25,6 +25,7 @@ use api::v1::{
     AlterTableExpr, AuthHeader, Basic, CreateTableExpr, DdlRequest, GreptimeRequest,
     InsertRequests, QueryRequest, RequestHeader, RowInsertRequests,
 };
+use arc_swap::ArcSwapOption;
 use arrow_flight::{FlightData, Ticket};
 use async_stream::stream;
 use base64::Engine;
@@ -35,6 +36,7 @@ use common_error::ext::BoxedError;
 use common_grpc::flight::do_put::DoPutResponse;
 use common_grpc::flight::{FlightDecoder, FlightMessage};
 use common_query::Output;
+use common_recordbatch::adapter::RecordBatchMetrics;
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{RecordBatch, RecordBatchStreamWrapper};
 use common_telemetry::tracing::Span;
@@ -424,24 +426,76 @@ impl Database {
                 .fail()
             }
             FlightMessage::Schema(schema) => {
+                let metrics = Arc::new(ArcSwapOption::from(None));
+                let metrics_ref = metrics.clone();
                 let schema = Arc::new(
                     datatypes::schema::Schema::try_from(schema)
                         .context(error::ConvertSchemaSnafu)?,
                 );
                 let schema_cloned = schema.clone();
                 let stream = Box::pin(stream!({
-                    while let Some(flight_message) = flight_message_stream.next().await {
-                        let flight_message = flight_message
-                            .map_err(BoxedError::new)
-                            .context(ExternalSnafu)?;
+                    let mut buffered_message: Option<FlightMessage> = None;
+                    let mut stream_ended = false;
+
+                    while !stream_ended {
+                        let flight_message_item = if let Some(msg) = buffered_message.take() {
+                            Some(Ok(msg))
+                        } else {
+                            flight_message_stream.next().await
+                        };
+
+                        let flight_message = match flight_message_item {
+                            Some(Ok(message)) => message,
+                            Some(Err(e)) => {
+                                yield Err(BoxedError::new(e)).context(ExternalSnafu);
+                                break;
+                            }
+                            None => break,
+                        };
+
                         match flight_message {
                             FlightMessage::RecordBatch(arrow_batch) => {
-                                yield Ok(RecordBatch::from_df_record_batch(
+                                let result_to_yield = RecordBatch::from_df_record_batch(
                                     schema_cloned.clone(),
                                     arrow_batch,
-                                ))
+                                );
+
+                                if let Some(next_flight_message_result) =
+                                    flight_message_stream.next().await
+                                {
+                                    match next_flight_message_result {
+                                        Ok(FlightMessage::Metrics(s)) => {
+                                            let m: Option<Arc<RecordBatchMetrics>> =
+                                                serde_json::from_str(&s).ok().map(Arc::new);
+                                            metrics_ref.swap(m);
+                                        }
+                                        Ok(FlightMessage::RecordBatch(rb)) => {
+                                            buffered_message = Some(FlightMessage::RecordBatch(rb));
+                                        }
+                                        Ok(_) => {
+                                            yield IllegalFlightMessagesSnafu {reason: "A RecordBatch message can only be succeeded by a Metrics message or another RecordBatch message"}
+                                                .fail()
+                                                .map_err(BoxedError::new)
+                                                .context(ExternalSnafu);
+                                            break;
+                                        }
+                                        Err(e) => {
+                                            yield Err(BoxedError::new(e)).context(ExternalSnafu);
+                                            break;
+                                        }
+                                    }
+                                } else {
+                                    stream_ended = true;
+                                }
+
+                                yield Ok(result_to_yield)
                             }
-                            FlightMessage::Metrics(_) => {}
+                            FlightMessage::Metrics(s) => {
+                                let m: Option<Arc<RecordBatchMetrics>> =
+                                    serde_json::from_str(&s).ok().map(Arc::new);
+                                metrics_ref.swap(m);
+                                break;
+                            }
                             FlightMessage::AffectedRows(_) | FlightMessage::Schema(_) => {
                                 yield IllegalFlightMessagesSnafu {reason: format!("A Schema message must be succeeded exclusively by a set of RecordBatch messages, flight_message: {:?}", flight_message)}
                                         .fail()
@@ -456,7 +510,7 @@ impl Database {
                     schema,
                     stream,
                     output_ordering: None,
-                    metrics: Default::default(),
+                    metrics,
                     span: Span::current(),
                 };
                 Ok(Output::new_with_stream(Box::pin(record_batch_stream)))

@@ -13,15 +13,19 @@
 // limitations under the License.
 
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use common_recordbatch::adapter::RecordBatchMetrics;
 use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream};
+use datafusion::physical_plan::ExecutionPlan;
 use datatypes::schema::SchemaRef;
 use futures::Stream;
 use futures_util::ready;
 use lazy_static::lazy_static;
 use prometheus::*;
+
+use crate::dist_plan::MergeScanExec;
 
 lazy_static! {
     /// Timer of different stages in query.
@@ -128,4 +132,73 @@ impl<F: FnOnce() + Unpin> Stream for OnDone<F> {
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.stream.size_hint()
     }
+}
+
+pub struct RegionWatermarkMetricsStream {
+    stream: SendableRecordBatchStream,
+    plan: Arc<dyn ExecutionPlan>,
+}
+
+impl RegionWatermarkMetricsStream {
+    pub fn new(stream: SendableRecordBatchStream, plan: Arc<dyn ExecutionPlan>) -> Self {
+        Self { stream, plan }
+    }
+}
+
+impl RecordBatchStream for RegionWatermarkMetricsStream {
+    fn name(&self) -> &str {
+        self.stream.name()
+    }
+
+    fn schema(&self) -> SchemaRef {
+        self.stream.schema()
+    }
+
+    fn output_ordering(&self) -> Option<&[OrderOption]> {
+        self.stream.output_ordering()
+    }
+
+    fn metrics(&self) -> Option<RecordBatchMetrics> {
+        let mut metrics = self.stream.metrics()?;
+        let region_latest_sequences = collect_region_latest_sequences(self.plan.clone());
+        if !region_latest_sequences.is_empty() {
+            metrics.region_latest_sequences = Some(region_latest_sequences);
+        }
+        Some(metrics)
+    }
+}
+
+impl Stream for RegionWatermarkMetricsStream {
+    type Item = common_recordbatch::error::Result<RecordBatch>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.stream).poll_next(cx)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.stream.size_hint()
+    }
+}
+
+fn collect_region_latest_sequences(plan: Arc<dyn ExecutionPlan>) -> Vec<(u64, u64)> {
+    let mut merged = std::collections::HashMap::new();
+    let mut stack = vec![plan];
+
+    while let Some(plan) = stack.pop() {
+        if let Some(merge_scan) = plan.as_any().downcast_ref::<MergeScanExec>() {
+            for metrics in merge_scan.sub_stage_metrics() {
+                if let Some(region_latest_sequences) = metrics.region_latest_sequences {
+                    for (region_id, seq) in region_latest_sequences {
+                        merged.insert(region_id, seq);
+                    }
+                }
+            }
+        }
+
+        stack.extend(plan.children().into_iter().cloned());
+    }
+
+    let mut region_latest_sequences = merged.into_iter().collect::<Vec<_>>();
+    region_latest_sequences.sort_unstable_by_key(|(region_id, _)| *region_id);
+    region_latest_sequences
 }

@@ -31,6 +31,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, atomic};
 use std::time::{Duration, SystemTime};
 
+use arc_swap::ArcSwapOption;
 use async_stream::stream;
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
@@ -492,9 +493,12 @@ fn attach_timeout(output: Output, mut timeout: Duration) -> Result<Output> {
         OutputData::AffectedRows(_) | OutputData::RecordBatches(_) => output,
         OutputData::Stream(mut stream) => {
             let schema = stream.schema();
+            let metrics = Arc::new(ArcSwapOption::from(stream.metrics().map(Arc::new)));
+            let metrics_ref = metrics.clone();
             let s = Box::pin(stream! {
                 let mut start = tokio::time::Instant::now();
                 while let Some(item) = tokio::time::timeout(timeout, stream.next()).await.map_err(|_| StreamTimeoutSnafu.build())? {
+                    metrics_ref.swap(stream.metrics().map(Arc::new));
                     yield item;
 
                     let now = tokio::time::Instant::now();
@@ -505,12 +509,13 @@ fn attach_timeout(output: Output, mut timeout: Duration) -> Result<Output> {
                         StreamTimeoutSnafu.fail()?;
                     }
                 }
+                metrics_ref.swap(stream.metrics().map(Arc::new));
             }) as Pin<Box<dyn Stream<Item = _> + Send>>;
             let stream = RecordBatchStreamWrapper {
                 schema,
                 stream: s,
                 output_ordering: None,
-                metrics: Default::default(),
+                metrics,
                 span: Span::current(),
             };
             Output::new(OutputData::Stream(Box::pin(stream)), output.meta)
@@ -1131,12 +1136,22 @@ fn should_capture_statement(stmt: Option<&Statement>) -> bool {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::pin::Pin;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Barrier};
+    use std::task::{Context, Poll};
     use std::thread;
     use std::time::{Duration, Instant};
 
     use common_base::Plugins;
+    use common_query::{Output, OutputData};
+    use common_recordbatch::adapter::RecordBatchMetrics;
+    use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream};
+    use datatypes::data_type::ConcreteDataType;
+    use datatypes::prelude::VectorRef;
+    use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
+    use datatypes::vectors::Int32Vector;
+    use futures::{Stream, StreamExt};
     use query::query_engine::options::QueryOptions;
     use session::context::QueryContext;
     use sql::dialect::GreptimeDbDialect;
@@ -1380,5 +1395,110 @@ mod tests {
             let result = check_permission(plugins.clone(), stmt, &query_ctx);
             assert_eq!(result.is_ok(), is_ok);
         }
+    }
+
+    struct MockMetricsStream {
+        schema: SchemaRef,
+        batch: Option<RecordBatch>,
+        metrics: RecordBatchMetrics,
+        terminal_metrics_only: bool,
+    }
+
+    impl Stream for MockMetricsStream {
+        type Item = common_recordbatch::error::Result<RecordBatch>;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            Poll::Ready(self.batch.take().map(Ok))
+        }
+    }
+
+    impl RecordBatchStream for MockMetricsStream {
+        fn schema(&self) -> SchemaRef {
+            self.schema.clone()
+        }
+
+        fn output_ordering(&self) -> Option<&[OrderOption]> {
+            None
+        }
+
+        fn metrics(&self) -> Option<RecordBatchMetrics> {
+            if self.terminal_metrics_only && self.batch.is_some() {
+                return None;
+            }
+            Some(self.metrics.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_attach_timeout_preserves_stream_metrics() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "v",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+        let batch = RecordBatch::new(
+            schema.clone(),
+            vec![Arc::new(Int32Vector::from_slice([1, 2])) as VectorRef],
+        )
+        .unwrap();
+        let expected_metrics = RecordBatchMetrics {
+            region_latest_sequences: Some(vec![(42, 99)]),
+            ..Default::default()
+        };
+        let output = Output::new_with_stream(Box::pin(MockMetricsStream {
+            schema,
+            batch: Some(batch),
+            metrics: expected_metrics.clone(),
+            terminal_metrics_only: false,
+        }));
+
+        let output = attach_timeout(output, Duration::from_secs(1)).unwrap();
+        let OutputData::Stream(mut stream) = output.data else {
+            panic!("expected stream output");
+        };
+        assert_eq!(
+            stream.metrics().and_then(|m| m.region_latest_sequences),
+            expected_metrics.region_latest_sequences.clone()
+        );
+        while stream.next().await.is_some() {}
+        assert_eq!(
+            stream.metrics().and_then(|m| m.region_latest_sequences),
+            expected_metrics.region_latest_sequences
+        );
+    }
+
+    #[tokio::test]
+    async fn test_attach_timeout_preserves_terminal_only_metrics() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "v",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+        let batch = RecordBatch::new(
+            schema.clone(),
+            vec![Arc::new(Int32Vector::from_slice([1, 2])) as VectorRef],
+        )
+        .unwrap();
+        let expected_metrics = RecordBatchMetrics {
+            region_latest_sequences: Some(vec![(7, 123)]),
+            ..Default::default()
+        };
+        let output = Output::new_with_stream(Box::pin(MockMetricsStream {
+            schema,
+            batch: Some(batch),
+            metrics: expected_metrics.clone(),
+            terminal_metrics_only: true,
+        }));
+
+        let output = attach_timeout(output, Duration::from_secs(1)).unwrap();
+        let OutputData::Stream(mut stream) = output.data else {
+            panic!("expected stream output");
+        };
+        assert!(stream.metrics().is_none());
+        while stream.next().await.is_some() {}
+        assert_eq!(
+            stream.metrics().and_then(|m| m.region_latest_sequences),
+            expected_metrics.region_latest_sequences
+        );
     }
 }

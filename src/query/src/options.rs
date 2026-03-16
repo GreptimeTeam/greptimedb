@@ -157,6 +157,10 @@ impl FlowQueryExtensions {
 
         Ok(self.incremental_after_seqs.is_some())
     }
+
+    pub fn should_collect_region_watermark(&self) -> bool {
+        self.return_region_seq || self.incremental_after_seqs.is_some()
+    }
 }
 
 fn parse_incremental_after_seqs(value: &str) -> Result<HashMap<u64, u64>> {
@@ -367,5 +371,29 @@ mod flow_extension_tests {
         let parsed = FlowQueryExtensions::from_extensions(&exts).unwrap();
         let apply_incremental = parsed.validate_for_scan(source_region_id).unwrap();
         assert!(!apply_incremental);
+    }
+
+    #[test]
+    fn test_should_collect_region_watermark_defaults_false() {
+        let parsed = FlowQueryExtensions::default();
+        assert!(!parsed.should_collect_region_watermark());
+    }
+
+    #[test]
+    fn test_should_collect_region_watermark_true_for_return_region_seq() {
+        let parsed = FlowQueryExtensions {
+            return_region_seq: true,
+            ..Default::default()
+        };
+        assert!(parsed.should_collect_region_watermark());
+    }
+
+    #[test]
+    fn test_should_collect_region_watermark_true_for_incremental_query() {
+        let parsed = FlowQueryExtensions {
+            incremental_after_seqs: Some(HashMap::from([(1, 10)])),
+            ..Default::default()
+        };
+        assert!(parsed.should_collect_region_watermark());
     }
 }

@@ -23,10 +23,13 @@ mod test {
     use auth::user_provider_from_option;
     use client::{Client, Database};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_error::ext::ErrorExt;
+    use common_error::status_code::StatusCode;
     use common_grpc::flight::do_put::DoPutMetadata;
     use common_grpc::flight::{FlightEncoder, FlightMessage};
     use common_query::OutputData;
     use common_recordbatch::RecordBatch;
+    use common_recordbatch::adapter::RecordBatchMetrics;
     use datatypes::prelude::{ConcreteDataType, ScalarVector, VectorRef};
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{Int32Vector, StringVector, TimestampMillisecondVector};
@@ -129,6 +132,141 @@ mod test {
 | 1970-01-01T00:00:00.009 | -9 | s9 |
 +-------------------------+----+----+";
         query_and_expect(db.fe_instance().as_ref(), sql, expected).await;
+
+        let output = client.sql(sql).await.unwrap();
+        let OutputData::Stream(mut stream) = output.data else {
+            panic!("expected stream output");
+        };
+        while let Some(batch) = stream.next().await {
+            batch.unwrap();
+        }
+        let metrics = stream.metrics().expect("expected terminal metrics");
+        assert!(metrics.region_latest_sequences.is_none());
+
+        let output = client
+            .sql_with_hint(sql, &[("flow.return_region_seq", "true")])
+            .await
+            .unwrap();
+        let OutputData::Stream(mut stream) = output.data else {
+            panic!("expected stream output");
+        };
+
+        let mut row_count = 0;
+        while let Some(batch) = stream.next().await {
+            let batch = batch.unwrap();
+            row_count += batch.num_rows();
+        }
+        assert_eq!(row_count, 9);
+
+        let RecordBatchMetrics {
+            region_latest_sequences,
+            ..
+        } = stream.metrics().expect("expected terminal metrics");
+        let region_latest_sequences =
+            region_latest_sequences.expect("expected region watermark metrics");
+        assert_eq!(region_latest_sequences.len(), 1);
+        assert!(region_latest_sequences[0].0 > 0);
+        assert!(region_latest_sequences[0].1 > 0);
+
+        let previous_watermark = region_latest_sequences[0];
+
+        let incremental_batches = create_record_batches(10);
+        test_put_record_batches(&client, incremental_batches).await;
+
+        let output = client
+            .sql_with_hint(
+                sql,
+                &[
+                    ("flow.incremental_mode", "memtable_only"),
+                    (
+                        "flow.incremental_after_seqs",
+                        &format!(
+                            r#"{{"{}":"{}"}}"#,
+                            previous_watermark.0, previous_watermark.1
+                        ),
+                    ),
+                    ("flow.return_region_seq", "true"),
+                ],
+            )
+            .await
+            .unwrap();
+        let OutputData::Stream(mut stream) = output.data else {
+            panic!("expected stream output");
+        };
+
+        let schema = stream.schema();
+        let mut rows = Vec::new();
+        while let Some(batch) = stream.next().await {
+            rows.push(batch.unwrap());
+        }
+        let pretty = common_recordbatch::RecordBatches::try_new(schema, rows)
+            .unwrap()
+            .pretty_print()
+            .unwrap();
+        assert_eq!(
+            pretty,
+            "\
++-------------------------+-----+-----+
+| ts                      | a   | B   |
++-------------------------+-----+-----+
+| 1970-01-01T00:00:00.010 | -10 | s10 |
+| 1970-01-01T00:00:00.011 | -11 | s11 |
+| 1970-01-01T00:00:00.012 | -12 | s12 |
+| 1970-01-01T00:00:00.013 | -13 | s13 |
+| 1970-01-01T00:00:00.014 | -14 | s14 |
+| 1970-01-01T00:00:00.015 | -15 | s15 |
+| 1970-01-01T00:00:00.016 | -16 | s16 |
+| 1970-01-01T00:00:00.017 | -17 | s17 |
+| 1970-01-01T00:00:00.018 | -18 | s18 |
++-------------------------+-----+-----+"
+        );
+
+        let RecordBatchMetrics {
+            region_latest_sequences,
+            ..
+        } = stream
+            .metrics()
+            .expect("expected terminal incremental metrics");
+        let region_latest_sequences =
+            region_latest_sequences.expect("expected incremental region watermark metrics");
+        assert_eq!(region_latest_sequences.len(), 1);
+        assert_eq!(region_latest_sequences[0].0, previous_watermark.0);
+        assert!(region_latest_sequences[0].1 > previous_watermark.1);
+
+        client.sql("admin flush_table('foo')").await.unwrap();
+
+        let output = client
+            .sql_with_hint(
+                sql,
+                &[
+                    ("flow.incremental_mode", "memtable_only"),
+                    (
+                        "flow.incremental_after_seqs",
+                        &format!(
+                            r#"{{"{}":"{}"}}"#,
+                            previous_watermark.0, previous_watermark.1
+                        ),
+                    ),
+                    ("flow.return_region_seq", "true"),
+                ],
+            )
+            .await
+            .unwrap();
+        let OutputData::Stream(mut stream) = output.data else {
+            panic!("expected stream output");
+        };
+        let err = loop {
+            match stream.next().await {
+                Some(Err(err)) => break err,
+                Some(Ok(_)) => continue,
+                None => panic!("expected stale incremental query to fail while consuming stream"),
+            }
+        };
+        assert_eq!(err.status_code(), StatusCode::EngineExecuteQuery);
+        let err_msg = format!("{err:?}");
+        assert!(err_msg.contains("STALE_CURSOR"));
+        assert!(err_msg.contains(&previous_watermark.0.to_string()));
+        assert!(err_msg.contains(&previous_watermark.1.to_string()));
     }
 
     async fn test_put_record_batches(client: &Database, record_batches: Vec<RecordBatch>) {
