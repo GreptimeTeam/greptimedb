@@ -65,6 +65,7 @@ ADMIN FLUSH_FLOW('pending_user_cnt');
 |  FLOW_FLUSHED  |
 +--------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT host, total_val FROM pending_user_cnt_sink ORDER BY host;
 
 +-------+-----------+
@@ -117,6 +118,7 @@ ADMIN FLUSH_FLOW('pending_replace_flow');
 |  FLOW_FLUSHED  |
 +------------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT host, total_val FROM pending_replace_sink WHERE host = 'host_old';
 
 +----------+-----------+
@@ -162,6 +164,7 @@ ADMIN FLUSH_FLOW('pending_replace_flow');
 |  FLOW_FLUSHED  |
 +------------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT host, total_val
 FROM pending_replace_sink
 WHERE host IN ('host_old_after_replace', 'host_new_after_replace')

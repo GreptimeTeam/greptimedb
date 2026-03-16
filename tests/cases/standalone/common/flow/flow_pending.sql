@@ -27,6 +27,7 @@ INSERT INTO pending_user_cnt_source VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('pending_user_cnt');
 
+-- SQLNESS SLEEP 1s
 SELECT host, total_val FROM pending_user_cnt_sink ORDER BY host;
 
 DROP FLOW pending_user_cnt;
@@ -52,6 +53,7 @@ INSERT INTO pending_replace_src_a VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('pending_replace_flow');
 
+-- SQLNESS SLEEP 1s
 SELECT host, total_val FROM pending_replace_sink WHERE host = 'host_old';
 
 CREATE OR REPLACE FLOW pending_replace_flow SINK TO pending_replace_sink AS
@@ -77,6 +79,7 @@ INSERT INTO pending_replace_src_b VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('pending_replace_flow');
 
+-- SQLNESS SLEEP 1s
 SELECT host, total_val
 FROM pending_replace_sink
 WHERE host IN ('host_old_after_replace', 'host_new_after_replace')
