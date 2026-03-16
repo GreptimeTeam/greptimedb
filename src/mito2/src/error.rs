@@ -1300,7 +1300,6 @@ impl ErrorExt for Error {
             | InvalidScanIndex { .. }
             | InvalidMeta { .. }
             | InvalidRequest { .. }
-            | IncrementalQueryStale { .. }
             | PartitionExprVersionMismatch { .. }
             | FillDefault { .. }
             | ConvertColumnDataType { .. }
@@ -1318,6 +1317,8 @@ impl ErrorExt for Error {
             | MissingPartitionExpr { .. }
             | SerializePartitionExpr { .. }
             | InvalidSourceAndTargetRegion { .. } => StatusCode::InvalidArguments,
+
+            IncrementalQueryStale { .. } => StatusCode::RequestOutdated,
 
             RegionMetadataNotFound { .. }
             | Join { .. }

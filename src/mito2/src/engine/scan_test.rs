@@ -75,7 +75,7 @@ async fn test_incremental_query_stale_error() {
         }
         _ => panic!("unexpected err: {err}"),
     };
-    assert_eq!(StatusCode::InvalidArguments, err.status_code());
+    assert_eq!(StatusCode::RequestOutdated, err.status_code());
     let err_msg = err.to_string();
     assert!(err_msg.contains("STALE_CURSOR"));
     assert!(err_msg.contains(&region_id.to_string()));
