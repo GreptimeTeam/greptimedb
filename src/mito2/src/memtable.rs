@@ -28,6 +28,7 @@ use mito_codec::key_values::KeyValue;
 pub use mito_codec::key_values::KeyValues;
 use mito_codec::row_converter::{PrimaryKeyCodec, build_primary_key_codec};
 use serde::{Deserialize, Serialize};
+use snafu::ensure;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, SequenceNumber, SequenceRange};
 
@@ -231,7 +232,16 @@ impl MemtableRanges {
 
 impl IterBuilder for MemtableRanges {
     fn build(&self, _metrics: Option<MemScanMetrics>) -> Result<BoxedBatchIterator> {
-        assert_eq!(self.ranges.len(), 1);
+        ensure!(
+            self.ranges.len() == 1,
+            UnsupportedOperationSnafu {
+                err_msg: format!(
+                    "Building an iterator from MemtableRanges expects 1 range, but got {}",
+                    self.ranges.len()
+                ),
+            }
+        );
+
         self.ranges.values().next().unwrap().build_iter()
     }
 
