@@ -159,6 +159,7 @@ impl ProjectionMapper {
 }
 
 /// Handles projection and converts a projected [Batch] to a projected [RecordBatch].
+#[allow(dead_code)]
 pub struct PrimaryKeyProjectionMapper {
     /// Metadata of the region.
     metadata: RegionMetadataRef,
@@ -178,6 +179,7 @@ pub struct PrimaryKeyProjectionMapper {
     is_empty_projection: bool,
 }
 
+#[allow(dead_code)]
 impl PrimaryKeyProjectionMapper {
     /// Returns a new mapper with projection.
     /// If `projection` is empty, it outputs [RecordBatch] without any column but only a row count.
@@ -413,6 +415,7 @@ pub(crate) fn read_column_ids_from_projection(
 
 /// Index of a vector in a [Batch].
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 enum BatchIndex {
     /// Index in primary keys.
     Tag((usize, ColumnId)),

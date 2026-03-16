@@ -43,7 +43,7 @@ use crate::read::merge::{MergeMetrics, MergeMetricsReport};
 use crate::read::pruner::PartitionPruner;
 use crate::read::range::{RangeMeta, RowGroupIndex};
 use crate::read::scan_region::StreamContext;
-use crate::read::{Batch, BoxedBatchStream, BoxedRecordBatchStream, ScannerMetrics, Source};
+use crate::read::{BoxedRecordBatchStream, ScannerMetrics};
 use crate::sst::file::{FileTimeRange, RegionFileId};
 use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplyMetrics;
 use crate::sst::index::fulltext_index::applier::FulltextIndexApplyMetrics;
@@ -1169,45 +1169,6 @@ pub(crate) struct SeriesDistributorMetrics {
     pub(crate) divider_cost: Duration,
 }
 
-/// Scans memtable ranges at `index`.
-#[tracing::instrument(
-    skip_all,
-    fields(
-        region_id = %stream_ctx.input.region_metadata().region_id,
-        file_or_mem_index = %index.index,
-        row_group_index = %index.row_group_index,
-        source = "mem"
-    )
-)]
-pub(crate) fn scan_mem_ranges(
-    stream_ctx: Arc<StreamContext>,
-    part_metrics: PartitionMetrics,
-    index: RowGroupIndex,
-    time_range: FileTimeRange,
-) -> impl Stream<Item = Result<Batch>> {
-    try_stream! {
-        let ranges = stream_ctx.input.build_mem_ranges(index);
-        part_metrics.inc_num_mem_ranges(ranges.len());
-        for range in ranges {
-            let build_reader_start = Instant::now();
-            let mem_scan_metrics = Some(MemScanMetrics::default());
-            let iter = range.build_prune_iter(time_range, mem_scan_metrics.clone())?;
-            part_metrics.inc_build_reader_cost(build_reader_start.elapsed());
-
-            let mut source = Source::Iter(iter);
-            while let Some(batch) = source.next_batch().await? {
-                yield batch;
-            }
-
-            // Report the memtable scan metrics to partition metrics
-            if let Some(ref metrics) = mem_scan_metrics {
-                let data = metrics.data();
-                part_metrics.report_mem_scan_metrics(&data);
-            }
-        }
-    }
-}
-
 /// Scans memtable ranges at `index` using flat format that returns RecordBatch.
 #[tracing::instrument(
     skip_all,
@@ -1325,59 +1286,6 @@ fn new_filter_metrics(explain_verbose: bool) -> ReaderFilterMetrics {
     }
 }
 
-/// Scans file ranges at `index`.
-#[tracing::instrument(
-    skip_all,
-    fields(
-        region_id = %stream_ctx.input.region_metadata().region_id,
-        row_group_index = %index.index,
-        source = read_type
-    )
-)]
-pub(crate) async fn scan_file_ranges(
-    stream_ctx: Arc<StreamContext>,
-    part_metrics: PartitionMetrics,
-    index: RowGroupIndex,
-    read_type: &'static str,
-    partition_pruner: Arc<PartitionPruner>,
-) -> Result<impl Stream<Item = Result<Batch>>> {
-    let mut reader_metrics = ReaderMetrics {
-        filter_metrics: new_filter_metrics(part_metrics.explain_verbose()),
-        ..Default::default()
-    };
-    let ranges = partition_pruner
-        .build_file_ranges(index, &part_metrics, &mut reader_metrics)
-        .await?;
-    part_metrics.inc_num_file_ranges(ranges.len());
-    part_metrics.merge_reader_metrics(&reader_metrics, None);
-
-    // Creates initial per-file metrics with build_part_cost.
-    let init_per_file_metrics = if part_metrics.explain_verbose() {
-        let file = stream_ctx.input.file_from_index(index);
-        let file_id = file.file_id();
-
-        let mut map = HashMap::new();
-        map.insert(
-            file_id,
-            FileScanMetrics {
-                build_part_cost: reader_metrics.build_cost,
-                ..Default::default()
-            },
-        );
-        Some(map)
-    } else {
-        None
-    };
-
-    Ok(build_file_range_scan_stream(
-        stream_ctx,
-        part_metrics,
-        read_type,
-        ranges,
-        init_per_file_metrics,
-    ))
-}
-
 /// Scans file ranges at `index` using flat reader that returns RecordBatch.
 #[tracing::instrument(
     skip_all,
@@ -1429,70 +1337,6 @@ pub(crate) async fn scan_flat_file_ranges(
         ranges,
         init_per_file_metrics,
     ))
-}
-
-/// Build the stream of scanning the input [`FileRange`]s.
-#[tracing::instrument(
-    skip_all,
-    fields(read_type = read_type, range_count = ranges.len())
-)]
-pub fn build_file_range_scan_stream(
-    stream_ctx: Arc<StreamContext>,
-    part_metrics: PartitionMetrics,
-    read_type: &'static str,
-    ranges: SmallVec<[FileRange; 2]>,
-    mut per_file_metrics: Option<HashMap<RegionFileId, FileScanMetrics>>,
-) -> impl Stream<Item = Result<Batch>> {
-    try_stream! {
-        let fetch_metrics = if part_metrics.explain_verbose() {
-            Some(Arc::new(ParquetFetchMetrics::default()))
-        } else {
-            None
-        };
-        let reader_metrics = &mut ReaderMetrics {
-            fetch_metrics: fetch_metrics.clone(),
-            ..Default::default()
-        };
-        for range in ranges {
-            let build_reader_start = Instant::now();
-            let Some(reader) = range.reader(stream_ctx.input.series_row_selector, fetch_metrics.as_deref()).await? else {
-                continue;
-            };
-            let build_cost = build_reader_start.elapsed();
-            part_metrics.inc_build_reader_cost(build_cost);
-            let compat_batch = range.compat_batch();
-            let mut source = Source::PruneReader(reader);
-            while let Some(mut batch) = source.next_batch().await? {
-                if let Some(compact_batch) = compat_batch {
-                    batch = compact_batch.as_primary_key().unwrap().compat_batch(batch)?;
-                }
-                yield batch;
-            }
-            if let Source::PruneReader(reader) = source {
-                let prune_metrics = reader.metrics();
-
-                // Update per-file metrics if tracking is enabled
-                if let Some(file_metrics_map) = per_file_metrics.as_mut() {
-                    let file_id = range.file_handle().file_id();
-                    let file_metrics = file_metrics_map
-                        .entry(file_id)
-                        .or_insert_with(FileScanMetrics::default);
-
-                    file_metrics.num_ranges += 1;
-                    file_metrics.num_rows += prune_metrics.num_rows;
-                    file_metrics.build_reader_cost += build_cost;
-                    file_metrics.scan_cost += prune_metrics.scan_cost;
-                }
-
-                reader_metrics.merge_from(&prune_metrics);
-            }
-        }
-
-        // Reports metrics.
-        reader_metrics.observe_rows(read_type);
-        reader_metrics.filter_metrics.observe();
-        part_metrics.merge_reader_metrics(reader_metrics, per_file_metrics.as_ref());
-    }
 }
 
 /// Build the stream of scanning the input [`FileRange`]s using flat reader that returns RecordBatch.
@@ -1571,47 +1415,6 @@ pub fn build_flat_file_range_scan_stream(
         reader_metrics.observe_rows(read_type);
         reader_metrics.filter_metrics.observe();
         part_metrics.merge_reader_metrics(reader_metrics, per_file_metrics.as_ref());
-    }
-}
-
-/// Build the stream of scanning the extension range denoted by the [`RowGroupIndex`].
-#[cfg(feature = "enterprise")]
-pub(crate) async fn scan_extension_range(
-    context: Arc<StreamContext>,
-    index: RowGroupIndex,
-    partition_metrics: PartitionMetrics,
-) -> Result<BoxedBatchStream> {
-    use snafu::ResultExt;
-
-    let range = context.input.extension_range(index.index);
-    let reader = range.reader(context.as_ref());
-    let stream = reader
-        .read(context, partition_metrics, index)
-        .await
-        .context(crate::error::ScanExternalRangeSnafu)?;
-    Ok(stream)
-}
-
-pub(crate) async fn maybe_scan_other_ranges(
-    context: &Arc<StreamContext>,
-    index: RowGroupIndex,
-    metrics: &PartitionMetrics,
-) -> Result<BoxedBatchStream> {
-    #[cfg(feature = "enterprise")]
-    {
-        scan_extension_range(context.clone(), index, metrics.clone()).await
-    }
-
-    #[cfg(not(feature = "enterprise"))]
-    {
-        let _ = context;
-        let _ = index;
-        let _ = metrics;
-
-        crate::error::UnexpectedSnafu {
-            reason: "no other ranges scannable",
-        }
-        .fail()
     }
 }
 

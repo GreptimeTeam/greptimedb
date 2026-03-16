@@ -2060,6 +2060,7 @@ impl RowGroupReaderContext for FileRangeContextRef {
 /// [RowGroupReader] that reads from [FileRange].
 pub(crate) type RowGroupReader = RowGroupReaderBase<FileRangeContextRef>;
 
+#[allow(dead_code)]
 impl RowGroupReader {
     /// Creates a new reader from file range.
     pub(crate) fn new(
@@ -2084,6 +2085,7 @@ pub(crate) struct RowGroupReaderBase<T> {
     override_sequence: Option<ArrayRef>,
 }
 
+#[allow(dead_code)]
 impl<T> RowGroupReaderBase<T>
 where
     T: RowGroupReaderContext,

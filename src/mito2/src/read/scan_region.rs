@@ -63,7 +63,6 @@ use crate::read::unordered_scan::UnorderedScan;
 use crate::read::{Batch, BoxedRecordBatchStream, RecordBatch, Source};
 use crate::region::options::MergeMode;
 use crate::region::version::VersionRef;
-use crate::sst::FormatType;
 use crate::sst::file::FileHandle;
 use crate::sst::index::bloom_filter::applier::{
     BloomFilterIndexApplierBuilder, BloomFilterIndexApplierRef,
@@ -401,8 +400,7 @@ impl ScanRegion {
 
     /// Returns true if the region use flat format.
     fn use_flat_format(&self) -> bool {
-        self.request.force_flat_format
-            || self.version.options.sst_format.unwrap_or_default() == FormatType::Flat
+        true
     }
 
     /// Creates a scan input.

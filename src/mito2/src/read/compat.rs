@@ -98,6 +98,7 @@ pub(crate) enum CompatBatch {
 
 impl CompatBatch {
     /// Returns the inner primary key batch adapter if this is a PrimaryKey format.
+    #[allow(dead_code)]
     pub(crate) fn as_primary_key(&self) -> Option<&PrimaryKeyCompatBatch> {
         match self {
             CompatBatch::PrimaryKey(batch) => Some(batch),

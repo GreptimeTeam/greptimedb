@@ -45,6 +45,7 @@ use crate::sst::parquet::reader::{FlatRowGroupReader, ReaderMetrics, RowGroupRea
 ///
 /// This reader is different from the [MergeMode](crate::region::options::MergeMode) as
 /// it focus on time series (the same key).
+#[allow(dead_code)]
 pub(crate) struct LastRowReader {
     /// Inner reader.
     reader: BoxedBatchReader,
@@ -52,6 +53,7 @@ pub(crate) struct LastRowReader {
     selector: LastRowSelector,
 }
 
+#[allow(dead_code)]
 impl LastRowReader {
     /// Creates a new `LastRowReader`.
     pub(crate) fn new(reader: BoxedBatchReader) -> Self {
