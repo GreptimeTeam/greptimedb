@@ -36,6 +36,18 @@ use crate::error;
 use crate::error::Result;
 
 impl MetricEngineInner {
+    /// Bulk-inserts logical rows into a metric region.
+    ///
+    /// This method accepts a `RegionBulkInsertsRequest` whose payload is a logical
+    /// `RecordBatch` (timestamp, value and tag columns) for the given logical `region_id`.
+    ///
+    /// The transformed batch is encoded to Arrow IPC and forwarded as a `BulkInserts`
+    /// request to the data region, along with the original `partition_expr_version`.
+    /// If the data region reports `StatusCode::Unsupported` for bulk inserts, the request
+    /// is transparently retried as a `Put` by converting the original logical batch into
+    /// `api::v1::Rows`, so callers observe the same semantics as `put_region`.
+    ///
+    /// Returns the number of affected rows, or `0` if the input batch is empty.
     pub async fn bulk_insert_region(
         &self,
         region_id: RegionId,
