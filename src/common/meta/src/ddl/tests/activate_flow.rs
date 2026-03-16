@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use api::v1::flow::flow_request::Body as PbFlowRequest;
+use api::v1::flow::{CreateRequest, FlowRequest, FlowResponse};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_procedure_test::execute_procedure_until_done;
 use common_time::TimeToLive;
@@ -23,7 +25,38 @@ use crate::ddl::activate_flow::ActivatePendingFlowProcedure;
 use crate::ddl::test_util::create_table::test_create_table_task;
 use crate::ddl::tests::create_flow::create_test_flow;
 use crate::key::table_route::TableRouteValue;
-use crate::test_util::{MockFlownodeManager, new_ddl_context};
+use crate::test_util::{MockFlownodeHandler, MockFlownodeManager, new_ddl_context};
+
+#[derive(Clone, Default)]
+struct RecordingFlownodeHandler {
+    create_requests: Arc<Mutex<Vec<CreateRequest>>>,
+}
+
+#[async_trait::async_trait]
+impl MockFlownodeHandler for RecordingFlownodeHandler {
+    async fn handle(
+        &self,
+        _peer: &crate::peer::Peer,
+        request: FlowRequest,
+    ) -> crate::error::Result<FlowResponse> {
+        if let Some(PbFlowRequest::Create(create_req)) = request.body {
+            self.create_requests.lock().unwrap().push(create_req);
+        }
+
+        Ok(FlowResponse {
+            affected_rows: 0,
+            ..Default::default()
+        })
+    }
+
+    async fn handle_inserts(
+        &self,
+        _peer: &crate::peer::Peer,
+        _requests: api::v1::region::InsertRequests,
+    ) -> crate::error::Result<FlowResponse> {
+        unreachable!()
+    }
+}
 
 #[tokio::test]
 async fn test_activate_pending_flow() {
@@ -155,4 +188,54 @@ async fn test_activate_pending_flow_require_streaming_keeps_pending() {
             .unwrap()
             .contains("requires streaming activation")
     );
+}
+
+#[tokio::test]
+async fn test_activate_pending_flow_uses_replace_semantics() {
+    let source_table_names = vec![TableName::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        "activate_replace_source_table",
+    )];
+    let sink_table_name = TableName::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        "activate_replace_sink_table",
+    );
+
+    let handler = RecordingFlownodeHandler::default();
+    let node_manager = Arc::new(MockFlownodeManager::new(handler.clone()));
+    let ddl_context = new_ddl_context(node_manager);
+
+    let flow_id = create_test_flow(
+        &ddl_context,
+        "activate_pending_flow_replace_semantics",
+        source_table_names,
+        sink_table_name,
+    )
+    .await;
+
+    let create_table_task = test_create_table_task("activate_replace_source_table", 1027);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            create_table_task.table_info.clone(),
+            TableRouteValue::physical(vec![]),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+
+    let mut procedure =
+        ActivatePendingFlowProcedure::new(flow_id, DEFAULT_CATALOG_NAME.to_string(), ddl_context);
+    let output = execute_procedure_until_done(&mut procedure).await.unwrap();
+    let activated_flow_id = output.downcast_ref::<u32>().unwrap();
+    assert_eq!(*activated_flow_id, flow_id);
+
+    let create_requests = handler.create_requests.lock().unwrap();
+    assert!(!create_requests.is_empty());
+    for req in create_requests.iter() {
+        assert!(!req.create_if_not_exists);
+        assert!(req.or_replace);
+    }
 }

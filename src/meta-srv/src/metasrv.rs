@@ -799,6 +799,10 @@ impl Metasrv {
                 .start()
                 .await
                 .context(StartProcedureManagerSnafu)?;
+
+            if let Some(pending_flow_reconcile_ticker) = &self.pending_flow_reconcile_ticker {
+                pending_flow_reconcile_ticker.start();
+            }
         }
 
         info!("Metasrv started");

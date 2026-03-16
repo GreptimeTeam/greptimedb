@@ -1,0 +1,191 @@
+CREATE FLOW pending_user_cnt SINK TO pending_user_cnt_sink AS
+SELECT host, COUNT(val) AS total_val
+FROM pending_user_cnt_source
+GROUP BY host;
+
+Affected Rows: 0
+
+SELECT source_table_ids, source_table_names, flownode_ids
+FROM information_schema.flows
+WHERE flow_name = 'pending_user_cnt';
+
++------------------+--------------------+--------------+
+| source_table_ids | source_table_names | flownode_ids |
++------------------+--------------------+--------------+
+| []               |                    | {}           |
++------------------+--------------------+--------------+
+
+SHOW CREATE TABLE pending_user_cnt_sink;
+
+Error: 4001(TableNotFound), Table not found: pending_user_cnt_sink
+
+CREATE TABLE pending_user_cnt_source (
+  ts TIMESTAMP TIME INDEX,
+  host STRING,
+  val DOUBLE,
+  PRIMARY KEY(host)
+);
+
+Affected Rows: 0
+
+-- SQLNESS SLEEP 15s
+SHOW CREATE TABLE pending_user_cnt_sink;
+
++-----------------------+------------------------------------------------------+
+| Table                 | Create Table                                         |
++-----------------------+------------------------------------------------------+
+| pending_user_cnt_sink | CREATE TABLE IF NOT EXISTS "pending_user_cnt_sink" ( |
+|                       |   "host" STRING NULL,                                |
+|                       |   "total_val" BIGINT NULL,                           |
+|                       |   "update_at" TIMESTAMP(3) NULL,                     |
+|                       |   "__ts_placeholder" TIMESTAMP(3) NOT NULL,          |
+|                       |   TIME INDEX ("__ts_placeholder"),                   |
+|                       |   PRIMARY KEY ("host")                               |
+|                       | )                                                    |
+|                       |                                                      |
+|                       | ENGINE=mito                                          |
+|                       | WITH(                                                |
+|                       |   'comment' = 'Auto created table by flow engine'    |
+|                       | )                                                    |
++-----------------------+------------------------------------------------------+
+
+INSERT INTO pending_user_cnt_source VALUES
+  ('2026-03-12T00:00:00Z', 'host1', 1.0),
+  ('2026-03-12T00:00:01Z', 'host1', 2.0),
+  ('2026-03-12T00:00:02Z', 'host2', 3.0);
+
+Affected Rows: 3
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('pending_user_cnt');
+
++--------------------------------------+
+| ADMIN FLUSH_FLOW('pending_user_cnt') |
++--------------------------------------+
+|  FLOW_FLUSHED  |
++--------------------------------------+
+
+SELECT host, total_val FROM pending_user_cnt_sink ORDER BY host;
+
++-------+-----------+
+| host  | total_val |
++-------+-----------+
+| host1 | 2         |
+| host2 | 1         |
++-------+-----------+
+
+DROP FLOW pending_user_cnt;
+
+Affected Rows: 0
+
+DROP TABLE pending_user_cnt_source;
+
+Affected Rows: 0
+
+DROP TABLE pending_user_cnt_sink;
+
+Affected Rows: 0
+
+CREATE TABLE pending_replace_src_a (
+  ts TIMESTAMP TIME INDEX,
+  host STRING,
+  val DOUBLE,
+  PRIMARY KEY(host)
+);
+
+Affected Rows: 0
+
+CREATE FLOW pending_replace_flow SINK TO pending_replace_sink AS
+SELECT host, COUNT(val) AS total_val
+FROM pending_replace_src_a
+GROUP BY host;
+
+Affected Rows: 0
+
+INSERT INTO pending_replace_src_a VALUES
+  ('2026-03-12T00:10:00Z', 'host_old', 1.0),
+  ('2026-03-12T00:10:01Z', 'host_old', 2.0);
+
+Affected Rows: 2
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('pending_replace_flow');
+
++------------------------------------------+
+| ADMIN FLUSH_FLOW('pending_replace_flow') |
++------------------------------------------+
+|  FLOW_FLUSHED  |
++------------------------------------------+
+
+SELECT host, total_val FROM pending_replace_sink WHERE host = 'host_old';
+
++----------+-----------+
+| host     | total_val |
++----------+-----------+
+| host_old | 2         |
++----------+-----------+
+
+CREATE OR REPLACE FLOW pending_replace_flow SINK TO pending_replace_sink AS
+SELECT host, COUNT(val) AS total_val
+FROM pending_replace_src_b
+GROUP BY host;
+
+Affected Rows: 0
+
+CREATE TABLE pending_replace_src_b (
+  ts TIMESTAMP TIME INDEX,
+  host STRING,
+  val DOUBLE,
+  PRIMARY KEY(host)
+);
+
+Affected Rows: 0
+
+-- SQLNESS SLEEP 15s
+INSERT INTO pending_replace_src_a VALUES
+  ('2026-03-12T00:11:00Z', 'host_old_after_replace', 9.0);
+
+Affected Rows: 1
+
+INSERT INTO pending_replace_src_b VALUES
+  ('2026-03-12T00:11:00Z', 'host_new_after_replace', 3.0),
+  ('2026-03-12T00:11:01Z', 'host_new_after_replace', 4.0);
+
+Affected Rows: 2
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('pending_replace_flow');
+
++------------------------------------------+
+| ADMIN FLUSH_FLOW('pending_replace_flow') |
++------------------------------------------+
+|  FLOW_FLUSHED  |
++------------------------------------------+
+
+SELECT host, total_val
+FROM pending_replace_sink
+WHERE host IN ('host_old_after_replace', 'host_new_after_replace')
+ORDER BY host;
+
++------------------------+-----------+
+| host                   | total_val |
++------------------------+-----------+
+| host_new_after_replace | 2         |
++------------------------+-----------+
+
+DROP FLOW pending_replace_flow;
+
+Affected Rows: 0
+
+DROP TABLE pending_replace_src_a;
+
+Affected Rows: 0
+
+DROP TABLE pending_replace_src_b;
+
+Affected Rows: 0
+
+DROP TABLE pending_replace_sink;
+
+Affected Rows: 0
+

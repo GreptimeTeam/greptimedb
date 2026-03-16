@@ -108,7 +108,17 @@ impl ActivatePendingFlowProcedure {
         };
 
         if current_flow_info.get_inner_ref().is_active() {
-            return Ok(Status::done());
+            let routes = self
+                .context
+                .flow_metadata_manager
+                .flow_route_manager()
+                .routes(self.data.flow_id)
+                .await?;
+            self.data.peers = routes.into_iter().map(|(_, value)| value.peer).collect();
+            self.data.resolved_table_ids =
+                current_flow_info.get_inner_ref().source_table_ids.clone();
+            self.data.state = ActivatePendingFlowState::InvalidateFlowCache;
+            return Ok(Status::executing(true));
         }
 
         let resolution =
@@ -206,7 +216,8 @@ impl ActivatePendingFlowProcedure {
             &self.data.resolved_table_ids,
             &self.data.peers,
         )
-        .await?;
+        .await
+        .map_err(error::Error::retry_later)?;
         Ok(Status::done_with_output(self.data.flow_id))
     }
 }
@@ -344,8 +355,8 @@ fn build_create_request(
             .map(|table_id| api::v1::TableId { id: *table_id })
             .collect_vec(),
         sink_table_name: Some(flow_info.sink_table_name.clone().into()),
-        create_if_not_exists: true,
-        or_replace: false,
+        create_if_not_exists: false,
+        or_replace: true,
         expire_after: flow_info.expire_after.map(|value| ExpireAfter { value }),
         eval_interval: flow_info
             .eval_interval_secs
