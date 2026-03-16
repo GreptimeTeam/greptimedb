@@ -591,12 +591,13 @@ impl StartCommand {
             ddl_manager
         };
 
-        let procedure_executor = creator
-            .procedure_executor_creator
-            .create(Arc::new(ddl_manager), procedure_manager.clone())
-            .await?;
         let ddl_manager = Arc::new(ddl_manager);
         let pending_flow_reconcile_runtime = PendingFlowReconcileRuntime::new(ddl_manager.clone());
+
+        let procedure_executor = creator
+            .procedure_executor_creator
+            .create(ddl_manager.clone(), procedure_manager.clone())
+            .await?;
 
         let fe_instance = FrontendBuilder::new(
             fe_opts.clone(),
