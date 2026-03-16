@@ -43,6 +43,7 @@ use table::metadata::{TableId, TableInfoRef};
 use table::table::scan::RegionScanExec;
 
 use crate::error::{GetRegionMetadataSnafu, Result};
+use crate::options::FlowQueryExtensions;
 
 /// Resolve to the given region (specified by [RegionId]) unconditionally.
 #[derive(Clone, Debug)]
@@ -295,14 +296,11 @@ impl DummyTableProviderFactory {
                     region_id,
                 })?;
 
-        let scan_request = query_ctx
-            .as_ref()
-            .map(|ctx| ScanRequest {
-                memtable_max_sequence: ctx.get_snapshot(region_id.as_u64()),
-                sst_min_sequence: ctx.sst_min_sequence(region_id.as_u64()),
-                ..Default::default()
-            })
-            .unwrap_or_default();
+        let scan_request = if let Some(ctx) = query_ctx.as_ref() {
+            scan_request_from_query_context(region_id, ctx)?
+        } else {
+            ScanRequest::default()
+        };
 
         Ok(DummyTableProvider {
             region_id,
@@ -312,6 +310,32 @@ impl DummyTableProviderFactory {
             query_ctx,
         })
     }
+}
+
+fn scan_request_from_query_context(
+    region_id: RegionId,
+    query_ctx: &QueryContext,
+) -> Result<ScanRequest> {
+    let mut scan_request = ScanRequest {
+        memtable_max_sequence: query_ctx.get_snapshot(region_id.as_u64()),
+        sst_min_sequence: query_ctx.sst_min_sequence(region_id.as_u64()),
+        ..Default::default()
+    };
+
+    let flow_extensions = FlowQueryExtensions::from_extensions(&query_ctx.extensions())?;
+
+    let should_apply_incremental = flow_extensions.validate_for_scan(region_id)?;
+    if should_apply_incremental
+        && let Some(after_seq) = flow_extensions
+            .incremental_after_seqs
+            .as_ref()
+            .and_then(|seqs| seqs.get(&region_id.as_u64()))
+            .copied()
+    {
+        scan_request.memtable_min_sequence = Some(after_seq);
+    }
+
+    Ok(scan_request)
 }
 
 #[async_trait]
@@ -441,5 +465,137 @@ impl CatalogManager for DummyCatalogManager {
         _query_ctx: Option<&'a QueryContext>,
     ) -> BoxStream<'a, CatalogResult<TableRef>> {
         Box::pin(futures::stream::empty())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::RwLock;
+
+    use common_error::ext::ErrorExt;
+    use common_error::status_code::StatusCode;
+    use session::context::QueryContextBuilder;
+
+    use super::*;
+    use crate::error::Error;
+    use crate::options::{FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, FLOW_SINK_TABLE_ID};
+
+    fn test_region_id() -> RegionId {
+        RegionId::new(1024, 1)
+    }
+
+    #[test]
+    fn test_scan_request_from_query_context_keeps_snapshot_fields() {
+        let region_id = test_region_id();
+        let query_ctx = QueryContextBuilder::default()
+            .snapshot_seqs(Arc::new(RwLock::new(HashMap::from([(
+                region_id.as_u64(),
+                100,
+            )]))))
+            .sst_min_sequences(Arc::new(RwLock::new(HashMap::from([(
+                region_id.as_u64(),
+                90,
+            )]))))
+            .build();
+
+        let request = scan_request_from_query_context(region_id, &query_ctx).unwrap();
+        assert_eq!(request.memtable_max_sequence, Some(100));
+        assert_eq!(request.sst_min_sequence, Some(90));
+        assert_eq!(request.memtable_min_sequence, None);
+    }
+
+    #[test]
+    fn test_scan_request_from_query_context_applies_incremental_after_seq_for_source_scan() {
+        let region_id = test_region_id();
+        let query_ctx = QueryContextBuilder::default()
+            .extensions(HashMap::from([
+                (
+                    FLOW_INCREMENTAL_MODE.to_string(),
+                    "memtable_only".to_string(),
+                ),
+                (
+                    FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+                    format!(r#"{{"{}":55}}"#, region_id.as_u64()),
+                ),
+            ]))
+            .build();
+
+        let request = scan_request_from_query_context(region_id, &query_ctx).unwrap();
+        assert_eq!(request.memtable_min_sequence, Some(55));
+    }
+
+    #[test]
+    fn test_scan_request_from_query_context_does_not_apply_incremental_for_sink_table() {
+        let region_id = test_region_id();
+        let query_ctx = QueryContextBuilder::default()
+            .extensions(HashMap::from([
+                (
+                    FLOW_INCREMENTAL_MODE.to_string(),
+                    "memtable_only".to_string(),
+                ),
+                (
+                    FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+                    format!(r#"{{"{}":55}}"#, region_id.as_u64()),
+                ),
+                (
+                    FLOW_SINK_TABLE_ID.to_string(),
+                    region_id.table_id().to_string(),
+                ),
+            ]))
+            .build();
+
+        let request = scan_request_from_query_context(region_id, &query_ctx).unwrap();
+        assert_eq!(request.memtable_min_sequence, None);
+    }
+
+    #[test]
+    fn test_scan_request_from_query_context_rejects_missing_memtable_only_region() {
+        let region_id = test_region_id();
+        let query_ctx = QueryContextBuilder::default()
+            .extensions(HashMap::from([
+                (
+                    FLOW_INCREMENTAL_MODE.to_string(),
+                    "memtable_only".to_string(),
+                ),
+                (
+                    FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+                    r#"{"9":55}"#.to_string(),
+                ),
+            ]))
+            .build();
+
+        let err = scan_request_from_query_context(region_id, &query_ctx).unwrap_err();
+        assert!(matches!(err, Error::InvalidQueryContextExtension { .. }));
+    }
+
+    #[test]
+    fn test_scan_request_from_query_context_rejects_invalid_incremental_json() {
+        let region_id = test_region_id();
+        let query_ctx = QueryContextBuilder::default()
+            .extensions(HashMap::from([(
+                FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+                "not-json".to_string(),
+            )]))
+            .build();
+
+        let err = scan_request_from_query_context(region_id, &query_ctx).unwrap_err();
+        assert!(matches!(err, Error::InvalidQueryContextExtension { .. }));
+        assert_eq!(err.status_code(), StatusCode::InvalidArguments);
+    }
+
+    #[test]
+    fn test_scan_request_from_query_context_rejects_invalid_sink_table_id() {
+        let region_id = test_region_id();
+        let query_ctx = QueryContextBuilder::default()
+            .extensions(HashMap::from([(
+                FLOW_SINK_TABLE_ID.to_string(),
+                "abc".to_string(),
+            )]))
+            .build();
+
+        let err = scan_request_from_query_context(region_id, &query_ctx).unwrap_err();
+        assert!(matches!(err, Error::InvalidQueryContextExtension { .. }));
+        assert_eq!(err.status_code(), StatusCode::InvalidArguments);
     }
 }

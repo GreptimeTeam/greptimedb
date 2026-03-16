@@ -16,7 +16,10 @@ use std::collections::HashMap;
 
 use common_base::memory_limit::MemoryLimit;
 use serde::{Deserialize, Serialize};
+use store_api::storage::RegionId;
 use table::metadata::TableId;
+
+use crate::error::{Error, InvalidQueryContextExtensionSnafu, Result};
 
 pub const FLOW_INCREMENTAL_AFTER_SEQS: &str = "flow.incremental_after_seqs";
 pub const FLOW_INCREMENTAL_MODE: &str = "flow.incremental_mode";
@@ -64,17 +67,17 @@ pub struct FlowQueryExtensions {
 }
 
 impl FlowQueryExtensions {
-    pub fn from_extensions(extensions: &HashMap<String, String>) -> Result<Self, String> {
+    pub fn from_extensions(extensions: &HashMap<String, String>) -> Result<Self> {
         let incremental_mode = extensions
             .get(FLOW_INCREMENTAL_MODE)
             .map(|value| match value.as_str() {
                 v if v.eq_ignore_ascii_case(FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY) => {
                     Ok(FlowIncrementalMode::MemtableOnly)
                 }
-                _ => Err(format!(
+                _ => Err(invalid_query_context_extension(format!(
                     "Invalid value for {}: {}",
                     FLOW_INCREMENTAL_MODE, value
-                )),
+                ))),
             })
             .transpose()?;
 
@@ -92,28 +95,31 @@ impl FlowQueryExtensions {
         let sink_table_id = extensions
             .get(FLOW_SINK_TABLE_ID)
             .map(|value| {
-                value
-                    .parse::<TableId>()
-                    .map_err(|_| format!("Invalid value for {}: {}", FLOW_SINK_TABLE_ID, value))
+                value.parse::<TableId>().map_err(|_| {
+                    invalid_query_context_extension(format!(
+                        "Invalid value for {}: {}",
+                        FLOW_SINK_TABLE_ID, value
+                    ))
+                })
             })
             .transpose()?;
 
         if matches!(incremental_mode, Some(FlowIncrementalMode::MemtableOnly)) {
             let after_seqs = incremental_after_seqs.as_ref().ok_or_else(|| {
-                format!(
+                invalid_query_context_extension(format!(
                     "{} is required when {}={}.",
                     FLOW_INCREMENTAL_AFTER_SEQS,
                     FLOW_INCREMENTAL_MODE,
                     FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY
-                )
+                ))
             })?;
             if after_seqs.is_empty() {
-                return Err(format!(
+                return Err(invalid_query_context_extension(format!(
                     "{} must not be empty when {}={}.",
                     FLOW_INCREMENTAL_AFTER_SEQS,
                     FLOW_INCREMENTAL_MODE,
                     FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY
-                ));
+                )));
             }
         }
 
@@ -125,12 +131,8 @@ impl FlowQueryExtensions {
         })
     }
 
-    pub fn validate_for_scan(
-        &self,
-        source_region_ids: &[u64],
-        current_scan_table_id: Option<TableId>,
-    ) -> Result<bool, String> {
-        if self.sink_table_id.is_some() && self.sink_table_id == current_scan_table_id {
+    pub fn validate_for_scan(&self, source_region_id: RegionId) -> Result<bool> {
+        if self.sink_table_id.is_some() && self.sink_table_id == Some(source_region_id.table_id()) {
             return Ok(false);
         }
 
@@ -139,19 +141,17 @@ impl FlowQueryExtensions {
             Some(FlowIncrementalMode::MemtableOnly)
         ) {
             let after_seqs = self.incremental_after_seqs.as_ref().ok_or_else(|| {
-                format!(
+                invalid_query_context_extension(format!(
                     "{} is required when {}=memtable_only.",
                     FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE
-                )
+                ))
             })?;
 
-            for region_id in source_region_ids {
-                if !after_seqs.contains_key(region_id) {
-                    return Err(format!(
-                        "Missing region {} in {} when {}=memtable_only.",
-                        region_id, FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE
-                    ));
-                }
+            if !after_seqs.contains_key(&source_region_id.as_u64()) {
+                return Err(invalid_query_context_extension(format!(
+                    "Missing region {} in {} when {}=memtable_only.",
+                    source_region_id, FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE
+                )));
             }
         }
 
@@ -159,38 +159,62 @@ impl FlowQueryExtensions {
     }
 }
 
-fn parse_incremental_after_seqs(value: &str) -> Result<HashMap<u64, u64>, String> {
-    let raw = serde_json::from_str::<HashMap<String, u64>>(value).map_err(|e| {
-        format!(
+fn parse_incremental_after_seqs(value: &str) -> Result<HashMap<u64, u64>> {
+    let raw = serde_json::from_str::<HashMap<String, serde_json::Value>>(value).map_err(|e| {
+        invalid_query_context_extension(format!(
             "Invalid JSON for {}: {} ({})",
             FLOW_INCREMENTAL_AFTER_SEQS, value, e
-        )
+        ))
     })?;
 
     raw.into_iter()
-        .map(|(region_id, seq)| {
-            region_id
-                .parse::<u64>()
-                .map(|region_id| (region_id, seq))
-                .map_err(|_| {
-                    format!(
-                        "Invalid region id in {}: {}",
+        .map(|(region_id, raw_seq)| {
+            let region_id = region_id.parse::<u64>().map_err(|_| {
+                invalid_query_context_extension(format!(
+                    "Invalid region id in {}: {}",
+                    FLOW_INCREMENTAL_AFTER_SEQS, region_id
+                ))
+            })?;
+
+            let seq = match raw_seq {
+                serde_json::Value::Number(num) => num.as_u64().ok_or_else(|| {
+                    invalid_query_context_extension(format!(
+                        "Invalid sequence value in {} for region {}: {}",
+                        FLOW_INCREMENTAL_AFTER_SEQS, region_id, num
+                    ))
+                })?,
+                serde_json::Value::String(s) => s.parse::<u64>().map_err(|_| {
+                    invalid_query_context_extension(format!(
+                        "Invalid sequence string in {} for region {}: {}",
+                        FLOW_INCREMENTAL_AFTER_SEQS, region_id, s
+                    ))
+                })?,
+                _ => {
+                    return Err(invalid_query_context_extension(format!(
+                        "Invalid sequence value type in {} for region {}",
                         FLOW_INCREMENTAL_AFTER_SEQS, region_id
-                    )
-                })
+                    )));
+                }
+            };
+
+            Ok((region_id, seq))
         })
         .collect()
 }
 
-fn parse_bool(value: &str) -> Result<bool, String> {
+fn parse_bool(value: &str) -> Result<bool> {
     match value {
         v if v.eq_ignore_ascii_case("true") => Ok(true),
         v if v.eq_ignore_ascii_case("false") => Ok(false),
-        _ => Err(format!(
+        _ => Err(invalid_query_context_extension(format!(
             "Invalid value for {}: {}",
             FLOW_RETURN_REGION_SEQ, value
-        )),
+        ))),
     }
+}
+
+fn invalid_query_context_extension(reason: String) -> Error {
+    InvalidQueryContextExtensionSnafu { reason }.build()
 }
 
 #[cfg(test)]
@@ -244,7 +268,7 @@ mod flow_extension_tests {
         )]);
 
         let err = FlowQueryExtensions::from_extensions(&exts).unwrap_err();
-        assert!(err.contains(FLOW_INCREMENTAL_AFTER_SEQS));
+        assert!(format!("{err}").contains(FLOW_INCREMENTAL_AFTER_SEQS));
     }
 
     #[test]
@@ -252,7 +276,7 @@ mod flow_extension_tests {
         let exts = HashMap::from([(FLOW_INCREMENTAL_MODE.to_string(), "foo".to_string())]);
 
         let err = FlowQueryExtensions::from_extensions(&exts).unwrap_err();
-        assert!(err.contains(FLOW_INCREMENTAL_MODE));
+        assert!(format!("{err}").contains(FLOW_INCREMENTAL_MODE));
     }
 
     #[test]
@@ -269,7 +293,32 @@ mod flow_extension_tests {
         ]);
 
         let err = FlowQueryExtensions::from_extensions(&exts).unwrap_err();
-        assert!(err.contains(FLOW_INCREMENTAL_AFTER_SEQS));
+        assert!(format!("{err}").contains(FLOW_INCREMENTAL_AFTER_SEQS));
+    }
+
+    #[test]
+    fn test_parse_flow_extensions_after_seqs_string_values() {
+        let exts = HashMap::from([(
+            FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+            r#"{"1":"10","2":"20"}"#.to_string(),
+        )]);
+
+        let parsed = FlowQueryExtensions::from_extensions(&exts).unwrap();
+        assert_eq!(
+            parsed.incremental_after_seqs.unwrap(),
+            HashMap::from([(1, 10), (2, 20)])
+        );
+    }
+
+    #[test]
+    fn test_parse_flow_extensions_after_seqs_invalid_value_type() {
+        let exts = HashMap::from([(
+            FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+            r#"{"1":true}"#.to_string(),
+        )]);
+
+        let err = FlowQueryExtensions::from_extensions(&exts).unwrap_err();
+        assert!(format!("{err}").contains(FLOW_INCREMENTAL_AFTER_SEQS));
     }
 
     #[test]
@@ -277,11 +326,13 @@ mod flow_extension_tests {
         let exts = HashMap::from([(FLOW_SINK_TABLE_ID.to_string(), "x".to_string())]);
 
         let err = FlowQueryExtensions::from_extensions(&exts).unwrap_err();
-        assert!(err.contains(FLOW_SINK_TABLE_ID));
+        assert!(format!("{err}").contains(FLOW_SINK_TABLE_ID));
     }
 
     #[test]
     fn test_validate_for_scan_missing_source_region() {
+        let source_region_id = RegionId::new(100, 2);
+        let existing_region_id = RegionId::new(100, 1);
         let exts = HashMap::from([
             (
                 FLOW_INCREMENTAL_MODE.to_string(),
@@ -289,17 +340,18 @@ mod flow_extension_tests {
             ),
             (
                 FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
-                r#"{"1":10}"#.to_string(),
+                format!(r#"{{"{}":10}}"#, existing_region_id.as_u64()),
             ),
         ]);
 
         let parsed = FlowQueryExtensions::from_extensions(&exts).unwrap();
-        let err = parsed.validate_for_scan(&[1, 2], Some(100)).unwrap_err();
-        assert!(err.contains("Missing region 2"));
+        let err = parsed.validate_for_scan(source_region_id).unwrap_err();
+        assert!(format!("{err}").contains("Missing region"));
     }
 
     #[test]
     fn test_validate_for_scan_sink_table_excluded() {
+        let source_region_id = RegionId::new(1024, 1);
         let exts = HashMap::from([
             (
                 FLOW_INCREMENTAL_MODE.to_string(),
@@ -307,13 +359,13 @@ mod flow_extension_tests {
             ),
             (
                 FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
-                r#"{"1":10}"#.to_string(),
+                format!(r#"{{"{}":10}}"#, source_region_id.as_u64()),
             ),
             (FLOW_SINK_TABLE_ID.to_string(), "1024".to_string()),
         ]);
 
         let parsed = FlowQueryExtensions::from_extensions(&exts).unwrap();
-        let apply_incremental = parsed.validate_for_scan(&[1, 2], Some(1024)).unwrap();
+        let apply_incremental = parsed.validate_for_scan(source_region_id).unwrap();
         assert!(!apply_incremental);
     }
 }
