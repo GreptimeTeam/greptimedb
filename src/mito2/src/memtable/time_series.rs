@@ -267,39 +267,6 @@ impl Memtable for TimeSeriesMemtable {
         Ok(())
     }
 
-    #[cfg(any(test, feature = "test"))]
-    fn iter(
-        &self,
-        projection: Option<&[ColumnId]>,
-        filters: Option<Predicate>,
-        sequence: Option<SequenceRange>,
-    ) -> Result<BoxedBatchIterator> {
-        let projection = if let Some(projection) = projection {
-            projection.iter().copied().collect()
-        } else {
-            self.region_metadata
-                .field_columns()
-                .map(|c| c.column_id)
-                .collect()
-        };
-
-        let iter = self.series_set.iter_series(
-            projection,
-            filters,
-            self.dedup,
-            self.merge_mode,
-            sequence,
-            None,
-        )?;
-
-        if self.merge_mode == MergeMode::LastNonNull {
-            let iter = LastNonNullIter::new(iter);
-            Ok(Box::new(iter))
-        } else {
-            Ok(Box::new(iter))
-        }
-    }
-
     fn ranges(
         &self,
         projection: Option<&[ColumnId]>,
@@ -1798,7 +1765,9 @@ mod tests {
             *expected_ts.entry(ts).or_default() += if dedup { 1 } else { 2 };
         }
 
-        let iter = memtable.iter(None, None, None).unwrap();
+        let ranges = memtable.ranges(None, RangesOptions::default()).unwrap();
+        let range = ranges.ranges.into_values().next().unwrap();
+        let iter = range.build_iter().unwrap();
         let mut read = HashMap::new();
 
         for ts in iter
@@ -1838,7 +1807,11 @@ mod tests {
         let memtable = TimeSeriesMemtable::new(schema, 42, None, true, MergeMode::LastRow);
         memtable.write(&kvs).unwrap();
 
-        let iter = memtable.iter(Some(&[3]), None, None).unwrap();
+        let iter = memtable
+            .ranges(Some(&[3]), RangesOptions::default())
+            .unwrap()
+            .build(None)
+            .unwrap();
 
         let mut v0_all = vec![];
 
@@ -1917,7 +1890,11 @@ mod tests {
                 barrier.wait();
 
                 for _ in 0..10 {
-                    let iter = memtable.iter(None, None, None).unwrap();
+                    let iter = memtable
+                        .ranges(None, RangesOptions::default())
+                        .unwrap()
+                        .build(None)
+                        .unwrap();
                     for batch_result in iter {
                         let _ = batch_result.unwrap();
                     }
@@ -1936,7 +1913,11 @@ mod tests {
             handle.join().unwrap();
         }
 
-        let iter = memtable.iter(None, None, None).unwrap();
+        let iter = memtable
+            .ranges(None, RangesOptions::default())
+            .unwrap()
+            .build(None)
+            .unwrap();
         let mut series_count = 0;
         let mut row_count = 0;
 
