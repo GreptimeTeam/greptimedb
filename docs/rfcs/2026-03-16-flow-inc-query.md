@@ -13,7 +13,7 @@ When incremental reads are stale or correctness cannot be proven, Flow falls bac
 
 # Motivation
 
-Flow batching currently still need to repeatly compute old data in the same time window, so having the chance to do incremental query 
+Flow batching currently still need to repeatedly compute old data in the same time window, so having the chance to do incremental query 
 could be useful for flow's performance.
 
 # Goals
