@@ -460,7 +460,7 @@ impl MetricEngineInner {
             .await
     }
 
-    fn find_data_region_meta(
+    pub(crate) fn find_data_region_meta(
         &self,
         logical_region_id: RegionId,
     ) -> Result<(RegionId, RegionId, PrimaryKeyEncoding)> {
