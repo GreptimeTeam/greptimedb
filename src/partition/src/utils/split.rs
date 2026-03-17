@@ -340,8 +340,8 @@ fn simplify_and_bounds(expr: PartitionExpr) -> PartitionExpr {
     }
 
     let mut out = passthrough;
-    for (col, lower) in lowers {
-        out.push(PartitionExpr::new(
+    out.extend(lowers.into_iter().map(|(col, lower)| {
+        PartitionExpr::new(
             Operand::Column(col),
             if lower.inclusive {
                 RestrictedOp::GtEq
@@ -349,10 +349,10 @@ fn simplify_and_bounds(expr: PartitionExpr) -> PartitionExpr {
                 RestrictedOp::Gt
             },
             Operand::Value(lower.value),
-        ));
-    }
-    for (col, upper) in uppers {
-        out.push(PartitionExpr::new(
+        )
+    }));
+    out.extend(uppers.into_iter().map(|(col, upper)| {
+        PartitionExpr::new(
             Operand::Column(col),
             if upper.inclusive {
                 RestrictedOp::LtEq
@@ -360,8 +360,8 @@ fn simplify_and_bounds(expr: PartitionExpr) -> PartitionExpr {
                 RestrictedOp::Lt
             },
             Operand::Value(upper.value),
-        ));
-    }
+        )
+    }));
 
     fold_and_exprs(out).unwrap_or(expr)
 }
@@ -423,15 +423,7 @@ fn prefer_lower(candidate: &LowerBound, current: &LowerBound) -> bool {
 
 /// Folds a list of expressions into a left-associated AND tree.
 fn fold_and_exprs(mut exprs: Vec<PartitionExpr>) -> Option<PartitionExpr> {
-    if exprs.is_empty() {
-        return None;
-    }
-    let mut iter = exprs.drain(..);
-    let mut acc = iter.next()?;
-    for next in iter {
-        acc = acc.and(next);
-    }
-    Some(acc)
+    exprs.drain(..).reduce(|acc, next| acc.and(next))
 }
 
 #[cfg(test)]
@@ -464,12 +456,8 @@ mod tests {
 
         let mut exprs = original_rule_exprs.to_vec();
         exprs.remove(replaced_index);
-        if let Some(left_expr) = left.clone() {
-            exprs.push(left_expr);
-        }
-        if let Some(right_expr) = right.clone() {
-            exprs.push(right_expr);
-        }
+        exprs.extend(left.iter().cloned());
+        exprs.extend(right.iter().cloned());
 
         ensure!(
             !exprs.is_empty(),
