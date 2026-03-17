@@ -179,6 +179,27 @@ pub struct DatabaseWithPeer {
     pub peer: Peer,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FlowQueryFailure {
+    pub stale_cursor: Option<FlowStaleCursorDetail>,
+}
+
+impl FlowQueryFailure {
+    pub fn is_stale_cursor(&self) -> bool {
+        self.stale_cursor.is_some()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FlowStaleCursorDetail {
+    pub region_id: Option<String>,
+    pub given_seq: Option<u64>,
+    pub min_readable_seq: Option<u64>,
+}
+
+const STALE_CURSOR_TOKEN: &str = "STALE_CURSOR";
+const STALE_CURSOR_RETRY_HINT: &str = "FALLBACK_FULL_RECOMPUTE";
+
 impl DatabaseWithPeer {
     fn new(database: Database, peer: Peer) -> Self {
         Self { database, peer }
@@ -199,6 +220,13 @@ impl DatabaseWithPeer {
 }
 
 impl FrontendClient {
+    /// TODO(discord9): better way to detect stale cursor error instead of parsing the error message
+    pub fn inspect_query_error(err: &Error) -> FlowQueryFailure {
+        let debug = format!("{err:?}");
+        let stale_cursor = parse_stale_cursor_detail(&debug);
+        FlowQueryFailure { stale_cursor }
+    }
+
     /// scan for available frontend from metadata
     pub(crate) async fn scan_for_frontend(&self) -> Result<Vec<(NodeInfoKey, NodeInfo)>, Error> {
         let Self::Distributed { meta_client, .. } = self else {
@@ -491,11 +519,37 @@ impl std::fmt::Display for PeerDesc {
     }
 }
 
+fn parse_stale_cursor_detail(message: &str) -> Option<FlowStaleCursorDetail> {
+    if !message.contains(STALE_CURSOR_TOKEN) || !message.contains(STALE_CURSOR_RETRY_HINT) {
+        return None;
+    }
+
+    Some(FlowStaleCursorDetail {
+        region_id: extract_segment(message, "region: ", ", given_seq:"),
+        given_seq: extract_u64_segment(message, "given_seq: ", ", min_readable_seq:"),
+        min_readable_seq: extract_u64_segment(message, "min_readable_seq: ", ", retry_hint:"),
+    })
+}
+
+fn extract_segment(message: &str, start: &str, end: &str) -> Option<String> {
+    let start_idx = message.find(start)? + start.len();
+    let tail = &message[start_idx..];
+    let end_idx = tail.find(end)?;
+    Some(tail[..end_idx].trim().to_string())
+}
+
+fn extract_u64_segment(message: &str, start: &str, end: &str) -> Option<u64> {
+    extract_segment(message, start, end)?.parse().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
+    use common_error::ext::PlainError;
+    use common_error::status_code::StatusCode;
     use common_query::Output;
+    use snafu::GenerateImplicitData;
     use tokio::time::timeout;
 
     use super::*;
@@ -558,5 +612,42 @@ mod tests {
                 .await
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn test_inspect_query_error_detects_stale_cursor() {
+        let err = Error::External {
+            source: BoxedError::new(PlainError::new(
+                "STALE_CURSOR: incremental query stale, region: 4398046511104(1024, 0), given_seq: 9, min_readable_seq: 18, retry_hint: FALLBACK_FULL_RECOMPUTE".to_string(),
+                StatusCode::EngineExecuteQuery,
+            )),
+            location: snafu::Location::generate(),
+        };
+
+        let failure = FrontendClient::inspect_query_error(&err);
+        assert!(failure.is_stale_cursor());
+        assert_eq!(
+            failure.stale_cursor,
+            Some(FlowStaleCursorDetail {
+                region_id: Some("4398046511104(1024, 0)".to_string()),
+                given_seq: Some(9),
+                min_readable_seq: Some(18),
+            })
+        );
+    }
+
+    #[test]
+    fn test_inspect_query_error_ignores_non_stale_error() {
+        let err = Error::External {
+            source: BoxedError::new(PlainError::new(
+                "ordinary query failure".to_string(),
+                StatusCode::EngineExecuteQuery,
+            )),
+            location: snafu::Location::generate(),
+        };
+
+        let failure = FrontendClient::inspect_query_error(&err);
+        assert!(!failure.is_stale_cursor());
+        assert_eq!(failure.stale_cursor, None);
     }
 }

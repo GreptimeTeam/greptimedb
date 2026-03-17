@@ -455,6 +455,44 @@ impl BatchingTask {
         Ok(Some((res, elapsed)))
     }
 
+    fn handle_flow_query_failure(&self, err: &Error, query: Option<&PlanInfo>) -> bool {
+        let failure = FrontendClient::inspect_query_error(err);
+        if failure.is_stale_cursor() {
+            warn!(
+                "Flow {} detected stale incremental query failure, switching to non-incremental recompute semantics for current query scope: {:?}",
+                self.config.flow_id, failure.stale_cursor
+            );
+
+            // notice that we only mark all as dirty if query itself has no time window filter.
+            if query.is_none_or(|query| query.filter.is_none())
+                && let Err(mark_err) = self.mark_all_windows_as_dirty()
+            {
+                warn!(
+                    "Flow {} failed to mark all windows dirty after stale incremental query without time-window scope: {}",
+                    self.config.flow_id, mark_err
+                );
+            }
+
+            true
+        } else {
+            false
+        }
+    }
+
+    fn restore_dirty_windows_after_failure(&self, query: &PlanInfo, is_stale_cursor: bool) {
+        if is_stale_cursor && query.filter.is_none() {
+            return;
+        }
+
+        self.state.write().unwrap().dirty_time_windows.add_windows(
+            query
+                .filter
+                .as_ref()
+                .map(|f| f.time_ranges.clone())
+                .unwrap_or_default(),
+        );
+    }
+
     /// start executing query in a loop, break when receive shutdown signal
     ///
     /// any error will be logged when executing query
@@ -558,6 +596,7 @@ impl BatchingTask {
                 }
                 // TODO(discord9): this error should have better place to go, but for now just print error, also more context is needed
                 Err(err) => {
+                    let is_stale_cursor = self.handle_flow_query_failure(&err, new_query.as_ref());
                     METRIC_FLOW_BATCHING_ENGINE_ERROR_CNT
                         .with_label_values(&[&flow_id_str])
                         .inc();
@@ -565,9 +604,7 @@ impl BatchingTask {
                         Some(query) => {
                             common_telemetry::error!(err; "Failed to execute query for flow={} with query: {}", self.config.flow_id, query.plan);
                             // Re-add dirty windows back since query failed
-                            self.state.write().unwrap().dirty_time_windows.add_windows(
-                                query.filter.map(|f| f.time_ranges).unwrap_or_default(),
-                            );
+                            self.restore_dirty_windows_after_failure(&query, is_stale_cursor);
                             // TODO(discord9): add some backoff here? half the query time window or what
                             // backoff meaning use smaller `max_window_cnt` for next query
 
@@ -979,8 +1016,11 @@ fn build_pk_from_aggr(plan: &LogicalPlan) -> Result<Option<TableDef>, Error> {
 #[cfg(test)]
 mod test {
     use api::v1::column_def::try_as_column_schema;
+    use common_error::ext::{BoxedError, PlainError};
+    use common_error::status_code::StatusCode;
     use pretty_assertions::assert_eq;
     use session::context::QueryContext;
+    use snafu::GenerateImplicitData;
 
     use super::*;
     use crate::test_utils::create_test_query_engine;
@@ -1105,5 +1145,127 @@ mod test {
             assert_eq!(tc.primary_keys, expr.primary_keys, "{:?}", tc.sql);
             assert_eq!(tc.time_index, expr.time_index, "{:?}", tc.sql);
         }
+    }
+
+    #[tokio::test]
+    async fn test_handle_flow_query_failure_marks_full_recompute_on_stale() {
+        let query_engine = create_test_query_engine();
+        let query_ctx = QueryContext::arc();
+        let plan = sql_to_df_plan(
+            query_ctx.clone(),
+            query_engine,
+            "SELECT number, ts FROM numbers_with_ts",
+            true,
+        )
+        .await
+        .unwrap();
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let task = BatchingTask::try_new(TaskArgs {
+            flow_id: 42,
+            query: "SELECT number, ts FROM numbers_with_ts",
+            plan,
+            time_window_expr: None,
+            expire_after: None,
+            sink_table_name: [
+                "greptime".to_string(),
+                "public".to_string(),
+                "sink".to_string(),
+            ],
+            source_table_names: vec![[
+                "greptime".to_string(),
+                "public".to_string(),
+                "numbers_with_ts".to_string(),
+            ]],
+            query_ctx,
+            catalog_manager: create_test_query_engine()
+                .engine_state()
+                .catalog_manager()
+                .clone(),
+            shutdown_rx: rx,
+            batch_opts: Arc::new(BatchingModeOptions::default()),
+            flow_eval_interval: None,
+        })
+        .unwrap();
+
+        let err = Error::External {
+            source: BoxedError::new(PlainError::new(
+                "STALE_CURSOR: incremental query stale, region: 4398046511104(1024, 0), given_seq: 9, min_readable_seq: 18, retry_hint: FALLBACK_FULL_RECOMPUTE".to_string(),
+                StatusCode::EngineExecuteQuery,
+            )),
+            location: snafu::Location::generate(),
+        };
+
+        task.handle_flow_query_failure(&err, None);
+
+        let state = task.state.read().unwrap();
+        assert_eq!(state.dirty_time_windows.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_stale_failure_preserves_current_time_window_scope() {
+        let query_engine = create_test_query_engine();
+        let query_ctx = QueryContext::arc();
+        let plan = sql_to_df_plan(
+            query_ctx.clone(),
+            query_engine,
+            "SELECT number, ts FROM numbers_with_ts",
+            true,
+        )
+        .await
+        .unwrap();
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let task = BatchingTask::try_new(TaskArgs {
+            flow_id: 43,
+            query: "SELECT number, ts FROM numbers_with_ts",
+            plan: plan.clone(),
+            time_window_expr: None,
+            expire_after: None,
+            sink_table_name: [
+                "greptime".to_string(),
+                "public".to_string(),
+                "sink".to_string(),
+            ],
+            source_table_names: vec![[
+                "greptime".to_string(),
+                "public".to_string(),
+                "numbers_with_ts".to_string(),
+            ]],
+            query_ctx,
+            catalog_manager: create_test_query_engine()
+                .engine_state()
+                .catalog_manager()
+                .clone(),
+            shutdown_rx: rx,
+            batch_opts: Arc::new(BatchingModeOptions::default()),
+            flow_eval_interval: None,
+        })
+        .unwrap();
+
+        let err = Error::External {
+            source: BoxedError::new(PlainError::new(
+                "STALE_CURSOR: incremental query stale, region: 4398046511104(1024, 0), given_seq: 9, min_readable_seq: 18, retry_hint: FALLBACK_FULL_RECOMPUTE".to_string(),
+                StatusCode::EngineExecuteQuery,
+            )),
+            location: snafu::Location::generate(),
+        };
+
+        let query = PlanInfo {
+            plan,
+            filter: Some(FilterExprInfo {
+                expr: datafusion_expr::lit(true),
+                col_name: "ts".to_string(),
+                time_ranges: vec![(Timestamp::new_second(0), Timestamp::new_second(1))],
+                window_size: chrono::Duration::seconds(1),
+            }),
+        };
+        let is_stale_cursor = task.handle_flow_query_failure(&err, Some(&query));
+        task.restore_dirty_windows_after_failure(&query, is_stale_cursor);
+
+        let state = task.state.read().unwrap();
+        assert_eq!(state.dirty_time_windows.len(), 1);
+        assert_eq!(
+            state.dirty_time_windows.window_size(),
+            std::time::Duration::from_secs(1)
+        );
     }
 }
