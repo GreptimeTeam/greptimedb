@@ -462,7 +462,7 @@ mod tests {
             .finish();
         OpenDalStorage::new_operator_rooted(
             OpenDalStorage::finish_local_store(object_store),
-            &Url::from_directory_path(dir).unwrap().to_string(),
+            Url::from_directory_path(dir).unwrap().as_ref(),
         )
     }
 
