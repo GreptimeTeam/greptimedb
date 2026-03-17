@@ -4029,6 +4029,7 @@ mod test {
     use table::test_util::EmptyTable;
 
     use super::*;
+    use crate::QueryEngineContext;
     use crate::options::QueryOptions;
     use crate::parser::QueryLanguageParser;
 
@@ -4044,6 +4045,20 @@ mod test {
             Plugins::default(),
             QueryOptions::default(),
         )
+    }
+
+    async fn build_optimized_promql_plan(
+        table_provider: DfTableSourceProvider,
+        eval_stmt: &EvalStmt,
+    ) -> LogicalPlan {
+        let state = build_query_engine_state();
+        let raw_plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt, &state)
+            .await
+            .unwrap();
+        let context = QueryEngineContext::new(state.session_state(), QueryContext::arc());
+        state
+            .optimize_by_extension_rules(raw_plan, &context)
+            .unwrap()
     }
 
     async fn build_test_table_provider(
@@ -4361,10 +4376,7 @@ mod test {
             1,
         )
         .await;
-        let plan =
-            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
-                .await
-                .unwrap();
+        let plan = build_optimized_promql_plan(table_provider, &eval_stmt).await;
 
         let expected = String::from(
             "Filter: TEMPLATE(field_0) IS NOT NULL [timestamp:Timestamp(ms), TEMPLATE(field_0):Float64;N, tag_0:Utf8]\
@@ -4571,10 +4583,7 @@ mod test {
             2,
         )
         .await;
-        let plan =
-            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
-                .await
-                .unwrap();
+        let plan = build_optimized_promql_plan(table_provider, &eval_stmt).await;
         let expected_no_without = String::from(
             "Sort: some_metric.tag_1 ASC NULLS LAST, some_metric.timestamp ASC NULLS LAST [tag_1:Utf8, timestamp:Timestamp(ms), TEMPLATE(some_metric.field_0):Float64;N, TEMPLATE(some_metric.field_1):Float64;N]\
             \n  Aggregate: groupBy=[[some_metric.tag_1, some_metric.timestamp]], aggr=[[TEMPLATE(some_metric.field_0), TEMPLATE(some_metric.field_1)]] [tag_1:Utf8, timestamp:Timestamp(ms), TEMPLATE(some_metric.field_0):Float64;N, TEMPLATE(some_metric.field_1):Float64;N]\
@@ -4601,10 +4610,7 @@ mod test {
             2,
         )
         .await;
-        let plan =
-            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
-                .await
-                .unwrap();
+        let plan = build_optimized_promql_plan(table_provider, &eval_stmt).await;
         let expected_without = String::from(
             "Sort: some_metric.tag_0 ASC NULLS LAST, some_metric.timestamp ASC NULLS LAST [tag_0:Utf8, timestamp:Timestamp(ms), TEMPLATE(some_metric.field_0):Float64;N, TEMPLATE(some_metric.field_1):Float64;N]\
             \n  Aggregate: groupBy=[[some_metric.tag_0, some_metric.timestamp]], aggr=[[TEMPLATE(some_metric.field_0), TEMPLATE(some_metric.field_1)]] [tag_0:Utf8, timestamp:Timestamp(ms), TEMPLATE(some_metric.field_0):Float64;N, TEMPLATE(some_metric.field_1):Float64;N]\
@@ -4641,10 +4647,7 @@ mod test {
             1,
         )
         .await;
-        let plan =
-            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
-                .await
-                .unwrap();
+        let plan = build_optimized_promql_plan(table_provider, &eval_stmt).await;
 
         let plan_str = plan.display_indent_schema().to_string();
         assert!(plan_str.contains("PromSeriesDivide: tags=[\"__tsid\"]"));
@@ -4656,6 +4659,186 @@ mod test {
                 .iter()
                 .any(|field| field.name() == DATA_SCHEMA_TSID_COLUMN_NAME)
         );
+    }
+
+    #[tokio::test]
+    async fn scalar_count_count_range_keeps_full_window() {
+        let prom_expr = parser::parse("scalar(count(count(some_metric) by (tag_0)))").unwrap();
+        let eval_stmt = EvalStmt {
+            expr: prom_expr,
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+
+        let table_provider = build_test_table_provider_with_tsid(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            1,
+            1,
+        )
+        .await;
+        let plan = build_optimized_promql_plan(table_provider, &eval_stmt).await;
+
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(plan_str.contains("ScalarCalculate: tags=[]"));
+        assert!(plan_str.contains("PromInstantManipulate: range=[0..100000000]"));
+        assert!(!plan_str.contains("PromInstantManipulate: range=[99999000..99999000]"));
+    }
+
+    #[tokio::test]
+    async fn scalar_count_count_instant_stays_at_eval_timestamp() {
+        let prom_expr = parser::parse("scalar(count(count(some_metric) by (tag_0)))").unwrap();
+        let eval_at = UNIX_EPOCH
+            .checked_add(Duration::from_secs(100_000))
+            .unwrap();
+        let eval_stmt = EvalStmt {
+            expr: prom_expr,
+            start: eval_at,
+            end: eval_at,
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+
+        let table_provider = build_test_table_provider_with_tsid(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            1,
+            1,
+        )
+        .await;
+        let plan = build_optimized_promql_plan(table_provider, &eval_stmt).await;
+
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(plan_str.contains("PromInstantManipulate: range=[100000000..100000000]"));
+        assert!(!plan_str.contains("PromInstantManipulate: range=[99999000..99999000]"));
+    }
+
+    #[tokio::test]
+    async fn scalar_count_count_rewrite_applies_inside_binary_expr_for_tsid_input() {
+        let prom_expr = parser::parse(
+            "sum(irate(some_metric[1h])) / scalar(count(count(some_metric) by (tag_0)))",
+        )
+        .unwrap();
+        let eval_stmt = EvalStmt {
+            expr: prom_expr,
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH.checked_add(Duration::from_secs(10)).unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(300),
+        };
+
+        let table_provider = build_test_table_provider_with_tsid(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            2,
+            1,
+        )
+        .await;
+        let plan = build_optimized_promql_plan(table_provider, &eval_stmt).await;
+
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(plan_str.contains("__prom_non_nan"), "{plan_str}");
+    }
+
+    #[tokio::test]
+    async fn nested_count_rewrite_keeps_full_series_key_with_tsid_input() {
+        let prom_expr = parser::parse("count(count(some_metric) by (tag_0))").unwrap();
+        let eval_stmt = EvalStmt {
+            expr: prom_expr,
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+
+        let table_provider = build_test_table_provider_with_tsid(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            2,
+            1,
+        )
+        .await;
+        let plan = build_optimized_promql_plan(table_provider, &eval_stmt).await;
+
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(plan_str.contains("PromSeriesDivide: tags=[\"__tsid\"]"));
+        assert!(plan_str.contains(
+            "Projection: some_metric.timestamp, some_metric.tag_0, CAST(some_metric.field_0 = some_metric.field_0 AS Int64) AS __prom_non_nan"
+        ));
+        assert!(plan_str.contains(
+            "Aggregate: groupBy=[[some_metric.timestamp, some_metric.tag_0]], aggr=[[max(__prom_non_nan) AS __prom_non_nan]]"
+        ));
+        assert!(plan_str.contains("Filter: __prom_non_nan = Int64(1)"));
+        assert!(plan_str.contains(
+            "Aggregate: groupBy=[[some_metric.timestamp]], aggr=[[sum(__prom_non_nan) AS count(count(some_metric.field_0))]]"
+        ));
+        assert!(!plan_str.contains("PromSeriesDivide: tags=[\"tag_0\"]"));
+    }
+
+    #[tokio::test]
+    async fn nested_count_rewrite_keeps_all_tags_without_tsid() {
+        let prom_expr = parser::parse("count(count(some_metric) by (tag_0))").unwrap();
+        let eval_stmt = EvalStmt {
+            expr: prom_expr,
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+
+        let table_provider = build_test_table_provider(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            2,
+            1,
+        )
+        .await;
+        let plan = build_optimized_promql_plan(table_provider, &eval_stmt).await;
+
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(plan_str.contains("PromSeriesDivide: tags=[\"tag_0\", \"tag_1\"]"));
+        assert!(plan_str.contains(
+            "Projection: some_metric.timestamp, some_metric.tag_0, CAST(some_metric.field_0 = some_metric.field_0 AS Int64) AS __prom_non_nan"
+        ));
+        assert!(plan_str.contains(
+            "Aggregate: groupBy=[[some_metric.timestamp, some_metric.tag_0]], aggr=[[max(__prom_non_nan) AS __prom_non_nan]]"
+        ));
+        assert!(plan_str.contains(
+            "Aggregate: groupBy=[[some_metric.timestamp]], aggr=[[sum(__prom_non_nan) AS count(count(some_metric.field_0))]]"
+        ));
+        assert!(!plan_str.contains("PromSeriesDivide: tags=[\"tag_0\"]"));
+    }
+
+    #[tokio::test]
+    async fn nested_count_rewrite_preserves_tsid_with_field_matcher() {
+        let prom_expr =
+            parser::parse(r#"count(count(some_metric{__field__="field_0"}) by (tag_0))"#).unwrap();
+        let eval_stmt = EvalStmt {
+            expr: prom_expr,
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+
+        let table_provider = build_test_table_provider_with_tsid(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            2,
+            2,
+        )
+        .await;
+        let plan = build_optimized_promql_plan(table_provider, &eval_stmt).await;
+
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(plan_str.contains("PromSeriesDivide: tags=[\"__tsid\"]"));
+        assert!(plan_str.contains(
+            "Projection: some_metric.field_0, some_metric.tag_0, some_metric.tag_1, some_metric.__tsid, some_metric.timestamp"
+        ));
     }
 
     #[tokio::test]

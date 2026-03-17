@@ -63,6 +63,7 @@ use crate::optimizer::constant_term::MatchesConstantTermOptimizer;
 use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
 use crate::optimizer::parallelize_scan::ParallelizeScan;
 use crate::optimizer::pass_distribution::PassDistribution;
+use crate::optimizer::promql_count::PromqlNestedCountRewriteRule;
 use crate::optimizer::remove_duplicate::RemoveDuplicate;
 use crate::optimizer::scan_hint::ScanHintRule;
 use crate::optimizer::string_normalization::StringNormalizationRule;
@@ -146,6 +147,7 @@ impl QueryEngineState {
 
         // The [`TypeConversionRule`] must be at first
         extension_rules.insert(0, Arc::new(TypeConversionRule) as _);
+        extension_rules.push(Arc::new(PromqlNestedCountRewriteRule) as _);
 
         // Apply the datafusion rules
         let mut analyzer = Analyzer::new();
