@@ -14,7 +14,7 @@
 
 //! Expression split utilities for partition rules.
 //!
-//! This module provides a conservative to split one partition expression `R`
+//! This module provides a conservative way to split one partition expression `R`
 //! by a split expression `S` into:
 //! - `left = R AND S`
 //! - `right = R AND NOT(S)`
@@ -27,14 +27,10 @@ use std::collections::{BTreeMap, HashSet};
 
 use datatypes::value::Value;
 use snafu::ensure;
-use store_api::storage::RegionNumber;
 
-use crate::checker::PartitionChecker;
 use crate::collider::Collider;
 use crate::error::{self, Result};
 use crate::expr::{Operand, PartitionExpr, RestrictedOp};
-use crate::multi_dim::MultiDimPartitionRule;
-use crate::simplify::simplify_merged_partition_expr;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExprSplitDegradeReason {
@@ -79,8 +75,8 @@ pub fn split_partition_expr(
         return Err(ExprSplitDegradeReason::ColliderRejected);
     }
 
-    let left_expr = maybe_simplify_expr(left_raw);
-    let right_expr = maybe_simplify_expr(right_raw);
+    let left_expr = simplify_and_bounds(left_raw);
+    let right_expr = simplify_and_bounds(right_raw);
 
     Ok((left_expr, right_expr))
 }
@@ -195,59 +191,6 @@ pub fn validate_supported_expr(expr: &PartitionExpr) -> Result<()> {
         }
         _ => validate_atomic(expr),
     }
-}
-
-/// Performs best-effort simplification for split outputs.
-pub fn maybe_simplify_expr(expr: PartitionExpr) -> PartitionExpr {
-    let merged = simplify_merged_partition_expr(expr);
-    simplify_and_bounds(merged)
-}
-
-/// Validates replacement result using existing partition checker.
-pub fn validate_cut_result_with_checker(
-    original_rule_exprs: &[PartitionExpr],
-    replaced_index: usize,
-    left: &Option<PartitionExpr>,
-    right: &Option<PartitionExpr>,
-    partition_columns: Vec<String>,
-    regions: Vec<RegionNumber>,
-) -> Result<()> {
-    ensure!(
-        replaced_index < original_rule_exprs.len(),
-        error::UnexpectedSnafu {
-            err_msg: format!(
-                "replaced index out of bounds: {replaced_index} >= {}",
-                original_rule_exprs.len()
-            )
-        }
-    );
-
-    let mut exprs = original_rule_exprs.to_vec();
-    exprs.remove(replaced_index);
-    if let Some(left_expr) = left.clone() {
-        exprs.push(left_expr);
-    }
-    if let Some(right_expr) = right.clone() {
-        exprs.push(right_expr);
-    }
-
-    ensure!(
-        !exprs.is_empty(),
-        error::UnexpectedSnafu {
-            err_msg: "empty rule exprs after split".to_string()
-        }
-    );
-
-    let final_regions = if regions.len() == exprs.len() {
-        regions
-    } else {
-        (0..exprs.len() as RegionNumber).collect()
-    };
-
-    let rule = MultiDimPartitionRule::try_new(partition_columns, final_regions, exprs, false)?;
-    let checker = PartitionChecker::try_new(&rule)?;
-    checker.check()?;
-    Ok(())
 }
 
 fn validate_atomic(expr: &PartitionExpr) -> Result<()> {
@@ -494,9 +437,58 @@ fn fold_and_exprs(mut exprs: Vec<PartitionExpr>) -> Option<PartitionExpr> {
 #[cfg(test)]
 mod tests {
     use datatypes::value::{OrderedFloat, Value};
+    use store_api::storage::RegionNumber;
 
     use super::*;
+    use crate::checker::PartitionChecker;
     use crate::expr::col;
+    use crate::multi_dim::MultiDimPartitionRule;
+
+    fn validate_cut_result_with_checker(
+        original_rule_exprs: &[PartitionExpr],
+        replaced_index: usize,
+        left: &Option<PartitionExpr>,
+        right: &Option<PartitionExpr>,
+        partition_columns: Vec<String>,
+        regions: Vec<RegionNumber>,
+    ) -> Result<()> {
+        ensure!(
+            replaced_index < original_rule_exprs.len(),
+            error::UnexpectedSnafu {
+                err_msg: format!(
+                    "replaced index out of bounds: {replaced_index} >= {}",
+                    original_rule_exprs.len()
+                )
+            }
+        );
+
+        let mut exprs = original_rule_exprs.to_vec();
+        exprs.remove(replaced_index);
+        if let Some(left_expr) = left.clone() {
+            exprs.push(left_expr);
+        }
+        if let Some(right_expr) = right.clone() {
+            exprs.push(right_expr);
+        }
+
+        ensure!(
+            !exprs.is_empty(),
+            error::UnexpectedSnafu {
+                err_msg: "empty rule exprs after split".to_string()
+            }
+        );
+
+        let final_regions = if regions.len() == exprs.len() {
+            regions
+        } else {
+            (0..exprs.len() as RegionNumber).collect()
+        };
+
+        let rule = MultiDimPartitionRule::try_new(partition_columns, final_regions, exprs, false)?;
+        let checker = PartitionChecker::try_new(&rule)?;
+        checker.check()?;
+        Ok(())
+    }
 
     #[test]
     fn test_split_simple_range() {
@@ -583,7 +575,7 @@ mod tests {
             .lt_eq(Value::Int64(10))
             .and(col("a").lt(Value::Int64(10)));
 
-        let simplified = maybe_simplify_expr(expr);
+        let simplified = simplify_and_bounds(expr);
         assert_eq!(simplified.to_string(), "a < 10");
     }
 
@@ -594,7 +586,7 @@ mod tests {
             .gt_eq(Value::Int64(10))
             .and(col("a").gt(Value::Int64(10)));
 
-        let simplified = maybe_simplify_expr(expr);
+        let simplified = simplify_and_bounds(expr);
         assert_eq!(simplified.to_string(), "a > 10");
     }
 
@@ -663,50 +655,6 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_cut_result_with_checker_index_out_of_bounds() {
-        // original has one expr, replacing index 1 must fail.
-        let original = vec![col("a").lt(Value::Int64(10))];
-        let left = Some(col("a").lt(Value::Int64(5)));
-        let right = Some(
-            col("a")
-                .gt_eq(Value::Int64(5))
-                .and(col("a").lt(Value::Int64(10))),
-        );
-
-        assert!(
-            validate_cut_result_with_checker(
-                &original,
-                1,
-                &left,
-                &right,
-                vec!["a".to_string()],
-                vec![1, 2],
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn test_validate_cut_result_with_checker_empty_after_replace() {
-        // Removing the only expr and adding none should fail validation.
-        let original = vec![col("a").lt(Value::Int64(10))];
-        let left = None;
-        let right = None;
-
-        assert!(
-            validate_cut_result_with_checker(
-                &original,
-                0,
-                &left,
-                &right,
-                vec!["a".to_string()],
-                vec![1],
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
     fn test_simplify_and_bounds_or_keeps_original() {
         // OR tree is intentionally not flattened by AND-only simplifier.
         let expr = PartitionExpr::new(
@@ -714,7 +662,7 @@ mod tests {
             RestrictedOp::Or,
             Operand::Expr(col("a").gt_eq(Value::Int64(20))),
         );
-        let simplified = maybe_simplify_expr(expr.clone());
+        let simplified = simplify_and_bounds(expr.clone());
         assert_eq!(simplified.to_string(), expr.to_string());
     }
 
@@ -724,13 +672,13 @@ mod tests {
         let upper = col("a")
             .lt(Value::Int64(5))
             .and(col("a").lt(Value::Int64(10)));
-        assert_eq!(maybe_simplify_expr(upper).to_string(), "a < 5");
+        assert_eq!(simplify_and_bounds(upper).to_string(), "a < 5");
 
         // lower: stronger bound first, weaker later -> keep stronger (> 10).
         let lower = col("a")
             .gt(Value::Int64(10))
             .and(col("a").gt(Value::Int64(5)));
-        assert_eq!(maybe_simplify_expr(lower).to_string(), "a > 10");
+        assert_eq!(simplify_and_bounds(lower).to_string(), "a > 10");
     }
 
     #[test]
