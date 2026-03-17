@@ -188,6 +188,23 @@ async fn test_activate_pending_flow_require_streaming_keeps_pending() {
             .unwrap()
             .contains("requires streaming activation")
     );
+    let first_updated_time = *pending_flow.updated_time();
+
+    let mut procedure = ActivatePendingFlowProcedure::new(
+        flow_id,
+        DEFAULT_CATALOG_NAME.to_string(),
+        ddl_context.clone(),
+    );
+    assert!(execute_procedure_until_done(&mut procedure).await.is_none());
+
+    let pending_flow = ddl_context
+        .flow_metadata_manager
+        .flow_info_manager()
+        .get(flow_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending_flow.updated_time(), &first_updated_time);
 }
 
 #[tokio::test]

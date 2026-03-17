@@ -316,6 +316,14 @@ async fn update_pending_flow_metadata(
     unresolved_source_table_names: Vec<TableName>,
     last_activation_error: Option<String>,
 ) -> Result<()> {
+    let current_flow_info_value = current_flow_info.get_inner_ref();
+    if current_flow_info_value.source_table_ids == resolved_table_ids
+        && current_flow_info_value.unresolved_source_table_names == unresolved_source_table_names
+        && current_flow_info_value.last_activation_error == last_activation_error
+    {
+        return Ok(());
+    }
+
     let mut new_flow_info = current_flow_info.get_inner_ref().clone();
     new_flow_info.source_table_ids = resolved_table_ids;
     new_flow_info.unresolved_source_table_names = unresolved_source_table_names;
