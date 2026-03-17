@@ -1043,7 +1043,7 @@ async fn preload_parquet_meta_cache_for_files(
         let loader = MetadataLoader::new(object_store.clone(), &file_path, file_size);
         match loader.load(&mut cache_metrics).await {
             Ok(metadata) => {
-                cache_manager.put_parquet_meta_data(file_id, Arc::new(metadata));
+                cache_manager.put_parquet_meta_data(file_id, Arc::new(metadata), None);
                 loaded += 1;
             }
             Err(err) => {
