@@ -718,4 +718,65 @@ mod tests {
 
         assert_eq!(put_output, bulk_output);
     }
+
+    #[test]
+    fn test_record_batch_to_rows_with_null_values() {
+        use datatypes::arrow::array::{Float64Array, StringArray, TimestampMillisecondArray};
+        use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema, TimeUnit};
+        use datatypes::arrow::record_batch::RecordBatch;
+        use store_api::storage::RegionId;
+
+        use crate::engine::bulk_insert::record_batch_to_rows;
+
+        let schema = Arc::new(ArrowSchema::new(vec![
+            Field::new(
+                greptime_timestamp(),
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                true,
+            ),
+            Field::new(greptime_value(), DataType::Float64, true),
+            Field::new("job", DataType::Utf8, true),
+            Field::new("host", DataType::Utf8, true),
+        ]));
+
+        let ts_array = TimestampMillisecondArray::from(vec![Some(1000), None, Some(3000)]);
+        let val_array = Float64Array::from(vec![Some(1.0), Some(2.0), None]);
+        let job_array = StringArray::from(vec![Some("job1"), None, Some("job3")]);
+        let host_array = StringArray::from(vec![None, Some("host2"), Some("host3")]);
+
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(ts_array),
+                Arc::new(val_array),
+                Arc::new(job_array),
+                Arc::new(host_array),
+            ],
+        )
+        .unwrap();
+
+        let region_id = RegionId::new(1, 1);
+        let rows = record_batch_to_rows(&batch, region_id).unwrap();
+
+        assert_eq!(rows.rows.len(), 3);
+        assert_eq!(rows.schema.len(), 4);
+
+        // Row 0: all non-null except host
+        assert!(rows.rows[0].values[0].value_data.is_some());
+        assert!(rows.rows[0].values[1].value_data.is_some());
+        assert!(rows.rows[0].values[2].value_data.is_some());
+        assert!(rows.rows[0].values[3].value_data.is_none());
+
+        // Row 1: null timestamp, null job
+        assert!(rows.rows[1].values[0].value_data.is_none());
+        assert!(rows.rows[1].values[1].value_data.is_some());
+        assert!(rows.rows[1].values[2].value_data.is_none());
+        assert!(rows.rows[1].values[3].value_data.is_some());
+
+        // Row 2: null value
+        assert!(rows.rows[2].values[0].value_data.is_some());
+        assert!(rows.rows[2].values[1].value_data.is_none());
+        assert!(rows.rows[2].values[2].value_data.is_some());
+        assert!(rows.rows[2].values[3].value_data.is_some());
+    }
 }
