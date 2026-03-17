@@ -16,8 +16,7 @@
 //!
 //! This module provides the V2 implementation of database import functionality,
 //! featuring:
-//! - JSON-based schema import
-//! - DDL generation from schema definitions
+//! - DDL-based schema import
 //! - Dry-run mode for verification
 //!
 //! # Example
@@ -36,7 +35,6 @@
 //! ```
 
 mod command;
-pub mod ddl_generator;
 pub mod error;
 pub mod executor;
 

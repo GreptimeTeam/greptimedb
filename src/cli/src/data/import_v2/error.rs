@@ -45,8 +45,8 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Export error"))]
-    Export {
+    #[snafu(display("Snapshot storage error"))]
+    SnapshotStorage {
         #[snafu(source)]
         error: crate::data::export_v2::error::Error,
         #[snafu(implicit)]
@@ -57,14 +57,6 @@ pub enum Error {
     Database {
         #[snafu(source)]
         error: crate::error::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Invalid column definition for table '{}': {}", table, reason))]
-    InvalidColumnDefinition {
-        table: String,
-        reason: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -80,8 +72,7 @@ impl ErrorExt for Error {
             }
             Error::ManifestVersionMismatch { .. } => StatusCode::InvalidArguments,
             Error::Database { error, .. } => error.status_code(),
-            Error::Export { error, .. } => error.status_code(),
-            Error::InvalidColumnDefinition { .. } => StatusCode::InvalidArguments,
+            Error::SnapshotStorage { error, .. } => error.status_code(),
         }
     }
 

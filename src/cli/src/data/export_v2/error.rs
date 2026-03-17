@@ -63,6 +63,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to decode text file as UTF-8"))]
+    TextDecode {
+        #[snafu(source)]
+        error: std::string::FromUtf8Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display(
         "Cannot resume schema-only snapshot with data export. Use --force to recreate."
     ))]
@@ -71,16 +79,10 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Table '{}' has no time index column", table))]
-    NoTimeIndex {
-        table: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Invalid semantic type: {}", value))]
-    InvalidSemanticType {
-        value: String,
+    #[snafu(display(
+        "Data export is not implemented yet. Use --schema-only to create a schema snapshot."
+    ))]
+    DataExportNotImplemented {
         #[snafu(implicit)]
         location: Location,
     },
@@ -152,17 +154,17 @@ impl ErrorExt for Error {
         match self {
             Error::InvalidUri { .. }
             | Error::UnsupportedScheme { .. }
-            | Error::InvalidSemanticType { .. }
             | Error::CannotResumeSchemaOnly { .. }
+            | Error::DataExportNotImplemented { .. }
             | Error::ManifestVersionMismatch { .. } => StatusCode::InvalidArguments,
 
             Error::StorageOperation { .. }
             | Error::ManifestParse { .. }
             | Error::ManifestSerialize { .. }
+            | Error::TextDecode { .. }
             | Error::BuildObjectStore { .. } => StatusCode::StorageUnavailable,
 
-            Error::NoTimeIndex { .. }
-            | Error::EmptyResult { .. }
+            Error::EmptyResult { .. }
             | Error::UnexpectedValueType { .. }
             | Error::UrlParse { .. } => StatusCode::Internal,
 

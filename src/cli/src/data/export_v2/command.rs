@@ -27,11 +27,11 @@ use snafu::{OptionExt, ResultExt};
 use crate::Tool;
 use crate::common::ObjectStoreConfig;
 use crate::data::export_v2::error::{
-    CannotResumeSchemaOnlySnafu, DatabaseSnafu, EmptyResultSnafu, Result, UnexpectedValueTypeSnafu,
+    CannotResumeSchemaOnlySnafu, DataExportNotImplementedSnafu, DatabaseSnafu, EmptyResultSnafu,
+    ManifestVersionMismatchSnafu, Result, UnexpectedValueTypeSnafu,
 };
 use crate::data::export_v2::extractor::SchemaExtractor;
-use crate::data::export_v2::manifest::{DataFormat, MANIFEST_VERSION, Manifest, TimeRange};
-use crate::data::export_v2::schema::SchemaSnapshot;
+use crate::data::export_v2::manifest::{DataFormat, MANIFEST_VERSION, Manifest};
 use crate::data::path::ddl_path_for_schema;
 use crate::data::snapshot_storage::{OpenDalStorage, SnapshotStorage, validate_uri};
 use crate::data::sql::{escape_sql_identifier, escape_sql_literal};
@@ -75,10 +75,6 @@ pub struct ExportCreateCommand {
     /// Export schema only, no data.
     #[clap(long)]
     schema_only: bool,
-
-    /// Also export DDL (SHOW CREATE) into schema/ddl.sql.
-    #[clap(long)]
-    include_ddl: bool,
 
     /// Time range start (ISO 8601 format, e.g., 2024-01-01T00:00:00Z).
     #[clap(long)]
@@ -131,6 +127,12 @@ impl ExportCreateCommand {
         // Validate URI format
         validate_uri(&self.to).map_err(BoxedError::new)?;
 
+        if !self.schema_only {
+            return DataExportNotImplementedSnafu
+                .fail()
+                .map_err(BoxedError::new);
+        }
+
         // Parse schemas (empty vec means all schemas)
         let schemas = if self.schemas.is_empty() {
             None
@@ -156,8 +158,7 @@ impl ExportCreateCommand {
             catalog: self.catalog.clone(),
             schemas,
             schema_only: self.schema_only,
-            include_ddl: self.include_ddl,
-            format: self.format,
+            _format: self.format,
             force: self.force,
             _parallelism: self.parallelism,
             storage: Box::new(storage),
@@ -171,8 +172,7 @@ pub struct ExportCreate {
     catalog: String,
     schemas: Option<Vec<String>>,
     schema_only: bool,
-    include_ddl: bool,
-    format: DataFormat,
+    _format: DataFormat,
     force: bool,
     _parallelism: usize,
     storage: Box<dyn SnapshotStorage>,
@@ -201,10 +201,11 @@ impl ExportCreate {
 
                 // Check version compatibility
                 if manifest.version != MANIFEST_VERSION {
-                    info!(
-                        "Warning: Manifest version mismatch (expected {}, found {})",
-                        MANIFEST_VERSION, manifest.version
-                    );
+                    return ManifestVersionMismatchSnafu {
+                        expected: MANIFEST_VERSION,
+                        found: manifest.version,
+                    }
+                    .fail();
                 }
 
                 // Cannot resume schema-only with data export
@@ -244,88 +245,53 @@ impl ExportCreate {
         info!("Exporting schemas: {:?}", schema_names);
 
         // 3. Create manifest
-        let manifest = if self.schema_only {
-            Manifest::new_schema_only(self.catalog.clone(), schema_names.clone())
-        } else {
-            // For M1, we create a schema-only manifest even for full export
-            // M2 will add time range parsing and chunk generation
-            Manifest::new_full(
-                self.catalog.clone(),
-                schema_names.clone(),
-                TimeRange::unbounded(),
-                self.format,
-            )
-        };
+        let manifest = Manifest::new_schema_only(self.catalog.clone(), schema_names.clone());
 
         // 4. Write schema files
         self.storage.write_schema(&schema_snapshot).await?;
-        info!(
-            "Exported {} schemas, {} tables, {} views",
-            schema_snapshot.schemas.len(),
-            schema_snapshot.tables.len(),
-            schema_snapshot.views.len()
-        );
+        info!("Exported {} schemas", schema_snapshot.schemas.len());
 
-        // 5. Optional DDL export (SHOW CREATE)
-        if self.include_ddl {
-            let ddl_by_schema = self.build_ddl_by_schema(&schema_snapshot).await?;
-            for (schema, ddl) in ddl_by_schema {
-                let ddl_path = ddl_path_for_schema(&schema);
-                self.storage.write_text(&ddl_path, &ddl).await?;
-                info!("Exported DDL for schema {} to {}", schema, ddl_path);
-            }
+        // 5. Export DDL files for import recovery.
+        let ddl_by_schema = self.build_ddl_by_schema(&schema_names).await?;
+        for (schema, ddl) in ddl_by_schema {
+            let ddl_path = ddl_path_for_schema(&schema);
+            self.storage.write_text(&ddl_path, &ddl).await?;
+            info!("Exported DDL for schema {} to {}", schema, ddl_path);
         }
 
-        // 6. Write manifest
+        // 6. Write manifest last.
+        //
+        // The manifest is the snapshot commit point: only write it after the schema
+        // index and all DDL files are durable, so a crash cannot leave a "valid"
+        // snapshot that is missing required schema artifacts.
         self.storage.write_manifest(&manifest).await?;
         info!("Snapshot created: {}", manifest.snapshot_id);
-
-        // 7. If not schema-only, data export would happen here (M2)
-        if !self.schema_only {
-            info!("Data export not yet implemented (M2). Schema export completed.");
-        }
 
         Ok(())
     }
 
-    async fn build_ddl_by_schema(
-        &self,
-        schema_snapshot: &SchemaSnapshot,
-    ) -> Result<Vec<(String, String)>> {
-        let mut schemas = schema_snapshot
-            .schemas
-            .iter()
-            .map(|s| s.name.clone())
-            .collect::<Vec<_>>();
+    async fn build_ddl_by_schema(&self, schema_names: &[String]) -> Result<Vec<(String, String)>> {
+        let mut schemas = schema_names.to_vec();
         schemas.sort();
 
         let mut ddl_by_schema = Vec::with_capacity(schemas.len());
         for schema in schemas {
             let create_database = self.show_create("DATABASE", &schema, None).await?;
 
-            let mut physical_tables = self.get_metric_physical_tables(&schema).await?;
+            let (mut physical_tables, mut tables, mut views) =
+                self.get_schema_objects(&schema).await?;
             physical_tables.sort();
             let mut physical_ddls = Vec::with_capacity(physical_tables.len());
             for table in physical_tables {
                 physical_ddls.push(self.show_create("TABLE", &schema, Some(&table)).await?);
             }
 
-            let mut tables = schema_snapshot
-                .tables_in_schema(&schema)
-                .into_iter()
-                .map(|t| t.name.clone())
-                .collect::<Vec<_>>();
             tables.sort();
             let mut table_ddls = Vec::with_capacity(tables.len());
             for table in tables {
                 table_ddls.push(self.show_create("TABLE", &schema, Some(&table)).await?);
             }
 
-            let mut views = schema_snapshot
-                .views_in_schema(&schema)
-                .into_iter()
-                .map(|v| v.name.clone())
-                .collect::<Vec<_>>();
             views.sort();
             let mut view_ddls = Vec::with_capacity(views.len());
             for view in views {
@@ -343,6 +309,50 @@ impl ExportCreate {
         }
 
         Ok(ddl_by_schema)
+    }
+
+    async fn get_schema_objects(
+        &self,
+        schema: &str,
+    ) -> Result<(Vec<String>, Vec<String>, Vec<String>)> {
+        let physical_tables = self.get_metric_physical_tables(schema).await?;
+        let physical_set: HashSet<&str> = physical_tables.iter().map(String::as_str).collect();
+        let sql = format!(
+            "SELECT table_name, table_type FROM information_schema.tables \
+             WHERE table_catalog = '{}' AND table_schema = '{}' \
+             AND (table_type = 'BASE TABLE' OR table_type = 'VIEW')",
+            escape_sql_literal(&self.catalog),
+            escape_sql_literal(schema)
+        );
+        let records: Option<Vec<Vec<Value>>> = self
+            .database_client
+            .sql_in_public(&sql)
+            .await
+            .context(DatabaseSnafu)?;
+
+        let mut tables = Vec::new();
+        let mut views = Vec::new();
+        if let Some(rows) = records {
+            for row in rows {
+                let name = match row.first() {
+                    Some(Value::String(name)) => name.clone(),
+                    _ => return UnexpectedValueTypeSnafu.fail(),
+                };
+                let table_type = match row.get(1) {
+                    Some(Value::String(table_type)) => table_type.as_str(),
+                    _ => return UnexpectedValueTypeSnafu.fail(),
+                };
+                if !physical_set.contains(name.as_str()) {
+                    if table_type == "VIEW" {
+                        views.push(name);
+                    } else {
+                        tables.push(name);
+                    }
+                }
+            }
+        }
+
+        Ok((physical_tables, tables, views))
     }
 
     async fn get_metric_physical_tables(&self, schema: &str) -> Result<Vec<String>> {
@@ -434,6 +444,8 @@ fn build_schema_ddl(
 
 #[cfg(test)]
 mod tests {
+    use clap::Parser;
+
     use super::*;
     use crate::data::path::ddl_path_for_schema;
 
@@ -463,5 +475,22 @@ mod tests {
         assert!(db_pos < physical_pos);
         assert!(physical_pos < table_pos);
         assert!(table_pos < view_pos);
+    }
+
+    #[tokio::test]
+    async fn test_build_rejects_non_schema_only_export() {
+        let cmd = ExportCreateCommand::parse_from([
+            "export-v2-create",
+            "--addr",
+            "127.0.0.1:4000",
+            "--to",
+            "file:///tmp/export-v2-test",
+        ]);
+
+        let result = cmd.build().await;
+        assert!(result.is_err());
+        let error = result.err().unwrap().to_string();
+
+        assert!(error.contains("Data export is not implemented yet"));
     }
 }

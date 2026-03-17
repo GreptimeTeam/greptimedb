@@ -254,10 +254,11 @@ impl Manifest {
     /// Returns true if all chunks are completed (or if schema-only).
     pub fn is_complete(&self) -> bool {
         self.schema_only
-            || self
-                .chunks
-                .iter()
-                .all(|c| c.status == ChunkStatus::Completed)
+            || (!self.chunks.is_empty()
+                && self
+                    .chunks
+                    .iter()
+                    .all(|c| c.status == ChunkStatus::Completed))
     }
 
     /// Returns the number of pending chunks.
@@ -348,7 +349,7 @@ mod tests {
 
         assert!(!manifest.schema_only);
         assert!(manifest.chunks.is_empty());
-        assert!(manifest.is_complete()); // No chunks means complete
+        assert!(!manifest.is_complete());
     }
 
     #[test]

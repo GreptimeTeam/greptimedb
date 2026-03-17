@@ -54,50 +54,6 @@ impl<'a> DdlExecutor<'a> {
         Self { client }
     }
 
-    /// Executes a list of DDL statements.
-    ///
-    /// Statements are executed in order. If any statement fails,
-    /// the error is returned and remaining statements are not executed.
-    pub async fn execute(&self, statements: &[DdlStatement]) -> Result<ExecutionResult> {
-        let total = statements.len();
-        let mut succeeded = 0;
-        let mut failed = 0;
-
-        for (i, stmt) in statements.iter().enumerate() {
-            let preview = preview_sql(&stmt.sql);
-
-            info!("Executing DDL ({}/{}): {}", i + 1, total, preview);
-
-            let result = if let Some(schema) = stmt.execution_schema.as_deref() {
-                self.client.sql(&stmt.sql, schema).await
-            } else {
-                self.client.sql_in_public(&stmt.sql).await
-            };
-
-            match result {
-                Ok(_) => {
-                    succeeded += 1;
-                }
-                Err(e) => {
-                    // Log the error but continue with remaining statements
-                    // This allows partial imports to succeed
-                    common_telemetry::warn!("DDL execution failed: {}: {}", preview, e);
-                    failed += 1;
-
-                    // For critical errors (like syntax errors), we might want to stop
-                    // But for "already exists" errors, we continue
-                    // TODO: Distinguish between error types
-                }
-            }
-        }
-
-        Ok(ExecutionResult {
-            total,
-            succeeded,
-            failed,
-        })
-    }
-
     /// Executes a list of DDL statements, stopping on first error.
     pub async fn execute_strict(&self, statements: &[DdlStatement]) -> Result<()> {
         let total = statements.len();
@@ -133,52 +89,9 @@ fn preview_sql(sql: &str) -> String {
         preview
     }
 }
-
-/// Result of DDL execution.
-#[derive(Debug)]
-pub struct ExecutionResult {
-    /// Total number of statements.
-    pub total: usize,
-    /// Number of successfully executed statements.
-    pub succeeded: usize,
-    /// Number of failed statements.
-    pub failed: usize,
-}
-
-impl ExecutionResult {
-    /// Returns true if all statements succeeded.
-    pub fn is_success(&self) -> bool {
-        self.failed == 0
-    }
-
-    /// Returns true if any statement failed.
-    pub fn has_failures(&self) -> bool {
-        self.failed > 0
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_execution_result() {
-        let result = ExecutionResult {
-            total: 10,
-            succeeded: 10,
-            failed: 0,
-        };
-        assert!(result.is_success());
-        assert!(!result.has_failures());
-
-        let result = ExecutionResult {
-            total: 10,
-            succeeded: 8,
-            failed: 2,
-        };
-        assert!(!result.is_success());
-        assert!(result.has_failures());
-    }
 
     #[test]
     fn test_statement_without_execution_schema_uses_public() {

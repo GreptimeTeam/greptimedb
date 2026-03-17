@@ -27,13 +27,16 @@ use url::Url;
 use crate::common::ObjectStoreConfig;
 use crate::data::export_v2::error::{
     BuildObjectStoreSnafu, InvalidUriSnafu, ManifestParseSnafu, ManifestSerializeSnafu, Result,
-    SnapshotNotFoundSnafu, StorageOperationSnafu, UnsupportedSchemeSnafu, UrlParseSnafu,
+    SnapshotNotFoundSnafu, StorageOperationSnafu, TextDecodeSnafu, UnsupportedSchemeSnafu,
+    UrlParseSnafu,
 };
 use crate::data::export_v2::manifest::{MANIFEST_FILE, Manifest};
-use crate::data::export_v2::schema::{
-    SCHEMA_DIR, SCHEMAS_FILE, SchemaDefinition, SchemaSnapshot, TABLES_FILE, TableDefinition,
-    VIEWS_FILE, ViewDefinition,
-};
+use crate::data::export_v2::schema::{SCHEMA_DIR, SCHEMAS_FILE, SchemaDefinition, SchemaSnapshot};
+
+struct RemoteLocation {
+    bucket_or_container: String,
+    root: String,
+}
 
 /// URI schemes supported for snapshot storage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,10 +70,10 @@ impl StorageScheme {
 }
 
 /// Extracts bucket/container and root path from a URI.
-fn extract_bucket_and_root(uri: &str) -> Result<(String, String)> {
+fn extract_remote_location(uri: &str) -> Result<RemoteLocation> {
     let url = Url::parse(uri).context(UrlParseSnafu)?;
-    let bucket = url.host_str().unwrap_or("").to_string();
-    if bucket.is_empty() {
+    let bucket_or_container = url.host_str().unwrap_or("").to_string();
+    if bucket_or_container.is_empty() {
         return InvalidUriSnafu {
             uri: uri.to_string(),
             reason: "URI must include bucket/container in host",
@@ -79,7 +82,10 @@ fn extract_bucket_and_root(uri: &str) -> Result<(String, String)> {
     }
 
     let root = url.path().trim_start_matches('/').to_string();
-    Ok((bucket, root))
+    Ok(RemoteLocation {
+        bucket_or_container,
+        root,
+    })
 }
 
 /// Validates that a URI has a proper scheme.
@@ -98,7 +104,7 @@ pub fn validate_uri(uri: &str) -> Result<StorageScheme> {
     // Must have a scheme
     if !uri.contains("://") {
         return InvalidUriSnafu {
-            uri: uri.to_string(),
+            uri,
             reason: "URI must have a scheme (e.g., s3://, file://). Bare paths are not supported.",
         }
         .fail();
@@ -107,22 +113,32 @@ pub fn validate_uri(uri: &str) -> Result<StorageScheme> {
     StorageScheme::from_uri(uri)
 }
 
-/// Extracts the path component from a URI.
-fn extract_path_from_uri(uri: &str) -> Result<String> {
+fn schema_index_path() -> String {
+    format!("{}/{}", SCHEMA_DIR, SCHEMAS_FILE)
+}
+
+/// Extracts the absolute filesystem path from a file:// URI.
+fn extract_file_path_from_uri(uri: &str) -> Result<String> {
     let url = Url::parse(uri).context(UrlParseSnafu)?;
 
-    match url.scheme() {
-        "file" => Ok(url.path().to_string()),
-        // For object storage, combine host (bucket) and path
-        _ => {
-            let bucket = url.host_str().unwrap_or("");
-            let path = url.path();
-            if path.is_empty() || path == "/" {
-                Ok(bucket.to_string())
-            } else {
-                Ok(format!("{}{}", bucket, path))
-            }
+    match url.host_str() {
+        Some(host) if !host.is_empty() && host != "localhost" => InvalidUriSnafu {
+            uri,
+            reason: "file:// URI must use an absolute path like file:///tmp/backup",
         }
+        .fail(),
+        _ => Ok(url.path().to_string()),
+    }
+}
+
+async fn ensure_snapshot_exists(storage: &OpenDalStorage) -> Result<()> {
+    if storage.exists().await? {
+        Ok(())
+    } else {
+        SnapshotNotFoundSnafu {
+            uri: storage.target_uri.as_str(),
+        }
+        .fail()
     }
 }
 
@@ -140,10 +156,10 @@ pub trait SnapshotStorage: Send + Sync {
     /// Writes the manifest file.
     async fn write_manifest(&self, manifest: &Manifest) -> Result<()>;
 
-    /// Reads schema definitions from schema/*.json files.
+    /// Reads the schema index from schema/schemas.json.
     async fn read_schema(&self) -> Result<SchemaSnapshot>;
 
-    /// Writes schema definitions to schema/*.json files.
+    /// Writes the schema index to schema/schemas.json.
     async fn write_schema(&self, schema: &SchemaSnapshot) -> Result<()>;
 
     /// Writes a text file to a relative path under the snapshot root.
@@ -157,230 +173,211 @@ pub trait SnapshotStorage: Send + Sync {
 
     /// Returns the underlying object store.
     fn object_store(&self) -> &ObjectStore;
-
-    /// Returns the snapshot root path.
-    fn root_path(&self) -> &str;
 }
 
 /// OpenDAL-based implementation of SnapshotStorage.
 pub struct OpenDalStorage {
     object_store: ObjectStore,
-    root_path: String,
+    target_uri: String,
 }
 
 impl OpenDalStorage {
+    fn new_operator_rooted(object_store: ObjectStore, target_uri: &str) -> Self {
+        Self {
+            object_store,
+            target_uri: target_uri.to_string(),
+        }
+    }
+
+    fn finish_local_store(object_store: ObjectStore) -> ObjectStore {
+        with_instrument_layers(object_store, false)
+    }
+
+    fn finish_remote_store(object_store: ObjectStore) -> ObjectStore {
+        with_instrument_layers(with_retry_layers(object_store), false)
+    }
+
+    fn ensure_backend_enabled(uri: &str, enabled: bool, reason: &'static str) -> Result<()> {
+        if enabled {
+            Ok(())
+        } else {
+            InvalidUriSnafu { uri, reason }.fail()
+        }
+    }
+
+    fn validate_remote_config<E: std::fmt::Display>(
+        uri: &str,
+        backend: &str,
+        result: std::result::Result<(), E>,
+    ) -> Result<()> {
+        result.map_err(|error| {
+            InvalidUriSnafu {
+                uri,
+                reason: format!("invalid {} config: {}", backend, error),
+            }
+            .build()
+        })
+    }
+
     /// Creates a new storage from a file:// URI.
     pub fn from_file_uri(uri: &str) -> Result<Self> {
-        let path = extract_path_from_uri(uri)?;
+        let path = extract_file_path_from_uri(uri)?;
 
         let builder = Fs::default().root(&path);
         let object_store = ObjectStore::new(builder)
             .context(BuildObjectStoreSnafu)?
             .finish();
-        let object_store = with_instrument_layers(object_store, false);
+        Ok(Self::new_operator_rooted(
+            Self::finish_local_store(object_store),
+            uri,
+        ))
+    }
 
-        Ok(Self {
-            object_store,
-            root_path: String::new(), // Root is already set in the operator
-        })
+    fn from_file_uri_with_config(uri: &str, storage: &ObjectStoreConfig) -> Result<Self> {
+        if storage.enable_s3 || storage.enable_oss || storage.enable_gcs || storage.enable_azblob {
+            return InvalidUriSnafu {
+                uri,
+                reason: "file:// cannot be used with remote storage flags",
+            }
+            .fail();
+        }
+
+        Self::from_file_uri(uri)
+    }
+
+    fn from_s3_uri(uri: &str, storage: &ObjectStoreConfig) -> Result<Self> {
+        Self::ensure_backend_enabled(
+            uri,
+            storage.enable_s3,
+            "s3:// requires --s3 and related options",
+        )?;
+
+        let location = extract_remote_location(uri)?;
+        let mut config = storage.s3.clone();
+        config.s3_bucket = location.bucket_or_container;
+        config.s3_root = location.root;
+        Self::validate_remote_config(uri, "s3", config.validate())?;
+
+        let conn: S3Connection = config.into();
+        let object_store = ObjectStore::new(S3::from(&conn))
+            .context(BuildObjectStoreSnafu)?
+            .finish();
+        Ok(Self::new_operator_rooted(
+            Self::finish_remote_store(object_store),
+            uri,
+        ))
+    }
+
+    fn from_oss_uri(uri: &str, storage: &ObjectStoreConfig) -> Result<Self> {
+        Self::ensure_backend_enabled(
+            uri,
+            storage.enable_oss,
+            "oss:// requires --oss and related options",
+        )?;
+
+        let location = extract_remote_location(uri)?;
+        let mut config = storage.oss.clone();
+        config.oss_bucket = location.bucket_or_container;
+        config.oss_root = location.root;
+        Self::validate_remote_config(uri, "oss", config.validate())?;
+
+        let conn: OssConnection = config.into();
+        let object_store = ObjectStore::new(Oss::from(&conn))
+            .context(BuildObjectStoreSnafu)?
+            .finish();
+        Ok(Self::new_operator_rooted(
+            Self::finish_remote_store(object_store),
+            uri,
+        ))
+    }
+
+    fn from_gcs_uri(uri: &str, storage: &ObjectStoreConfig) -> Result<Self> {
+        Self::ensure_backend_enabled(
+            uri,
+            storage.enable_gcs,
+            "gs:// or gcs:// requires --gcs and related options",
+        )?;
+
+        let location = extract_remote_location(uri)?;
+        let mut config = storage.gcs.clone();
+        config.gcs_bucket = location.bucket_or_container;
+        config.gcs_root = location.root;
+        Self::validate_remote_config(uri, "gcs", config.validate())?;
+
+        let conn: GcsConnection = config.into();
+        let object_store = ObjectStore::new(Gcs::from(&conn))
+            .context(BuildObjectStoreSnafu)?
+            .finish();
+        Ok(Self::new_operator_rooted(
+            Self::finish_remote_store(object_store),
+            uri,
+        ))
+    }
+
+    fn from_azblob_uri(uri: &str, storage: &ObjectStoreConfig) -> Result<Self> {
+        Self::ensure_backend_enabled(
+            uri,
+            storage.enable_azblob,
+            "azblob:// requires --azblob and related options",
+        )?;
+
+        let location = extract_remote_location(uri)?;
+        let mut config = storage.azblob.clone();
+        config.azblob_container = location.bucket_or_container;
+        config.azblob_root = location.root;
+        Self::validate_remote_config(uri, "azblob", config.validate())?;
+
+        let conn: AzblobConnection = config.into();
+        let object_store = ObjectStore::new(Azblob::from(&conn))
+            .context(BuildObjectStoreSnafu)?
+            .finish();
+        Ok(Self::new_operator_rooted(
+            Self::finish_remote_store(object_store),
+            uri,
+        ))
     }
 
     /// Creates a new storage from a URI and object store config.
     pub fn from_uri(uri: &str, storage: &ObjectStoreConfig) -> Result<Self> {
-        let scheme = StorageScheme::from_uri(uri)?;
-
-        match scheme {
-            StorageScheme::File => {
-                if storage.enable_s3
-                    || storage.enable_oss
-                    || storage.enable_gcs
-                    || storage.enable_azblob
-                {
-                    return InvalidUriSnafu {
-                        uri,
-                        reason: "file:// cannot be used with remote storage flags",
-                    }
-                    .fail();
-                }
-                Self::from_file_uri(uri)
-            }
-            StorageScheme::S3 => {
-                if !storage.enable_s3 {
-                    return InvalidUriSnafu {
-                        uri,
-                        reason: "s3:// requires --s3 and related options",
-                    }
-                    .fail();
-                }
-                let (bucket, root) = extract_bucket_and_root(uri)?;
-                let mut config = storage.clone();
-                config.s3.s3_bucket = bucket;
-                config.s3.s3_root = root;
-                config.s3.validate().map_err(|e| {
-                    InvalidUriSnafu {
-                        uri,
-                        reason: format!("invalid s3 config: {}", e),
-                    }
-                    .build()
-                })?;
-
-                let conn: S3Connection = config.s3.clone().into();
-                let object_store = ObjectStore::new(S3::from(&conn))
-                    .context(BuildObjectStoreSnafu)?
-                    .finish();
-                let object_store = with_instrument_layers(with_retry_layers(object_store), false);
-
-                Ok(Self {
-                    object_store,
-                    root_path: String::new(),
-                })
-            }
-            StorageScheme::Oss => {
-                if !storage.enable_oss {
-                    return InvalidUriSnafu {
-                        uri,
-                        reason: "oss:// requires --oss and related options",
-                    }
-                    .fail();
-                }
-                let (bucket, root) = extract_bucket_and_root(uri)?;
-                let mut config = storage.clone();
-                config.oss.oss_bucket = bucket;
-                config.oss.oss_root = root;
-                config.oss.validate().map_err(|e| {
-                    InvalidUriSnafu {
-                        uri,
-                        reason: format!("invalid oss config: {}", e),
-                    }
-                    .build()
-                })?;
-
-                let conn: OssConnection = config.oss.clone().into();
-                let object_store = ObjectStore::new(Oss::from(&conn))
-                    .context(BuildObjectStoreSnafu)?
-                    .finish();
-                let object_store = with_instrument_layers(with_retry_layers(object_store), false);
-
-                Ok(Self {
-                    object_store,
-                    root_path: String::new(),
-                })
-            }
-            StorageScheme::Gcs => {
-                if !storage.enable_gcs {
-                    return InvalidUriSnafu {
-                        uri,
-                        reason: "gs:// or gcs:// requires --gcs and related options",
-                    }
-                    .fail();
-                }
-                let (bucket, root) = extract_bucket_and_root(uri)?;
-                let mut config = storage.clone();
-                config.gcs.gcs_bucket = bucket;
-                config.gcs.gcs_root = root;
-                config.gcs.validate().map_err(|e| {
-                    InvalidUriSnafu {
-                        uri,
-                        reason: format!("invalid gcs config: {}", e),
-                    }
-                    .build()
-                })?;
-
-                let conn: GcsConnection = config.gcs.clone().into();
-                let object_store = ObjectStore::new(Gcs::from(&conn))
-                    .context(BuildObjectStoreSnafu)?
-                    .finish();
-                let object_store = with_instrument_layers(with_retry_layers(object_store), false);
-
-                Ok(Self {
-                    object_store,
-                    root_path: String::new(),
-                })
-            }
-            StorageScheme::Azblob => {
-                if !storage.enable_azblob {
-                    return InvalidUriSnafu {
-                        uri,
-                        reason: "azblob:// requires --azblob and related options",
-                    }
-                    .fail();
-                }
-                let (container, root) = extract_bucket_and_root(uri)?;
-                let mut config = storage.clone();
-                config.azblob.azblob_container = container;
-                config.azblob.azblob_root = root;
-                config.azblob.validate().map_err(|e| {
-                    InvalidUriSnafu {
-                        uri,
-                        reason: format!("invalid azblob config: {}", e),
-                    }
-                    .build()
-                })?;
-
-                let conn: AzblobConnection = config.azblob.clone().into();
-                let object_store = ObjectStore::new(Azblob::from(&conn))
-                    .context(BuildObjectStoreSnafu)?
-                    .finish();
-                let object_store = with_instrument_layers(with_retry_layers(object_store), false);
-
-                Ok(Self {
-                    object_store,
-                    root_path: String::new(),
-                })
-            }
-        }
-    }
-
-    /// Creates a new storage with an existing ObjectStore and root path.
-    pub fn new(object_store: ObjectStore, root_path: String) -> Self {
-        Self {
-            object_store,
-            root_path,
-        }
-    }
-
-    /// Joins the root path with a relative path.
-    fn full_path(&self, relative: &str) -> String {
-        if self.root_path.is_empty() {
-            relative.to_string()
-        } else {
-            format!("{}/{}", self.root_path.trim_end_matches('/'), relative)
+        match StorageScheme::from_uri(uri)? {
+            StorageScheme::File => Self::from_file_uri_with_config(uri, storage),
+            StorageScheme::S3 => Self::from_s3_uri(uri, storage),
+            StorageScheme::Oss => Self::from_oss_uri(uri, storage),
+            StorageScheme::Gcs => Self::from_gcs_uri(uri, storage),
+            StorageScheme::Azblob => Self::from_azblob_uri(uri, storage),
         }
     }
 
     /// Reads a file as bytes.
     async fn read_file(&self, path: &str) -> Result<Vec<u8>> {
-        let full_path = self.full_path(path);
         let data = self
             .object_store
-            .read(&full_path)
+            .read(path)
             .await
             .context(StorageOperationSnafu {
-                operation: format!("read {}", full_path),
+                operation: format!("read {}", path),
             })?;
         Ok(data.to_vec())
     }
 
     /// Writes bytes to a file.
     async fn write_file(&self, path: &str, data: Vec<u8>) -> Result<()> {
-        let full_path = self.full_path(path);
         self.object_store
-            .write(&full_path, data)
+            .write(path, data)
             .await
             .map(|_| ())
             .context(StorageOperationSnafu {
-                operation: format!("write {}", full_path),
+                operation: format!("write {}", path),
             })
     }
 
     /// Checks if a file exists using stat.
     async fn file_exists(&self, path: &str) -> Result<bool> {
-        let full_path = self.full_path(path);
-        match self.object_store.stat(&full_path).await {
+        match self.object_store.stat(path).await {
             Ok(_) => Ok(true),
             Err(e) if e.kind() == object_store::ErrorKind::NotFound => Ok(false),
             Err(e) => Err(e).context(StorageOperationSnafu {
-                operation: format!("check exists {}", full_path),
+                operation: format!("check exists {}", path),
             }),
         }
     }
@@ -393,12 +390,7 @@ impl SnapshotStorage for OpenDalStorage {
     }
 
     async fn read_manifest(&self) -> Result<Manifest> {
-        if !self.exists().await? {
-            return SnapshotNotFoundSnafu {
-                uri: self.root_path.as_str(),
-            }
-            .fail();
-        }
+        ensure_snapshot_exists(self).await?;
 
         let data = self.read_file(MANIFEST_FILE).await?;
         serde_json::from_slice(&data).context(ManifestParseSnafu)
@@ -410,8 +402,7 @@ impl SnapshotStorage for OpenDalStorage {
     }
 
     async fn read_schema(&self) -> Result<SchemaSnapshot> {
-        // Read schemas.json
-        let schemas_path = format!("{}/{}", SCHEMA_DIR, SCHEMAS_FILE);
+        let schemas_path = schema_index_path();
         let schemas: Vec<SchemaDefinition> = if self.file_exists(&schemas_path).await? {
             let data = self.read_file(&schemas_path).await?;
             serde_json::from_slice(&data).context(ManifestParseSnafu)?
@@ -419,51 +410,14 @@ impl SnapshotStorage for OpenDalStorage {
             vec![]
         };
 
-        // Read tables.json
-        let tables_path = format!("{}/{}", SCHEMA_DIR, TABLES_FILE);
-        let tables: Vec<TableDefinition> = if self.file_exists(&tables_path).await? {
-            let data = self.read_file(&tables_path).await?;
-            serde_json::from_slice(&data).context(ManifestParseSnafu)?
-        } else {
-            vec![]
-        };
-
-        // Read views.json
-        let views_path = format!("{}/{}", SCHEMA_DIR, VIEWS_FILE);
-        let views: Vec<ViewDefinition> = if self.file_exists(&views_path).await? {
-            let data = self.read_file(&views_path).await?;
-            serde_json::from_slice(&data).context(ManifestParseSnafu)?
-        } else {
-            vec![]
-        };
-
-        Ok(SchemaSnapshot {
-            schemas,
-            tables,
-            views,
-        })
+        Ok(SchemaSnapshot { schemas })
     }
 
     async fn write_schema(&self, schema: &SchemaSnapshot) -> Result<()> {
-        // Write schemas.json
-        let schemas_path = format!("{}/{}", SCHEMA_DIR, SCHEMAS_FILE);
+        let schemas_path = schema_index_path();
         let schemas_data =
             serde_json::to_vec_pretty(&schema.schemas).context(ManifestSerializeSnafu)?;
-        self.write_file(&schemas_path, schemas_data).await?;
-
-        // Write tables.json
-        let tables_path = format!("{}/{}", SCHEMA_DIR, TABLES_FILE);
-        let tables_data =
-            serde_json::to_vec_pretty(&schema.tables).context(ManifestSerializeSnafu)?;
-        self.write_file(&tables_path, tables_data).await?;
-
-        // Write views.json
-        let views_path = format!("{}/{}", SCHEMA_DIR, VIEWS_FILE);
-        let views_data =
-            serde_json::to_vec_pretty(&schema.views).context(ManifestSerializeSnafu)?;
-        self.write_file(&views_path, views_data).await?;
-
-        Ok(())
+        self.write_file(&schemas_path, schemas_data).await
     }
 
     async fn write_text(&self, path: &str, content: &str) -> Result<()> {
@@ -472,18 +426,12 @@ impl SnapshotStorage for OpenDalStorage {
 
     async fn read_text(&self, path: &str) -> Result<String> {
         let data = self.read_file(path).await?;
-        Ok(String::from_utf8_lossy(&data).to_string())
+        String::from_utf8(data).context(TextDecodeSnafu)
     }
 
     async fn delete_snapshot(&self) -> Result<()> {
-        let root = if self.root_path.is_empty() {
-            "/".to_string()
-        } else {
-            format!("{}/", self.root_path.trim_end_matches('/'))
-        };
-
         self.object_store
-            .remove_all(&root)
+            .remove_all("/")
             .await
             .context(StorageOperationSnafu {
                 operation: "delete snapshot",
@@ -493,15 +441,30 @@ impl SnapshotStorage for OpenDalStorage {
     fn object_store(&self) -> &ObjectStore {
         &self.object_store
     }
-
-    fn root_path(&self) -> &str {
-        &self.root_path
-    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use object_store::ObjectStore;
+    use object_store::services::Fs;
+    use tempfile::tempdir;
+    use url::Url;
+
     use super::*;
+    use crate::data::export_v2::manifest::{DataFormat, TimeRange};
+    use crate::data::export_v2::schema::SchemaDefinition;
+
+    fn make_storage_with_rooted_fs(dir: &std::path::Path) -> OpenDalStorage {
+        let object_store = ObjectStore::new(Fs::default().root(dir.to_str().unwrap()))
+            .unwrap()
+            .finish();
+        OpenDalStorage::new_operator_rooted(
+            OpenDalStorage::finish_local_store(object_store),
+            &Url::from_directory_path(dir).unwrap().to_string(),
+        )
+    }
 
     #[test]
     fn test_validate_uri_valid() {
@@ -542,13 +505,135 @@ mod tests {
     #[test]
     fn test_extract_path_from_uri() {
         assert_eq!(
-            extract_path_from_uri("file:///tmp/backup").unwrap(),
+            extract_file_path_from_uri("file:///tmp/backup").unwrap(),
             "/tmp/backup"
         );
         assert_eq!(
-            extract_path_from_uri("s3://mybucket/snapshots/prod").unwrap(),
-            "mybucket/snapshots/prod"
+            extract_file_path_from_uri("file://localhost/tmp/backup").unwrap(),
+            "/tmp/backup"
         );
-        assert_eq!(extract_path_from_uri("s3://mybucket").unwrap(), "mybucket");
+    }
+
+    #[test]
+    fn test_extract_file_path_from_uri_rejects_file_host() {
+        assert!(extract_file_path_from_uri("file://tmp/backup").is_err());
+    }
+
+    #[tokio::test]
+    async fn test_read_manifest_reports_requested_uri() {
+        let dir = tempdir().unwrap();
+        let uri = Url::from_directory_path(dir.path()).unwrap().to_string();
+        let storage = OpenDalStorage::from_file_uri(&uri).unwrap();
+
+        let error = storage.read_manifest().await.unwrap_err().to_string();
+
+        assert!(error.contains(uri.as_str()));
+    }
+
+    #[tokio::test]
+    async fn test_manifest_round_trip() {
+        let dir = tempdir().unwrap();
+        let storage = make_storage_with_rooted_fs(dir.path());
+
+        let manifest = Manifest::new_full(
+            "greptime".to_string(),
+            vec!["public".to_string()],
+            TimeRange::unbounded(),
+            DataFormat::Parquet,
+        );
+
+        storage.write_manifest(&manifest).await.unwrap();
+        let loaded = storage.read_manifest().await.unwrap();
+
+        assert_eq!(loaded.catalog, manifest.catalog);
+        assert_eq!(loaded.schemas, manifest.schemas);
+        assert_eq!(loaded.schema_only, manifest.schema_only);
+        assert_eq!(loaded.format, manifest.format);
+        assert_eq!(loaded.snapshot_id, manifest.snapshot_id);
+    }
+
+    #[tokio::test]
+    async fn test_schema_round_trip() {
+        let dir = tempdir().unwrap();
+        let storage = make_storage_with_rooted_fs(dir.path());
+
+        let mut snapshot = SchemaSnapshot::new();
+        snapshot.add_schema(SchemaDefinition {
+            catalog: "greptime".to_string(),
+            name: "test_db".to_string(),
+            options: HashMap::from([("ttl".to_string(), "7d".to_string())]),
+        });
+
+        storage.write_schema(&snapshot).await.unwrap();
+        let loaded = storage.read_schema().await.unwrap();
+
+        assert_eq!(loaded, snapshot);
+    }
+
+    #[tokio::test]
+    async fn test_text_round_trip() {
+        let dir = tempdir().unwrap();
+        let storage = make_storage_with_rooted_fs(dir.path());
+        let content = "CREATE TABLE metrics (ts TIMESTAMP TIME INDEX);";
+
+        storage
+            .write_text("schema/ddl/public.sql", content)
+            .await
+            .unwrap();
+        let loaded = storage.read_text("schema/ddl/public.sql").await.unwrap();
+
+        assert_eq!(loaded, content);
+    }
+
+    #[tokio::test]
+    async fn test_read_text_rejects_invalid_utf8() {
+        let dir = tempdir().unwrap();
+        let storage = make_storage_with_rooted_fs(dir.path());
+
+        storage
+            .write_file("schema/ddl/public.sql", vec![0xff, 0xfe, 0xfd])
+            .await
+            .unwrap();
+
+        let error = storage
+            .read_text("schema/ddl/public.sql")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("UTF-8"));
+    }
+
+    #[tokio::test]
+    async fn test_exists_follows_manifest_presence() {
+        let dir = tempdir().unwrap();
+        let storage = make_storage_with_rooted_fs(dir.path());
+
+        assert!(!storage.exists().await.unwrap());
+
+        storage
+            .write_manifest(&Manifest::new_schema_only(
+                "greptime".to_string(),
+                vec!["public".to_string()],
+            ))
+            .await
+            .unwrap();
+
+        assert!(storage.exists().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_delete_snapshot_only_removes_rooted_contents() {
+        let parent = tempdir().unwrap();
+        let snapshot_root = parent.path().join("snapshot");
+        let sibling = parent.path().join("sibling");
+        std::fs::create_dir_all(&snapshot_root).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        std::fs::write(snapshot_root.join("manifest.json"), b"{}").unwrap();
+        std::fs::write(sibling.join("keep.txt"), b"keep").unwrap();
+
+        let storage = make_storage_with_rooted_fs(&snapshot_root);
+        storage.delete_snapshot().await.unwrap();
+
+        assert!(!snapshot_root.join("manifest.json").exists());
+        assert!(sibling.join("keep.txt").exists());
     }
 }

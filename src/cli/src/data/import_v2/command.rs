@@ -25,9 +25,8 @@ use snafu::ResultExt;
 use crate::Tool;
 use crate::common::ObjectStoreConfig;
 use crate::data::export_v2::manifest::MANIFEST_VERSION;
-use crate::data::import_v2::ddl_generator::DdlGenerator;
 use crate::data::import_v2::error::{
-    ExportSnafu, ManifestVersionMismatchSnafu, Result, SchemaNotInSnapshotSnafu,
+    ManifestVersionMismatchSnafu, Result, SchemaNotInSnapshotSnafu, SnapshotStorageSnafu,
 };
 use crate::data::import_v2::executor::{DdlExecutor, DdlStatement};
 use crate::data::path::ddl_path_for_schema;
@@ -57,10 +56,6 @@ pub struct ImportV2Command {
     /// Verify without importing (dry-run).
     #[clap(long)]
     dry_run: bool,
-
-    /// Use DDL files (schema/ddl/<schema>.sql) instead of JSON schema.
-    #[clap(long)]
-    use_ddl: bool,
 
     /// Concurrency level (for future use).
     #[clap(long, default_value = "1")]
@@ -96,7 +91,7 @@ impl ImportV2Command {
     pub async fn build(&self) -> std::result::Result<Box<dyn Tool>, BoxedError> {
         // Validate URI format
         validate_uri(&self.from)
-            .context(ExportSnafu)
+            .context(SnapshotStorageSnafu)
             .map_err(BoxedError::new)?;
 
         // Parse schemas (empty vec means all schemas)
@@ -108,7 +103,7 @@ impl ImportV2Command {
 
         // Build storage
         let storage = OpenDalStorage::from_uri(&self.from, &self.storage)
-            .context(ExportSnafu)
+            .context(SnapshotStorageSnafu)
             .map_err(BoxedError::new)?;
 
         // Build database client
@@ -125,7 +120,6 @@ impl ImportV2Command {
         Ok(Box::new(Import {
             schemas,
             dry_run: self.dry_run,
-            use_ddl: self.use_ddl,
             _parallelism: self.parallelism,
             storage: Box::new(storage),
             database_client,
@@ -137,7 +131,6 @@ impl ImportV2Command {
 pub struct Import {
     schemas: Option<Vec<String>>,
     dry_run: bool,
-    use_ddl: bool,
     _parallelism: usize,
     storage: Box<dyn SnapshotStorage>,
     database_client: DatabaseClient,
@@ -153,7 +146,11 @@ impl Tool for Import {
 impl Import {
     async fn run(&self) -> Result<()> {
         // 1. Read manifest
-        let manifest = self.storage.read_manifest().await.context(ExportSnafu)?;
+        let manifest = self
+            .storage
+            .read_manifest()
+            .await
+            .context(SnapshotStorageSnafu)?;
 
         info!(
             "Loading snapshot: {} (version: {}, schema_only: {})",
@@ -169,17 +166,9 @@ impl Import {
             .fail();
         }
 
-        // 2. Read schema snapshot
-        let schema_snapshot = self.storage.read_schema().await.context(ExportSnafu)?;
+        info!("Snapshot contains {} schema(s)", manifest.schemas.len());
 
-        info!(
-            "Snapshot contains {} schemas, {} tables, {} views",
-            schema_snapshot.schemas.len(),
-            schema_snapshot.tables.len(),
-            schema_snapshot.views.len()
-        );
-
-        // 3. Determine schemas to import
+        // 2. Determine schemas to import
         let schemas_to_import = match &self.schemas {
             Some(filter) => canonicalize_schema_filter(filter, &manifest.schemas)?,
             None => manifest.schemas.clone(),
@@ -187,17 +176,12 @@ impl Import {
 
         info!("Importing schemas: {:?}", schemas_to_import);
 
-        // 4. Generate DDL statements
-        let ddl_statements = if self.use_ddl {
-            self.read_ddl_statements(&schemas_to_import).await?
-        } else {
-            let generator = DdlGenerator::new(&schema_snapshot);
-            generator.generate(&schemas_to_import)?
-        };
+        // 3. Read DDL statements
+        let ddl_statements = self.read_ddl_statements(&schemas_to_import).await?;
 
         info!("Generated {} DDL statements", ddl_statements.len());
 
-        // 5. Dry-run mode: print DDL and exit
+        // 4. Dry-run mode: print DDL and exit
         if self.dry_run {
             info!("Dry-run mode - DDL statements to execute:");
             println!();
@@ -209,23 +193,16 @@ impl Import {
             return Ok(());
         }
 
-        // 6. Execute DDL
+        // 5. Execute DDL
         let executor = DdlExecutor::new(&self.database_client);
-        let result = executor.execute(&ddl_statements).await?;
+        executor.execute_strict(&ddl_statements).await?;
 
         info!(
-            "Import completed: {} succeeded, {} failed out of {} total",
-            result.succeeded, result.failed, result.total
+            "Import completed: {} DDL statements executed",
+            ddl_statements.len()
         );
 
-        if result.has_failures() {
-            info!(
-                "Warning: {} statements failed. Check logs for details.",
-                result.failed
-            );
-        }
-
-        // 7. Data import would happen here for non-schema-only snapshots (M2/M3)
+        // 6. Data import would happen here for non-schema-only snapshots (M2/M3)
         if !manifest.schema_only && !manifest.chunks.is_empty() {
             info!(
                 "Data import not yet implemented (M3). {} chunks pending.",
@@ -240,7 +217,11 @@ impl Import {
         let mut statements = Vec::new();
         for schema in schemas {
             let path = ddl_path_for_schema(schema);
-            let content = self.storage.read_text(&path).await.context(ExportSnafu)?;
+            let content = self
+                .storage
+                .read_text(&path)
+                .await
+                .context(SnapshotStorageSnafu)?;
             statements.extend(
                 parse_ddl_statements(&content)
                     .into_iter()
@@ -253,22 +234,89 @@ impl Import {
 }
 
 fn parse_ddl_statements(content: &str) -> Vec<String> {
-    let mut cleaned = String::new();
-    for line in content.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("--") || trimmed.is_empty() {
+    let mut statements = Vec::new();
+    let mut current = String::new();
+    let mut chars = content.chars().peekable();
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+
+    while let Some(ch) = chars.next() {
+        if in_line_comment {
+            if ch == '\n' {
+                in_line_comment = false;
+                current.push('\n');
+            }
             continue;
         }
-        cleaned.push_str(line);
-        cleaned.push('\n');
+
+        if in_block_comment {
+            if ch == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                in_block_comment = false;
+            }
+            continue;
+        }
+
+        if in_single_quote {
+            current.push(ch);
+            if ch == '\'' {
+                if chars.peek() == Some(&'\'') {
+                    current.push(chars.next().expect("peeked quote must exist"));
+                } else {
+                    in_single_quote = false;
+                }
+            }
+            continue;
+        }
+
+        if in_double_quote {
+            current.push(ch);
+            if ch == '"' {
+                if chars.peek() == Some(&'"') {
+                    current.push(chars.next().expect("peeked quote must exist"));
+                } else {
+                    in_double_quote = false;
+                }
+            }
+            continue;
+        }
+
+        match ch {
+            '-' if chars.peek() == Some(&'-') => {
+                chars.next();
+                in_line_comment = true;
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                in_block_comment = true;
+            }
+            '\'' => {
+                in_single_quote = true;
+                current.push(ch);
+            }
+            '"' => {
+                in_double_quote = true;
+                current.push(ch);
+            }
+            ';' => {
+                let statement = current.trim();
+                if !statement.is_empty() {
+                    statements.push(statement.to_string());
+                }
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
     }
 
-    cleaned
-        .split(';')
-        .map(|stmt| stmt.trim())
-        .filter(|stmt| !stmt.is_empty())
-        .map(|stmt| stmt.to_string())
-        .collect()
+    let statement = current.trim();
+    if !statement.is_empty() {
+        statements.push(statement.to_string());
+    }
+
+    statements
 }
 
 fn ddl_statement_for_schema(schema: &str, sql: String) -> DdlStatement {
@@ -288,7 +336,20 @@ fn is_schema_scoped_statement(sql: &str) -> bool {
     let Some(rest) = trimmed.get("CREATE".len()..) else {
         return false;
     };
-    let rest = rest.trim_start();
+    let mut rest = rest.trim_start();
+    if starts_with_keyword(rest, "OR") {
+        let Some(next) = rest.get("OR".len()..) else {
+            return false;
+        };
+        rest = next.trim_start();
+        if !starts_with_keyword(rest, "REPLACE") {
+            return false;
+        }
+        let Some(next) = rest.get("REPLACE".len()..) else {
+            return false;
+        };
+        rest = next.trim_start();
+    }
     starts_with_keyword(rest, "TABLE") || starts_with_keyword(rest, "VIEW")
 }
 
@@ -297,6 +358,11 @@ fn starts_with_keyword(input: &str, keyword: &str) -> bool {
         .get(0..keyword.len())
         .map(|s| s.eq_ignore_ascii_case(keyword))
         .unwrap_or(false)
+        && input
+            .as_bytes()
+            .get(keyword.len())
+            .map(|b| !b.is_ascii_alphanumeric() && *b != b'_')
+            .unwrap_or(true)
 }
 
 fn canonicalize_schema_filter(
@@ -342,6 +408,37 @@ CREATE VIEW v AS SELECT * FROM t;
     }
 
     #[test]
+    fn test_parse_ddl_statements_preserves_semicolons_in_string_literals() {
+        let content = r#"
+CREATE TABLE t (
+    host STRING DEFAULT 'a;b'
+);
+CREATE VIEW v AS SELECT ';' AS marker;
+"#;
+
+        let statements = parse_ddl_statements(content);
+
+        assert_eq!(statements.len(), 2);
+        assert!(statements[0].contains("'a;b'"));
+        assert!(statements[1].contains("';' AS marker"));
+    }
+
+    #[test]
+    fn test_parse_ddl_statements_handles_comments_without_splitting() {
+        let content = r#"
+-- leading comment
+CREATE TABLE t (ts TIMESTAMP TIME INDEX); /* block; comment */
+CREATE VIEW v AS SELECT 1;
+"#;
+
+        let statements = parse_ddl_statements(content);
+
+        assert_eq!(statements.len(), 2);
+        assert!(statements[0].starts_with("CREATE TABLE t"));
+        assert!(statements[1].starts_with("CREATE VIEW v"));
+    }
+
+    #[test]
     fn test_canonicalize_schema_filter_uses_manifest_casing() {
         let filter = vec!["TEST_DB".to_string(), "PUBLIC".to_string()];
         let manifest_schemas = vec!["test_db".to_string(), "public".to_string()];
@@ -382,8 +479,24 @@ CREATE VIEW v AS SELECT * FROM t;
     }
 
     #[test]
+    fn test_ddl_statement_for_schema_create_or_replace_view_uses_execution_schema() {
+        let stmt = ddl_statement_for_schema(
+            "test_db",
+            "CREATE OR REPLACE VIEW metrics_view AS SELECT * FROM metrics".to_string(),
+        );
+        assert_eq!(stmt.execution_schema.as_deref(), Some("test_db"));
+    }
+
+    #[test]
     fn test_ddl_statement_for_schema_create_database_uses_public_context() {
         let stmt = ddl_statement_for_schema("test_db", "CREATE DATABASE test_db".to_string());
         assert_eq!(stmt.execution_schema, None);
+    }
+
+    #[test]
+    fn test_starts_with_keyword_requires_word_boundary() {
+        assert!(starts_with_keyword("CREATE TABLE t", "CREATE"));
+        assert!(!starts_with_keyword("CREATED TABLE t", "CREATE"));
+        assert!(!starts_with_keyword("TABLESPACE foo", "TABLE"));
     }
 }
