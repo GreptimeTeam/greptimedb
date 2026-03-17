@@ -143,6 +143,23 @@ mod test {
         let metrics = stream.metrics().expect("expected terminal metrics");
         assert!(metrics.region_latest_sequences.is_none());
 
+        let result = client
+            .sql_with_terminal_metrics(sql, &[("flow.return_region_seq", "true")])
+            .await
+            .unwrap();
+        let terminal_metrics = result.metrics.clone();
+        let OutputData::Stream(mut stream) = result.output.data else {
+            panic!("expected stream output");
+        };
+        while let Some(batch) = stream.next().await {
+            batch.unwrap();
+        }
+        assert!(
+            terminal_metrics
+                .region_watermark_map()
+                .is_some_and(|m| !m.is_empty())
+        );
+
         let output = client
             .sql_with_hint(sql, &[("flow.return_region_seq", "true")])
             .await
@@ -169,6 +186,43 @@ mod test {
         assert!(region_latest_sequences[0].1 > 0);
 
         let previous_watermark = region_latest_sequences[0];
+
+        create_table_named(&client, "bar").await;
+        let result = client
+            .sql_with_terminal_metrics("insert into bar select ts, a, `B` from foo", &[])
+            .await
+            .unwrap();
+        let OutputData::AffectedRows(affected_rows) = result.output.data else {
+            panic!("expected affected rows output");
+        };
+        assert_eq!(affected_rows, 9);
+        assert!(result.metrics.is_ready());
+        assert!(result.region_watermark_map().is_none());
+
+        let err = client
+            .sql_with_terminal_metrics(
+                "insert into bar select ts, a, `B` from foo",
+                &[("flow.return_region_seq", "not-a-bool")],
+            )
+            .await
+            .unwrap_err();
+        let err_msg = format!("{err:?}");
+        assert!(err_msg.contains("Invalid value for flow.return_region_seq"));
+
+        client.sql("truncate table bar").await.unwrap();
+
+        let result = client
+            .sql_with_terminal_metrics(
+                "insert into bar select ts, a, `B` from foo",
+                &[("flow.return_region_seq", "true")],
+            )
+            .await
+            .unwrap();
+        let OutputData::AffectedRows(affected_rows) = result.output.data else {
+            panic!("expected affected rows output");
+        };
+        assert_eq!(affected_rows, 9);
+        assert!(result.region_watermark_map().is_some_and(|m| !m.is_empty()));
 
         let incremental_batches = create_record_batches(10);
         test_put_record_batches(&client, incremental_batches).await;
@@ -362,6 +416,10 @@ mod test {
     }
 
     async fn create_table(client: &Database) {
+        create_table_named(client, "foo").await;
+    }
+
+    async fn create_table_named(client: &Database, table_name: &str) {
         // create table foo (
         //   ts timestamp time index,
         //   a int primary key,
@@ -370,7 +428,7 @@ mod test {
         let output = client
             .create(CreateTableExpr {
                 schema_name: "public".to_string(),
-                table_name: "foo".to_string(),
+                table_name: table_name.to_string(),
                 column_defs: vec![
                     ColumnDef {
                         name: "ts".to_string(),

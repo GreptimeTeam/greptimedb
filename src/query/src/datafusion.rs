@@ -132,7 +132,9 @@ impl DatafusionQueryEngine {
         let output = self
             .exec_query_plan((*dml.input).clone(), query_ctx.clone())
             .await?;
-        let mut stream = match output.data {
+        let common_query::Output { data, meta } = output;
+        let input_plan = meta.plan;
+        let mut stream = match data {
             OutputData::RecordBatches(batches) => batches.as_stream(),
             OutputData::Stream(stream) => stream,
             _ => unreachable!(),
@@ -168,7 +170,7 @@ impl DatafusionQueryEngine {
         }
         Ok(Output::new(
             OutputData::AffectedRows(affected_rows),
-            OutputMeta::new_with_cost(insert_cost),
+            OutputMeta::new(input_plan, insert_cost),
         ))
     }
 

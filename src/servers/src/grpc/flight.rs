@@ -39,7 +39,9 @@ use datatypes::arrow::datatypes::SchemaRef;
 use futures::{Stream, future, ready};
 use futures_util::{StreamExt, TryStreamExt};
 use prost::Message;
-use session::context::{QueryContext, QueryContextRef};
+use query::metrics::terminal_recordbatch_metrics_from_plan;
+use query::options::FlowQueryExtensions;
+use session::context::{Channel, QueryContextRef};
 use snafu::{IntoError, ResultExt, ensure};
 use table::table_name::TableName;
 use tokio::sync::mpsc;
@@ -48,7 +50,9 @@ use tonic::{Request, Response, Status, Streaming};
 
 use crate::error::{InvalidParameterSnafu, Result, ToJsonSnafu};
 pub use crate::grpc::flight::stream::FlightRecordBatchStream;
-use crate::grpc::greptime_handler::{GreptimeRequestHandler, get_request_type};
+use crate::grpc::greptime_handler::{
+    GreptimeRequestHandler, create_query_context, get_request_type,
+};
 use crate::grpc::{FlightCompression, TonicResult, context_auth};
 use crate::request_memory_limiter::ServerMemoryLimiter;
 use crate::request_memory_metrics::RequestMemoryMetrics;
@@ -192,6 +196,10 @@ impl FlightCraft for GreptimeRequestHandler {
         let ticket = request.into_inner().ticket;
         let request =
             GreptimeRequest::decode(ticket.as_ref()).context(error::InvalidFlightTicketSnafu)?;
+        let query_ctx =
+            create_query_context(Channel::Grpc, request.header.as_ref(), hints.clone())?;
+        FlowQueryExtensions::from_extensions(&query_ctx.extensions())
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
         // The Grpc protocol pass query by Flight. It needs to be wrapped under a span, in order to record stream
         let span = info_span!(
@@ -206,7 +214,7 @@ impl FlightCraft for GreptimeRequestHandler {
                 output,
                 TracingContext::from_current_span(),
                 flight_compression,
-                QueryContext::arc(),
+                query_ctx,
             );
             Ok(Response::new(stream))
         }
@@ -539,12 +547,22 @@ fn to_flight_data_stream(
             Box::pin(stream) as _
         }
         OutputData::AffectedRows(rows) => {
-            let stream = tokio_stream::iter(
-                FlightEncoder::default()
-                    .encode(FlightMessage::AffectedRows(rows))
-                    .into_iter()
-                    .map(Ok),
-            );
+            let affected_rows = FlightEncoder::default().encode(FlightMessage::AffectedRows(rows));
+            let should_emit_terminal_metrics =
+                FlowQueryExtensions::from_extensions(&query_ctx.extensions())
+                    .expect("flow extensions must be validated before Flight serialization")
+                    .should_collect_region_watermark();
+            let terminal_metrics = should_emit_terminal_metrics
+                .then_some(output.meta.plan)
+                .flatten()
+                .and_then(terminal_recordbatch_metrics_from_plan)
+                .and_then(|metrics| serde_json::to_string(&metrics).ok())
+                .map(FlightMessage::Metrics)
+                .map(|message| FlightEncoder::default().encode(message))
+                .into_iter()
+                .flatten();
+            let stream =
+                tokio_stream::iter(affected_rows.into_iter().chain(terminal_metrics).map(Ok));
             Box::pin(stream) as _
         }
     }

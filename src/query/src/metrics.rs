@@ -180,6 +180,20 @@ impl Stream for RegionWatermarkMetricsStream {
     }
 }
 
+pub fn terminal_recordbatch_metrics_from_plan(
+    plan: Arc<dyn ExecutionPlan>,
+) -> Option<RecordBatchMetrics> {
+    let region_latest_sequences = collect_region_latest_sequences(plan);
+    if region_latest_sequences.is_empty() {
+        None
+    } else {
+        Some(RecordBatchMetrics {
+            region_latest_sequences: Some(region_latest_sequences),
+            ..Default::default()
+        })
+    }
+}
+
 fn collect_region_latest_sequences(plan: Arc<dyn ExecutionPlan>) -> Vec<(u64, u64)> {
     let mut merged = std::collections::HashMap::new();
     let mut stack = vec![plan];
