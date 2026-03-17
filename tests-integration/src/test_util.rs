@@ -534,6 +534,7 @@ pub async fn setup_test_http_app_with_frontend_and_custom_options(
         .with_influxdb_handler(instance.fe_instance().clone())
         .with_otlp_handler(instance.fe_instance().clone(), true)
         .with_jaeger_handler(instance.fe_instance().clone())
+        .with_dashboard_handler(instance.fe_instance().clone())
         .with_greptime_config_options(instance.opts.to_toml().unwrap());
 
     if let Some(user_provider) = user_provider {

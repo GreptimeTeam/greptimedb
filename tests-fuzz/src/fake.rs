@@ -65,6 +65,26 @@ where
     _v: PhantomData<V>,
 }
 
+pub struct ConstGenerator<V> {
+    value: V,
+}
+
+impl<V> ConstGenerator<V> {
+    pub fn new(value: V) -> Self {
+        Self { value }
+    }
+}
+
+impl<R, V> Random<V, R> for ConstGenerator<V>
+where
+    R: Rng,
+    V: Clone,
+{
+    fn choose(&self, _rng: &mut R, amount: usize) -> Vec<V> {
+        vec![self.value.clone(); amount]
+    }
+}
+
 pub fn random_capitalize_map<R: Rng + 'static>(rng: &mut R, s: Ident) -> Ident {
     let mut v = s.value.chars().collect::<Vec<_>>();
 

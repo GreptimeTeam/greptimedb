@@ -28,7 +28,7 @@ use mito2::memtable::bulk::part_reader::BulkPartBatchIter;
 use mito2::memtable::bulk::{BulkMemtable, BulkMemtableConfig};
 use mito2::memtable::partition_tree::{PartitionTreeConfig, PartitionTreeMemtable};
 use mito2::memtable::time_series::TimeSeriesMemtable;
-use mito2::memtable::{KeyValues, Memtable, RangesOptions};
+use mito2::memtable::{IterBuilder, KeyValues, Memtable, RangesOptions};
 use mito2::read::flat_merge::FlatMergeIterator;
 use mito2::read::scan_region::PredicateGroup;
 use mito2::region::options::MergeMode;
@@ -105,7 +105,11 @@ fn full_scan(c: &mut Criterion) {
         }
 
         b.iter(|| {
-            let iter = memtable.iter(None, None, None).unwrap();
+            let iter = memtable
+                .ranges(None, RangesOptions::default())
+                .unwrap()
+                .build(None)
+                .unwrap();
             for batch in iter {
                 let _batch = batch.unwrap();
             }
@@ -145,7 +149,17 @@ fn filter_1_host(c: &mut Criterion) {
         let predicate = generator.random_host_filter();
 
         b.iter(|| {
-            let iter = memtable.iter(None, Some(predicate.clone()), None).unwrap();
+            let iter = memtable
+                .ranges(
+                    None,
+                    RangesOptions {
+                        predicate: PredicateGroup::new(&metadata, predicate.exprs()).unwrap(),
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+                .build(None)
+                .unwrap();
             for batch in iter {
                 let _batch = batch.unwrap();
             }

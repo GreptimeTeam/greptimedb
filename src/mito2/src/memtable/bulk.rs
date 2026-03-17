@@ -57,7 +57,7 @@ use crate::memtable::{
 use crate::read::flat_dedup::{FlatDedupIterator, FlatLastNonNull, FlatLastRow};
 use crate::read::flat_merge::FlatMergeIterator;
 use crate::region::options::MergeMode;
-use crate::sst::parquet::format::FIXED_POS_COLUMN_NUM;
+use crate::sst::parquet::flat_format::field_column_start;
 use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, DEFAULT_ROW_GROUP_SIZE};
 use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
 
@@ -460,16 +460,6 @@ impl Memtable for BulkMemtable {
         }
 
         Ok(())
-    }
-
-    #[cfg(any(test, feature = "test"))]
-    fn iter(
-        &self,
-        _projection: Option<&[ColumnId]>,
-        _predicate: Option<table::predicate::Predicate>,
-        _sequence: Option<SequenceRange>,
-    ) -> Result<crate::memtable::BoxedBatchIterator> {
-        todo!()
     }
 
     fn ranges(
@@ -1186,13 +1176,8 @@ impl MemtableCompactor {
                     Box::new(dedup_iter)
                 }
                 MergeMode::LastNonNull => {
-                    // Calculates field column start: total columns - fixed columns - field columns
-                    // Field column count = total metadata columns - time index column - primary key columns
-                    let field_column_count =
-                        metadata.column_metadatas.len() - 1 - metadata.primary_key.len();
-                    let total_columns = arrow_schema.fields().len();
                     let field_column_start =
-                        total_columns - FIXED_POS_COLUMN_NUM - field_column_count;
+                        field_column_start(metadata, arrow_schema.fields().len());
 
                     let dedup_iter = FlatDedupIterator::new(
                         merged_iter,

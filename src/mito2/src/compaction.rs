@@ -58,10 +58,10 @@ use crate::error::{
     TimeRangePredicateOverflowSnafu, TimeoutSnafu,
 };
 use crate::metrics::{COMPACTION_STAGE_ELAPSED, INFLIGHT_COMPACTION_COUNT};
+use crate::read::BoxedRecordBatchStream;
 use crate::read::projection::ProjectionMapper;
 use crate::read::scan_region::{PredicateGroup, ScanInput};
 use crate::read::seq_scan::SeqScan;
-use crate::read::{BoxedBatchReader, BoxedRecordBatchStream};
 use crate::region::options::{MergeMode, RegionOptions};
 use crate::region::version::VersionControlRef;
 use crate::region::{ManifestContextRef, RegionLeaderState, RegionRoleState};
@@ -828,7 +828,7 @@ pub struct SerializedCompactionOutput {
     output_time_range: Option<TimestampRange>,
 }
 
-/// Builders to create [BoxedBatchReader] for compaction.
+/// Builders to create [BoxedRecordBatchStream] for compaction.
 struct CompactionSstReaderBuilder<'a> {
     metadata: RegionMetadataRef,
     sst_layer: AccessLayerRef,
@@ -841,24 +841,17 @@ struct CompactionSstReaderBuilder<'a> {
 }
 
 impl CompactionSstReaderBuilder<'_> {
-    /// Builds [BoxedBatchReader] that reads all SST files and yields batches in primary key order.
-    async fn build_sst_reader(self) -> Result<BoxedBatchReader> {
-        let scan_input = self.build_scan_input(false)?.with_compaction(true);
-
-        SeqScan::new(scan_input).build_reader_for_compaction().await
-    }
-
     /// Builds [BoxedRecordBatchStream] that reads all SST files and yields batches in flat format for compaction.
     async fn build_flat_sst_reader(self) -> Result<BoxedRecordBatchStream> {
-        let scan_input = self.build_scan_input(true)?.with_compaction(true);
+        let scan_input = self.build_scan_input()?.with_compaction(true);
 
         SeqScan::new(scan_input)
             .build_flat_reader_for_compaction()
             .await
     }
 
-    fn build_scan_input(self, flat_format: bool) -> Result<ScanInput> {
-        let mapper = ProjectionMapper::all(&self.metadata, flat_format)?;
+    fn build_scan_input(self) -> Result<ScanInput> {
+        let mapper = ProjectionMapper::all(&self.metadata, true)?;
         let mut scan_input = ScanInput::new(self.sst_layer, mapper)
             .with_files(self.inputs.to_vec())
             .with_append_mode(self.append_mode)
@@ -868,7 +861,7 @@ impl CompactionSstReaderBuilder<'_> {
             // We ignore file not found error during compaction.
             .with_ignore_file_not_found(true)
             .with_merge_mode(self.merge_mode)
-            .with_flat_format(flat_format);
+            .with_flat_format(true);
 
         // This serves as a workaround of https://github.com/GreptimeTeam/greptimedb/issues/3944
         // by converting time ranges into predicate.

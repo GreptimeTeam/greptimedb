@@ -21,9 +21,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use api::v1::SemanticType;
-use async_trait::async_trait;
 use common_recordbatch::filter::SimpleFilterEvaluator;
-use common_telemetry::{debug, tracing, warn};
+use common_telemetry::{tracing, warn};
 use datafusion_expr::Expr;
 use datatypes::arrow::array::ArrayRef;
 use datatypes::arrow::datatypes::Field;
@@ -56,7 +55,7 @@ use crate::metrics::{
     READ_ROWS_TOTAL, READ_STAGE_ELAPSED,
 };
 use crate::read::flat_projection::CompactionProjectionMapper;
-use crate::read::prune::{PruneReader, Source};
+use crate::read::prune::FlatPruneReader;
 use crate::read::{Batch, BatchReader};
 use crate::sst::file::FileHandle;
 use crate::sst::index::bloom_filter::applier::{
@@ -302,7 +301,8 @@ impl ParquetReaderBuilder {
     pub async fn build(&self) -> Result<Option<ParquetReader>> {
         let mut metrics = ReaderMetrics::default();
 
-        let Some((context, selection)) = self.build_reader_input(&mut metrics).await? else {
+        let Some((context, selection)) = self.build_reader_input_inner(&mut metrics, true).await?
+        else {
             return Ok(None);
         };
         ParquetReader::new(Arc::new(context), selection)
@@ -324,12 +324,14 @@ impl ParquetReaderBuilder {
         &self,
         metrics: &mut ReaderMetrics,
     ) -> Result<Option<(FileRangeContext, RowGroupSelection)>> {
-        self.build_reader_input_inner(metrics).await
+        self.build_reader_input_inner(metrics, self.flat_format)
+            .await
     }
 
     async fn build_reader_input_inner(
         &self,
         metrics: &mut ReaderMetrics,
+        flat_format: bool,
     ) -> Result<Option<(FileRangeContext, RowGroupSelection)>> {
         let start = Instant::now();
 
@@ -371,7 +373,7 @@ impl ParquetReaderBuilder {
         // before compat handling.
         let compaction_projection_mapper = if self.compaction
             && !is_same_region_partition
-            && self.flat_format
+            && flat_format
             && region_meta.primary_key_encoding == PrimaryKeyEncoding::Sparse
         {
             Some(CompactionProjectionMapper::try_new(&region_meta)?)
@@ -383,7 +385,7 @@ impl ParquetReaderBuilder {
             ReadFormat::new(
                 region_meta.clone(),
                 Some(column_ids),
-                self.flat_format,
+                flat_format,
                 Some(parquet_meta.file_metadata().schema_descr().num_columns()),
                 &file_path,
                 skip_auto_convert,
@@ -399,7 +401,7 @@ impl ParquetReaderBuilder {
             ReadFormat::new(
                 region_meta.clone(),
                 Some(&column_ids),
-                self.flat_format,
+                flat_format,
                 Some(parquet_meta.file_metadata().schema_descr().num_columns()),
                 &file_path,
                 skip_auto_convert,
@@ -1722,24 +1724,6 @@ impl RowGroupReaderBuilder {
     }
 }
 
-/// The state of a [ParquetReader].
-enum ReaderState {
-    /// The reader is reading a row group.
-    Readable(PruneReader),
-    /// The reader is exhausted.
-    Exhausted(ReaderMetrics),
-}
-
-impl ReaderState {
-    /// Returns the metrics of the reader.
-    fn metrics(&self) -> ReaderMetrics {
-        match self {
-            ReaderState::Readable(reader) => reader.metrics(),
-            ReaderState::Exhausted(m) => m.clone(),
-        }
-    }
-}
-
 /// The filter to evaluate or the prune result of the default value.
 pub(crate) enum MaybeFilter {
     /// The filter to evaluate.
@@ -1850,13 +1834,12 @@ pub struct ParquetReader {
     /// Row group selection to read.
     selection: RowGroupSelection,
     /// Reader of current row group.
-    reader_state: ReaderState,
+    reader: Option<FlatPruneReader>,
     /// Metrics for tracking row group fetch operations.
     fetch_metrics: ParquetFetchMetrics,
 }
 
-#[async_trait]
-impl BatchReader for ParquetReader {
+impl ParquetReader {
     #[tracing::instrument(
         skip_all,
         fields(
@@ -1864,18 +1847,20 @@ impl BatchReader for ParquetReader {
             file_id = %self.context.reader_builder().file_handle.file_id()
         )
     )]
-    async fn next_batch(&mut self) -> Result<Option<Batch>> {
-        let ReaderState::Readable(reader) = &mut self.reader_state else {
-            return Ok(None);
-        };
+    pub async fn next_record_batch(&mut self) -> Result<Option<RecordBatch>> {
+        loop {
+            if let Some(reader) = &mut self.reader {
+                if let Some(batch) = reader.next_batch()? {
+                    return Ok(Some(batch));
+                }
+                self.reader = None;
+                continue;
+            }
 
-        // We don't collect the elapsed time if the reader returns an error.
-        if let Some(batch) = reader.next_batch().await? {
-            return Ok(Some(batch));
-        }
+            let Some((row_group_idx, row_selection)) = self.selection.pop_first() else {
+                return Ok(None);
+            };
 
-        // No more items in current row group, reads next row group.
-        while let Some((row_group_idx, row_selection)) = self.selection.pop_first() {
             let parquet_reader = self
                 .context
                 .reader_builder()
@@ -1886,54 +1871,14 @@ impl BatchReader for ParquetReader {
                 )
                 .await?;
 
-            // Resets the parquet reader.
-            // Compute skip_fields for this row group
             let skip_fields = self.context.should_skip_fields(row_group_idx);
-            reader.reset_source(
-                Source::RowGroup(RowGroupReader::new(self.context.clone(), parquet_reader)),
+            self.reader = Some(FlatPruneReader::new_with_row_group_reader(
+                self.context.clone(),
+                FlatRowGroupReader::new(self.context.clone(), parquet_reader),
                 skip_fields,
-            );
-            if let Some(batch) = reader.next_batch().await? {
-                return Ok(Some(batch));
-            }
+            ));
         }
-
-        // The reader is exhausted.
-        self.reader_state = ReaderState::Exhausted(reader.metrics().clone());
-        Ok(None)
     }
-}
-
-impl Drop for ParquetReader {
-    fn drop(&mut self) {
-        let metrics = self.reader_state.metrics();
-        debug!(
-            "Read parquet {} {}, range: {:?}, {}/{} row groups, metrics: {:?}",
-            self.context.reader_builder().file_handle.region_id(),
-            self.context.reader_builder().file_handle.file_id(),
-            self.context.reader_builder().file_handle.time_range(),
-            metrics.filter_metrics.rg_total
-                - metrics.filter_metrics.rg_inverted_filtered
-                - metrics.filter_metrics.rg_minmax_filtered
-                - metrics.filter_metrics.rg_fulltext_filtered
-                - metrics.filter_metrics.rg_bloom_filtered,
-            metrics.filter_metrics.rg_total,
-            metrics
-        );
-
-        // Report metrics.
-        READ_STAGE_ELAPSED
-            .with_label_values(&["build_parquet_reader"])
-            .observe(metrics.build_cost.as_secs_f64());
-        READ_STAGE_ELAPSED
-            .with_label_values(&["scan_row_groups"])
-            .observe(metrics.scan_cost.as_secs_f64());
-        metrics.observe_rows("parquet_reader");
-        metrics.filter_metrics.observe();
-    }
-}
-
-impl ParquetReader {
     /// Creates a new reader.
     #[tracing::instrument(
         skip_all,
@@ -1946,28 +1891,27 @@ impl ParquetReader {
         context: FileRangeContextRef,
         mut selection: RowGroupSelection,
     ) -> Result<Self> {
+        debug_assert!(context.read_format().as_flat().is_some());
         let fetch_metrics = ParquetFetchMetrics::default();
-        // No more items in current row group, reads next row group.
-        let reader_state = if let Some((row_group_idx, row_selection)) = selection.pop_first() {
+        let reader = if let Some((row_group_idx, row_selection)) = selection.pop_first() {
             let parquet_reader = context
                 .reader_builder()
                 .build(row_group_idx, Some(row_selection), Some(&fetch_metrics))
                 .await?;
-            // Compute skip_fields once for this row group
             let skip_fields = context.should_skip_fields(row_group_idx);
-            ReaderState::Readable(PruneReader::new_with_row_group_reader(
+            Some(FlatPruneReader::new_with_row_group_reader(
                 context.clone(),
-                RowGroupReader::new(context.clone(), parquet_reader),
+                FlatRowGroupReader::new(context.clone(), parquet_reader),
                 skip_fields,
             ))
         } else {
-            ReaderState::Exhausted(ReaderMetrics::default())
+            None
         };
 
         Ok(ParquetReader {
             context,
             selection,
-            reader_state,
+            reader,
             fetch_metrics,
         })
     }

@@ -21,7 +21,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use mito2::memtable::simple_bulk_memtable::SimpleBulkMemtable;
-use mito2::memtable::{KeyValues, Memtable, MemtableRanges, RangesOptions};
+use mito2::memtable::{IterBuilder, KeyValues, Memtable, MemtableRanges, RangesOptions};
 use mito2::read;
 use mito2::read::Source;
 use mito2::read::dedup::DedupReader;
@@ -156,7 +156,11 @@ async fn flush(mem: &SimpleBulkMemtable) {
 }
 
 async fn flush_original(mem: &SimpleBulkMemtable) {
-    let iter = mem.iter(None, None, None).unwrap();
+    let iter = mem
+        .ranges(None, RangesOptions::default())
+        .unwrap()
+        .build(None)
+        .unwrap();
     for b in iter {
         black_box(b.unwrap());
     }

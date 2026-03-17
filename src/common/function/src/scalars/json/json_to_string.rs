@@ -19,6 +19,7 @@ use datafusion_common::DataFusionError;
 use datafusion_common::arrow::array::{Array, AsArray, StringViewBuilder};
 use datafusion_common::arrow::datatypes::DataType;
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
+use datatypes::types::jsonb_to_string;
 
 use crate::function::{Function, extract_args};
 
@@ -74,7 +75,7 @@ impl Function for JsonToStringFunction {
         for i in 0..size {
             let json = jsons.is_valid(i).then(|| jsons.value(i));
             let result = json
-                .map(|json| jsonb::from_slice(json).map(|x| x.to_string()))
+                .map(jsonb_to_string)
                 .transpose()
                 .map_err(|e| DataFusionError::Execution(format!("invalid json binary: {e}")))?;
 

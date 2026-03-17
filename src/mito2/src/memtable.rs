@@ -28,6 +28,7 @@ use mito_codec::key_values::KeyValue;
 pub use mito_codec::key_values::KeyValues;
 use mito_codec::row_converter::{PrimaryKeyCodec, build_primary_key_codec};
 use serde::{Deserialize, Serialize};
+use snafu::ensure;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, SequenceNumber, SequenceRange};
 
@@ -231,10 +232,17 @@ impl MemtableRanges {
 
 impl IterBuilder for MemtableRanges {
     fn build(&self, _metrics: Option<MemScanMetrics>) -> Result<BoxedBatchIterator> {
-        UnsupportedOperationSnafu {
-            err_msg: "MemtableRanges does not support build iterator",
-        }
-        .fail()
+        ensure!(
+            self.ranges.len() == 1,
+            UnsupportedOperationSnafu {
+                err_msg: format!(
+                    "Building an iterator from MemtableRanges expects 1 range, but got {}",
+                    self.ranges.len()
+                ),
+            }
+        );
+
+        self.ranges.values().next().unwrap().build_iter()
     }
 
     fn is_record_batch(&self) -> bool {
@@ -255,20 +263,6 @@ pub trait Memtable: Send + Sync + fmt::Debug {
 
     /// Writes an encoded batch of into memtable.
     fn write_bulk(&self, part: crate::memtable::bulk::part::BulkPart) -> Result<()>;
-
-    /// Scans the memtable.
-    /// `projection` selects columns to read, `None` means reading all columns.
-    /// `filters` are the predicates to be pushed down to memtable.
-    ///
-    /// # Note
-    /// This method should only be used for tests.
-    #[cfg(any(test, feature = "test"))]
-    fn iter(
-        &self,
-        projection: Option<&[ColumnId]>,
-        predicate: Option<table::predicate::Predicate>,
-        sequence: Option<SequenceRange>,
-    ) -> Result<BoxedBatchIterator>;
 
     /// Returns the ranges in the memtable.
     ///
