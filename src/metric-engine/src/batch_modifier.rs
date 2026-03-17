@@ -15,7 +15,7 @@
 use std::hash::Hasher;
 use std::sync::Arc;
 
-use datatypes::arrow::array::{Array, BinaryArray, StringArray, UInt64Array};
+use datatypes::arrow::array::{Array, BinaryBuilder, StringArray, UInt64Array};
 use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::value::ValueRef;
@@ -124,9 +124,10 @@ pub(crate) fn modify_batch_sparse(
     let tag_arrays: Vec<&StringArray> = build_tag_arrays(&batch, sorted_tag_columns);
     let tsid_array = compute_tsid_array(&batch, sorted_tag_columns, &tag_arrays);
 
-    let mut pk_values: Vec<Vec<u8>> = Vec::with_capacity(num_rows);
+    let mut pk_builder = BinaryBuilder::with_capacity(num_rows, 0);
+    let mut buffer = Vec::new();
     for row in 0..num_rows {
-        let mut buffer = Vec::new();
+        buffer.clear();
         let internal = [
             (ReservedColumnId::table_id(), ValueRef::UInt32(table_id)),
             (
@@ -147,10 +148,10 @@ pub(crate) fn modify_batch_sparse(
             .encode_to_vec(tags, &mut buffer)
             .context(EncodePrimaryKeySnafu)?;
 
-        pk_values.push(buffer);
+        pk_builder.append_value(&buffer);
     }
 
-    let pk_array = BinaryArray::from_iter_values(pk_values.iter().map(Vec::as_slice));
+    let pk_array = pk_builder.finish();
 
     let mut fields = vec![Arc::new(Field::new(
         PRIMARY_KEY_COLUMN_NAME,
