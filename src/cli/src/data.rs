@@ -12,8 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub(crate) mod copy;
 mod export;
+pub mod export_v2;
 mod import;
+pub mod import_v2;
+pub(crate) mod retry;
+pub mod snapshot_storage;
 mod storage_export;
 
 use clap::Subcommand;
@@ -22,15 +27,27 @@ use common_error::ext::BoxedError;
 
 use crate::Tool;
 use crate::data::export::ExportCommand;
+use crate::data::export_v2::ExportV2Command;
 use crate::data::import::ImportCommand;
+use crate::data::import_v2::ImportV2Command;
 
 pub(crate) const COPY_PATH_PLACEHOLDER: &str = "<PATH/TO/FILES>";
+
+#[cfg(test)]
+mod tests;
 
 /// Command for data operations including exporting data from and importing data into GreptimeDB.
 #[derive(Subcommand)]
 pub enum DataCommand {
+    /// Export data (V1 - legacy).
     Export(ExportCommand),
+    /// Import data (V1 - legacy).
     Import(ImportCommand),
+    /// Export V2 - JSON-based schema export with manifest support.
+    #[clap(subcommand)]
+    ExportV2(ExportV2Command),
+    /// Import V2 - Import from V2 snapshot.
+    ImportV2(ImportV2Command),
 }
 
 impl DataCommand {
@@ -38,6 +55,8 @@ impl DataCommand {
         match self {
             DataCommand::Export(cmd) => cmd.build().await,
             DataCommand::Import(cmd) => cmd.build().await,
+            DataCommand::ExportV2(cmd) => cmd.build().await,
+            DataCommand::ImportV2(cmd) => cmd.build().await,
         }
     }
 }
