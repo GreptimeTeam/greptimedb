@@ -110,6 +110,7 @@ impl MetricEngineInner {
         {
             Ok(affected_rows) => Ok(affected_rows),
             Err(err) if err.status_code() == StatusCode::Unsupported => {
+                // todo(hl): fallback path for PartitionTreeMemtable, remove this once we remove it
                 let rows = record_batch_to_rows(&batch, region_id)?;
                 self.put_region(
                     region_id,
@@ -245,14 +246,14 @@ fn record_batch_to_rows(batch: &RecordBatch, logical_region_id: RegionId) -> Res
         }
     }
 
-    let ts_idx = ts_idx.context(error::UnexpectedRequestSnafu {
+    let ts_idx = ts_idx.with_context(|| error::UnexpectedRequestSnafu {
         reason: format!(
             "Timestamp column '{}' not found in RecordBatch for region {:?}",
             greptime_timestamp(),
             logical_region_id
         ),
     })?;
-    let val_idx = val_idx.context(error::UnexpectedRequestSnafu {
+    let val_idx = val_idx.with_context(|| error::UnexpectedRequestSnafu {
         reason: format!(
             "Value column '{}' not found in RecordBatch for region {:?}",
             greptime_value(),
