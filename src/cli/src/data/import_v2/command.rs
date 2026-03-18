@@ -14,6 +14,7 @@
 
 //! Import V2 CLI command.
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -369,21 +370,27 @@ fn canonicalize_schema_filter(
     filter: &[String],
     manifest_schemas: &[String],
 ) -> Result<Vec<String>> {
-    filter
-        .iter()
-        .map(|schema| {
-            manifest_schemas
-                .iter()
-                .find(|candidate| candidate.eq_ignore_ascii_case(schema))
-                .cloned()
-                .ok_or_else(|| {
-                    SchemaNotInSnapshotSnafu {
-                        schema: schema.clone(),
-                    }
-                    .build()
-                })
-        })
-        .collect()
+    let mut canonicalized = Vec::new();
+    let mut seen = HashSet::new();
+
+    for schema in filter {
+        let canonical = manifest_schemas
+            .iter()
+            .find(|candidate| candidate.eq_ignore_ascii_case(schema))
+            .cloned()
+            .ok_or_else(|| {
+                SchemaNotInSnapshotSnafu {
+                    schema: schema.clone(),
+                }
+                .build()
+            })?;
+
+        if seen.insert(canonical.to_ascii_lowercase()) {
+            canonicalized.push(canonical);
+        }
+    }
+
+    Ok(canonicalized)
 }
 
 #[cfg(test)]
@@ -441,6 +448,21 @@ CREATE VIEW v AS SELECT 1;
     #[test]
     fn test_canonicalize_schema_filter_uses_manifest_casing() {
         let filter = vec!["TEST_DB".to_string(), "PUBLIC".to_string()];
+        let manifest_schemas = vec!["test_db".to_string(), "public".to_string()];
+
+        let canonicalized = canonicalize_schema_filter(&filter, &manifest_schemas).unwrap();
+
+        assert_eq!(canonicalized, vec!["test_db", "public"]);
+    }
+
+    #[test]
+    fn test_canonicalize_schema_filter_dedupes_case_insensitive_matches() {
+        let filter = vec![
+            "TEST_DB".to_string(),
+            "test_db".to_string(),
+            "PUBLIC".to_string(),
+            "public".to_string(),
+        ];
         let manifest_schemas = vec!["test_db".to_string(), "public".to_string()];
 
         let canonicalized = canonicalize_schema_filter(&filter, &manifest_schemas).unwrap();

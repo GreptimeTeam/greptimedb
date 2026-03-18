@@ -16,7 +16,7 @@
 //!
 //! For V2 DDL-only snapshots, extractor only persists the schema index.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 use snafu::ResultExt;
@@ -86,26 +86,7 @@ impl<'a> SchemaExtractor<'a> {
     /// Validates that all specified schemas exist.
     async fn validate_schemas(&self, schemas: &[String]) -> Result<Vec<String>> {
         let all_schemas = self.get_all_schemas().await?;
-
-        for schema in schemas {
-            if !all_schemas.iter().any(|s| s.eq_ignore_ascii_case(schema)) {
-                return SchemaNotFoundSnafu {
-                    catalog: self.catalog,
-                    schema,
-                }
-                .fail();
-            }
-        }
-
-        Ok(schemas
-            .iter()
-            .filter_map(|s| {
-                all_schemas
-                    .iter()
-                    .find(|a| a.eq_ignore_ascii_case(s))
-                    .cloned()
-            })
-            .collect())
+        dedupe_canonicalized_schemas(schemas, &all_schemas, self.catalog)
     }
 
     /// Extracts schema (database) definition.
@@ -199,6 +180,27 @@ fn parse_quoted_option_line(line: &str) -> Option<(String, String)> {
     Some((key.to_string(), value.to_string()))
 }
 
+fn dedupe_canonicalized_schemas(
+    requested: &[String],
+    available: &[String],
+    catalog: &str,
+) -> Result<Vec<String>> {
+    let mut canonicalized = Vec::new();
+    let mut seen = HashSet::new();
+
+    for schema in requested {
+        let Some(canonical) = available.iter().find(|s| s.eq_ignore_ascii_case(schema)) else {
+            return SchemaNotFoundSnafu { catalog, schema }.fail();
+        };
+
+        if seen.insert(canonical.to_ascii_lowercase()) {
+            canonicalized.push(canonical.clone());
+        }
+    }
+
+    Ok(canonicalized)
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::Value;
@@ -233,5 +235,20 @@ mod tests {
     fn test_extract_string_rejects_null() {
         let row = vec![Value::Null];
         assert!(extract_string(&row, 0).is_err());
+    }
+
+    #[test]
+    fn test_dedupe_canonicalized_schemas() {
+        let available = vec!["public".to_string(), "test_db".to_string()];
+        let requested = vec![
+            "PUBLIC".to_string(),
+            "public".to_string(),
+            "Test_Db".to_string(),
+        ];
+
+        let canonicalized = dedupe_canonicalized_schemas(&requested, &available, "greptime")
+            .expect("schemas should be canonicalized");
+
+        assert_eq!(canonicalized, vec!["public", "test_db"]);
     }
 }
