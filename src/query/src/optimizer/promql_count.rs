@@ -12,15 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeSet;
+use std::sync::Arc;
+
 use datafusion::config::ConfigOptions;
 use datafusion::functions_aggregate::min_max::max_udaf;
 use datafusion::functions_aggregate::sum::sum_udaf;
-use datafusion::logical_expr::{Cast, LogicalPlan, LogicalPlanBuilder, Sort};
+use datafusion::logical_expr::{Cast, Extension, LogicalPlan, LogicalPlanBuilder, Sort};
 use datafusion_common::Result;
 use datafusion_common::tree_node::{Transformed, TreeNode};
-use datafusion_expr::{Expr, Operator, col, lit};
+use datafusion_expr::{Expr, Operator, UserDefinedLogicalNodeCore, col, lit};
 use datatypes::arrow::datatypes::DataType;
-use promql::extension_plan::InstantManipulate;
+use promql::extension_plan::{InstantManipulate, SeriesDivide, SeriesNormalize};
+use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 
 use crate::QueryEngineContext;
 use crate::optimizer::ExtensionAnalyzerRule;
@@ -94,7 +98,7 @@ impl PromqlNestedCountRewriteRule {
             Some(arg) => arg,
             None => return Ok(None),
         };
-        let Expr::Column(_inner_value_column) = inner_value_expr else {
+        let Expr::Column(_) = inner_value_expr else {
             return Ok(None);
         };
 
@@ -137,7 +141,14 @@ impl PromqlNestedCountRewriteRule {
                 .map(|(_, expr)| expr.clone()),
         );
 
-        let presence_input = LogicalPlanBuilder::from(inner_agg.input.as_ref().clone())
+        let mut required_input_columns =
+            Self::collect_required_input_columns(&presence_group_exprs, inner_value_expr);
+        let presence_source = Self::prune_projection_chain_to_instant(
+            inner_agg.input.as_ref(),
+            &mut required_input_columns,
+        )?;
+
+        let presence_input = LogicalPlanBuilder::from(presence_source)
             .project(
                 presence_group_exprs
                     .iter()
@@ -192,6 +203,21 @@ impl PromqlNestedCountRewriteRule {
         Ok(Some(rewritten))
     }
 
+    fn collect_required_input_columns(group_exprs: &[Expr], value_expr: &Expr) -> BTreeSet<String> {
+        let mut required = BTreeSet::new();
+
+        for expr in group_exprs {
+            if let Expr::Column(column) = expr {
+                required.insert(column.name.clone());
+            }
+        }
+        if let Expr::Column(column) = value_expr {
+            required.insert(column.name.clone());
+        }
+
+        required
+    }
+
     fn count_arg(expr: &Expr) -> Option<&Expr> {
         let Expr::AggregateFunction(func) = expr else {
             return None;
@@ -218,6 +244,91 @@ impl PromqlNestedCountRewriteRule {
                 }
                 _ => return false,
             }
+        }
+    }
+
+    fn prune_projection_chain_to_instant(
+        plan: &LogicalPlan,
+        required_columns: &mut BTreeSet<String>,
+    ) -> Result<LogicalPlan> {
+        match plan {
+            LogicalPlan::Projection(projection) => {
+                let input = Self::prune_projection_chain_to_instant(
+                    projection.input.as_ref(),
+                    required_columns,
+                )?;
+                LogicalPlanBuilder::from(input)
+                    .project(projection.expr.clone())?
+                    .build()
+            }
+            LogicalPlan::Extension(extension) => {
+                if let Some(instant) = extension.node.as_any().downcast_ref::<InstantManipulate>() {
+                    let input =
+                        Self::prune_instant_input(extension.node.inputs()[0], required_columns)?;
+                    return Ok(LogicalPlan::Extension(Extension {
+                        node: Arc::new(instant.with_exprs_and_inputs(vec![], vec![input])?),
+                    }));
+                }
+
+                Ok(plan.clone())
+            }
+            _ => Ok(plan.clone()),
+        }
+    }
+
+    fn prune_instant_input(
+        plan: &LogicalPlan,
+        required_columns: &mut BTreeSet<String>,
+    ) -> Result<LogicalPlan> {
+        match plan {
+            LogicalPlan::Extension(extension) => {
+                if let Some(normalize) = extension.node.as_any().downcast_ref::<SeriesNormalize>() {
+                    let input =
+                        Self::prune_instant_input(extension.node.inputs()[0], required_columns)?;
+                    return Ok(LogicalPlan::Extension(Extension {
+                        node: Arc::new(normalize.with_exprs_and_inputs(vec![], vec![input])?),
+                    }));
+                }
+
+                if let Some(divide) = extension.node.as_any().downcast_ref::<SeriesDivide>() {
+                    let divide_input = extension.node.inputs()[0].clone();
+                    for expr in extension.node.expressions() {
+                        if let Expr::Column(column) = expr {
+                            required_columns.insert(column.name.clone());
+                        }
+                    }
+                    if divide_input
+                        .schema()
+                        .fields()
+                        .iter()
+                        .any(|field| field.name() == DATA_SCHEMA_TSID_COLUMN_NAME)
+                    {
+                        required_columns.insert(DATA_SCHEMA_TSID_COLUMN_NAME.to_string());
+                    }
+
+                    let projection_exprs = divide_input
+                        .schema()
+                        .fields()
+                        .iter()
+                        .filter(|field| required_columns.contains(field.name()))
+                        .map(|field| {
+                            Expr::Column(datafusion_common::Column::from_name(field.name().clone()))
+                        })
+                        .collect::<Vec<_>>();
+                    let projected_input = LogicalPlanBuilder::from(divide_input)
+                        .project(projection_exprs)?
+                        .build()?;
+
+                    return Ok(LogicalPlan::Extension(Extension {
+                        node: Arc::new(
+                            divide.with_exprs_and_inputs(vec![], vec![projected_input])?,
+                        ),
+                    }));
+                }
+
+                Ok(plan.clone())
+            }
+            _ => Ok(plan.clone()),
         }
     }
 }
