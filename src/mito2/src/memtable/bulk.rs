@@ -462,16 +462,6 @@ impl Memtable for BulkMemtable {
         Ok(())
     }
 
-    #[cfg(any(test, feature = "test"))]
-    fn iter(
-        &self,
-        _projection: Option<&[ColumnId]>,
-        _predicate: Option<table::predicate::Predicate>,
-        _sequence: Option<SequenceRange>,
-    ) -> Result<crate::memtable::BoxedBatchIterator> {
-        todo!()
-    }
-
     fn ranges(
         &self,
         projection: Option<&[ColumnId]>,

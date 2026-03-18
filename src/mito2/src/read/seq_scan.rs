@@ -39,7 +39,7 @@ use crate::error::{PartitionOutOfRangeSnafu, Result, TooManyFilesToReadSnafu, Un
 use crate::read::dedup::{DedupReader, LastNonNull, LastRow};
 use crate::read::flat_dedup::{FlatDedupReader, FlatLastNonNull, FlatLastRow};
 use crate::read::flat_merge::FlatMergeReader;
-use crate::read::last_row::LastRowReader;
+use crate::read::last_row::{FlatLastRowReader, LastRowReader};
 use crate::read::merge::MergeReaderBuilder;
 use crate::read::pruner::{PartitionPruner, Pruner};
 use crate::read::range::RangeMeta;
@@ -287,6 +287,13 @@ impl SeqScan {
             }
         } else {
             Box::pin(reader.into_stream()) as _
+        };
+
+        let reader = match &stream_ctx.input.series_row_selector {
+            Some(TimeSeriesRowSelector::LastRow) => {
+                Box::pin(FlatLastRowReader::new(reader).into_stream()) as _
+            }
+            None => reader,
         };
 
         Ok(reader)

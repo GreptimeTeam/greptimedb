@@ -827,6 +827,7 @@ mod tests {
     use super::*;
     use crate::memtable::partition_tree::PartitionTreeMemtableBuilder;
     use crate::memtable::time_series::TimeSeriesMemtableBuilder;
+    use crate::memtable::{IterBuilder, RangesOptions};
     use crate::test_util::memtable_util::{self, collect_iter_timestamps};
 
     #[test]
@@ -852,7 +853,11 @@ mod tests {
         partitions.list_memtables(&mut memtables);
         assert_eq!(0, memtables[0].id());
 
-        let iter = memtables[0].iter(None, None, None).unwrap();
+        let iter = memtables[0]
+            .ranges(None, RangesOptions::default())
+            .unwrap()
+            .build(None)
+            .unwrap();
         let timestamps = collect_iter_timestamps(iter);
         assert_eq!(&[1000, 3000, 5000, 6000, 7000], &timestamps[..]);
     }
@@ -890,7 +895,11 @@ mod tests {
 
         let mut memtables = Vec::new();
         partitions.list_memtables(&mut memtables);
-        let iter = memtables[0].iter(None, None, None).unwrap();
+        let iter = memtables[0]
+            .ranges(None, RangesOptions::default())
+            .unwrap()
+            .build(None)
+            .unwrap();
         let timestamps = collect_iter_timestamps(iter);
         assert_eq!(&[0, 2000, 3000, 4000, 5000, 7000], &timestamps[..]);
         let parts = partitions.list_partitions();
@@ -943,7 +952,12 @@ mod tests {
         let partitions = new_multi_partitions(&metadata);
 
         let parts = partitions.list_partitions();
-        let iter = parts[0].memtable.iter(None, None, None).unwrap();
+        let iter = parts[0]
+            .memtable
+            .ranges(None, RangesOptions::default())
+            .unwrap()
+            .build(None)
+            .unwrap();
         let timestamps = collect_iter_timestamps(iter);
         assert_eq!(0, parts[0].memtable.id());
         assert_eq!(
@@ -955,7 +969,12 @@ mod tests {
             parts[0].time_range.max_timestamp
         );
         assert_eq!(&[0, 2000, 3000, 4000], &timestamps[..]);
-        let iter = parts[1].memtable.iter(None, None, None).unwrap();
+        let iter = parts[1]
+            .memtable
+            .ranges(None, RangesOptions::default())
+            .unwrap()
+            .build(None)
+            .unwrap();
         assert_eq!(1, parts[1].memtable.id());
         let timestamps = collect_iter_timestamps(iter);
         assert_eq!(&[5000, 7000], &timestamps[..]);
@@ -1273,7 +1292,12 @@ mod tests {
 
         let parts = partitions.list_partitions();
         assert_eq!(1, parts.len());
-        let iter = parts[0].memtable.iter(None, None, None).unwrap();
+        let iter = parts[0]
+            .memtable
+            .ranges(None, RangesOptions::default())
+            .unwrap()
+            .build(None)
+            .unwrap();
         let timestamps = collect_iter_timestamps(iter);
         assert_eq!(&[1000, 2000, 3000], &timestamps[..]);
 
@@ -1284,11 +1308,21 @@ mod tests {
         let parts = partitions.list_partitions();
         assert_eq!(2, parts.len());
         // Check first partition [0, 5000)
-        let iter = parts[0].memtable.iter(None, None, None).unwrap();
+        let iter = parts[0]
+            .memtable
+            .ranges(None, RangesOptions::default())
+            .unwrap()
+            .build(None)
+            .unwrap();
         let timestamps = collect_iter_timestamps(iter);
         assert_eq!(&[1000, 2000, 3000, 4000], &timestamps[..]);
         // Check second partition [5000, 10000)
-        let iter = parts[1].memtable.iter(None, None, None).unwrap();
+        let iter = parts[1]
+            .memtable
+            .ranges(None, RangesOptions::default())
+            .unwrap()
+            .build(None)
+            .unwrap();
         let timestamps = collect_iter_timestamps(iter);
         assert_eq!(&[5000, 6000], &timestamps[..]);
 
@@ -1301,7 +1335,12 @@ mod tests {
         assert_eq!(3, parts.len());
 
         // Check new partition [10000, 15000)
-        let iter = parts[2].memtable.iter(None, None, None).unwrap();
+        let iter = parts[2]
+            .memtable
+            .ranges(None, RangesOptions::default())
+            .unwrap()
+            .build(None)
+            .unwrap();
         let timestamps = collect_iter_timestamps(iter);
         assert_eq!(&[11000, 12000], &timestamps[..]);
 
@@ -1314,7 +1353,12 @@ mod tests {
 
         let parts = partitions.list_partitions();
         assert_eq!(1, parts.len());
-        let iter = parts[0].memtable.iter(None, None, None).unwrap();
+        let iter = parts[0]
+            .memtable
+            .ranges(None, RangesOptions::default())
+            .unwrap()
+            .build(None)
+            .unwrap();
         let timestamps = collect_iter_timestamps(iter);
         assert_eq!(&[1000, 5000, 9000], &timestamps[..]);
     }

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod alter;
+mod bulk_insert;
 mod catchup;
 mod close;
 mod create;
@@ -288,9 +289,8 @@ impl RegionEngine for MetricEngine {
                 debug_assert_eq!(region_id, resp_region_id);
                 return response;
             }
-            RegionRequest::BulkInserts(_) => {
-                // todo(hl): find a way to support bulk inserts in metric engine.
-                UnsupportedRegionRequestSnafu { request }.fail()
+            RegionRequest::BulkInserts(bulk) => {
+                self.inner.bulk_insert_region(region_id, bulk).await
             }
         };
 

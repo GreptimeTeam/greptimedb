@@ -52,6 +52,7 @@
 
 #![feature(assert_matches)]
 
+mod batch_modifier;
 pub mod config;
 mod data_region;
 pub mod engine;

@@ -27,6 +27,7 @@ pub mod projection;
 pub(crate) mod prune;
 pub(crate) mod pruner;
 pub mod range;
+pub(crate) mod range_cache;
 pub mod scan_region;
 pub mod scan_util;
 pub(crate) mod seq_scan;
