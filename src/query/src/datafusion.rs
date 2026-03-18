@@ -355,25 +355,6 @@ impl DatafusionQueryEngine {
     }
 
     #[tracing::instrument(skip_all)]
-    pub fn optimize(
-        &self,
-        context: &QueryEngineContext,
-        plan: &LogicalPlan,
-    ) -> Result<LogicalPlan> {
-        let _timer = metrics::OPTIMIZE_LOGICAL_ELAPSED.start_timer();
-
-        // Optimized by extension rules
-        let optimized_plan = self
-            .state
-            .optimize_by_extension_rules(plan.clone(), context)?;
-
-        // Optimized by datafusion optimizer
-        let optimized_plan = self.state.session_state().optimize(&optimized_plan)?;
-
-        Ok(optimized_plan)
-    }
-
-    #[tracing::instrument(skip_all)]
     fn optimize_physical_plan(
         &self,
         ctx: &mut QueryEngineContext,
