@@ -638,6 +638,9 @@ impl MemoryMetrics for CallbackMemoryMetrics {
 pub struct MemoryTrackedStream {
     inner: SendableRecordBatchStream,
     tracker: Option<StreamMemoryTracker>,
+    // Waiting stores a batch that has already been pulled from the inner stream but has not yet
+    // acquired additional quota. This keeps `poll_next()` non-blocking and allows bounded waits,
+    // at the cost of temporarily holding one untracked batch per blocked stream in memory.
     waiting: Option<PendingTrackFuture>,
 }
 
@@ -716,6 +719,10 @@ impl MemoryTrackedStream {
                 return Poll::Ready(Some(Err(error)));
             }
 
+            // `Wait` is a deliberate tradeoff: the batch has already been materialized, so we keep
+            // it in memory while waiting for quota instead of failing immediately. Under contention,
+            // real memory usage can therefore exceed `scan_memory_limit` by up to one buffered
+            // batch per blocked stream.
             self.enter_waiting(batch, additional);
             return self.poll_waiting(cx);
         }
