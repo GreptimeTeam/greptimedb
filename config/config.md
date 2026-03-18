@@ -161,7 +161,7 @@
 | `region_engine.mito.max_concurrent_scan_files` | Integer | `384` | Maximum number of SST files to scan concurrently. |
 | `region_engine.mito.allow_stale_entries` | Bool | `false` | Whether to allow stale WAL entries read during replay. |
 | `region_engine.mito.scan_memory_limit` | String | `50%` | Memory limit for table scans across all queries.<br/>Supports absolute size (e.g., "2GB") or percentage of system memory (e.g., "20%").<br/>Setting it to 0 disables the limit. |
-| `region_engine.mito.scan_memory_on_exhausted` | String | `fail` | Behavior when scan memory tracking cannot immediately acquire memory.<br/>Supported values: `fail`, `skip`, `wait`, `wait(&lt;duration&gt;)` such as `wait(3s)` or `wait(500ms)`.<br/>`wait` means `wait(10s)`, not unlimited waiting.<br/>Defaults to `fail`, which intentionally differs from `OnExhaustedPolicy::default()`. |
+| `region_engine.mito.scan_memory_on_exhausted` | String | `fail` | Behavior when scan memory tracking cannot immediately acquire memory.<br/>Supported values:<br/>- "fail"<br/>- "wait" (same as "wait(10s)", not unlimited)<br/>- "wait(3s)"<br/>- "wait(500ms)" |
 | `region_engine.mito.min_compaction_interval` | String | `0m` | Minimum time interval between two compactions.<br/>To align with the old behavior, the default value is 0 (no restrictions). |
 | `region_engine.mito.default_experimental_flat_format` | Bool | `false` | Whether to enable experimental flat format as the default format. |
 | `region_engine.mito.index` | -- | -- | The options for index in Mito engine. |
@@ -554,7 +554,7 @@
 | `region_engine.mito.max_concurrent_scan_files` | Integer | `384` | Maximum number of SST files to scan concurrently. |
 | `region_engine.mito.allow_stale_entries` | Bool | `false` | Whether to allow stale WAL entries read during replay. |
 | `region_engine.mito.scan_memory_limit` | String | `50%` | Memory limit for table scans across all queries.<br/>Supports absolute size (e.g., "2GB") or percentage of system memory (e.g., "20%").<br/>Setting it to 0 disables the limit. |
-| `region_engine.mito.scan_memory_on_exhausted` | String | `fail` | Behavior when scan memory tracking cannot immediately acquire memory.<br/>Supported values: `fail`, `skip`, `wait`, `wait(&lt;duration&gt;)` such as `wait(3s)` or `wait(500ms)`.<br/>`wait` means `wait(10s)`, not unlimited waiting.<br/>Defaults to `fail`, which intentionally differs from `OnExhaustedPolicy::default()`. |
+| `region_engine.mito.scan_memory_on_exhausted` | String | `fail` | Behavior when scan memory tracking cannot immediately acquire memory.<br/>Supported values:<br/>- "fail"<br/>- "wait" (same as "wait(10s)", not unlimited)<br/>- "wait(3s)"<br/>- "wait(500ms)" |
 | `region_engine.mito.min_compaction_interval` | String | `0m` | Minimum time interval between two compactions.<br/>To align with the old behavior, the default value is 0 (no restrictions). |
 | `region_engine.mito.default_experimental_flat_format` | Bool | `false` | Whether to enable experimental flat format as the default format. |
 | `region_engine.mito.index` | -- | -- | The options for index in Mito engine. |
