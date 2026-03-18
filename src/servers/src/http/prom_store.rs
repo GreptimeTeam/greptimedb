@@ -39,7 +39,7 @@ use crate::pending_rows_batcher::PendingRowsBatcher;
 use crate::prom_remote_write::decode::PromSeriesProcessor;
 use crate::prom_remote_write::decode_remote_write_request;
 use crate::prom_remote_write::validation::PromValidationMode;
-use crate::prom_store::{extract_schema_from_read_request, snappy_decompress, zstd_decompress};
+use crate::prom_store::{extract_schema_from_read_request, snappy_decompress};
 use crate::query_handler::{PipelineHandlerRef, PromStoreProtocolHandlerRef, PromStoreResponse};
 
 pub const PHYSICAL_TABLE_PARAM: &str = "physical_table";
@@ -215,14 +215,6 @@ pub async fn remote_read(
         .start_timer();
 
     state.prom_store_handler.read(request, query_ctx).await
-}
-
-pub fn try_decompress(is_zstd: bool, body: &[u8]) -> Result<Bytes> {
-    Ok(Bytes::from(if is_zstd {
-        zstd_decompress(body)?
-    } else {
-        snappy_decompress(body)?
-    }))
 }
 
 async fn decode_remote_read_request(body: Bytes) -> Result<ReadRequest> {
