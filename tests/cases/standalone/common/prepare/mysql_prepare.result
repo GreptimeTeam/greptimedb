@@ -125,6 +125,25 @@ DEALLOCATE stmt;
 affected_rows: 0
 
 -- SQLNESS PROTOCOL MYSQL
+PREPARE stmt FROM 'SELECT table_name, table_schema FROM information_schema.tables WHERE table_name = ?';
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+EXECUTE stmt USING 'cake';
+
++------------+--------------+
+| table_name | table_schema |
++------------+--------------+
+| cake       | public       |
++------------+--------------+
+
+-- SQLNESS PROTOCOL MYSQL
+DEALLOCATE stmt;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
 DROP TABLE cake;
 
 affected_rows: 0
