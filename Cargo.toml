@@ -345,7 +345,6 @@ datafusion-datasource = { git = "https://github.com/GreptimeTeam/datafusion.git"
 datafusion-sql = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "02b82535e0160c4545667f36a03e1ff9d1d2e51f" }
 datafusion-substrait = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "02b82535e0160c4545667f36a03e1ff9d1d2e51f" }
 sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "2aefa08a8d69c96eec2d6d6703598a009bba6e4c" }                           # on branch v0.61.x
-pgwire = { git = "https://github.com/sunng87/pgwire", rev = "26ee9805c433bc56262c6075b8c12f9c9e132364" }
 
 [profile.release]
 debug = 1
