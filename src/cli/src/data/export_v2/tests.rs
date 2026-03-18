@@ -24,7 +24,7 @@ use url::Url;
 use super::command::ExportCreateCommand;
 use crate::common::ObjectStoreConfig;
 use crate::data::import_v2::ImportV2Command;
-use crate::data::snapshot_storage::{OpenDalStorage, SnapshotStorage};
+use crate::data::snapshot_storage::OpenDalStorage;
 use crate::database::DatabaseClient;
 use crate::error::{FileIoSnafu, InvalidArgumentsSnafu, OtherSnafu, Result};
 

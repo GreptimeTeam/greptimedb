@@ -31,7 +31,9 @@ use crate::data::export_v2::error::{
     UrlParseSnafu,
 };
 use crate::data::export_v2::manifest::{MANIFEST_FILE, Manifest};
-use crate::data::export_v2::schema::{SCHEMA_DIR, SCHEMAS_FILE, SchemaDefinition, SchemaSnapshot};
+#[cfg(test)]
+use crate::data::export_v2::schema::SchemaDefinition;
+use crate::data::export_v2::schema::{SCHEMA_DIR, SCHEMAS_FILE, SchemaSnapshot};
 
 struct RemoteLocation {
     bucket_or_container: String,
@@ -75,13 +77,21 @@ fn extract_remote_location(uri: &str) -> Result<RemoteLocation> {
     let bucket_or_container = url.host_str().unwrap_or("").to_string();
     if bucket_or_container.is_empty() {
         return InvalidUriSnafu {
-            uri: uri.to_string(),
+            uri,
             reason: "URI must include bucket/container in host",
         }
         .fail();
     }
 
     let root = url.path().trim_start_matches('/').to_string();
+    if root.is_empty() {
+        return InvalidUriSnafu {
+            uri,
+            reason: "snapshot URI must include a non-empty path after the bucket/container",
+        }
+        .fail();
+    }
+
     Ok(RemoteLocation {
         bucket_or_container,
         root,
@@ -156,9 +166,6 @@ pub trait SnapshotStorage: Send + Sync {
     /// Writes the manifest file.
     async fn write_manifest(&self, manifest: &Manifest) -> Result<()>;
 
-    /// Reads the schema index from schema/schemas.json.
-    async fn read_schema(&self) -> Result<SchemaSnapshot>;
-
     /// Writes the schema index to schema/schemas.json.
     async fn write_schema(&self, schema: &SchemaSnapshot) -> Result<()>;
 
@@ -170,9 +177,6 @@ pub trait SnapshotStorage: Send + Sync {
 
     /// Deletes the entire snapshot (for --force).
     async fn delete_snapshot(&self) -> Result<()>;
-
-    /// Returns the underlying object store.
-    fn object_store(&self) -> &ObjectStore;
 }
 
 /// OpenDAL-based implementation of SnapshotStorage.
@@ -381,6 +385,19 @@ impl OpenDalStorage {
             }),
         }
     }
+
+    #[cfg(test)]
+    pub async fn read_schema(&self) -> Result<SchemaSnapshot> {
+        let schemas_path = schema_index_path();
+        let schemas: Vec<SchemaDefinition> = if self.file_exists(&schemas_path).await? {
+            let data = self.read_file(&schemas_path).await?;
+            serde_json::from_slice(&data).context(ManifestParseSnafu)?
+        } else {
+            vec![]
+        };
+
+        Ok(SchemaSnapshot { schemas })
+    }
 }
 
 #[async_trait]
@@ -399,18 +416,6 @@ impl SnapshotStorage for OpenDalStorage {
     async fn write_manifest(&self, manifest: &Manifest) -> Result<()> {
         let data = serde_json::to_vec_pretty(manifest).context(ManifestSerializeSnafu)?;
         self.write_file(MANIFEST_FILE, data).await
-    }
-
-    async fn read_schema(&self) -> Result<SchemaSnapshot> {
-        let schemas_path = schema_index_path();
-        let schemas: Vec<SchemaDefinition> = if self.file_exists(&schemas_path).await? {
-            let data = self.read_file(&schemas_path).await?;
-            serde_json::from_slice(&data).context(ManifestParseSnafu)?
-        } else {
-            vec![]
-        };
-
-        Ok(SchemaSnapshot { schemas })
     }
 
     async fn write_schema(&self, schema: &SchemaSnapshot) -> Result<()> {
@@ -436,10 +441,6 @@ impl SnapshotStorage for OpenDalStorage {
             .context(StorageOperationSnafu {
                 operation: "delete snapshot",
             })
-    }
-
-    fn object_store(&self) -> &ObjectStore {
-        &self.object_store
     }
 }
 
@@ -500,6 +501,15 @@ mod tests {
 
         // Unknown schemes
         assert!(validate_uri("ftp://server/path").is_err());
+    }
+
+    #[test]
+    fn test_extract_remote_location_requires_non_empty_root() {
+        assert!(extract_remote_location("s3://bucket").is_err());
+        assert!(extract_remote_location("s3://bucket/").is_err());
+        assert!(extract_remote_location("oss://bucket").is_err());
+        assert!(extract_remote_location("gs://bucket").is_err());
+        assert!(extract_remote_location("azblob://container").is_err());
     }
 
     #[test]
