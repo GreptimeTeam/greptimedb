@@ -441,6 +441,13 @@ impl QueryContext {
         self.snapshot_seqs.read().unwrap().get(&region_id).cloned()
     }
 
+    pub fn set_snapshot(&self, region_id: u64, sequence: u64) {
+        self.snapshot_seqs
+            .write()
+            .unwrap()
+            .insert(region_id, sequence);
+    }
+
     /// Returns `true` if the session can cast strings to numbers in MySQL style.
     pub fn auto_string_to_numeric(&self) -> bool {
         matches!(self.channel, Channel::Mysql)

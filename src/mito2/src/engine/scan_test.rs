@@ -119,6 +119,56 @@ async fn test_scan_with_min_sst_sequence() {
     test_scan_with_min_sst_sequence_with_format(true).await;
 }
 
+#[tokio::test]
+async fn test_full_snapshot_upper_bound_does_not_constrain_sst_rows() {
+    let mut env =
+        TestEnv::with_prefix("test_full_snapshot_upper_bound_does_not_constrain_sst_rows").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = test_util::rows_schema(&request);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let first_rows = Rows {
+        schema: column_schemas.clone(),
+        rows: test_util::build_rows(0, 3),
+    };
+    test_util::put_rows(&engine, region_id, first_rows).await;
+    test_util::flush_region(&engine, region_id, None).await;
+
+    let snapshot_upper_bound = engine.get_committed_sequence(region_id).await.unwrap();
+
+    let second_rows = Rows {
+        schema: column_schemas,
+        rows: test_util::build_rows(3, 5),
+    };
+    test_util::put_rows(&engine, region_id, second_rows).await;
+    test_util::flush_region(&engine, region_id, None).await;
+
+    let scanner = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                memtable_max_sequence: Some(snapshot_upper_bound),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let stream = scanner.scan().await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    let pretty = batches.pretty_print().unwrap();
+
+    assert!(pretty.contains("1970-01-01T00:00:03"));
+    assert!(pretty.contains("1970-01-01T00:00:04"));
+}
+
 async fn test_scan_with_min_sst_sequence_with_format(flat_format: bool) {
     let mut env = TestEnv::with_prefix("test_scan_with_min_sst_sequence").await;
     let engine = env

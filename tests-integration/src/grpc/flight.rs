@@ -39,6 +39,7 @@ mod test {
     use servers::grpc::greptime_handler::GreptimeRequestHandler;
     use servers::grpc::{FlightCompression, GrpcServerConfig};
     use servers::server::Server;
+    use store_api::storage::RegionId;
 
     use crate::cluster::GreptimeDbClusterBuilder;
     use crate::grpc::query_and_expect;
@@ -154,10 +155,13 @@ mod test {
         while let Some(batch) = stream.next().await {
             batch.unwrap();
         }
-        assert!(
-            terminal_metrics
-                .region_watermark_map()
-                .is_some_and(|m| !m.is_empty())
+        let regions = db.list_all_regions().await;
+        assert_eq!(regions.len(), 1);
+        let (region_id, region) = regions.into_iter().next().unwrap();
+        let expected_watermark = (region_id.as_u64(), region.find_committed_sequence());
+        assert_eq!(
+            terminal_metrics.region_watermark_map(),
+            Some(std::collections::HashMap::from([expected_watermark]))
         );
 
         let output = client
@@ -175,17 +179,13 @@ mod test {
         }
         assert_eq!(row_count, 9);
 
-        let RecordBatchMetrics {
-            region_latest_sequences,
-            ..
-        } = stream.metrics().expect("expected terminal metrics");
-        let region_latest_sequences =
-            region_latest_sequences.expect("expected region watermark metrics");
-        assert_eq!(region_latest_sequences.len(), 1);
-        assert!(region_latest_sequences[0].0 > 0);
-        assert!(region_latest_sequences[0].1 > 0);
+        let metrics = stream.metrics().expect("expected terminal metrics");
+        let region_latest_sequences = metrics
+            .region_latest_sequences
+            .expect("expected region watermark metrics");
+        assert_eq!(region_latest_sequences, vec![expected_watermark]);
 
-        let previous_watermark = region_latest_sequences[0];
+        let previous_watermark = expected_watermark;
 
         create_table_named(&client, "bar").await;
         let result = client
@@ -222,7 +222,10 @@ mod test {
             panic!("expected affected rows output");
         };
         assert_eq!(affected_rows, 9);
-        assert!(result.region_watermark_map().is_some_and(|m| !m.is_empty()));
+        assert_eq!(
+            result.region_watermark_map(),
+            Some(std::collections::HashMap::from([previous_watermark]))
+        );
 
         let incremental_batches = create_record_batches(10);
         test_put_record_batches(&client, incremental_batches).await;
@@ -283,9 +286,16 @@ mod test {
             .expect("expected terminal incremental metrics");
         let region_latest_sequences =
             region_latest_sequences.expect("expected incremental region watermark metrics");
-        assert_eq!(region_latest_sequences.len(), 1);
-        assert_eq!(region_latest_sequences[0].0, previous_watermark.0);
-        assert!(region_latest_sequences[0].1 > previous_watermark.1);
+        let regions = db.list_all_regions().await;
+        let region = regions
+            .get(&RegionId::from_u64(previous_watermark.0))
+            .expect("expected source region to exist");
+        let expected_incremental_watermark =
+            (previous_watermark.0, region.find_committed_sequence());
+        assert_eq!(
+            region_latest_sequences,
+            vec![expected_incremental_watermark]
+        );
 
         client.sql("admin flush_table('foo')").await.unwrap();
 
