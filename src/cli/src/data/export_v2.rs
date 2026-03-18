@@ -47,5 +47,3 @@ pub use command::ExportV2Command;
 
 #[cfg(test)]
 mod tests;
-
-pub use super::snapshot_storage as storage;
