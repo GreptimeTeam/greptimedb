@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use arrow::array::RecordBatch;
+
 use api::prom_store::remote::Sample;
 use api::v1::helper::{field_column_schema, time_index_column_schema};
 use api::v1::value::ValueData;
@@ -21,7 +21,7 @@ use api::v1::{ColumnDataType, ColumnSchema, Row, RowInsertRequest, Rows, Semanti
 use common_query::prelude::{greptime_timestamp, greptime_value};
 use pipeline::{ContextOpt, ContextReq};
 use prost::DecodeError;
-use crate::error;
+
 use crate::prom_remote_write::PromValidationMode;
 use crate::prom_remote_write::types::PromLabel;
 use crate::prom_remote_write::validation::validate_label_name;
@@ -37,12 +37,6 @@ pub struct PromCtx {
 pub struct TablesBuilder<'a> {
     pub tables: HashMap<PromCtx, HashMap<String, TableBuilder<'a>>>,
     pub(crate) raw_data: Vec<u8>,
-}
-
-#[derive(Debug)]
-pub struct PromRecordBatchGroup {
-    pub prom_ctx: PromCtx,
-    pub table_batches: Vec<(String, RecordBatch)>,
 }
 
 impl<'a> Clear for TablesBuilder<'a> {
@@ -91,27 +85,6 @@ impl<'a> TablesBuilder<'a> {
                 req.merge(reqs);
                 req
             })
-    }
-
-    pub fn as_record_batch_groups(&mut self) -> error::Result<Vec<PromRecordBatchGroup>> {
-        self.tables
-            .drain()
-            .map(|(prom_ctx, mut tables)| {
-                let mut table_batches = Vec::with_capacity(tables.len());
-                for (table_name, mut table) in tables.drain() {
-                    let record_batch = table.take_record_batch()?;
-                    if record_batch.num_rows() == 0 {
-                        continue;
-                    }
-                    table_batches.push((table_name, record_batch));
-                }
-
-                Ok(PromRecordBatchGroup {
-                    prom_ctx,
-                    table_batches,
-                })
-            })
-            .collect()
     }
 
     pub(crate) fn set_raw_data(&mut self, buf: Vec<u8>) {

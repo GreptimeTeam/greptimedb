@@ -35,10 +35,10 @@ use snafu::prelude::*;
 use crate::error::{self, InternalSnafu, PipelineSnafu, Result};
 use crate::http::extractor::PipelineInfo;
 use crate::http::header::{GREPTIME_DB_HEADER_METRICS, write_cost_header_map};
+use crate::pending_rows_batcher::PendingRowsBatcher;
 use crate::prom_remote_write::decode::PromSeriesProcessor;
 use crate::prom_remote_write::decode_remote_write_request;
 use crate::prom_remote_write::validation::PromValidationMode;
-use crate::pending_rows_batcher::PendingRowsBatcher;
 use crate::prom_store::{extract_schema_from_read_request, snappy_decompress, zstd_decompress};
 use crate::query_handler::{PipelineHandlerRef, PromStoreProtocolHandlerRef, PromStoreResponse};
 
@@ -224,7 +224,6 @@ pub fn try_decompress(is_zstd: bool, body: &[u8]) -> Result<Bytes> {
         snappy_decompress(body)?
     }))
 }
-
 
 async fn decode_remote_read_request(body: Bytes) -> Result<ReadRequest> {
     let buf = snappy_decompress(&body[..])?;

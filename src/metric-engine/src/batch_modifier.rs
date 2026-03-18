@@ -126,13 +126,6 @@ pub(crate) fn modify_batch_sparse(
     let mut buffer = Vec::new();
     for row in 0..num_rows {
         buffer.clear();
-        let internal = [
-            (ReservedColumnId::table_id(), ValueRef::UInt32(table_id)),
-            (
-                ReservedColumnId::tsid(),
-                ValueRef::UInt64(tsid_array.value(row)),
-            ),
-        ];
         codec
             .encode_internal(table_id, tsid_array.value(row), &mut buffer)
             .context(EncodePrimaryKeySnafu)?;
@@ -171,7 +164,6 @@ pub(crate) fn modify_batch_sparse(
         .build()
     })
 }
-
 
 #[cfg(test)]
 mod tests {

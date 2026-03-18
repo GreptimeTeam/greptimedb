@@ -136,6 +136,7 @@ pub struct PendingRowsBatcher {
 }
 
 impl PendingRowsBatcher {
+    #[allow(clippy::too_many_arguments)]
     pub fn try_new(
         partition_manager: PartitionRuleManagerRef,
         node_manager: NodeManagerRef,
@@ -323,6 +324,7 @@ impl PendingBatch {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn start_worker(
     mut rx: mpsc::Receiver<WorkerCommand>,
     shutdown: broadcast::Sender<()>,
@@ -586,7 +588,7 @@ async fn flush_batch(
             let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
                 .with_label_values(&["flush_split_record_batch"])
                 .start_timer();
-            match partition_rule.split_record_batch(&record_batch) {
+            match partition_rule.0.split_record_batch(&record_batch) {
                 Ok(masks) => masks,
                 Err(err) => {
                     record_failure!(
@@ -675,6 +677,7 @@ async fn flush_batch(
                 }),
                 body: Some(region_request::Body::BulkInsert(BulkInsertRequest {
                     region_id: region_id.as_u64(),
+                    partition_expr_version: None,
                     body: Some(bulk_insert_request::Body::ArrowIpc(ArrowIpc {
                         schema: schema_bytes,
                         data_header,
@@ -685,7 +688,7 @@ async fn flush_batch(
 
             let datanode = node_manager.datanode(&datanode).await;
             let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
-                .with_label_values(&["flush_write_region"])
+                .with_label_values(&["flush_wn ite_region"])
                 .start_timer();
             match datanode.handle(request).await {
                 Ok(_) => {
