@@ -79,10 +79,11 @@ impl PromqlNestedCountRewriteRule {
             return Ok(None);
         }
         let outer_time_expr = outer_agg.group_expr[0].clone();
-        let outer_count_arg = match Self::count_arg(&outer_agg.aggr_expr[0]) {
-            Some(arg) => arg,
-            None => return Ok(None),
-        };
+        let outer_count_arg =
+            match Self::aggregate_arg_if(&outer_agg.aggr_expr[0], |name| name == "count") {
+                Some(arg) => arg,
+                None => return Ok(None),
+            };
 
         let LogicalPlan::Sort(inner_sort) = outer_agg.input.as_ref() else {
             return Ok(None);
@@ -97,7 +98,9 @@ impl PromqlNestedCountRewriteRule {
         if inner_agg.aggr_expr.len() != 1 || inner_agg.group_expr.is_empty() {
             return Ok(None);
         }
-        let inner_value_expr = match Self::presence_preserving_inner_arg(&inner_agg.aggr_expr[0]) {
+        let inner_value_expr = match Self::aggregate_arg_if(&inner_agg.aggr_expr[0], |name| {
+            Self::is_supported_inner_aggregate(name)
+        }) {
             Some(arg) => arg,
             None => return Ok(None),
         };
@@ -221,27 +224,14 @@ impl PromqlNestedCountRewriteRule {
         required
     }
 
-    fn count_arg(expr: &Expr) -> Option<&Expr> {
+    fn aggregate_arg_if<F>(expr: &Expr, accept_name: F) -> Option<&Expr>
+    where
+        F: FnOnce(&str) -> bool,
+    {
         let Expr::AggregateFunction(func) = expr else {
             return None;
         };
-        if func.func.name() != "count"
-            || func.params.filter.is_some()
-            || func.params.distinct
-            || !func.params.order_by.is_empty()
-            || func.params.args.len() != 1
-        {
-            return None;
-        }
-
-        Some(&func.params.args[0])
-    }
-
-    fn presence_preserving_inner_arg(expr: &Expr) -> Option<&Expr> {
-        let Expr::AggregateFunction(func) = expr else {
-            return None;
-        };
-        if !Self::is_supported_inner_aggregate(func.func.name())
+        if !accept_name(func.func.name())
             || func.params.filter.is_some()
             || func.params.distinct
             || !func.params.order_by.is_empty()

@@ -703,6 +703,25 @@ mod tests {
             .unwrap()
     }
 
+    async fn parse_promql_to_plan(query: &str) -> LogicalPlan {
+        let engine = create_promql_test_engine();
+        let query_ctx = QueryContext::arc();
+        let stmt = QueryLanguageParser::parse_promql(
+            &PromQuery {
+                query: query.to_string(),
+                start: "0".to_string(),
+                end: "10".to_string(),
+                step: "5s".to_string(),
+                lookback: "300s".to_string(),
+                alias: None,
+            },
+            &query_ctx,
+        )
+        .unwrap();
+
+        engine.planner().plan(&stmt, query_ctx).await.unwrap()
+    }
+
     #[tokio::test]
     async fn test_extract_placeholder_cast_types_multiple() {
         let plan = parse_sql_to_plan(
@@ -741,47 +760,48 @@ mod tests {
 
     #[tokio::test]
     async fn test_plan_pql_applies_extension_rules() {
-        let engine = create_promql_test_engine();
-        let query_ctx = QueryContext::arc();
-        let stmt = QueryLanguageParser::parse_promql(
-            &PromQuery {
-                query: "sum(irate(some_metric[1h])) / scalar(count(count(some_metric) by (tag_0)))"
-                    .to_string(),
-                start: "0".to_string(),
-                end: "10".to_string(),
-                step: "5s".to_string(),
-                lookback: "300s".to_string(),
-                alias: None,
-            },
-            &query_ctx,
-        )
-        .unwrap();
-
-        let plan = engine.planner().plan(&stmt, query_ctx).await.unwrap();
-        let plan_str = plan.display_indent_schema().to_string();
-        assert!(plan_str.contains("__prom_non_nan"), "{plan_str}");
+        for inner_agg in ["count", "sum", "avg", "min", "max", "stddev", "stdvar"] {
+            let plan = parse_promql_to_plan(&format!(
+                "sum(irate(some_metric[1h])) / scalar(count({inner_agg}(some_metric) by (tag_0)))"
+            ))
+            .await;
+            let plan_str = plan.display_indent_schema().to_string();
+            assert!(
+                plan_str.contains("__prom_non_nan"),
+                "{inner_agg}: {plan_str}"
+            );
+        }
     }
 
     #[tokio::test]
-    async fn test_plan_pql_applies_extension_rules_to_presence_preserving_inner_agg() {
-        let engine = create_promql_test_engine();
-        let query_ctx = QueryContext::arc();
-        let stmt = QueryLanguageParser::parse_promql(
-            &PromQuery {
-                query: "sum(irate(some_metric[1h])) / scalar(count(sum(some_metric) by (tag_0)))"
-                    .to_string(),
-                start: "0".to_string(),
-                end: "10".to_string(),
-                step: "5s".to_string(),
-                lookback: "300s".to_string(),
-                alias: None,
-            },
-            &query_ctx,
-        )
-        .unwrap();
+    async fn test_plan_pql_skips_extension_rules_for_non_direct_or_unsupported_inner_agg() {
+        for query in [
+            "sum(irate(some_metric[1h])) / scalar(count(sum(irate(some_metric[1h])) by (tag_0)))",
+            "sum(irate(some_metric[1h])) / scalar(count(group(some_metric) by (tag_0)))",
+        ] {
+            let plan = parse_promql_to_plan(query).await;
+            let plan_str = plan.display_indent_schema().to_string();
+            assert!(!plan_str.contains("__prom_non_nan"), "{query}: {plan_str}");
+        }
+    }
 
-        let plan = engine.planner().plan(&stmt, query_ctx).await.unwrap();
+    #[tokio::test]
+    async fn test_plan_sql_does_not_apply_nested_count_rule() {
+        let plan = parse_sql_to_plan(
+            "SELECT id, count(inner_count) \
+             FROM ( \
+                 SELECT id, count(name) AS inner_count \
+                 FROM test \
+                 GROUP BY id \
+                 ORDER BY id \
+                 LIMIT 1000000 \
+             ) t \
+             GROUP BY id \
+             ORDER BY id",
+        )
+        .await;
+
         let plan_str = plan.display_indent_schema().to_string();
-        assert!(plan_str.contains("__prom_non_nan"), "{plan_str}");
+        assert!(!plan_str.contains("__prom_non_nan"), "{plan_str}");
     }
 }

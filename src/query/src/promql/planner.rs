@@ -4061,6 +4061,55 @@ mod test {
             .unwrap()
     }
 
+    async fn build_optimized_tsid_plan(
+        query: &str,
+        num_tag: usize,
+        num_field: usize,
+        end_secs: u64,
+        lookback_secs: u64,
+    ) -> String {
+        let eval_stmt = EvalStmt {
+            expr: parser::parse(query).unwrap(),
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(end_secs))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(lookback_secs),
+        };
+        let table_provider = build_test_table_provider_with_tsid(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            num_tag,
+            num_field,
+        )
+        .await;
+
+        build_optimized_promql_plan(table_provider, &eval_stmt)
+            .await
+            .display_indent_schema()
+            .to_string()
+    }
+
+    async fn assert_nested_count_rewrite_applies(query: &str, expected_outer_agg: &str) {
+        let plan_str = build_optimized_tsid_plan(query, 2, 1, 100_000, 1).await;
+
+        assert!(plan_str.contains("PromSeriesDivide: tags=[\"__tsid\"]"));
+        assert!(plan_str.contains(
+            "Projection: some_metric.timestamp, some_metric.tag_0, CAST(some_metric.field_0 = some_metric.field_0 AS Int64) AS __prom_non_nan"
+        ));
+        assert!(plan_str.contains(
+            "Aggregate: groupBy=[[some_metric.timestamp, some_metric.tag_0]], aggr=[[max(__prom_non_nan) AS __prom_non_nan]]"
+        ));
+        assert!(plan_str.contains("Filter: __prom_non_nan = Int64(1)"));
+        assert!(plan_str.contains(expected_outer_agg), "{plan_str}");
+        assert!(!plan_str.contains("PromSeriesDivide: tags=[\"tag_0\"]"));
+    }
+
+    async fn assert_nested_count_rewrite_missing(query: &str, num_tag: usize, lookback_secs: u64) {
+        let plan_str = build_optimized_tsid_plan(query, num_tag, 1, 100_000, lookback_secs).await;
+        assert!(!plan_str.contains("__prom_non_nan"), "{plan_str}");
+    }
+
     async fn build_test_table_provider(
         table_name_tuples: &[(String, String)],
         num_tag: usize,
@@ -4675,26 +4724,14 @@ mod test {
 
     #[tokio::test]
     async fn scalar_count_count_range_keeps_full_window() {
-        let prom_expr = parser::parse("scalar(count(count(some_metric) by (tag_0)))").unwrap();
-        let eval_stmt = EvalStmt {
-            expr: prom_expr,
-            start: UNIX_EPOCH,
-            end: UNIX_EPOCH
-                .checked_add(Duration::from_secs(100_000))
-                .unwrap(),
-            interval: Duration::from_secs(5),
-            lookback_delta: Duration::from_secs(1),
-        };
-
-        let table_provider = build_test_table_provider_with_tsid(
-            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+        let plan_str = build_optimized_tsid_plan(
+            "scalar(count(count(some_metric) by (tag_0)))",
             1,
+            1,
+            100_000,
             1,
         )
         .await;
-        let plan = build_optimized_promql_plan(table_provider, &eval_stmt).await;
-
-        let plan_str = plan.display_indent_schema().to_string();
         assert!(plan_str.contains("ScalarCalculate: tags=[]"));
         assert!(plan_str.contains("PromInstantManipulate: range=[0..100000000]"));
         assert!(!plan_str.contains("PromInstantManipulate: range=[99999000..99999000]"));
@@ -4702,100 +4739,72 @@ mod test {
 
     #[tokio::test]
     async fn scalar_count_count_rewrite_applies_inside_binary_expr_for_tsid_input() {
-        let prom_expr = parser::parse(
+        let plan_str = build_optimized_tsid_plan(
             "sum(irate(some_metric[1h])) / scalar(count(count(some_metric) by (tag_0)))",
-        )
-        .unwrap();
-        let eval_stmt = EvalStmt {
-            expr: prom_expr,
-            start: UNIX_EPOCH,
-            end: UNIX_EPOCH.checked_add(Duration::from_secs(10)).unwrap(),
-            interval: Duration::from_secs(5),
-            lookback_delta: Duration::from_secs(300),
-        };
-
-        let table_provider = build_test_table_provider_with_tsid(
-            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
             2,
             1,
+            10,
+            300,
         )
         .await;
-        let plan = build_optimized_promql_plan(table_provider, &eval_stmt).await;
-
-        let plan_str = plan.display_indent_schema().to_string();
         assert!(plan_str.contains("__prom_non_nan"), "{plan_str}");
     }
 
     #[tokio::test]
     async fn nested_count_rewrite_keeps_full_series_key_with_tsid_input() {
-        let prom_expr = parser::parse("count(count(some_metric) by (tag_0))").unwrap();
-        let eval_stmt = EvalStmt {
-            expr: prom_expr,
-            start: UNIX_EPOCH,
-            end: UNIX_EPOCH
-                .checked_add(Duration::from_secs(100_000))
-                .unwrap(),
-            interval: Duration::from_secs(5),
-            lookback_delta: Duration::from_secs(1),
-        };
-
-        let table_provider = build_test_table_provider_with_tsid(
-            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
-            2,
-            1,
+        assert_nested_count_rewrite_applies(
+            "count(count(some_metric) by (tag_0))",
+            "Aggregate: groupBy=[[some_metric.timestamp]], aggr=[[sum(__prom_non_nan) AS count(count(some_metric.field_0))]]"
         )
         .await;
-        let plan = build_optimized_promql_plan(table_provider, &eval_stmt).await;
-
-        let plan_str = plan.display_indent_schema().to_string();
-        assert!(plan_str.contains("PromSeriesDivide: tags=[\"__tsid\"]"));
-        assert!(plan_str.contains(
-            "Projection: some_metric.timestamp, some_metric.tag_0, CAST(some_metric.field_0 = some_metric.field_0 AS Int64) AS __prom_non_nan"
-        ));
-        assert!(plan_str.contains(
-            "Aggregate: groupBy=[[some_metric.timestamp, some_metric.tag_0]], aggr=[[max(__prom_non_nan) AS __prom_non_nan]]"
-        ));
-        assert!(plan_str.contains("Filter: __prom_non_nan = Int64(1)"));
-        assert!(plan_str.contains(
-            "Aggregate: groupBy=[[some_metric.timestamp]], aggr=[[sum(__prom_non_nan) AS count(count(some_metric.field_0))]]"
-        ));
-        assert!(!plan_str.contains("PromSeriesDivide: tags=[\"tag_0\"]"));
     }
 
     #[tokio::test]
     async fn nested_sum_count_rewrite_keeps_full_series_key_with_tsid_input() {
-        let prom_expr = parser::parse("count(sum(some_metric) by (tag_0))").unwrap();
-        let eval_stmt = EvalStmt {
-            expr: prom_expr,
-            start: UNIX_EPOCH,
-            end: UNIX_EPOCH
-                .checked_add(Duration::from_secs(100_000))
-                .unwrap(),
-            interval: Duration::from_secs(5),
-            lookback_delta: Duration::from_secs(1),
-        };
-
-        let table_provider = build_test_table_provider_with_tsid(
-            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
-            2,
-            1,
+        assert_nested_count_rewrite_applies(
+            "count(sum(some_metric) by (tag_0))",
+            "Aggregate: groupBy=[[some_metric.timestamp]], aggr=[[sum(__prom_non_nan) AS count(sum(some_metric.field_0))]]"
         )
         .await;
-        let plan = build_optimized_promql_plan(table_provider, &eval_stmt).await;
+    }
 
-        let plan_str = plan.display_indent_schema().to_string();
-        assert!(plan_str.contains("PromSeriesDivide: tags=[\"__tsid\"]"));
-        assert!(plan_str.contains(
-            "Projection: some_metric.timestamp, some_metric.tag_0, CAST(some_metric.field_0 = some_metric.field_0 AS Int64) AS __prom_non_nan"
-        ));
-        assert!(plan_str.contains(
-            "Aggregate: groupBy=[[some_metric.timestamp, some_metric.tag_0]], aggr=[[max(__prom_non_nan) AS __prom_non_nan]]"
-        ));
-        assert!(plan_str.contains("Filter: __prom_non_nan = Int64(1)"));
-        assert!(plan_str.contains(
-            "Aggregate: groupBy=[[some_metric.timestamp]], aggr=[[sum(__prom_non_nan) AS count(sum(some_metric.field_0))]]"
-        ));
-        assert!(!plan_str.contains("PromSeriesDivide: tags=[\"tag_0\"]"));
+    #[tokio::test]
+    async fn nested_supported_inner_aggs_rewrite_apply_for_tsid_input() {
+        for (query, expected_outer_agg) in [
+            (
+                "count(avg(some_metric) by (tag_0))",
+                "Aggregate: groupBy=[[some_metric.timestamp]], aggr=[[sum(__prom_non_nan) AS count(avg(some_metric.field_0))]]",
+            ),
+            (
+                "count(min(some_metric) by (tag_0))",
+                "Aggregate: groupBy=[[some_metric.timestamp]], aggr=[[sum(__prom_non_nan) AS count(min(some_metric.field_0))]]",
+            ),
+            (
+                "count(max(some_metric) by (tag_0))",
+                "Aggregate: groupBy=[[some_metric.timestamp]], aggr=[[sum(__prom_non_nan) AS count(max(some_metric.field_0))]]",
+            ),
+            (
+                "count(stddev(some_metric) by (tag_0))",
+                "Aggregate: groupBy=[[some_metric.timestamp]], aggr=[[sum(__prom_non_nan) AS count(stddev_pop(some_metric.field_0))]]",
+            ),
+            (
+                "count(stdvar(some_metric) by (tag_0))",
+                "Aggregate: groupBy=[[some_metric.timestamp]], aggr=[[sum(__prom_non_nan) AS count(var_pop(some_metric.field_0))]]",
+            ),
+        ] {
+            assert_nested_count_rewrite_applies(query, expected_outer_agg).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn nested_unsupported_or_non_direct_inner_aggs_do_not_rewrite() {
+        assert_nested_count_rewrite_missing("count(group(some_metric) by (tag_0))", 2, 1).await;
+        assert_nested_count_rewrite_missing(
+            "count(sum(irate(some_metric[1h])) by (tag_0))",
+            2,
+            300,
+        )
+        .await;
     }
 
     #[tokio::test]
