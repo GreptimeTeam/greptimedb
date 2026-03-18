@@ -1633,11 +1633,12 @@ pub struct ReaderMetrics {
     pub(crate) filter_metrics: ReaderFilterMetrics,
     /// Duration to build the parquet reader.
     pub(crate) build_cost: Duration,
-    /// Duration to scan the reader.
+    /// Duration to scan the reader, including parquet fetches and decoding work
+    /// needed to materialize output batches.
     pub(crate) scan_cost: Duration,
     /// Number of record batches read.
     pub(crate) num_record_batches: usize,
-    /// Number of batches decoded.
+    /// Number of decoded output batches materialized from parquet data.
     pub(crate) num_batches: usize,
     /// Number of rows read.
     pub(crate) num_rows: usize,

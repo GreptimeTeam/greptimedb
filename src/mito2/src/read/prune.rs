@@ -314,18 +314,21 @@ impl FlatPruneReader {
     }
 
     pub(crate) fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
-        while let Some(raw_batch) = {
+        loop {
             let start = std::time::Instant::now();
-            let batch = self.source.next_raw_batch()?;
-            self.metrics.scan_cost += start.elapsed();
-            batch
-        } {
-            // Update metrics for the received batch
+            let Some(raw_batch) = self.source.next_raw_batch()? else {
+                return Ok(None);
+            };
+
+            // Account rows as soon as parquet yields a raw batch. The scan timer spans
+            // the raw read, encoded primary-key prefilter, and flat conversion so
+            // `scan_cost` keeps the same meaning after splitting `next_raw_batch()`
+            // from `convert_batch()`.
             self.metrics.num_rows += raw_batch.num_rows();
-            self.metrics.num_batches += 1;
 
             let num_rows_before_prefilter = raw_batch.num_rows();
             let Some(prefiltered_batch) = self.prefilter_primary_keys(raw_batch)? else {
+                self.metrics.scan_cost += start.elapsed();
                 self.metrics.filter_metrics.rows_precise_filtered += num_rows_before_prefilter;
                 continue;
             };
@@ -333,7 +336,10 @@ impl FlatPruneReader {
             self.metrics.filter_metrics.rows_precise_filtered += prefiltered_rows;
 
             let record_batch = self.source.convert_batch(prefiltered_batch)?;
+            self.metrics.scan_cost += start.elapsed();
 
+            // `num_batches` counts decoded flat batches, not raw parquet batches.
+            self.metrics.num_batches += 1;
             match self.prune_flat(record_batch)? {
                 Some(filtered_batch) => {
                     return Ok(Some(filtered_batch));
@@ -343,8 +349,6 @@ impl FlatPruneReader {
                 }
             }
         }
-
-        Ok(None)
     }
 
     fn prefilter_primary_keys(&mut self, record_batch: RecordBatch) -> Result<Option<RecordBatch>> {
