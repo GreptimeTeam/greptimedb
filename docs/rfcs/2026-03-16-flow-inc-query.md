@@ -47,6 +47,12 @@ When incremental mode is enabled:
 - map `after_seq` to `memtable_min_sequence` (exclusive lower bound)
 - keep existing snapshot upper-bound behavior (`memtable_max_sequence`)
 
+Important limitation in v1:
+
+- incremental filtering is correctness-proven only for memtable rows
+- SST files do not preserve detailed row-level sequence metadata; they only expose coarser file-level sequence information
+- therefore `seq > checkpoint` must not assume precise incremental pruning across memtable->SST flush boundaries
+
 If required incremental parameters are missing or invalid, return argument error.
 
 ## 3) Stale protection
@@ -61,6 +67,9 @@ Behavior:
 - if `given_seq == min_readable_seq`, query is valid and reads `seq > given_seq`
 - if `given_seq > min_readable_seq`, query is also valid and reads `seq > given_seq`
 
+`IncrementalQueryStale` also covers the case where rows newer than the checkpoint have crossed a memtable->SST flush boundary and sequence-precise incremental exclusion can no longer be proven.
+In other words, the flush-boundary case is not a separate fallback category in v1; it is one concrete way an incremental cursor becomes stale.
+
 ## 4) Watermark return
 
 Extend query metrics with optional per-region watermark map:
@@ -74,6 +83,10 @@ Rules:
 - if correctness is unprovable, business rows may return but watermark is absent
 
 ## 5) Flow state machine
+
+Checkpoint and watermark state are kept only in flownode memory in v1; they are not persisted as durable flow metadata.
+Cold start or flownode restart therefore always re-enters through a full snapshot read.
+Only after that full query succeeds with a complete correctness watermark may Flow switch back to incremental mode.
 
 Flow starts in full mode, then transitions:
 
@@ -119,6 +132,16 @@ Policy behavior:
 2. Switch to full mode for the affected flow/window in the next round.
 3. Return to incremental mode only after a full query succeeds with a complete correctness watermark map.
 
+### Persistence and recovery model
+
+The v1 design is intentionally correctness-first and keeps the progress cursor lightweight:
+
+1. Watermarks/checkpoints live only in flownode memory; v1 does not persist them separately.
+2. On cold start, the flow re-establishes progress by running a successful full-query snapshot read, then resumes incremental mode only after that round returns a complete correctness watermark map.
+3. Sequence-precise incremental correctness is currently limited to rows still visible in memtables.
+4. Once relevant rows have been flushed into SST, the system cannot use `seq > checkpoint` alone to prove precise incremental exclusion, because SST lacks detailed row-level sequence metadata.
+5. In that case the correct behavior is to fall back to full recomputation, not to continue a best-effort incremental scan.
+
 # Distributed and Compatibility Requirements
 
 1. Distributed path must preserve region-level snapshot/read-bound semantics end-to-end.
@@ -154,6 +177,7 @@ Policy behavior:
 1. Boundary semantic mismatch (`<` vs `<=`) may cause correctness bugs.
 2. Incomplete distributed propagation can silently invalidate watermark safety.
 3. Frequent fallback can reduce throughput before phase-2 optimizations.
+4. Memtable->SST flushes may force more full recomputation than expected until finer-grained SST sequence tracking exists.
 
 # Alternatives
 
