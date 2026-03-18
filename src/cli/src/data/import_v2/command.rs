@@ -351,6 +351,14 @@ fn is_schema_scoped_statement(sql: &str) -> bool {
         };
         rest = next.trim_start();
     }
+
+    if starts_with_keyword(rest, "EXTERNAL") {
+        let Some(next) = rest.get("EXTERNAL".len()..) else {
+            return false;
+        };
+        rest = next.trim_start();
+    }
+
     starts_with_keyword(rest, "TABLE") || starts_with_keyword(rest, "VIEW")
 }
 
@@ -505,6 +513,16 @@ CREATE VIEW v AS SELECT 1;
         let stmt = ddl_statement_for_schema(
             "test_db",
             "CREATE OR REPLACE VIEW metrics_view AS SELECT * FROM metrics".to_string(),
+        );
+        assert_eq!(stmt.execution_schema.as_deref(), Some("test_db"));
+    }
+
+    #[test]
+    fn test_ddl_statement_for_schema_create_external_table_uses_execution_schema() {
+        let stmt = ddl_statement_for_schema(
+            "test_db",
+            "CREATE EXTERNAL TABLE IF NOT EXISTS ext_metrics (ts TIMESTAMP TIME INDEX) ENGINE=file"
+                .to_string(),
         );
         assert_eq!(stmt.execution_schema.as_deref(), Some("test_db"));
     }
