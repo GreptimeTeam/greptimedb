@@ -28,6 +28,7 @@ use servers::error::{self, AuthSnafu, Result as ServerResult};
 use servers::http::prom_store::PHYSICAL_TABLE_PARAM;
 use servers::interceptor::{OpenTelemetryProtocolInterceptor, OpenTelemetryProtocolInterceptorRef};
 use servers::otlp;
+use tonic::{Request, Response, Status};
 use servers::query_handler::{OpenTelemetryProtocolHandler, PipelineHandlerRef};
 use session::context::QueryContextRef;
 use snafu::ResultExt;
