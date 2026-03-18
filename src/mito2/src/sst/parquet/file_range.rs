@@ -20,6 +20,7 @@ use std::ops::BitAnd;
 use std::sync::Arc;
 
 use api::v1::{OpType, SemanticType};
+use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_telemetry::error;
 use datafusion::physical_plan::PhysicalExpr;
 use datafusion::physical_plan::expressions::DynamicFilterPhysicalExpr;
@@ -28,7 +29,7 @@ use datatypes::arrow::buffer::BooleanBuffer;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::Schema;
-use mito_codec::row_converter::{CompositeValues, PrimaryKeyCodec};
+use mito_codec::row_converter::{CompositeValues, PrimaryKeyCodec, PrimaryKeyFilter};
 use parquet::arrow::arrow_reader::RowSelection;
 use parquet::file::metadata::ParquetMetaData;
 use snafu::{OptionExt, ResultExt};
@@ -49,9 +50,9 @@ use crate::read::last_row::{FlatRowGroupLastRowCachedReader, RowGroupLastRowCach
 use crate::read::prune::{FlatPruneReader, PruneReader};
 use crate::sst::file::FileHandle;
 use crate::sst::parquet::flat_format::{
-    DecodedPrimaryKeys, decode_primary_keys, time_index_column_index,
+    DecodedPrimaryKeys, decode_primary_keys, primary_key_column_index, time_index_column_index,
 };
-use crate::sst::parquet::format::ReadFormat;
+use crate::sst::parquet::format::{PrimaryKeyArray, ReadFormat};
 use crate::sst::parquet::reader::{
     FlatRowGroupReader, MaybeFilter, RowGroupReader, RowGroupReaderBuilder, SimpleFilterContext,
 };
@@ -343,6 +344,11 @@ impl FileRangeContext {
         &self.base.filters
     }
 
+    /// Builds an encoded primary-key filter for flat scan pre-filtering.
+    pub(crate) fn new_primary_key_filter(&self) -> Option<Box<dyn PrimaryKeyFilter>> {
+        self.base.new_primary_key_filter()
+    }
+
     /// Returns true if a partition filter is configured.
     pub(crate) fn has_partition_filter(&self) -> bool {
         self.base.partition_filter.is_some()
@@ -388,6 +394,16 @@ impl FileRangeContext {
         skip_fields: bool,
     ) -> Result<Option<RecordBatch>> {
         self.base.precise_filter_flat(input, skip_fields)
+    }
+
+    /// Applies an encoded primary-key prefilter to the input `RecordBatch`.
+    pub(crate) fn prefilter_flat_batch_by_primary_key(
+        &self,
+        input: RecordBatch,
+        primary_key_filter: &mut dyn PrimaryKeyFilter,
+    ) -> Result<Option<RecordBatch>> {
+        self.base
+            .prefilter_flat_batch_by_primary_key(input, primary_key_filter)
     }
 
     /// Determines whether to skip field filters based on PreFilterMode and row group delete status.
@@ -439,6 +455,8 @@ pub(crate) struct PartitionFilterContext {
 pub(crate) struct RangeBase {
     /// Filters pushed down.
     pub(crate) filters: Vec<SimpleFilterContext>,
+    /// Simple filters that can be compiled into encoded primary-key checks.
+    pub(crate) primary_key_filters: Option<Arc<Vec<SimpleFilterEvaluator>>>,
     /// Dynamic filter physical exprs.
     pub(crate) dyn_filters: Vec<Arc<DynamicFilterPhysicalExpr>>,
     /// Helper to read the SST.
@@ -473,6 +491,121 @@ impl TagDecodeState {
 }
 
 impl RangeBase {
+    /// Builds an encoded primary-key filter for flat scan pre-filtering.
+    pub(crate) fn new_primary_key_filter(&self) -> Option<Box<dyn PrimaryKeyFilter>> {
+        let filters = self.primary_key_filters.as_ref()?;
+        if self.read_format.metadata().primary_key.is_empty() {
+            return None;
+        }
+
+        Some(
+            self.codec
+                .primary_key_filter(self.read_format.metadata(), filters.clone()),
+        )
+    }
+
+    /// Applies an encoded primary-key prefilter before flat-row materialization.
+    ///
+    /// This only prunes rows that are guaranteed to fail simple primary-key predicates.
+    /// The normal precise filter still runs after flat conversion.
+    pub(crate) fn prefilter_flat_batch_by_primary_key(
+        &self,
+        input: RecordBatch,
+        primary_key_filter: &mut dyn PrimaryKeyFilter,
+    ) -> Result<Option<RecordBatch>> {
+        if input.num_rows() == 0 {
+            return Ok(Some(input));
+        }
+
+        let primary_key_index = primary_key_column_index(input.num_columns());
+        let pk_dict_array = input
+            .column(primary_key_index)
+            .as_any()
+            .downcast_ref::<PrimaryKeyArray>()
+            .context(UnexpectedSnafu {
+                reason: "Primary key column is not a dictionary array".to_string(),
+            })?;
+        let pk_values = pk_dict_array
+            .values()
+            .as_any()
+            .downcast_ref::<datatypes::arrow::array::BinaryArray>()
+            .context(UnexpectedSnafu {
+                reason: "Primary key values are not binary array".to_string(),
+            })?;
+        let keys = pk_dict_array.keys();
+        let key_values = keys.values();
+
+        if key_values.is_empty() {
+            return Ok(Some(input));
+        }
+
+        // Rows are sorted by primary key, so a single key means the whole batch is keep/drop.
+        if key_values[0] == key_values[key_values.len() - 1] {
+            let matched = primary_key_filter.matches(pk_values.value(key_values[0] as usize));
+            return Ok(matched.then_some(input));
+        }
+
+        let mut matched_rows = 0;
+        let mut contiguous_span = None::<(usize, usize)>;
+        let mut fragmented_spans = Vec::new();
+
+        let mut start = 0;
+        while start < key_values.len() {
+            let key = key_values[start];
+            let mut end = start + 1;
+            while end < key_values.len() && key_values[end] == key {
+                end += 1;
+            }
+
+            if primary_key_filter.matches(pk_values.value(key as usize)) {
+                matched_rows += end - start;
+                if let Some((span_start, span_end)) = contiguous_span {
+                    if span_end == start {
+                        contiguous_span = Some((span_start, end));
+                    } else {
+                        fragmented_spans.push((span_start, span_end));
+                        contiguous_span = Some((start, end));
+                    }
+                } else {
+                    contiguous_span = Some((start, end));
+                }
+            }
+
+            start = end;
+        }
+
+        if matched_rows == 0 {
+            return Ok(None);
+        }
+
+        if matched_rows == input.num_rows() {
+            return Ok(Some(input));
+        }
+
+        let Some((span_start, span_end)) = contiguous_span else {
+            return Ok(None);
+        };
+
+        if fragmented_spans.is_empty() {
+            return Ok(Some(input.slice(span_start, span_end - span_start)));
+        }
+
+        fragmented_spans.push((span_start, span_end));
+        let mut mask = vec![false; input.num_rows()];
+        for (start, end) in fragmented_spans {
+            mask[start..end].fill(true);
+        }
+
+        let filtered =
+            datatypes::arrow::compute::filter_record_batch(&input, &BooleanArray::from(mask))
+                .context(ComputeArrowSnafu)?;
+        if filtered.num_rows() == 0 {
+            Ok(None)
+        } else {
+            Ok(Some(filtered))
+        }
+    }
+
     /// TRY THE BEST to perform pushed down predicate precisely on the input batch.
     /// Return the filtered batch. If the entire batch is filtered out, return None.
     ///
@@ -924,5 +1057,186 @@ impl RangeBase {
         }
 
         RecordBatch::try_new(arrow_schema.clone(), columns).context(NewRecordBatchSnafu)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use datafusion_expr::{Expr, col, lit};
+    use datatypes::arrow::array::{
+        Array, ArrayRef, BinaryArray, DictionaryArray, TimestampMillisecondArray, UInt8Array,
+        UInt32Array, UInt64Array,
+    };
+    use datatypes::arrow::datatypes::UInt32Type;
+    use mito_codec::row_converter::build_primary_key_codec;
+
+    use super::*;
+    use crate::test_util::sst_util::{new_primary_key, sst_region_metadata};
+
+    fn new_test_range_base(exprs: &[Expr]) -> RangeBase {
+        let metadata = Arc::new(sst_region_metadata());
+        let read_format = ReadFormat::new_flat(
+            metadata.clone(),
+            metadata.column_metadatas.iter().map(|c| c.column_id),
+            Some(5),
+            "test",
+            false,
+        )
+        .unwrap();
+        let primary_key_filters = exprs
+            .iter()
+            .filter_map(SimpleFilterEvaluator::try_new)
+            .collect::<Vec<_>>();
+
+        RangeBase {
+            filters: vec![],
+            primary_key_filters: (!primary_key_filters.is_empty())
+                .then_some(Arc::new(primary_key_filters)),
+            dyn_filters: vec![],
+            read_format,
+            expected_metadata: None,
+            prune_schema: metadata.schema.clone(),
+            codec: build_primary_key_codec(metadata.as_ref()),
+            compat_batch: None,
+            compaction_projection_mapper: None,
+            pre_filter_mode: PreFilterMode::All,
+            partition_filter: None,
+        }
+    }
+
+    fn new_raw_batch(primary_keys: &[&[u8]], field_values: &[u64]) -> RecordBatch {
+        assert_eq!(primary_keys.len(), field_values.len());
+
+        let metadata = Arc::new(sst_region_metadata());
+        let schema = ReadFormat::new_flat(
+            metadata.clone(),
+            metadata.column_metadatas.iter().map(|c| c.column_id),
+            Some(5),
+            "test",
+            false,
+        )
+        .unwrap()
+        .arrow_schema()
+        .clone();
+
+        let mut dict_values = Vec::new();
+        let mut keys = Vec::with_capacity(primary_keys.len());
+        for pk in primary_keys {
+            let key = dict_values
+                .iter()
+                .position(|existing: &&[u8]| existing == pk)
+                .unwrap_or_else(|| {
+                    dict_values.push(*pk);
+                    dict_values.len() - 1
+                });
+            keys.push(key as u32);
+        }
+
+        let pk_array: ArrayRef = Arc::new(DictionaryArray::<UInt32Type>::new(
+            UInt32Array::from(keys),
+            Arc::new(BinaryArray::from_iter_values(dict_values.iter().copied())),
+        ));
+
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(UInt64Array::from(field_values.to_vec())),
+                Arc::new(TimestampMillisecondArray::from_iter_values(
+                    0..primary_keys.len() as i64,
+                )),
+                pk_array,
+                Arc::new(UInt64Array::from(vec![1; primary_keys.len()])),
+                Arc::new(UInt8Array::from(vec![1; primary_keys.len()])),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn field_values(batch: &RecordBatch) -> Vec<u64> {
+        batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap()
+            .values()
+            .to_vec()
+    }
+
+    #[test]
+    fn test_prefilter_primary_key_drops_single_dictionary_batch() {
+        let pk_a = new_primary_key(&["a", "x"]);
+        let batch = new_raw_batch(&[pk_a.as_slice(), pk_a.as_slice()], &[10, 11]);
+        let base = new_test_range_base(&[col("tag_0").eq(lit("b"))]);
+        let mut primary_key_filter = base.new_primary_key_filter().unwrap();
+
+        let filtered = base
+            .prefilter_flat_batch_by_primary_key(batch, primary_key_filter.as_mut())
+            .unwrap();
+
+        assert!(filtered.is_none());
+    }
+
+    #[test]
+    fn test_prefilter_primary_key_returns_slice_for_contiguous_matches() {
+        let pk_a = new_primary_key(&["a", "x"]);
+        let pk_b = new_primary_key(&["b", "x"]);
+        let pk_c = new_primary_key(&["c", "x"]);
+        let pk_d = new_primary_key(&["d", "x"]);
+        let batch = new_raw_batch(
+            &[
+                pk_a.as_slice(),
+                pk_a.as_slice(),
+                pk_b.as_slice(),
+                pk_b.as_slice(),
+                pk_c.as_slice(),
+                pk_c.as_slice(),
+                pk_d.as_slice(),
+                pk_d.as_slice(),
+            ],
+            &[10, 11, 12, 13, 14, 15, 16, 17],
+        );
+        let base = new_test_range_base(&[col("tag_0").eq(lit("b")).or(col("tag_0").eq(lit("c")))]);
+        let mut primary_key_filter = base.new_primary_key_filter().unwrap();
+
+        let filtered = base
+            .prefilter_flat_batch_by_primary_key(batch, primary_key_filter.as_mut())
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(filtered.num_rows(), 4);
+        assert_eq!(field_values(&filtered), vec![12, 13, 14, 15]);
+    }
+
+    #[test]
+    fn test_prefilter_primary_key_builds_mask_for_fragmented_matches() {
+        let pk_a = new_primary_key(&["a", "x"]);
+        let pk_b = new_primary_key(&["b", "x"]);
+        let pk_c = new_primary_key(&["c", "x"]);
+        let pk_d = new_primary_key(&["d", "x"]);
+        let batch = new_raw_batch(
+            &[
+                pk_a.as_slice(),
+                pk_a.as_slice(),
+                pk_b.as_slice(),
+                pk_b.as_slice(),
+                pk_c.as_slice(),
+                pk_c.as_slice(),
+                pk_d.as_slice(),
+                pk_d.as_slice(),
+            ],
+            &[10, 11, 12, 13, 14, 15, 16, 17],
+        );
+        let base = new_test_range_base(&[col("tag_0").eq(lit("a")).or(col("tag_0").eq(lit("c")))]);
+        let mut primary_key_filter = base.new_primary_key_filter().unwrap();
+
+        let filtered = base
+            .prefilter_flat_batch_by_primary_key(batch, primary_key_filter.as_mut())
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(filtered.num_rows(), 4);
+        assert_eq!(field_values(&filtered), vec![10, 11, 14, 15]);
     }
 }

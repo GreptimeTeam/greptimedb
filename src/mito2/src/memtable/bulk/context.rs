@@ -17,6 +17,7 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
+use common_recordbatch::filter::SimpleFilterEvaluator;
 use mito_codec::row_converter::{DensePrimaryKeyCodec, build_primary_key_codec};
 use parquet::file::metadata::ParquetMetaData;
 use store_api::metadata::RegionMetadataRef;
@@ -86,10 +87,21 @@ impl BulkIterContext {
             .as_ref()
             .map(|pred| pred.dyn_filters().as_ref().clone())
             .unwrap_or_default();
+        let primary_key_filters = predicate
+            .as_ref()
+            .map(|pred| {
+                pred.exprs()
+                    .iter()
+                    .filter_map(SimpleFilterEvaluator::try_new)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|filters| !filters.is_empty())
+            .map(Arc::new);
 
         Ok(Self {
             base: RangeBase {
                 filters: simple_filters,
+                primary_key_filters,
                 dyn_filters,
                 read_format,
                 prune_schema: region_metadata.schema.clone(),

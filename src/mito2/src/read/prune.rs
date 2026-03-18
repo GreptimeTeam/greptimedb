@@ -20,6 +20,7 @@ use common_time::Timestamp;
 use datatypes::arrow::array::BooleanArray;
 use datatypes::arrow::buffer::BooleanBuffer;
 use datatypes::arrow::record_batch::RecordBatch;
+use mito_codec::row_converter::PrimaryKeyFilter;
 use snafu::ResultExt;
 
 use crate::error::{RecordBatchSnafu, Result};
@@ -252,10 +253,17 @@ pub enum FlatSource {
 }
 
 impl FlatSource {
-    fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
+    fn next_raw_batch(&mut self) -> Result<Option<RecordBatch>> {
         match self {
-            FlatSource::RowGroup(r) => r.next_batch(),
+            FlatSource::RowGroup(r) => r.next_raw_batch(),
             FlatSource::LastRow(r) => r.next_batch(),
+        }
+    }
+
+    fn convert_batch(&self, batch: RecordBatch) -> Result<RecordBatch> {
+        match self {
+            FlatSource::RowGroup(r) => r.convert_batch(batch),
+            FlatSource::LastRow(_) => Ok(batch),
         }
     }
 }
@@ -265,6 +273,7 @@ pub struct FlatPruneReader {
     /// Context for file ranges.
     context: FileRangeContextRef,
     source: FlatSource,
+    primary_key_filter: Option<Box<dyn PrimaryKeyFilter>>,
     metrics: ReaderMetrics,
     /// Whether to skip field filters for this row group.
     skip_fields: bool,
@@ -277,6 +286,7 @@ impl FlatPruneReader {
         skip_fields: bool,
     ) -> Self {
         Self {
+            primary_key_filter: ctx.new_primary_key_filter(),
             context: ctx,
             source: FlatSource::RowGroup(reader),
             metrics: Default::default(),
@@ -290,6 +300,7 @@ impl FlatPruneReader {
         skip_fields: bool,
     ) -> Self {
         Self {
+            primary_key_filter: ctx.new_primary_key_filter(),
             context: ctx,
             source: FlatSource::LastRow(reader),
             metrics: Default::default(),
@@ -303,15 +314,25 @@ impl FlatPruneReader {
     }
 
     pub(crate) fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
-        while let Some(record_batch) = {
+        while let Some(raw_batch) = {
             let start = std::time::Instant::now();
-            let batch = self.source.next_batch()?;
+            let batch = self.source.next_raw_batch()?;
             self.metrics.scan_cost += start.elapsed();
             batch
         } {
             // Update metrics for the received batch
-            self.metrics.num_rows += record_batch.num_rows();
+            self.metrics.num_rows += raw_batch.num_rows();
             self.metrics.num_batches += 1;
+
+            let num_rows_before_prefilter = raw_batch.num_rows();
+            let Some(prefiltered_batch) = self.prefilter_primary_keys(raw_batch)? else {
+                self.metrics.filter_metrics.rows_precise_filtered += num_rows_before_prefilter;
+                continue;
+            };
+            let prefiltered_rows = num_rows_before_prefilter - prefiltered_batch.num_rows();
+            self.metrics.filter_metrics.rows_precise_filtered += prefiltered_rows;
+
+            let record_batch = self.source.convert_batch(prefiltered_batch)?;
 
             match self.prune_flat(record_batch)? {
                 Some(filtered_batch) => {
@@ -324,6 +345,15 @@ impl FlatPruneReader {
         }
 
         Ok(None)
+    }
+
+    fn prefilter_primary_keys(&mut self, record_batch: RecordBatch) -> Result<Option<RecordBatch>> {
+        let Some(primary_key_filter) = self.primary_key_filter.as_mut() else {
+            return Ok(Some(record_batch));
+        };
+
+        self.context
+            .prefilter_flat_batch_by_primary_key(record_batch, primary_key_filter.as_mut())
     }
 
     /// Prunes batches by the pushed down predicate and returns RecordBatch.

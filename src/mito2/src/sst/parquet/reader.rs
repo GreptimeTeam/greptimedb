@@ -485,6 +485,19 @@ impl ParquetReaderBuilder {
             vec![]
         };
 
+        let primary_key_filters = self
+            .predicate
+            .as_ref()
+            .map(|predicate| {
+                predicate
+                    .exprs()
+                    .iter()
+                    .filter_map(SimpleFilterEvaluator::try_new)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|filters| !filters.is_empty())
+            .map(Arc::new);
+
         let dyn_filters = if let Some(predicate) = &self.predicate {
             predicate.dyn_filters().as_ref().clone()
         } else {
@@ -499,6 +512,7 @@ impl ParquetReaderBuilder {
             reader_builder,
             RangeBase {
                 filters,
+                primary_key_filters,
                 dyn_filters,
                 read_format,
                 expected_metadata: self.expected_metadata.clone(),
@@ -2168,22 +2182,31 @@ impl FlatRowGroupReader {
         }
     }
 
-    /// Returns the next RecordBatch.
-    pub(crate) fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
+    /// Returns the next raw RecordBatch from parquet before flat-format conversion.
+    pub(crate) fn next_raw_batch(&mut self) -> Result<Option<RecordBatch>> {
         match self.reader.next() {
             Some(batch_result) => {
                 let record_batch = batch_result.context(ArrowReaderSnafu {
                     path: self.context.file_path(),
                 })?;
-
-                // Safety: Only flat format use FlatRowGroupReader.
-                let flat_format = self.context.read_format().as_flat().unwrap();
-                let record_batch =
-                    flat_format.convert_batch(record_batch, self.override_sequence.as_ref())?;
                 Ok(Some(record_batch))
             }
             None => Ok(None),
         }
+    }
+
+    /// Converts a raw parquet batch into the projected flat batch.
+    pub(crate) fn convert_batch(&self, record_batch: RecordBatch) -> Result<RecordBatch> {
+        // Safety: Only flat format use FlatRowGroupReader.
+        let flat_format = self.context.read_format().as_flat().unwrap();
+        flat_format.convert_batch(record_batch, self.override_sequence.as_ref())
+    }
+
+    /// Returns the next converted flat RecordBatch.
+    pub(crate) fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
+        self.next_raw_batch()?
+            .map(|record_batch| self.convert_batch(record_batch))
+            .transpose()
     }
 }
 
