@@ -42,7 +42,7 @@ affected_rows: 0
 -- SQLNESS PROTOCOL MYSQL
 EXECUTE stmt USING 'a';
 
-Failed to execute query, err: MySqlError { ERROR 1815 (HY000): (EngineExecuteQuery): Cast error: Cannot cast string 'a' to value of Int32 type }
+Failed to execute query, err: MySqlError { ERROR 1210 (HY000): (InvalidArguments): Invalid request parameter: Unable to convert a to datatype Int32(Int32Type) }
 
 -- SQLNESS PROTOCOL MYSQL
 DEALLOCATE stmt;
