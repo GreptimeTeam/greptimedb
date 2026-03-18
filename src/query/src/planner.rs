@@ -761,4 +761,27 @@ mod tests {
         let plan_str = plan.display_indent_schema().to_string();
         assert!(plan_str.contains("__prom_non_nan"), "{plan_str}");
     }
+
+    #[tokio::test]
+    async fn test_plan_pql_applies_extension_rules_to_presence_preserving_inner_agg() {
+        let engine = create_promql_test_engine();
+        let query_ctx = QueryContext::arc();
+        let stmt = QueryLanguageParser::parse_promql(
+            &PromQuery {
+                query: "sum(irate(some_metric[1h])) / scalar(count(sum(some_metric) by (tag_0)))"
+                    .to_string(),
+                start: "0".to_string(),
+                end: "10".to_string(),
+                step: "5s".to_string(),
+                lookback: "300s".to_string(),
+                alias: None,
+            },
+            &query_ctx,
+        )
+        .unwrap();
+
+        let plan = engine.planner().plan(&stmt, query_ctx).await.unwrap();
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(plan_str.contains("__prom_non_nan"), "{plan_str}");
+    }
 }

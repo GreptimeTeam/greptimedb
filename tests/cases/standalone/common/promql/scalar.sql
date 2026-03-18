@@ -44,6 +44,9 @@ TQL EVAL (0, 15, '5s') scalar(host{host="host1"}) + host;
 TQL EVAL (0, 15, '5s') scalar(count(count(host) by (host)));
 
 -- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 15, '5s') scalar(count(sum(host) by (host)));
+
+-- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 15, '5s') scalar(host{host="host1"} + scalar(host{host="host2"}));
 
 -- SQLNESS SORT_RESULT 3 1

@@ -31,10 +31,13 @@ use crate::optimizer::ExtensionAnalyzerRule;
 
 const NON_NAN_COLUMN: &str = "__prom_non_nan";
 
-/// Rewrites `count(count(<vector_selector>) by (...))` into a presence-based group count.
+/// Rewrites `count(<presence-preserving-agg>(<vector_selector>) by (...))` into a presence-based
+/// group count.
 ///
 /// This stays intentionally narrow:
-/// - both aggregates must be plain `count`
+/// - the outer aggregate must be plain `count`
+/// - the inner aggregate must be a plain aggregate whose result existence is equivalent to input
+///   group existence
 /// - the inner input must be the direct instant-vector-selector plan
 /// - the outer count must only group by the evaluation timestamp
 #[derive(Debug)]
@@ -94,7 +97,7 @@ impl PromqlNestedCountRewriteRule {
         if inner_agg.aggr_expr.len() != 1 || inner_agg.group_expr.is_empty() {
             return Ok(None);
         }
-        let inner_value_expr = match Self::count_arg(&inner_agg.aggr_expr[0]) {
+        let inner_value_expr = match Self::presence_preserving_inner_arg(&inner_agg.aggr_expr[0]) {
             Some(arg) => arg,
             None => return Ok(None),
         };
@@ -232,6 +235,29 @@ impl PromqlNestedCountRewriteRule {
         }
 
         Some(&func.params.args[0])
+    }
+
+    fn presence_preserving_inner_arg(expr: &Expr) -> Option<&Expr> {
+        let Expr::AggregateFunction(func) = expr else {
+            return None;
+        };
+        if !Self::is_supported_inner_aggregate(func.func.name())
+            || func.params.filter.is_some()
+            || func.params.distinct
+            || !func.params.order_by.is_empty()
+            || func.params.args.len() != 1
+        {
+            return None;
+        }
+
+        Some(&func.params.args[0])
+    }
+
+    fn is_supported_inner_aggregate(name: &str) -> bool {
+        matches!(
+            name,
+            "count" | "sum" | "avg" | "min" | "max" | "stddev_pop" | "var_pop"
+        )
     }
 
     fn is_projection_chain_to_instant(plan: &LogicalPlan) -> bool {
