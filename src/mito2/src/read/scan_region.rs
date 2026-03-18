@@ -1420,7 +1420,6 @@ fn pre_filter_mode(append_mode: bool, merge_mode: MergeMode) -> PreFilterMode {
 
 /// Builds a [ScanRequestFingerprint] from a [ScanInput] if the scan is eligible
 /// for partition range caching.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn build_scan_fingerprint(input: &ScanInput) -> Option<ScanRequestFingerprint> {
     let eligible = input.flat_format
         && !input.compaction
@@ -1511,6 +1510,10 @@ pub struct StreamContext {
     pub input: ScanInput,
     /// Metadata for partition ranges.
     pub(crate) ranges: Vec<RangeMeta>,
+    /// Precomputed scan fingerprint for partition range caching.
+    /// `None` when the scan is not eligible for caching.
+    #[allow(dead_code)]
+    pub(crate) scan_fingerprint: Option<ScanRequestFingerprint>,
 
     // Metrics:
     /// The start time of the query.
@@ -1523,10 +1526,12 @@ impl StreamContext {
         let query_start = input.query_start.unwrap_or_else(Instant::now);
         let ranges = RangeMeta::seq_scan_ranges(&input);
         READ_SST_COUNT.observe(input.num_files() as f64);
+        let scan_fingerprint = build_scan_fingerprint(&input);
 
         Self {
             input,
             ranges,
+            scan_fingerprint,
             query_start,
         }
     }
@@ -1536,10 +1541,12 @@ impl StreamContext {
         let query_start = input.query_start.unwrap_or_else(Instant::now);
         let ranges = RangeMeta::unordered_scan_ranges(&input);
         READ_SST_COUNT.observe(input.num_files() as f64);
+        let scan_fingerprint = build_scan_fingerprint(&input);
 
         Self {
             input,
             ranges,
+            scan_fingerprint,
             query_start,
         }
     }

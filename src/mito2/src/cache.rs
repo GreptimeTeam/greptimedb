@@ -350,7 +350,7 @@ impl CacheStrategy {
 
     /// Calls [CacheManager::get_range_result()].
     /// It returns None if the strategy is [CacheStrategy::Compaction] or [CacheStrategy::Disabled].
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) fn get_range_result(
         &self,
         key: &RangeScanCacheKey,
@@ -363,7 +363,6 @@ impl CacheStrategy {
 
     /// Calls [CacheManager::put_range_result()].
     /// It does nothing if the strategy isn't [CacheStrategy::EnableAll].
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn put_range_result(
         &self,
         key: RangeScanCacheKey,
@@ -476,7 +475,6 @@ pub struct CacheManager {
     /// Cache for time series selectors.
     selector_result_cache: Option<SelectorResultCache>,
     /// Cache for range scan outputs in flat format.
-    #[cfg_attr(not(test), allow(dead_code))]
     range_result_cache: Option<RangeResultCache>,
     /// Cache for index result.
     index_result_cache: Option<IndexResultCache>,
@@ -713,7 +711,7 @@ impl CacheManager {
     }
 
     /// Gets cached result for range scan.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) fn get_range_result(
         &self,
         key: &RangeScanCacheKey,
@@ -723,8 +721,7 @@ impl CacheManager {
             .and_then(|cache| update_hit_miss(cache.get(key), RANGE_RESULT_TYPE))
     }
 
-    /// Puts range scan result into the cache.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Puts range scan result into cache.
     pub(crate) fn put_range_result(
         &self,
         key: RangeScanCacheKey,
@@ -949,7 +946,7 @@ impl CacheManagerBuilder {
             Cache::builder()
                 .max_capacity(self.range_result_cache_size)
                 .weigher(range_result_cache_weight)
-                .eviction_listener(|k, v, cause| {
+                .eviction_listener(move |k, v, cause| {
                     let size = range_result_cache_weight(&k, &v);
                     CACHE_BYTES
                         .with_label_values(&[RANGE_RESULT_TYPE])
