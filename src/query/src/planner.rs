@@ -21,7 +21,8 @@ use std::sync::Arc;
 use arrow_schema::DataType;
 use async_trait::async_trait;
 use catalog::table_source::DfTableSourceProvider;
-use common_error::ext::BoxedError;
+use common_error::ext::{BoxedError, PlainError};
+use common_error::status_code::StatusCode;
 use common_telemetry::tracing;
 use datafusion::common::{DFSchema, plan_err};
 use datafusion::execution::context::SessionState;
@@ -277,16 +278,24 @@ impl DfLogicalPlanner {
         let table_provider = DfTableSourceProvider::new(
             self.engine_state.catalog_manager().clone(),
             self.engine_state.disallow_cross_catalog_query(),
-            query_ctx,
+            query_ctx.clone(),
             plan_decoder,
             self.session_state
                 .config_options()
                 .sql_parser
                 .enable_ident_normalization,
         );
-        PromPlanner::stmt_to_plan(table_provider, stmt, &self.engine_state)
+        let plan = PromPlanner::stmt_to_plan(table_provider, stmt, &self.engine_state)
             .await
             .map_err(BoxedError::new)
+            .context(QueryPlanSnafu)?;
+
+        let context = QueryEngineContext::new(self.session_state.clone(), query_ctx);
+        self.engine_state
+            .optimize_by_extension_rules(plan, &context)
+            .map_err(|error| {
+                BoxedError::new(PlainError::new(error.to_string(), StatusCode::Unexpected))
+            })
             .context(QueryPlanSnafu)
     }
 
@@ -545,15 +554,22 @@ mod tests {
     use std::sync::Arc;
 
     use arrow_schema::DataType;
+    use catalog::RegisterTableRequest;
+    use catalog::memory::MemoryCatalogManager;
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
     use session::context::QueryContext;
+    use store_api::metric_engine_consts::{
+        DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME, LOGICAL_TABLE_METADATA_KEY,
+        METRIC_ENGINE_NAME,
+    };
     use table::metadata::{TableInfoBuilder, TableMetaBuilder};
     use table::test_util::EmptyTable;
 
     use super::*;
-    use crate::QueryEngineRef;
-    use crate::parser::QueryLanguageParser;
+    use crate::parser::{PromQuery, QueryLanguageParser};
+    use crate::{QueryEngineFactory, QueryEngineRef};
 
     async fn create_test_engine() -> QueryEngineRef {
         let columns = vec![
@@ -572,6 +588,109 @@ mod tests {
         let table = EmptyTable::from_table_info(&table_info);
 
         crate::tests::new_query_engine_with_table(table)
+    }
+
+    fn create_promql_test_engine() -> QueryEngineRef {
+        let catalog_manager = MemoryCatalogManager::with_default_setup();
+        let physical_table_name = "phy";
+        let physical_table_id = 999u32;
+
+        let physical_schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                DATA_SCHEMA_TABLE_ID_COLUMN_NAME.to_string(),
+                ConcreteDataType::uint32_datatype(),
+                false,
+            ),
+            ColumnSchema::new(
+                DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
+                ConcreteDataType::uint64_datatype(),
+                false,
+            ),
+            ColumnSchema::new("tag_0", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("tag_1", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new("field_0", ConcreteDataType::float64_datatype(), true),
+        ]));
+        let physical_meta = TableMetaBuilder::empty()
+            .schema(physical_schema)
+            .primary_key_indices(vec![0, 1, 2, 3])
+            .value_indices(vec![4, 5])
+            .engine(METRIC_ENGINE_NAME.to_string())
+            .next_column_id(1024)
+            .build()
+            .unwrap();
+        let physical_info = TableInfoBuilder::default()
+            .table_id(physical_table_id)
+            .name(physical_table_name)
+            .meta(physical_meta)
+            .build()
+            .unwrap();
+        catalog_manager
+            .register_table_sync(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: physical_table_name.to_string(),
+                table_id: physical_table_id,
+                table: EmptyTable::from_table_info(&physical_info),
+            })
+            .unwrap();
+
+        let mut options = table::requests::TableOptions::default();
+        options.extra_options.insert(
+            LOGICAL_TABLE_METADATA_KEY.to_string(),
+            physical_table_name.to_string(),
+        );
+        let logical_schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("tag_0", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("tag_1", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new("field_0", ConcreteDataType::float64_datatype(), true),
+        ]));
+        let logical_meta = TableMetaBuilder::empty()
+            .schema(logical_schema)
+            .primary_key_indices(vec![0, 1])
+            .value_indices(vec![3])
+            .engine(METRIC_ENGINE_NAME.to_string())
+            .options(options)
+            .next_column_id(1024)
+            .build()
+            .unwrap();
+        let logical_info = TableInfoBuilder::default()
+            .table_id(1024)
+            .name("some_metric")
+            .meta(logical_meta)
+            .build()
+            .unwrap();
+        catalog_manager
+            .register_table_sync(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: "some_metric".to_string(),
+                table_id: 1024,
+                table: EmptyTable::from_table_info(&logical_info),
+            })
+            .unwrap();
+
+        QueryEngineFactory::new(
+            catalog_manager,
+            None,
+            None,
+            None,
+            None,
+            false,
+            crate::options::QueryOptions::default(),
+        )
+        .query_engine()
     }
 
     async fn parse_sql_to_plan(sql: &str) -> LogicalPlan {
@@ -618,5 +737,28 @@ mod tests {
         assert!(type_1.is_none(), "Expected $1 to be None");
         assert_eq!(type_2, &Some(DataType::Utf8));
         assert_eq!(type_3, &Some(DataType::Int32));
+    }
+
+    #[tokio::test]
+    async fn test_plan_pql_applies_extension_rules() {
+        let engine = create_promql_test_engine();
+        let query_ctx = QueryContext::arc();
+        let stmt = QueryLanguageParser::parse_promql(
+            &PromQuery {
+                query: "sum(irate(some_metric[1h])) / scalar(count(count(some_metric) by (tag_0)))"
+                    .to_string(),
+                start: "0".to_string(),
+                end: "10".to_string(),
+                step: "5s".to_string(),
+                lookback: "300s".to_string(),
+                alias: None,
+            },
+            &query_ctx,
+        )
+        .unwrap();
+
+        let plan = engine.planner().plan(&stmt, query_ctx).await.unwrap();
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(plan_str.contains("__prom_non_nan"), "{plan_str}");
     }
 }
