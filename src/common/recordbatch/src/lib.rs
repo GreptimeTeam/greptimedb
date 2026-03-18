@@ -22,13 +22,17 @@ pub mod recordbatch;
 pub mod util;
 
 use std::fmt;
+use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use adapter::RecordBatchMetrics;
 use arc_swap::ArcSwapOption;
 use common_base::readable_size::ReadableSize;
+use common_error::ext::BoxedError;
+use common_memory_manager::{
+    MemoryGuard, MemoryManager, MemoryMetrics, OnExhaustedPolicy, PermitGranularity,
+};
 use common_telemetry::tracing::Span;
 pub use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
 use datatypes::arrow::array::{ArrayRef, AsArray, StringBuilder};
@@ -42,7 +46,7 @@ use error::Result;
 use futures::task::{Context, Poll};
 use futures::{Stream, TryStreamExt};
 pub use recordbatch::RecordBatch;
-use snafu::{ResultExt, ensure};
+use snafu::{IntoError, ResultExt, ensure};
 
 use crate::error::NewDfRecordBatchSnafu;
 
@@ -416,195 +420,54 @@ impl<S: Stream<Item = Result<RecordBatch>> + Unpin> Stream for RecordBatchStream
     }
 }
 
-/// Memory permit for a stream, providing privileged access or rate limiting.
-///
-/// The permit tracks whether this stream has privileged Top-K status.
-/// When dropped, it automatically releases any privileged slot it holds.
-pub struct MemoryPermit {
-    tracker: QueryMemoryTracker,
-    is_privileged: AtomicBool,
-}
-
-impl MemoryPermit {
-    /// Check if this permit currently has privileged status.
-    pub fn is_privileged(&self) -> bool {
-        self.is_privileged.load(Ordering::Acquire)
-    }
-
-    /// Ensure this permit has privileged status by acquiring a slot if available.
-    /// Returns true if privileged (either already privileged or just acquired privilege).
-    fn ensure_privileged(&self) -> bool {
-        if self.is_privileged.load(Ordering::Acquire) {
-            return true;
-        }
-
-        // Try to claim a privileged slot
-        self.tracker
-            .privileged_count
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                if count < self.tracker.privileged_slots {
-                    Some(count + 1)
-                } else {
-                    None
-                }
-            })
-            .map(|_| {
-                self.is_privileged.store(true, Ordering::Release);
-                true
-            })
-            .unwrap_or(false)
-    }
-
-    /// Track additional memory usage with this permit.
-    /// Returns error if limit is exceeded.
-    ///
-    /// # Arguments
-    /// * `additional` - Additional memory size to track in bytes
-    /// * `stream_tracked` - Total memory already tracked by this stream
-    ///
-    /// # Behavior
-    /// - Privileged streams: Can push global memory usage up to full limit
-    /// - Standard-tier streams: Can push global memory usage up to limit * standard_tier_memory_fraction (default: 0.7)
-    /// - Standard-tier streams automatically attempt to acquire privilege if slots become available
-    /// - The configured limit is absolute hard limit - no stream can exceed it
-    pub fn track(&self, additional: usize, stream_tracked: usize) -> Result<()> {
-        // Ensure privileged status if possible
-        let is_privileged = self.ensure_privileged();
-
-        self.tracker
-            .track_internal(additional, is_privileged, stream_tracked)
-    }
-
-    /// Release tracked memory.
-    ///
-    /// # Arguments
-    /// * `amount` - Amount of memory to release in bytes
-    pub fn release(&self, amount: usize) {
-        self.tracker.release(amount);
-    }
-}
-
-impl Drop for MemoryPermit {
-    fn drop(&mut self) {
-        // Release privileged slot if we had one
-        if self.is_privileged.load(Ordering::Acquire) {
-            self.tracker
-                .privileged_count
-                .fetch_sub(1, Ordering::Release);
-        }
-    }
-}
-
 /// Memory tracker for RecordBatch streams. Clone to share the same limit across queries.
 ///
-/// Implements a two-tier memory allocation strategy:
-/// - **Privileged tier**: First N streams (default: 20) can use up to the full memory limit
-/// - **Standard tier**: Remaining streams are restricted to a fraction of the limit (default: 70%)
-/// - Privilege is granted on a first-come-first-served basis
-/// - The configured limit is an absolute hard cap - no stream can exceed it
+/// Each stream acquires quota independently from this tracker.
 #[derive(Clone)]
 pub struct QueryMemoryTracker {
-    current: Arc<AtomicUsize>,
-    limit: usize,
-    standard_tier_memory_fraction: f64,
-    privileged_count: Arc<AtomicUsize>,
-    privileged_slots: usize,
-    on_update: Option<Arc<dyn Fn(usize) + Send + Sync>>,
-    on_reject: Option<Arc<dyn Fn() + Send + Sync>>,
+    manager: MemoryManager<CallbackMemoryMetrics>,
+    metrics: CallbackMemoryMetrics,
+    on_exhausted_policy: OnExhaustedPolicy,
 }
 
 impl fmt::Debug for QueryMemoryTracker {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("QueryMemoryTracker")
-            .field("current", &self.current.load(Ordering::Acquire))
-            .field("limit", &self.limit)
-            .field(
-                "standard_tier_memory_fraction",
-                &self.standard_tier_memory_fraction,
-            )
-            .field(
-                "privileged_count",
-                &self.privileged_count.load(Ordering::Acquire),
-            )
-            .field("privileged_slots", &self.privileged_slots)
-            .field("on_update", &self.on_update.is_some())
-            .field("on_reject", &self.on_reject.is_some())
+            .field("current", &self.current())
+            .field("limit", &self.limit())
+            .field("on_exhausted_policy", &self.on_exhausted_policy)
+            .field("on_update", &self.metrics.has_on_update())
+            .field("on_reject", &self.metrics.has_on_reject())
             .finish()
     }
 }
 
 impl QueryMemoryTracker {
-    // Default privileged slots when max_concurrent_queries is 0.
-    const DEFAULT_PRIVILEGED_SLOTS: usize = 20;
-    // Ratio for privileged tier: 70% queries get privileged access, standard tier uses 70% memory.
-    const DEFAULT_PRIVILEGED_TIER_RATIO: f64 = 0.7;
-
-    /// Create a new memory tracker with the given limit and max_concurrent_queries.
-    /// Calculates privileged slots as 70% of max_concurrent_queries (or 20 if max_concurrent_queries is 0).
+    /// Create a new memory tracker with the given limit.
     ///
     /// # Arguments
     /// * `limit` - Maximum memory usage in bytes (hard limit for all streams). 0 means unlimited.
-    /// * `max_concurrent_queries` - Maximum number of concurrent queries (0 = unlimited).
-    pub fn new(limit: usize, max_concurrent_queries: usize) -> Self {
-        let privileged_slots = Self::calculate_privileged_slots(max_concurrent_queries);
-        Self::with_privileged_slots(limit, privileged_slots)
-    }
-
-    /// Create a new memory tracker with custom privileged slots limit.
-    pub fn with_privileged_slots(limit: usize, privileged_slots: usize) -> Self {
-        Self::with_config(limit, privileged_slots, Self::DEFAULT_PRIVILEGED_TIER_RATIO)
-    }
-
-    /// Create a new memory tracker with full configuration.
-    ///
-    /// # Arguments
-    /// * `limit` - Maximum memory usage in bytes (hard limit for all streams). 0 means unlimited.
-    /// * `privileged_slots` - Maximum number of streams that can get privileged status.
-    /// * `standard_tier_memory_fraction` - Memory fraction for standard-tier streams (range: [0.0, 1.0]).
-    ///
-    /// # Panics
-    /// Panics if `standard_tier_memory_fraction` is not in the range [0.0, 1.0].
-    pub fn with_config(
-        limit: usize,
-        privileged_slots: usize,
-        standard_tier_memory_fraction: f64,
-    ) -> Self {
-        assert!(
-            (0.0..=1.0).contains(&standard_tier_memory_fraction),
-            "standard_tier_memory_fraction must be in [0.0, 1.0], got {}",
-            standard_tier_memory_fraction
+    /// * `on_exhausted_policy` - Behavior when a stream cannot immediately acquire memory.
+    pub fn new(limit: usize, on_exhausted_policy: OnExhaustedPolicy) -> Self {
+        let metrics = CallbackMemoryMetrics::default();
+        let manager = MemoryManager::with_granularity(
+            limit as u64,
+            PermitGranularity::Megabyte,
+            metrics.clone(),
         );
 
         Self {
-            current: Arc::new(AtomicUsize::new(0)),
-            limit,
-            standard_tier_memory_fraction,
-            privileged_count: Arc::new(AtomicUsize::new(0)),
-            privileged_slots,
-            on_update: None,
-            on_reject: None,
+            manager,
+            metrics,
+            on_exhausted_policy,
         }
     }
 
-    /// Register a new permit for memory tracking.
-    /// The first `privileged_slots` permits get privileged status automatically.
-    /// The returned permit can be shared across multiple streams of the same query.
-    pub fn register_permit(&self) -> MemoryPermit {
-        // Try to claim a privileged slot
-        let is_privileged = self
-            .privileged_count
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                if count < self.privileged_slots {
-                    Some(count + 1)
-                } else {
-                    None
-                }
-            })
-            .is_ok();
-
-        MemoryPermit {
+    fn new_stream_tracker(&self) -> StreamMemoryTracker {
+        StreamMemoryTracker {
             tracker: self.clone(),
-            is_privileged: AtomicBool::new(is_privileged),
+            guard: self.manager.try_acquire(0).unwrap(),
+            tracked_bytes: 0,
         }
     }
 
@@ -612,13 +475,13 @@ impl QueryMemoryTracker {
     /// The callback receives the new total usage in bytes.
     ///
     /// # Note
-    /// The callback is called after both successful `track()` and `release()` operations.
-    /// It is called even when `limit == 0` (unlimited mode) to track actual usage.
-    pub fn with_on_update<F>(mut self, on_update: F) -> Self
+    /// The callback is called after both successful `track()` and stream drop.
+    /// Usage is exact in unlimited mode and 1MB-aligned in limited mode.
+    pub fn with_on_update<F>(self, on_update: F) -> Self
     where
         F: Fn(usize) + Send + Sync + 'static,
     {
-        self.on_update = Some(Arc::new(on_update));
+        self.metrics.set_on_update(on_update);
         self
     }
 
@@ -627,113 +490,146 @@ impl QueryMemoryTracker {
     /// # Note
     /// This is only called when `track()` fails due to exceeding the limit.
     /// It is never called when `limit == 0` (unlimited mode).
-    pub fn with_on_reject<F>(mut self, on_reject: F) -> Self
+    pub fn with_on_reject<F>(self, on_reject: F) -> Self
     where
         F: Fn() + Send + Sync + 'static,
     {
-        self.on_reject = Some(Arc::new(on_reject));
+        self.metrics.set_on_reject(on_reject);
         self
     }
 
     /// Get the current memory usage in bytes.
     pub fn current(&self) -> usize {
-        self.current.load(Ordering::Acquire)
+        self.manager.used_bytes() as usize
     }
 
-    fn calculate_privileged_slots(max_concurrent_queries: usize) -> usize {
-        if max_concurrent_queries == 0 {
-            Self::DEFAULT_PRIVILEGED_SLOTS
+    fn limit(&self) -> usize {
+        self.manager.limit_bytes() as usize
+    }
+
+    fn reject_error(
+        &self,
+        current: usize,
+        additional: usize,
+        stream_tracked: usize,
+    ) -> error::Error {
+        let limit = self.limit();
+        let msg = format!(
+            "{} requested, {} used globally ({}%), {} used by this stream, hard limit: {}",
+            ReadableSize(additional as u64),
+            ReadableSize(current as u64),
+            if limit > 0 { current * 100 / limit } else { 0 },
+            ReadableSize(stream_tracked as u64),
+            ReadableSize(limit as u64)
+        );
+        error::ExceedMemoryLimitSnafu { msg }.build()
+    }
+}
+
+struct StreamMemoryTracker {
+    tracker: QueryMemoryTracker,
+    guard: MemoryGuard<CallbackMemoryMetrics>,
+    tracked_bytes: usize,
+}
+
+type MemoryAcquireResult = std::result::Result<(), common_memory_manager::Error>;
+
+impl StreamMemoryTracker {
+    fn try_track(&mut self, additional: usize) -> Result<()> {
+        if self.guard.try_acquire_additional(additional as u64) {
+            self.tracked_bytes = self.tracked_bytes.saturating_add(additional);
+            Ok(())
         } else {
-            ((max_concurrent_queries as f64 * Self::DEFAULT_PRIVILEGED_TIER_RATIO) as usize).max(1)
+            Err(self.reject_error(additional))
         }
     }
 
-    /// Internal method to track additional memory usage.
-    ///
-    /// Called by `MemoryPermit::track()`. Use `MemoryPermit::track()` instead of calling this directly.
-    fn track_internal(
-        &self,
-        additional: usize,
-        is_privileged: bool,
-        stream_tracked: usize,
-    ) -> Result<()> {
-        // Calculate effective global limit based on stream privilege
-        // Privileged streams: can push global usage up to full limit
-        // Standard-tier streams: can only push global usage up to fraction of limit
-        let effective_limit = if is_privileged {
-            self.limit
-        } else {
-            (self.limit as f64 * self.standard_tier_memory_fraction) as usize
-        };
+    fn reject_error(&self, additional: usize) -> error::Error {
+        let current = self.tracker.current();
+        self.tracker
+            .reject_error(current, additional, self.tracked_bytes)
+    }
 
-        let mut new_total = 0;
-        let result = self
-            .current
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                new_total = current.saturating_add(additional);
-
-                if self.limit == 0 {
-                    // Unlimited mode
-                    return Some(new_total);
-                }
-
-                // Check if new global total exceeds effective limit
-                // The configured limit is absolute hard limit - no stream can exceed it
-                if new_total <= effective_limit {
-                    Some(new_total)
-                } else {
-                    None
-                }
-            });
-
-        match result {
-            Ok(_) => {
-                if let Some(callback) = &self.on_update {
-                    callback(new_total);
-                }
-                Ok(())
+    fn wait_error(&self, additional: usize, source: common_memory_manager::Error) -> error::Error {
+        match source {
+            common_memory_manager::Error::MemoryLimitExceeded { .. } => {
+                self.reject_error(additional)
             }
-            Err(current) => {
-                if let Some(callback) = &self.on_reject {
-                    callback();
-                }
+            common_memory_manager::Error::MemoryAcquireTimeout { waited, .. } => {
+                let current = self.tracker.current();
+                let limit = self.tracker.limit();
                 let msg = format!(
-                    "{} requested, {} used globally ({}%), {} used by this stream (privileged: {}), effective limit: {} ({}%), hard limit: {}",
+                    "timed out waiting {:?} for {}, {} used globally ({}%), {} used by this stream, hard limit: {}",
+                    waited,
                     ReadableSize(additional as u64),
                     ReadableSize(current as u64),
-                    if self.limit > 0 {
-                        current * 100 / self.limit
-                    } else {
-                        0
-                    },
-                    ReadableSize(stream_tracked as u64),
-                    is_privileged,
-                    ReadableSize(effective_limit as u64),
-                    if self.limit > 0 {
-                        effective_limit * 100 / self.limit
-                    } else {
-                        0
-                    },
-                    ReadableSize(self.limit as u64)
+                    if limit > 0 { current * 100 / limit } else { 0 },
+                    ReadableSize(self.tracked_bytes as u64),
+                    ReadableSize(limit as u64)
                 );
-                error::ExceedMemoryLimitSnafu { msg }.fail()
+                error::ExceedMemoryLimitSnafu { msg }.build()
             }
+            error => error::ExternalSnafu.into_error(BoxedError::new(error)),
+        }
+    }
+}
+
+type PendingTrackFuture = Pin<
+    Box<dyn Future<Output = (StreamMemoryTracker, RecordBatch, usize, MemoryAcquireResult)> + Send>,
+>;
+
+#[derive(Clone, Default)]
+struct CallbackMemoryMetrics {
+    inner: Arc<CallbackMemoryMetricsInner>,
+}
+
+type UpdateCallback = Arc<dyn Fn(usize) + Send + Sync>;
+type RejectCallback = Arc<dyn Fn() + Send + Sync>;
+
+#[derive(Default)]
+struct CallbackMemoryMetricsInner {
+    on_update: Mutex<Option<UpdateCallback>>,
+    on_reject: Mutex<Option<RejectCallback>>,
+}
+
+impl CallbackMemoryMetrics {
+    fn set_on_update<F>(&self, on_update: F)
+    where
+        F: Fn(usize) + Send + Sync + 'static,
+    {
+        *self.inner.on_update.lock().unwrap() = Some(Arc::new(on_update));
+    }
+
+    fn set_on_reject<F>(&self, on_reject: F)
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        *self.inner.on_reject.lock().unwrap() = Some(Arc::new(on_reject));
+    }
+
+    fn has_on_update(&self) -> bool {
+        self.inner.on_update.lock().unwrap().is_some()
+    }
+
+    fn has_on_reject(&self) -> bool {
+        self.inner.on_reject.lock().unwrap().is_some()
+    }
+}
+
+impl MemoryMetrics for CallbackMemoryMetrics {
+    fn set_limit(&self, _: i64) {}
+
+    fn set_in_use(&self, bytes: i64) {
+        let callback = self.inner.on_update.lock().unwrap().clone();
+        if let Some(callback) = callback {
+            callback(bytes.max(0) as usize);
         }
     }
 
-    /// Release tracked memory.
-    ///
-    /// # Arguments
-    /// * `amount` - Amount of memory to release in bytes
-    pub fn release(&self, amount: usize) {
-        if let Ok(old_value) =
-            self.current
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                    Some(current.saturating_sub(amount))
-                })
-            && let Some(callback) = &self.on_update
-        {
-            callback(old_value.saturating_sub(amount));
+    fn inc_rejected(&self, _: &str) {
+        let callback = self.inner.on_reject.lock().unwrap().clone();
+        if let Some(callback) = callback {
+            callback();
         }
     }
 }
@@ -741,18 +637,90 @@ impl QueryMemoryTracker {
 /// A wrapper stream that tracks memory usage of RecordBatches.
 pub struct MemoryTrackedStream {
     inner: SendableRecordBatchStream,
-    permit: Arc<MemoryPermit>,
-    // Total tracked size, released when stream drops.
-    total_tracked: usize,
+    tracker: Option<StreamMemoryTracker>,
+    waiting: Option<PendingTrackFuture>,
 }
 
 impl MemoryTrackedStream {
-    pub fn new(inner: SendableRecordBatchStream, permit: Arc<MemoryPermit>) -> Self {
+    pub fn new(inner: SendableRecordBatchStream, tracker: QueryMemoryTracker) -> Self {
         Self {
             inner,
-            permit,
-            total_tracked: 0,
+            tracker: Some(tracker.new_stream_tracker()),
+            waiting: None,
         }
+    }
+
+    fn ready_tracker_mut(&mut self) -> &mut StreamMemoryTracker {
+        debug_assert!(
+            self.waiting.is_none(),
+            "a ready tracker must not coexist with a waiting future"
+        );
+        self.tracker.as_mut().unwrap()
+    }
+
+    fn enter_waiting(&mut self, batch: RecordBatch, additional: usize) {
+        let tracker = self.tracker.take().unwrap();
+        self.waiting = Some(Self::start_waiting(tracker, batch, additional));
+    }
+
+    fn start_waiting(
+        tracker: StreamMemoryTracker,
+        batch: RecordBatch,
+        additional: usize,
+    ) -> PendingTrackFuture {
+        Box::pin(async move {
+            let mut tracker = tracker;
+            let result = tracker
+                .guard
+                .acquire_additional_with_policy(
+                    additional as u64,
+                    tracker.tracker.on_exhausted_policy,
+                )
+                .await;
+            if result.is_ok() {
+                tracker.tracked_bytes = tracker.tracked_bytes.saturating_add(additional);
+            }
+            (tracker, batch, additional, result)
+        })
+    }
+
+    fn poll_waiting(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<RecordBatch>>> {
+        let future = self.waiting.as_mut().unwrap();
+        match future.as_mut().poll(cx) {
+            Poll::Ready((tracker, batch, additional, result)) => {
+                let output = match result {
+                    Ok(()) => Ok(batch),
+                    Err(error) => Err(tracker.wait_error(additional, error)),
+                };
+                self.waiting = None;
+                self.tracker = Some(tracker);
+                Poll::Ready(Some(output))
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn poll_batch(
+        &mut self,
+        batch: RecordBatch,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<RecordBatch>>> {
+        let additional = batch.buffer_memory_size();
+        let tracker = self.ready_tracker_mut();
+
+        if let Err(error) = tracker.try_track(additional) {
+            if !matches!(
+                tracker.tracker.on_exhausted_policy,
+                OnExhaustedPolicy::Wait { .. }
+            ) {
+                return Poll::Ready(Some(Err(error)));
+            }
+
+            self.enter_waiting(batch, additional);
+            return self.poll_waiting(cx);
+        }
+
+        Poll::Ready(Some(Ok(batch)))
     }
 }
 
@@ -760,19 +728,13 @@ impl Stream for MemoryTrackedStream {
     type Item = Result<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.waiting.is_some() {
+            return self.poll_waiting(cx);
+        }
+
         match Pin::new(&mut self.inner).poll_next(cx) {
-            Poll::Ready(Some(Ok(batch))) => {
-                let additional = batch.buffer_memory_size();
-
-                if let Err(e) = self.permit.track(additional, self.total_tracked) {
-                    return Poll::Ready(Some(Err(e)));
-                }
-
-                self.total_tracked += additional;
-
-                Poll::Ready(Some(Ok(batch)))
-            }
-            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
+            Poll::Ready(Some(Ok(batch))) => self.poll_batch(batch, cx),
+            Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error))),
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
         }
@@ -780,14 +742,6 @@ impl Stream for MemoryTrackedStream {
 
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.inner.size_hint()
-    }
-}
-
-impl Drop for MemoryTrackedStream {
-    fn drop(&mut self) {
-        if self.total_tracked > 0 {
-            self.permit.release(self.total_tracked);
-        }
     }
 }
 
@@ -808,12 +762,27 @@ impl RecordBatchStream for MemoryTrackedStream {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
+    use common_memory_manager::OnExhaustedPolicy;
     use datatypes::prelude::{ConcreteDataType, VectorRef};
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{BooleanVector, Int32Vector, StringVector};
+    use futures::StreamExt;
+    use tokio::time::{sleep, timeout};
 
     use super::*;
+
+    fn large_string_batch(bytes: usize) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "payload",
+            ConcreteDataType::string_datatype(),
+            false,
+        )]));
+        let payload = "x".repeat(bytes);
+        let vector: VectorRef = Arc::new(StringVector::from(vec![payload]));
+        RecordBatch::new(schema, vec![vector]).unwrap()
+    }
 
     #[test]
     fn test_recordbatches_try_from_columns() {
@@ -896,156 +865,161 @@ mod tests {
         assert_eq!(collected[1], batch2);
     }
 
+    const MB: usize = 1024 * 1024;
+
     #[test]
     fn test_query_memory_tracker_basic() {
-        let tracker = Arc::new(QueryMemoryTracker::new(1000, 0));
+        let tracker = Arc::new(QueryMemoryTracker::new(10 * MB, OnExhaustedPolicy::Fail));
 
-        // Register first stream - should get privileged status
-        let permit1 = tracker.register_permit();
-        assert!(permit1.is_privileged());
+        let mut stream1 = tracker.new_stream_tracker();
+        assert!(stream1.try_track(5 * MB).is_ok());
+        assert_eq!(tracker.current(), 5 * MB);
 
-        // Privileged stream can use up to limit
-        assert!(permit1.track(500, 0).is_ok());
-        assert_eq!(tracker.current(), 500);
+        let mut stream2 = tracker.new_stream_tracker();
+        assert!(stream2.try_track(4 * MB).is_ok());
+        assert_eq!(tracker.current(), 9 * MB);
 
-        // Register second stream - also privileged
-        let permit2 = tracker.register_permit();
-        assert!(permit2.is_privileged());
-        // Can add more but cannot exceed hard limit (1000)
-        assert!(permit2.track(400, 0).is_ok());
-        assert_eq!(tracker.current(), 900);
-
-        permit1.release(500);
-        permit2.release(400);
+        drop(stream1);
+        drop(stream2);
         assert_eq!(tracker.current(), 0);
     }
 
     #[test]
-    fn test_query_memory_tracker_privileged_limit() {
-        // Privileged slots = 2 for easy testing
-        // Limit: 1000, standard-tier fraction: 0.7 (default)
-        // Privileged can push global to 1000, standard-tier can push global to 700
-        let tracker = Arc::new(QueryMemoryTracker::with_privileged_slots(1000, 2));
+    fn test_query_memory_tracker_shared_global_limit() {
+        let tracker = Arc::new(QueryMemoryTracker::new(10 * MB, OnExhaustedPolicy::Fail));
+        let mut stream1 = tracker.new_stream_tracker();
+        let mut stream2 = tracker.new_stream_tracker();
 
-        // First 2 streams are privileged
-        let permit1 = tracker.register_permit();
-        let permit2 = tracker.register_permit();
-        assert!(permit1.is_privileged());
-        assert!(permit2.is_privileged());
+        assert!(stream1.try_track(3 * MB).is_ok());
+        assert_eq!(tracker.current(), 3 * MB);
+        assert!(stream2.try_track(6 * MB).is_ok());
+        assert_eq!(tracker.current(), 9 * MB);
 
-        // Third stream is standard-tier (not privileged)
-        let permit3 = tracker.register_permit();
-        assert!(!permit3.is_privileged());
-
-        // Privileged stream uses some memory
-        assert!(permit1.track(300, 0).is_ok());
-        assert_eq!(tracker.current(), 300);
-
-        // Standard-tier can add up to 400 (total becomes 700, its effective limit)
-        assert!(permit3.track(400, 0).is_ok());
-        assert_eq!(tracker.current(), 700);
-
-        // Standard-tier stream cannot push global beyond 700
-        let err = permit3.track(100, 400).unwrap_err();
+        let err = stream2.try_track(2 * MB).unwrap_err();
         let err_msg = err.to_string();
-        assert!(err_msg.contains("400B used by this stream"));
-        assert!(err_msg.contains("effective limit: 700B (70%)"));
-        assert!(err_msg.contains("700B used globally (70%)"));
-        assert_eq!(tracker.current(), 700);
+        assert!(err_msg.contains("6.0MiB used by this stream"));
+        assert!(err_msg.contains("9.0MiB used globally (90%)"));
+        assert!(err_msg.contains("hard limit: 10.0MiB"));
+        assert_eq!(tracker.current(), 9 * MB);
 
-        permit1.release(300);
-        permit3.release(400);
+        drop(stream1);
+        assert_eq!(tracker.current(), 6 * MB);
+        drop(stream2);
         assert_eq!(tracker.current(), 0);
     }
 
     #[test]
-    fn test_query_memory_tracker_promotion() {
-        // Privileged slots = 1 for easy testing
-        let tracker = Arc::new(QueryMemoryTracker::with_privileged_slots(1000, 1));
+    fn test_query_memory_tracker_hard_limit() {
+        let tracker = Arc::new(QueryMemoryTracker::new(10 * MB, OnExhaustedPolicy::Fail));
+        let mut stream = tracker.new_stream_tracker();
 
-        // First stream is privileged
-        let permit1 = tracker.register_permit();
-        assert!(permit1.is_privileged());
+        assert!(stream.try_track(9 * MB).is_ok());
+        assert_eq!(tracker.current(), 9 * MB);
 
-        // Second stream is standard-tier (can only use 500)
-        let permit2 = tracker.register_permit();
-        assert!(!permit2.is_privileged());
+        assert!(stream.try_track(2 * MB).is_err());
+        assert_eq!(tracker.current(), 9 * MB);
 
-        // Standard-tier can only track 500
-        assert!(permit2.track(400, 0).is_ok());
-        assert_eq!(tracker.current(), 400);
+        assert!(stream.try_track(MB).is_ok());
+        assert_eq!(tracker.current(), 10 * MB);
 
-        // Drop first permit to release privileged slot
-        drop(permit1);
+        assert!(stream.try_track(MB).is_err());
+        assert_eq!(tracker.current(), 10 * MB);
 
-        // Second stream can now be promoted and use more memory
-        assert!(permit2.track(500, 400).is_ok());
-        assert!(permit2.is_privileged());
-        assert_eq!(tracker.current(), 900);
-
-        permit2.release(900);
+        drop(stream);
         assert_eq!(tracker.current(), 0);
     }
 
     #[test]
-    fn test_query_memory_tracker_privileged_hard_limit() {
-        // Test that the configured limit is absolute hard limit for all streams
-        // Privileged: can use full limit (1000)
-        // Standard-tier: can use 0.7x limit (700 with defaults)
-        let tracker = Arc::new(QueryMemoryTracker::new(1000, 0));
+    fn test_query_memory_tracker_unlimited() {
+        let tracker = Arc::new(QueryMemoryTracker::new(0, OnExhaustedPolicy::Fail));
+        let mut stream = tracker.new_stream_tracker();
 
-        let permit1 = tracker.register_permit();
-        assert!(permit1.is_privileged());
-
-        // Privileged can use up to full limit (1000)
-        assert!(permit1.track(900, 0).is_ok());
-        assert_eq!(tracker.current(), 900);
-
-        // Privileged cannot exceed hard limit (1000)
-        assert!(permit1.track(200, 900).is_err());
-        assert_eq!(tracker.current(), 900);
-
-        // Can add within hard limit
-        assert!(permit1.track(100, 900).is_ok());
-        assert_eq!(tracker.current(), 1000);
-
-        // Cannot exceed even by 1 byte
-        assert!(permit1.track(1, 1000).is_err());
-        assert_eq!(tracker.current(), 1000);
-
-        permit1.release(1000);
+        assert!(stream.try_track(10 * MB).is_ok());
+        assert_eq!(tracker.current(), 10 * MB);
+        drop(stream);
         assert_eq!(tracker.current(), 0);
     }
 
     #[test]
-    fn test_query_memory_tracker_standard_tier_fraction() {
-        // Test standard-tier streams use fraction of limit
-        // Limit: 1000, default fraction: 0.7, so standard-tier can use 700
-        let tracker = Arc::new(QueryMemoryTracker::with_privileged_slots(1000, 1));
+    fn test_query_memory_tracker_rounds_to_megabytes() {
+        let tracker = Arc::new(QueryMemoryTracker::new(10 * MB, OnExhaustedPolicy::Fail));
+        let mut stream = tracker.new_stream_tracker();
 
-        let permit1 = tracker.register_permit();
-        assert!(permit1.is_privileged());
+        assert!(stream.try_track(512 * 1024).is_ok());
+        assert_eq!(tracker.current(), MB);
 
-        let permit2 = tracker.register_permit();
-        assert!(!permit2.is_privileged());
-
-        // Standard-tier can use up to 700 (1000 * 0.7 default)
-        assert!(permit2.track(600, 0).is_ok());
-        assert_eq!(tracker.current(), 600);
-
-        // Cannot exceed standard-tier limit (700)
-        assert!(permit2.track(200, 600).is_err());
-        assert_eq!(tracker.current(), 600);
-
-        // Can add within standard-tier limit
-        assert!(permit2.track(100, 600).is_ok());
-        assert_eq!(tracker.current(), 700);
-
-        // Cannot exceed standard-tier limit
-        assert!(permit2.track(1, 700).is_err());
-        assert_eq!(tracker.current(), 700);
-
-        permit2.release(700);
+        drop(stream);
         assert_eq!(tracker.current(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_memory_tracked_stream_waits_for_capacity() {
+        let tracker = QueryMemoryTracker::new(
+            MB,
+            OnExhaustedPolicy::Wait {
+                timeout: Duration::from_millis(200),
+            },
+        );
+        let batch = large_string_batch(512 * 1024);
+
+        let mut stream1 = MemoryTrackedStream::new(
+            RecordBatches::try_new(batch.schema.clone(), vec![batch.clone()])
+                .unwrap()
+                .as_stream(),
+            tracker.clone(),
+        );
+        let first = stream1.next().await.unwrap().unwrap();
+        assert_eq!(first.num_rows(), 1);
+        assert_eq!(tracker.current(), MB);
+
+        let stream2 = MemoryTrackedStream::new(
+            RecordBatches::try_new(batch.schema.clone(), vec![batch])
+                .unwrap()
+                .as_stream(),
+            tracker.clone(),
+        );
+        let waiter = tokio::spawn(async move {
+            let mut stream2 = stream2;
+            stream2.next().await.unwrap()
+        });
+
+        sleep(Duration::from_millis(50)).await;
+        assert!(!waiter.is_finished());
+
+        drop(stream1);
+        let second = waiter.await.unwrap().unwrap();
+        assert_eq!(second.num_rows(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_memory_tracked_stream_wait_times_out() {
+        let tracker = QueryMemoryTracker::new(
+            MB,
+            OnExhaustedPolicy::Wait {
+                timeout: Duration::from_millis(50),
+            },
+        );
+        let batch = large_string_batch(512 * 1024);
+
+        let mut stream1 = MemoryTrackedStream::new(
+            RecordBatches::try_new(batch.schema.clone(), vec![batch.clone()])
+                .unwrap()
+                .as_stream(),
+            tracker.clone(),
+        );
+        let first = stream1.next().await.unwrap().unwrap();
+        assert_eq!(first.num_rows(), 1);
+
+        let mut stream2 = MemoryTrackedStream::new(
+            RecordBatches::try_new(batch.schema.clone(), vec![batch])
+                .unwrap()
+                .as_stream(),
+            tracker,
+        );
+        let result = timeout(Duration::from_secs(1), stream2.next())
+            .await
+            .unwrap();
+        let error = result.unwrap().unwrap_err();
+        assert!(error.to_string().contains("timed out waiting"));
     }
 }

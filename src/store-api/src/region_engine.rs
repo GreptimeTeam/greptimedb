@@ -23,7 +23,7 @@ use api::greptime_proto::v1::meta::{GrantedRegion as PbGrantedRegion, RegionRole
 use api::region::RegionResponse;
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
-use common_recordbatch::{EmptyRecordBatchStream, MemoryPermit, SendableRecordBatchStream};
+use common_recordbatch::{EmptyRecordBatchStream, QueryMemoryTracker, SendableRecordBatchStream};
 use common_time::Timestamp;
 use datafusion_physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion_physical_plan::{DisplayAs, DisplayFormatType, PhysicalExpr};
@@ -886,8 +886,8 @@ pub trait RegionEngine: Send + Sync {
         request: ScanRequest,
     ) -> Result<RegionScannerRef, BoxedError>;
 
-    /// Registers and returns a query memory permit.
-    fn register_query_memory_permit(&self) -> Option<Arc<MemoryPermit>> {
+    /// Returns the query memory tracker for scan execution.
+    fn query_memory_tracker(&self) -> Option<QueryMemoryTracker> {
         None
     }
 

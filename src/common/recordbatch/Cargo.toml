@@ -11,6 +11,7 @@ workspace = true
 arc-swap = "1.6"
 common-base.workspace = true
 common-error.workspace = true
+common-memory-manager.workspace = true
 common-macro.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
