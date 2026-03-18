@@ -452,7 +452,7 @@ impl QueryMemoryTracker {
         let metrics = CallbackMemoryMetrics::default();
         let manager = MemoryManager::with_granularity(
             limit as u64,
-            PermitGranularity::Megabyte,
+            PermitGranularity::Kilobyte,
             metrics.clone(),
         );
 
@@ -476,7 +476,7 @@ impl QueryMemoryTracker {
     ///
     /// # Note
     /// The callback is called after both successful `track()` and stream drop.
-    /// Usage is exact in unlimited mode and 1MB-aligned in limited mode.
+    /// Usage is exact in unlimited mode and 1KB-aligned in limited mode.
     pub fn with_on_update<F>(self, on_update: F) -> Self
     where
         F: Fn(usize) + Send + Sync + 'static,
@@ -770,7 +770,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use common_memory_manager::OnExhaustedPolicy;
+    use common_memory_manager::{OnExhaustedPolicy, PermitGranularity};
     use datatypes::prelude::{ConcreteDataType, VectorRef};
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{BooleanVector, Int32Vector, StringVector};
@@ -788,6 +788,12 @@ mod tests {
         let payload = "x".repeat(bytes);
         let vector: VectorRef = Arc::new(StringVector::from(vec![payload]));
         RecordBatch::new(schema, vec![vector]).unwrap()
+    }
+
+    fn aligned_tracked_bytes(bytes: usize) -> usize {
+        PermitGranularity::Kilobyte
+            .permits_to_bytes(PermitGranularity::Kilobyte.bytes_to_permits(bytes as u64))
+            as usize
     }
 
     #[test]
@@ -947,12 +953,12 @@ mod tests {
     }
 
     #[test]
-    fn test_query_memory_tracker_rounds_to_megabytes() {
+    fn test_query_memory_tracker_rounds_to_kilobytes() {
         let tracker = Arc::new(QueryMemoryTracker::new(10 * MB, OnExhaustedPolicy::Fail));
         let mut stream = tracker.new_stream_tracker();
 
-        assert!(stream.try_track(512 * 1024).is_ok());
-        assert_eq!(tracker.current(), MB);
+        assert!(stream.try_track(1_537).is_ok());
+        assert_eq!(tracker.current(), 2 * 1024);
 
         drop(stream);
         assert_eq!(tracker.current(), 0);
@@ -966,7 +972,8 @@ mod tests {
                 timeout: Duration::from_millis(200),
             },
         );
-        let batch = large_string_batch(512 * 1024);
+        let batch = large_string_batch(700 * 1024);
+        let expected_bytes = aligned_tracked_bytes(batch.buffer_memory_size());
 
         let mut stream1 = MemoryTrackedStream::new(
             RecordBatches::try_new(batch.schema.clone(), vec![batch.clone()])
@@ -976,7 +983,7 @@ mod tests {
         );
         let first = stream1.next().await.unwrap().unwrap();
         assert_eq!(first.num_rows(), 1);
-        assert_eq!(tracker.current(), MB);
+        assert_eq!(tracker.current(), expected_bytes);
 
         let stream2 = MemoryTrackedStream::new(
             RecordBatches::try_new(batch.schema.clone(), vec![batch])
@@ -1005,7 +1012,7 @@ mod tests {
                 timeout: Duration::from_millis(50),
             },
         );
-        let batch = large_string_batch(512 * 1024);
+        let batch = large_string_batch(700 * 1024);
 
         let mut stream1 = MemoryTrackedStream::new(
             RecordBatches::try_new(batch.schema.clone(), vec![batch.clone()])
