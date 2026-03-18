@@ -713,19 +713,17 @@ impl MemoryTrackedStream {
         let tracker = self.ready_tracker_mut();
 
         if let Err(error) = tracker.try_track(additional) {
-            if !matches!(
-                tracker.tracker.on_exhausted_policy,
-                OnExhaustedPolicy::Wait { .. }
-            ) {
-                return Poll::Ready(Some(Err(error)));
+            match tracker.tracker.on_exhausted_policy {
+                OnExhaustedPolicy::Fail => return Poll::Ready(Some(Err(error))),
+                // `Wait` is a deliberate tradeoff: the batch has already been materialized, so we
+                // keep it in memory while waiting for quota instead of failing immediately. Under
+                // contention, real memory usage can therefore exceed `scan_memory_limit` by up to
+                // one buffered batch per blocked stream.
+                OnExhaustedPolicy::Wait { .. } => {
+                    self.enter_waiting(batch, additional);
+                    return self.poll_waiting(cx);
+                }
             }
-
-            // `Wait` is a deliberate tradeoff: the batch has already been materialized, so we keep
-            // it in memory while waiting for quota instead of failing immediately. Under contention,
-            // real memory usage can therefore exceed `scan_memory_limit` by up to one buffered
-            // batch per blocked stream.
-            self.enter_waiting(batch, additional);
-            return self.poll_waiting(cx);
         }
 
         Poll::Ready(Some(Ok(batch)))
