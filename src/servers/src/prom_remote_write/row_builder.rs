@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-
+use arrow::array::RecordBatch;
 use api::prom_store::remote::Sample;
 use api::v1::helper::{field_column_schema, time_index_column_schema};
 use api::v1::value::ValueData;
@@ -21,9 +21,7 @@ use api::v1::{ColumnDataType, ColumnSchema, Row, RowInsertRequest, Rows, Semanti
 use common_query::prelude::{greptime_timestamp, greptime_value};
 use pipeline::{ContextOpt, ContextReq};
 use prost::DecodeError;
-
-use crate::http::PromValidationMode;
-use crate::proto::PromLabel;
+use crate::error;
 use crate::prom_remote_write::PromValidationMode;
 use crate::prom_remote_write::types::PromLabel;
 use crate::prom_remote_write::validation::validate_label_name;
@@ -95,7 +93,7 @@ impl<'a> TablesBuilder<'a> {
             })
     }
 
-    pub fn as_record_batch_groups(&mut self) -> Result<Vec<PromRecordBatchGroup>> {
+    pub fn as_record_batch_groups(&mut self) -> error::Result<Vec<PromRecordBatchGroup>> {
         self.tables
             .drain()
             .map(|(prom_ctx, mut tables)| {
