@@ -544,6 +544,17 @@ impl StreamMemoryTracker {
         }
     }
 
+    async fn track_with_policy(mut self, additional: usize) -> (Self, MemoryAcquireResult) {
+        let result = self
+            .guard
+            .acquire_additional_with_policy(additional as u64, self.tracker.on_exhausted_policy)
+            .await;
+        if result.is_ok() {
+            self.tracked_bytes = self.tracked_bytes.saturating_add(additional);
+        }
+        (self, result)
+    }
+
     fn reject_error(&self, additional: usize) -> error::Error {
         let current = self.tracker.current();
         self.tracker
@@ -672,17 +683,7 @@ impl MemoryTrackedStream {
         additional: usize,
     ) -> PendingTrackFuture {
         Box::pin(async move {
-            let mut tracker = tracker;
-            let result = tracker
-                .guard
-                .acquire_additional_with_policy(
-                    additional as u64,
-                    tracker.tracker.on_exhausted_policy,
-                )
-                .await;
-            if result.is_ok() {
-                tracker.tracked_bytes = tracker.tracked_bytes.saturating_add(additional);
-            }
+            let (tracker, result) = tracker.track_with_policy(additional).await;
             (tracker, batch, additional, result)
         })
     }
