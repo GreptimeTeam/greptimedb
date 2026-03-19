@@ -17,16 +17,12 @@
 //! Provides a TSBS cpu-like data generator ([`CpuDataGenerator`]) and schema
 //! ([`cpu_metadata`]) used by multiple benchmark binaries in this directory.
 
-#![allow(dead_code)]
-
 use api::v1::value::ValueData;
 use api::v1::{Row, Rows, SemanticType};
 use datafusion_common::Column;
 use datafusion_expr::{Expr, lit};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
-use mito2::memtable::KeyValues;
-use mito2::test_util::memtable_util::region_metadata_to_row_schema;
 use rand::Rng;
 use rand::rngs::ThreadRng;
 use rand::seq::IndexedRandom;
@@ -35,6 +31,9 @@ use store_api::metadata::{
 };
 use store_api::storage::RegionId;
 use table::predicate::Predicate;
+
+use crate::memtable::KeyValues;
+use crate::test_util::memtable_util::region_metadata_to_row_schema;
 
 pub struct Host {
     pub hostname: String,

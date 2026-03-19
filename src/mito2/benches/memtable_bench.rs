@@ -20,11 +20,9 @@
 //! cargo bench -p mito2 --features test --bench memtable_bench
 //! ```
 
-mod bench_util;
-
 use std::sync::Arc;
 
-use bench_util::{CpuDataGenerator, cpu_metadata};
+use mito2::test_util::bench_util::{CpuDataGenerator, cpu_metadata};
 use criterion::{Criterion, criterion_group, criterion_main};
 use mito_codec::row_converter::DensePrimaryKeyCodec;
 use mito2::memtable::bulk::context::BulkIterContext;

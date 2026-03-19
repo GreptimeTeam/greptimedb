@@ -15,6 +15,7 @@
 //! Utilities for testing.
 
 pub mod batch_util;
+pub mod bench_util;
 pub mod memtable_util;
 pub mod scheduler_util;
 pub mod sst_util;

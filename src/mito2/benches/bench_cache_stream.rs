@@ -22,12 +22,10 @@
 //! cargo bench -p mito2 --features test --bench bench_cache_stream
 //! ```
 
-mod bench_util;
-
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use bench_util::{CpuDataGenerator, cpu_metadata};
+use mito2::test_util::bench_util::{CpuDataGenerator, cpu_metadata};
 use criterion::{Criterion, criterion_group, criterion_main};
 use futures::TryStreamExt;
 use mito2::memtable::bulk::context::BulkIterContext;
