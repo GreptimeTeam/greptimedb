@@ -19,8 +19,11 @@ use std::sync::Arc;
 
 use async_stream::try_stream;
 use common_time::range::TimestampRange;
-use datatypes::arrow::array::{Array, BinaryArray, DictionaryArray, UInt32Array};
-use datatypes::arrow::datatypes::UInt32Type;
+use datatypes::arrow::array::{Array, AsArray, DictionaryArray};
+use datatypes::arrow::datatypes::{
+    ArrowDictionaryKeyType, BinaryType as ArrowBinaryType, ByteArrayType,
+    DataType as ArrowDataType, LargeBinaryType, LargeUtf8Type, UInt32Type, Utf8Type,
+};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
 use futures::TryStreamExt;
@@ -28,13 +31,11 @@ use store_api::region_engine::PartitionRange;
 use store_api::storage::{ColumnId, FileId, RegionId, TimeSeriesRowSelector};
 
 use crate::cache::CacheStrategy;
-use crate::memtable::record_batch_estimated_size;
 use crate::read::BoxedRecordBatchStream;
 use crate::read::scan_region::StreamContext;
 use crate::read::scan_util::PartitionMetrics;
 use crate::region::options::MergeMode;
 use crate::sst::file::FileTimeRange;
-use crate::sst::parquet::flat_format::primary_key_column_index;
 
 /// Fingerprint of the scan request fields that affect partition range cache reuse.
 ///
@@ -190,21 +191,22 @@ impl RangeScanCacheKey {
 /// Cached result for one range scan.
 pub(crate) struct RangeScanCacheValue {
     pub(crate) batches: Vec<RecordBatch>,
+    /// Precomputed size of all batches, accounting for shared dictionary values.
+    estimated_batches_size: usize,
 }
 
 impl RangeScanCacheValue {
-    pub(crate) fn new(batches: Vec<RecordBatch>) -> Self {
-        Self { batches }
+    pub(crate) fn new(batches: Vec<RecordBatch>, estimated_batches_size: usize) -> Self {
+        Self {
+            batches,
+            estimated_batches_size,
+        }
     }
 
     pub(crate) fn estimated_size(&self) -> usize {
         mem::size_of::<Self>()
             + self.batches.capacity() * mem::size_of::<RecordBatch>()
-            + self
-                .batches
-                .iter()
-                .map(record_batch_estimated_size)
-                .sum::<usize>()
+            + self.estimated_batches_size
     }
 }
 
@@ -304,55 +306,135 @@ pub(crate) fn cached_flat_range_stream(value: Arc<RangeScanCacheValue>) -> Boxed
     ))
 }
 
-/// Compacts the `__primary_key` dictionary column in a record batch by removing
-/// unreferenced values. This reduces memory usage when caching batches whose
-/// dictionary values array contains entries not referenced by any key.
-///
-/// Only compacts when the values array has more than 4 entries to avoid
-/// unnecessary work for small dictionaries.
-fn compact_pk_dictionary(batch: RecordBatch) -> RecordBatch {
-    let pk_idx = primary_key_column_index(batch.num_columns());
-    let pk_col = match batch
-        .column(pk_idx)
-        .as_any()
-        .downcast_ref::<DictionaryArray<UInt32Type>>()
-    {
-        Some(dict) if dict.values().len() > 4 => dict,
-        _ => return batch,
-    };
+/// Cheap pointer-based comparison of two byte arrays (adapted from arrow-rs).
+fn bytes_ptr_eq<T: ByteArrayType>(a: &dyn Array, b: &dyn Array) -> bool {
+    match (a.as_bytes_opt::<T>(), b.as_bytes_opt::<T>()) {
+        (Some(a), Some(b)) => {
+            let values_eq = a.values().ptr_eq(b.values()) && a.offsets().ptr_eq(b.offsets());
+            match (a.nulls(), b.nulls()) {
+                (Some(a), Some(b)) => values_eq && a.inner().ptr_eq(b.inner()),
+                (None, None) => values_eq,
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
 
-    let old_values = pk_col
-        .values()
-        .as_any()
-        .downcast_ref::<BinaryArray>()
-        .expect("primary key dictionary values must be BinaryArray");
-    let keys = pk_col.keys();
+/// Returns true if two dictionary arrays share the same dictionary values
+/// by pointer comparison. Supports Utf8, Binary, LargeUtf8, LargeBinary value types.
+fn dict_values_ptr_eq<K: ArrowDictionaryKeyType>(a: &dyn Array, b: &dyn Array) -> bool {
+    let a_dict = a.as_any().downcast_ref::<DictionaryArray<K>>();
+    let b_dict = b.as_any().downcast_ref::<DictionaryArray<K>>();
+    match (a_dict, b_dict) {
+        (Some(a_dict), Some(b_dict)) => {
+            let a_vals = a_dict.values().as_ref();
+            let b_vals = b_dict.values().as_ref();
+            let value_type = a_dict.value_type();
+            match value_type {
+                ArrowDataType::Utf8 => bytes_ptr_eq::<Utf8Type>(a_vals, b_vals),
+                ArrowDataType::Binary => bytes_ptr_eq::<ArrowBinaryType>(a_vals, b_vals),
+                ArrowDataType::LargeUtf8 => bytes_ptr_eq::<LargeUtf8Type>(a_vals, b_vals),
+                ArrowDataType::LargeBinary => bytes_ptr_eq::<LargeBinaryType>(a_vals, b_vals),
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
 
-    // Single linear pass: since keys are sorted/grouped, we track when the key changes.
-    let mut remap = vec![0u32; old_values.len()];
-    let mut new_values: Vec<&[u8]> = Vec::new();
-    let mut prev_key: Option<u32> = None;
+/// Tracks state of a dictionary-encoded column across batches for shared-dictionary detection.
+struct DictColumnState {
+    /// The first batch's dictionary array, for pointer comparison.
+    first_array: Arc<dyn Array>,
+    /// Whether all batches so far share the same dictionary values for this column.
+    shared: bool,
+}
 
-    for key in keys.iter().flatten() {
-        if prev_key != Some(key) {
-            let new_index = new_values.len() as u32;
-            new_values.push(old_values.value(key as usize));
-            remap[key as usize] = new_index;
-            prev_key = Some(key);
+/// Buffers record batches for caching, tracking memory size while deduplicating
+/// shared dictionary values across batches.
+struct CacheBatchBuffer {
+    batches: Vec<RecordBatch>,
+    /// Running total of batch memory.
+    total_size: usize,
+    /// Per-column dictionary state. `None` for non-dictionary columns.
+    dict_columns: Vec<Option<DictColumnState>>,
+}
+
+impl CacheBatchBuffer {
+    fn new() -> Self {
+        Self {
+            batches: Vec::new(),
+            total_size: 0,
+            dict_columns: Vec::new(),
         }
     }
 
-    if new_values.len() == old_values.len() {
-        return batch; // all values are in use
+    fn push(&mut self, batch: RecordBatch) {
+        if self.batches.is_empty() {
+            self.init_first_batch(&batch);
+        } else {
+            self.add_subsequent_batch(&batch);
+        }
+        self.batches.push(batch);
     }
 
-    let new_keys = UInt32Array::from_iter(keys.iter().map(|k| k.map(|v| remap[v as usize])));
-    let new_values_array = BinaryArray::from_iter_values(new_values);
-    let new_dict = DictionaryArray::new(new_keys, Arc::new(new_values_array));
+    fn init_first_batch(&mut self, batch: &RecordBatch) {
+        for col_idx in 0..batch.num_columns() {
+            let col = batch.column(col_idx);
+            if let Some(dict) = col.as_any().downcast_ref::<DictionaryArray<UInt32Type>>() {
+                let key_size = dict.keys().to_data().get_slice_memory_size().unwrap_or(0);
+                let dict_values_size = dict.values().to_data().get_slice_memory_size().unwrap_or(0);
+                self.total_size += key_size + dict_values_size;
+                self.dict_columns.push(Some(DictColumnState {
+                    first_array: Arc::clone(col),
+                    shared: true,
+                }));
+            } else {
+                let col_size = col.to_data().get_slice_memory_size().unwrap_or(0);
+                self.total_size += col_size;
+                self.dict_columns.push(None);
+            }
+        }
+    }
 
-    let mut columns: Vec<_> = batch.columns().to_vec();
-    columns[pk_idx] = Arc::new(new_dict);
-    RecordBatch::try_new(batch.schema(), columns).expect("schema should match after compaction")
+    fn add_subsequent_batch(&mut self, batch: &RecordBatch) {
+        for col_idx in 0..batch.num_columns() {
+            let col = batch.column(col_idx);
+            if let Some(Some(state)) = self.dict_columns.get_mut(col_idx) {
+                let dict = col
+                    .as_any()
+                    .downcast_ref::<DictionaryArray<UInt32Type>>()
+                    .unwrap();
+                let key_size = dict.keys().to_data().get_slice_memory_size().unwrap_or(0);
+                if state.shared {
+                    if dict_values_ptr_eq::<UInt32Type>(state.first_array.as_ref(), col.as_ref()) {
+                        self.total_size += key_size;
+                    } else {
+                        state.shared = false;
+                        let dict_values_size =
+                            dict.values().to_data().get_slice_memory_size().unwrap_or(0);
+                        self.total_size += key_size + dict_values_size;
+                    }
+                } else {
+                    let dict_values_size =
+                        dict.values().to_data().get_slice_memory_size().unwrap_or(0);
+                    self.total_size += key_size + dict_values_size;
+                }
+            } else {
+                let col_size = col.to_data().get_slice_memory_size().unwrap_or(0);
+                self.total_size += col_size;
+            }
+        }
+    }
+
+    fn estimated_batches_size(&self) -> usize {
+        self.total_size
+    }
+
+    fn into_batches(self) -> Vec<RecordBatch> {
+        self.batches
+    }
 }
 
 /// Wraps a stream to cache its output for future range cache hits.
@@ -364,23 +446,17 @@ pub(crate) fn cache_flat_range_stream(
     part_metrics: PartitionMetrics,
 ) -> BoxedRecordBatchStream {
     Box::pin(try_stream! {
-        let mut batches = Vec::new();
+        let mut buffer = CacheBatchBuffer::new();
         while let Some(batch) = stream.try_next().await? {
-            let batch = compact_pk_dictionary(batch);
-            batches.push(batch.clone());
+            buffer.push(batch.clone());
             yield batch;
         }
 
-        if !batches.is_empty() {
-            let value = Arc::new(RangeScanCacheValue::new(batches));
-
-            part_metrics.inc_range_cache_size(key.estimated_size() + value.estimated_size());
-            cache_strategy.put_range_result(key, value);
-        } else {
-            part_metrics.inc_range_cache_size(key.estimated_size());
-            let value = Arc::new(RangeScanCacheValue::new(batches));
-            cache_strategy.put_range_result(key, value);
-        }
+        let estimated_size = buffer.estimated_batches_size();
+        let batches = buffer.into_batches();
+        let value = Arc::new(RangeScanCacheValue::new(batches, estimated_size));
+        part_metrics.inc_range_cache_size(key.estimated_size() + value.estimated_size());
+        cache_strategy.put_range_result(key, value);
     })
 }
 
@@ -623,6 +699,196 @@ mod tests {
         assert_eq!(
             reset.partition_expr_version,
             fingerprint.partition_expr_version
+        );
+    }
+
+    /// Helper to create a record batch with a dictionary column sharing the same values buffer.
+    fn make_dict_batch(
+        schema: Arc<datatypes::arrow::datatypes::Schema>,
+        dict_values: &datatypes::arrow::array::StringArray,
+        keys: &[u32],
+        int_values: &[i64],
+    ) -> RecordBatch {
+        use datatypes::arrow::array::{Int64Array, UInt32Array};
+
+        let key_array = UInt32Array::from(keys.to_vec());
+        let dict_array: DictionaryArray<UInt32Type> =
+            DictionaryArray::new(key_array, Arc::new(dict_values.clone()));
+        let int_array = Int64Array::from(int_values.to_vec());
+        RecordBatch::try_new(
+            schema,
+            vec![Arc::new(dict_array), Arc::new(int_array)],
+        )
+        .unwrap()
+    }
+
+    fn dict_test_schema() -> Arc<datatypes::arrow::datatypes::Schema> {
+        use datatypes::arrow::datatypes::{Field, Schema};
+        Arc::new(Schema::new(vec![
+            Field::new(
+                "tags",
+                ArrowDataType::Dictionary(
+                    Box::new(ArrowDataType::UInt32),
+                    Box::new(ArrowDataType::Utf8),
+                ),
+                false,
+            ),
+            Field::new("value", ArrowDataType::Int64, false),
+        ]))
+    }
+
+    #[test]
+    fn cache_batch_buffer_empty() {
+        let buffer = CacheBatchBuffer::new();
+        assert_eq!(buffer.estimated_batches_size(), 0);
+        assert!(buffer.into_batches().is_empty());
+    }
+
+    #[test]
+    fn cache_batch_buffer_single_batch() {
+        use datatypes::arrow::array::StringArray;
+
+        let schema = dict_test_schema();
+        let dict_values = StringArray::from(vec!["a", "b", "c"]);
+        let batch = make_dict_batch(schema, &dict_values, &[0, 1, 2], &[10, 20, 30]);
+
+        let full_size: usize = batch
+            .columns()
+            .iter()
+            .map(|c| c.to_data().get_slice_memory_size().unwrap_or(0))
+            .sum();
+
+        let mut buffer = CacheBatchBuffer::new();
+        buffer.push(batch);
+        assert_eq!(buffer.estimated_batches_size(), full_size);
+        assert_eq!(buffer.into_batches().len(), 1);
+    }
+
+    #[test]
+    fn cache_batch_buffer_shared_dictionary() {
+        use datatypes::arrow::array::StringArray;
+
+        let schema = dict_test_schema();
+        let dict_values = StringArray::from(vec!["alpha", "beta", "gamma"]);
+
+        // Two batches sharing the same dictionary values array.
+        let batch1 = make_dict_batch(schema.clone(), &dict_values, &[0, 1], &[10, 20]);
+        let batch2 = make_dict_batch(schema, &dict_values, &[1, 2], &[30, 40]);
+
+        let batch1_full: usize = batch1
+            .columns()
+            .iter()
+            .map(|c| c.to_data().get_slice_memory_size().unwrap_or(0))
+            .sum();
+        let batch2_full: usize = batch2
+            .columns()
+            .iter()
+            .map(|c| c.to_data().get_slice_memory_size().unwrap_or(0))
+            .sum();
+
+        // The dictionary values size that should be deduplicated for the second batch.
+        let dict_values_size = batch2
+            .column(0)
+            .as_any()
+            .downcast_ref::<DictionaryArray<UInt32Type>>()
+            .unwrap()
+            .values()
+            .to_data()
+            .get_slice_memory_size()
+            .unwrap_or(0);
+
+        let mut buffer = CacheBatchBuffer::new();
+        buffer.push(batch1);
+        buffer.push(batch2);
+
+        // Second batch's dict values should not be counted again.
+        assert_eq!(
+            buffer.estimated_batches_size(),
+            batch1_full + batch2_full - dict_values_size
+        );
+        assert_eq!(buffer.into_batches().len(), 2);
+    }
+
+    #[test]
+    fn cache_batch_buffer_non_shared_dictionary() {
+        use datatypes::arrow::array::StringArray;
+
+        let schema = dict_test_schema();
+        let dict_values1 = StringArray::from(vec!["a", "b"]);
+        let dict_values2 = StringArray::from(vec!["x", "y"]);
+
+        let batch1 = make_dict_batch(schema.clone(), &dict_values1, &[0, 1], &[10, 20]);
+        let batch2 = make_dict_batch(schema, &dict_values2, &[0, 1], &[30, 40]);
+
+        let batch1_full: usize = batch1
+            .columns()
+            .iter()
+            .map(|c| c.to_data().get_slice_memory_size().unwrap_or(0))
+            .sum();
+        let batch2_full: usize = batch2
+            .columns()
+            .iter()
+            .map(|c| c.to_data().get_slice_memory_size().unwrap_or(0))
+            .sum();
+
+        let mut buffer = CacheBatchBuffer::new();
+        buffer.push(batch1);
+        buffer.push(batch2);
+
+        // Different dictionaries: full size for both.
+        assert_eq!(
+            buffer.estimated_batches_size(),
+            batch1_full + batch2_full
+        );
+    }
+
+    #[test]
+    fn cache_batch_buffer_shared_then_diverged() {
+        use datatypes::arrow::array::StringArray;
+
+        let schema = dict_test_schema();
+        let shared_values = StringArray::from(vec!["a", "b", "c"]);
+        let different_values = StringArray::from(vec!["x", "y"]);
+
+        let batch1 = make_dict_batch(schema.clone(), &shared_values, &[0], &[1]);
+        let batch2 = make_dict_batch(schema.clone(), &shared_values, &[1], &[2]);
+        let batch3 = make_dict_batch(schema, &different_values, &[0], &[3]);
+
+        let size1: usize = batch1
+            .columns()
+            .iter()
+            .map(|c| c.to_data().get_slice_memory_size().unwrap_or(0))
+            .sum();
+        let size2: usize = batch2
+            .columns()
+            .iter()
+            .map(|c| c.to_data().get_slice_memory_size().unwrap_or(0))
+            .sum();
+        let size3: usize = batch3
+            .columns()
+            .iter()
+            .map(|c| c.to_data().get_slice_memory_size().unwrap_or(0))
+            .sum();
+
+        let dict_values_size = batch2
+            .column(0)
+            .as_any()
+            .downcast_ref::<DictionaryArray<UInt32Type>>()
+            .unwrap()
+            .values()
+            .to_data()
+            .get_slice_memory_size()
+            .unwrap_or(0);
+
+        let mut buffer = CacheBatchBuffer::new();
+        buffer.push(batch1);
+        buffer.push(batch2);
+        buffer.push(batch3);
+
+        // batch2 shares dict with batch1 (dedup), batch3 does not (full size).
+        assert_eq!(
+            buffer.estimated_batches_size(),
+            size1 + (size2 - dict_values_size) + size3
         );
     }
 }

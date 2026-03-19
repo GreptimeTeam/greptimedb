@@ -1358,7 +1358,7 @@ mod tests {
             }
             .build(),
         };
-        let value = Arc::new(RangeScanCacheValue::new(Vec::new()));
+        let value = Arc::new(RangeScanCacheValue::new(Vec::new(), 0));
 
         assert!(cache.get_range_result(&key).is_none());
         cache.put_range_result(key.clone(), value.clone());

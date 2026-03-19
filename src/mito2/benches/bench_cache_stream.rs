@@ -15,7 +15,7 @@
 //! Benchmarks for `cache_flat_range_stream` overhead.
 //!
 //! Compares consuming batches from a plain stream vs through the caching wrapper
-//! that compacts primary key dictionaries and clones batches for the range cache.
+//! that clones batches for the range cache.
 //!
 //! Run with:
 //! ```sh
