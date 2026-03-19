@@ -18,7 +18,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use common_recordbatch::filter::SimpleFilterEvaluator;
-use mito_codec::row_converter::{DensePrimaryKeyCodec, build_primary_key_codec};
+use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyFilter, build_primary_key_codec};
 use parquet::file::metadata::ParquetMetaData;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
@@ -147,6 +147,10 @@ impl BulkIterContext {
 
     pub(crate) fn read_format(&self) -> &ReadFormat {
         &self.base.read_format
+    }
+
+    pub(crate) fn new_primary_key_filter(&self) -> Option<Box<dyn PrimaryKeyFilter>> {
+        self.base.new_primary_key_filter()
     }
 
     /// Returns the pre-filter mode.

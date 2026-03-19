@@ -31,7 +31,7 @@ use datatypes::arrow::error::ArrowError;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::DataType;
-use mito_codec::row_converter::build_primary_key_codec;
+use mito_codec::row_converter::{PrimaryKeyFilter, build_primary_key_codec};
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, RowSelection};
 use parquet::arrow::{FieldLevels, ProjectionMask, parquet_to_arrow_field_levels};
@@ -2203,11 +2203,14 @@ impl FlatRowGroupReader {
         flat_format.convert_batch(record_batch, self.override_sequence.as_ref())
     }
 
-    /// Returns the next converted flat RecordBatch.
-    pub(crate) fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
-        self.next_raw_batch()?
-            .map(|record_batch| self.convert_batch(record_batch))
-            .transpose()
+    /// Applies the encoded primary-key prefilter to a raw parquet batch before flat conversion.
+    pub(crate) fn prefilter_raw_batch_by_primary_key(
+        &self,
+        record_batch: RecordBatch,
+        primary_key_filter: &mut dyn PrimaryKeyFilter,
+    ) -> Result<Option<RecordBatch>> {
+        self.context
+            .prefilter_flat_batch_by_primary_key(record_batch, primary_key_filter)
     }
 }
 

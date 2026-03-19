@@ -300,7 +300,7 @@ impl FlatPruneReader {
         skip_fields: bool,
     ) -> Self {
         Self {
-            primary_key_filter: ctx.new_primary_key_filter(),
+            primary_key_filter: None,
             context: ctx,
             source: FlatSource::LastRow(reader),
             metrics: Default::default(),

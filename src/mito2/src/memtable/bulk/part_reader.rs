@@ -17,6 +17,7 @@ use std::time::Instant;
 
 use datatypes::arrow::array::BooleanArray;
 use datatypes::arrow::record_batch::RecordBatch;
+use mito_codec::row_converter::PrimaryKeyFilter;
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReader;
 use snafu::ResultExt;
@@ -46,6 +47,7 @@ pub struct EncodedBulkPartIter {
     metrics: MemScanMetricsData,
     /// Optional memory scan metrics to report to.
     mem_scan_metrics: Option<MemScanMetrics>,
+    primary_key_filter: Option<Box<dyn PrimaryKeyFilter>>,
 }
 
 impl EncodedBulkPartIter {
@@ -58,6 +60,7 @@ impl EncodedBulkPartIter {
         mem_scan_metrics: Option<MemScanMetrics>,
     ) -> error::Result<Self> {
         assert!(context.read_format().as_flat().is_some());
+        let primary_key_filter = context.base.new_primary_key_filter();
 
         let parquet_meta = encoded_part.metadata().parquet_metadata.clone();
         let data = encoded_part.data().clone();
@@ -91,6 +94,7 @@ impl EncodedBulkPartIter {
                 ..Default::default()
             },
             mem_scan_metrics,
+            primary_key_filter,
         })
     }
 
@@ -115,6 +119,7 @@ impl EncodedBulkPartIter {
             if let Some(batch) = apply_combined_filters(
                 &self.context,
                 &self.sequence,
+                &mut self.primary_key_filter,
                 batch,
                 self.current_skip_fields,
             )? {
@@ -141,6 +146,7 @@ impl EncodedBulkPartIter {
                 if let Some(batch) = apply_combined_filters(
                     &self.context,
                     &self.sequence,
+                    &mut self.primary_key_filter,
                     batch,
                     self.current_skip_fields,
                 )? {
@@ -210,6 +216,7 @@ pub struct BulkPartBatchIter {
     metrics: MemScanMetricsData,
     /// Optional memory scan metrics to report to.
     mem_scan_metrics: Option<MemScanMetrics>,
+    primary_key_filter: Option<Box<dyn PrimaryKeyFilter>>,
 }
 
 impl BulkPartBatchIter {
@@ -222,6 +229,7 @@ impl BulkPartBatchIter {
         mem_scan_metrics: Option<MemScanMetrics>,
     ) -> Self {
         assert!(context.read_format().as_flat().is_some());
+        let primary_key_filter = context.base.new_primary_key_filter();
 
         Self {
             batches: VecDeque::from(batches),
@@ -232,6 +240,7 @@ impl BulkPartBatchIter {
                 ..Default::default()
             },
             mem_scan_metrics,
+            primary_key_filter,
         }
     }
 
@@ -283,8 +292,13 @@ impl BulkPartBatchIter {
             PreFilterMode::SkipFieldsOnDelete => true,
         };
 
-        let Some(filtered_batch) =
-            apply_combined_filters(&self.context, &self.sequence, projected_batch, skip_fields)?
+        let Some(filtered_batch) = apply_combined_filters(
+            &self.context,
+            &self.sequence,
+            &mut self.primary_key_filter,
+            projected_batch,
+            skip_fields,
+        )?
         else {
             self.metrics.scan_cost += start.elapsed();
             return Ok(None);
@@ -352,9 +366,20 @@ impl Drop for BulkPartBatchIter {
 fn apply_combined_filters(
     context: &BulkIterContext,
     sequence: &Option<SequenceRange>,
+    primary_key_filter: &mut Option<Box<dyn PrimaryKeyFilter>>,
     record_batch: RecordBatch,
     skip_fields: bool,
 ) -> error::Result<Option<RecordBatch>> {
+    let record_batch = match primary_key_filter.as_mut() {
+        Some(primary_key_filter) => context
+            .base
+            .prefilter_flat_batch_by_primary_key(record_batch, primary_key_filter.as_mut())?,
+        None => Some(record_batch),
+    };
+    let Some(record_batch) = record_batch else {
+        return Ok(None);
+    };
+
     // Converts the format to the flat format first.
     let format = context.read_format().as_flat().unwrap();
     let record_batch = format.convert_batch(record_batch, None)?;
