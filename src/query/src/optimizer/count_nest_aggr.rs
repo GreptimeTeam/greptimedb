@@ -76,8 +76,8 @@ impl CountNestAggrRule {
         }
         let outer_time_expr = outer_agg.group_expr[0].clone();
         let outer_count_arg =
-            match Self::aggregate_arg_if(&outer_agg.aggr_expr[0], |name| name == "count") {
-                Some(arg) => arg,
+            match Self::aggregate_if(&outer_agg.aggr_expr[0], |name| name == "count") {
+                Some((_, arg)) => arg,
                 None => return Ok(None),
             };
 
@@ -94,12 +94,13 @@ impl CountNestAggrRule {
         if inner_agg.aggr_expr.len() != 1 || inner_agg.group_expr.is_empty() {
             return Ok(None);
         }
-        let inner_value_expr = match Self::aggregate_arg_if(&inner_agg.aggr_expr[0], |name| {
-            Self::is_supported_inner_aggregate(name)
-        }) {
-            Some(arg) => arg,
-            None => return Ok(None),
-        };
+        let (inner_agg_name, inner_value_expr) =
+            match Self::aggregate_if(&inner_agg.aggr_expr[0], |name| {
+                Self::is_supported_inner_aggregate(name)
+            }) {
+                Some((name, arg)) => (name, arg),
+                None => return Ok(None),
+            };
         let Expr::Column(_) = inner_value_expr else {
             return Ok(None);
         };
@@ -155,7 +156,11 @@ impl CountNestAggrRule {
             .field(outer_agg.group_expr.len())
             .name()
             .clone();
-        let presence_input = LogicalPlanBuilder::from(presence_source)
+        let mut presence_input = LogicalPlanBuilder::from(presence_source);
+        if inner_agg_name != "count" {
+            presence_input = presence_input.filter(inner_value_expr.clone().is_not_null())?;
+        }
+        let presence_input = presence_input
             .project(presence_group_exprs.clone())?
             .distinct()?
             .build()?;
@@ -188,14 +193,15 @@ impl CountNestAggrRule {
         required
     }
 
-    fn aggregate_arg_if<F>(expr: &Expr, accept_name: F) -> Option<&Expr>
+    fn aggregate_if<F>(expr: &Expr, accept_name: F) -> Option<(&str, &Expr)>
     where
         F: FnOnce(&str) -> bool,
     {
         let Expr::AggregateFunction(func) = expr else {
             return None;
         };
-        if !accept_name(func.func.name())
+        let name = func.func.name();
+        if !accept_name(name)
             || func.params.filter.is_some()
             || func.params.distinct
             || !func.params.order_by.is_empty()
@@ -204,7 +210,7 @@ impl CountNestAggrRule {
             return None;
         }
 
-        Some(&func.params.args[0])
+        Some((name, &func.params.args[0]))
     }
 
     fn is_supported_inner_aggregate(name: &str) -> bool {

@@ -4792,6 +4792,32 @@ mod test {
     }
 
     #[tokio::test]
+    async fn nested_non_count_inner_aggs_rewrite_filter_null_values_for_tsid_input() {
+        let count_plan =
+            build_optimized_tsid_plan("count(count(some_metric) by (tag_0))", 2, 1, 100_000, 1)
+                .await;
+        assert!(
+            !count_plan.contains("some_metric.field_0 IS NOT NULL"),
+            "{count_plan}"
+        );
+
+        for query in [
+            "count(sum(some_metric) by (tag_0))",
+            "count(avg(some_metric) by (tag_0))",
+            "count(min(some_metric) by (tag_0))",
+            "count(max(some_metric) by (tag_0))",
+            "count(stddev(some_metric) by (tag_0))",
+            "count(stdvar(some_metric) by (tag_0))",
+        ] {
+            let plan_str = build_optimized_tsid_plan(query, 2, 1, 100_000, 1).await;
+            assert!(
+                plan_str.contains("Filter: some_metric.field_0 IS NOT NULL"),
+                "{query}: {plan_str}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn nested_unsupported_or_non_direct_inner_aggs_do_not_rewrite() {
         assert_nested_count_rewrite_missing("count(group(some_metric) by (tag_0))", 2, 1).await;
         assert_nested_count_rewrite_missing(

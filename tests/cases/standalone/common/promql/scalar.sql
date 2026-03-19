@@ -195,6 +195,10 @@ TQL EVAL (0, 600, '200s') count(presence_metric{instance="i1"}) by (cpu);
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 600, '200s') scalar(count(count(presence_metric{instance="i1"}) by (cpu)));
 
+-- Non-count inner aggregates must drop NULL-only groups before the outer count.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 600, '200s') scalar(count(sum(presence_metric{instance="i1"}) by (cpu)));
+
 -- False case: outer `by (instance)` keeps multiple series at the scalar input, so scalar should still yield NaN.
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 600, '200s') scalar(count(count(presence_metric) by (instance, cpu)) by (instance));

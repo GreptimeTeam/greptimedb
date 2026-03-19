@@ -771,6 +771,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_plan_pql_filters_null_only_groups_for_non_count_inner_aggs() {
+        let count_plan = parse_promql_to_plan("scalar(count(count(some_metric) by (tag_0)))").await;
+        let count_plan_str = count_plan.display_indent_schema().to_string();
+        assert!(
+            !count_plan_str.contains("field_0 IS NOT NULL"),
+            "{count_plan_str}"
+        );
+
+        for inner_agg in ["sum", "avg", "min", "max", "stddev", "stdvar"] {
+            let plan = parse_promql_to_plan(&format!(
+                "scalar(count({inner_agg}(some_metric) by (tag_0)))"
+            ))
+            .await;
+            let plan_str = plan.display_indent_schema().to_string();
+            assert!(
+                plan_str.contains("field_0 IS NOT NULL"),
+                "{inner_agg}: {plan_str}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn test_plan_pql_skips_extension_rules_for_non_direct_or_unsupported_inner_agg() {
         for query in [
             "sum(irate(some_metric[1h])) / scalar(count(sum(irate(some_metric[1h])) by (tag_0)))",
