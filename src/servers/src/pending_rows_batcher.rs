@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -57,6 +56,8 @@ use crate::metrics::{
 };
 
 const PHYSICAL_TABLE_KEY: &str = "physical_table";
+/// Whether wait for ingestion result before reply to client.
+const PENDING_ROWS_BATCH_SYNC_ENV: &str = "PENDING_ROWS_BATCH_SYNC";
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 struct BatchKey {
@@ -132,6 +133,7 @@ pub struct PendingRowsBatcher {
     flush_semaphore: Arc<Semaphore>,
     inflight_semaphore: Arc<Semaphore>,
     worker_channel_capacity: usize,
+    pending_rows_batch_sync: bool,
     shutdown: broadcast::Sender<()>,
 }
 
@@ -152,6 +154,11 @@ impl PendingRowsBatcher {
         }
 
         let (shutdown, _) = broadcast::channel(1);
+        let pending_rows_batch_sync = std::env::var(PENDING_ROWS_BATCH_SYNC_ENV)
+            .ok()
+            .as_deref()
+            .and_then(|v| v.parse::<bool>().ok())
+            .unwrap_or(true);
         Some(Arc::new(Self {
             workers: DashMap::new(),
             flush_interval,
@@ -162,6 +169,7 @@ impl PendingRowsBatcher {
             flush_semaphore: Arc::new(Semaphore::new(max_concurrent_flushes)),
             inflight_semaphore: Arc::new(Semaphore::new(max_inflight_requests)),
             worker_channel_capacity,
+            pending_rows_batch_sync,
             shutdown,
         }))
     }
@@ -217,11 +225,7 @@ impl PendingRowsBatcher {
                 .map_err(|_| Error::BatcherChannelClosed)?;
         }
 
-        if std::env::var("PENDING_ROWS_BATCH_SYNC")
-            .ok()
-            .and_then(|v| bool::from_str(&v).ok())
-            .unwrap_or(false)
-        {
+        if self.pending_rows_batch_sync {
             let result = {
                 let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
                     .with_label_values(&["submit_wait_flush_result"])
