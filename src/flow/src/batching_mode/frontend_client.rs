@@ -753,7 +753,10 @@ mod tests {
                 schema,
                 batch: Some(batch),
                 metrics: RecordBatchMetrics {
-                    region_latest_sequences: Some(vec![(42, 99)]),
+                    region_watermarks: vec![common_recordbatch::adapter::RegionWatermarkEntry {
+                        region_id: 42,
+                        watermark: Some(99),
+                    }],
                     ..Default::default()
                 },
                 terminal_metrics_only: true,

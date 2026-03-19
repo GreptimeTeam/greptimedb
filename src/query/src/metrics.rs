@@ -211,6 +211,11 @@ fn collect_region_watermarks(plan: Arc<dyn ExecutionPlan>) -> Vec<RegionWatermar
 
     while let Some(plan) = stack.pop() {
         if let Some(merge_scan) = plan.as_any().downcast_ref::<MergeScanExec>() {
+            for region_id in merge_scan.regions() {
+                merged
+                    .entry(region_id.as_u64())
+                    .or_insert(MergeState::Unproved);
+            }
             for metrics in merge_scan.sub_stage_metrics() {
                 for entry in metrics.region_watermarks {
                     merged

@@ -18,6 +18,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use api::v1::CreateTableExpr;
 use catalog::CatalogManagerRef;
+use client::OutputWithMetrics;
 use common_error::ext::BoxedError;
 use common_query::logical_plan::breakup_insert_plan;
 use common_telemetry::tracing::warn;
@@ -32,6 +33,10 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use operator::expr_helper::column_schemas_to_defs;
 use query::QueryEngineRef;
+use query::options::{
+    FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY,
+    FLOW_SINK_TABLE_ID,
+};
 use query::query_engine::DefaultSerializer;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -46,7 +51,7 @@ use tokio::time::Instant;
 use crate::adapter::{AUTO_CREATED_PLACEHOLDER_TS_COL, AUTO_CREATED_UPDATE_AT_TS_COL};
 use crate::batching_mode::BatchingModeOptions;
 use crate::batching_mode::frontend_client::FrontendClient;
-use crate::batching_mode::state::{FilterExprInfo, TaskState};
+use crate::batching_mode::state::{CheckpointMode, FilterExprInfo, TaskState};
 use crate::batching_mode::time_window::TimeWindowExpr;
 use crate::batching_mode::utils::{
     AddFilterRewriter, ColumnMatcherRewriter, FindGroupByFinalName, gen_plan_with_matching_schema,
@@ -378,81 +383,128 @@ impl BatchingTask {
             })?
             .data;
 
-        let mut peer_desc = None;
+        let extensions = self.build_flow_query_extensions().await?;
+        let extension_refs = extensions
+            .iter()
+            .map(|(key, value)| (*key, value.as_str()))
+            .collect::<Vec<_>>();
 
         let res = {
             let _timer = METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME
                 .with_label_values(&[flow_id.to_string().as_str()])
                 .start_timer();
 
-            // hack and special handling the insert logical plan
             let req = if let Some((insert_to, insert_plan)) =
                 breakup_insert_plan(&plan, catalog, schema)
             {
                 let message = DFLogicalSubstraitConvertor {}
                     .encode(&insert_plan, DefaultSerializer)
                     .context(SubstraitEncodeLogicalPlanSnafu)?;
-                api::v1::greptime_request::Request::Query(api::v1::QueryRequest {
+                api::v1::QueryRequest {
                     query: Some(api::v1::query_request::Query::InsertIntoPlan(
                         api::v1::InsertIntoPlan {
                             table_name: Some(insert_to),
                             logical_plan: message.to_vec(),
                         },
                     )),
-                })
+                }
             } else {
                 let message = DFLogicalSubstraitConvertor {}
                     .encode(&plan, DefaultSerializer)
                     .context(SubstraitEncodeLogicalPlanSnafu)?;
 
-                api::v1::greptime_request::Request::Query(api::v1::QueryRequest {
+                api::v1::QueryRequest {
                     query: Some(api::v1::query_request::Query::LogicalPlan(message.to_vec())),
-                })
+                }
             };
 
             frontend_client
-                .handle(req, catalog, schema, &mut peer_desc)
+                .query_with_terminal_metrics(catalog, schema, req, &extension_refs)
                 .await
         };
 
         let elapsed = instant.elapsed();
-        if let Ok(affected_rows) = &res {
+        if let Ok(result) = &res {
+            let (affected_rows, _) = result.output.extract_rows_and_cost();
             debug!(
-                "Flow {flow_id} executed, affected_rows: {affected_rows:?}, elapsed: {:?}",
-                elapsed
+                "Flow {flow_id} executed, affected_rows: {affected_rows:?}, elapsed: {:?}, watermark: {:?}",
+                elapsed,
+                result.region_watermark_map()
             );
             METRIC_FLOW_ROWS
                 .with_label_values(&[format!("{}-out-batching", flow_id).as_str()])
-                .inc_by(*affected_rows as _);
+                .inc_by(affected_rows as _);
         } else if let Err(err) = &res {
             warn!(
-                "Failed to execute Flow {flow_id} on frontend {:?}, result: {err:?}, elapsed: {:?} with query: {}",
-                peer_desc, elapsed, &plan
+                "Failed to execute Flow {flow_id}, result: {err:?}, elapsed: {:?} with query: {}",
+                elapsed, &plan
             );
+            self.state.write().unwrap().after_query_exec(elapsed, false);
         }
 
         // record slow query
         if elapsed >= self.config.batch_opts.slow_query_threshold {
             warn!(
-                "Flow {flow_id} on frontend {:?} executed for {:?} before complete, query: {}",
-                peer_desc, elapsed, &plan
+                "Flow {flow_id} executed for {:?} before complete, query: {}",
+                elapsed, &plan
             );
             METRIC_FLOW_BATCHING_ENGINE_SLOW_QUERY
-                .with_label_values(&[
-                    flow_id.to_string().as_str(),
-                    &peer_desc.unwrap_or_default().to_string(),
-                ])
+                .with_label_values(&[flow_id.to_string().as_str(), "watermark-path"])
                 .observe(elapsed.as_secs_f64());
         }
 
-        self.state
-            .write()
-            .unwrap()
-            .after_query_exec(elapsed, res.is_ok());
-
         let res = res?;
+        let (affected_rows, _) = res.output.extract_rows_and_cost();
+        let affected_rows: u32 = affected_rows.try_into().map_err(|_| {
+            UnexpectedSnafu {
+                reason: format!("Failed to convert rows to u32: {}", affected_rows),
+            }
+            .build()
+        })?;
 
-        Ok(Some((res, elapsed)))
+        {
+            let mut state = self.state.write().unwrap();
+            Self::apply_query_result_to_state(&mut state, &res, elapsed);
+        }
+
+        Ok(Some((affected_rows, elapsed)))
+    }
+
+    fn apply_query_result_to_state(
+        state: &mut TaskState,
+        res: &OutputWithMetrics,
+        elapsed: Duration,
+    ) {
+        state.after_query_exec(elapsed, true);
+        if let (Some(participating_regions), Some(watermark_map)) =
+            (res.participating_regions(), res.region_watermark_map())
+        {
+            let checkpoint_mode = state.checkpoint_mode();
+            let can_advance = match checkpoint_mode {
+                CheckpointMode::FullSnapshot => state
+                    .can_advance_full_snapshot_checkpoints(&participating_regions, &watermark_map),
+                CheckpointMode::Incremental => state
+                    .can_advance_incremental_checkpoints_with_participation(
+                        &participating_regions,
+                        &watermark_map,
+                    ),
+            };
+
+            if can_advance {
+                match checkpoint_mode {
+                    CheckpointMode::FullSnapshot => state.advance_checkpoints(watermark_map),
+                    CheckpointMode::Incremental => state
+                        .advance_incremental_checkpoints_with_participation(
+                            &participating_regions,
+                            watermark_map,
+                        ),
+                }
+            } else {
+                state.mark_full_snapshot();
+            }
+        } else {
+            state.mark_full_snapshot();
+        }
     }
 
     fn handle_flow_query_failure(&self, err: &Error, query: Option<&PlanInfo>) -> bool {
@@ -462,6 +514,7 @@ impl BatchingTask {
                 "Flow {} detected stale incremental query failure, switching to non-incremental recompute semantics for current query scope: {:?}",
                 self.config.flow_id, failure.stale_cursor
             );
+            self.state.write().unwrap().mark_full_snapshot();
 
             // notice that we only mark all as dirty if query itself has no time window filter.
             if query.is_none_or(|query| query.filter.is_none())
@@ -491,6 +544,45 @@ impl BatchingTask {
                 .map(|f| f.time_ranges.clone())
                 .unwrap_or_default(),
         );
+    }
+
+    async fn build_flow_query_extensions(&self) -> Result<Vec<(&'static str, String)>, Error> {
+        let state = self.state.read().unwrap();
+        let mut extensions = vec![("flow.return_region_seq", "true".to_string())];
+
+        drop(state);
+        if let Some(table) = self
+            .config
+            .catalog_manager
+            .table(
+                &self.config.sink_table_name[0],
+                &self.config.sink_table_name[1],
+                &self.config.sink_table_name[2],
+                None,
+            )
+            .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?
+        {
+            extensions.push((
+                FLOW_SINK_TABLE_ID,
+                table.table_info().table_id().to_string(),
+            ));
+        }
+
+        let state = self.state.read().unwrap();
+        if state.checkpoint_mode() == CheckpointMode::Incremental && !state.checkpoints().is_empty()
+        {
+            let checkpoints_json = serde_json::to_string(state.checkpoints())
+                .expect("checkpoint map should serialize");
+            extensions.push((
+                FLOW_INCREMENTAL_MODE,
+                FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY.to_string(),
+            ));
+            extensions.push((FLOW_INCREMENTAL_AFTER_SEQS, checkpoints_json));
+        }
+
+        Ok(extensions)
     }
 
     /// start executing query in a loop, break when receive shutdown signal
@@ -1015,9 +1107,13 @@ fn build_pk_from_aggr(plan: &LogicalPlan) -> Result<Option<TableDef>, Error> {
 
 #[cfg(test)]
 mod test {
+    use std::collections::BTreeMap;
+
     use api::v1::column_def::try_as_column_schema;
     use common_error::ext::{BoxedError, PlainError};
     use common_error::status_code::StatusCode;
+    use common_query::Output;
+    use common_recordbatch::adapter::{RecordBatchMetrics, RegionWatermarkEntry};
     use pretty_assertions::assert_eq;
     use session::context::QueryContext;
     use snafu::GenerateImplicitData;
@@ -1266,6 +1362,329 @@ mod test {
         assert_eq!(
             state.dirty_time_windows.window_size(),
             std::time::Duration::from_secs(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_flow_query_extensions_switches_with_checkpoint_mode() {
+        let query_engine = create_test_query_engine();
+        let query_ctx = QueryContext::arc();
+        let plan = sql_to_df_plan(
+            query_ctx.clone(),
+            query_engine,
+            "SELECT number, ts FROM numbers_with_ts",
+            true,
+        )
+        .await
+        .unwrap();
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let task = BatchingTask::try_new(TaskArgs {
+            flow_id: 44,
+            query: "SELECT number, ts FROM numbers_with_ts",
+            plan,
+            time_window_expr: None,
+            expire_after: None,
+            sink_table_name: [
+                "greptime".to_string(),
+                "public".to_string(),
+                "sink".to_string(),
+            ],
+            source_table_names: vec![[
+                "greptime".to_string(),
+                "public".to_string(),
+                "numbers_with_ts".to_string(),
+            ]],
+            query_ctx,
+            catalog_manager: create_test_query_engine()
+                .engine_state()
+                .catalog_manager()
+                .clone(),
+            shutdown_rx: rx,
+            batch_opts: Arc::new(BatchingModeOptions::default()),
+            flow_eval_interval: None,
+        })
+        .unwrap();
+
+        let extensions = task.build_flow_query_extensions().await.unwrap();
+        assert!(
+            extensions
+                .iter()
+                .any(|(k, v)| *k == "flow.return_region_seq" && v == "true")
+        );
+
+        task.state
+            .write()
+            .unwrap()
+            .advance_checkpoints(HashMap::from([(7_u64, 42_u64)]));
+        let extensions = task.build_flow_query_extensions().await.unwrap();
+        assert!(
+            extensions
+                .iter()
+                .any(|(k, v)| *k == "flow.return_region_seq" && v == "true")
+        );
+        assert!(
+            extensions
+                .iter()
+                .any(|(k, v)| *k == "flow.incremental_mode" && v == "memtable_only")
+        );
+        assert!(
+            extensions
+                .iter()
+                .any(|(k, v)| *k == "flow.incremental_after_seqs" && v == r#"{"7":42}"#)
+        );
+    }
+
+    fn watermark_result(entries: Vec<(u64, Option<u64>)>) -> OutputWithMetrics {
+        let result = OutputWithMetrics::from_output(Output::new_with_affected_rows(1));
+        result.metrics.update(Some(RecordBatchMetrics {
+            region_watermarks: entries
+                .into_iter()
+                .map(|(region_id, watermark)| RegionWatermarkEntry {
+                    region_id,
+                    watermark,
+                })
+                .collect(),
+            ..Default::default()
+        }));
+        result.metrics.mark_ready();
+        result
+    }
+
+    #[tokio::test]
+    async fn test_apply_query_result_to_state_advances_full_snapshot_to_incremental() {
+        let query_engine = create_test_query_engine();
+        let query_ctx = QueryContext::arc();
+        let plan = sql_to_df_plan(
+            query_ctx.clone(),
+            query_engine,
+            "SELECT number, ts FROM numbers_with_ts",
+            true,
+        )
+        .await
+        .unwrap();
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let task = BatchingTask::try_new(TaskArgs {
+            flow_id: 45,
+            query: "SELECT number, ts FROM numbers_with_ts",
+            plan,
+            time_window_expr: None,
+            expire_after: None,
+            sink_table_name: [
+                "greptime".to_string(),
+                "public".to_string(),
+                "sink".to_string(),
+            ],
+            source_table_names: vec![[
+                "greptime".to_string(),
+                "public".to_string(),
+                "numbers_with_ts".to_string(),
+            ]],
+            query_ctx,
+            catalog_manager: create_test_query_engine()
+                .engine_state()
+                .catalog_manager()
+                .clone(),
+            shutdown_rx: rx,
+            batch_opts: Arc::new(BatchingModeOptions::default()),
+            flow_eval_interval: None,
+        })
+        .unwrap();
+
+        let result = watermark_result(vec![(1, Some(10)), (2, Some(20))]);
+        let mut state = task.state.write().unwrap();
+        BatchingTask::apply_query_result_to_state(&mut state, &result, Duration::from_millis(1));
+
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::Incremental);
+        assert_eq!(
+            state.checkpoints(),
+            &BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_apply_query_result_to_state_rejects_partial_incremental_watermark_map() {
+        let query_engine = create_test_query_engine();
+        let query_ctx = QueryContext::arc();
+        let plan = sql_to_df_plan(
+            query_ctx.clone(),
+            query_engine,
+            "SELECT number, ts FROM numbers_with_ts",
+            true,
+        )
+        .await
+        .unwrap();
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let task = BatchingTask::try_new(TaskArgs {
+            flow_id: 46,
+            query: "SELECT number, ts FROM numbers_with_ts",
+            plan,
+            time_window_expr: None,
+            expire_after: None,
+            sink_table_name: [
+                "greptime".to_string(),
+                "public".to_string(),
+                "sink".to_string(),
+            ],
+            source_table_names: vec![[
+                "greptime".to_string(),
+                "public".to_string(),
+                "numbers_with_ts".to_string(),
+            ]],
+            query_ctx,
+            catalog_manager: create_test_query_engine()
+                .engine_state()
+                .catalog_manager()
+                .clone(),
+            shutdown_rx: rx,
+            batch_opts: Arc::new(BatchingModeOptions::default()),
+            flow_eval_interval: None,
+        })
+        .unwrap();
+
+        {
+            let mut state = task.state.write().unwrap();
+            state.advance_checkpoints(HashMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]));
+        }
+
+        let result = watermark_result(vec![(1, Some(11)), (2, None)]);
+        let mut state = task.state.write().unwrap();
+        BatchingTask::apply_query_result_to_state(&mut state, &result, Duration::from_millis(1));
+
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+        assert_eq!(
+            state.checkpoints(),
+            &BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_apply_query_result_to_state_accepts_pruned_incremental_subset_and_preserves_others()
+     {
+        let query_engine = create_test_query_engine();
+        let query_ctx = QueryContext::arc();
+        let plan = sql_to_df_plan(
+            query_ctx.clone(),
+            query_engine,
+            "SELECT number, ts FROM numbers_with_ts",
+            true,
+        )
+        .await
+        .unwrap();
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let task = BatchingTask::try_new(TaskArgs {
+            flow_id: 48,
+            query: "SELECT number, ts FROM numbers_with_ts",
+            plan,
+            time_window_expr: None,
+            expire_after: None,
+            sink_table_name: [
+                "greptime".to_string(),
+                "public".to_string(),
+                "sink".to_string(),
+            ],
+            source_table_names: vec![[
+                "greptime".to_string(),
+                "public".to_string(),
+                "numbers_with_ts".to_string(),
+            ]],
+            query_ctx,
+            catalog_manager: create_test_query_engine()
+                .engine_state()
+                .catalog_manager()
+                .clone(),
+            shutdown_rx: rx,
+            batch_opts: Arc::new(BatchingModeOptions::default()),
+            flow_eval_interval: None,
+        })
+        .unwrap();
+
+        {
+            let mut state = task.state.write().unwrap();
+            state.advance_checkpoints(HashMap::from([
+                (1_u64, 10_u64),
+                (2_u64, 20_u64),
+                (3_u64, 30_u64),
+            ]));
+        }
+
+        let result = watermark_result(vec![(1, Some(12)), (3, Some(31))]);
+        let mut state = task.state.write().unwrap();
+        BatchingTask::apply_query_result_to_state(&mut state, &result, Duration::from_millis(1));
+
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::Incremental);
+        assert_eq!(
+            state.checkpoints(),
+            &BTreeMap::from([(1_u64, 12_u64), (2_u64, 20_u64), (3_u64, 31_u64)])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stale_to_full_to_incremental_recovery_path() {
+        let query_engine = create_test_query_engine();
+        let query_ctx = QueryContext::arc();
+        let plan = sql_to_df_plan(
+            query_ctx.clone(),
+            query_engine,
+            "SELECT number, ts FROM numbers_with_ts",
+            true,
+        )
+        .await
+        .unwrap();
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let task = BatchingTask::try_new(TaskArgs {
+            flow_id: 47,
+            query: "SELECT number, ts FROM numbers_with_ts",
+            plan: plan.clone(),
+            time_window_expr: None,
+            expire_after: None,
+            sink_table_name: [
+                "greptime".to_string(),
+                "public".to_string(),
+                "sink".to_string(),
+            ],
+            source_table_names: vec![[
+                "greptime".to_string(),
+                "public".to_string(),
+                "numbers_with_ts".to_string(),
+            ]],
+            query_ctx,
+            catalog_manager: create_test_query_engine()
+                .engine_state()
+                .catalog_manager()
+                .clone(),
+            shutdown_rx: rx,
+            batch_opts: Arc::new(BatchingModeOptions::default()),
+            flow_eval_interval: None,
+        })
+        .unwrap();
+
+        {
+            let mut state = task.state.write().unwrap();
+            state.advance_checkpoints(HashMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]));
+            assert_eq!(state.checkpoint_mode(), CheckpointMode::Incremental);
+        }
+
+        let err = Error::External {
+            source: BoxedError::new(PlainError::new(
+                "STALE_CURSOR: incremental query stale, region: 4398046511104(1024, 0), given_seq: 9, min_readable_seq: 18, retry_hint: FALLBACK_FULL_RECOMPUTE".to_string(),
+                StatusCode::EngineExecuteQuery,
+            )),
+            location: snafu::Location::generate(),
+        };
+        assert!(task.handle_flow_query_failure(&err, None));
+        assert_eq!(
+            task.state.read().unwrap().checkpoint_mode(),
+            CheckpointMode::FullSnapshot
+        );
+
+        let result = watermark_result(vec![(1, Some(30)), (2, Some(40))]);
+        let mut state = task.state.write().unwrap();
+        BatchingTask::apply_query_result_to_state(&mut state, &result, Duration::from_millis(1));
+
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::Incremental);
+        assert_eq!(
+            state.checkpoints(),
+            &BTreeMap::from([(1_u64, 30_u64), (2_u64, 40_u64)])
         );
     }
 }

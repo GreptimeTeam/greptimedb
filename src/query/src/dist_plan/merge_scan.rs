@@ -415,6 +415,10 @@ impl MergeScanExec {
         )))
     }
 
+    pub fn regions(&self) -> &[RegionId] {
+        &self.regions
+    }
+
     pub fn try_with_new_distribution(&self, distribution: Distribution) -> Option<Self> {
         let Distribution::HashPartitioned(hash_exprs) = distribution else {
             // not applicable

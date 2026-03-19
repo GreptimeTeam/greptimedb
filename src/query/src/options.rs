@@ -26,7 +26,7 @@ pub const FLOW_INCREMENTAL_MODE: &str = "flow.incremental_mode";
 pub const FLOW_RETURN_REGION_SEQ: &str = "flow.return_region_seq";
 pub const FLOW_SINK_TABLE_ID: &str = "flow.sink_table_id";
 
-const FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY: &str = "memtable_only";
+pub const FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY: &str = "memtable_only";
 
 /// Query engine config
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
