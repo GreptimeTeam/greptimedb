@@ -59,7 +59,7 @@ impl BatchToRecordBatchAdapter {
     /// - `metadata`: region metadata describing the schema.
     /// - `codec`: codec for decoding the encoded primary key bytes.
     /// - `read_column_ids`: projected column ids to read.
-    pub(crate) fn new(
+    pub fn new(
         iter: BoxedBatchIterator,
         metadata: RegionMetadataRef,
         codec: Arc<dyn PrimaryKeyCodec>,

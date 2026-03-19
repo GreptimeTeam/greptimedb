@@ -13,9 +13,10 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use snafu::ensure;
-use tokio::sync::{Semaphore, TryAcquireError};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
 use crate::error::{
     MemoryAcquireTimeoutSnafu, MemoryLimitExceededSnafu, MemorySemaphoreClosedSnafu, Result,
@@ -34,7 +35,7 @@ pub trait MemoryMetrics: Clone + Send + Sync + 'static {
 /// Generic memory manager for quota-controlled operations.
 #[derive(Clone)]
 pub struct MemoryManager<M: MemoryMetrics> {
-    quota: Option<MemoryQuota<M>>,
+    quota: MemoryQuotaState<M>,
 }
 
 impl<M: MemoryMetrics + Default> Default for MemoryManager<M> {
@@ -51,6 +52,18 @@ pub(crate) struct MemoryQuota<M: MemoryMetrics> {
     pub(crate) metrics: M,
 }
 
+#[derive(Clone)]
+pub(crate) struct UnlimitedMemoryQuota<M: MemoryMetrics> {
+    pub(crate) current_bytes: Arc<AtomicU64>,
+    pub(crate) metrics: M,
+}
+
+#[derive(Clone)]
+pub(crate) enum MemoryQuotaState<M: MemoryMetrics> {
+    Unlimited(UnlimitedMemoryQuota<M>),
+    Limited(MemoryQuota<M>),
+}
+
 impl<M: MemoryMetrics> MemoryManager<M> {
     /// Creates a new memory manager with the given limit in bytes.
     /// `limit_bytes = 0` disables the limit.
@@ -62,7 +75,12 @@ impl<M: MemoryMetrics> MemoryManager<M> {
     pub fn with_granularity(limit_bytes: u64, granularity: PermitGranularity, metrics: M) -> Self {
         if limit_bytes == 0 {
             metrics.set_limit(0);
-            return Self { quota: None };
+            return Self {
+                quota: MemoryQuotaState::Unlimited(UnlimitedMemoryQuota {
+                    current_bytes: Arc::new(AtomicU64::new(0)),
+                    metrics,
+                }),
+            };
         }
 
         let limit_permits = granularity.bytes_to_permits(limit_bytes);
@@ -70,7 +88,7 @@ impl<M: MemoryMetrics> MemoryManager<M> {
         metrics.set_limit(limit_aligned_bytes as i64);
 
         Self {
-            quota: Some(MemoryQuota {
+            quota: MemoryQuotaState::Limited(MemoryQuota {
                 semaphore: Arc::new(Semaphore::new(limit_permits as usize)),
                 limit_permits,
                 granularity,
@@ -81,26 +99,30 @@ impl<M: MemoryMetrics> MemoryManager<M> {
 
     /// Returns the configured limit in bytes (0 if unlimited).
     pub fn limit_bytes(&self) -> u64 {
-        self.quota
-            .as_ref()
-            .map(|quota| quota.permits_to_bytes(quota.limit_permits))
-            .unwrap_or(0)
+        match &self.quota {
+            MemoryQuotaState::Unlimited(_) => 0,
+            MemoryQuotaState::Limited(quota) => quota.permits_to_bytes(quota.limit_permits),
+        }
     }
 
     /// Returns currently used bytes.
     pub fn used_bytes(&self) -> u64 {
-        self.quota
-            .as_ref()
-            .map(|quota| quota.permits_to_bytes(quota.used_permits()))
-            .unwrap_or(0)
+        match &self.quota {
+            MemoryQuotaState::Unlimited(quota) => quota.current_bytes.load(Ordering::Acquire),
+            MemoryQuotaState::Limited(quota) => quota.permits_to_bytes(quota.used_permits()),
+        }
     }
 
     /// Returns available bytes.
+    ///
+    /// Unlimited managers report `u64::MAX`.
     pub fn available_bytes(&self) -> u64 {
-        self.quota
-            .as_ref()
-            .map(|quota| quota.permits_to_bytes(quota.available_permits_clamped()))
-            .unwrap_or(0)
+        match &self.quota {
+            MemoryQuotaState::Unlimited(_) => u64::MAX,
+            MemoryQuotaState::Limited(quota) => {
+                quota.permits_to_bytes(quota.available_permits_clamped())
+            }
+        }
     }
 
     /// Acquires memory, waiting if necessary until enough is available.
@@ -110,8 +132,8 @@ impl<M: MemoryMetrics> MemoryManager<M> {
     /// - Returns error if the semaphore is unexpectedly closed
     pub async fn acquire(&self, bytes: u64) -> Result<MemoryGuard<M>> {
         match &self.quota {
-            None => Ok(MemoryGuard::unlimited()),
-            Some(quota) => {
+            MemoryQuotaState::Unlimited(quota) => Ok(MemoryGuard::unlimited(quota.clone(), bytes)),
+            MemoryQuotaState::Limited(quota) => {
                 let permits = quota.bytes_to_permits(bytes);
 
                 ensure!(
@@ -129,7 +151,7 @@ impl<M: MemoryMetrics> MemoryManager<M> {
                     .await
                     .map_err(|_| MemorySemaphoreClosedSnafu.build())?;
                 quota.update_in_use_metric();
-                Ok(MemoryGuard::limited(permit, quota.clone()))
+                Ok(MemoryGuard::limited(quota.clone(), permit))
             }
         }
     }
@@ -137,14 +159,16 @@ impl<M: MemoryMetrics> MemoryManager<M> {
     /// Tries to acquire memory. Returns Some(guard) on success, None if insufficient.
     pub fn try_acquire(&self, bytes: u64) -> Option<MemoryGuard<M>> {
         match &self.quota {
-            None => Some(MemoryGuard::unlimited()),
-            Some(quota) => {
+            MemoryQuotaState::Unlimited(quota) => {
+                Some(MemoryGuard::unlimited(quota.clone(), bytes))
+            }
+            MemoryQuotaState::Limited(quota) => {
                 let permits = quota.bytes_to_permits(bytes);
 
                 match quota.semaphore.clone().try_acquire_many_owned(permits) {
                     Ok(permit) => {
                         quota.update_in_use_metric();
-                        Some(MemoryGuard::limited(permit, quota.clone()))
+                        Some(MemoryGuard::limited(quota.clone(), permit))
                     }
                     Err(TryAcquireError::NoPermits) | Err(TryAcquireError::Closed) => {
                         quota.metrics.inc_rejected("try_acquire");
@@ -218,5 +242,50 @@ impl<M: MemoryMetrics> MemoryQuota<M> {
     pub(crate) fn update_in_use_metric(&self) {
         let bytes = self.permits_to_bytes(self.used_permits());
         self.metrics.set_in_use(bytes as i64);
+    }
+
+    pub(crate) fn release_permit(&self, permit: OwnedSemaphorePermit) {
+        drop(permit);
+        self.update_in_use_metric();
+    }
+}
+
+impl<M: MemoryMetrics> UnlimitedMemoryQuota<M> {
+    pub(crate) fn add_in_use(&self, bytes: u64) {
+        if bytes == 0 {
+            return;
+        }
+
+        let previous = self
+            .current_bytes
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                Some(current.saturating_add(bytes))
+            })
+            .unwrap();
+        let new_total = previous.saturating_add(bytes);
+        debug_assert!(
+            new_total >= previous,
+            "unlimited memory usage counter overflowed"
+        );
+        self.metrics.set_in_use(new_total as i64);
+    }
+
+    pub(crate) fn sub_in_use(&self, bytes: u64) {
+        if bytes == 0 {
+            return;
+        }
+
+        let previous = self
+            .current_bytes
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                Some(current.saturating_sub(bytes))
+            })
+            .unwrap();
+        debug_assert!(
+            previous >= bytes,
+            "unlimited memory usage counter underflowed: current={previous}, release={bytes}"
+        );
+        let new_total = previous.saturating_sub(bytes);
+        self.metrics.set_in_use(new_total as i64);
     }
 }

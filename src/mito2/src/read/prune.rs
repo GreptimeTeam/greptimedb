@@ -81,11 +81,6 @@ impl PruneReader {
         }
     }
 
-    pub(crate) fn reset_source(&mut self, source: Source, skip_fields: bool) {
-        self.source = source;
-        self.skip_fields = skip_fields;
-    }
-
     /// Merge metrics with the inner reader and return the merged metrics.
     pub(crate) fn metrics(&self) -> ReaderMetrics {
         let mut metrics = self.metrics.clone();

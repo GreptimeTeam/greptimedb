@@ -55,6 +55,7 @@ use crate::metrics::READ_SST_COUNT;
 use crate::read::compat::{self, CompatBatch, FlatCompatBatch, PrimaryKeyCompatBatch};
 use crate::read::projection::ProjectionMapper;
 use crate::read::range::{FileRangeBuilder, MemRangeBuilder, RangeMeta, RowGroupIndex};
+use crate::read::range_cache::ScanRequestFingerprint;
 use crate::read::seq_scan::SeqScan;
 use crate::read::series_scan::SeriesScan;
 use crate::read::stream::ScanBatchStream;
@@ -815,7 +816,7 @@ pub struct ScanInput {
     /// But this read columns might also include non-projected columns needed for filtering.
     pub(crate) read_column_ids: Vec<ColumnId>,
     /// Time range filter for time index.
-    time_range: Option<TimestampRange>,
+    pub(crate) time_range: Option<TimestampRange>,
     /// Predicate to push down.
     pub(crate) predicate: PredicateGroup,
     /// Region partition expr applied at read time.
@@ -1417,6 +1418,92 @@ fn pre_filter_mode(append_mode: bool, merge_mode: MergeMode) -> PreFilterMode {
     }
 }
 
+/// Builds a [ScanRequestFingerprint] from a [ScanInput] if the scan is eligible
+/// for partition range caching.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn build_scan_fingerprint(input: &ScanInput) -> Option<ScanRequestFingerprint> {
+    let eligible = input.flat_format
+        && !input.compaction
+        && !input.files.is_empty()
+        && matches!(input.cache_strategy, CacheStrategy::EnableAll(_));
+
+    if !eligible {
+        return None;
+    }
+
+    let metadata = input.region_metadata();
+    let tag_names: HashSet<&str> = metadata
+        .column_metadatas
+        .iter()
+        .filter(|col| col.semantic_type == SemanticType::Tag)
+        .map(|col| col.column_schema.name.as_str())
+        .collect();
+
+    let time_index_name = metadata.time_index_column().column_schema.name.clone();
+
+    let exprs = input
+        .predicate_group()
+        .predicate_without_region()
+        .map(|predicate| predicate.exprs())
+        .unwrap_or_default();
+
+    let mut filters = Vec::new();
+    let mut time_filters = Vec::new();
+    let mut has_tag_filter = false;
+    let mut columns = HashSet::new();
+
+    for expr in exprs {
+        columns.clear();
+        let is_time_only = match expr_to_columns(expr, &mut columns) {
+            Ok(()) if !columns.is_empty() => {
+                has_tag_filter |= columns
+                    .iter()
+                    .any(|col| tag_names.contains(col.name.as_str()));
+                columns.iter().all(|col| col.name == time_index_name)
+            }
+            _ => false,
+        };
+
+        if is_time_only {
+            time_filters.push(expr.to_string());
+        } else {
+            filters.push(expr.to_string());
+        }
+    }
+
+    if !has_tag_filter {
+        // We only cache requests that have tag filters to avoid caching all series.
+        return None;
+    }
+
+    // Ensure the filters are sorted for consistent fingerprinting.
+    filters.sort_unstable();
+    time_filters.sort_unstable();
+
+    Some(
+        crate::read::range_cache::ScanRequestFingerprintBuilder {
+            read_column_ids: input.read_column_ids.clone(),
+            read_column_types: input
+                .read_column_ids
+                .iter()
+                .map(|id| {
+                    metadata
+                        .column_by_id(*id)
+                        .map(|col| col.column_schema.data_type.clone())
+                })
+                .collect(),
+            filters,
+            time_filters,
+            series_row_selector: input.series_row_selector,
+            append_mode: input.append_mode,
+            filter_deleted: input.filter_deleted,
+            merge_mode: input.merge_mode,
+            partition_expr_version: metadata.partition_expr_version,
+        }
+        .build(),
+    )
+}
+
 /// Context shared by different streams from a scanner.
 /// It contains the input and ranges to scan.
 pub struct StreamContext {
@@ -1763,10 +1850,15 @@ mod tests {
 
     use datafusion::physical_plan::expressions::lit as physical_lit;
     use datafusion_expr::{col, lit};
-    use store_api::storage::ScanRequest;
+    use datatypes::value::Value;
+    use partition::expr::col as partition_col;
+    use store_api::metadata::RegionMetadataBuilder;
+    use store_api::storage::{ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector};
 
     use super::*;
+    use crate::cache::CacheManager;
     use crate::memtable::time_partition::TimePartitions;
+    use crate::read::range_cache::ScanRequestFingerprintBuilder;
     use crate::region::options::RegionOptions;
     use crate::region::version::VersionBuilder;
     use crate::sst::FormatType;
@@ -1802,6 +1894,26 @@ mod tests {
                 .options(options)
                 .build(),
         )
+    }
+
+    async fn new_scan_input(metadata: RegionMetadataRef, filters: Vec<Expr>) -> ScanInput {
+        let env = SchedulerEnv::new().await;
+        let mapper = ProjectionMapper::new(&metadata, [0, 2, 3].into_iter(), true).unwrap();
+        let predicate = PredicateGroup::new(metadata.as_ref(), &filters).unwrap();
+        let file = FileHandle::new(
+            crate::sst::file::FileMeta::default(),
+            Arc::new(crate::sst::file_purger::NoopFilePurger),
+        );
+
+        ScanInput::new(env.access_layer.clone(), mapper)
+            .with_predicate(predicate)
+            .with_cache(CacheStrategy::EnableAll(Arc::new(
+                CacheManager::builder()
+                    .range_result_cache_size(1024)
+                    .build(),
+            )))
+            .with_flat_format(true)
+            .with_files(vec![file])
     }
 
     #[tokio::test]
@@ -1921,6 +2033,133 @@ mod tests {
             CacheStrategy::Disabled,
         );
         assert!(scan_region.use_flat_format());
+    }
+
+    #[tokio::test]
+    async fn test_build_scan_fingerprint_for_eligible_scan() {
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let input = new_scan_input(
+            metadata.clone(),
+            vec![
+                col("ts").gt_eq(lit(1000)),
+                col("k0").eq(lit("foo")),
+                col("v0").gt(lit(1)),
+            ],
+        )
+        .await
+        .with_distribution(Some(TimeSeriesDistribution::PerSeries))
+        .with_series_row_selector(Some(TimeSeriesRowSelector::LastRow))
+        .with_merge_mode(MergeMode::LastNonNull)
+        .with_filter_deleted(false);
+
+        let fingerprint = build_scan_fingerprint(&input).unwrap();
+
+        let expected = ScanRequestFingerprintBuilder {
+            read_column_ids: input.read_column_ids.clone(),
+            read_column_types: vec![
+                metadata
+                    .column_by_id(0)
+                    .map(|col| col.column_schema.data_type.clone()),
+                metadata
+                    .column_by_id(2)
+                    .map(|col| col.column_schema.data_type.clone()),
+                metadata
+                    .column_by_id(3)
+                    .map(|col| col.column_schema.data_type.clone()),
+            ],
+            filters: vec![
+                col("k0").eq(lit("foo")).to_string(),
+                col("v0").gt(lit(1)).to_string(),
+            ],
+            time_filters: vec![col("ts").gt_eq(lit(1000)).to_string()],
+            series_row_selector: Some(TimeSeriesRowSelector::LastRow),
+            append_mode: false,
+            filter_deleted: false,
+            merge_mode: MergeMode::LastNonNull,
+            partition_expr_version: 0,
+        }
+        .build();
+        assert_eq!(expected, fingerprint);
+    }
+
+    #[tokio::test]
+    async fn test_build_scan_fingerprint_requires_tag_filter() {
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let input = new_scan_input(
+            metadata,
+            vec![col("ts").gt_eq(lit(1000)), col("v0").gt(lit(1))],
+        )
+        .await;
+
+        assert!(build_scan_fingerprint(&input).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_build_scan_fingerprint_respects_scan_eligibility() {
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let filters = vec![col("k0").eq(lit("foo"))];
+
+        let disabled = ScanInput::new(
+            SchedulerEnv::new().await.access_layer.clone(),
+            ProjectionMapper::new(&metadata, [0, 2, 3].into_iter(), true).unwrap(),
+        )
+        .with_predicate(PredicateGroup::new(metadata.as_ref(), &filters).unwrap())
+        .with_flat_format(true);
+        assert!(build_scan_fingerprint(&disabled).is_none());
+
+        let non_flat = new_scan_input(metadata.clone(), filters.clone())
+            .await
+            .with_flat_format(false);
+        assert!(build_scan_fingerprint(&non_flat).is_none());
+
+        let compaction = new_scan_input(metadata.clone(), filters.clone())
+            .await
+            .with_compaction(true);
+        assert!(build_scan_fingerprint(&compaction).is_none());
+
+        // No files to read.
+        let no_files = new_scan_input(metadata, filters).await.with_files(vec![]);
+        assert!(build_scan_fingerprint(&no_files).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_build_scan_fingerprint_tracks_schema_and_partition_expr_changes() {
+        let base = metadata_with_primary_key(vec![0, 1], false);
+        let mut builder = RegionMetadataBuilder::from_existing(base);
+        let partition_expr = partition_col("k0")
+            .gt_eq(Value::String("foo".into()))
+            .as_json_str()
+            .unwrap();
+        builder.partition_expr_json(Some(partition_expr));
+        let metadata = Arc::new(builder.build_without_validation().unwrap());
+
+        let input = new_scan_input(metadata.clone(), vec![col("k0").eq(lit("foo"))]).await;
+        let fingerprint = build_scan_fingerprint(&input).unwrap();
+
+        let expected = ScanRequestFingerprintBuilder {
+            read_column_ids: input.read_column_ids.clone(),
+            read_column_types: vec![
+                metadata
+                    .column_by_id(0)
+                    .map(|col| col.column_schema.data_type.clone()),
+                metadata
+                    .column_by_id(2)
+                    .map(|col| col.column_schema.data_type.clone()),
+                metadata
+                    .column_by_id(3)
+                    .map(|col| col.column_schema.data_type.clone()),
+            ],
+            filters: vec![col("k0").eq(lit("foo")).to_string()],
+            time_filters: vec![],
+            series_row_selector: None,
+            append_mode: false,
+            filter_deleted: true,
+            merge_mode: MergeMode::LastRow,
+            partition_expr_version: metadata.partition_expr_version,
+        }
+        .build();
+        assert_eq!(expected, fingerprint);
+        assert_ne!(0, metadata.partition_expr_version);
     }
 
     #[test]

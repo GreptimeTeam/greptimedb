@@ -50,7 +50,7 @@ pub(crate) fn parse_wal_options(
 }
 
 /// Mode to handle duplicate rows while merging.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, EnumString)]
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum MergeMode {

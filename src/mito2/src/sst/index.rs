@@ -58,7 +58,7 @@ use crate::error::{
 };
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::metrics::INDEX_CREATE_MEMORY_USAGE;
-use crate::read::{Batch, BatchReader};
+use crate::read::Batch;
 use crate::region::options::IndexOptions;
 use crate::region::version::VersionControlRef;
 use crate::region::{ManifestContextRef, RegionLeaderState};
@@ -802,9 +802,9 @@ impl IndexBuildTask {
         if let Some(mut parquet_reader) = parquet_reader {
             // TODO(SNC123): optimize index batch
             loop {
-                match parquet_reader.next_batch().await {
-                    Ok(Some(mut batch)) => {
-                        indexer.update(&mut batch).await;
+                match parquet_reader.next_record_batch().await {
+                    Ok(Some(batch)) => {
+                        indexer.update_flat(&batch).await;
                     }
                     Ok(None) => break,
                     Err(e) => {
@@ -1227,7 +1227,9 @@ mod tests {
     use crate::sst::parquet::WriteOptions;
     use crate::test_util::memtable_util::EmptyMemtableBuilder;
     use crate::test_util::scheduler_util::SchedulerEnv;
-    use crate::test_util::sst_util::{new_batch_by_range, new_source, sst_region_metadata};
+    use crate::test_util::sst_util::{
+        new_flat_source_from_record_batches, new_record_batch_by_range, sst_region_metadata,
+    };
 
     struct MetaConfig {
         with_inverted: bool,
@@ -1358,19 +1360,20 @@ mod tests {
         env: &SchedulerEnv,
         build_mode: IndexBuildMode,
     ) -> SstInfo {
-        let source = new_source(&[
-            new_batch_by_range(&["a", "d"], 0, 60),
-            new_batch_by_range(&["b", "f"], 0, 40),
-            new_batch_by_range(&["b", "h"], 100, 200),
+        let source = new_flat_source_from_record_batches(vec![
+            new_record_batch_by_range(&["a", "d"], 0, 60),
+            new_record_batch_by_range(&["b", "f"], 0, 40),
+            new_record_batch_by_range(&["b", "h"], 100, 200),
         ]);
         let mut index_config = MitoConfig::default().index;
         index_config.build_mode = build_mode;
         let write_request = SstWriteRequest {
             op_type: OperationType::Flush,
             metadata: metadata.clone(),
-            source: either::Left(source),
+            source,
             storage: None,
             max_sequence: None,
+            sst_write_format: Default::default(),
             cache_manager: Default::default(),
             index_options: IndexOptions::default(),
             index_config,

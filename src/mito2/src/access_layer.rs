@@ -17,7 +17,6 @@ use std::time::{Duration, Instant};
 
 use async_stream::try_stream;
 use common_time::Timestamp;
-use either::Either;
 use futures::{Stream, TryStreamExt};
 use object_store::services::Fs;
 use object_store::util::{join_dir, with_instrument_layers};
@@ -37,7 +36,7 @@ use crate::error::{
     CleanDirSnafu, DeleteIndexSnafu, DeleteIndexesSnafu, DeleteSstsSnafu, OpenDalSnafu, Result,
 };
 use crate::metrics::{COMPACTION_STAGE_ELAPSED, FLUSH_ELAPSED};
-use crate::read::{FlatSource, Source};
+use crate::read::FlatSource;
 use crate::region::options::IndexOptions;
 use crate::sst::file::{FileHandle, RegionFileId, RegionIndexId};
 use crate::sst::index::IndexerBuilderImpl;
@@ -47,7 +46,7 @@ use crate::sst::location::{self, region_dir_from_table_dir};
 use crate::sst::parquet::reader::ParquetReaderBuilder;
 use crate::sst::parquet::writer::ParquetWriter;
 use crate::sst::parquet::{SstInfo, WriteOptions};
-use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY};
+use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY, FormatType};
 
 pub type AccessLayerRef = Arc<AccessLayer>;
 /// SST write results.
@@ -339,6 +338,7 @@ impl AccessLayer {
         metrics: &mut Metrics,
     ) -> Result<SstInfoArray> {
         let region_id = request.metadata.region_id;
+        let region_metadata = request.metadata.clone();
         let cache_manager = request.cache_manager.clone();
 
         let sst_info = if let Some(write_cache) = cache_manager.write_cache() {
@@ -391,15 +391,19 @@ impl AccessLayer {
             )
             .await
             .with_file_cleaner(cleaner);
-            match request.source {
-                Either::Left(source) => {
+            match request.sst_write_format {
+                FormatType::PrimaryKey => {
                     writer
-                        .write_all(source, request.max_sequence, write_opts)
+                        .write_all_flat_as_primary_key(
+                            request.source,
+                            request.max_sequence,
+                            write_opts,
+                        )
                         .await?
                 }
-                Either::Right(flat_source) => {
+                FormatType::Flat => {
                     writer
-                        .write_all_flat(flat_source, request.max_sequence, write_opts)
+                        .write_all_flat(request.source, request.max_sequence, write_opts)
                         .await?
                 }
             }
@@ -412,6 +416,7 @@ impl AccessLayer {
                     cache_manager.put_parquet_meta_data(
                         RegionFileId::new(region_id, sst.file_id),
                         parquet_metadata.clone(),
+                        Some(region_metadata.clone()),
                     )
                 }
             }
@@ -520,11 +525,12 @@ pub enum OperationType {
 pub struct SstWriteRequest {
     pub op_type: OperationType,
     pub metadata: RegionMetadataRef,
-    pub source: Either<Source, FlatSource>,
+    pub source: FlatSource,
     pub cache_manager: CacheManagerRef,
     #[allow(dead_code)]
     pub storage: Option<String>,
     pub max_sequence: Option<SequenceNumber>,
+    pub sst_write_format: FormatType,
 
     /// Configs for index
     pub index_options: IndexOptions,

@@ -52,8 +52,8 @@ use crate::error::{
     NewRecordBatchSnafu, Result,
 };
 use crate::sst::parquet::format::{
-    FormatProjection, INTERNAL_COLUMN_NUM, PrimaryKeyArray, PrimaryKeyReadFormat, ReadFormat,
-    StatValues,
+    FIXED_POS_COLUMN_NUM, FormatProjection, INTERNAL_COLUMN_NUM, PrimaryKeyArray,
+    PrimaryKeyReadFormat, ReadFormat, StatValues,
 };
 use crate::sst::{
     FlatSchemaOptions, flat_sst_arrow_schema_column_num, tag_maybe_to_dictionary_field,
@@ -125,6 +125,21 @@ pub(crate) fn primary_key_column_index(num_columns: usize) -> usize {
 /// Returns the position of the op type key column.
 pub(crate) fn op_type_column_index(num_columns: usize) -> usize {
     num_columns - 1
+}
+
+/// Returns the start index of field columns in a flat batch.
+///
+/// `num_columns` is the total number of columns in the flat batch schema,
+/// including tag columns (if present), field columns, and fixed position columns
+/// (time index, primary key, sequence, op type).
+///
+/// For Dense encoding (raw PK columns included): field_column_start = primary_key.len()
+/// For Sparse encoding (no raw PK columns): field_column_start = 0
+pub(crate) fn field_column_start(metadata: &RegionMetadata, num_columns: usize) -> usize {
+    // Calculates field column start: total columns - fixed columns - field columns
+    // Field column count = total metadata columns - time index column - primary key columns
+    let field_column_count = metadata.column_metadatas.len() - 1 - metadata.primary_key.len();
+    num_columns - FIXED_POS_COLUMN_NUM - field_column_count
 }
 
 // TODO(yingwen): Add an option to skip reading internal columns if the region is
@@ -772,5 +787,91 @@ impl FlatReadFormat {
             false,
         )
         .unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use api::v1::SemanticType;
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
+    use store_api::codec::PrimaryKeyEncoding;
+    use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
+    use store_api::storage::RegionId;
+
+    use super::field_column_start;
+    use crate::sst::{FlatSchemaOptions, flat_sst_arrow_schema_column_num};
+
+    /// Builds a `RegionMetadata` with the given number of tags and fields.
+    fn build_metadata(
+        num_tags: usize,
+        num_fields: usize,
+        encoding: PrimaryKeyEncoding,
+    ) -> RegionMetadata {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(0, 0));
+        let mut col_id = 0u32;
+
+        for i in 0..num_tags {
+            builder.push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    format!("tag_{i}"),
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: col_id,
+            });
+            col_id += 1;
+        }
+
+        for i in 0..num_fields {
+            builder.push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    format!("field_{i}"),
+                    ConcreteDataType::uint64_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: col_id,
+            });
+            col_id += 1;
+        }
+
+        builder.push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "ts".to_string(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            semantic_type: SemanticType::Timestamp,
+            column_id: col_id,
+        });
+
+        let primary_key: Vec<u32> = (0..num_tags as u32).collect();
+        builder.primary_key(primary_key);
+        builder.primary_key_encoding(encoding);
+        builder.build().unwrap()
+    }
+
+    #[test]
+    fn test_field_column_start() {
+        // (num_tags, num_fields, encoding, expected)
+        let cases = [
+            (1, 1, PrimaryKeyEncoding::Dense, 1),
+            (2, 2, PrimaryKeyEncoding::Dense, 2),
+            (0, 2, PrimaryKeyEncoding::Dense, 0),
+            (2, 2, PrimaryKeyEncoding::Sparse, 0),
+        ];
+
+        for (num_tags, num_fields, encoding, expected) in cases {
+            let metadata = build_metadata(num_tags, num_fields, encoding);
+            let options = FlatSchemaOptions::from_encoding(encoding);
+            let num_columns = flat_sst_arrow_schema_column_num(&metadata, &options);
+            let result = field_column_start(&metadata, num_columns);
+            assert_eq!(
+                result, expected,
+                "num_tags={num_tags}, num_fields={num_fields}, encoding={encoding:?}"
+            );
+        }
     }
 }
