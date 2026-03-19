@@ -325,11 +325,10 @@ impl StateWrapper {
 
     fn fix_inner_acc_args<'b>(
         &self,
-        acc_args: datafusion_expr::function::AccumulatorArgs<'b>,
+        mut acc_args: datafusion_expr::function::AccumulatorArgs<'b>,
     ) -> datafusion_common::Result<datafusion_expr::function::AccumulatorArgs<'b>> {
-        let mut new_acc_args = acc_args.clone();
-        new_acc_args.return_field = self.deduce_aggr_return_type(&acc_args)?;
-        Ok(new_acc_args)
+        acc_args.return_field = self.deduce_aggr_return_type(&acc_args)?;
+        Ok(acc_args)
     }
 }
 
