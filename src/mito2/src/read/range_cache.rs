@@ -21,8 +21,8 @@ use async_stream::try_stream;
 use common_time::range::TimestampRange;
 use datatypes::arrow::array::{Array, AsArray, DictionaryArray};
 use datatypes::arrow::datatypes::{
-    ArrowDictionaryKeyType, BinaryType as ArrowBinaryType, ByteArrayType,
-    DataType as ArrowDataType, LargeBinaryType, LargeUtf8Type, UInt32Type, Utf8Type,
+    BinaryType as ArrowBinaryType, ByteArrayType, DataType as ArrowDataType, LargeBinaryType,
+    LargeUtf8Type, UInt32Type, Utf8Type,
 };
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
@@ -321,32 +321,24 @@ fn bytes_ptr_eq<T: ByteArrayType>(a: &dyn Array, b: &dyn Array) -> bool {
     }
 }
 
-/// Returns true if two dictionary arrays share the same dictionary values
+/// Returns true if two values arrays share the same underlying buffers
 /// by pointer comparison. Supports Utf8, Binary, LargeUtf8, LargeBinary value types.
-fn dict_values_ptr_eq<K: ArrowDictionaryKeyType>(a: &dyn Array, b: &dyn Array) -> bool {
-    let a_dict = a.as_any().downcast_ref::<DictionaryArray<K>>();
-    let b_dict = b.as_any().downcast_ref::<DictionaryArray<K>>();
-    match (a_dict, b_dict) {
-        (Some(a_dict), Some(b_dict)) => {
-            let a_vals = a_dict.values().as_ref();
-            let b_vals = b_dict.values().as_ref();
-            let value_type = a_dict.value_type();
-            match value_type {
-                ArrowDataType::Utf8 => bytes_ptr_eq::<Utf8Type>(a_vals, b_vals),
-                ArrowDataType::Binary => bytes_ptr_eq::<ArrowBinaryType>(a_vals, b_vals),
-                ArrowDataType::LargeUtf8 => bytes_ptr_eq::<LargeUtf8Type>(a_vals, b_vals),
-                ArrowDataType::LargeBinary => bytes_ptr_eq::<LargeBinaryType>(a_vals, b_vals),
-                _ => false,
-            }
-        }
+fn values_ptr_eq(a: &dyn Array, b: &dyn Array, data_type: &ArrowDataType) -> bool {
+    match data_type {
+        ArrowDataType::Utf8 => bytes_ptr_eq::<Utf8Type>(a, b),
+        ArrowDataType::Binary => bytes_ptr_eq::<ArrowBinaryType>(a, b),
+        ArrowDataType::LargeUtf8 => bytes_ptr_eq::<LargeUtf8Type>(a, b),
+        ArrowDataType::LargeBinary => bytes_ptr_eq::<LargeBinaryType>(a, b),
         _ => false,
     }
 }
 
 /// Tracks state of a dictionary-encoded column across batches for shared-dictionary detection.
 struct DictColumnState {
-    /// The first batch's dictionary array, for pointer comparison.
-    first_array: Arc<dyn Array>,
+    /// The data type of the dictionary values (e.g. Utf8, Binary).
+    value_type: ArrowDataType,
+    /// The first batch's dictionary values array, for pointer comparison.
+    first_values: Arc<dyn Array>,
     /// Whether all batches so far share the same dictionary values for this column.
     shared: bool,
 }
@@ -387,7 +379,8 @@ impl CacheBatchBuffer {
                 let dict_values_size = dict.values().to_data().get_slice_memory_size().unwrap_or(0);
                 self.total_size += key_size + dict_values_size;
                 self.dict_columns.push(Some(DictColumnState {
-                    first_array: Arc::clone(col),
+                    value_type: dict.value_type(),
+                    first_values: Arc::clone(dict.values()),
                     shared: true,
                 }));
             } else {
@@ -408,7 +401,12 @@ impl CacheBatchBuffer {
                     .unwrap();
                 let key_size = dict.keys().to_data().get_slice_memory_size().unwrap_or(0);
                 if state.shared {
-                    if dict_values_ptr_eq::<UInt32Type>(state.first_array.as_ref(), col.as_ref()) {
+                    let current_values = dict.values();
+                    if values_ptr_eq(
+                        state.first_values.as_ref(),
+                        current_values.as_ref(),
+                        &state.value_type,
+                    ) {
                         self.total_size += key_size;
                     } else {
                         state.shared = false;
@@ -919,10 +917,21 @@ mod tests {
             let prev = &window[0];
             let curr = &window[1];
             for &col_idx in &dict_col_indices {
+                let prev_dict = prev
+                    .column(col_idx)
+                    .as_any()
+                    .downcast_ref::<DictionaryArray<UInt32Type>>()
+                    .unwrap();
+                let curr_dict = curr
+                    .column(col_idx)
+                    .as_any()
+                    .downcast_ref::<DictionaryArray<UInt32Type>>()
+                    .unwrap();
                 assert!(
-                    dict_values_ptr_eq::<UInt32Type>(
-                        prev.column(col_idx).as_ref(),
-                        curr.column(col_idx).as_ref()
+                    values_ptr_eq(
+                        prev_dict.values().as_ref(),
+                        curr_dict.values().as_ref(),
+                        &prev_dict.value_type(),
                     ),
                     "dictionary values not pointer-equal for column {} between consecutive batches",
                     schema.field(col_idx).name()
