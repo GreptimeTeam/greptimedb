@@ -515,6 +515,13 @@ impl FlatRowGroupLastRowReader {
         if self.yielded_batches.is_empty() {
             return;
         }
+
+        // Filtered flat last-row scans only contain the subset of series that matched the
+        // encoded primary-key prefilter, so they cannot be published under the shared
+        // selector cache key.
+        if self.primary_key_filter.is_some() {
+            return;
+        }
         let batches = std::mem::take(&mut self.yielded_batches);
         let value = Arc::new(SelectorResultValue::new_flat(
             batches,
