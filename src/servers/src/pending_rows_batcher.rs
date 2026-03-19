@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -348,10 +348,8 @@ impl PendingRowsBatcher {
                 region_schema
             };
 
-            let missing_columns = collect_missing_prom_tag_columns(
-                record_batch.schema().as_ref(),
-                region_schema.as_ref(),
-            )?;
+            let (record_batch, missing_columns) =
+                accommodate_record_batch_for_target_schema(record_batch, region_schema.as_ref())?;
             let region_schema = if missing_columns.is_empty() {
                 region_schema
             } else {
@@ -379,14 +377,6 @@ impl PendingRowsBatcher {
                 region_schemas.insert(table_name.clone(), refreshed_region_schema.clone());
                 refreshed_region_schema
             };
-
-            let (timestamp_column, field_column) =
-                find_prom_special_column_names(region_schema.as_ref());
-            let record_batch = rename_prom_special_columns_for_existing_schema(
-                record_batch,
-                timestamp_column.as_deref(),
-                field_column.as_deref(),
-            )?;
 
             let record_batch = align_record_batch_to_schema(record_batch, region_schema.as_ref())?;
             aligned_batches.push((table_name, record_batch));
@@ -451,35 +441,113 @@ impl PendingRowsBatcher {
     }
 }
 
-fn collect_missing_prom_tag_columns(
-    source_schema: &ArrowSchema,
+/// Normalizes an incoming Prometheus record batch against an existing table schema.
+///
+/// This performs a single pass over source fields to:
+/// - remap Prometheus special columns (`greptime_timestamp`, `greptime_value`) to the
+///   target table's effective timestamp/field column names when they differ;
+/// - collect columns that are absent in the target schema and must be added as tag columns.
+///
+/// Returns the normalized record batch plus the list of missing tag column names.
+/// A missing column is accepted only when its source type is `Utf8`; otherwise it returns
+/// an error because non-string missing columns cannot be safely treated as Prom tags.
+fn accommodate_record_batch_for_target_schema(
+    record_batch: RecordBatch,
     target_schema: &ArrowSchema,
-) -> Result<Vec<String>> {
+) -> Result<(RecordBatch, Vec<String>)> {
+    let (target_timestamp_col_name, target_field_col_name, target_tags) =
+        unzip_logical_region_schema(target_schema)?;
+
+    let incoming_schema = record_batch.schema();
     let mut missing_columns = Vec::new();
-    for source_field in source_schema.fields() {
-        if target_schema
-            .column_with_name(source_field.name())
-            .is_none()
-        {
-            if source_field.data_type() != &ArrowDataType::Utf8 {
-                return Err(Error::Internal {
-                    err_msg: format!(
-                        "Failed to align record batch schema, missing column '{}' in target schema must be Utf8 but got {:?}",
-                        source_field.name(),
-                        source_field.data_type()
-                    ),
-                });
+    let mut renamed_fields = Vec::with_capacity(incoming_schema.fields().len());
+    let mut changed = false;
+
+    for source_field in incoming_schema.fields() {
+        match source_field.data_type() {
+            ArrowDataType::Float64 => {
+                if source_field.name() != target_field_col_name.as_str() {
+                    // Field name mismatch
+                    changed = true;
+                    renamed_fields.push(Arc::new(Field::new(
+                        target_field_col_name.clone(),
+                        ArrowDataType::Float64,
+                        false,
+                    )));
+                } else {
+                    renamed_fields.push(source_field.clone());
+                }
             }
-            missing_columns.push(source_field.name().clone());
+            ArrowDataType::Timestamp(unit, _) => {
+                ensure!(
+                    unit == &TimeUnit::Millisecond,
+                    error::InvalidPromRemoteRequestSnafu {
+                        msg: format!(
+                            "Unexpected remote write batch timestamp unit, expect milliseond, got: {}",
+                            unit
+                        )
+                    }
+                );
+                if source_field.name() != &target_timestamp_col_name {
+                    // Timestamp column name mismatch
+                    changed = true;
+                    renamed_fields.push(Arc::new(Field::new(
+                        target_timestamp_col_name.clone(),
+                        ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
+                        false,
+                    )));
+                } else {
+                    renamed_fields.push(source_field.clone())
+                }
+            }
+            ArrowDataType::Utf8 => {
+                ensure!(
+                    source_field.data_type() == &ArrowDataType::Utf8,
+                    error::InvalidPromRemoteRequestSnafu {
+                        msg: format!(
+                            "Failed to align record batch schema, missing column '{}' in target schema must be Utf8 but got {:?}",
+                            source_field.name(),
+                            source_field.data_type()
+                        )
+                    }
+                );
+                if !target_tags.contains(source_field.name()) {
+                    missing_columns.push(source_field.name().clone());
+                    changed = true;
+                }
+                renamed_fields.push(source_field.clone());
+            }
+            other => {
+                return error::InvalidPromRemoteRequestSnafu {
+                    msg: format!(
+                        "Unexpected remote write batch field type {}, field name: {}",
+                        other,
+                        source_field.name()
+                    ),
+                }
+                .fail();
+            }
         }
     }
-    Ok(missing_columns)
+
+    if !changed {
+        // No need to accommodate columns, simply return the original record batch.
+        return Ok((record_batch, missing_columns));
+    }
+
+    let (_, columns, _) = record_batch.into_parts();
+    let renamed_record_batch =
+        RecordBatch::try_new(Arc::new(ArrowSchema::new(renamed_fields)), columns)
+            .context(error::ArrowSnafu)?;
+    Ok((renamed_record_batch, missing_columns))
 }
 
-fn find_prom_special_column_names(target_schema: &ArrowSchema) -> (Option<String>, Option<String>) {
+fn unzip_logical_region_schema(
+    target_schema: &ArrowSchema,
+) -> Result<(String, String, HashSet<String>)> {
     let mut timestamp_column = None;
     let mut field_column = None;
-
+    let mut tag_columns = HashSet::with_capacity(target_schema.fields.len() - 2);
     for field in target_schema.fields() {
         if field.name() == greptime_timestamp() {
             timestamp_column = Some(field.name().clone());
@@ -499,54 +567,19 @@ fn find_prom_special_column_names(target_schema: &ArrowSchema) -> (Option<String
 
         if field_column.is_none() && matches!(field.data_type(), ArrowDataType::Float64) {
             field_column = Some(field.name().clone());
-        }
-    }
-
-    (timestamp_column, field_column)
-}
-
-fn rename_prom_special_columns_for_existing_schema(
-    record_batch: RecordBatch,
-    timestamp_column: Option<&str>,
-    field_column: Option<&str>,
-) -> Result<RecordBatch> {
-    let source_schema = record_batch.schema();
-    let mut renamed_fields = Vec::with_capacity(source_schema.fields().len());
-    let mut changed = false;
-
-    for field in source_schema.fields() {
-        let target_name = if field.name() == greptime_timestamp() {
-            timestamp_column
-        } else if field.name() == greptime_value() {
-            field_column
-        } else {
-            None
-        };
-
-        if let Some(target_name) = target_name
-            && target_name != field.name()
-        {
-            renamed_fields.push(Field::new(
-                target_name,
-                field.data_type().clone(),
-                field.is_nullable(),
-            ));
-            changed = true;
             continue;
         }
-
-        renamed_fields.push(field.as_ref().clone());
+        tag_columns.insert(field.name().clone());
     }
 
-    if !changed {
-        return Ok(record_batch);
-    }
+    let timestamp_column = timestamp_column.with_context(|| error::UnexpectedResultSnafu {
+        reason: "Failed to locate timestamp column in target schema".to_string(),
+    })?;
+    let field_column = field_column.with_context(|| error::UnexpectedResultSnafu {
+        reason: "Failed to locate field column in target schema".to_string(),
+    })?;
 
-    RecordBatch::try_new(
-        Arc::new(ArrowSchema::new(renamed_fields)),
-        record_batch.columns().to_vec(),
-    )
-    .context(error::ArrowSnafu)
+    Ok((timestamp_column, field_column, tag_columns))
 }
 
 fn build_prom_create_table_schema(source_schema: &ArrowSchema) -> Result<Vec<ColumnSchema>> {
@@ -1301,16 +1334,17 @@ mod tests {
 
     use api::v1::value::ValueData;
     use api::v1::{ColumnDataType, ColumnSchema, Row, Rows, SemanticType, Value};
-    use arrow::array::{Array, Float64Array, Int32Array, Int64Array, StringArray};
+    use arrow::array::{
+        Array, Float64Array, Int32Array, Int64Array, StringArray, TimestampMillisecondArray,
+    };
     use arrow::datatypes::{DataType, Field, Schema as ArrowSchema, TimeUnit};
     use arrow::record_batch::RecordBatch;
     use dashmap::DashMap;
     use tokio::sync::mpsc;
 
     use super::{
-        align_record_batch_to_schema, build_prom_create_table_schema,
-        collect_missing_prom_tag_columns, rename_prom_special_columns_for_existing_schema,
-        rows_to_record_batch,
+        accommodate_record_batch_for_target_schema, align_record_batch_to_schema,
+        build_prom_create_table_schema, rows_to_record_batch,
     };
     use super::{
         BatchKey, PendingWorker, WorkerCommand, align_record_batch_to_schema,
@@ -1478,30 +1512,94 @@ mod tests {
 
 
     #[test]
-    fn test_collect_missing_prom_tag_columns() {
+    fn test_prepare_record_batch_for_target_schema_collects_missing_tag_columns() {
         let source = ArrowSchema::new(vec![
+            Field::new(
+                "greptime_timestamp",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
             Field::new("host", DataType::Utf8, true),
             Field::new("instance", DataType::Utf8, true),
-            Field::new("value", DataType::Float64, true),
+            Field::new("greptime_value", DataType::Float64, true),
         ]);
         let target = ArrowSchema::new(vec![
+            Field::new(
+                "my_ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
             Field::new("host", DataType::Utf8, true),
-            Field::new("value", DataType::Float64, true),
+            Field::new("my_value", DataType::Float64, true),
         ]);
 
-        let missing = collect_missing_prom_tag_columns(&source, &target).unwrap();
+        let record_batch = RecordBatch::try_new(
+            Arc::new(source),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![Some(1000)])),
+                Arc::new(StringArray::from(vec!["h1"])),
+                Arc::new(StringArray::from(vec!["i1"])),
+                Arc::new(Float64Array::from(vec![1.0])),
+            ],
+        )
+        .unwrap();
+
+        let (_, missing) =
+            accommodate_record_batch_for_target_schema(record_batch, &target).unwrap();
         assert_eq!(missing, vec!["instance".to_string()]);
     }
 
     #[test]
-    fn test_collect_missing_prom_tag_columns_reject_non_utf8() {
-        let source = ArrowSchema::new(vec![Field::new("code", DataType::Int64, true)]);
-        let target = ArrowSchema::new(vec![Field::new("host", DataType::Utf8, true)]);
+    fn test_prepare_record_batch_for_target_schema_reject_non_utf8_missing_column() {
+        let source = ArrowSchema::new(vec![
+            Field::new(
+                "greptime_timestamp",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("code", DataType::Utf8, true),
+            Field::new("greptime_value", DataType::Float64, true),
+        ]);
+        let target = ArrowSchema::new(vec![
+            Field::new(
+                "my_ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("host", DataType::Utf8, true),
+            Field::new("my_value", DataType::Float64, true),
+        ]);
 
-        let err = collect_missing_prom_tag_columns(&source, &target).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("missing column 'code' in target schema must be Utf8")
+        let record_batch = RecordBatch::try_new(
+            Arc::new(source),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![Some(1000)])),
+                Arc::new(StringArray::from(vec!["1"])),
+                Arc::new(Float64Array::from(vec![1.0])),
+            ],
+        )
+        .unwrap();
+        let (rb, mut missing) =
+            accommodate_record_batch_for_target_schema(record_batch, &target).unwrap();
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing.swap_remove(0).as_str(), "code");
+        assert_eq!(
+            rb.schema()
+                .fields
+                .iter()
+                .find(|f| matches!(f.data_type(), DataType::Timestamp(_, _)))
+                .unwrap()
+                .name(),
+            "my_ts"
+        );
+        assert_eq!(
+            rb.schema()
+                .fields
+                .iter()
+                .find(|f| matches!(f.data_type(), DataType::Float64))
+                .unwrap()
+                .name(),
+            "my_value"
         );
     }
 
@@ -1550,16 +1648,23 @@ mod tests {
     }
 
     #[test]
-    fn test_rename_prom_special_columns_for_existing_schema() {
+    fn test_prepare_record_batch_for_target_schema_renames_prom_special_columns() {
         let source_schema = Arc::new(ArrowSchema::new(vec![
-            Field::new("greptime_timestamp", DataType::Int64, false),
+            Field::new(
+                "greptime_timestamp",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
             Field::new("host", DataType::Utf8, true),
             Field::new("greptime_value", DataType::Float64, true),
         ]));
         let source = RecordBatch::try_new(
             source_schema,
             vec![
-                Arc::new(Int64Array::from(vec![Some(1000), Some(2000)])),
+                Arc::new(TimestampMillisecondArray::from(vec![
+                    Some(1000),
+                    Some(2000),
+                ])),
                 Arc::new(StringArray::from(vec!["h1", "h2"])),
                 Arc::new(Float64Array::from(vec![Some(1.0), Some(2.0)])),
             ],
@@ -1567,21 +1672,92 @@ mod tests {
         .unwrap();
 
         let target = ArrowSchema::new(vec![
-            Field::new("my_ts", DataType::Int64, false),
+            Field::new(
+                "my_ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
             Field::new("host", DataType::Utf8, true),
             Field::new("my_value", DataType::Float64, true),
         ]);
 
-        let renamed = rename_prom_special_columns_for_existing_schema(
-            source,
-            Some("my_ts"),
-            Some("my_value"),
-        )
-        .unwrap();
-        let aligned = align_record_batch_to_schema(renamed, &target).unwrap();
+        let (prepared, missing) =
+            accommodate_record_batch_for_target_schema(source, &target).unwrap();
+        assert!(missing.is_empty());
+        let aligned = align_record_batch_to_schema(prepared, &target).unwrap();
 
         assert_eq!(aligned.schema().as_ref(), &target);
         assert_eq!(2, aligned.num_rows());
         assert_eq!(3, aligned.num_columns());
+    }
+
+    #[test]
+    fn test_prepare_record_batch_for_target_schema_requires_timestamp_column() {
+        let source_schema = Arc::new(ArrowSchema::new(vec![
+            Field::new(
+                "greptime_timestamp",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("host", DataType::Utf8, true),
+            Field::new("greptime_value", DataType::Float64, true),
+        ]));
+        let source = RecordBatch::try_new(
+            source_schema,
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![Some(1000)])),
+                Arc::new(StringArray::from(vec!["h1"])),
+                Arc::new(Float64Array::from(vec![Some(1.0)])),
+            ],
+        )
+        .unwrap();
+
+        let target = ArrowSchema::new(vec![
+            Field::new("host", DataType::Utf8, true),
+            Field::new("my_value", DataType::Float64, true),
+        ]);
+
+        let err = accommodate_record_batch_for_target_schema(source, &target).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Failed to locate timestamp column in target schema")
+        );
+    }
+
+    #[test]
+    fn test_prepare_record_batch_for_target_schema_requires_field_column() {
+        let source_schema = Arc::new(ArrowSchema::new(vec![
+            Field::new(
+                "greptime_timestamp",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("host", DataType::Utf8, true),
+            Field::new("greptime_value", DataType::Float64, true),
+        ]));
+        let source = RecordBatch::try_new(
+            source_schema,
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![Some(1000)])),
+                Arc::new(StringArray::from(vec!["h1"])),
+                Arc::new(Float64Array::from(vec![Some(1.0)])),
+            ],
+        )
+        .unwrap();
+
+        let target = ArrowSchema::new(vec![
+            Field::new(
+                "my_ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("host", DataType::Utf8, true),
+        ]);
+
+        let err = accommodate_record_batch_for_target_schema(source, &target).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Failed to locate field column in target schema")
+        );
     }
 }
