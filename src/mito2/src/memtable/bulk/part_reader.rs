@@ -17,7 +17,6 @@ use std::time::Instant;
 
 use datatypes::arrow::array::BooleanArray;
 use datatypes::arrow::record_batch::RecordBatch;
-use mito_codec::row_converter::PrimaryKeyFilter;
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReader;
 use snafu::ResultExt;
@@ -47,7 +46,6 @@ pub struct EncodedBulkPartIter {
     metrics: MemScanMetricsData,
     /// Optional memory scan metrics to report to.
     mem_scan_metrics: Option<MemScanMetrics>,
-    primary_key_filter: Option<Box<dyn PrimaryKeyFilter>>,
 }
 
 impl EncodedBulkPartIter {
@@ -60,7 +58,6 @@ impl EncodedBulkPartIter {
         mem_scan_metrics: Option<MemScanMetrics>,
     ) -> error::Result<Self> {
         assert!(context.read_format().as_flat().is_some());
-        let primary_key_filter = context.base.new_primary_key_filter();
 
         let parquet_meta = encoded_part.metadata().parquet_metadata.clone();
         let data = encoded_part.data().clone();
@@ -94,7 +91,6 @@ impl EncodedBulkPartIter {
                 ..Default::default()
             },
             mem_scan_metrics,
-            primary_key_filter,
         })
     }
 
@@ -119,7 +115,6 @@ impl EncodedBulkPartIter {
             if let Some(batch) = apply_combined_filters(
                 &self.context,
                 &self.sequence,
-                &mut self.primary_key_filter,
                 batch,
                 self.current_skip_fields,
             )? {
@@ -146,7 +141,6 @@ impl EncodedBulkPartIter {
                 if let Some(batch) = apply_combined_filters(
                     &self.context,
                     &self.sequence,
-                    &mut self.primary_key_filter,
                     batch,
                     self.current_skip_fields,
                 )? {
@@ -216,7 +210,6 @@ pub struct BulkPartBatchIter {
     metrics: MemScanMetricsData,
     /// Optional memory scan metrics to report to.
     mem_scan_metrics: Option<MemScanMetrics>,
-    primary_key_filter: Option<Box<dyn PrimaryKeyFilter>>,
 }
 
 impl BulkPartBatchIter {
@@ -229,7 +222,6 @@ impl BulkPartBatchIter {
         mem_scan_metrics: Option<MemScanMetrics>,
     ) -> Self {
         assert!(context.read_format().as_flat().is_some());
-        let primary_key_filter = context.base.new_primary_key_filter();
 
         Self {
             batches: VecDeque::from(batches),
@@ -240,7 +232,6 @@ impl BulkPartBatchIter {
                 ..Default::default()
             },
             mem_scan_metrics,
-            primary_key_filter,
         }
     }
 
@@ -292,13 +283,8 @@ impl BulkPartBatchIter {
             PreFilterMode::SkipFieldsOnDelete => true,
         };
 
-        let Some(filtered_batch) = apply_combined_filters(
-            &self.context,
-            &self.sequence,
-            &mut self.primary_key_filter,
-            projected_batch,
-            skip_fields,
-        )?
+        let Some(filtered_batch) =
+            apply_combined_filters(&self.context, &self.sequence, projected_batch, skip_fields)?
         else {
             self.metrics.scan_cost += start.elapsed();
             return Ok(None);
@@ -366,23 +352,9 @@ impl Drop for BulkPartBatchIter {
 fn apply_combined_filters(
     context: &BulkIterContext,
     sequence: &Option<SequenceRange>,
-    primary_key_filter: &mut Option<Box<dyn PrimaryKeyFilter>>,
     record_batch: RecordBatch,
     skip_fields: bool,
 ) -> error::Result<Option<RecordBatch>> {
-    let covered_primary_key_filter_columns = primary_key_filter
-        .as_ref()
-        .and_then(|_| context.base.covered_primary_key_filter_columns());
-    let record_batch = match primary_key_filter.as_mut() {
-        Some(primary_key_filter) => context
-            .base
-            .prefilter_flat_batch_by_primary_key(record_batch, primary_key_filter.as_mut())?,
-        None => Some(record_batch),
-    };
-    let Some(record_batch) = record_batch else {
-        return Ok(None);
-    };
-
     // Converts the format to the flat format first.
     let format = context.read_format().as_flat().unwrap();
     let record_batch = format.convert_batch(record_batch, None)?;
@@ -396,7 +368,6 @@ fn apply_combined_filters(
         let predicate_mask = context.base.compute_filter_mask_flat(
             &record_batch,
             skip_fields,
-            covered_primary_key_filter_columns.as_ref(),
             &mut tag_decode_state,
         )?;
         // If predicate filters out the entire batch, return None early
@@ -453,7 +424,7 @@ mod tests {
         ArrayRef, BinaryArray, DictionaryArray, Int64Array, StringArray, UInt8Array, UInt32Array,
         UInt64Array,
     };
-    use datatypes::arrow::datatypes::{DataType, Field, Schema, UInt32Type};
+    use datatypes::arrow::datatypes::{DataType, Field, Schema};
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
@@ -462,15 +433,6 @@ mod tests {
 
     use super::*;
     use crate::memtable::bulk::context::BulkIterContext;
-    use crate::test_util::sst_util::new_primary_key;
-
-    fn encoded_primary_key_array(tags: &[&str]) -> Arc<DictionaryArray<UInt32Type>> {
-        let values = Arc::new(BinaryArray::from_iter_values(
-            tags.iter().map(|tag| new_primary_key(&[*tag])),
-        ));
-        let keys = UInt32Array::from_iter_values(0..tags.len() as u32);
-        Arc::new(DictionaryArray::new(keys, values))
-    }
 
     #[test]
     fn test_bulk_part_batch_iter() {
@@ -500,7 +462,10 @@ mod tests {
         ));
 
         // Create primary key dictionary array
-        let primary_key = encoded_primary_key_array(&["key1", "key2", "key3"]);
+        use datatypes::arrow::array::{BinaryArray, DictionaryArray, UInt32Array};
+        let values = Arc::new(BinaryArray::from_iter_values([b"key1", b"key2", b"key3"]));
+        let keys = UInt32Array::from(vec![0, 1, 2]);
+        let primary_key = Arc::new(DictionaryArray::new(keys, values));
 
         let sequence = Arc::new(UInt64Array::from(vec![1, 2, 3]));
         let op_type = Arc::new(UInt8Array::from(vec![1, 1, 1])); // PUT operations
@@ -636,7 +601,9 @@ mod tests {
         let timestamp_1 = Arc::new(datatypes::arrow::array::TimestampMillisecondArray::from(
             vec![1000, 2000],
         ));
-        let primary_key_1 = encoded_primary_key_array(&["key1", "key2"]);
+        let values_1 = Arc::new(BinaryArray::from_iter_values([b"key1", b"key2"]));
+        let keys_1 = UInt32Array::from(vec![0, 1]);
+        let primary_key_1 = Arc::new(DictionaryArray::new(keys_1, values_1));
         let sequence_1 = Arc::new(UInt64Array::from(vec![1, 2]));
         let op_type_1 = Arc::new(UInt8Array::from(vec![1, 1]));
 
@@ -659,7 +626,9 @@ mod tests {
         let timestamp_2 = Arc::new(datatypes::arrow::array::TimestampMillisecondArray::from(
             vec![3000, 4000, 5000],
         ));
-        let primary_key_2 = encoded_primary_key_array(&["key3", "key4", "key5"]);
+        let values_2 = Arc::new(BinaryArray::from_iter_values([b"key3", b"key4", b"key5"]));
+        let keys_2 = UInt32Array::from(vec![0, 1, 2]);
+        let primary_key_2 = Arc::new(DictionaryArray::new(keys_2, values_2));
         let sequence_2 = Arc::new(UInt64Array::from(vec![3, 4, 5]));
         let op_type_2 = Arc::new(UInt8Array::from(vec![1, 1, 1]));
 

@@ -22,7 +22,6 @@ use datatypes::arrow::compute::concat_batches;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::vectors::UInt32Vector;
 use futures::{Stream, TryStreamExt};
-use mito_codec::row_converter::PrimaryKeyFilter;
 use snafu::ResultExt;
 use store_api::storage::{FileId, TimeSeriesRowSelector};
 
@@ -313,7 +312,6 @@ impl FlatRowGroupLastRowCachedReader {
         cache_strategy: CacheStrategy,
         projection: &[usize],
         reader: FlatRowGroupReader,
-        primary_key_filter: Option<Box<dyn PrimaryKeyFilter>>,
     ) -> Self {
         let key = SelectorResultKey {
             file_id,
@@ -327,10 +325,10 @@ impl FlatRowGroupLastRowCachedReader {
             if is_flat && schema_matches {
                 Self::new_hit(value)
             } else {
-                Self::new_miss(key, projection, reader, cache_strategy, primary_key_filter)
+                Self::new_miss(key, projection, reader, cache_strategy)
             }
         } else {
-            Self::new_miss(key, projection, reader, cache_strategy, primary_key_filter)
+            Self::new_miss(key, projection, reader, cache_strategy)
         }
     }
 
@@ -352,7 +350,6 @@ impl FlatRowGroupLastRowCachedReader {
         projection: &[usize],
         reader: FlatRowGroupReader,
         cache_strategy: CacheStrategy,
-        primary_key_filter: Option<Box<dyn PrimaryKeyFilter>>,
     ) -> Self {
         selector_result_cache_miss();
         Self::Miss(FlatRowGroupLastRowReader::new(
@@ -360,7 +357,6 @@ impl FlatRowGroupLastRowCachedReader {
             projection.to_vec(),
             reader,
             cache_strategy,
-            primary_key_filter,
         ))
     }
 }
@@ -434,7 +430,6 @@ impl BatchBuffer {
 pub(crate) struct FlatRowGroupLastRowReader {
     key: SelectorResultKey,
     reader: FlatRowGroupReader,
-    primary_key_filter: Option<Box<dyn PrimaryKeyFilter>>,
     selector: FlatLastTimestampSelector,
     yielded_batches: Vec<RecordBatch>,
     cache_strategy: CacheStrategy,
@@ -449,12 +444,10 @@ impl FlatRowGroupLastRowReader {
         projection: Vec<usize>,
         reader: FlatRowGroupReader,
         cache_strategy: CacheStrategy,
-        primary_key_filter: Option<Box<dyn PrimaryKeyFilter>>,
     ) -> Self {
         Self {
             key,
             reader,
-            primary_key_filter,
             selector: FlatLastTimestampSelector::default(),
             yielded_batches: vec![],
             cache_strategy,
@@ -478,11 +471,7 @@ impl FlatRowGroupLastRowReader {
             return self.flush_pending();
         }
 
-        while let Some(raw_batch) = self.reader.next_raw_batch()? {
-            let Some(raw_batch) = self.prefilter_primary_keys(raw_batch)? else {
-                continue;
-            };
-            let batch = self.reader.convert_batch(raw_batch)?;
+        while let Some(batch) = self.reader.next_batch()? {
             self.selector.on_next(batch, &mut self.pending)?;
             if self.pending.is_full() {
                 return self.flush_pending();
@@ -503,24 +492,8 @@ impl FlatRowGroupLastRowReader {
         Ok(None)
     }
 
-    fn prefilter_primary_keys(&mut self, batch: RecordBatch) -> Result<Option<RecordBatch>> {
-        let Some(primary_key_filter) = self.primary_key_filter.as_mut() else {
-            return Ok(Some(batch));
-        };
-
-        self.reader
-            .prefilter_raw_batch_by_primary_key(batch, primary_key_filter.as_mut())
-    }
-
     fn maybe_update_cache(&mut self) {
         if self.yielded_batches.is_empty() {
-            return;
-        }
-
-        // Filtered flat last-row scans only contain the subset of series that matched the
-        // encoded primary-key prefilter, so they cannot be published under the shared
-        // selector cache key.
-        if self.primary_key_filter.is_some() {
             return;
         }
         let batches = std::mem::take(&mut self.yielded_batches);

@@ -30,7 +30,7 @@ use datatypes::arrow::error::ArrowError;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::DataType;
-use mito_codec::row_converter::{PrimaryKeyFilter, build_primary_key_codec};
+use mito_codec::row_converter::build_primary_key_codec;
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, RowSelection};
 use parquet::arrow::{FieldLevels, ProjectionMask, parquet_to_arrow_field_levels};
@@ -1606,12 +1606,11 @@ pub struct ReaderMetrics {
     pub(crate) filter_metrics: ReaderFilterMetrics,
     /// Duration to build the parquet reader.
     pub(crate) build_cost: Duration,
-    /// Duration to scan the reader, including parquet fetches and decoding work
-    /// needed to materialize output batches.
+    /// Duration to scan the reader.
     pub(crate) scan_cost: Duration,
     /// Number of record batches read.
     pub(crate) num_record_batches: usize,
-    /// Number of decoded output batches materialized from parquet data.
+    /// Number of batches decoded.
     pub(crate) num_batches: usize,
     /// Number of rows read.
     pub(crate) num_rows: usize,
@@ -2164,14 +2163,13 @@ impl FlatRowGroupReader {
         flat_format.convert_batch(record_batch, self.override_sequence.as_ref())
     }
 
-    /// Applies the encoded primary-key prefilter to a raw parquet batch before flat conversion.
-    pub(crate) fn prefilter_raw_batch_by_primary_key(
-        &self,
-        record_batch: RecordBatch,
-        primary_key_filter: &mut dyn PrimaryKeyFilter,
-    ) -> Result<Option<RecordBatch>> {
-        self.context
-            .prefilter_flat_batch_by_primary_key(record_batch, primary_key_filter)
+    /// Returns the next flat RecordBatch.
+    pub(crate) fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
+        let Some(record_batch) = self.next_raw_batch()? else {
+            return Ok(None);
+        };
+
+        self.convert_batch(record_batch).map(Some)
     }
 }
 
