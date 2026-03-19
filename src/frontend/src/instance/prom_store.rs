@@ -48,6 +48,7 @@ use servers::query_handler::{
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use store_api::metric_engine_consts::{METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY};
+use store_api::mito_engine_options::SST_FORMAT_KEY;
 use table::table_reference::TableReference;
 use tracing::instrument;
 
@@ -234,10 +235,9 @@ impl PendingRowsSchemaAlterer for Instance {
 
         let mut table_options = std::collections::HashMap::with_capacity(4);
         fill_table_options_for_create(&mut table_options, &create_type, &ctx);
-        create_table_expr.table_options.extend(table_options);
-
         match create_type {
             AutoCreateTableType::Logical(_) => {
+                create_table_expr.table_options.extend(table_options);
                 self.statement_executor
                     .create_logical_tables(&[create_table_expr], ctx)
                     .await
@@ -245,6 +245,10 @@ impl PendingRowsSchemaAlterer for Instance {
                     .context(error::ExecuteGrpcQuerySnafu)?;
             }
             AutoCreateTableType::Physical => {
+                // Pending-rows writes benefit from the flat SST format to leverage bulk memtables,
+                // so we force `sst_format=flat` only when auto-creating physical tables.
+                table_options.insert(SST_FORMAT_KEY.to_string(), "flat".to_string());
+                create_table_expr.table_options.extend(table_options);
                 self.statement_executor
                     .create_table_inner(&mut create_table_expr, None, ctx)
                     .await
