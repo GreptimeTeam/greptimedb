@@ -392,7 +392,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Error accessing catalog"))]
+    #[snafu(transparent)]
     Catalog {
         source: catalog::error::Error,
         #[snafu(implicit)]

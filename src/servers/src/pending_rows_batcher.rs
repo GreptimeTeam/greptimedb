@@ -21,21 +21,22 @@ use api::v1::region::{
     BulkInsertRequest, RegionRequest, RegionRequestHeader, bulk_insert_request, region_request,
 };
 use api::v1::value::ValueData;
-use api::v1::{ArrowIpc, RowInsertRequests, Rows};
+use api::v1::{ArrowIpc, ColumnSchema, RowInsertRequests, Rows, SemanticType};
 use arrow::array::{
     ArrayRef, Float64Builder, StringBuilder, TimestampMicrosecondBuilder,
     TimestampMillisecondBuilder, TimestampNanosecondBuilder, TimestampSecondBuilder,
     new_null_array,
 };
 use arrow::compute::{cast, concat_batches, filter_record_batch};
-use arrow::datatypes::{Field, Schema as ArrowSchema};
+use arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use arrow_schema::TimeUnit;
+use async_trait::async_trait;
 use bytes::Bytes;
 use catalog::CatalogManagerRef;
 use common_grpc::flight::{FlightEncoder, FlightMessage};
 use common_meta::node_manager::NodeManagerRef;
-use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
+use common_query::prelude::{GREPTIME_PHYSICAL_TABLE, greptime_timestamp, greptime_value};
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{debug, error, info, warn};
 use dashmap::DashMap;
@@ -44,7 +45,7 @@ use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
-use snafu::{ResultExt, ensure};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::RegionId;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, mpsc, oneshot};
 
@@ -59,6 +60,30 @@ const PHYSICAL_TABLE_KEY: &str = "physical_table";
 /// Whether wait for ingestion result before reply to client.
 const PENDING_ROWS_BATCH_SYNC_ENV: &str = "PENDING_ROWS_BATCH_SYNC";
 const WORKER_IDLE_TIMEOUT_MULTIPLIER: u32 = 3;
+
+#[async_trait]
+pub trait PendingRowsSchemaAlterer: Send + Sync {
+    async fn create_table_if_missing(
+        &self,
+        catalog: &str,
+        schema: &str,
+        table_name: &str,
+        request_schema: &[ColumnSchema],
+        with_metric_engine: bool,
+        ctx: QueryContextRef,
+    ) -> Result<()>;
+
+    async fn add_missing_prom_tag_columns(
+        &self,
+        catalog: &str,
+        schema: &str,
+        table_name: &str,
+        columns: &[String],
+        ctx: QueryContextRef,
+    ) -> Result<()>;
+}
+
+pub type PendingRowsSchemaAltererRef = Arc<dyn PendingRowsSchemaAlterer>;
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 struct BatchKey {
@@ -134,6 +159,8 @@ pub struct PendingRowsBatcher {
     flush_semaphore: Arc<Semaphore>,
     inflight_semaphore: Arc<Semaphore>,
     worker_channel_capacity: usize,
+    prom_store_with_metric_engine: bool,
+    schema_alterer: PendingRowsSchemaAltererRef,
     pending_rows_batch_sync: bool,
     shutdown: broadcast::Sender<()>,
 }
@@ -144,6 +171,8 @@ impl PendingRowsBatcher {
         partition_manager: PartitionRuleManagerRef,
         node_manager: NodeManagerRef,
         catalog_manager: CatalogManagerRef,
+        prom_store_with_metric_engine: bool,
+        schema_alterer: PendingRowsSchemaAltererRef,
         flush_interval: Duration,
         max_batch_rows: usize,
         max_concurrent_flushes: usize,
@@ -178,6 +207,8 @@ impl PendingRowsBatcher {
             partition_manager,
             node_manager,
             catalog_manager,
+            prom_store_with_metric_engine,
+            schema_alterer,
             flush_semaphore: Arc::new(Semaphore::new(max_concurrent_flushes)),
             inflight_semaphore: Arc::new(Semaphore::new(max_inflight_requests)),
             worker_channel_capacity,
@@ -282,25 +313,70 @@ impl PendingRowsBatcher {
             let region_schema = if let Some(region_schema) = region_schemas.get(&table_name) {
                 region_schema.clone()
             } else {
-                let table = self
+                let mut table = self
                     .catalog_manager
                     .table(&catalog, &schema, &table_name, Some(ctx.as_ref()))
-                    .await
-                    .map_err(|err| Error::Internal {
-                        err_msg: format!(
-                            "Failed to resolve table {} for pending batch alignment: {}",
-                            table_name, err
-                        ),
-                    })?
-                    .ok_or_else(|| Error::Internal {
-                        err_msg: format!(
-                            "Table not found during pending batch alignment: {}",
-                            table_name
-                        ),
-                    })?;
+                    .await?;
+                if table.is_none() {
+                    let request_schema =
+                        build_prom_create_table_schema(record_batch.schema().as_ref())?;
+                    self.schema_alterer
+                        .create_table_if_missing(
+                            &catalog,
+                            &schema,
+                            &table_name,
+                            &request_schema,
+                            self.prom_store_with_metric_engine,
+                            ctx.clone(),
+                        )
+                        .await?;
+                    table = self
+                        .catalog_manager
+                        .table(&catalog, &schema, &table_name, Some(ctx.as_ref()))
+                        .await?;
+                }
+
+                let table = table.with_context(|| error::UnexpectedResultSnafu {
+                    reason: format!(
+                        "Table not found after pending batch create attempt: {}",
+                        table_name
+                    ),
+                })?;
                 let region_schema = table.table_info().meta.schema.arrow_schema().clone();
                 region_schemas.insert(table_name.clone(), region_schema.clone());
                 region_schema
+            };
+
+            let missing_columns = collect_missing_prom_tag_columns(
+                record_batch.schema().as_ref(),
+                region_schema.as_ref(),
+            )?;
+            let region_schema = if missing_columns.is_empty() {
+                region_schema
+            } else {
+                self.schema_alterer
+                    .add_missing_prom_tag_columns(
+                        &catalog,
+                        &schema,
+                        &table_name,
+                        &missing_columns,
+                        ctx.clone(),
+                    )
+                    .await?;
+
+                let table = self
+                    .catalog_manager
+                    .table(&catalog, &schema, &table_name, Some(ctx.as_ref()))
+                    .await?
+                    .with_context(|| error::UnexpectedResultSnafu {
+                        reason: format!(
+                            "Table not found after pending batch schema alter: {}",
+                            table_name
+                        ),
+                    })?;
+                let refreshed_region_schema = table.table_info().meta.schema.arrow_schema().clone();
+                region_schemas.insert(table_name.clone(), refreshed_region_schema.clone());
+                refreshed_region_schema
             };
 
             let record_batch = align_record_batch_to_schema(record_batch, region_schema.as_ref())?;
@@ -364,6 +440,83 @@ impl PendingRowsBatcher {
 
         worker
     }
+}
+
+fn collect_missing_prom_tag_columns(
+    source_schema: &ArrowSchema,
+    target_schema: &ArrowSchema,
+) -> Result<Vec<String>> {
+    let mut missing_columns = Vec::new();
+    for source_field in source_schema.fields() {
+        if target_schema
+            .column_with_name(source_field.name())
+            .is_none()
+        {
+            if source_field.data_type() != &ArrowDataType::Utf8 {
+                return Err(Error::Internal {
+                    err_msg: format!(
+                        "Failed to align record batch schema, missing column '{}' in target schema must be Utf8 but got {:?}",
+                        source_field.name(),
+                        source_field.data_type()
+                    ),
+                });
+            }
+            missing_columns.push(source_field.name().clone());
+        }
+    }
+    Ok(missing_columns)
+}
+
+fn build_prom_create_table_schema(source_schema: &ArrowSchema) -> Result<Vec<ColumnSchema>> {
+    source_schema
+        .fields()
+        .iter()
+        .map(|field| {
+            let semantic_type = if field.name() == greptime_timestamp() {
+                SemanticType::Timestamp
+            } else if field.name() == greptime_value() {
+                SemanticType::Field
+            } else {
+                SemanticType::Tag
+            };
+
+            let concrete_type = ConcreteDataType::try_from(field.data_type()).map_err(|err| {
+                Error::Internal {
+                    err_msg: format!(
+                        "Failed to convert request column '{}' arrow data type {:?} for pending batch table create: {}",
+                        field.name(),
+                        field.data_type(),
+                        err
+                    ),
+                }
+            })?;
+            let (datatype, datatype_extension) = ColumnDataTypeWrapper::try_from(concrete_type)
+                .map_err(|err| Error::Internal {
+                    err_msg: format!(
+                        "Failed to convert request column '{}' data type for pending batch table create: {}",
+                        field.name(), err
+                    ),
+                })?
+                .into_parts();
+
+            if semantic_type == SemanticType::Tag && datatype != api::v1::ColumnDataType::String {
+                return Err(Error::Internal {
+                    err_msg: format!(
+                        "Failed to build create table schema, tag column '{}' must be String but got {:?}",
+                        field.name(), datatype
+                    ),
+                });
+            }
+
+            Ok(ColumnSchema {
+                column_name: field.name().clone(),
+                datatype: datatype as i32,
+                semantic_type: semantic_type as i32,
+                datatype_extension,
+                options: None,
+            })
+        })
+        .collect()
 }
 
 impl Drop for PendingRowsBatcher {
@@ -818,7 +971,7 @@ async fn flush_batch(
 
     let elapsed = start.elapsed().as_secs_f64();
     FLUSH_ELAPSED.observe(elapsed);
-    info!(
+    debug!(
         "Pending rows batch flushed, total rows: {}, elapsed time: {}s",
         total_row_count, elapsed
     );
@@ -1082,11 +1235,15 @@ mod tests {
     use api::v1::value::ValueData;
     use api::v1::{ColumnDataType, ColumnSchema, Row, Rows, SemanticType, Value};
     use arrow::array::{Array, Float64Array, Int32Array, Int64Array, StringArray};
-    use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
+    use arrow::datatypes::{DataType, Field, Schema as ArrowSchema, TimeUnit};
     use arrow::record_batch::RecordBatch;
     use dashmap::DashMap;
     use tokio::sync::mpsc;
 
+    use super::{
+        align_record_batch_to_schema, build_prom_create_table_schema,
+        collect_missing_prom_tag_columns, rows_to_record_batch,
+    };
     use super::{
         BatchKey, PendingWorker, WorkerCommand, align_record_batch_to_schema,
         remove_worker_if_same_channel, rows_to_record_batch, should_close_worker_on_idle_timeout,
@@ -1249,5 +1406,78 @@ mod tests {
         assert!(should_close_worker_on_idle_timeout(0, 0));
         assert!(!should_close_worker_on_idle_timeout(1, 0));
         assert!(!should_close_worker_on_idle_timeout(0, 1));
+    }
+
+
+    #[test]
+    fn test_collect_missing_prom_tag_columns() {
+        let source = ArrowSchema::new(vec![
+            Field::new("host", DataType::Utf8, true),
+            Field::new("instance", DataType::Utf8, true),
+            Field::new("value", DataType::Float64, true),
+        ]);
+        let target = ArrowSchema::new(vec![
+            Field::new("host", DataType::Utf8, true),
+            Field::new("value", DataType::Float64, true),
+        ]);
+
+        let missing = collect_missing_prom_tag_columns(&source, &target).unwrap();
+        assert_eq!(missing, vec!["instance".to_string()]);
+    }
+
+    #[test]
+    fn test_collect_missing_prom_tag_columns_reject_non_utf8() {
+        let source = ArrowSchema::new(vec![Field::new("code", DataType::Int64, true)]);
+        let target = ArrowSchema::new(vec![Field::new("host", DataType::Utf8, true)]);
+
+        let err = collect_missing_prom_tag_columns(&source, &target).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("missing column 'code' in target schema must be Utf8")
+        );
+    }
+
+    #[test]
+    fn test_build_prom_create_table_schema_from_request_schema() {
+        let source = ArrowSchema::new(vec![
+            Field::new(
+                common_query::prelude::greptime_timestamp(),
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("job", DataType::Utf8, true),
+            Field::new(
+                common_query::prelude::greptime_value(),
+                DataType::Float64,
+                true,
+            ),
+        ]);
+
+        let schema = build_prom_create_table_schema(&source).unwrap();
+        assert_eq!(3, schema.len());
+
+        assert_eq!(
+            common_query::prelude::greptime_timestamp(),
+            schema[0].column_name
+        );
+        assert_eq!(
+            api::v1::SemanticType::Timestamp as i32,
+            schema[0].semantic_type
+        );
+        assert_eq!(
+            api::v1::ColumnDataType::TimestampMillisecond as i32,
+            schema[0].datatype
+        );
+
+        assert_eq!("job", schema[1].column_name);
+        assert_eq!(api::v1::SemanticType::Tag as i32, schema[1].semantic_type);
+        assert_eq!(api::v1::ColumnDataType::String as i32, schema[1].datatype);
+
+        assert_eq!(
+            common_query::prelude::greptime_value(),
+            schema[2].column_name
+        );
+        assert_eq!(api::v1::SemanticType::Field as i32, schema[2].semantic_type);
+        assert_eq!(api::v1::ColumnDataType::Float64 as i32, schema[2].datatype);
     }
 }

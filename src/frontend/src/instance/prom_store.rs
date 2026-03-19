@@ -17,7 +17,11 @@ use std::sync::Arc;
 
 use api::prom_store::remote::read_request::ResponseType;
 use api::prom_store::remote::{Query, QueryResult, ReadRequest, ReadResponse};
-use api::v1::RowInsertRequests;
+use api::v1::alter_table_expr::Kind;
+use api::v1::{
+    AddColumn, AddColumns, AlterTableExpr, ColumnDataType, ColumnDef, RowInsertRequests,
+    SemanticType,
+};
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use client::OutputData;
@@ -27,19 +31,24 @@ use common_query::Output;
 use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
 use common_recordbatch::RecordBatches;
 use common_telemetry::{debug, tracing};
-use operator::insert::InserterRef;
+use operator::insert::{
+    AutoCreateTableType, InserterRef, build_create_table_expr, fill_table_options_for_create,
+};
 use operator::statement::StatementExecutor;
 use prost::Message;
 use servers::error::{self, AuthSnafu, Result as ServerResult};
 use servers::http::header::{CONTENT_ENCODING_SNAPPY, CONTENT_TYPE_PROTOBUF, collect_plan_metrics};
 use servers::http::prom_store::PHYSICAL_TABLE_PARAM;
 use servers::interceptor::{PromStoreProtocolInterceptor, PromStoreProtocolInterceptorRef};
+use servers::pending_rows_batcher::PendingRowsSchemaAlterer;
 use servers::prom_store::{self, Metrics};
 use servers::query_handler::{
     PromStoreProtocolHandler, PromStoreProtocolHandlerRef, PromStoreResponse,
 };
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
+use store_api::metric_engine_consts::{METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY};
+use table::table_reference::TableReference;
 use tracing::instrument;
 
 use crate::error::{
@@ -49,6 +58,28 @@ use crate::error::{
 use crate::instance::Instance;
 
 const SAMPLES_RESPONSE_TYPE: i32 = ResponseType::Samples as i32;
+
+fn auto_create_table_type_for_prom_remote_write(
+    ctx: &QueryContextRef,
+    with_metric_engine: bool,
+) -> AutoCreateTableType {
+    if with_metric_engine {
+        let physical_table = ctx
+            .extension(PHYSICAL_TABLE_PARAM)
+            .unwrap_or(GREPTIME_PHYSICAL_TABLE)
+            .to_string();
+        AutoCreateTableType::Logical(physical_table)
+    } else {
+        AutoCreateTableType::Physical
+    }
+}
+
+fn required_physical_table_for_create_type(create_type: &AutoCreateTableType) -> Option<&str> {
+    match create_type {
+        AutoCreateTableType::Logical(physical_table) => Some(physical_table.as_str()),
+        _ => None,
+    }
+}
 
 #[inline]
 fn is_supported(response_type: i32) -> bool {
@@ -160,6 +191,123 @@ impl Instance {
 }
 
 #[async_trait]
+impl PendingRowsSchemaAlterer for Instance {
+    async fn create_table_if_missing(
+        &self,
+        catalog: &str,
+        schema: &str,
+        table_name: &str,
+        request_schema: &[api::v1::ColumnSchema],
+        with_metric_engine: bool,
+        ctx: QueryContextRef,
+    ) -> ServerResult<()> {
+        let table = self
+            .catalog_manager()
+            .table(catalog, schema, table_name, Some(ctx.as_ref()))
+            .await
+            .map_err(BoxedError::new)
+            .context(error::ExecuteGrpcQuerySnafu)?;
+        if table.is_some() {
+            return Ok(());
+        }
+
+        let create_type = auto_create_table_type_for_prom_remote_write(&ctx, with_metric_engine);
+        if let Some(physical_table) = required_physical_table_for_create_type(&create_type) {
+            self.create_metric_physical_table_if_missing(
+                catalog,
+                schema,
+                physical_table,
+                ctx.clone(),
+            )
+            .await?;
+        }
+
+        let table_ref = TableReference::full(catalog, schema, table_name);
+        let engine = if matches!(create_type, AutoCreateTableType::Logical(_)) {
+            METRIC_ENGINE_NAME
+        } else {
+            common_catalog::consts::default_engine()
+        };
+        let mut create_table_expr = build_create_table_expr(&table_ref, request_schema, engine)
+            .map_err(BoxedError::new)
+            .context(error::ExecuteGrpcQuerySnafu)?;
+
+        let mut table_options = std::collections::HashMap::with_capacity(4);
+        fill_table_options_for_create(&mut table_options, &create_type, &ctx);
+        create_table_expr.table_options.extend(table_options);
+
+        match create_type {
+            AutoCreateTableType::Logical(_) => {
+                self.statement_executor
+                    .create_logical_tables(&[create_table_expr], ctx)
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(error::ExecuteGrpcQuerySnafu)?;
+            }
+            AutoCreateTableType::Physical => {
+                self.statement_executor
+                    .create_table_inner(&mut create_table_expr, None, ctx)
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(error::ExecuteGrpcQuerySnafu)?;
+            }
+            _ => {
+                unreachable!("prom remote write only supports logical or physical auto-create");
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn add_missing_prom_tag_columns(
+        &self,
+        catalog: &str,
+        schema: &str,
+        table_name: &str,
+        columns: &[String],
+        ctx: QueryContextRef,
+    ) -> ServerResult<()> {
+        if columns.is_empty() {
+            return Ok(());
+        }
+
+        let add_columns = AddColumns {
+            add_columns: columns
+                .iter()
+                .map(|column_name| AddColumn {
+                    column_def: Some(ColumnDef {
+                        name: column_name.clone(),
+                        data_type: ColumnDataType::String as i32,
+                        is_nullable: true,
+                        semantic_type: SemanticType::Tag as i32,
+                        comment: String::new(),
+                        ..Default::default()
+                    }),
+                    location: None,
+                    add_if_not_exists: true,
+                })
+                .collect(),
+        };
+
+        self.statement_executor
+            .alter_table_inner(
+                AlterTableExpr {
+                    catalog_name: catalog.to_string(),
+                    schema_name: schema.to_string(),
+                    table_name: table_name.to_string(),
+                    kind: Some(Kind::AddColumns(add_columns)),
+                },
+                ctx,
+            )
+            .await
+            .map_err(BoxedError::new)
+            .context(error::ExecuteGrpcQuerySnafu)?;
+
+        Ok(())
+    }
+}
+
+#[async_trait]
 impl PromStoreProtocolHandler for Instance {
     async fn pre_write(
         &self,
@@ -267,6 +415,63 @@ impl PromStoreProtocolHandler for Instance {
     }
 }
 
+impl Instance {
+    async fn create_metric_physical_table_if_missing(
+        &self,
+        catalog: &str,
+        schema: &str,
+        physical_table: &str,
+        ctx: QueryContextRef,
+    ) -> ServerResult<()> {
+        let table = self
+            .catalog_manager()
+            .table(catalog, schema, physical_table, Some(ctx.as_ref()))
+            .await
+            .map_err(BoxedError::new)
+            .context(error::ExecuteGrpcQuerySnafu)?;
+        if table.is_some() {
+            return Ok(());
+        }
+
+        let table_ref = TableReference::full(catalog, schema, physical_table);
+        let default_schema = vec![
+            api::v1::ColumnSchema {
+                column_name: common_query::prelude::greptime_timestamp().to_string(),
+                datatype: api::v1::ColumnDataType::TimestampMillisecond as i32,
+                semantic_type: api::v1::SemanticType::Timestamp as i32,
+                datatype_extension: None,
+                options: None,
+            },
+            api::v1::ColumnSchema {
+                column_name: common_query::prelude::greptime_value().to_string(),
+                datatype: api::v1::ColumnDataType::Float64 as i32,
+                semantic_type: api::v1::SemanticType::Field as i32,
+                datatype_extension: None,
+                options: None,
+            },
+        ];
+        let mut create_table_expr = build_create_table_expr(
+            &table_ref,
+            &default_schema,
+            common_catalog::consts::default_engine(),
+        )
+        .map_err(BoxedError::new)
+        .context(error::ExecuteGrpcQuerySnafu)?;
+        create_table_expr.engine = METRIC_ENGINE_NAME.to_string();
+        create_table_expr
+            .table_options
+            .insert(PHYSICAL_TABLE_METADATA_KEY.to_string(), "true".to_string());
+
+        self.statement_executor
+            .create_table_inner(&mut create_table_expr, None, ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(error::ExecuteGrpcQuerySnafu)?;
+
+        Ok(())
+    }
+}
+
 /// This handler is mainly used for `frontend` or `standalone` to directly import
 /// the metrics collected by itself, thereby avoiding importing metrics through the network,
 /// thus reducing compression and network transmission overhead,
@@ -318,5 +523,56 @@ impl PromStoreProtocolHandler for ExportMetricHandler {
 
     async fn ingest_metrics(&self, _metrics: Metrics) -> ServerResult<()> {
         unreachable!();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use session::context::QueryContext;
+
+    use super::*;
+
+    #[test]
+    fn test_auto_create_table_type_for_prom_remote_write_metric_engine() {
+        let mut query_ctx = QueryContext::with(
+            common_catalog::consts::DEFAULT_CATALOG_NAME,
+            common_catalog::consts::DEFAULT_SCHEMA_NAME,
+        );
+        query_ctx.set_extension(PHYSICAL_TABLE_PARAM, "metric_physical".to_string());
+        let ctx = Arc::new(query_ctx);
+
+        let create_type = auto_create_table_type_for_prom_remote_write(&ctx, true);
+        match create_type {
+            AutoCreateTableType::Logical(physical) => assert_eq!(physical, "metric_physical"),
+            _ => panic!("expected logical table create type"),
+        }
+    }
+
+    #[test]
+    fn test_auto_create_table_type_for_prom_remote_write_without_metric_engine() {
+        let ctx = Arc::new(QueryContext::with(
+            common_catalog::consts::DEFAULT_CATALOG_NAME,
+            common_catalog::consts::DEFAULT_SCHEMA_NAME,
+        ));
+
+        let create_type = auto_create_table_type_for_prom_remote_write(&ctx, false);
+        match create_type {
+            AutoCreateTableType::Physical => {}
+            _ => panic!("expected physical table create type"),
+        }
+    }
+
+    #[test]
+    fn test_required_physical_table_for_create_type() {
+        let logical = AutoCreateTableType::Logical("phy_table".to_string());
+        assert_eq!(
+            Some("phy_table"),
+            required_physical_table_for_create_type(&logical)
+        );
+
+        let physical = AutoCreateTableType::Physical;
+        assert_eq!(None, required_physical_table_for_create_type(&physical));
     }
 }
