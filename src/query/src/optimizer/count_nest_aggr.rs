@@ -37,9 +37,9 @@ use crate::optimizer::ExtensionAnalyzerRule;
 /// - the inner input must be the direct instant-vector-selector plan
 /// - the outer count must only group by the evaluation timestamp
 #[derive(Debug)]
-pub struct PromqlNestedCountRewriteRule;
+pub struct CountNestAggrRule;
 
-impl ExtensionAnalyzerRule for PromqlNestedCountRewriteRule {
+impl ExtensionAnalyzerRule for CountNestAggrRule {
     fn analyze(
         &self,
         plan: LogicalPlan,
@@ -50,7 +50,7 @@ impl ExtensionAnalyzerRule for PromqlNestedCountRewriteRule {
     }
 }
 
-impl PromqlNestedCountRewriteRule {
+impl CountNestAggrRule {
     fn rewrite_plan(plan: LogicalPlan) -> Result<Transformed<LogicalPlan>> {
         let LogicalPlan::Sort(sort) = plan else {
             return Ok(Transformed::no(plan));
