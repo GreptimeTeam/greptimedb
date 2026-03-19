@@ -144,22 +144,22 @@ impl PromqlNestedCountRewriteRule {
         );
 
         let mut required_input_columns =
-            Self::collect_required_input_columns(&presence_group_exprs);
+            Self::collect_required_input_columns(&presence_group_exprs, inner_value_expr);
         let presence_source = Self::prune_projection_chain_to_instant(
             inner_agg.input.as_ref(),
             &mut required_input_columns,
         )?;
-
-        let presence_input = LogicalPlanBuilder::from(presence_source)
-            .project(presence_group_exprs.clone())?
-            .distinct()?
-            .build()?;
 
         let outer_value_name = outer_agg
             .schema
             .field(outer_agg.group_expr.len())
             .name()
             .clone();
+        let presence_input = LogicalPlanBuilder::from(presence_source)
+            .project(presence_group_exprs.clone())?
+            .distinct()?
+            .build()?;
+
         let rewritten = LogicalPlanBuilder::from(presence_input)
             .aggregate(
                 outer_agg.group_expr.clone(),
@@ -171,13 +171,18 @@ impl PromqlNestedCountRewriteRule {
         Ok(Some(rewritten))
     }
 
-    fn collect_required_input_columns(group_exprs: &[Expr]) -> BTreeSet<String> {
+    fn collect_required_input_columns(group_exprs: &[Expr], value_expr: &Expr) -> BTreeSet<String> {
         let mut required = BTreeSet::new();
 
         for expr in group_exprs {
             if let Expr::Column(column) = expr {
                 required.insert(column.name.clone());
             }
+        }
+        if let Expr::Column(column) = value_expr {
+            // Keep the value column in the pruned instant input so `InstantManipulate`
+            // can still perform stale-NaN filtering before we project down to keys.
+            required.insert(column.name.clone());
         }
 
         required
