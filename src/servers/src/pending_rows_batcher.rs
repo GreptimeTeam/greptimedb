@@ -306,7 +306,8 @@ impl PendingRowsBatcher {
     ) -> Result<Vec<(String, RecordBatch)>> {
         let catalog = ctx.current_catalog().to_string();
         let schema = ctx.current_schema();
-        let mut region_schemas: HashMap<String, Arc<ArrowSchema>> = HashMap::new();
+        let mut region_schemas: HashMap<String, Arc<ArrowSchema>> =
+            HashMap::with_capacity(table_batches.len());
         let mut aligned_batches = Vec::with_capacity(table_batches.len());
 
         for (table_name, record_batch) in table_batches {
@@ -1048,17 +1049,17 @@ fn align_record_batch_to_schema(
     }
 
     for source_field in source_schema.fields() {
-        if target_schema
-            .column_with_name(source_field.name())
-            .is_none()
-        {
-            return Err(Error::Internal {
-                err_msg: format!(
+        ensure!(
+            target_schema
+                .column_with_name(source_field.name())
+                .is_some(),
+            error::UnexpectedResultSnafu {
+                reason: format!(
                     "Failed to align record batch schema, column '{}' not found in target schema",
                     source_field.name()
                 ),
-            });
-        }
+            }
+        );
     }
 
     let row_count = record_batch.num_rows();
