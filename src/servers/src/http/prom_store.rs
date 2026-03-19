@@ -140,8 +140,11 @@ pub async fn remote_write(
         req.as_insert_requests()
     };
 
-    if let Some(batcher) = pending_rows_batcher {
+    if prom_store_with_metric_engine && let Some(batcher) = pending_rows_batcher {
         for (temp_ctx, reqs) in req.as_req_iter(query_ctx) {
+            prom_store_handler
+                .pre_write(&reqs, temp_ctx.clone())
+                .await?;
             let rows = batcher.submit(reqs, temp_ctx).await?;
             crate::metrics::PROM_STORE_REMOTE_WRITE_SAMPLES
                 .with_label_values(&[db.as_str()])

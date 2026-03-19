@@ -125,16 +125,20 @@ where
         }
 
         if opts.prom_store.enable {
-            let pending_rows_batcher = PendingRowsBatcher::try_new(
-                self.instance.partition_manager().clone(),
-                self.instance.node_manager().clone(),
-                self.instance.catalog_manager().clone(),
-                opts.prom_store.pending_rows_flush_interval,
-                opts.prom_store.max_batch_rows,
-                opts.prom_store.max_concurrent_flushes,
-                opts.prom_store.worker_channel_capacity,
-                opts.prom_store.max_inflight_requests,
-            );
+            let pending_rows_batcher = if opts.prom_store.with_metric_engine {
+                PendingRowsBatcher::try_new(
+                    self.instance.partition_manager().clone(),
+                    self.instance.node_manager().clone(),
+                    self.instance.catalog_manager().clone(),
+                    opts.prom_store.pending_rows_flush_interval,
+                    opts.prom_store.max_batch_rows,
+                    opts.prom_store.max_concurrent_flushes,
+                    opts.prom_store.worker_channel_capacity,
+                    opts.prom_store.max_inflight_requests,
+                )
+            } else {
+                None
+            };
             builder = builder
                 .with_prom_handler(
                     self.instance.clone(),
