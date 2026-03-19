@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use api::helper::ColumnDataTypeWrapper;
+use api::v1::meta::Peer;
 use api::v1::region::{
     BulkInsertRequest, RegionRequest, RegionRequestHeader, bulk_insert_request, region_request,
 };
@@ -872,6 +873,75 @@ async fn spawn_flush(
     }
 }
 
+struct FlushRegionWrite {
+    region_id: RegionId,
+    row_count: usize,
+    datanode: Peer,
+    request: RegionRequest,
+}
+
+enum FlushWriteResult {
+    Success { row_count: usize },
+    Failed { row_count: usize, message: String },
+}
+
+fn should_dispatch_concurrently(region_write_count: usize) -> bool {
+    region_write_count > 1
+}
+
+async fn flush_region_writes_concurrently(
+    node_manager: NodeManagerRef,
+    writes: Vec<FlushRegionWrite>,
+) -> Vec<FlushWriteResult> {
+    if !should_dispatch_concurrently(writes.len()) {
+        let mut results = Vec::with_capacity(writes.len());
+        for write in writes {
+            let datanode = node_manager.datanode(&write.datanode).await;
+            let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+                .with_label_values(&["flush_write_region"])
+                .start_timer();
+            match datanode.handle(write.request).await {
+                Ok(_) => results.push(FlushWriteResult::Success {
+                    row_count: write.row_count,
+                }),
+                Err(err) => results.push(FlushWriteResult::Failed {
+                    row_count: write.row_count,
+                    message: format!(
+                        "Bulk insert flush failed for region {}: {:?}",
+                        write.region_id, err
+                    ),
+                }),
+            }
+        }
+        return results;
+    }
+
+    let write_futures = writes.into_iter().map(|write| {
+        let node_manager = node_manager.clone();
+        async move {
+            let datanode = node_manager.datanode(&write.datanode).await;
+            let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+                .with_label_values(&["flush_write_region"])
+                .start_timer();
+
+            match datanode.handle(write.request).await {
+                Ok(_) => FlushWriteResult::Success {
+                    row_count: write.row_count,
+                },
+                Err(err) => FlushWriteResult::Failed {
+                    row_count: write.row_count,
+                    message: format!(
+                        "Bulk insert flush failed for region {}: {:?}",
+                        write.region_id, err
+                    ),
+                },
+            }
+        }
+    });
+
+    futures::future::join_all(write_futures).await
+}
+
 async fn flush_batch(
     flush: FlushBatch,
     partition_manager: PartitionRuleManagerRef,
@@ -1004,6 +1074,7 @@ async fn flush_batch(
             }
         };
 
+        let mut region_writes = Vec::new();
         for (region_number, mask) in region_masks {
             if mask.select_none() {
                 continue;
@@ -1087,23 +1158,22 @@ async fn flush_batch(
                 })),
             };
 
-            let datanode = node_manager.datanode(&datanode).await;
-            let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
-                .with_label_values(&["flush_write_region"])
-                .start_timer();
-            match datanode.handle(request).await {
-                Ok(_) => {
+            region_writes.push(FlushRegionWrite {
+                region_id,
+                row_count,
+                datanode,
+                request,
+            });
+        }
+
+        for result in flush_region_writes_concurrently(node_manager.clone(), region_writes).await {
+            match result {
+                FlushWriteResult::Success { row_count } => {
                     FLUSH_TOTAL.inc();
                     FLUSH_ROWS.observe(row_count as f64);
                 }
-                Err(err) => {
-                    record_failure!(
-                        row_count,
-                        format!(
-                            "Bulk insert flush failed for region {}: {:?}",
-                            region_id, err
-                        )
-                    );
+                FlushWriteResult::Failed { row_count, message } => {
+                    record_failure!(row_count, message);
                 }
             }
         }
@@ -1370,8 +1440,15 @@ fn record_batch_to_ipc(record_batch: RecordBatch) -> Result<(Bytes, Bytes, Bytes
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
+    use api::region::RegionResponse;
+    use api::v1::flow::{DirtyWindowRequests, FlowRequest, FlowResponse};
+    use api::v1::meta::Peer;
+    use api::v1::region::{InsertRequests, RegionRequest};
     use api::v1::value::ValueData;
     use api::v1::{ColumnDataType, ColumnSchema, Row, Rows, SemanticType, Value};
     use arrow::array::{
@@ -1379,17 +1456,107 @@ mod tests {
     };
     use arrow::datatypes::{DataType, Field, Schema as ArrowSchema, TimeUnit};
     use arrow::record_batch::RecordBatch;
+    use async_trait::async_trait;
+    use common_meta::error::Result as MetaResult;
+    use common_meta::node_manager::{
+        Datanode, DatanodeManager, DatanodeRef, Flownode, FlownodeManager, FlownodeRef,
+    };
+    use common_query::request::QueryRequest;
+    use common_recordbatch::SendableRecordBatchStream;
+    use store_api::storage::RegionId;
+    use tokio::time::sleep;
     use dashmap::DashMap;
     use tokio::sync::mpsc;
 
     use super::{
-        accommodate_record_batch_for_target_schema, align_record_batch_to_schema,
-        build_prom_create_table_schema, rows_to_record_batch,
+        FlushRegionWrite, FlushWriteResult, accommodate_record_batch_for_target_schema,
+        align_record_batch_to_schema, build_prom_create_table_schema,
+        flush_region_writes_concurrently, rows_to_record_batch, should_dispatch_concurrently,
     };
     use super::{
         BatchKey, PendingWorker, WorkerCommand, align_record_batch_to_schema,
         remove_worker_if_same_channel, rows_to_record_batch, should_close_worker_on_idle_timeout,
     };
+
+    #[derive(Clone)]
+    struct ConcurrentMockDatanode {
+        delay: Duration,
+        inflight: Arc<AtomicUsize>,
+        max_inflight: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Datanode for ConcurrentMockDatanode {
+        async fn handle(&self, _request: RegionRequest) -> MetaResult<RegionResponse> {
+            let now = self.inflight.fetch_add(1, Ordering::SeqCst) + 1;
+            loop {
+                let max = self.max_inflight.load(Ordering::SeqCst);
+                if now <= max {
+                    break;
+                }
+                if self
+                    .max_inflight
+                    .compare_exchange(max, now, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    break;
+                }
+            }
+
+            sleep(self.delay).await;
+            self.inflight.fetch_sub(1, Ordering::SeqCst);
+            Ok(RegionResponse::new(0))
+        }
+
+        async fn handle_query(
+            &self,
+            _request: QueryRequest,
+        ) -> MetaResult<SendableRecordBatchStream> {
+            unimplemented!()
+        }
+    }
+
+    #[derive(Clone)]
+    struct ConcurrentMockNodeManager {
+        datanodes: Arc<HashMap<u64, DatanodeRef>>,
+    }
+
+    #[async_trait]
+    impl DatanodeManager for ConcurrentMockNodeManager {
+        async fn datanode(&self, node: &Peer) -> DatanodeRef {
+            self.datanodes
+                .get(&node.id)
+                .expect("datanode not found")
+                .clone()
+        }
+    }
+
+    struct NoopFlownode;
+
+    #[async_trait]
+    impl Flownode for NoopFlownode {
+        async fn handle(&self, _request: FlowRequest) -> MetaResult<FlowResponse> {
+            unimplemented!()
+        }
+
+        async fn handle_inserts(&self, _request: InsertRequests) -> MetaResult<FlowResponse> {
+            unimplemented!()
+        }
+
+        async fn handle_mark_window_dirty(
+            &self,
+            _req: DirtyWindowRequests,
+        ) -> MetaResult<FlowResponse> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl FlownodeManager for ConcurrentMockNodeManager {
+        async fn flownode(&self, _node: &Peer) -> FlownodeRef {
+            Arc::new(NoopFlownode)
+        }
+    }
 
     #[test]
     fn test_rows_to_record_batch() {
@@ -1799,5 +1966,65 @@ mod tests {
             err.to_string()
                 .contains("Failed to locate field column in target schema")
         );
+    }
+
+    #[tokio::test]
+    async fn test_flush_region_writes_concurrently_dispatches_multiple_datanodes() {
+        let inflight = Arc::new(AtomicUsize::new(0));
+        let max_inflight = Arc::new(AtomicUsize::new(0));
+        let datanode1: DatanodeRef = Arc::new(ConcurrentMockDatanode {
+            delay: Duration::from_millis(100),
+            inflight: inflight.clone(),
+            max_inflight: max_inflight.clone(),
+        });
+        let datanode2: DatanodeRef = Arc::new(ConcurrentMockDatanode {
+            delay: Duration::from_millis(100),
+            inflight,
+            max_inflight: max_inflight.clone(),
+        });
+
+        let mut datanodes = HashMap::new();
+        datanodes.insert(1, datanode1);
+        datanodes.insert(2, datanode2);
+        let node_manager = Arc::new(ConcurrentMockNodeManager {
+            datanodes: Arc::new(datanodes),
+        });
+
+        let writes = vec![
+            FlushRegionWrite {
+                region_id: RegionId::new(1024, 1),
+                row_count: 10,
+                datanode: Peer {
+                    id: 1,
+                    addr: "node1".to_string(),
+                },
+                request: RegionRequest::default(),
+            },
+            FlushRegionWrite {
+                region_id: RegionId::new(1024, 2),
+                row_count: 12,
+                datanode: Peer {
+                    id: 2,
+                    addr: "node2".to_string(),
+                },
+                request: RegionRequest::default(),
+            },
+        ];
+
+        let results = flush_region_writes_concurrently(node_manager, writes).await;
+        assert_eq!(2, results.len());
+        assert!(
+            results
+                .iter()
+                .all(|result| matches!(result, FlushWriteResult::Success { .. }))
+        );
+        assert!(max_inflight.load(Ordering::SeqCst) >= 2);
+    }
+
+    #[test]
+    fn test_should_dispatch_concurrently_by_region_count() {
+        assert!(!should_dispatch_concurrently(0));
+        assert!(!should_dispatch_concurrently(1));
+        assert!(should_dispatch_concurrently(2));
     }
 }
