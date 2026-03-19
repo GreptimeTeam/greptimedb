@@ -4094,20 +4094,15 @@ mod test {
         let plan_str = build_optimized_tsid_plan(query, 2, 1, 100_000, 1).await;
 
         assert!(plan_str.contains("PromSeriesDivide: tags=[\"__tsid\"]"));
-        assert!(plan_str.contains(
-            "Projection: some_metric.timestamp, some_metric.tag_0, CAST(some_metric.field_0 = some_metric.field_0 AS Int64) AS __prom_non_nan"
-        ));
-        assert!(plan_str.contains(
-            "Aggregate: groupBy=[[some_metric.timestamp, some_metric.tag_0]], aggr=[[max(__prom_non_nan) AS __prom_non_nan]]"
-        ));
-        assert!(plan_str.contains("Filter: __prom_non_nan = Int64(1)"));
+        assert!(plan_str.contains("Projection: some_metric.timestamp, some_metric.tag_0"));
+        assert!(plan_str.contains("Distinct:"));
         assert!(plan_str.contains(expected_outer_agg), "{plan_str}");
         assert!(!plan_str.contains("PromSeriesDivide: tags=[\"tag_0\"]"));
     }
 
     async fn assert_nested_count_rewrite_missing(query: &str, num_tag: usize, lookback_secs: u64) {
         let plan_str = build_optimized_tsid_plan(query, num_tag, 1, 100_000, lookback_secs).await;
-        assert!(!plan_str.contains("__prom_non_nan"), "{plan_str}");
+        assert!(!plan_str.contains("Distinct:"), "{plan_str}");
     }
 
     async fn build_test_table_provider(
@@ -4747,14 +4742,14 @@ mod test {
             300,
         )
         .await;
-        assert!(plan_str.contains("__prom_non_nan"), "{plan_str}");
+        assert!(plan_str.contains("Distinct:"), "{plan_str}");
     }
 
     #[tokio::test]
     async fn nested_count_rewrite_keeps_full_series_key_with_tsid_input() {
         assert_nested_count_rewrite_applies(
             "count(count(some_metric) by (tag_0))",
-            "Aggregate: groupBy=[[some_metric.timestamp]], aggr=[[sum(__prom_non_nan) AS count(count(some_metric.field_0))]]"
+            "Aggregate: groupBy=[[some_metric.timestamp]], aggr=[[count(Int64(1)) AS count(count(some_metric.field_0))]]"
         )
         .await;
     }
@@ -4763,7 +4758,7 @@ mod test {
     async fn nested_sum_count_rewrite_keeps_full_series_key_with_tsid_input() {
         assert_nested_count_rewrite_applies(
             "count(sum(some_metric) by (tag_0))",
-            "Aggregate: groupBy=[[some_metric.timestamp]], aggr=[[sum(__prom_non_nan) AS count(sum(some_metric.field_0))]]"
+            "Aggregate: groupBy=[[some_metric.timestamp]], aggr=[[count(Int64(1)) AS count(sum(some_metric.field_0))]]"
         )
         .await;
     }
@@ -4773,23 +4768,23 @@ mod test {
         for (query, expected_outer_agg) in [
             (
                 "count(avg(some_metric) by (tag_0))",
-                "Aggregate: groupBy=[[some_metric.timestamp]], aggr=[[sum(__prom_non_nan) AS count(avg(some_metric.field_0))]]",
+                "Aggregate: groupBy=[[some_metric.timestamp]], aggr=[[count(Int64(1)) AS count(avg(some_metric.field_0))]]",
             ),
             (
                 "count(min(some_metric) by (tag_0))",
-                "Aggregate: groupBy=[[some_metric.timestamp]], aggr=[[sum(__prom_non_nan) AS count(min(some_metric.field_0))]]",
+                "Aggregate: groupBy=[[some_metric.timestamp]], aggr=[[count(Int64(1)) AS count(min(some_metric.field_0))]]",
             ),
             (
                 "count(max(some_metric) by (tag_0))",
-                "Aggregate: groupBy=[[some_metric.timestamp]], aggr=[[sum(__prom_non_nan) AS count(max(some_metric.field_0))]]",
+                "Aggregate: groupBy=[[some_metric.timestamp]], aggr=[[count(Int64(1)) AS count(max(some_metric.field_0))]]",
             ),
             (
                 "count(stddev(some_metric) by (tag_0))",
-                "Aggregate: groupBy=[[some_metric.timestamp]], aggr=[[sum(__prom_non_nan) AS count(stddev_pop(some_metric.field_0))]]",
+                "Aggregate: groupBy=[[some_metric.timestamp]], aggr=[[count(Int64(1)) AS count(stddev_pop(some_metric.field_0))]]",
             ),
             (
                 "count(stdvar(some_metric) by (tag_0))",
-                "Aggregate: groupBy=[[some_metric.timestamp]], aggr=[[sum(__prom_non_nan) AS count(var_pop(some_metric.field_0))]]",
+                "Aggregate: groupBy=[[some_metric.timestamp]], aggr=[[count(Int64(1)) AS count(var_pop(some_metric.field_0))]]",
             ),
         ] {
             assert_nested_count_rewrite_applies(query, expected_outer_agg).await;

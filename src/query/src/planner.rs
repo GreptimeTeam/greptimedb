@@ -766,10 +766,7 @@ mod tests {
             ))
             .await;
             let plan_str = plan.display_indent_schema().to_string();
-            assert!(
-                plan_str.contains("__prom_non_nan"),
-                "{inner_agg}: {plan_str}"
-            );
+            assert!(plan_str.contains("Distinct:"), "{inner_agg}: {plan_str}");
         }
     }
 
@@ -781,7 +778,7 @@ mod tests {
         ] {
             let plan = parse_promql_to_plan(query).await;
             let plan_str = plan.display_indent_schema().to_string();
-            assert!(!plan_str.contains("__prom_non_nan"), "{query}: {plan_str}");
+            assert!(!plan_str.contains("Distinct:"), "{query}: {plan_str}");
         }
     }
 
@@ -802,6 +799,6 @@ mod tests {
         .await;
 
         let plan_str = plan.display_indent_schema().to_string();
-        assert!(!plan_str.contains("__prom_non_nan"), "{plan_str}");
+        assert!(!plan_str.contains("Distinct:"), "{plan_str}");
     }
 }

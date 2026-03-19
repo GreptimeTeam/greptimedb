@@ -16,20 +16,16 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use datafusion::config::ConfigOptions;
-use datafusion::functions_aggregate::min_max::max_udaf;
-use datafusion::functions_aggregate::sum::sum_udaf;
-use datafusion::logical_expr::{Cast, Extension, LogicalPlan, LogicalPlanBuilder, Sort};
+use datafusion::functions_aggregate::count::count_udaf;
+use datafusion::logical_expr::{Extension, LogicalPlan, LogicalPlanBuilder, Sort};
 use datafusion_common::Result;
 use datafusion_common::tree_node::{Transformed, TreeNode};
-use datafusion_expr::{Expr, Operator, UserDefinedLogicalNodeCore, col, lit};
-use datatypes::arrow::datatypes::DataType;
+use datafusion_expr::{Expr, UserDefinedLogicalNodeCore, lit};
 use promql::extension_plan::{InstantManipulate, SeriesDivide, SeriesNormalize};
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 
 use crate::QueryEngineContext;
 use crate::optimizer::ExtensionAnalyzerRule;
-
-const NON_NAN_COLUMN: &str = "__prom_non_nan";
 
 /// Rewrites `count(<presence-preserving-agg>(<vector_selector>) by (...))` into a presence-based
 /// group count.
@@ -148,45 +144,15 @@ impl PromqlNestedCountRewriteRule {
         );
 
         let mut required_input_columns =
-            Self::collect_required_input_columns(&presence_group_exprs, inner_value_expr);
+            Self::collect_required_input_columns(&presence_group_exprs);
         let presence_source = Self::prune_projection_chain_to_instant(
             inner_agg.input.as_ref(),
             &mut required_input_columns,
         )?;
 
         let presence_input = LogicalPlanBuilder::from(presence_source)
-            .project(
-                presence_group_exprs
-                    .iter()
-                    .cloned()
-                    .chain(Some(
-                        Expr::Cast(Cast {
-                            expr: Box::new(Expr::BinaryExpr(datafusion_expr::BinaryExpr {
-                                left: Box::new(inner_value_expr.clone()),
-                                op: Operator::Eq,
-                                right: Box::new(inner_value_expr.clone()),
-                            })),
-                            data_type: DataType::Int64,
-                        })
-                        .alias(NON_NAN_COLUMN),
-                    ))
-                    .collect::<Vec<_>>(),
-            )?
-            .build()?;
-
-        let grouped = LogicalPlanBuilder::from(presence_input)
-            .aggregate(
-                presence_group_exprs.clone(),
-                vec![
-                    max_udaf()
-                        .call(vec![col(NON_NAN_COLUMN)])
-                        .alias(NON_NAN_COLUMN),
-                ],
-            )?
-            .build()?;
-
-        let active_groups = LogicalPlanBuilder::from(grouped)
-            .filter(col(NON_NAN_COLUMN).eq(lit(1_i64)))?
+            .project(presence_group_exprs.clone())?
+            .distinct()?
             .build()?;
 
         let outer_value_name = outer_agg
@@ -194,14 +160,10 @@ impl PromqlNestedCountRewriteRule {
             .field(outer_agg.group_expr.len())
             .name()
             .clone();
-        let rewritten = LogicalPlanBuilder::from(active_groups)
+        let rewritten = LogicalPlanBuilder::from(presence_input)
             .aggregate(
                 outer_agg.group_expr.clone(),
-                vec![
-                    sum_udaf()
-                        .call(vec![col(NON_NAN_COLUMN)])
-                        .alias(outer_value_name),
-                ],
+                vec![count_udaf().call(vec![lit(1_i64)]).alias(outer_value_name)],
             )?
             .sort(sort.expr.clone())?
             .build()?;
@@ -209,16 +171,13 @@ impl PromqlNestedCountRewriteRule {
         Ok(Some(rewritten))
     }
 
-    fn collect_required_input_columns(group_exprs: &[Expr], value_expr: &Expr) -> BTreeSet<String> {
+    fn collect_required_input_columns(group_exprs: &[Expr]) -> BTreeSet<String> {
         let mut required = BTreeSet::new();
 
         for expr in group_exprs {
             if let Expr::Column(column) = expr {
                 required.insert(column.name.clone());
             }
-        }
-        if let Expr::Column(column) = value_expr {
-            required.insert(column.name.clone());
         }
 
         required
