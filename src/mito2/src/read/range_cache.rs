@@ -843,6 +843,116 @@ mod tests {
     }
 
     #[test]
+    fn dict_values_ptr_eq_from_bulk_part() {
+        use std::collections::VecDeque;
+
+        use crate::memtable::bulk::context::BulkIterContext;
+        use crate::memtable::bulk::part::{BulkPartConverter, BulkPartEncoder};
+        use crate::memtable::bulk::part_reader::EncodedBulkPartIter;
+        use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
+        use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
+        use crate::test_util::bench_util::{CpuDataGenerator, cpu_metadata};
+        use mito_codec::row_converter::DensePrimaryKeyCodec;
+
+        let metadata = Arc::new(cpu_metadata());
+        let start_sec = 1710043200;
+        // 100 hosts × 51 steps = 5,100 rows — enough for multiple batches
+        let num_hosts = 100;
+        let end_sec = start_sec + 510;
+        let generator = CpuDataGenerator::new(metadata.clone(), num_hosts, start_sec, end_sec);
+
+        // Build a BulkPart from all the generated data
+        let schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
+        let codec = Arc::new(DensePrimaryKeyCodec::new(&metadata));
+
+        let mut converter = BulkPartConverter::new(
+            &metadata,
+            schema,
+            DEFAULT_ROW_GROUP_SIZE,
+            codec,
+            true,
+        );
+        for kvs in generator.iter() {
+            converter.append_key_values(&kvs).unwrap();
+        }
+        let bulk_part = converter.convert().unwrap();
+
+        // Encode to parquet
+        let encoder = BulkPartEncoder::new(metadata.clone(), DEFAULT_ROW_GROUP_SIZE).unwrap();
+        let encoded_part = encoder.encode_part(&bulk_part).unwrap().unwrap();
+
+        // Decode all record batches
+        let num_row_groups = encoded_part.metadata().parquet_metadata.num_row_groups();
+        let context = Arc::new(
+            BulkIterContext::new(
+                metadata.clone(),
+                None, // No projection
+                None, // No predicate
+                false,
+            )
+            .unwrap(),
+        );
+        let row_groups: VecDeque<usize> = (0..num_row_groups).collect();
+
+        let iter = EncodedBulkPartIter::try_new(
+            &encoded_part,
+            context,
+            row_groups,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let batches: Vec<RecordBatch> = iter
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|r| r.unwrap())
+            .collect();
+
+        // We should have at least 2 batches to test cross-batch sharing.
+        assert!(
+            batches.len() >= 2,
+            "expected at least 2 batches, got {}",
+            batches.len()
+        );
+
+        // Identify dictionary columns in the schema.
+        let schema = batches[0].schema();
+        let dict_col_indices: Vec<usize> = schema
+            .fields()
+            .iter()
+            .enumerate()
+            .filter_map(|(i, f)| {
+                matches!(
+                    f.data_type(),
+                    ArrowDataType::Dictionary(_, _)
+                )
+                .then_some(i)
+            })
+            .collect();
+        assert!(
+            !dict_col_indices.is_empty(),
+            "expected dictionary columns in the schema"
+        );
+
+        // For consecutive batch pairs, verify dictionary values are pointer-equal.
+        for window in batches.windows(2) {
+            let prev = &window[0];
+            let curr = &window[1];
+            for &col_idx in &dict_col_indices {
+                assert!(
+                    dict_values_ptr_eq::<UInt32Type>(
+                        prev.column(col_idx).as_ref(),
+                        curr.column(col_idx).as_ref()
+                    ),
+                    "dictionary values not pointer-equal for column {} between consecutive batches",
+                    schema.field(col_idx).name()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn cache_batch_buffer_shared_then_diverged() {
         use datatypes::arrow::array::StringArray;
 
