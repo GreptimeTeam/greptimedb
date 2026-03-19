@@ -1170,6 +1170,7 @@ fn build_pk_from_aggr(plan: &LogicalPlan) -> Result<Option<TableDef>, Error> {
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)]
 mod test {
     use std::collections::BTreeMap;
     use std::sync::Arc;
