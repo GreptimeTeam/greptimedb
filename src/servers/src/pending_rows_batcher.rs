@@ -44,6 +44,7 @@ use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
+use metric_engine::batch_modifier::{TagColumnInfo, modify_batch_sparse};
 use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -96,6 +97,7 @@ struct BatchKey {
 #[derive(Debug)]
 struct TableBatch {
     table_name: String,
+    table_id: Option<u32>,
     batches: Vec<RecordBatch>,
     row_count: usize,
 }
@@ -127,7 +129,7 @@ struct PendingWorker {
 
 enum WorkerCommand {
     Submit {
-        table_batches: Vec<(String, RecordBatch)>,
+        table_batches: Vec<(String, u32, RecordBatch)>,
         total_rows: usize,
         ctx: QueryContextRef,
         response_tx: oneshot::Sender<Result<()>>,
@@ -304,21 +306,21 @@ impl PendingRowsBatcher {
         &self,
         table_batches: Vec<(String, RecordBatch)>,
         ctx: &QueryContextRef,
-    ) -> Result<Vec<(String, RecordBatch)>> {
+    ) -> Result<Vec<(String, u32, RecordBatch)>> {
         let catalog = ctx.current_catalog().to_string();
         let schema = ctx.current_schema();
-        let mut region_schemas: HashMap<String, Arc<ArrowSchema>> =
+        let mut region_schemas: HashMap<String, (Arc<ArrowSchema>, u32)> =
             HashMap::with_capacity(table_batches.len());
         let mut aligned_batches = Vec::with_capacity(table_batches.len());
 
         for (table_name, record_batch) in table_batches {
-            let region_schema = if let Some(region_schema) = {
+            let (region_schema, table_id) = if let Some((region_schema, table_id)) = {
                 let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
                     .with_label_values(&["align_check_schema_cache"])
                     .start_timer();
                 region_schemas.get(&table_name)
             } {
-                region_schema.clone()
+                (region_schema.clone(), *table_id)
             } else {
                 let mut table = {
                     let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
@@ -366,9 +368,11 @@ impl PendingRowsBatcher {
                         table_name
                     ),
                 })?;
-                let region_schema = table.table_info().meta.schema.arrow_schema().clone();
-                region_schemas.insert(table_name.clone(), region_schema.clone());
-                region_schema
+                let table_info = table.table_info();
+                let table_id = table_info.ident.table_id;
+                let region_schema = table_info.meta.schema.arrow_schema().clone();
+                region_schemas.insert(table_name.clone(), (region_schema.clone(), table_id));
+                (region_schema, table_id)
             };
 
             let (record_batch, missing_columns) = {
@@ -410,7 +414,10 @@ impl PendingRowsBatcher {
                         })?
                 };
                 let refreshed_region_schema = table.table_info().meta.schema.arrow_schema().clone();
-                region_schemas.insert(table_name.clone(), refreshed_region_schema.clone());
+                region_schemas.insert(
+                    table_name.clone(),
+                    (refreshed_region_schema.clone(), table_id),
+                );
                 refreshed_region_schema
             };
 
@@ -420,7 +427,7 @@ impl PendingRowsBatcher {
                     .start_timer();
                 align_record_batch_to_schema(record_batch, region_schema.as_ref())?
             };
-            aligned_batches.push((table_name, record_batch));
+            aligned_batches.push((table_name, table_id, record_batch));
         }
 
         Ok(aligned_batches)
@@ -716,9 +723,10 @@ fn start_worker(
 
                             batch.waiters.push(FlushWaiter { response_tx, _permit });
 
-                            for (table_name, record_batch) in table_batches {
+                            for (table_name, table_id, record_batch) in table_batches {
                                 let entry = batch.tables.entry(table_name.clone()).or_insert_with(|| TableBatch {
                                     table_name,
+                                    table_id: Some(table_id),
                                     batches: Vec::new(),
                                     row_count: 0,
                                 });
@@ -960,11 +968,430 @@ async fn flush_batch(
     let catalog = ctx.current_catalog().to_string();
     let schema = ctx.current_schema();
 
+    // Attempt physical-table-level flush: transform all logical table batches
+    // into physical format and write them together, reducing catalog lookups
+    // and partition rule fetches from N (per logical table) to 1.
+    let physical_table_name = ctx
+        .extension(PHYSICAL_TABLE_KEY)
+        .unwrap_or(GREPTIME_PHYSICAL_TABLE)
+        .to_string();
+    let physical_flush_attempted = flush_batch_physical(
+        &table_batches,
+        total_row_count,
+        &catalog,
+        &schema,
+        &physical_table_name,
+        &ctx,
+        &partition_manager,
+        &node_manager,
+        &catalog_manager,
+        &mut first_error,
+    )
+    .await;
+
+    if !physical_flush_attempted {
+        // Fallback: flush per logical table (original path).
+        // This handles non-metric-engine tables, dense encoding, or any
+        // case where the physical flush path cannot be used.
+        flush_batch_per_logical_table(
+            &table_batches,
+            &catalog,
+            &schema,
+            &ctx,
+            &partition_manager,
+            &node_manager,
+            &catalog_manager,
+            &mut first_error,
+        )
+        .await;
+    }
+
+    let elapsed = start.elapsed().as_secs_f64();
+    FLUSH_ELAPSED.observe(elapsed);
+    debug!(
+        "Pending rows batch flushed, total rows: {}, elapsed time: {}s",
+        total_row_count, elapsed
+    );
+
+    notify_waiters(waiters, &first_error);
+}
+
+/// Attempts to flush all table batches by transforming them into the physical
+/// table format (sparse primary key encoding) and writing directly to the
+/// physical data regions.
+///
+/// Returns `true` if the physical flush was attempted (even if some individual
+/// table batches failed). Returns `false` if the physical table could not be
+/// resolved or does not support this path, meaning the caller should fall back
+/// to per-logical-table flushing.
+#[allow(clippy::too_many_arguments)]
+async fn flush_batch_physical(
+    table_batches: &[TableBatch],
+    total_row_count: usize,
+    catalog: &str,
+    schema: &str,
+    physical_table_name: &str,
+    ctx: &QueryContextRef,
+    partition_manager: &PartitionRuleManagerRef,
+    node_manager: &NodeManagerRef,
+    catalog_manager: &CatalogManagerRef,
+    first_error: &mut Option<String>,
+) -> bool {
     macro_rules! record_failure {
         ($row_count:expr, $msg:expr) => {{
             let msg = $msg;
             if first_error.is_none() {
-                first_error = Some(msg.clone());
+                *first_error = Some(msg.clone());
+            }
+            mark_flush_failure($row_count, &msg);
+        }};
+    }
+
+    // 1. Resolve the physical table and get column ID mapping
+    let physical_table = {
+        let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
+            .with_label_values(&["flush_physical_resolve_table"])
+            .start_timer();
+        match catalog_manager
+            .table(catalog, schema, physical_table_name, Some(ctx.as_ref()))
+            .await
+        {
+            Ok(Some(table)) => table,
+            Ok(None) => {
+                debug!(
+                    "Physical table '{}' not found, falling back to per-logical-table flush",
+                    physical_table_name
+                );
+                return false;
+            }
+            Err(err) => {
+                debug!(
+                    "Failed to resolve physical table '{}': {:?}, falling back",
+                    physical_table_name, err
+                );
+                return false;
+            }
+        }
+    };
+
+    let physical_table_info = physical_table.table_info();
+    let name_to_ids = match physical_table_info.name_to_ids() {
+        Some(ids) => ids,
+        None => {
+            debug!(
+                "Physical table '{}' has no column IDs, falling back to per-logical-table flush",
+                physical_table_name
+            );
+            return false;
+        }
+    };
+
+    // 2. Get the physical table's partition rule (one lookup instead of N)
+    let partition_rule = {
+        let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
+            .with_label_values(&["flush_physical_fetch_partition_rule"])
+            .start_timer();
+        match partition_manager
+            .find_table_partition_rule(&physical_table_info)
+            .await
+        {
+            Ok(rule) => rule,
+            Err(err) => {
+                debug!(
+                    "Failed to fetch partition rule for physical table '{}': {:?}, falling back",
+                    physical_table_name, err
+                );
+                return false;
+            }
+        }
+    };
+
+    // 3. Transform each logical table batch into physical format
+    let mut modified_batches: Vec<RecordBatch> = Vec::with_capacity(table_batches.len());
+    let mut modified_row_count: usize = 0;
+
+    'next_table: for table_batch in table_batches {
+        let table_id = match table_batch.table_id {
+            Some(id) => id,
+            None => {
+                record_failure!(
+                    table_batch.row_count,
+                    format!(
+                        "Missing table_id for logical table '{}' during physical flush",
+                        table_batch.table_name
+                    )
+                );
+                continue 'next_table;
+            }
+        };
+
+        let Some(first_batch) = table_batch.batches.first() else {
+            continue 'next_table;
+        };
+
+        let schema_ref = first_batch.schema();
+        let record_batch = {
+            let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
+                .with_label_values(&["flush_physical_concat_table_batches"])
+                .start_timer();
+            match concat_batches(&schema_ref, &table_batch.batches) {
+                Ok(batch) => batch,
+                Err(err) => {
+                    record_failure!(
+                        table_batch.row_count,
+                        format!(
+                            "Failed to concat table batch '{}': {:?}",
+                            table_batch.table_name, err
+                        )
+                    );
+                    continue 'next_table;
+                }
+            }
+        };
+
+        // Identify tag columns and non-tag columns from the logical batch schema.
+        // In prom batches, Float64 = value, Timestamp = timestamp, Utf8 = tags.
+        let mut tag_columns = Vec::new();
+        let mut non_tag_indices = Vec::new();
+        let batch_schema = record_batch.schema();
+        let mut column_resolution_failed = false;
+        for (index, field) in batch_schema.fields().iter().enumerate() {
+            match field.data_type() {
+                ArrowDataType::Utf8 => {
+                    let column_id = match name_to_ids.get(field.name()) {
+                        Some(&id) => id,
+                        None => {
+                            // Column not found in physical table — this table batch
+                            // cannot be transformed to physical format. Record error
+                            // and skip the entire table batch.
+                            warn!(
+                                "Column '{}' from logical table '{}' not found in physical table column IDs",
+                                field.name(),
+                                table_batch.table_name
+                            );
+                            record_failure!(
+                                table_batch.row_count,
+                                format!(
+                                    "Column '{}' not found in physical table for logical table '{}'",
+                                    field.name(),
+                                    table_batch.table_name
+                                )
+                            );
+                            column_resolution_failed = true;
+                            break;
+                        }
+                    };
+                    tag_columns.push(TagColumnInfo {
+                        name: field.name().clone(),
+                        index,
+                        column_id,
+                    });
+                }
+                _ => {
+                    non_tag_indices.push(index);
+                }
+            }
+        }
+        if column_resolution_failed {
+            continue 'next_table;
+        }
+        tag_columns.sort_by(|a, b| a.name.cmp(&b.name));
+
+        // Transform to physical format using sparse primary key encoding
+        let modified = {
+            let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
+                .with_label_values(&["flush_physical_modify_batch"])
+                .start_timer();
+            match modify_batch_sparse(record_batch, table_id, &tag_columns, &non_tag_indices) {
+                Ok(batch) => batch,
+                Err(err) => {
+                    record_failure!(
+                        table_batch.row_count,
+                        format!(
+                            "Failed to modify batch for logical table '{}': {:?}",
+                            table_batch.table_name, err
+                        )
+                    );
+                    continue 'next_table;
+                }
+            }
+        };
+
+        modified_row_count += modified.num_rows();
+        modified_batches.push(modified);
+    }
+
+    if modified_batches.is_empty() {
+        return true;
+    }
+
+    // 4. Concatenate all modified batches (all share the same physical schema)
+    let combined_batch = {
+        let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
+            .with_label_values(&["flush_physical_concat_all"])
+            .start_timer();
+        let combined_schema = modified_batches[0].schema();
+        match concat_batches(&combined_schema, &modified_batches) {
+            Ok(batch) => batch,
+            Err(err) => {
+                record_failure!(
+                    modified_row_count,
+                    format!("Failed to concat modified batches: {:?}", err)
+                );
+                return true;
+            }
+        }
+    };
+
+    // 5. Split by physical partition rule and send to regions
+    let physical_table_id = physical_table_info.table_id();
+    let region_masks = {
+        let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
+            .with_label_values(&["flush_physical_split_record_batch"])
+            .start_timer();
+        match partition_rule.0.split_record_batch(&combined_batch) {
+            Ok(masks) => masks,
+            Err(err) => {
+                record_failure!(
+                    total_row_count,
+                    format!(
+                        "Failed to split combined batch for physical table '{}': {:?}",
+                        physical_table_name, err
+                    )
+                );
+                return true;
+            }
+        }
+    };
+
+    let mut region_writes = Vec::new();
+    for (region_number, mask) in region_masks {
+        if mask.select_none() {
+            continue;
+        }
+
+        let region_batch = if mask.select_all() {
+            combined_batch.clone()
+        } else {
+            let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
+                .with_label_values(&["flush_physical_filter_record_batch"])
+                .start_timer();
+            match filter_record_batch(&combined_batch, mask.array()) {
+                Ok(batch) => batch,
+                Err(err) => {
+                    record_failure!(
+                        total_row_count,
+                        format!(
+                            "Failed to filter combined batch for physical table '{}': {:?}",
+                            physical_table_name, err
+                        )
+                    );
+                    continue;
+                }
+            }
+        };
+
+        let row_count = region_batch.num_rows();
+        if row_count == 0 {
+            continue;
+        }
+
+        let region_id = RegionId::new(physical_table_id, region_number);
+        let datanode = {
+            let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
+                .with_label_values(&["flush_physical_resolve_region_leader"])
+                .start_timer();
+            match partition_manager.find_region_leader(region_id).await {
+                Ok(peer) => peer,
+                Err(err) => {
+                    record_failure!(
+                        row_count,
+                        format!(
+                            "Failed to resolve region leader for physical region {}: {:?}",
+                            region_id, err
+                        )
+                    );
+                    continue;
+                }
+            }
+        };
+
+        let (schema_bytes, data_header, payload) = {
+            let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
+                .with_label_values(&["flush_physical_encode_ipc"])
+                .start_timer();
+            match record_batch_to_ipc(region_batch) {
+                Ok(encoded) => encoded,
+                Err(err) => {
+                    record_failure!(
+                        row_count,
+                        format!(
+                            "Failed to encode Arrow IPC for physical region {}: {:?}",
+                            region_id, err
+                        )
+                    );
+                    continue;
+                }
+            }
+        };
+
+        let request = RegionRequest {
+            header: Some(RegionRequestHeader {
+                tracing_context: TracingContext::from_current_span().to_w3c(),
+                ..Default::default()
+            }),
+            body: Some(region_request::Body::BulkInsert(BulkInsertRequest {
+                region_id: region_id.as_u64(),
+                partition_expr_version: None,
+                body: Some(bulk_insert_request::Body::ArrowIpc(ArrowIpc {
+                    schema: schema_bytes,
+                    data_header,
+                    payload,
+                })),
+            })),
+        };
+
+        region_writes.push(FlushRegionWrite {
+            region_id,
+            row_count,
+            datanode,
+            request,
+        });
+    }
+
+    for result in flush_region_writes_concurrently(node_manager.clone(), region_writes).await {
+        match result {
+            FlushWriteResult::Success { row_count } => {
+                FLUSH_TOTAL.inc();
+                FLUSH_ROWS.observe(row_count as f64);
+            }
+            FlushWriteResult::Failed { row_count, message } => {
+                record_failure!(row_count, message);
+            }
+        }
+    }
+
+    true
+}
+
+/// Original per-logical-table flush path. Used as fallback when the physical
+/// table flush path cannot be applied.
+#[allow(clippy::too_many_arguments)]
+async fn flush_batch_per_logical_table(
+    table_batches: &[TableBatch],
+    catalog: &str,
+    schema: &str,
+    ctx: &QueryContextRef,
+    partition_manager: &PartitionRuleManagerRef,
+    node_manager: &NodeManagerRef,
+    catalog_manager: &CatalogManagerRef,
+    first_error: &mut Option<String>,
+) {
+    macro_rules! record_failure {
+        ($row_count:expr, $msg:expr) => {{
+            let msg = $msg;
+            if first_error.is_none() {
+                *first_error = Some(msg.clone());
             }
             mark_flush_failure($row_count, &msg);
         }};
@@ -1000,12 +1427,7 @@ async fn flush_batch(
                 .with_label_values(&["flush_resolve_table"])
                 .start_timer();
             match catalog_manager
-                .table(
-                    &catalog,
-                    &schema,
-                    &table_batch.table_name,
-                    Some(ctx.as_ref()),
-                )
+                .table(catalog, schema, &table_batch.table_name, Some(ctx.as_ref()))
                 .await
             {
                 Ok(Some(table)) => table,
@@ -1178,15 +1600,6 @@ async fn flush_batch(
             }
         }
     }
-
-    let elapsed = start.elapsed().as_secs_f64();
-    FLUSH_ELAPSED.observe(elapsed);
-    debug!(
-        "Pending rows batch flushed, total rows: {}, elapsed time: {}s",
-        total_row_count, elapsed
-    );
-
-    notify_waiters(waiters, &first_error);
 }
 
 fn notify_waiters(waiters: Vec<FlushWaiter>, first_error: &Option<String>) {

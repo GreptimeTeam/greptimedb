@@ -12057,6 +12057,7 @@ dependencies = [
  "local-ip-address",
  "log-query",
  "loki-proto",
+ "metric-engine",
  "mime_guess",
  "mysql_async",
  "notify",

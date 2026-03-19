@@ -28,7 +28,7 @@ use crate::error::{EncodePrimaryKeySnafu, Result, UnexpectedRequestSnafu};
 
 /// Info about a tag column for TSID computation and sparse primary key encoding.
 #[allow(dead_code)]
-pub(crate) struct TagColumnInfo {
+pub struct TagColumnInfo {
     /// Column name (used for label-name hash).
     pub name: String,
     /// Column index in the RecordBatch.
@@ -39,7 +39,7 @@ pub(crate) struct TagColumnInfo {
 
 /// Computes `__tsid` values for each row.
 #[allow(dead_code)]
-pub(crate) fn compute_tsid_array(
+pub fn compute_tsid_array(
     batch: &RecordBatch,
     sorted_tag_columns: &[TagColumnInfo],
     tag_arrays: &[&StringArray],
@@ -111,7 +111,7 @@ fn build_tag_arrays<'a>(
 }
 
 /// Modifies a RecordBatch for sparse primary key encoding.
-pub(crate) fn modify_batch_sparse(
+pub fn modify_batch_sparse(
     batch: RecordBatch,
     table_id: u32,
     sorted_tag_columns: &[TagColumnInfo],
