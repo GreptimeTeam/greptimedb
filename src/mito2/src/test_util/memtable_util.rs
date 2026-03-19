@@ -30,7 +30,7 @@ use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt, SortFi
 use store_api::metadata::{
     ColumnMetadata, RegionMetadata, RegionMetadataBuilder, RegionMetadataRef,
 };
-use store_api::storage::{ColumnId, RegionId, SequenceNumber, SequenceRange};
+use store_api::storage::{ColumnId, RegionId, SequenceNumber};
 
 use crate::error::Result;
 use crate::memtable::bulk::part::BulkPart;

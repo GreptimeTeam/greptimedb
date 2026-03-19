@@ -22,7 +22,6 @@
 
 use std::sync::Arc;
 
-use mito2::test_util::bench_util::{CpuDataGenerator, cpu_metadata};
 use criterion::{Criterion, criterion_group, criterion_main};
 use mito_codec::row_converter::DensePrimaryKeyCodec;
 use mito2::memtable::bulk::context::BulkIterContext;
@@ -36,6 +35,7 @@ use mito2::read::flat_merge::FlatMergeIterator;
 use mito2::read::scan_region::PredicateGroup;
 use mito2::region::options::MergeMode;
 use mito2::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
+use mito2::test_util::bench_util::{CpuDataGenerator, cpu_metadata};
 use mito2::test_util::memtable_util;
 
 /// Writes rows.

@@ -25,16 +25,16 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use mito2::test_util::bench_util::{CpuDataGenerator, cpu_metadata};
 use criterion::{Criterion, criterion_group, criterion_main};
 use futures::TryStreamExt;
+use mito_codec::row_converter::DensePrimaryKeyCodec;
 use mito2::memtable::bulk::context::BulkIterContext;
 use mito2::memtable::bulk::part::{BulkPartConverter, BulkPartEncoder};
 use mito2::memtable::bulk::part_reader::EncodedBulkPartIter;
 use mito2::read::range_cache::bench_cache_flat_range_stream;
 use mito2::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
 use mito2::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
-use mito_codec::row_converter::DensePrimaryKeyCodec;
+use mito2::test_util::bench_util::{CpuDataGenerator, cpu_metadata};
 
 fn cache_flat_range_stream_bench(c: &mut Criterion) {
     let metadata = Arc::new(cpu_metadata());
@@ -115,8 +115,7 @@ fn cache_flat_range_stream_bench(c: &mut Criterion) {
                 .unwrap();
                 let stream: mito2::read::BoxedRecordBatchStream =
                     Box::pin(futures::stream::iter(iter));
-                let mut stream =
-                    bench_cache_flat_range_stream(stream, 64 * 1024 * 1024, region_id);
+                let mut stream = bench_cache_flat_range_stream(stream, 64 * 1024 * 1024, region_id);
                 while let Some(_batch) = stream.try_next().await.unwrap() {}
             });
         });

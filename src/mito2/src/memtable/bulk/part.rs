@@ -1121,10 +1121,7 @@ pub struct BulkPartEncoder {
 }
 
 impl BulkPartEncoder {
-    pub fn new(
-        metadata: RegionMetadataRef,
-        row_group_size: usize,
-    ) -> Result<BulkPartEncoder> {
+    pub fn new(metadata: RegionMetadataRef, row_group_size: usize) -> Result<BulkPartEncoder> {
         // TODO(yingwen): Skip arrow schema if needed.
         let json = metadata.to_json().context(InvalidMetadataSnafu)?;
         let key_value_meta =

@@ -715,11 +715,7 @@ mod tests {
         let dict_array: DictionaryArray<UInt32Type> =
             DictionaryArray::new(key_array, Arc::new(dict_values.clone()));
         let int_array = Int64Array::from(int_values.to_vec());
-        RecordBatch::try_new(
-            schema,
-            vec![Arc::new(dict_array), Arc::new(int_array)],
-        )
-        .unwrap()
+        RecordBatch::try_new(schema, vec![Arc::new(dict_array), Arc::new(int_array)]).unwrap()
     }
 
     fn dict_test_schema() -> Arc<datatypes::arrow::datatypes::Schema> {
@@ -836,15 +832,14 @@ mod tests {
         buffer.push(batch2);
 
         // Different dictionaries: full size for both.
-        assert_eq!(
-            buffer.estimated_batches_size(),
-            batch1_full + batch2_full
-        );
+        assert_eq!(buffer.estimated_batches_size(), batch1_full + batch2_full);
     }
 
     #[test]
     fn dict_values_ptr_eq_from_bulk_part() {
         use std::collections::VecDeque;
+
+        use mito_codec::row_converter::DensePrimaryKeyCodec;
 
         use crate::memtable::bulk::context::BulkIterContext;
         use crate::memtable::bulk::part::{BulkPartConverter, BulkPartEncoder};
@@ -852,7 +847,6 @@ mod tests {
         use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
         use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
         use crate::test_util::bench_util::{CpuDataGenerator, cpu_metadata};
-        use mito_codec::row_converter::DensePrimaryKeyCodec;
 
         let metadata = Arc::new(cpu_metadata());
         let start_sec = 1710043200;
@@ -865,13 +859,8 @@ mod tests {
         let schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
         let codec = Arc::new(DensePrimaryKeyCodec::new(&metadata));
 
-        let mut converter = BulkPartConverter::new(
-            &metadata,
-            schema,
-            DEFAULT_ROW_GROUP_SIZE,
-            codec,
-            true,
-        );
+        let mut converter =
+            BulkPartConverter::new(&metadata, schema, DEFAULT_ROW_GROUP_SIZE, codec, true);
         for kvs in generator.iter() {
             converter.append_key_values(&kvs).unwrap();
         }
@@ -894,14 +883,8 @@ mod tests {
         );
         let row_groups: VecDeque<usize> = (0..num_row_groups).collect();
 
-        let iter = EncodedBulkPartIter::try_new(
-            &encoded_part,
-            context,
-            row_groups,
-            None,
-            None,
-        )
-        .unwrap();
+        let iter =
+            EncodedBulkPartIter::try_new(&encoded_part, context, row_groups, None, None).unwrap();
 
         let batches: Vec<RecordBatch> = iter
             .collect::<Vec<_>>()
@@ -923,11 +906,7 @@ mod tests {
             .iter()
             .enumerate()
             .filter_map(|(i, f)| {
-                matches!(
-                    f.data_type(),
-                    ArrowDataType::Dictionary(_, _)
-                )
-                .then_some(i)
+                matches!(f.data_type(), ArrowDataType::Dictionary(_, _)).then_some(i)
             })
             .collect();
         assert!(
