@@ -371,6 +371,10 @@ impl CacheBatchBuffer {
         self.batches.push(batch);
     }
 
+    // TODO(yingwen): slice memory size may be less that the actual cached memory size.
+    // This may be an issue if we cache the array.
+    // We may deep copy the array in background if the get_slice_memory_size is much less that the size
+    // from get_array_memory_size.
     fn init_first_batch(&mut self, batch: &RecordBatch) {
         for col_idx in 0..batch.num_columns() {
             let col = batch.column(col_idx);
