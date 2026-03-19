@@ -19,8 +19,8 @@ use api::prom_store::remote::read_request::ResponseType;
 use api::prom_store::remote::{Query, QueryResult, ReadRequest, ReadResponse};
 use api::v1::alter_table_expr::Kind;
 use api::v1::{
-    AddColumn, AddColumns, AlterTableExpr, ColumnDataType, ColumnDef, RowInsertRequests,
-    SemanticType,
+    AddColumn, AddColumns, AlterTableExpr, ColumnDataType, ColumnDef, CreateTableExpr,
+    RowInsertRequests, SemanticType,
 };
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
@@ -303,6 +303,148 @@ impl PendingRowsSchemaAlterer for Instance {
                 },
                 ctx,
             )
+            .await
+            .map_err(BoxedError::new)
+            .context(error::ExecuteGrpcQuerySnafu)?;
+
+        Ok(())
+    }
+
+    async fn create_tables_if_missing_batch(
+        &self,
+        catalog: &str,
+        schema: &str,
+        tables: &[(&str, &[api::v1::ColumnSchema])],
+        with_metric_engine: bool,
+        ctx: QueryContextRef,
+    ) -> ServerResult<()> {
+        if tables.is_empty() {
+            return Ok(());
+        }
+
+        let create_type = auto_create_table_type_for_prom_remote_write(&ctx, with_metric_engine);
+        if let Some(physical_table) = required_physical_table_for_create_type(&create_type) {
+            self.create_metric_physical_table_if_missing(
+                catalog,
+                schema,
+                physical_table,
+                ctx.clone(),
+            )
+            .await?;
+        }
+
+        let engine = if matches!(create_type, AutoCreateTableType::Logical(_)) {
+            METRIC_ENGINE_NAME
+        } else {
+            common_catalog::consts::default_engine()
+        };
+
+        // Check which tables actually still need to be created (may have been
+        // concurrently created by another request).
+        let mut create_exprs: Vec<CreateTableExpr> = Vec::with_capacity(tables.len());
+        for &(table_name, request_schema) in tables {
+            let existing = self
+                .catalog_manager()
+                .table(catalog, schema, table_name, Some(ctx.as_ref()))
+                .await
+                .map_err(BoxedError::new)
+                .context(error::ExecuteGrpcQuerySnafu)?;
+            if existing.is_some() {
+                continue;
+            }
+
+            let table_ref = TableReference::full(catalog, schema, table_name);
+            let mut create_table_expr = build_create_table_expr(&table_ref, request_schema, engine)
+                .map_err(BoxedError::new)
+                .context(error::ExecuteGrpcQuerySnafu)?;
+
+            let mut table_options = std::collections::HashMap::with_capacity(4);
+            fill_table_options_for_create(&mut table_options, &create_type, &ctx);
+            create_table_expr.table_options.extend(table_options);
+            create_exprs.push(create_table_expr);
+        }
+
+        if create_exprs.is_empty() {
+            return Ok(());
+        }
+
+        match create_type {
+            AutoCreateTableType::Logical(_) => {
+                // Use the batch API for logical tables.
+                self.statement_executor
+                    .create_logical_tables(&create_exprs, ctx)
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(error::ExecuteGrpcQuerySnafu)?;
+            }
+            AutoCreateTableType::Physical => {
+                // Physical tables don't have a batch DDL path; create one at a time.
+                for mut expr in create_exprs {
+                    expr.table_options
+                        .insert(SST_FORMAT_KEY.to_string(), "flat".to_string());
+                    self.statement_executor
+                        .create_table_inner(&mut expr, None, ctx.clone())
+                        .await
+                        .map_err(BoxedError::new)
+                        .context(error::ExecuteGrpcQuerySnafu)?;
+                }
+            }
+            _ => {
+                unreachable!("prom remote write only supports logical or physical auto-create");
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn add_missing_prom_tag_columns_batch(
+        &self,
+        catalog: &str,
+        schema: &str,
+        tables: &[(&str, &[String])],
+        ctx: QueryContextRef,
+    ) -> ServerResult<()> {
+        if tables.is_empty() {
+            return Ok(());
+        }
+
+        let alter_exprs: Vec<AlterTableExpr> = tables
+            .iter()
+            .filter(|(_, columns)| !columns.is_empty())
+            .map(|&(table_name, columns)| {
+                let add_columns = AddColumns {
+                    add_columns: columns
+                        .iter()
+                        .map(|column_name| AddColumn {
+                            column_def: Some(ColumnDef {
+                                name: column_name.clone(),
+                                data_type: ColumnDataType::String as i32,
+                                is_nullable: true,
+                                semantic_type: SemanticType::Tag as i32,
+                                comment: String::new(),
+                                ..Default::default()
+                            }),
+                            location: None,
+                            add_if_not_exists: true,
+                        })
+                        .collect(),
+                };
+
+                AlterTableExpr {
+                    catalog_name: catalog.to_string(),
+                    schema_name: schema.to_string(),
+                    table_name: table_name.to_string(),
+                    kind: Some(Kind::AddColumns(add_columns)),
+                }
+            })
+            .collect();
+
+        if alter_exprs.is_empty() {
+            return Ok(());
+        }
+
+        self.statement_executor
+            .alter_logical_tables(alter_exprs, ctx)
             .await
             .map_err(BoxedError::new)
             .context(error::ExecuteGrpcQuerySnafu)?;
