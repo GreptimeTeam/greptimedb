@@ -54,7 +54,7 @@ use crate::error;
 use crate::error::{Error, Result};
 use crate::metrics::{
     FLUSH_DROPPED_ROWS, FLUSH_ELAPSED, FLUSH_FAILURES, FLUSH_ROWS, FLUSH_TOTAL, PENDING_BATCHES,
-    PENDING_ROWS, PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED, PENDING_WORKERS,
+    PENDING_ROWS, PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED, PENDING_WORKERS
 };
 
 const PHYSICAL_TABLE_KEY: &str = "physical_table";
@@ -897,7 +897,7 @@ async fn flush_region_writes_concurrently(
         let mut results = Vec::with_capacity(writes.len());
         for write in writes {
             let datanode = node_manager.datanode(&write.datanode).await;
-            let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+            let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
                 .with_label_values(&["flush_write_region"])
                 .start_timer();
             match datanode.handle(write.request).await {
@@ -920,7 +920,7 @@ async fn flush_region_writes_concurrently(
         let node_manager = node_manager.clone();
         async move {
             let datanode = node_manager.datanode(&write.datanode).await;
-            let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+            let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
                 .with_label_values(&["flush_write_region"])
                 .start_timer();
 
@@ -977,7 +977,7 @@ async fn flush_batch(
 
         let schema_ref = first_batch.schema();
         let record_batch = {
-            let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+            let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
                 .with_label_values(&["flush_concat_table_batches"])
                 .start_timer();
             match concat_batches(&schema_ref, &table_batch.batches) {
@@ -996,7 +996,7 @@ async fn flush_batch(
         };
 
         let table = {
-            let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+            let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
                 .with_label_values(&["flush_resolve_table"])
                 .start_timer();
             match catalog_manager
@@ -1034,7 +1034,7 @@ async fn flush_batch(
         let table_info = table.table_info();
 
         let partition_rule = {
-            let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+            let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
                 .with_label_values(&["flush_fetch_partition_rule"])
                 .start_timer();
             match partition_manager
@@ -1056,7 +1056,7 @@ async fn flush_batch(
         };
 
         let region_masks = {
-            let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+            let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
                 .with_label_values(&["flush_split_record_batch"])
                 .start_timer();
             match partition_rule.0.split_record_batch(&record_batch) {
@@ -1083,7 +1083,7 @@ async fn flush_batch(
             let region_batch = if mask.select_all() {
                 record_batch.clone()
             } else {
-                let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+                let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
                     .with_label_values(&["flush_filter_record_batch"])
                     .start_timer();
                 match filter_record_batch(&record_batch, mask.array()) {
@@ -1108,7 +1108,7 @@ async fn flush_batch(
 
             let region_id = RegionId::new(table_info.table_id(), region_number);
             let datanode = {
-                let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+                let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
                     .with_label_values(&["flush_resolve_region_leader"])
                     .start_timer();
                 match partition_manager.find_region_leader(region_id).await {
@@ -1124,7 +1124,7 @@ async fn flush_batch(
             };
 
             let (schema_bytes, data_header, payload) = {
-                let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+                let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
                     .with_label_values(&["flush_encode_ipc"])
                     .start_timer();
                 match record_batch_to_ipc(region_batch) {
