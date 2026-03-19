@@ -692,7 +692,7 @@ async fn flush_batch(
 
             let datanode = node_manager.datanode(&datanode).await;
             let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
-                .with_label_values(&["flush_wn ite_region"])
+                .with_label_values(&["flush_write_region"])
                 .start_timer();
             match datanode.handle(request).await {
                 Ok(_) => {
@@ -887,106 +887,51 @@ fn build_arrow_array(
     column_data_type: arrow::datatypes::DataType,
     row_count: usize,
 ) -> Result<ArrayRef> {
+    macro_rules! build_array {
+        ($builder:expr, $( $pattern:pat => $value:expr ),+ $(,)?) => {{
+            let mut builder = $builder;
+            for row in &rows.rows {
+                match row.values[col_idx].value_data.as_ref() {
+                    $(Some($pattern) => builder.append_value($value),)+
+                    Some(v) => {
+                        return error::InvalidPromRemoteRequestSnafu {
+                            msg: format!("Unexpected value: {:?}", v),
+                        }
+                        .fail();
+                    }
+                    None => builder.append_null(),
+                }
+            }
+            Arc::new(builder.finish()) as ArrayRef
+        }};
+    }
+
     let array: ArrayRef = match column_data_type {
         arrow::datatypes::DataType::Float64 => {
-            let mut builder = Float64Builder::with_capacity(row_count);
-            for row in &rows.rows {
-                match row.values[col_idx].value_data.as_ref() {
-                    Some(ValueData::F64Value(v)) => builder.append_value(*v),
-                    Some(v) => {
-                        return error::InvalidPromRemoteRequestSnafu {
-                            msg: format!("Unexpected value: {:?}", v),
-                        }
-                        .fail();
-                    }
-                    None => builder.append_null(),
-                }
-            }
-            Arc::new(builder.finish())
+            build_array!(Float64Builder::with_capacity(row_count), ValueData::F64Value(v) => *v)
         }
-        arrow::datatypes::DataType::Utf8 => {
-            let mut builder = StringBuilder::with_capacity(row_count, 0);
-            for row in &rows.rows {
-                match row.values[col_idx].value_data.as_ref() {
-                    Some(ValueData::StringValue(v)) => builder.append_value(v),
-                    Some(v) => {
-                        return error::InvalidPromRemoteRequestSnafu {
-                            msg: format!("Unexpected value: {:?}", v),
-                        }
-                        .fail();
-                    }
-                    None => builder.append_null(),
-                }
-            }
-            Arc::new(builder.finish())
-        }
+        arrow::datatypes::DataType::Utf8 => build_array!(
+            StringBuilder::with_capacity(row_count, 0),
+            ValueData::StringValue(v) => v
+        ),
         arrow::datatypes::DataType::Timestamp(u, _) => match u {
-            TimeUnit::Second => {
-                let mut builder = TimestampSecondBuilder::with_capacity(row_count);
-                for row in &rows.rows {
-                    match row.values[col_idx].value_data.as_ref() {
-                        Some(ValueData::TimestampSecondValue(v)) => builder.append_value(*v),
-                        Some(v) => {
-                            return error::InvalidPromRemoteRequestSnafu {
-                                msg: format!("Unexpected value: {:?}", v),
-                            }
-                            .fail();
-                        }
-                        None => builder.append_null(),
-                    }
-                }
-                Arc::new(builder.finish())
-            }
-            TimeUnit::Millisecond => {
-                let mut builder = TimestampMillisecondBuilder::with_capacity(row_count);
-                for row in &rows.rows {
-                    match row.values[col_idx].value_data.as_ref() {
-                        Some(ValueData::TimestampMillisecondValue(v)) => builder.append_value(*v),
-                        Some(v) => {
-                            return error::InvalidPromRemoteRequestSnafu {
-                                msg: format!("Unexpected value: {:?}", v),
-                            }
-                            .fail();
-                        }
-                        None => builder.append_null(),
-                    }
-                }
-                Arc::new(builder.finish())
-            }
-            TimeUnit::Microsecond => {
-                let mut builder = TimestampMicrosecondBuilder::with_capacity(row_count);
-                for row in &rows.rows {
-                    match row.values[col_idx].value_data.as_ref() {
-                        Some(
-                            ValueData::DatetimeValue(v) | ValueData::TimestampMicrosecondValue(v),
-                        ) => builder.append_value(*v),
-                        Some(v) => {
-                            return error::InvalidPromRemoteRequestSnafu {
-                                msg: format!("Unexpected value: {:?}", v),
-                            }
-                            .fail();
-                        }
-                        None => builder.append_null(),
-                    }
-                }
-                Arc::new(builder.finish())
-            }
-            TimeUnit::Nanosecond => {
-                let mut builder = TimestampNanosecondBuilder::with_capacity(row_count);
-                for row in &rows.rows {
-                    match row.values[col_idx].value_data.as_ref() {
-                        Some(ValueData::TimestampNanosecondValue(v)) => builder.append_value(*v),
-                        Some(v) => {
-                            return error::InvalidPromRemoteRequestSnafu {
-                                msg: format!("Unexpected value: {:?}", v),
-                            }
-                            .fail();
-                        }
-                        None => builder.append_null(),
-                    }
-                }
-                Arc::new(builder.finish())
-            }
+            TimeUnit::Second => build_array!(
+                TimestampSecondBuilder::with_capacity(row_count),
+                ValueData::TimestampSecondValue(v) => *v
+            ),
+            TimeUnit::Millisecond => build_array!(
+                TimestampMillisecondBuilder::with_capacity(row_count),
+                ValueData::TimestampMillisecondValue(v) => *v
+            ),
+            TimeUnit::Microsecond => build_array!(
+                TimestampMicrosecondBuilder::with_capacity(row_count),
+                ValueData::DatetimeValue(v) => *v,
+                ValueData::TimestampMicrosecondValue(v) => *v
+            ),
+            TimeUnit::Nanosecond => build_array!(
+                TimestampNanosecondBuilder::with_capacity(row_count),
+                ValueData::TimestampNanosecondValue(v) => *v
+            ),
         },
         ty => {
             return error::InvalidPromRemoteRequestSnafu {
