@@ -1694,12 +1694,58 @@ impl RowGroupReaderBuilder {
         &self.cache_strategy
     }
 
+    /// Builds a [ParquetRecordBatchReader] for `row_group_idx` using a custom read format.
+    pub(crate) async fn build_with_read_format(
+        &self,
+        row_group_idx: usize,
+        row_selection: Option<RowSelection>,
+        fetch_metrics: Option<&ParquetFetchMetrics>,
+        read_format: &ReadFormat,
+    ) -> Result<ParquetRecordBatchReader> {
+        let parquet_schema_desc = self.parquet_meta.file_metadata().schema_descr();
+        let projection_mask = ProjectionMask::roots(
+            parquet_schema_desc,
+            read_format.projection_indices().iter().copied(),
+        );
+        let hint = Some(read_format.arrow_schema().fields());
+        let field_levels =
+            parquet_to_arrow_field_levels(parquet_schema_desc, projection_mask.clone(), hint)
+                .context(ReadDataPartSnafu)?;
+
+        self.build_with_projection(
+            row_group_idx,
+            row_selection,
+            fetch_metrics,
+            projection_mask,
+            field_levels,
+        )
+        .await
+    }
+
     /// Builds a [ParquetRecordBatchReader] to read the row group at `row_group_idx`.
     pub(crate) async fn build(
         &self,
         row_group_idx: usize,
         row_selection: Option<RowSelection>,
         fetch_metrics: Option<&ParquetFetchMetrics>,
+    ) -> Result<ParquetRecordBatchReader> {
+        self.build_with_projection(
+            row_group_idx,
+            row_selection,
+            fetch_metrics,
+            self.projection.clone(),
+            self.field_levels.clone(),
+        )
+        .await
+    }
+
+    async fn build_with_projection(
+        &self,
+        row_group_idx: usize,
+        row_selection: Option<RowSelection>,
+        fetch_metrics: Option<&ParquetFetchMetrics>,
+        projection: ProjectionMask,
+        field_levels: FieldLevels,
     ) -> Result<ParquetRecordBatchReader> {
         let fetch_start = Instant::now();
 
@@ -1714,7 +1760,7 @@ impl RowGroupReaderBuilder {
         );
         // Fetches data into memory.
         row_group
-            .fetch(&self.projection, row_selection.as_ref(), fetch_metrics)
+            .fetch(&projection, row_selection.as_ref(), fetch_metrics)
             .await
             .context(ReadParquetSnafu {
                 path: &self.file_path,
@@ -1728,7 +1774,7 @@ impl RowGroupReaderBuilder {
         // Builds the parquet reader.
         // Now the row selection is None.
         ParquetRecordBatchReader::try_new_with_row_groups(
-            &self.field_levels,
+            &field_levels,
             &row_group,
             DEFAULT_READ_BATCH_SIZE,
             row_selection,

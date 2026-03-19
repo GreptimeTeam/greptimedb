@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
 use std::ops::BitAnd;
 use std::sync::Arc;
 
@@ -19,16 +20,20 @@ use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_time::Timestamp;
 use datatypes::arrow::array::BooleanArray;
 use datatypes::arrow::buffer::BooleanBuffer;
+use datatypes::arrow::compute::concat_batches;
 use datatypes::arrow::record_batch::RecordBatch;
 use mito_codec::row_converter::PrimaryKeyFilter;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
+use store_api::storage::ColumnId;
 
-use crate::error::{RecordBatchSnafu, Result};
+use crate::error::{ComputeArrowSnafu, RecordBatchSnafu, Result, UnexpectedSnafu};
 use crate::memtable::BoxedBatchIterator;
 use crate::read::last_row::{FlatRowGroupLastRowCachedReader, RowGroupLastRowCachedReader};
 use crate::read::{Batch, BatchReader};
 use crate::sst::file::FileTimeRange;
 use crate::sst::parquet::file_range::FileRangeContextRef;
+use crate::sst::parquet::flat_format::primary_key_column_index;
+use crate::sst::parquet::format::PrimaryKeyArray;
 use crate::sst::parquet::reader::{FlatRowGroupReader, ReaderMetrics, RowGroupReader};
 
 pub enum Source {
@@ -263,12 +268,75 @@ impl FlatSource {
     }
 }
 
+struct CachedPrimaryKeyFilter {
+    inner: Box<dyn PrimaryKeyFilter>,
+    last_primary_key: Vec<u8>,
+    last_match: Option<bool>,
+}
+
+impl CachedPrimaryKeyFilter {
+    fn new(inner: Box<dyn PrimaryKeyFilter>) -> Self {
+        Self {
+            inner,
+            last_primary_key: Vec::new(),
+            last_match: None,
+        }
+    }
+}
+
+impl PrimaryKeyFilter for CachedPrimaryKeyFilter {
+    fn matches(&mut self, pk: &[u8]) -> bool {
+        if let Some(last_match) = self.last_match
+            && self.last_primary_key == pk
+        {
+            return last_match;
+        }
+
+        let matched = self.inner.matches(pk);
+        self.last_primary_key.clear();
+        self.last_primary_key.extend_from_slice(pk);
+        self.last_match = Some(matched);
+        matched
+    }
+}
+
+fn batch_single_primary_key(batch: &RecordBatch) -> Result<Option<&[u8]>> {
+    let primary_key_index = primary_key_column_index(batch.num_columns());
+    let pk_dict_array = batch
+        .column(primary_key_index)
+        .as_any()
+        .downcast_ref::<PrimaryKeyArray>()
+        .context(UnexpectedSnafu {
+            reason: "Primary key column is not a dictionary array".to_string(),
+        })?;
+    let pk_values = pk_dict_array
+        .values()
+        .as_any()
+        .downcast_ref::<datatypes::arrow::array::BinaryArray>()
+        .context(UnexpectedSnafu {
+            reason: "Primary key values are not binary array".to_string(),
+        })?;
+    let keys = pk_dict_array.keys();
+    if keys.is_empty() {
+        return Ok(None);
+    }
+
+    let first_key = keys.value(0);
+    if first_key != keys.value(keys.len() - 1) {
+        return Ok(None);
+    }
+
+    Ok(Some(pk_values.value(first_key as usize)))
+}
+
 /// A flat format reader that returns RecordBatch instead of Batch.
 pub struct FlatPruneReader {
     /// Context for file ranges.
     context: FileRangeContextRef,
     source: FlatSource,
-    primary_key_filter: Option<Box<dyn PrimaryKeyFilter>>,
+    primary_key_filter: Option<CachedPrimaryKeyFilter>,
+    covered_primary_key_filter_columns: Option<HashSet<ColumnId>>,
+    buffered_prefiltered_batch: Option<RecordBatch>,
     metrics: ReaderMetrics,
     /// Whether to skip field filters for this row group.
     skip_fields: bool,
@@ -281,7 +349,11 @@ impl FlatPruneReader {
         skip_fields: bool,
     ) -> Self {
         Self {
-            primary_key_filter: ctx.new_primary_key_filter(),
+            primary_key_filter: ctx
+                .new_primary_key_filter()
+                .map(CachedPrimaryKeyFilter::new),
+            covered_primary_key_filter_columns: ctx.covered_primary_key_filter_columns(),
+            buffered_prefiltered_batch: None,
             context: ctx,
             source: FlatSource::RowGroup(reader),
             metrics: Default::default(),
@@ -296,6 +368,8 @@ impl FlatPruneReader {
     ) -> Self {
         Self {
             primary_key_filter: None,
+            covered_primary_key_filter_columns: None,
+            buffered_prefiltered_batch: None,
             context: ctx,
             source: FlatSource::LastRow(reader),
             metrics: Default::default(),
@@ -310,28 +384,14 @@ impl FlatPruneReader {
 
     pub(crate) fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
         loop {
-            let start = std::time::Instant::now();
-            let Some(raw_batch) = self.source.next_raw_batch()? else {
+            let Some(mut raw_batch) = self.next_prefiltered_batch()? else {
                 return Ok(None);
             };
 
-            // Account rows as soon as parquet yields a raw batch. The scan timer spans
-            // the raw read, encoded primary-key prefilter, and flat conversion so
-            // `scan_cost` keeps the same meaning after splitting `next_raw_batch()`
-            // from `convert_batch()`.
-            self.metrics.num_rows += raw_batch.num_rows();
-
-            let num_rows_before_prefilter = raw_batch.num_rows();
-            let Some(prefiltered_batch) = self.prefilter_primary_keys(raw_batch)? else {
-                self.metrics.scan_cost += start.elapsed();
-                self.metrics.filter_metrics.rows_precise_filtered += num_rows_before_prefilter;
-                continue;
-            };
-            let prefiltered_rows = num_rows_before_prefilter - prefiltered_batch.num_rows();
-            self.metrics.filter_metrics.rows_precise_filtered += prefiltered_rows;
-
-            let record_batch = self.source.convert_batch(prefiltered_batch)?;
-            self.metrics.scan_cost += start.elapsed();
+            let scan_start = std::time::Instant::now();
+            self.coalesce_prefiltered_batches(&mut raw_batch)?;
+            let record_batch = self.source.convert_batch(raw_batch)?;
+            self.metrics.scan_cost += scan_start.elapsed();
 
             // `num_batches` counts decoded flat batches, not raw parquet batches.
             self.metrics.num_batches += 1;
@@ -346,13 +406,63 @@ impl FlatPruneReader {
         }
     }
 
+    fn next_prefiltered_batch(&mut self) -> Result<Option<RecordBatch>> {
+        if let Some(batch) = self.buffered_prefiltered_batch.take() {
+            return Ok(Some(batch));
+        }
+
+        loop {
+            let start = std::time::Instant::now();
+            let Some(raw_batch) = self.source.next_raw_batch()? else {
+                return Ok(None);
+            };
+
+            self.metrics.num_rows += raw_batch.num_rows();
+
+            let num_rows_before_prefilter = raw_batch.num_rows();
+            let Some(prefiltered_batch) = self.prefilter_primary_keys(raw_batch)? else {
+                self.metrics.scan_cost += start.elapsed();
+                self.metrics.filter_metrics.rows_precise_filtered += num_rows_before_prefilter;
+                continue;
+            };
+            let prefiltered_rows = num_rows_before_prefilter - prefiltered_batch.num_rows();
+            self.metrics.filter_metrics.rows_precise_filtered += prefiltered_rows;
+            self.metrics.scan_cost += start.elapsed();
+            return Ok(Some(prefiltered_batch));
+        }
+    }
+
+    fn coalesce_prefiltered_batches(&mut self, batch: &mut RecordBatch) -> Result<()> {
+        let Some(primary_key) = batch_single_primary_key(batch)? else {
+            return Ok(());
+        };
+        let primary_key = primary_key.to_vec();
+        let schema = batch.schema();
+        let mut batches = vec![batch.clone()];
+
+        while let Some(next_batch) = self.next_prefiltered_batch()? {
+            if batch_single_primary_key(&next_batch)? == Some(primary_key.as_slice()) {
+                batches.push(next_batch);
+            } else {
+                self.buffered_prefiltered_batch = Some(next_batch);
+                break;
+            }
+        }
+
+        if batches.len() > 1 {
+            *batch = concat_batches(&schema, &batches).context(ComputeArrowSnafu)?;
+        }
+
+        Ok(())
+    }
+
     fn prefilter_primary_keys(&mut self, record_batch: RecordBatch) -> Result<Option<RecordBatch>> {
         let Some(primary_key_filter) = self.primary_key_filter.as_mut() else {
             return Ok(Some(record_batch));
         };
 
         self.context
-            .prefilter_flat_batch_by_primary_key(record_batch, primary_key_filter.as_mut())
+            .prefilter_flat_batch_by_primary_key(record_batch, primary_key_filter)
     }
 
     /// Prunes batches by the pushed down predicate and returns RecordBatch.
@@ -363,9 +473,11 @@ impl FlatPruneReader {
         }
 
         let num_rows_before_filter = record_batch.num_rows();
-        let Some(filtered_batch) = self
-            .context
-            .precise_filter_flat(record_batch, self.skip_fields)?
+        let Some(filtered_batch) = self.context.precise_filter_flat(
+            record_batch,
+            self.skip_fields,
+            self.covered_primary_key_filter_columns.as_ref(),
+        )?
         else {
             // the entire batch is filtered out
             self.metrics.filter_metrics.rows_precise_filtered += num_rows_before_filter;
@@ -386,12 +498,120 @@ impl FlatPruneReader {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use api::v1::OpType;
     use datafusion_common::ScalarValue;
     use datafusion_expr::{Expr, col, lit};
+    use datatypes::arrow::array::{ArrayRef, BinaryArray, DictionaryArray, UInt32Array};
+    use datatypes::arrow::datatypes::{DataType, Field, Schema, TimeUnit, UInt32Type};
 
     use super::*;
     use crate::test_util::new_batch;
+
+    struct CountingPrimaryKeyFilter {
+        calls: Arc<AtomicUsize>,
+        matched: bool,
+    }
+
+    impl PrimaryKeyFilter for CountingPrimaryKeyFilter {
+        fn matches(&mut self, _pk: &[u8]) -> bool {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.matched
+        }
+    }
+
+    #[test]
+    fn test_cached_primary_key_filter_reuses_last_match() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut filter = CachedPrimaryKeyFilter::new(Box::new(CountingPrimaryKeyFilter {
+            calls: calls.clone(),
+            matched: true,
+        }));
+
+        assert!(filter.matches(b"series-a"));
+        assert!(filter.matches(b"series-a"));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+
+        assert!(filter.matches(b"series-b"));
+        assert!(filter.matches(b"series-b"));
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+    }
+
+    fn new_flat_raw_batch(primary_keys: &[&[u8]]) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("value", DataType::Float64, true),
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new(
+                "__primary_key",
+                DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Binary)),
+                false,
+            ),
+            Field::new("__sequence", DataType::UInt64, false),
+            Field::new("__op_type", DataType::UInt8, false),
+        ]));
+
+        let mut dict_values = Vec::new();
+        let mut keys = Vec::with_capacity(primary_keys.len());
+        for pk in primary_keys {
+            let key = dict_values
+                .iter()
+                .position(|existing: &&[u8]| existing == pk)
+                .unwrap_or_else(|| {
+                    dict_values.push(*pk);
+                    dict_values.len() - 1
+                });
+            keys.push(key as u32);
+        }
+
+        let pk_array: ArrayRef = Arc::new(DictionaryArray::<UInt32Type>::new(
+            UInt32Array::from(keys),
+            Arc::new(BinaryArray::from_iter_values(dict_values.iter().copied())),
+        ));
+
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(datatypes::arrow::array::Float64Array::from(
+                    vec![1.0; primary_keys.len()],
+                )),
+                Arc::new(
+                    datatypes::arrow::array::TimestampMillisecondArray::from_iter_values(
+                        0..primary_keys.len() as i64,
+                    ),
+                ),
+                pk_array,
+                Arc::new(datatypes::arrow::array::UInt64Array::from(vec![
+                    1;
+                    primary_keys
+                        .len()
+                ])),
+                Arc::new(datatypes::arrow::array::UInt8Array::from(vec![
+                    1;
+                    primary_keys
+                        .len()
+                ])),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_batch_single_primary_key_detects_single_series_batch() {
+        let batch = new_flat_raw_batch(&[b"series-a", b"series-a"]);
+        assert_eq!(
+            batch_single_primary_key(&batch).unwrap(),
+            Some(&b"series-a"[..])
+        );
+
+        let batch = new_flat_raw_batch(&[b"series-a", b"series-b"]);
+        assert!(batch_single_primary_key(&batch).unwrap().is_none());
+    }
 
     #[test]
     fn test_prune_time_iter_empty() {
