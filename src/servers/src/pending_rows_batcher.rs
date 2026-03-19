@@ -311,30 +311,52 @@ impl PendingRowsBatcher {
         let mut aligned_batches = Vec::with_capacity(table_batches.len());
 
         for (table_name, record_batch) in table_batches {
-            let region_schema = if let Some(region_schema) = region_schemas.get(&table_name) {
+            let region_schema = if let Some(region_schema) = {
+                let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+                    .with_label_values(&["align_check_schema_cache"])
+                    .start_timer();
+                region_schemas.get(&table_name)
+            } {
                 region_schema.clone()
             } else {
-                let mut table = self
-                    .catalog_manager
-                    .table(&catalog, &schema, &table_name, Some(ctx.as_ref()))
-                    .await?;
-                if table.is_none() {
-                    let request_schema =
-                        build_prom_create_table_schema(record_batch.schema().as_ref())?;
-                    self.schema_alterer
-                        .create_table_if_missing(
-                            &catalog,
-                            &schema,
-                            &table_name,
-                            &request_schema,
-                            self.prom_store_with_metric_engine,
-                            ctx.clone(),
-                        )
-                        .await?;
-                    table = self
-                        .catalog_manager
+                let mut table = {
+                    let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+                        .with_label_values(&["align_resolve_table"])
+                        .start_timer();
+                    self.catalog_manager
                         .table(&catalog, &schema, &table_name, Some(ctx.as_ref()))
-                        .await?;
+                        .await?
+                };
+                if table.is_none() {
+                    let request_schema = {
+                        let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+                            .with_label_values(&["align_build_create_table_schema"])
+                            .start_timer();
+                        build_prom_create_table_schema(record_batch.schema().as_ref())?
+                    };
+                    {
+                        let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+                            .with_label_values(&["align_create_table_if_missing"])
+                            .start_timer();
+                        self.schema_alterer
+                            .create_table_if_missing(
+                                &catalog,
+                                &schema,
+                                &table_name,
+                                &request_schema,
+                                self.prom_store_with_metric_engine,
+                                ctx.clone(),
+                            )
+                            .await?;
+                    }
+                    table = {
+                        let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+                            .with_label_values(&["align_resolve_table_after_create"])
+                            .start_timer();
+                        self.catalog_manager
+                            .table(&catalog, &schema, &table_name, Some(ctx.as_ref()))
+                            .await?
+                    };
                 }
 
                 let table = table.with_context(|| error::UnexpectedResultSnafu {
@@ -348,37 +370,55 @@ impl PendingRowsBatcher {
                 region_schema
             };
 
-            let (record_batch, missing_columns) =
-                accommodate_record_batch_for_target_schema(record_batch, region_schema.as_ref())?;
+            let (record_batch, missing_columns) = {
+                let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+                    .with_label_values(&["align_accommodate_record_batch"])
+                    .start_timer();
+                accommodate_record_batch_for_target_schema(record_batch, region_schema.as_ref())?
+            };
             let region_schema = if missing_columns.is_empty() {
                 region_schema
             } else {
-                self.schema_alterer
-                    .add_missing_prom_tag_columns(
-                        &catalog,
-                        &schema,
-                        &table_name,
-                        &missing_columns,
-                        ctx.clone(),
-                    )
-                    .await?;
+                {
+                    let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+                        .with_label_values(&["align_add_missing_prom_tag_columns"])
+                        .start_timer();
+                    self.schema_alterer
+                        .add_missing_prom_tag_columns(
+                            &catalog,
+                            &schema,
+                            &table_name,
+                            &missing_columns,
+                            ctx.clone(),
+                        )
+                        .await?;
+                }
 
-                let table = self
-                    .catalog_manager
-                    .table(&catalog, &schema, &table_name, Some(ctx.as_ref()))
-                    .await?
-                    .with_context(|| error::UnexpectedResultSnafu {
-                        reason: format!(
-                            "Table not found after pending batch schema alter: {}",
-                            table_name
-                        ),
-                    })?;
+                let table = {
+                    let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+                        .with_label_values(&["align_resolve_table_after_schema_alter"])
+                        .start_timer();
+                    self.catalog_manager
+                        .table(&catalog, &schema, &table_name, Some(ctx.as_ref()))
+                        .await?
+                        .with_context(|| error::UnexpectedResultSnafu {
+                            reason: format!(
+                                "Table not found after pending batch schema alter: {}",
+                                table_name
+                            ),
+                        })?
+                };
                 let refreshed_region_schema = table.table_info().meta.schema.arrow_schema().clone();
                 region_schemas.insert(table_name.clone(), refreshed_region_schema.clone());
                 refreshed_region_schema
             };
 
-            let record_batch = align_record_batch_to_schema(record_batch, region_schema.as_ref())?;
+            let record_batch = {
+                let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+                    .with_label_values(&["align_record_batch_to_schema"])
+                    .start_timer();
+                align_record_batch_to_schema(record_batch, region_schema.as_ref())?
+            };
             aligned_batches.push((table_name, record_batch));
         }
 
