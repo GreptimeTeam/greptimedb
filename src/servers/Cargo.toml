@@ -88,6 +88,7 @@ opentelemetry-proto.workspace = true
 operator.workspace = true
 otel-arrow-rust.workspace = true
 parking_lot.workspace = true
+partition.workspace = true
 pg_interval = { version = "0.5.2", package = "pg_interval_2" }
 pgwire = { version = "0.38", default-features = false, features = [
     "server-api-ring",
@@ -95,7 +96,6 @@ pgwire = { version = "0.38", default-features = false, features = [
 ] }
 pin-project = "1.0"
 pipeline.workspace = true
-partition.workspace = true
 postgres-types = { version = "0.2", features = ["with-chrono-0_4", "with-serde_json-1"] }
 prometheus.workspace = true
 promql-parser.workspace = true
