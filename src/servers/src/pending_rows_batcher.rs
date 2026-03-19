@@ -380,6 +380,14 @@ impl PendingRowsBatcher {
                 refreshed_region_schema
             };
 
+            let (timestamp_column, field_column) =
+                find_prom_special_column_names(region_schema.as_ref());
+            let record_batch = rename_prom_special_columns_for_existing_schema(
+                record_batch,
+                timestamp_column.as_deref(),
+                field_column.as_deref(),
+            )?;
+
             let record_batch = align_record_batch_to_schema(record_batch, region_schema.as_ref())?;
             aligned_batches.push((table_name, record_batch));
         }
@@ -468,6 +476,79 @@ fn collect_missing_prom_tag_columns(
     Ok(missing_columns)
 }
 
+fn find_prom_special_column_names(target_schema: &ArrowSchema) -> (Option<String>, Option<String>) {
+    let mut timestamp_column = None;
+    let mut field_column = None;
+
+    for field in target_schema.fields() {
+        if field.name() == greptime_timestamp() {
+            timestamp_column = Some(field.name().clone());
+            continue;
+        }
+
+        if field.name() == greptime_value() {
+            field_column = Some(field.name().clone());
+            continue;
+        }
+
+        if timestamp_column.is_none() && matches!(field.data_type(), ArrowDataType::Timestamp(_, _))
+        {
+            timestamp_column = Some(field.name().clone());
+            continue;
+        }
+
+        if field_column.is_none() && matches!(field.data_type(), ArrowDataType::Float64) {
+            field_column = Some(field.name().clone());
+        }
+    }
+
+    (timestamp_column, field_column)
+}
+
+fn rename_prom_special_columns_for_existing_schema(
+    record_batch: RecordBatch,
+    timestamp_column: Option<&str>,
+    field_column: Option<&str>,
+) -> Result<RecordBatch> {
+    let source_schema = record_batch.schema();
+    let mut renamed_fields = Vec::with_capacity(source_schema.fields().len());
+    let mut changed = false;
+
+    for field in source_schema.fields() {
+        let target_name = if field.name() == greptime_timestamp() {
+            timestamp_column
+        } else if field.name() == greptime_value() {
+            field_column
+        } else {
+            None
+        };
+
+        if let Some(target_name) = target_name
+            && target_name != field.name()
+        {
+            renamed_fields.push(Field::new(
+                target_name,
+                field.data_type().clone(),
+                field.is_nullable(),
+            ));
+            changed = true;
+            continue;
+        }
+
+        renamed_fields.push(field.as_ref().clone());
+    }
+
+    if !changed {
+        return Ok(record_batch);
+    }
+
+    RecordBatch::try_new(
+        Arc::new(ArrowSchema::new(renamed_fields)),
+        record_batch.columns().to_vec(),
+    )
+    .context(error::ArrowSnafu)
+}
+
 fn build_prom_create_table_schema(source_schema: &ArrowSchema) -> Result<Vec<ColumnSchema>> {
     source_schema
         .fields()
@@ -481,23 +562,8 @@ fn build_prom_create_table_schema(source_schema: &ArrowSchema) -> Result<Vec<Col
                 SemanticType::Tag
             };
 
-            let concrete_type = ConcreteDataType::try_from(field.data_type()).map_err(|err| {
-                Error::Internal {
-                    err_msg: format!(
-                        "Failed to convert request column '{}' arrow data type {:?} for pending batch table create: {}",
-                        field.name(),
-                        field.data_type(),
-                        err
-                    ),
-                }
-            })?;
-            let (datatype, datatype_extension) = ColumnDataTypeWrapper::try_from(concrete_type)
-                .map_err(|err| Error::Internal {
-                    err_msg: format!(
-                        "Failed to convert request column '{}' data type for pending batch table create: {}",
-                        field.name(), err
-                    ),
-                })?
+            let concrete_type = ConcreteDataType::try_from(field.data_type())?;
+            let (datatype, datatype_extension) = ColumnDataTypeWrapper::try_from(concrete_type)?
                 .into_parts();
 
             if semantic_type == SemanticType::Tag && datatype != api::v1::ColumnDataType::String {
@@ -1243,7 +1309,8 @@ mod tests {
 
     use super::{
         align_record_batch_to_schema, build_prom_create_table_schema,
-        collect_missing_prom_tag_columns, rows_to_record_batch,
+        collect_missing_prom_tag_columns, rename_prom_special_columns_for_existing_schema,
+        rows_to_record_batch,
     };
     use super::{
         BatchKey, PendingWorker, WorkerCommand, align_record_batch_to_schema,
@@ -1480,5 +1547,41 @@ mod tests {
         );
         assert_eq!(api::v1::SemanticType::Field as i32, schema[2].semantic_type);
         assert_eq!(api::v1::ColumnDataType::Float64 as i32, schema[2].datatype);
+    }
+
+    #[test]
+    fn test_rename_prom_special_columns_for_existing_schema() {
+        let source_schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("greptime_timestamp", DataType::Int64, false),
+            Field::new("host", DataType::Utf8, true),
+            Field::new("greptime_value", DataType::Float64, true),
+        ]));
+        let source = RecordBatch::try_new(
+            source_schema,
+            vec![
+                Arc::new(Int64Array::from(vec![Some(1000), Some(2000)])),
+                Arc::new(StringArray::from(vec!["h1", "h2"])),
+                Arc::new(Float64Array::from(vec![Some(1.0), Some(2.0)])),
+            ],
+        )
+        .unwrap();
+
+        let target = ArrowSchema::new(vec![
+            Field::new("my_ts", DataType::Int64, false),
+            Field::new("host", DataType::Utf8, true),
+            Field::new("my_value", DataType::Float64, true),
+        ]);
+
+        let renamed = rename_prom_special_columns_for_existing_schema(
+            source,
+            Some("my_ts"),
+            Some("my_value"),
+        )
+        .unwrap();
+        let aligned = align_record_batch_to_schema(renamed, &target).unwrap();
+
+        assert_eq!(aligned.schema().as_ref(), &target);
+        assert_eq!(2, aligned.num_rows());
+        assert_eq!(3, aligned.num_columns());
     }
 }
