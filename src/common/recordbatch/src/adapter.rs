@@ -446,8 +446,15 @@ pub struct RecordBatchMetrics {
     // Detailed per-plan metrics
     /// An ordered list of plan metrics, from top to bottom in post-order.
     pub plan_metrics: Vec<PlanMetrics>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub region_watermarks: Vec<RegionWatermarkEntry>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RegionWatermarkEntry {
+    pub region_id: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub region_latest_sequences: Option<Vec<(u64, u64)>>,
+    pub watermark: Option<u64>,
 }
 
 /// Determines if a metric name represents a time measurement that should be formatted.

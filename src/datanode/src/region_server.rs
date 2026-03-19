@@ -864,21 +864,29 @@ impl RegionWatermarkStream {
     }
 
     fn merged_metrics(&self, mut metrics: RecordBatchMetrics) -> RecordBatchMetrics {
+        let entry = if let Some(entry) = metrics
+            .region_watermarks
+            .iter_mut()
+            .find(|entry| entry.region_id == self.region_id)
+        {
+            entry
+        } else {
+            metrics
+                .region_watermarks
+                .push(common_recordbatch::adapter::RegionWatermarkEntry {
+                    region_id: self.region_id,
+                    watermark: None,
+                });
+            metrics.region_watermarks.last_mut().unwrap()
+        };
+
         // TODO(discord9): Move correctness-watermark proof into the mito scan
         // path. The current stream-end proof is conservatively safe, but still
         // allows false negatives if a late flush happens after the scan snapshot.
         if !self.proof_passed() {
             return metrics;
         }
-        let region_latest_sequences = metrics.region_latest_sequences.get_or_insert_with(Vec::new);
-        if let Some((_, seq)) = region_latest_sequences
-            .iter_mut()
-            .find(|(region_id, _)| *region_id == self.region_id)
-        {
-            *seq = self.snapshot_seq;
-        } else {
-            region_latest_sequences.push((self.region_id, self.snapshot_seq));
-        }
+        entry.watermark = Some(self.snapshot_seq);
         metrics
     }
 }
@@ -1077,8 +1085,11 @@ mod watermark_tests {
 
         let metrics = pinned.as_ref().get_ref().metrics().unwrap();
         assert_eq!(
-            metrics.region_latest_sequences,
-            Some(vec![(region_id.as_u64(), 99)])
+            metrics.region_watermarks,
+            vec![common_recordbatch::adapter::RegionWatermarkEntry {
+                region_id: region_id.as_u64(),
+                watermark: Some(99),
+            }]
         );
     }
 
@@ -1102,7 +1113,13 @@ mod watermark_tests {
         while pinned.next().await.is_some() {}
 
         let metrics = pinned.as_ref().get_ref().metrics().unwrap();
-        assert!(metrics.region_latest_sequences.is_none());
+        assert_eq!(
+            metrics.region_watermarks,
+            vec![common_recordbatch::adapter::RegionWatermarkEntry {
+                region_id: region_id.as_u64(),
+                watermark: None,
+            }]
+        );
     }
 
     #[tokio::test]
@@ -1160,7 +1177,13 @@ mod watermark_tests {
         assert!(pinned.next().await.is_none());
 
         let metrics = pinned.as_ref().get_ref().metrics().unwrap();
-        assert!(metrics.region_latest_sequences.is_none());
+        assert_eq!(
+            metrics.region_watermarks,
+            vec![common_recordbatch::adapter::RegionWatermarkEntry {
+                region_id: region_id.as_u64(),
+                watermark: None,
+            }]
+        );
     }
 }
 

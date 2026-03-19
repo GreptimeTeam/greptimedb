@@ -89,11 +89,23 @@ impl OutputMetrics {
     }
 
     pub fn region_watermark_map(&self) -> Option<std::collections::HashMap<u64, u64>> {
-        self.get()?.region_latest_sequences.map(|sequences| {
-            sequences
+        Some(
+            self.get()?
+                .region_watermarks
                 .into_iter()
-                .collect::<std::collections::HashMap<_, _>>()
-        })
+                .filter_map(|entry| entry.watermark.map(|seq| (entry.region_id, seq)))
+                .collect::<std::collections::HashMap<_, _>>(),
+        )
+    }
+
+    pub fn participating_regions(&self) -> Option<std::collections::BTreeSet<u64>> {
+        Some(
+            self.get()?
+                .region_watermarks
+                .into_iter()
+                .map(|entry| entry.region_id)
+                .collect::<std::collections::BTreeSet<_>>(),
+        )
     }
 }
 
@@ -115,6 +127,10 @@ impl OutputWithMetrics {
 
     pub fn region_watermark_map(&self) -> Option<std::collections::HashMap<u64, u64>> {
         self.metrics.region_watermark_map()
+    }
+
+    pub fn participating_regions(&self) -> Option<std::collections::BTreeSet<u64>> {
+        self.metrics.participating_regions()
     }
 
     pub fn into_output(self) -> Output {
@@ -874,7 +890,10 @@ mod tests {
             schema,
             batch: Some(batch),
             metrics: RecordBatchMetrics {
-                region_latest_sequences: Some(vec![(7, 42)]),
+                region_watermarks: vec![common_recordbatch::adapter::RegionWatermarkEntry {
+                    region_id: 7,
+                    watermark: Some(42),
+                }],
                 ..Default::default()
             },
             terminal_metrics_only: true,
@@ -892,6 +911,10 @@ mod tests {
 
         assert!(terminal_metrics.is_ready());
         assert_eq!(
+            terminal_metrics.participating_regions(),
+            Some(std::collections::BTreeSet::from([7_u64]))
+        );
+        assert_eq!(
             terminal_metrics.region_watermark_map(),
             Some(std::collections::HashMap::from([(7_u64, 42_u64)]))
         );
@@ -900,5 +923,20 @@ mod tests {
     #[test]
     fn test_parse_terminal_metrics_rejects_invalid_json() {
         assert!(parse_terminal_metrics("{not-json}").is_none());
+    }
+
+    #[test]
+    fn test_output_metrics_distinguishes_empty_region_watermarks_from_absence() {
+        let metrics = OutputMetrics::default();
+        metrics.update(Some(RecordBatchMetrics::default()));
+
+        assert_eq!(
+            metrics.participating_regions(),
+            Some(std::collections::BTreeSet::new())
+        );
+        assert_eq!(
+            metrics.region_watermark_map(),
+            Some(std::collections::HashMap::new())
+        );
     }
 }

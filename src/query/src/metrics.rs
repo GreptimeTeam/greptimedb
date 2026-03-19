@@ -16,8 +16,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use common_recordbatch::adapter::RecordBatchMetrics;
+use common_recordbatch::adapter::{RecordBatchMetrics, RegionWatermarkEntry};
 use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream};
+use common_telemetry::warn;
 use datafusion::physical_plan::ExecutionPlan;
 use datatypes::schema::SchemaRef;
 use futures::Stream;
@@ -160,9 +161,9 @@ impl RecordBatchStream for RegionWatermarkMetricsStream {
 
     fn metrics(&self) -> Option<RecordBatchMetrics> {
         let mut metrics = self.stream.metrics()?;
-        let region_latest_sequences = collect_region_latest_sequences(self.plan.clone());
-        if !region_latest_sequences.is_empty() {
-            metrics.region_latest_sequences = Some(region_latest_sequences);
+        let region_watermarks = collect_region_watermarks(self.plan.clone());
+        if !region_watermarks.is_empty() {
+            metrics.region_watermarks = region_watermarks;
         }
         Some(metrics)
     }
@@ -183,28 +184,86 @@ impl Stream for RegionWatermarkMetricsStream {
 pub fn terminal_recordbatch_metrics_from_plan(
     plan: Arc<dyn ExecutionPlan>,
 ) -> Option<RecordBatchMetrics> {
-    let region_latest_sequences = collect_region_latest_sequences(plan);
-    if region_latest_sequences.is_empty() {
+    let region_watermarks = collect_region_watermarks(plan);
+    if region_watermarks.is_empty() {
         None
     } else {
         Some(RecordBatchMetrics {
-            region_latest_sequences: Some(region_latest_sequences),
+            region_watermarks,
             ..Default::default()
         })
     }
 }
 
-fn collect_region_latest_sequences(plan: Arc<dyn ExecutionPlan>) -> Vec<(u64, u64)> {
-    let mut merged = std::collections::HashMap::new();
+fn collect_region_watermarks(plan: Arc<dyn ExecutionPlan>) -> Vec<RegionWatermarkEntry> {
+    #[derive(Clone)]
+    enum MergeState {
+        Unproved,
+        Proved(u64),
+        Conflict {
+            region_id: u64,
+            watermarks: Vec<u64>,
+        },
+    }
+
+    let mut merged = std::collections::BTreeMap::<u64, MergeState>::new();
     let mut stack = vec![plan];
 
     while let Some(plan) = stack.pop() {
         if let Some(merge_scan) = plan.as_any().downcast_ref::<MergeScanExec>() {
             for metrics in merge_scan.sub_stage_metrics() {
-                if let Some(region_latest_sequences) = metrics.region_latest_sequences {
-                    for (region_id, seq) in region_latest_sequences {
-                        merged.insert(region_id, seq);
-                    }
+                for entry in metrics.region_watermarks {
+                    merged
+                        .entry(entry.region_id)
+                        .and_modify(|existing| {
+                            *existing = match (existing.clone(), entry.watermark) {
+                                (
+                                    MergeState::Conflict {
+                                        region_id,
+                                        mut watermarks,
+                                    },
+                                    Some(seq),
+                                ) => {
+                                    if !watermarks.contains(&seq) {
+                                        watermarks.push(seq);
+                                    }
+                                    MergeState::Conflict {
+                                        region_id,
+                                        watermarks,
+                                    }
+                                }
+                                (
+                                    MergeState::Conflict {
+                                        region_id,
+                                        watermarks,
+                                    },
+                                    None,
+                                ) => MergeState::Conflict {
+                                    region_id,
+                                    watermarks,
+                                },
+                                (MergeState::Unproved, None) => MergeState::Unproved,
+                                (MergeState::Unproved, Some(seq)) => MergeState::Proved(seq),
+                                (MergeState::Proved(existing_seq), None) => {
+                                    MergeState::Proved(existing_seq)
+                                }
+                                (MergeState::Proved(existing_seq), Some(seq))
+                                    if existing_seq == seq =>
+                                {
+                                    MergeState::Proved(existing_seq)
+                                }
+                                (MergeState::Proved(existing_seq), Some(seq)) => {
+                                    MergeState::Conflict {
+                                        region_id: entry.region_id,
+                                        watermarks: vec![existing_seq, seq],
+                                    }
+                                }
+                            }
+                        })
+                        .or_insert(match entry.watermark {
+                            Some(seq) => MergeState::Proved(seq),
+                            None => MergeState::Unproved,
+                        });
                 }
             }
         }
@@ -212,7 +271,24 @@ fn collect_region_latest_sequences(plan: Arc<dyn ExecutionPlan>) -> Vec<(u64, u6
         stack.extend(plan.children().into_iter().cloned());
     }
 
-    let mut region_latest_sequences = merged.into_iter().collect::<Vec<_>>();
-    region_latest_sequences.sort_unstable_by_key(|(region_id, _)| *region_id);
-    region_latest_sequences
+    merged
+        .into_iter()
+        .map(|(region_id, state)| RegionWatermarkEntry {
+            region_id,
+            watermark: match state {
+                MergeState::Unproved => None,
+                MergeState::Proved(seq) => Some(seq),
+                MergeState::Conflict {
+                    region_id,
+                    watermarks,
+                } => {
+                    warn!(
+                        "Conflicting proved watermarks for region {}: {:?}; degrading to unproved",
+                        region_id, watermarks
+                    );
+                    None
+                }
+            },
+        })
+        .collect()
 }
