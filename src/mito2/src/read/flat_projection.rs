@@ -18,21 +18,21 @@ use std::sync::Arc;
 
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
-use common_recordbatch::error::{ArrowComputeSnafu, ExternalSnafu};
+use common_recordbatch::error::{ArrowComputeSnafu, ExternalSnafu, NewDfRecordBatchSnafu};
 use common_recordbatch::{DfRecordBatch, RecordBatch};
 use datatypes::arrow::array::Array;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field};
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::schema::{Schema, SchemaRef};
 use datatypes::value::Value;
-use datatypes::vectors::{Helper, VectorRef};
+use datatypes::vectors::Helper;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
 
 use crate::cache::CacheStrategy;
 use crate::error::{InvalidRequestSnafu, RecordBatchSnafu, Result};
-use crate::read::projection::read_column_ids_from_projection;
+use crate::read::projection::{read_column_ids_from_projection, repeated_vector_with_cache};
 use crate::sst::parquet::flat_format::sst_column_id_indices;
 use crate::sst::parquet::format::FormatProjection;
 use crate::sst::{
@@ -65,9 +65,6 @@ pub struct FlatProjectionMapper {
     /// Precomputed Arrow schema for input batches.
     input_arrow_schema: datatypes::arrow::datatypes::SchemaRef,
 }
-
-/// Max length of a repeated vector we will store in cache.
-const MAX_VECTOR_LENGTH_TO_CACHE: usize = 16384;
 
 impl FlatProjectionMapper {
     /// Returns a new mapper with projection.
@@ -307,13 +304,7 @@ impl FlatProjectionMapper {
 
         let df_record_batch =
             DfRecordBatch::try_new(self.output_schema.arrow_schema().clone(), arrays)
-                .map_err(|e| {
-                    BoxedError::new(common_error::ext::PlainError::new(
-                        e.to_string(),
-                        common_error::status_code::StatusCode::Internal,
-                    ))
-                })
-                .context(ExternalSnafu)?;
+                .context(NewDfRecordBatchSnafu)?;
         Ok(RecordBatch::from_df_record_batch(
             self.output_schema.clone(),
             df_record_batch,
@@ -343,43 +334,6 @@ impl FlatProjectionMapper {
         }
         Ok(columns)
     }
-}
-
-fn repeated_vector_with_cache(
-    data_type: &ConcreteDataType,
-    value: &Value,
-    num_rows: usize,
-    cache_strategy: &CacheStrategy,
-) -> common_recordbatch::error::Result<VectorRef> {
-    if let Some(vector) = cache_strategy.get_repeated_vector(data_type, value) {
-        // If the cached vector doesn't have enough length, create a new one.
-        match vector.len().cmp(&num_rows) {
-            std::cmp::Ordering::Less => {}
-            std::cmp::Ordering::Equal => return Ok(vector),
-            std::cmp::Ordering::Greater => return Ok(vector.slice(0, num_rows)),
-        }
-    }
-
-    let vector = new_repeated_vector(data_type, value, num_rows)?;
-    if vector.len() <= MAX_VECTOR_LENGTH_TO_CACHE {
-        cache_strategy.put_repeated_vector(value.clone(), vector.clone());
-    }
-
-    Ok(vector)
-}
-
-fn new_repeated_vector(
-    data_type: &ConcreteDataType,
-    value: &Value,
-    num_rows: usize,
-) -> common_recordbatch::error::Result<VectorRef> {
-    let mut mutable_vector = data_type.create_mutable_vector(1);
-    mutable_vector
-        .try_push_value_ref(&value.as_value_ref())
-        .map_err(BoxedError::new)
-        .context(ExternalSnafu)?;
-    let base_vector = mutable_vector.to_vector();
-    Ok(base_vector.replicate(&[num_rows]))
 }
 
 /// Returns ids and datatypes of columns of the output batch after applying the `projection`.

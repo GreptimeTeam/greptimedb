@@ -21,7 +21,7 @@ use std::sync::Arc;
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
 use common_recordbatch::RecordBatch;
-use common_recordbatch::error::ExternalSnafu;
+use common_recordbatch::error::{DataTypesSnafu, ExternalSnafu};
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::schema::{Schema, SchemaRef};
 use datatypes::value::Value;
@@ -37,7 +37,7 @@ use crate::read::Batch;
 use crate::read::flat_projection::FlatProjectionMapper;
 
 /// Only cache vector when its length `<=` this value.
-const MAX_VECTOR_LENGTH_TO_CACHE: usize = 16384;
+pub(crate) const MAX_VECTOR_LENGTH_TO_CACHE: usize = 16384;
 
 /// Wrapper enum for different projection mapper implementations.
 pub enum ProjectionMapper {
@@ -423,7 +423,7 @@ enum BatchIndex {
 }
 
 /// Gets a vector with repeated values from specific cache or creates a new one.
-fn repeated_vector_with_cache(
+pub(crate) fn repeated_vector_with_cache(
     data_type: &ConcreteDataType,
     value: &Value,
     num_rows: usize,
@@ -450,7 +450,7 @@ fn repeated_vector_with_cache(
 }
 
 /// Returns a vector with repeated values.
-fn new_repeated_vector(
+pub(crate) fn new_repeated_vector(
     data_type: &ConcreteDataType,
     value: &Value,
     num_rows: usize,
@@ -458,8 +458,7 @@ fn new_repeated_vector(
     let mut mutable_vector = data_type.create_mutable_vector(1);
     mutable_vector
         .try_push_value_ref(&value.as_value_ref())
-        .map_err(BoxedError::new)
-        .context(ExternalSnafu)?;
+        .context(DataTypesSnafu)?;
     // This requires an additional allocation.
     let base_vector = mutable_vector.to_vector();
     Ok(base_vector.replicate(&[num_rows]))
