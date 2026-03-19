@@ -14,8 +14,10 @@
 
 use std::collections::HashMap;
 
+use axum::Json;
 use axum::extract::State;
 use axum::response::{IntoResponse, Response};
+use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use tonic::codegen::http;
 
@@ -29,6 +31,12 @@ pub struct LeaderHandler {
     pub election: Option<ElectionRef>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct LeaderResponse {
+    leader_addr: Option<String>,
+    is_leader: bool,
+}
+
 impl LeaderHandler {
     async fn get_leader(&self) -> Result<Option<String>> {
         if let Some(election) = &self.election {
@@ -37,16 +45,31 @@ impl LeaderHandler {
         }
         Ok(None)
     }
+
+    async fn get_leader_response(&self) -> Result<LeaderResponse> {
+        if let Some(election) = &self.election {
+            let leader_addr = election.leader().await?.0;
+            let is_leader = election.is_leader();
+            return Ok(LeaderResponse {
+                leader_addr: Some(leader_addr),
+                is_leader,
+            });
+        }
+        Ok(LeaderResponse {
+            leader_addr: None,
+            is_leader: false,
+        })
+    }
 }
 
 /// Get the leader handler.
 #[axum_macros::debug_handler]
 pub(crate) async fn get(State(handler): State<LeaderHandler>) -> Response {
     handler
-        .get_leader()
+        .get_leader_response()
         .await
+        .map(Json)
         .map_err(ErrorHandler::new)
-        .map(|leader| leader.unwrap_or("election info is None".to_string()))
         .into_response()
 }
 
