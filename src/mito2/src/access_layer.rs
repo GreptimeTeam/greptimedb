@@ -338,6 +338,7 @@ impl AccessLayer {
         metrics: &mut Metrics,
     ) -> Result<SstInfoArray> {
         let region_id = request.metadata.region_id;
+        let region_metadata = request.metadata.clone();
         let cache_manager = request.cache_manager.clone();
 
         let sst_info = if let Some(write_cache) = cache_manager.write_cache() {
@@ -415,6 +416,7 @@ impl AccessLayer {
                     cache_manager.put_parquet_meta_data(
                         RegionFileId::new(region_id, sst.file_id),
                         parquet_metadata.clone(),
+                        Some(region_metadata.clone()),
                     )
                 }
             }

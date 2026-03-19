@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::fmt;
 use std::str::FromStr;
+use std::{fmt, mem};
 
 use arrow::datatypes::Field;
 use arrow_schema::extension::{
@@ -176,6 +176,19 @@ impl ColumnSchema {
             let _ = self.metadata.remove(TIME_INDEX_KEY);
         }
         self
+    }
+
+    /// Returns the estimated memory footprint of this schema.
+    pub fn estimated_size(&self) -> usize {
+        mem::size_of_val(self) - mem::size_of_val(&self.data_type)
+            + self.data_type.as_arrow_type().size()
+            + self.name.capacity()
+            + self
+                .default_constraint
+                .as_ref()
+                .map(column_default_constraint_size)
+                .unwrap_or_default()
+            + metadata_size(&self.metadata)
     }
 
     /// Set the inverted index for the column.
@@ -490,6 +503,21 @@ impl ColumnSchema {
 
     pub fn is_indexed(&self) -> bool {
         self.is_inverted_indexed() || self.is_fulltext_indexed() || self.is_skipping_indexed()
+    }
+}
+
+fn metadata_size(metadata: &Metadata) -> usize {
+    mem::size_of::<(String, String)>() * metadata.capacity()
+        + metadata
+            .iter()
+            .map(|(key, value)| key.capacity() + value.capacity())
+            .sum::<usize>()
+}
+
+fn column_default_constraint_size(default_constraint: &ColumnDefaultConstraint) -> usize {
+    match default_constraint {
+        ColumnDefaultConstraint::Function(expr) => expr.capacity(),
+        ColumnDefaultConstraint::Value(value) => value.as_value_ref().data_size(),
     }
 }
 

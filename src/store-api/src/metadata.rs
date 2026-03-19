@@ -18,8 +18,8 @@
 
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
-use std::fmt;
 use std::sync::Arc;
+use std::{fmt, mem};
 
 use api::v1::SemanticType;
 use api::v1::column_def::try_as_column_schema;
@@ -98,6 +98,12 @@ impl ColumnMetadata {
 
     pub fn is_same_datatype(&self, other: &Self) -> bool {
         self.column_schema.data_type == other.column_schema.data_type
+    }
+
+    /// Returns the estimated memory footprint of this metadata.
+    pub fn estimated_size(&self) -> usize {
+        mem::size_of_val(self) - mem::size_of_val(&self.column_schema)
+            + self.column_schema.estimated_size()
     }
 }
 
@@ -224,6 +230,25 @@ impl RegionMetadata {
     /// Decode the metadata from a JSON str.
     pub fn from_json(s: &str) -> Result<Self> {
         serde_json::from_str(s).context(SerdeJsonSnafu)
+    }
+
+    /// Returns the estimated memory footprint of this metadata.
+    pub fn estimated_size(&self) -> usize {
+        mem::size_of_val(self)
+            + mem::size_of::<ColumnMetadata>() * self.column_metadatas.capacity()
+            + self
+                .column_metadatas
+                .iter()
+                .map(|column| column.estimated_size() - mem::size_of::<ColumnMetadata>())
+                .sum::<usize>()
+            + mem::size_of::<ColumnId>() * self.primary_key.capacity()
+            + mem::size_of::<(ColumnId, usize)>() * self.id_to_index.capacity()
+            + self.schema.estimated_size()
+            + self
+                .partition_expr
+                .as_ref()
+                .map(|expr| expr.capacity())
+                .unwrap_or_default()
     }
 
     /// Encode the metadata to a JSON string.
