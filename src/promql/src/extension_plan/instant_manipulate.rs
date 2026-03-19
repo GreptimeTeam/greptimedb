@@ -225,14 +225,19 @@ impl InstantManipulate {
             return tag_columns.to_vec();
         }
 
-        let LogicalPlan::Extension(Extension { node }) = input else {
-            return Vec::new();
-        };
+        Self::find_series_divide_tags(input).unwrap_or_default()
+    }
 
-        node.as_any()
-            .downcast_ref::<SeriesDivide>()
-            .map(|series_divide| series_divide.tags().to_vec())
-            .unwrap_or_default()
+    fn find_series_divide_tags(plan: &LogicalPlan) -> Option<Vec<String>> {
+        if let LogicalPlan::Extension(Extension { node }) = plan
+            && let Some(series_divide) = node.as_any().downcast_ref::<SeriesDivide>()
+        {
+            return Some(series_divide.tags().to_vec());
+        }
+
+        plan.inputs()
+            .into_iter()
+            .find_map(Self::find_series_divide_tags)
     }
 
     pub fn to_execution_plan(&self, exec_input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
@@ -778,6 +783,80 @@ mod test {
             .unwrap();
 
         assert_eq!(plan.tag_columns, vec!["__tsid".to_string()]);
+    }
+
+    #[test]
+    fn rebuild_should_recover_tag_columns_from_series_normalize_input() {
+        let df_schema = prepare_test_data().schema().to_dfschema_ref().unwrap();
+        let input = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: df_schema,
+        });
+        let series_divide = LogicalPlan::Extension(Extension {
+            node: Arc::new(SeriesDivide::new(
+                vec!["__tsid".to_string()],
+                TIME_INDEX_COLUMN.to_string(),
+                input,
+            )),
+        });
+        let series_normalize = LogicalPlan::Extension(Extension {
+            node: Arc::new(crate::extension_plan::SeriesNormalize::new(
+                0,
+                TIME_INDEX_COLUMN,
+                false,
+                vec!["__tsid".to_string()],
+                series_divide,
+            )),
+        });
+        let bytes = InstantManipulate::new(
+            0,
+            0,
+            0,
+            0,
+            TIME_INDEX_COLUMN.to_string(),
+            vec!["__tsid".to_string()],
+            Some("value".to_string()),
+            series_normalize.clone(),
+        )
+        .serialize();
+        let plan = InstantManipulate::deserialize(&bytes)
+            .unwrap()
+            .with_exprs_and_inputs(vec![], vec![series_normalize])
+            .unwrap();
+
+        assert_eq!(plan.tag_columns, vec!["__tsid".to_string()]);
+    }
+
+    #[test]
+    fn to_execution_plan_enables_tsid_fast_path() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                TIME_INDEX_COLUMN,
+                DataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("value", DataType::Float64, true),
+        ]));
+        let exec_input: Arc<dyn ExecutionPlan> = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[], schema, None).unwrap(),
+        )));
+
+        let exec = InstantManipulate::new(
+            0,
+            0,
+            0,
+            0,
+            TIME_INDEX_COLUMN.to_string(),
+            vec!["__tsid".to_string()],
+            Some("value".to_string()),
+            LogicalPlan::EmptyRelation(EmptyRelation {
+                produce_one_row: false,
+                schema: Arc::new(datafusion::common::DFSchema::empty()),
+            }),
+        )
+        .to_execution_plan(exec_input);
+
+        assert!(format!("{exec:?}").contains("reuse_all_non_sample_columns: true"));
     }
 
     #[tokio::test]

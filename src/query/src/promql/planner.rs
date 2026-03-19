@@ -915,7 +915,11 @@ impl PromPlanner {
                 .time_index_column
                 .clone()
                 .expect("time index should be set in `setup_context`"),
-            self.ctx.tag_columns.clone(),
+            if self.ctx.use_tsid {
+                vec![DATA_SCHEMA_TSID_COLUMN_NAME.to_string()]
+            } else {
+                self.ctx.tag_columns.clone()
+            },
             self.ctx.field_columns.first().cloned(),
             normalize,
         );
@@ -4021,6 +4025,10 @@ mod test {
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_query::prelude::greptime_timestamp;
     use common_query::test_util::DummyDecoder;
+    use datafusion::arrow::datatypes::Schema as ArrowSchema;
+    use datafusion::datasource::memory::MemorySourceConfig;
+    use datafusion::datasource::source::DataSourceExec;
+    use datafusion::logical_expr::Extension;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
     use promql_parser::label::Labels;
@@ -4032,6 +4040,16 @@ mod test {
     use super::*;
     use crate::options::QueryOptions;
     use crate::parser::QueryLanguageParser;
+
+    fn find_instant_manipulate(plan: &LogicalPlan) -> Option<&InstantManipulate> {
+        if let LogicalPlan::Extension(Extension { node }) = plan
+            && let Some(instant_manipulate) = node.as_any().downcast_ref::<InstantManipulate>()
+        {
+            return Some(instant_manipulate);
+        }
+
+        plan.inputs().into_iter().find_map(find_instant_manipulate)
+    }
 
     fn build_query_engine_state() -> QueryEngineState {
         QueryEngineState::new(
@@ -4657,6 +4675,12 @@ mod test {
                 .iter()
                 .any(|field| field.name() == DATA_SCHEMA_TSID_COLUMN_NAME)
         );
+
+        let manipulate = find_instant_manipulate(&plan).unwrap();
+        let exec = manipulate.to_execution_plan(Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[], Arc::new(ArrowSchema::empty()), None).unwrap(),
+        ))));
+        assert!(format!("{exec:?}").contains("reuse_all_non_sample_columns: true"));
     }
 
     #[tokio::test]
