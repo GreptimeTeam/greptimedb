@@ -397,7 +397,7 @@ mod tests {
                     Operand::Value(datatypes::value::Value::String("sh".into())),
                 ),
             ],
-            false,
+            true,
         )
         .unwrap();
         assert_matches!(
@@ -738,7 +738,7 @@ mod tests {
                     .and(col("value").gt_eq(Value::Int64(10))),
                 col("host").gt_eq(Value::String("server10".into())),
             ],
-            false,
+            true,
         )
         .unwrap();
     }
