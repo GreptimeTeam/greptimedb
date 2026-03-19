@@ -27,6 +27,9 @@ pub mod projection;
 pub(crate) mod prune;
 pub(crate) mod pruner;
 pub mod range;
+#[cfg(feature = "test")]
+pub mod range_cache;
+#[cfg(not(feature = "test"))]
 pub(crate) mod range_cache;
 pub mod scan_region;
 pub mod scan_util;

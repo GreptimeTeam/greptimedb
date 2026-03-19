@@ -967,7 +967,7 @@ impl EncodedBulkPart {
         Self { data, metadata }
     }
 
-    pub(crate) fn metadata(&self) -> &BulkPartMeta {
+    pub fn metadata(&self) -> &BulkPartMeta {
         &self.metadata
     }
 
@@ -977,7 +977,7 @@ impl EncodedBulkPart {
     }
 
     /// Returns the encoded data.
-    pub(crate) fn data(&self) -> &Bytes {
+    pub fn data(&self) -> &Bytes {
         &self.data
     }
 
@@ -1121,7 +1121,7 @@ pub struct BulkPartEncoder {
 }
 
 impl BulkPartEncoder {
-    pub(crate) fn new(
+    pub fn new(
         metadata: RegionMetadataRef,
         row_group_size: usize,
     ) -> Result<BulkPartEncoder> {
@@ -1216,7 +1216,7 @@ impl BulkPartEncoder {
     }
 
     /// Encodes bulk part to a [EncodedBulkPart], returns the encoded data.
-    fn encode_part(&self, part: &BulkPart) -> Result<Option<EncodedBulkPart>> {
+    pub fn encode_part(&self, part: &BulkPart) -> Result<Option<EncodedBulkPart>> {
         if part.batch.num_rows() == 0 {
             return Ok(None);
         }

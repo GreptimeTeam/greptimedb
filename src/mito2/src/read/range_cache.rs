@@ -384,6 +384,55 @@ pub(crate) fn cache_flat_range_stream(
     })
 }
 
+/// Creates a `cache_flat_range_stream` with dummy internals for benchmarking.
+///
+/// This avoids exposing `RangeScanCacheKey`, `ScanRequestFingerprint`, and
+/// `PartitionMetrics` publicly.
+#[cfg(feature = "test")]
+pub fn bench_cache_flat_range_stream(
+    stream: BoxedRecordBatchStream,
+    cache_size_bytes: u64,
+    region_id: RegionId,
+) -> BoxedRecordBatchStream {
+    use std::time::Instant;
+
+    use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+
+    use crate::region::options::MergeMode;
+
+    let cache_manager = Arc::new(
+        crate::cache::CacheManager::builder()
+            .range_result_cache_size(cache_size_bytes)
+            .build(),
+    );
+    let cache_strategy = CacheStrategy::EnableAll(cache_manager);
+
+    let fingerprint = ScanRequestFingerprintBuilder {
+        read_column_ids: vec![],
+        read_column_types: vec![],
+        filters: vec![],
+        time_filters: vec![],
+        series_row_selector: None,
+        append_mode: false,
+        filter_deleted: false,
+        merge_mode: MergeMode::LastRow,
+        partition_expr_version: 0,
+    }
+    .build();
+
+    let key = RangeScanCacheKey {
+        region_id,
+        row_groups: vec![],
+        scan: fingerprint,
+    };
+
+    let metrics_set = ExecutionPlanMetricsSet::new();
+    let part_metrics =
+        PartitionMetrics::new(region_id, 0, "bench", Instant::now(), false, &metrics_set);
+
+    cache_flat_range_stream(stream, cache_strategy, key, part_metrics)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
