@@ -37,6 +37,7 @@ pub enum ExprSplitDegradeReason {
     UnsupportedType,
     UnsupportedNotExpansion,
     ColliderRejected,
+    EmptyBranch,
     ValidationFailed,
     SimplifyFailed,
 }
@@ -78,7 +79,132 @@ pub fn split_partition_expr(
     let left_expr = simplify_and_bounds(left_raw);
     let right_expr = simplify_and_bounds(right_raw);
 
+    if is_empty_and_conjunction(&left_expr) || is_empty_and_conjunction(&right_expr) {
+        return Err(ExprSplitDegradeReason::EmptyBranch);
+    }
+
     Ok((left_expr, right_expr))
+}
+
+/// Detects whether a pure conjunction expression is definitely unsatisfiable.
+///
+/// Scope and intent:
+/// - This checker is intentionally conservative.
+/// - It only analyzes expressions that can be flattened into:
+///   `atom1 AND atom2 AND ...`
+/// - If any `OR` is present, it returns `false` (unknown / not handled here).
+///
+/// Strategy:
+/// - For each column, keep only the tightest lower bound (`>` / `>=`) and
+///   tightest upper bound (`<` / `<=`).
+/// - `=` is treated as both lower and upper bound at the same value.
+/// - After bounds are collected, the conjunction is empty iff for any column:
+///   - lower value is greater than upper value, or
+///   - lower value equals upper value but at least one bound is exclusive.
+///
+/// Notes:
+/// - `!=` is ignored in this check because it does not define a single closed
+///   interval boundary and this function focuses on fast range contradiction
+///   detection for split degradation.
+fn is_empty_and_conjunction(expr: &PartitionExpr) -> bool {
+    let mut atoms = Vec::new();
+    // Only handle conjunction trees. If expression contains OR, skip here.
+    if !collect_and_atoms(expr, &mut atoms) {
+        return false;
+    }
+
+    let mut lowers: BTreeMap<String, LowerBound> = BTreeMap::new();
+    let mut uppers: BTreeMap<String, UpperBound> = BTreeMap::new();
+
+    for atom in atoms {
+        let atom = atom.canonicalize();
+        let Some((col, op, val)) = atom_col_op_val(&atom) else {
+            continue;
+        };
+
+        match op {
+            // Keep the tightest upper bound for this column.
+            RestrictedOp::Lt | RestrictedOp::LtEq => {
+                let candidate = UpperBound {
+                    value: val,
+                    inclusive: matches!(op, RestrictedOp::LtEq),
+                };
+                match uppers.get_mut(&col) {
+                    Some(current) => {
+                        if prefer_upper(&candidate, current) {
+                            *current = candidate;
+                        }
+                    }
+                    None => {
+                        uppers.insert(col, candidate);
+                    }
+                }
+            }
+            // Keep the tightest lower bound for this column.
+            RestrictedOp::Gt | RestrictedOp::GtEq => {
+                let candidate = LowerBound {
+                    value: val,
+                    inclusive: matches!(op, RestrictedOp::GtEq),
+                };
+                match lowers.get_mut(&col) {
+                    Some(current) => {
+                        if prefer_lower(&candidate, current) {
+                            *current = candidate;
+                        }
+                    }
+                    None => {
+                        lowers.insert(col, candidate);
+                    }
+                }
+            }
+            // Equality means both lower and upper are fixed at the same point.
+            RestrictedOp::Eq => {
+                let lower = LowerBound {
+                    value: val.clone(),
+                    inclusive: true,
+                };
+                let upper = UpperBound {
+                    value: val,
+                    inclusive: true,
+                };
+                match lowers.get_mut(&col) {
+                    Some(current) => {
+                        if prefer_lower(&lower, current) {
+                            *current = lower;
+                        }
+                    }
+                    None => {
+                        lowers.insert(col.clone(), lower);
+                    }
+                }
+                match uppers.get_mut(&col) {
+                    Some(current) => {
+                        if prefer_upper(&upper, current) {
+                            *current = upper;
+                        }
+                    }
+                    None => {
+                        uppers.insert(col, upper);
+                    }
+                }
+            }
+            // NotEq does not shrink to a single boundary interval in this fast path.
+            RestrictedOp::NotEq | RestrictedOp::And | RestrictedOp::Or => {}
+        }
+    }
+
+    // Check for contradiction between collected lower/upper bounds per column.
+    lowers.into_iter().any(|(col, lower)| {
+        let Some(upper) = uppers.get(&col) else {
+            return false;
+        };
+
+        match lower.value.partial_cmp(&upper.value) {
+            Some(std::cmp::Ordering::Greater) => true,
+            Some(std::cmp::Ordering::Equal) => !lower.inclusive || !upper.inclusive,
+            _ => false,
+        }
+    })
 }
 
 /// Rewrites `NOT(expr)` into an equivalent `PartitionExpr` without introducing a unary NOT node.
@@ -497,11 +623,13 @@ mod tests {
         let base = col("v")
             .gt(Value::String("m".into()))
             .and(col("v").lt(Value::String("n".into())));
-        // S: v < 'k'
-        let split = col("v").lt(Value::String("k".into()));
-        let (left, _right) = split_partition_expr(base, split).unwrap();
-        // left = (v > m AND v < n) AND (v < k) -> v > m AND v < k
-        assert_eq!(left.to_string(), "v > m AND v < k");
+        // S: v < 'm~'
+        let split = col("v").lt(Value::String("m~".into()));
+        let (left, right) = split_partition_expr(base, split).unwrap();
+        // left = (v > m AND v < n) AND (v < m~) -> v > m AND v < m~
+        assert_eq!(left.to_string(), "v > m AND v < m~");
+        // right = (v > m AND v < n) AND (v >= m~) -> v >= m~ AND v < n
+        assert_eq!(right.to_string(), "v >= m~ AND v < n");
     }
 
     #[test]
@@ -554,6 +682,18 @@ mod tests {
             vec![1, 2, 3],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn test_split_degrade_on_empty_branch() {
+        // R: a < 10
+        let base = col("a").lt(Value::Int64(10));
+        // S: a < 20
+        let split = col("a").lt(Value::Int64(20));
+
+        // right = (a < 10) AND (a >= 20) is unsatisfiable, should degrade.
+        let result = split_partition_expr(base, split);
+        assert_eq!(result.unwrap_err(), ExprSplitDegradeReason::EmptyBranch);
     }
 
     #[test]
