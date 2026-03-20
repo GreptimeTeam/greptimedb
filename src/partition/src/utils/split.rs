@@ -98,13 +98,15 @@ pub fn split_partition_expr(
 /// - For each column, keep only the tightest lower bound (`>` / `>=`) and
 ///   tightest upper bound (`<` / `<=`).
 /// - `=` is treated as both lower and upper bound at the same value.
+/// - `!=` is tracked per column to catch direct conflicts with `=`.
 /// - After bounds are collected, the conjunction is empty iff for any column:
 ///   - lower value is greater than upper value, or
 ///   - lower value equals upper value but at least one bound is exclusive.
+/// - For discrete domains (`Int*`, `UInt*`, `Date`, `Timestamp`), adjacent open
+///   bounds with no representable value in between are also treated as empty.
 ///
 /// Notes:
-/// - `!=` is ignored in this check because it does not define a single closed
-///   interval boundary and this function focuses on fast range contradiction
+/// - This is still a conservative fast path focused on conjunction emptiness
 ///   detection for split degradation.
 fn is_empty_and_conjunction(expr: &PartitionExpr) -> bool {
     let mut atoms = Vec::new();
@@ -115,6 +117,8 @@ fn is_empty_and_conjunction(expr: &PartitionExpr) -> bool {
 
     let mut lowers: BTreeMap<String, LowerBound> = BTreeMap::new();
     let mut uppers: BTreeMap<String, UpperBound> = BTreeMap::new();
+    let mut equals: BTreeMap<String, Value> = BTreeMap::new();
+    let mut not_equals: BTreeMap<String, HashSet<Value>> = BTreeMap::new();
 
     for atom in atoms {
         let atom = atom.canonicalize();
@@ -159,6 +163,19 @@ fn is_empty_and_conjunction(expr: &PartitionExpr) -> bool {
             }
             // Equality means both lower and upper are fixed at the same point.
             RestrictedOp::Eq => {
+                if let Some(existing) = equals.get(&col)
+                    && existing != &val
+                {
+                    return true;
+                }
+                if not_equals
+                    .get(&col)
+                    .is_some_and(|excluded| excluded.contains(&val))
+                {
+                    return true;
+                }
+                equals.insert(col.clone(), val.clone());
+
                 let lower = LowerBound {
                     value: val.clone(),
                     inclusive: true,
@@ -188,8 +205,13 @@ fn is_empty_and_conjunction(expr: &PartitionExpr) -> bool {
                     }
                 }
             }
-            // NotEq does not shrink to a single boundary interval in this fast path.
-            RestrictedOp::NotEq | RestrictedOp::And | RestrictedOp::Or => {}
+            RestrictedOp::NotEq => {
+                if equals.get(&col).is_some_and(|eq| eq == &val) {
+                    return true;
+                }
+                not_equals.entry(col).or_default().insert(val);
+            }
+            RestrictedOp::And | RestrictedOp::Or => {}
         }
     }
 
@@ -202,9 +224,49 @@ fn is_empty_and_conjunction(expr: &PartitionExpr) -> bool {
         match lower.value.partial_cmp(&upper.value) {
             Some(std::cmp::Ordering::Greater) => true,
             Some(std::cmp::Ordering::Equal) => !lower.inclusive || !upper.inclusive,
+            Some(std::cmp::Ordering::Less) => {
+                match (
+                    discrete_value_index(&lower.value),
+                    discrete_value_index(&upper.value),
+                ) {
+                    (Some(lower_idx), Some(upper_idx)) => {
+                        let min_candidate = if lower.inclusive {
+                            Some(lower_idx)
+                        } else {
+                            lower_idx.checked_add(1)
+                        };
+                        let max_candidate = if upper.inclusive {
+                            Some(upper_idx)
+                        } else {
+                            upper_idx.checked_sub(1)
+                        };
+                        match (min_candidate, max_candidate) {
+                            (Some(min_val), Some(max_val)) => min_val > max_val,
+                            _ => true,
+                        }
+                    }
+                    _ => false,
+                }
+            }
             _ => false,
         }
     })
+}
+
+fn discrete_value_index(v: &Value) -> Option<i128> {
+    match v {
+        Value::Int8(x) => Some(*x as i128),
+        Value::Int16(x) => Some(*x as i128),
+        Value::Int32(x) => Some(*x as i128),
+        Value::Int64(x) => Some(*x as i128),
+        Value::UInt8(x) => Some(*x as i128),
+        Value::UInt16(x) => Some(*x as i128),
+        Value::UInt32(x) => Some(*x as i128),
+        Value::UInt64(x) => Some(*x as i128),
+        Value::Date(x) => Some(x.val() as i128),
+        Value::Timestamp(x) => Some((x.value() as i128) * (x.unit().factor() as i128)),
+        _ => None,
+    }
 }
 
 /// Rewrites `NOT(expr)` into an equivalent `PartitionExpr` without introducing a unary NOT node.
@@ -692,6 +754,42 @@ mod tests {
         let split = col("a").lt(Value::Int64(20));
 
         // right = (a < 10) AND (a >= 20) is unsatisfiable, should degrade.
+        let result = split_partition_expr(base, split);
+        assert_eq!(result.unwrap_err(), ExprSplitDegradeReason::EmptyBranch);
+    }
+
+    #[test]
+    fn test_split_degrade_on_eq_neq_conflict() {
+        // R: a = 5
+        let base = col("a").eq(Value::Int64(5));
+        // S: a = 5
+        let split = col("a").eq(Value::Int64(5));
+
+        // right = (a = 5) AND (a <> 5) is unsatisfiable, should degrade.
+        let result = split_partition_expr(base, split);
+        assert_eq!(result.unwrap_err(), ExprSplitDegradeReason::EmptyBranch);
+    }
+
+    #[test]
+    fn test_split_degrade_on_discrete_gap_int() {
+        // R: a < 5
+        let base = col("a").lt(Value::Int64(5));
+        // S: a <= 4
+        let split = col("a").lt_eq(Value::Int64(4));
+
+        // right = (a < 5) AND (a > 4) has no integer solution, should degrade.
+        let result = split_partition_expr(base, split);
+        assert_eq!(result.unwrap_err(), ExprSplitDegradeReason::EmptyBranch);
+    }
+
+    #[test]
+    fn test_split_degrade_on_discrete_gap_date() {
+        // R: d < 5
+        let base = col("d").lt(Value::Date(5.into()));
+        // S: d <= 4
+        let split = col("d").lt_eq(Value::Date(4.into()));
+
+        // right = (d < 5) AND (d > 4) has no date solution, should degrade.
         let result = split_partition_expr(base, split);
         assert_eq!(result.unwrap_err(), ExprSplitDegradeReason::EmptyBranch);
     }
