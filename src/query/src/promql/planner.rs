@@ -3323,28 +3323,44 @@ impl PromPlanner {
     fn prom_token_to_binary_expr_builder(
         token: TokenType,
     ) -> Result<Box<dyn Fn(DfExpr, DfExpr) -> Result<DfExpr>>> {
+        let cast_float = |expr| {
+            DfExpr::Cast(Cast {
+                expr: Box::new(expr),
+                data_type: ArrowDataType::Float64,
+            })
+        };
         match token.id() {
-            token::T_ADD => Ok(Box::new(|lhs, rhs| Ok(lhs + rhs))),
-            token::T_SUB => Ok(Box::new(|lhs, rhs| Ok(lhs - rhs))),
-            token::T_MUL => Ok(Box::new(|lhs, rhs| Ok(lhs * rhs))),
-            token::T_DIV => Ok(Box::new(|lhs, rhs| Ok(lhs / rhs))),
-            token::T_MOD => Ok(Box::new(|lhs: DfExpr, rhs| Ok(lhs % rhs))),
+            token::T_ADD => Ok(Box::new(move |lhs, rhs| {
+                Ok(cast_float(lhs) + cast_float(rhs))
+            })),
+            token::T_SUB => Ok(Box::new(move |lhs, rhs| {
+                Ok(cast_float(lhs) - cast_float(rhs))
+            })),
+            token::T_MUL => Ok(Box::new(move |lhs, rhs| {
+                Ok(cast_float(lhs) * cast_float(rhs))
+            })),
+            token::T_DIV => Ok(Box::new(move |lhs, rhs| {
+                Ok(cast_float(lhs) / cast_float(rhs))
+            })),
+            token::T_MOD => Ok(Box::new(move |lhs: DfExpr, rhs| {
+                Ok(cast_float(lhs) % cast_float(rhs))
+            })),
             token::T_EQLC => Ok(Box::new(|lhs, rhs| Ok(lhs.eq(rhs)))),
             token::T_NEQ => Ok(Box::new(|lhs, rhs| Ok(lhs.not_eq(rhs)))),
             token::T_GTR => Ok(Box::new(|lhs, rhs| Ok(lhs.gt(rhs)))),
             token::T_LSS => Ok(Box::new(|lhs, rhs| Ok(lhs.lt(rhs)))),
             token::T_GTE => Ok(Box::new(|lhs, rhs| Ok(lhs.gt_eq(rhs)))),
             token::T_LTE => Ok(Box::new(|lhs, rhs| Ok(lhs.lt_eq(rhs)))),
-            token::T_POW => Ok(Box::new(|lhs, rhs| {
+            token::T_POW => Ok(Box::new(move |lhs, rhs| {
                 Ok(DfExpr::ScalarFunction(ScalarFunction {
                     func: datafusion_functions::math::power(),
-                    args: vec![lhs, rhs],
+                    args: vec![cast_float(lhs), cast_float(rhs)],
                 }))
             })),
-            token::T_ATAN2 => Ok(Box::new(|lhs, rhs| {
+            token::T_ATAN2 => Ok(Box::new(move |lhs, rhs| {
                 Ok(DfExpr::ScalarFunction(ScalarFunction {
                     func: datafusion_functions::math::atan2(),
-                    args: vec![lhs, rhs],
+                    args: vec![cast_float(lhs), cast_float(rhs)],
                 }))
             })),
             _ => UnexpectedTokenSnafu { token }.fail(),
