@@ -169,6 +169,166 @@ async fn test_full_snapshot_upper_bound_does_not_constrain_sst_rows() {
     assert!(pretty.contains("1970-01-01T00:00:04"));
 }
 
+#[tokio::test]
+async fn test_snapshot_bound_query_binds_memtable_upper_bound_at_scan_open() {
+    let mut env =
+        TestEnv::with_prefix("test_snapshot_bound_query_binds_memtable_upper_bound_at_scan_open")
+            .await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = test_util::rows_schema(&request);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let first_rows = Rows {
+        schema: column_schemas.clone(),
+        rows: test_util::build_rows(0, 3),
+    };
+    test_util::put_rows(&engine, region_id, first_rows).await;
+
+    let expected_snapshot = engine.get_committed_sequence(region_id).await.unwrap();
+    let scanner = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                snapshot_on_scan: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(scanner.snapshot_sequence(), Some(expected_snapshot));
+
+    let second_rows = Rows {
+        schema: column_schemas,
+        rows: test_util::build_rows(3, 5),
+    };
+    test_util::put_rows(&engine, region_id, second_rows).await;
+
+    let stream = scanner.scan().await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(
+        batches.pretty_print().unwrap(),
+        "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| 0     | 0.0     | 1970-01-01T00:00:00 |
+| 1     | 1.0     | 1970-01-01T00:00:01 |
+| 2     | 2.0     | 1970-01-01T00:00:02 |
++-------+---------+---------------------+"
+    );
+}
+
+#[tokio::test]
+async fn test_snapshot_bound_query_keeps_open_snapshot_after_late_flush() {
+    let mut env =
+        TestEnv::with_prefix("test_snapshot_bound_query_keeps_open_snapshot_after_late_flush")
+            .await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = test_util::rows_schema(&request);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let first_rows = Rows {
+        schema: column_schemas.clone(),
+        rows: test_util::build_rows(0, 3),
+    };
+    test_util::put_rows(&engine, region_id, first_rows).await;
+
+    let expected_snapshot = engine.get_committed_sequence(region_id).await.unwrap();
+    let scanner = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                snapshot_on_scan: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(scanner.snapshot_sequence(), Some(expected_snapshot));
+
+    let second_rows = Rows {
+        schema: column_schemas,
+        rows: test_util::build_rows(3, 5),
+    };
+    test_util::put_rows(&engine, region_id, second_rows).await;
+    test_util::flush_region(&engine, region_id, None).await;
+
+    assert_eq!(scanner.snapshot_sequence(), Some(expected_snapshot));
+}
+
+#[tokio::test]
+async fn test_snapshot_bound_query_keeps_correct_result_after_late_flush() {
+    let mut env =
+        TestEnv::with_prefix("test_snapshot_bound_query_keeps_correct_result_after_late_flush")
+            .await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = test_util::rows_schema(&request);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let first_rows = Rows {
+        schema: column_schemas.clone(),
+        rows: test_util::build_rows(0, 3),
+    };
+    test_util::put_rows(&engine, region_id, first_rows).await;
+
+    let expected_snapshot = engine.get_committed_sequence(region_id).await.unwrap();
+    let scanner = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                snapshot_on_scan: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(scanner.snapshot_sequence(), Some(expected_snapshot));
+
+    let second_rows = Rows {
+        schema: column_schemas,
+        rows: test_util::build_rows(3, 5),
+    };
+    test_util::put_rows(&engine, region_id, second_rows).await;
+    test_util::flush_region(&engine, region_id, None).await;
+
+    assert_eq!(scanner.snapshot_sequence(), Some(expected_snapshot));
+
+    let stream = scanner.scan().await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(
+        batches.pretty_print().unwrap(),
+        "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| 0     | 0.0     | 1970-01-01T00:00:00 |
+| 1     | 1.0     | 1970-01-01T00:00:01 |
+| 2     | 2.0     | 1970-01-01T00:00:02 |
++-------+---------+---------------------+"
+    );
+}
+
 async fn test_scan_with_min_sst_sequence_with_format(flat_format: bool) {
     let mut env = TestEnv::with_prefix("test_scan_with_min_sst_sequence").await;
     let engine = env

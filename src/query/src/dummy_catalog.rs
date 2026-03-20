@@ -188,6 +188,12 @@ impl TableProvider for DummyTableProvider {
             .handle_query(self.region_id, request.clone())
             .await
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        if request.snapshot_on_scan
+            && let Some(query_ctx) = &self.query_ctx
+            && let Some(snapshot_sequence) = scanner.snapshot_sequence()
+        {
+            bind_snapshot_bound_region_seq(query_ctx, self.region_id, snapshot_sequence);
+        }
         let query_memory_permit = self.engine.register_query_memory_permit();
         let mut scan_exec = RegionScanExec::new(scanner, request, query_memory_permit)?;
         if let Some(query_ctx) = &self.query_ctx {
@@ -317,8 +323,8 @@ fn scan_request_from_query_context(
     query_ctx: &QueryContext,
 ) -> Result<ScanRequest> {
     let mut scan_request = ScanRequest {
-        memtable_max_sequence: query_ctx.get_snapshot(region_id.as_u64()),
         sst_min_sequence: query_ctx.sst_min_sequence(region_id.as_u64()),
+        snapshot_on_scan: query_requires_snapshot_bound(query_ctx),
         ..Default::default()
     };
 
@@ -336,6 +342,33 @@ fn scan_request_from_query_context(
     }
 
     Ok(scan_request)
+}
+
+fn query_requires_snapshot_bound(query_ctx: &QueryContext) -> bool {
+    FlowQueryExtensions::from_extensions(&query_ctx.extensions())
+        .map(|extensions| extensions.should_collect_region_watermark())
+        .unwrap_or(false)
+}
+
+fn bind_snapshot_bound_region_seq(
+    query_ctx: &QueryContext,
+    region_id: RegionId,
+    snapshot_sequence: u64,
+) -> u64 {
+    if let Some(existing) = query_ctx.get_snapshot(region_id.as_u64()) {
+        if existing != snapshot_sequence {
+            common_telemetry::warn!(
+                "conflicting snapshot sequence observed for region {} in a single query; keeping the first bound snapshot (existing={}, new={})",
+                region_id,
+                existing,
+                snapshot_sequence,
+            );
+        }
+        existing
+    } else {
+        query_ctx.set_snapshot(region_id.as_u64(), snapshot_sequence);
+        snapshot_sequence
+    }
 }
 
 #[async_trait]
@@ -471,7 +504,7 @@ impl CatalogManager for DummyCatalogManager {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::sync::RwLock;
+    use std::sync::{Arc, RwLock};
 
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
@@ -483,6 +516,48 @@ mod tests {
 
     fn test_region_id() -> RegionId {
         RegionId::new(1024, 1)
+    }
+
+    #[test]
+    fn test_scan_request_from_query_context_uses_snapshot_bound_intent() {
+        let region_id = test_region_id();
+        let query_ctx = QueryContextBuilder::default()
+            .extensions(HashMap::from([(
+                "flow.return_region_seq".to_string(),
+                "true".to_string(),
+            )]))
+            .snapshot_seqs(Arc::new(RwLock::new(HashMap::from([(
+                region_id.as_u64(),
+                42_u64,
+            )]))))
+            .sst_min_sequences(Arc::new(RwLock::new(HashMap::from([(
+                region_id.as_u64(),
+                7_u64,
+            )]))))
+            .build();
+
+        let request = scan_request_from_query_context(region_id, &query_ctx).unwrap();
+
+        assert!(request.snapshot_on_scan);
+        assert_eq!(request.memtable_max_sequence, None);
+        assert_eq!(request.sst_min_sequence, Some(7));
+    }
+
+    #[test]
+    fn test_scan_request_from_incremental_context_uses_snapshot_bound_intent() {
+        let region_id = test_region_id();
+        let query_ctx = QueryContextBuilder::default()
+            .extensions(HashMap::from([(
+                "flow.incremental_after_seqs".to_string(),
+                format!(r#"{{"{}":10}}"#, region_id.as_u64()),
+            )]))
+            .build();
+
+        let request = scan_request_from_query_context(region_id, &query_ctx).unwrap();
+
+        assert!(request.snapshot_on_scan);
+        assert_eq!(request.memtable_min_sequence, Some(10));
+        assert_eq!(request.memtable_max_sequence, None);
     }
 
     #[test]
@@ -500,9 +575,37 @@ mod tests {
             .build();
 
         let request = scan_request_from_query_context(region_id, &query_ctx).unwrap();
-        assert_eq!(request.memtable_max_sequence, Some(100));
+        assert_eq!(request.memtable_max_sequence, None);
         assert_eq!(request.sst_min_sequence, Some(90));
         assert_eq!(request.memtable_min_sequence, None);
+        assert!(!request.snapshot_on_scan);
+    }
+
+    #[test]
+    fn test_bind_snapshot_bound_region_seq_reuses_existing_snapshot() {
+        let region_id = test_region_id();
+        let query_ctx = QueryContextBuilder::default()
+            .snapshot_seqs(Arc::new(RwLock::new(HashMap::from([(
+                region_id.as_u64(),
+                42_u64,
+            )]))))
+            .build();
+
+        let seq = bind_snapshot_bound_region_seq(&query_ctx, region_id, 99);
+
+        assert_eq!(seq, 42);
+        assert_eq!(query_ctx.get_snapshot(region_id.as_u64()), Some(42));
+    }
+
+    #[test]
+    fn test_bind_snapshot_bound_region_seq_sets_snapshot_once() {
+        let region_id = test_region_id();
+        let query_ctx = QueryContextBuilder::default().build();
+
+        let seq = bind_snapshot_bound_region_seq(&query_ctx, region_id, 99);
+
+        assert_eq!(seq, 99);
+        assert_eq!(query_ctx.get_snapshot(region_id.as_u64()), Some(99));
     }
 
     #[test]

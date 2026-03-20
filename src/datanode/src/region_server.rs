@@ -19,7 +19,7 @@ use std::fmt::Debug;
 use std::ops::Deref;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -71,9 +71,9 @@ use store_api::metric_engine_consts::{
     FILE_ENGINE_NAME, LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME,
 };
 use store_api::region_engine::{
-    RegionEngine, RegionEngineRef, RegionManifestInfo, RegionRole, RegionStatistic,
-    RemapManifestsRequest, RemapManifestsResponse, SetRegionRoleStateResponse,
-    SettableRegionRoleState, SyncRegionFromRequest,
+    RegionEngineRef, RegionManifestInfo, RegionRole, RegionStatistic, RemapManifestsRequest,
+    RemapManifestsResponse, SetRegionRoleStateResponse, SettableRegionRoleState,
+    SyncRegionFromRequest,
 };
 use store_api::region_request::{
     AffectedRows, BatchRegionDdlRequest, RegionCatchupRequest, RegionCloseRequest,
@@ -241,16 +241,6 @@ impl RegionServer {
         );
 
         let engine = status.into_engine();
-        if let Some(ctx) = &ctx
-            && should_return_region_seq(ctx)
-            && ctx.get_snapshot(region_id.as_u64()).is_none()
-        {
-            let sampled_sequence = engine
-                .get_committed_sequence(region_id)
-                .await
-                .with_context(|_| HandleRegionRequestSnafu { region_id })?;
-            bind_snapshot_bound_region_seq(ctx, region_id, sampled_sequence);
-        }
 
         self.inner
             .table_provider_factory
@@ -313,12 +303,8 @@ impl RegionServer {
         };
 
         if let Some(seq) = region_latest_seq {
-            Ok(Box::pin(RegionWatermarkStream::new(
-                stream,
-                region_id,
-                seq,
-                self.find_engine(region_id)?,
-            )) as SendableRecordBatchStream)
+            Ok(Box::pin(RegionWatermarkStream::new(stream, region_id, seq))
+                as SendableRecordBatchStream)
         } else {
             Ok(stream)
         }
@@ -789,78 +775,22 @@ fn should_return_region_seq(query_ctx: &QueryContext) -> bool {
         || query_ctx.extension(FLOW_INCREMENTAL_AFTER_SEQS).is_some()
 }
 
-fn bind_snapshot_bound_region_seq(
-    query_ctx: &QueryContext,
-    region_id: RegionId,
-    sampled_sequence: u64,
-) -> u64 {
-    if let Some(snapshot_seq) = query_ctx.get_snapshot(region_id.as_u64()) {
-        snapshot_seq
-    } else {
-        query_ctx.set_snapshot(region_id.as_u64(), sampled_sequence);
-        sampled_sequence
-    }
-}
-
-/// Returns whether `snapshot_sequence` is a valid correctness watermark for this region,
-/// i.e. whether this query can safely treat it as the read upper bound.
-///
-/// For now this proof only covers memtable-side sequence information; SST-side proof
-/// can be added later if finer sequence metadata becomes available.
-fn can_prove_region_watermark_for_engine(
-    engine: &dyn RegionEngine,
-    region_id: RegionId,
-    snapshot_sequence: u64,
-) -> bool {
-    if let Some(mito_engine) = engine.as_any().downcast_ref::<MitoEngine>()
-        && let Some(region) = mito_engine.find_region(region_id)
-    {
-        return snapshot_sequence >= region.flushed_sequence();
-    }
-    true
-}
-
+/// Wraps a region read stream so terminal metrics can carry the scan-open watermark.
 struct RegionWatermarkStream {
     stream: SendableRecordBatchStream,
     region_id: u64,
     snapshot_seq: u64,
-    proof_engine: Option<RegionEngineRef>,
     finished: AtomicBool,
-    proof_state: Mutex<Option<bool>>,
 }
 
 impl RegionWatermarkStream {
-    fn new(
-        stream: SendableRecordBatchStream,
-        region_id: RegionId,
-        latest_sequence: u64,
-        proof_engine: Option<RegionEngineRef>,
-    ) -> Self {
+    fn new(stream: SendableRecordBatchStream, region_id: RegionId, latest_sequence: u64) -> Self {
         Self {
             stream,
             region_id: region_id.as_u64(),
             snapshot_seq: latest_sequence,
-            proof_engine,
             finished: AtomicBool::new(false),
-            proof_state: Mutex::new(None),
         }
-    }
-
-    fn compute_proof(&self) -> bool {
-        self.proof_engine
-            .as_ref()
-            .map(|engine| {
-                can_prove_region_watermark_for_engine(
-                    engine.as_ref(),
-                    RegionId::from_u64(self.region_id),
-                    self.snapshot_seq,
-                )
-            })
-            .unwrap_or(false)
-    }
-
-    fn proof_passed(&self) -> bool {
-        self.proof_state.lock().unwrap().unwrap_or(false)
     }
 
     fn merged_metrics(&self, mut metrics: RecordBatchMetrics) -> RecordBatchMetrics {
@@ -880,12 +810,6 @@ impl RegionWatermarkStream {
             metrics.region_watermarks.last_mut().unwrap()
         };
 
-        // TODO(discord9): Move correctness-watermark proof into the mito scan
-        // path. The current stream-end proof is conservatively safe, but still
-        // allows false negatives if a late flush happens after the scan snapshot.
-        if !self.proof_passed() {
-            return metrics;
-        }
         entry.watermark = Some(self.snapshot_seq);
         metrics
     }
@@ -920,7 +844,6 @@ impl Stream for RegionWatermarkStream {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match Pin::new(&mut self.stream).poll_next(cx) {
             Poll::Ready(None) => {
-                *self.proof_state.lock().unwrap() = Some(self.compute_proof());
                 self.finished.store(true, Ordering::Relaxed);
                 Poll::Ready(None)
             }
@@ -943,11 +866,24 @@ mod watermark_tests {
     use mito2::config::MitoConfig;
     use mito2::test_util::{self, CreateRequestBuilder, TestEnv};
     use session::context::QueryContextBuilder;
+    use store_api::region_engine::RegionEngine;
     use store_api::region_request::RegionRequest;
 
     use super::*;
-    use crate::tests::MockRegionEngine;
 
+    #[cfg(test)]
+    fn bind_snapshot_bound_region_seq(
+        query_ctx: &QueryContext,
+        region_id: RegionId,
+        sampled_sequence: u64,
+    ) -> u64 {
+        if let Some(snapshot_seq) = query_ctx.get_snapshot(region_id.as_u64()) {
+            snapshot_seq
+        } else {
+            query_ctx.set_snapshot(region_id.as_u64(), sampled_sequence);
+            sampled_sequence
+        }
+    }
     #[test]
     fn test_should_return_region_seq() {
         let ctx = QueryContextBuilder::default()
@@ -1019,49 +955,6 @@ mod watermark_tests {
         assert_eq!(ctx.get_snapshot(region_id.as_u64()), Some(99));
     }
 
-    #[test]
-    fn test_can_prove_region_watermark_for_non_mito_engine_defaults_true() {
-        let engine = MockRegionEngine::new(MITO_ENGINE_NAME).0;
-        assert!(can_prove_region_watermark_for_engine(
-            engine.as_ref(),
-            RegionId::new(1, 1),
-            42,
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_can_prove_region_watermark_for_mito_engine_when_snapshot_ge_flushed() {
-        let mut env = TestEnv::with_prefix(
-            "test_can_prove_region_watermark_for_mito_engine_when_snapshot_ge_flushed",
-        )
-        .await;
-        let engine = env.create_engine(MitoConfig::default()).await;
-
-        let region_id = RegionId::new(1, 1);
-        let request = CreateRequestBuilder::new().build();
-        let column_schemas = test_util::rows_schema(&request);
-        engine
-            .handle_request(region_id, RegionRequest::Create(request))
-            .await
-            .unwrap();
-
-        let rows = Rows {
-            schema: column_schemas,
-            rows: test_util::build_rows(0, 3),
-        };
-        test_util::put_rows(&engine, region_id, rows).await;
-        test_util::flush_region(&engine, region_id, None).await;
-
-        let region = engine.find_region(region_id).unwrap();
-        let snapshot_seq = region.flushed_sequence();
-
-        assert!(can_prove_region_watermark_for_engine(
-            &engine,
-            region_id,
-            snapshot_seq,
-        ));
-    }
-
     #[tokio::test]
     async fn test_region_watermark_stream_only_sets_terminal_metrics() {
         let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
@@ -1076,8 +969,7 @@ mod watermark_tests {
             .as_stream();
 
         let region_id = RegionId::new(42, 7);
-        let proof_engine = Some(MockRegionEngine::new(MITO_ENGINE_NAME).0 as RegionEngineRef);
-        let wrapped = RegionWatermarkStream::new(stream, region_id, 99, proof_engine);
+        let wrapped = RegionWatermarkStream::new(stream, region_id, 99);
         let mut pinned = Box::pin(wrapped);
 
         assert!(pinned.as_ref().get_ref().metrics().is_none());
@@ -1094,7 +986,7 @@ mod watermark_tests {
     }
 
     #[tokio::test]
-    async fn test_region_watermark_stream_without_proof_engine_omits_watermark() {
+    async fn test_region_watermark_stream_sets_watermark_from_snapshot() {
         let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
             "v",
             ConcreteDataType::int32_datatype(),
@@ -1107,7 +999,7 @@ mod watermark_tests {
             .as_stream();
 
         let region_id = RegionId::new(42, 7);
-        let wrapped = RegionWatermarkStream::new(stream, region_id, 99, None);
+        let wrapped = RegionWatermarkStream::new(stream, region_id, 99);
         let mut pinned = Box::pin(wrapped);
 
         while pinned.next().await.is_some() {}
@@ -1117,15 +1009,15 @@ mod watermark_tests {
             metrics.region_watermarks,
             vec![common_recordbatch::adapter::RegionWatermarkEntry {
                 region_id: region_id.as_u64(),
-                watermark: None,
+                watermark: Some(99),
             }]
         );
     }
 
     #[tokio::test]
-    async fn test_region_watermark_stream_omits_watermark_after_late_flush() {
+    async fn test_region_watermark_stream_keeps_watermark_after_late_flush() {
         let mut env =
-            TestEnv::with_prefix("test_region_watermark_stream_omits_watermark_after_late_flush")
+            TestEnv::with_prefix("test_region_watermark_stream_keeps_watermark_after_late_flush")
                 .await;
         let engine = env.create_engine(MitoConfig::default()).await;
 
@@ -1157,12 +1049,7 @@ mod watermark_tests {
             .unwrap()
             .as_stream();
 
-        let wrapped = RegionWatermarkStream::new(
-            stream,
-            region_id,
-            snapshot_seq,
-            Some(Arc::new(engine.clone()) as RegionEngineRef),
-        );
+        let wrapped = RegionWatermarkStream::new(stream, region_id, snapshot_seq);
         let mut pinned = Box::pin(wrapped);
 
         assert!(pinned.next().await.is_some());
@@ -1181,7 +1068,7 @@ mod watermark_tests {
             metrics.region_watermarks,
             vec![common_recordbatch::adapter::RegionWatermarkEntry {
                 region_id: region_id.as_u64(),
-                watermark: None,
+                watermark: Some(snapshot_seq),
             }]
         );
     }

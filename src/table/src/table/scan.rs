@@ -599,7 +599,12 @@ mod test {
             .primary_key(vec![1]);
         let region_metadata = Arc::new(builder.build().unwrap());
 
-        let scanner = Box::new(SinglePartitionScanner::new(stream, false, region_metadata));
+        let scanner = Box::new(SinglePartitionScanner::new(
+            stream,
+            false,
+            region_metadata,
+            None,
+        ));
         let plan = RegionScanExec::new(scanner, ScanRequest::default(), None).unwrap();
         let actual: SchemaRef = Arc::new(
             plan.properties

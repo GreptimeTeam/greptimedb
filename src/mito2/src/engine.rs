@@ -1012,11 +1012,16 @@ impl EngineInner {
 
     /// Handles the scan `request` and returns a [ScanRegion].
     #[tracing::instrument(skip_all, fields(region_id = %region_id))]
-    fn scan_region(&self, region_id: RegionId, request: ScanRequest) -> Result<ScanRegion> {
+    fn scan_region(&self, region_id: RegionId, mut request: ScanRequest) -> Result<ScanRegion> {
         let query_start = Instant::now();
         // Reading a region doesn't need to go through the region worker thread.
         let region = self.find_region(region_id)?;
-        let version = region.version();
+        let version_data = region.version_control.current();
+        let version = version_data.version;
+
+        if request.snapshot_on_scan && request.memtable_max_sequence.is_none() {
+            request.memtable_max_sequence = Some(version_data.committed_sequence);
+        }
 
         if let Some(given_seq) = request.memtable_min_sequence {
             let min_readable_seq = version.flushed_sequence;
