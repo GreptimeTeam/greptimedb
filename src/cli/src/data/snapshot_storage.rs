@@ -137,7 +137,16 @@ fn extract_file_path_from_uri(uri: &str) -> Result<String> {
             reason: "file:// URI must use an absolute path like file:///tmp/backup",
         }
         .fail(),
-        _ => Ok(url.path().to_string()),
+        _ => url
+            .to_file_path()
+            .map(|path| path.to_string_lossy().into_owned())
+            .map_err(|_| {
+                InvalidUriSnafu {
+                    uri,
+                    reason: "file:// URI must use a valid absolute filesystem path",
+                }
+                .build()
+            }),
     }
 }
 
@@ -447,6 +456,7 @@ impl SnapshotStorage for OpenDalStorage {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::path::Path;
 
     use object_store::ObjectStore;
     use object_store::services::Fs;
@@ -512,8 +522,9 @@ mod tests {
         assert!(extract_remote_location("azblob://container").is_err());
     }
 
+    #[cfg(not(windows))]
     #[test]
-    fn test_extract_path_from_uri() {
+    fn test_extract_path_from_uri_unix_examples() {
         assert_eq!(
             extract_file_path_from_uri("file:///tmp/backup").unwrap(),
             "/tmp/backup"
@@ -527,6 +538,15 @@ mod tests {
     #[test]
     fn test_extract_file_path_from_uri_rejects_file_host() {
         assert!(extract_file_path_from_uri("file://tmp/backup").is_err());
+    }
+
+    #[test]
+    fn test_extract_file_path_from_uri_round_trips_directory_url() {
+        let dir = tempdir().unwrap();
+        let uri = Url::from_directory_path(dir.path()).unwrap().to_string();
+        let path = extract_file_path_from_uri(&uri).unwrap();
+
+        assert_eq!(Path::new(&path), dir.path());
     }
 
     #[tokio::test]
