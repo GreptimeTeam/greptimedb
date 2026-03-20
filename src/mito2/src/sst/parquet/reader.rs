@@ -1693,14 +1693,22 @@ impl RowGroupReaderBuilder {
         &self.cache_strategy
     }
 
-    /// Builds a [ParquetRecordBatchReader] for `row_group_idx` using a custom read format.
-    pub(crate) async fn build_with_read_format(
+    pub(crate) fn new_in_memory_row_group(&self, row_group_idx: usize) -> InMemoryRowGroup<'_> {
+        InMemoryRowGroup::create(
+            self.file_handle.region_id(),
+            self.file_handle.file_id().file_id(),
+            &self.parquet_meta,
+            row_group_idx,
+            self.cache_strategy.clone(),
+            &self.file_path,
+            self.object_store.clone(),
+        )
+    }
+
+    fn projection_and_field_levels(
         &self,
-        row_group_idx: usize,
-        row_selection: Option<RowSelection>,
-        fetch_metrics: Option<&ParquetFetchMetrics>,
         read_format: &ReadFormat,
-    ) -> Result<ParquetRecordBatchReader> {
+    ) -> Result<(ProjectionMask, FieldLevels)> {
         let parquet_schema_desc = self.parquet_meta.file_metadata().schema_descr();
         let projection_mask = ProjectionMask::roots(
             parquet_schema_desc,
@@ -1711,14 +1719,7 @@ impl RowGroupReaderBuilder {
             parquet_to_arrow_field_levels(parquet_schema_desc, projection_mask.clone(), hint)
                 .context(ReadDataPartSnafu)?;
 
-        self.build_with_projection(
-            row_group_idx,
-            row_selection,
-            fetch_metrics,
-            projection_mask,
-            field_levels,
-        )
-        .await
+        Ok((projection_mask, field_levels))
     }
 
     /// Builds a [ParquetRecordBatchReader] to read the row group at `row_group_idx`.
@@ -1728,8 +1729,9 @@ impl RowGroupReaderBuilder {
         row_selection: Option<RowSelection>,
         fetch_metrics: Option<&ParquetFetchMetrics>,
     ) -> Result<ParquetRecordBatchReader> {
-        self.build_with_projection(
-            row_group_idx,
+        let mut row_group = self.new_in_memory_row_group(row_group_idx);
+        self.build_on_row_group_with_projection(
+            &mut row_group,
             row_selection,
             fetch_metrics,
             self.projection.clone(),
@@ -1738,9 +1740,43 @@ impl RowGroupReaderBuilder {
         .await
     }
 
-    async fn build_with_projection(
+    pub(crate) async fn build_on_row_group_with_read_format(
         &self,
-        row_group_idx: usize,
+        row_group: &mut InMemoryRowGroup<'_>,
+        row_selection: Option<RowSelection>,
+        fetch_metrics: Option<&ParquetFetchMetrics>,
+        read_format: &ReadFormat,
+    ) -> Result<ParquetRecordBatchReader> {
+        let (projection, field_levels) = self.projection_and_field_levels(read_format)?;
+        self.build_on_row_group_with_projection(
+            row_group,
+            row_selection,
+            fetch_metrics,
+            projection,
+            field_levels,
+        )
+        .await
+    }
+
+    pub(crate) async fn build_on_row_group(
+        &self,
+        row_group: &mut InMemoryRowGroup<'_>,
+        row_selection: Option<RowSelection>,
+        fetch_metrics: Option<&ParquetFetchMetrics>,
+    ) -> Result<ParquetRecordBatchReader> {
+        self.build_on_row_group_with_projection(
+            row_group,
+            row_selection,
+            fetch_metrics,
+            self.projection.clone(),
+            self.field_levels.clone(),
+        )
+        .await
+    }
+
+    async fn build_on_row_group_with_projection(
+        &self,
+        row_group: &mut InMemoryRowGroup<'_>,
         row_selection: Option<RowSelection>,
         fetch_metrics: Option<&ParquetFetchMetrics>,
         projection: ProjectionMask,
@@ -1748,15 +1784,6 @@ impl RowGroupReaderBuilder {
     ) -> Result<ParquetRecordBatchReader> {
         let fetch_start = Instant::now();
 
-        let mut row_group = InMemoryRowGroup::create(
-            self.file_handle.region_id(),
-            self.file_handle.file_id().file_id(),
-            &self.parquet_meta,
-            row_group_idx,
-            self.cache_strategy.clone(),
-            &self.file_path,
-            self.object_store.clone(),
-        );
         // Fetches data into memory.
         row_group
             .fetch(&projection, row_selection.as_ref(), fetch_metrics)
@@ -1774,7 +1801,7 @@ impl RowGroupReaderBuilder {
         // Now the row selection is None.
         ParquetRecordBatchReader::try_new_with_row_groups(
             &field_levels,
-            &row_group,
+            row_group,
             DEFAULT_READ_BATCH_SIZE,
             row_selection,
         )
