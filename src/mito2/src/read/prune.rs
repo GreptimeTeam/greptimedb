@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
 use std::ops::BitAnd;
 use std::sync::Arc;
 
@@ -24,7 +23,6 @@ use datatypes::arrow::compute::concat_batches;
 use datatypes::arrow::record_batch::RecordBatch;
 use mito_codec::row_converter::PrimaryKeyFilter;
 use snafu::{OptionExt, ResultExt};
-use store_api::storage::ColumnId;
 
 use crate::error::{ComputeArrowSnafu, RecordBatchSnafu, Result, UnexpectedSnafu};
 use crate::memtable::BoxedBatchIterator;
@@ -335,7 +333,6 @@ pub struct FlatPruneReader {
     context: FileRangeContextRef,
     source: FlatSource,
     primary_key_filter: Option<CachedPrimaryKeyFilter>,
-    covered_primary_key_filter_columns: Option<HashSet<ColumnId>>,
     buffered_prefiltered_batch: Option<RecordBatch>,
     metrics: ReaderMetrics,
     /// Whether to skip field filters for this row group.
@@ -352,7 +349,6 @@ impl FlatPruneReader {
             primary_key_filter: ctx
                 .new_primary_key_filter()
                 .map(CachedPrimaryKeyFilter::new),
-            covered_primary_key_filter_columns: ctx.covered_primary_key_filter_columns(),
             buffered_prefiltered_batch: None,
             context: ctx,
             source: FlatSource::RowGroup(reader),
@@ -368,7 +364,6 @@ impl FlatPruneReader {
     ) -> Self {
         Self {
             primary_key_filter: None,
-            covered_primary_key_filter_columns: None,
             buffered_prefiltered_batch: None,
             context: ctx,
             source: FlatSource::LastRow(reader),
@@ -472,11 +467,9 @@ impl FlatPruneReader {
         }
 
         let num_rows_before_filter = record_batch.num_rows();
-        let Some(filtered_batch) = self.context.precise_filter_flat(
-            record_batch,
-            self.skip_fields,
-            self.covered_primary_key_filter_columns.as_ref(),
-        )?
+        let Some(filtered_batch) = self
+            .context
+            .precise_filter_flat(record_batch, self.skip_fields)?
         else {
             // the entire batch is filtered out
             self.metrics.filter_metrics.rows_precise_filtered += num_rows_before_filter;

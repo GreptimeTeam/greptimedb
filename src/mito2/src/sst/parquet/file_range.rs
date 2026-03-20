@@ -15,7 +15,7 @@
 //! Structs and functions for reading ranges from a parquet file. A file range
 //! is usually a row group in a parquet file.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ops::{BitAnd, Range};
 use std::sync::Arc;
 
@@ -480,12 +480,6 @@ impl FileRangeContext {
         self.base.new_primary_key_filter()
     }
 
-    /// Returns tag columns whose simple filters are already guaranteed by the
-    /// encoded primary-key prefilter.
-    pub(crate) fn covered_primary_key_filter_columns(&self) -> Option<HashSet<ColumnId>> {
-        self.base.covered_primary_key_filter_columns()
-    }
-
     /// Returns true if a partition filter is configured.
     pub(crate) fn has_partition_filter(&self) -> bool {
         self.base.partition_filter.is_some()
@@ -529,10 +523,8 @@ impl FileRangeContext {
         &self,
         input: RecordBatch,
         skip_fields: bool,
-        skip_tag_filter_columns: Option<&HashSet<ColumnId>>,
     ) -> Result<Option<RecordBatch>> {
-        self.base
-            .precise_filter_flat(input, skip_fields, skip_tag_filter_columns)
+        self.base.precise_filter_flat(input, skip_fields)
     }
 
     /// Applies an encoded primary-key prefilter to the input `RecordBatch`.
@@ -705,32 +697,6 @@ impl RangeBase {
             self.codec
                 .primary_key_filter(self.read_format.metadata(), filters),
         )
-    }
-
-    pub(crate) fn covered_primary_key_filter_columns(&self) -> Option<HashSet<ColumnId>> {
-        if self.read_format.metadata().primary_key.is_empty()
-            || !self
-                .read_format
-                .as_flat()
-                .is_some_and(|format| format.raw_batch_has_primary_key_dictionary())
-        {
-            return None;
-        }
-
-        let sst_metadata = self.read_format.metadata();
-        let expected_metadata = self.expected_metadata.as_deref();
-        let filters = self.usable_primary_key_filters()?;
-        let column_ids = filters
-            .iter()
-            .filter_map(|filter| {
-                expected_metadata
-                    .and_then(|metadata| metadata.column_by_name(filter.column_name()))
-                    .or_else(|| sst_metadata.column_by_name(filter.column_name()))
-                    .map(|column| column.column_id)
-            })
-            .collect::<HashSet<_>>();
-
-        (!column_ids.is_empty()).then_some(column_ids)
     }
 
     /// Applies an encoded primary-key prefilter before flat-row materialization.
@@ -958,24 +924,14 @@ impl RangeBase {
         &self,
         input: RecordBatch,
         skip_fields: bool,
-        skip_tag_filter_columns: Option<&HashSet<ColumnId>>,
     ) -> Result<Option<RecordBatch>> {
         let mut tag_decode_state = TagDecodeState::new();
-        let mask = self.compute_filter_mask_flat(
-            &input,
-            skip_fields,
-            skip_tag_filter_columns,
-            &mut tag_decode_state,
-        )?;
+        let mask = self.compute_filter_mask_flat(&input, skip_fields, &mut tag_decode_state)?;
 
         // If mask is None, the entire batch is filtered out
         let Some(mut mask) = mask else {
             return Ok(None);
         };
-
-        if self.partition_filter.is_none() && mask.count_set_bits() == input.num_rows() {
-            return Ok(Some(input));
-        }
 
         // Apply partition filter
         if let Some(partition_filter) = &self.partition_filter {
@@ -1015,7 +971,6 @@ impl RangeBase {
         &self,
         input: &RecordBatch,
         skip_fields: bool,
-        skip_tag_filter_columns: Option<&HashSet<ColumnId>>,
         tag_decode_state: &mut TagDecodeState,
     ) -> Result<Option<BooleanBuffer>> {
         let mut mask = BooleanBuffer::new_set(input.num_rows());
@@ -1040,13 +995,6 @@ impl RangeBase {
 
             // Skip field filters if skip_fields is true
             if skip_fields && filter_ctx.semantic_type() == SemanticType::Field {
-                continue;
-            }
-
-            if skip_tag_filter_columns.is_some_and(|columns| {
-                filter_ctx.semantic_type() == SemanticType::Tag
-                    && columns.contains(&filter_ctx.column_id())
-            }) {
                 continue;
             }
 
@@ -1336,8 +1284,7 @@ mod tests {
     use crate::sst::{internal_fields, location};
     use crate::test_util::sst_util::{
         new_flat_source_from_record_batches, new_primary_key, new_record_batch_by_range,
-        new_sparse_primary_key, sst_file_handle, sst_region_metadata,
-        sst_region_metadata_with_encoding,
+        sst_file_handle, sst_region_metadata, sst_region_metadata_with_encoding,
     };
 
     const FILE_DIR: &str = "/";
@@ -1598,33 +1545,6 @@ mod tests {
     }
 
     #[test]
-    fn test_prefilter_primary_key_ignores_reused_expected_tag_name() {
-        let metadata = Arc::new(sst_region_metadata());
-        let expected_metadata = expected_metadata_with_reused_tag_name(&metadata);
-        let pk_ax = new_primary_key(&["a", "x"]);
-        let pk_by = new_primary_key(&["b", "y"]);
-        let batch = new_raw_batch_with_metadata(
-            metadata.clone(),
-            &[pk_ax.as_slice(), pk_by.as_slice()],
-            &[10, 11],
-        );
-        let base = new_test_range_base_with_expected_metadata(
-            metadata,
-            expected_metadata,
-            &[col("tag_0").eq(lit("b")), col("tag_1").eq(lit("x"))],
-        );
-        let mut primary_key_filter = base.new_primary_key_filter().unwrap();
-
-        let filtered = base
-            .prefilter_flat_batch_by_primary_key(batch, primary_key_filter.as_mut())
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(filtered.num_rows(), 1);
-        assert_eq!(field_values(&filtered), vec![10]);
-    }
-
-    #[test]
     fn test_prefilter_primary_key_drops_single_dictionary_batch() {
         let pk_a = new_primary_key(&["a", "x"]);
         let batch = new_raw_batch(&[pk_a.as_slice(), pk_a.as_slice()], &[10, 11]);
@@ -1636,37 +1556,6 @@ mod tests {
             .unwrap();
 
         assert!(filtered.is_none());
-    }
-
-    #[test]
-    fn test_prefilter_primary_key_returns_slice_for_contiguous_matches() {
-        let pk_a = new_primary_key(&["a", "x"]);
-        let pk_b = new_primary_key(&["b", "x"]);
-        let pk_c = new_primary_key(&["c", "x"]);
-        let pk_d = new_primary_key(&["d", "x"]);
-        let batch = new_raw_batch(
-            &[
-                pk_a.as_slice(),
-                pk_a.as_slice(),
-                pk_b.as_slice(),
-                pk_b.as_slice(),
-                pk_c.as_slice(),
-                pk_c.as_slice(),
-                pk_d.as_slice(),
-                pk_d.as_slice(),
-            ],
-            &[10, 11, 12, 13, 14, 15, 16, 17],
-        );
-        let base = new_test_range_base(&[col("tag_0").eq(lit("b")).or(col("tag_0").eq(lit("c")))]);
-        let mut primary_key_filter = base.new_primary_key_filter().unwrap();
-
-        let filtered = base
-            .prefilter_flat_batch_by_primary_key(batch, primary_key_filter.as_mut())
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(filtered.num_rows(), 4);
-        assert_eq!(field_values(&filtered), vec![12, 13, 14, 15]);
     }
 
     #[test]
@@ -1698,64 +1587,6 @@ mod tests {
 
         assert_eq!(filtered.num_rows(), 4);
         assert_eq!(field_values(&filtered), vec![10, 11, 14, 15]);
-    }
-
-    #[test]
-    fn test_matching_row_ranges_by_primary_key_merges_adjacent_spans() {
-        let pk_a = new_primary_key(&["a", "x"]);
-        let pk_b = new_primary_key(&["b", "x"]);
-        let pk_c = new_primary_key(&["c", "x"]);
-        let pk_d = new_primary_key(&["d", "x"]);
-        let batch = new_raw_batch(
-            &[
-                pk_a.as_slice(),
-                pk_a.as_slice(),
-                pk_b.as_slice(),
-                pk_b.as_slice(),
-                pk_c.as_slice(),
-                pk_c.as_slice(),
-                pk_d.as_slice(),
-                pk_d.as_slice(),
-            ],
-            &[10, 11, 12, 13, 14, 15, 16, 17],
-        );
-        let base = new_test_range_base(&[col("tag_0").eq(lit("a")).or(col("tag_0").eq(lit("c")))]);
-        let mut primary_key_filter = base.new_primary_key_filter().unwrap();
-
-        let matched = base
-            .matching_row_ranges_by_primary_key(&batch, primary_key_filter.as_mut())
-            .unwrap();
-
-        assert_eq!(matched, vec![0..2, 4..6]);
-    }
-
-    #[test]
-    fn test_prefilter_primary_key_sparse_path() {
-        let metadata = Arc::new(sst_region_metadata_with_encoding(
-            PrimaryKeyEncoding::Sparse,
-        ));
-        let pk_a = new_sparse_primary_key(&["a", "x"], &metadata, 1, 11);
-        let pk_b = new_sparse_primary_key(&["b", "x"], &metadata, 1, 22);
-        let batch = new_raw_batch_with_metadata(
-            metadata.clone(),
-            &[
-                pk_a.as_slice(),
-                pk_a.as_slice(),
-                pk_b.as_slice(),
-                pk_b.as_slice(),
-            ],
-            &[10, 11, 12, 13],
-        );
-        let base = new_test_range_base_with_metadata(metadata, None, &[col("tag_0").eq(lit("b"))]);
-        let mut primary_key_filter = base.new_primary_key_filter().unwrap();
-
-        let filtered = base
-            .prefilter_flat_batch_by_primary_key(batch, primary_key_filter.as_mut())
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(filtered.num_rows(), 2);
-        assert_eq!(field_values(&filtered), vec![12, 13]);
     }
 
     async fn fetch_metrics_for_predicate(predicate: Option<Predicate>) -> ParquetFetchMetricsData {
