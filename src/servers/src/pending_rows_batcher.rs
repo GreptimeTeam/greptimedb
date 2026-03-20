@@ -343,20 +343,34 @@ impl PendingRowsBatcher {
         // Track which tables exist and which don't, along with their record batches.
         // For tables that exist, also store the region schema for pass 2.
 
-        for (table_name, record_batch) in &table_batches {
-            if region_schemas.contains_key(table_name) {
-                // Already resolved in this batch (duplicate table name).
-                continue;
+        // Collect unique table names (preserving first-seen record batch for each).
+        let mut unique_tables: Vec<(&str, &RecordBatch)> = Vec::new();
+        {
+            let mut seen = HashSet::new();
+            for (table_name, record_batch) in &table_batches {
+                if seen.insert(table_name.as_str()) {
+                    unique_tables.push((table_name.as_str(), record_batch));
+                }
             }
+        }
 
-            let table = {
-                let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
-                    .with_label_values(&["align_resolve_table"])
-                    .start_timer();
+        // Fetch all table metadata concurrently.
+        let resolved_tables = {
+            let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+                .with_label_values(&["align_resolve_table"])
+                .start_timer();
+            futures::future::join_all(unique_tables.iter().map(|(table_name, _)| {
                 self.catalog_manager
                     .table(&catalog, &schema, table_name, Some(ctx.as_ref()))
-                    .await?
-            };
+            }))
+            .await
+        };
+
+        // Process the results: classify into existing / to-create / to-alter.
+        for ((table_name, record_batch), table_result) in
+            unique_tables.iter().zip(resolved_tables.into_iter())
+        {
+            let table = table_result?;
 
             if let Some(table) = table {
                 let table_info = table.table_info();
@@ -369,14 +383,15 @@ impl PendingRowsBatcher {
                         .with_label_values(&["align_accommodate_record_batch"])
                         .start_timer();
                     accommodate_record_batch_for_target_schema(
-                        record_batch.clone(),
+                        (*record_batch).clone(),
                         region_schema.as_ref(),
                     )?
                 };
                 if !missing_columns.is_empty() {
-                    tables_to_alter.push((table_name.clone(), missing_columns));
+                    tables_to_alter.push((table_name.to_string(), missing_columns));
                 }
-                region_schemas.insert(table_name.clone(), (region_schema, table_id));
+                region_schemas
+                    .insert(table_name.to_string(), (region_schema, table_id));
             } else {
                 // Table doesn't exist, collect it for batch creation.
                 let request_schema = {
@@ -385,7 +400,7 @@ impl PendingRowsBatcher {
                         .start_timer();
                     build_prom_create_table_schema(record_batch.schema().as_ref())?
                 };
-                tables_to_create.push((table_name.clone(), request_schema));
+                tables_to_create.push((table_name.to_string(), request_schema));
             }
         }
 
@@ -409,22 +424,26 @@ impl PendingRowsBatcher {
                     )
                     .await?;
             }
-            // Resolve newly created tables.
-            for (table_name, _) in &tables_to_create {
-                let table = {
-                    let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
-                        .with_label_values(&["align_resolve_table_after_create"])
-                        .start_timer();
+            // Resolve newly created tables concurrently.
+            let created_table_results = {
+                let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+                    .with_label_values(&["align_resolve_table_after_create"])
+                    .start_timer();
+                futures::future::join_all(tables_to_create.iter().map(|(table_name, _)| {
                     self.catalog_manager
                         .table(&catalog, &schema, table_name, Some(ctx.as_ref()))
-                        .await?
-                        .with_context(|| error::UnexpectedResultSnafu {
-                            reason: format!(
-                                "Table not found after pending batch create attempt: {}",
-                                table_name
-                            ),
-                        })?
-                };
+                }))
+                .await
+            };
+            for ((table_name, _), table_result) in
+                tables_to_create.iter().zip(created_table_results.into_iter())
+            {
+                let table = table_result?.with_context(|| error::UnexpectedResultSnafu {
+                    reason: format!(
+                        "Table not found after pending batch create attempt: {}",
+                        table_name
+                    ),
+                })?;
                 let table_info = table.table_info();
                 let table_id = table_info.ident.table_id;
                 let region_schema = table_info.meta.schema.arrow_schema().clone();
@@ -469,22 +488,26 @@ impl PendingRowsBatcher {
                     .add_missing_prom_tag_columns_batch(&catalog, &schema, &alter_refs, ctx.clone())
                     .await?;
             }
-            // Refresh schemas for altered tables.
-            for (table_name, _) in &tables_to_alter {
-                let table = {
-                    let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
-                        .with_label_values(&["align_resolve_table_after_schema_alter"])
-                        .start_timer();
+            // Refresh schemas for altered tables concurrently.
+            let altered_table_results = {
+                let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+                    .with_label_values(&["align_resolve_table_after_schema_alter"])
+                    .start_timer();
+                futures::future::join_all(tables_to_alter.iter().map(|(table_name, _)| {
                     self.catalog_manager
                         .table(&catalog, &schema, table_name, Some(ctx.as_ref()))
-                        .await?
-                        .with_context(|| error::UnexpectedResultSnafu {
-                            reason: format!(
-                                "Table not found after pending batch schema alter: {}",
-                                table_name
-                            ),
-                        })?
-                };
+                }))
+                .await
+            };
+            for ((table_name, _), table_result) in
+                tables_to_alter.iter().zip(altered_table_results.into_iter())
+            {
+                let table = table_result?.with_context(|| error::UnexpectedResultSnafu {
+                    reason: format!(
+                        "Table not found after pending batch schema alter: {}",
+                        table_name
+                    ),
+                })?;
                 let table_info = table.table_info();
                 let table_id = table_info.ident.table_id;
                 let refreshed_region_schema = table_info.meta.schema.arrow_schema().clone();
@@ -1216,31 +1239,13 @@ async fn flush_batch_physical(
             continue 'next_table;
         };
 
-        let schema_ref = first_batch.schema();
-        let record_batch = {
-            let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
-                .with_label_values(&["flush_physical_concat_table_batches"])
-                .start_timer();
-            match concat_batches(&schema_ref, &table_batch.batches) {
-                Ok(batch) => batch,
-                Err(err) => {
-                    record_failure!(
-                        table_batch.row_count,
-                        format!(
-                            "Failed to concat table batch '{}': {:?}",
-                            table_batch.table_name, err
-                        )
-                    );
-                    continue 'next_table;
-                }
-            }
-        };
-
         // Identify tag columns and non-tag columns from the logical batch schema.
+        // All chunks within a table_batch share the same schema, so we resolve
+        // column metadata once from the first batch.
         // In prom batches, Float64 = value, Timestamp = timestamp, Utf8 = tags.
         let mut tag_columns = Vec::new();
         let mut non_tag_indices = Vec::new();
-        let batch_schema = record_batch.schema();
+        let batch_schema = first_batch.schema();
         let mut column_resolution_failed = false;
         for (index, field) in batch_schema.fields().iter().enumerate() {
             match field.data_type() {
@@ -1284,28 +1289,36 @@ async fn flush_batch_physical(
         }
         tag_columns.sort_by(|a, b| a.name.cmp(&b.name));
 
-        // Transform to physical format using sparse primary key encoding
-        let modified = {
-            let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
-                .with_label_values(&["flush_physical_modify_batch"])
-                .start_timer();
-            match modify_batch_sparse(record_batch, table_id, &tag_columns, &non_tag_indices) {
-                Ok(batch) => batch,
-                Err(err) => {
-                    record_failure!(
-                        table_batch.row_count,
-                        format!(
-                            "Failed to modify batch for logical table '{}': {:?}",
-                            table_batch.table_name, err
-                        )
-                    );
-                    continue 'next_table;
+        // Transform each chunk to physical format directly, avoiding an
+        // intermediate concat_batches per logical table.
+        for batch in &table_batch.batches {
+            let modified = {
+                let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
+                    .with_label_values(&["flush_physical_modify_batch"])
+                    .start_timer();
+                match modify_batch_sparse(
+                    batch.clone(),
+                    table_id,
+                    &tag_columns,
+                    &non_tag_indices,
+                ) {
+                    Ok(batch) => batch,
+                    Err(err) => {
+                        record_failure!(
+                            table_batch.row_count,
+                            format!(
+                                "Failed to modify batch for logical table '{}': {:?}",
+                                table_batch.table_name, err
+                            )
+                        );
+                        continue 'next_table;
+                    }
                 }
-            }
-        };
+            };
 
-        modified_row_count += modified.num_rows();
-        modified_batches.push(modified);
+            modified_row_count += modified.num_rows();
+            modified_batches.push(modified);
+        }
     }
 
     if modified_batches.is_empty() {
