@@ -887,9 +887,6 @@ async fn flush_batch(
     let start = Instant::now();
     let mut first_error: Option<String> = None;
 
-    let catalog = ctx.current_catalog().to_string();
-    let schema = ctx.current_schema();
-
     // Physical-table-level flush: transform all logical table batches
     // into physical format and write them together.
     let physical_table_name = ctx
@@ -899,8 +896,6 @@ async fn flush_batch(
     flush_batch_physical(
         &table_batches,
         total_row_count,
-        &catalog,
-        &schema,
         &physical_table_name,
         &ctx,
         &partition_manager,
@@ -930,8 +925,6 @@ async fn flush_batch(
 async fn flush_batch_physical(
     table_batches: &[TableBatch],
     total_row_count: usize,
-    catalog: &str,
-    schema: &str,
     physical_table_name: &str,
     ctx: &QueryContextRef,
     partition_manager: &PartitionRuleManagerRef,
@@ -955,7 +948,12 @@ async fn flush_batch_physical(
             .with_label_values(&["flush_physical_resolve_table"])
             .start_timer();
         match catalog_manager
-            .table(catalog, schema, physical_table_name, Some(ctx.as_ref()))
+            .table(
+                ctx.current_catalog(),
+                &ctx.current_schema(),
+                physical_table_name,
+                Some(ctx.as_ref()),
+            )
             .await
         {
             Ok(Some(table)) => table,
