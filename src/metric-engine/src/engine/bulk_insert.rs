@@ -34,6 +34,7 @@ use crate::batch_modifier::{TagColumnInfo, modify_batch_sparse};
 use crate::engine::MetricEngineInner;
 use crate::error;
 use crate::error::Result;
+use crate::metrics::MITO_OPERATION_ELAPSED;
 
 impl MetricEngineInner {
     /// Bulk-inserts rows into a metric region.
@@ -54,10 +55,19 @@ impl MetricEngineInner {
         region_id: RegionId,
         request: RegionBulkInsertsRequest,
     ) -> Result<AffectedRows> {
+        if request.payload.num_rows() == 0 {
+            return Ok(0);
+        }
         if self.is_physical_region(region_id) {
+            let _timer = MITO_OPERATION_ELAPSED
+                .with_label_values(&["bulk_insert_physical"])
+                .start_timer();
             return self.bulk_insert_physical_region(region_id, request).await;
         }
 
+        let _timer = MITO_OPERATION_ELAPSED
+            .with_label_values(&["bulk_insert_logical"])
+            .start_timer();
         self.bulk_insert_logical_region(region_id, request).await
     }
 
@@ -70,10 +80,6 @@ impl MetricEngineInner {
         region_id: RegionId,
         request: RegionBulkInsertsRequest,
     ) -> Result<AffectedRows> {
-        if request.payload.num_rows() == 0 {
-            return Ok(0);
-        }
-
         self.data_region
             .write_data(region_id, RegionRequest::BulkInserts(request))
             .await
@@ -425,6 +431,7 @@ mod tests {
     use super::record_batch_to_ipc;
     use crate::batch_modifier::{TagColumnInfo, modify_batch_sparse};
     use crate::error::Error;
+    use crate::metrics::MITO_OPERATION_ELAPSED;
     use crate::test_util::{self, TestEnv};
 
     fn build_logical_batch(start: usize, rows: usize) -> RecordBatch {
@@ -740,6 +747,27 @@ mod tests {
             .unwrap();
         let batches = RecordBatches::try_collect(stream).await.unwrap();
         assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 4);
+    }
+
+    #[tokio::test]
+    async fn test_bulk_insert_records_elapsed_metric() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let logical_region_id = env.default_logical_region_id();
+
+        let histogram = MITO_OPERATION_ELAPSED.with_label_values(&["bulk_insert"]);
+        let before = histogram.get_sample_count();
+
+        let request = build_bulk_request(logical_region_id, build_logical_batch(0, 3));
+        let response = env
+            .metric()
+            .handle_request(logical_region_id, request)
+            .await
+            .unwrap();
+        assert_eq!(response.affected_rows, 3);
+
+        let after = histogram.get_sample_count();
+        assert!(after > before, "bulk_insert elapsed metric is not recorded");
     }
 
     #[tokio::test]
