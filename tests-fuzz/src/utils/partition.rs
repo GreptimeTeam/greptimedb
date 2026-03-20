@@ -36,7 +36,7 @@ pub struct PartitionCount {
 }
 
 pub async fn count_partitions(db: &MySqlPool, datanode_id: u64) -> Result<PartitionCount> {
-    let sql = "select count(1) as count from information_schema.region_peers where peer_id == ?";
+    let sql = "select count(1) as count from information_schema.region_peers where peer_id = ?";
     sqlx::query_as::<_, PartitionCount>(sql)
         .bind(datanode_id)
         .fetch_one(db)

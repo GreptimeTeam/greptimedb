@@ -42,7 +42,7 @@ affected_rows: 0
 -- SQLNESS PROTOCOL MYSQL
 EXECUTE stmt USING 'a';
 
-Failed to execute query, err: MySqlError { ERROR 1815 (HY000): (EngineExecuteQuery): Cast error: Cannot cast string 'a' to value of Int32 type }
+Failed to execute query, err: MySqlError { ERROR 1210 (HY000): (InvalidArguments): Invalid request parameter: Unable to convert a to datatype Int32(Int32Type) }
 
 -- SQLNESS PROTOCOL MYSQL
 DEALLOCATE stmt;
@@ -118,6 +118,25 @@ EXECUTE stmt USING 'happy', 42, 0;
 +--------+-----------+----------------------------+
 | happy  | 0         | 2025-03-18 12:55:51.758000 |
 +--------+-----------+----------------------------+
+
+-- SQLNESS PROTOCOL MYSQL
+DEALLOCATE stmt;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+PREPARE stmt FROM 'SELECT table_name, table_schema FROM information_schema.tables WHERE table_name = ?';
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+EXECUTE stmt USING 'cake';
+
++------------+--------------+
+| table_name | table_schema |
++------------+--------------+
+| cake       | public       |
++------------+--------------+
 
 -- SQLNESS PROTOCOL MYSQL
 DEALLOCATE stmt;
