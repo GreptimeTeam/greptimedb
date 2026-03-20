@@ -20,7 +20,7 @@ use api::v1::meta::Peer;
 use api::v1::region::{
     BulkInsertRequest, RegionRequest, RegionRequestHeader, bulk_insert_request, region_request,
 };
-use api::v1::{ArrowIpc, ColumnSchema, RowInsertRequests};
+use api::v1::{ArrowIpc, ColumnSchema, RowInsertRequests, Rows};
 use arrow::compute::{concat_batches, filter_record_batch};
 use arrow::datatypes::{DataType as ArrowDataType, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
@@ -48,8 +48,8 @@ use crate::metrics::{
     PENDING_ROWS, PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED, PENDING_WORKERS
 };
 use crate::prom_row_builder::{
-    accommodate_record_batch_for_target_schema, align_record_batch_to_schema,
-    build_prom_create_table_schema, rows_to_record_batch,
+    build_prom_create_table_schema_from_proto, identify_missing_columns_from_proto,
+    rows_to_aligned_record_batch,
 };
 
 const PHYSICAL_TABLE_KEY: &str = "physical_table";
@@ -238,20 +238,13 @@ impl PendingRowsBatcher {
     pub async fn submit(&self, requests: RowInsertRequests, ctx: QueryContextRef) -> Result<u64> {
         let (table_batches, total_rows) = {
             let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
-                .with_label_values(&["submit_build_table_batches"])
+                .with_label_values(&["submit_build_and_align"])
                 .start_timer();
-            build_table_batches(requests)?
+            self.build_and_align_table_batches(requests, &ctx).await?
         };
         if total_rows == 0 {
             return Ok(0);
         }
-        let table_batches = {
-            let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
-                .with_label_values(&["submit_align_region_schema"])
-                .start_timer();
-            self.align_table_batches_to_region_schema(table_batches, &ctx)
-                .await?
-        };
 
         let permit = {
             let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
@@ -317,33 +310,49 @@ impl PendingRowsBatcher {
         }
     }
 
-    async fn align_table_batches_to_region_schema(
+    /// Converts proto `RowInsertRequests` directly into aligned `RecordBatch`es
+    /// in a single pass, handling table creation, schema alteration, column
+    /// renaming, reordering, and null-filling without building intermediate
+    /// RecordBatches.
+    async fn build_and_align_table_batches(
         &self,
-        table_batches: Vec<(String, RecordBatch)>,
+        requests: RowInsertRequests,
         ctx: &QueryContextRef,
-    ) -> Result<Vec<(String, u32, RecordBatch)>> {
+    ) -> Result<(Vec<(String, u32, RecordBatch)>, usize)> {
         let catalog = ctx.current_catalog().to_string();
         let schema = ctx.current_schema();
+
+        // Extract (table_name, Rows) pairs from proto requests.
+        let mut table_rows: Vec<(String, Rows)> = Vec::with_capacity(requests.inserts.len());
+        let mut total_rows = 0;
+        for request in requests.inserts {
+            let Some(rows) = request.rows else {
+                continue;
+            };
+            if rows.rows.is_empty() {
+                continue;
+            }
+            total_rows += rows.rows.len();
+            table_rows.push((request.table_name, rows));
+        }
+        if total_rows == 0 {
+            return Ok((Vec::new(), 0));
+        }
+
         let mut region_schemas: HashMap<String, (Arc<ArrowSchema>, u32)> =
-            HashMap::with_capacity(table_batches.len());
-        let mut aligned_batches = Vec::with_capacity(table_batches.len());
+            HashMap::with_capacity(table_rows.len());
 
         // --- Pass 1: Identify missing tables and missing columns ---
-        // We collect all creates and alters needed so we can batch them.
-        // Each entry in `tables_to_create` is (table_name, column_schemas).
         let mut tables_to_create: Vec<(String, Vec<ColumnSchema>)> = Vec::new();
-        // Each entry in `tables_to_alter` is (table_name, missing_column_names).
         let mut tables_to_alter: Vec<(String, Vec<String>)> = Vec::new();
-        // Track which tables exist and which don't, along with their record batches.
-        // For tables that exist, also store the region schema for pass 2.
 
-        // Collect unique table names (preserving first-seen record batch for each).
-        let mut unique_tables: Vec<(&str, &RecordBatch)> = Vec::new();
+        // Collect unique table names (preserving first-seen proto schema).
+        let mut unique_tables: Vec<(&str, &[ColumnSchema])> = Vec::new();
         {
             let mut seen = HashSet::new();
-            for (table_name, record_batch) in &table_batches {
+            for (table_name, rows) in &table_rows {
                 if seen.insert(table_name.as_str()) {
-                    unique_tables.push((table_name.as_str(), record_batch));
+                    unique_tables.push((table_name.as_str(), &rows.schema));
                 }
             }
         }
@@ -360,8 +369,8 @@ impl PendingRowsBatcher {
             .await
         };
 
-        // Process the results: classify into existing / to-create / to-alter.
-        for ((table_name, record_batch), table_result) in
+        // Classify into existing / to-create / to-alter using proto schemas directly.
+        for ((table_name, rows_schema), table_result) in
             unique_tables.iter().zip(resolved_tables.into_iter())
         {
             let table = table_result?;
@@ -371,27 +380,24 @@ impl PendingRowsBatcher {
                 let table_id = table_info.ident.table_id;
                 let region_schema = table_info.meta.schema.arrow_schema().clone();
 
-                // Check if we need to alter (add missing columns).
-                let (_accommodated, missing_columns) = {
+                // Check for missing columns directly from proto schema.
+                let missing_columns = {
                     let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
-                        .with_label_values(&["align_accommodate_record_batch"])
+                        .with_label_values(&["align_identify_missing_columns"])
                         .start_timer();
-                    accommodate_record_batch_for_target_schema(
-                        (*record_batch).clone(),
-                        region_schema.as_ref(),
-                    )?
+                    identify_missing_columns_from_proto(rows_schema, region_schema.as_ref())?
                 };
                 if !missing_columns.is_empty() {
                     tables_to_alter.push((table_name.to_string(), missing_columns));
                 }
                 region_schemas.insert(table_name.to_string(), (region_schema, table_id));
             } else {
-                // Table doesn't exist, collect it for batch creation.
+                // Table doesn't exist — build create schema directly from proto.
                 let request_schema = {
                     let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
                         .with_label_values(&["align_build_create_table_schema"])
                         .start_timer();
-                    build_prom_create_table_schema(record_batch.schema().as_ref())?
+                    build_prom_create_table_schema_from_proto(rows_schema)?
                 };
                 tables_to_create.push((table_name.to_string(), request_schema));
             }
@@ -444,20 +450,15 @@ impl PendingRowsBatcher {
                 region_schemas.insert(table_name.clone(), (region_schema, table_id));
             }
 
-            // For newly created tables, check if they also need column alters
-            // (the create schema may already include all needed columns from the
-            // first record batch for that table, but subsequent batches with the
-            // same table name could have additional columns).
-            // We re-check missing columns for the created tables.
-            for (table_name, record_batch) in &table_batches {
+            // For newly created tables, re-check all rows for additional missing columns
+            // (subsequent rows for the same table may have extra tag columns).
+            for (table_name, rows) in &table_rows {
                 if let Some((region_schema, _table_id)) = region_schemas.get(table_name) {
-                    // Only check tables that were just created.
                     if tables_to_create.iter().any(|(n, _)| n == table_name) {
-                        let (_accommodated, missing_columns) =
-                            accommodate_record_batch_for_target_schema(
-                                record_batch.clone(),
-                                region_schema.as_ref(),
-                            )?;
+                        let missing_columns = identify_missing_columns_from_proto(
+                            &rows.schema,
+                            region_schema.as_ref(),
+                        )?;
                         if !missing_columns.is_empty()
                             && !tables_to_alter.iter().any(|(n, _)| n == table_name)
                         {
@@ -510,10 +511,11 @@ impl PendingRowsBatcher {
             }
         }
 
-        // --- Pass 2: Align all record batches to their (now up-to-date) schemas ---
-        for (table_name, record_batch) in table_batches {
+        // --- Build all record batches directly aligned to their region schemas ---
+        let mut aligned_batches = Vec::with_capacity(table_rows.len());
+        for (table_name, rows) in &table_rows {
             let (region_schema, table_id) =
-                region_schemas.get(&table_name).cloned().with_context(|| {
+                region_schemas.get(table_name).cloned().with_context(|| {
                     error::UnexpectedResultSnafu {
                         reason: format!("Region schema not resolved for table: {}", table_name),
                     }
@@ -521,21 +523,14 @@ impl PendingRowsBatcher {
 
             let (record_batch, _missing_columns) = {
                 let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
-                    .with_label_values(&["align_accommodate_record_batch"])
+                    .with_label_values(&["align_rows_to_record_batch"])
                     .start_timer();
-                accommodate_record_batch_for_target_schema(record_batch, &region_schema)?
+                rows_to_aligned_record_batch(rows, region_schema.as_ref())?
             };
-
-            let record_batch = {
-                let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
-                    .with_label_values(&["align_record_batch_to_schema"])
-                    .start_timer();
-                align_record_batch_to_schema(record_batch, region_schema.as_ref())?
-            };
-            aligned_batches.push((table_name, table_id, record_batch));
+            aligned_batches.push((table_name.clone(), table_id, record_batch));
         }
 
-        Ok(aligned_batches)
+        Ok((aligned_batches, total_rows))
     }
 
     fn get_or_spawn_worker(&self, key: BatchKey) -> PendingWorker {
@@ -1551,26 +1546,6 @@ fn flush_with_error(batch: &mut PendingBatch, message: &str) {
     let err_msg = Some(message.to_string());
     notify_waiters(waiters, &err_msg);
     mark_flush_failure(row_count, message);
-}
-
-fn build_table_batches(requests: RowInsertRequests) -> Result<(Vec<(String, RecordBatch)>, usize)> {
-    let mut table_batches = Vec::with_capacity(requests.inserts.len());
-    let mut total_rows = 0;
-
-    for request in requests.inserts {
-        let Some(rows) = request.rows else {
-            continue;
-        };
-        if rows.rows.is_empty() {
-            continue;
-        }
-
-        let record_batch = rows_to_record_batch(&rows)?;
-        total_rows += record_batch.num_rows();
-        table_batches.push((request.table_name, record_batch));
-    }
-
-    Ok((table_batches, total_rows))
 }
 
 fn record_batch_to_ipc(record_batch: RecordBatch) -> Result<(Bytes, Bytes, Bytes)> {

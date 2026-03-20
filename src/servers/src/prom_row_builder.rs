@@ -16,7 +16,7 @@
 //! `RecordBatch`es and aligning / normalizing their schemas against
 //! existing table schemas in the catalog.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
@@ -28,7 +28,9 @@ use arrow::array::{
     new_null_array,
 };
 use arrow::compute::cast;
-use arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
+#[cfg(test)]
+use arrow::datatypes::Field;
+use arrow::datatypes::{DataType as ArrowDataType, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use arrow_schema::TimeUnit;
 use common_query::prelude::{greptime_timestamp, greptime_value};
@@ -49,7 +51,8 @@ use crate::error::{Error, Result};
 /// Returns the normalized record batch plus the list of missing tag column names.
 /// A missing column is accepted only when its source type is `Utf8`; otherwise it returns
 /// an error because non-string missing columns cannot be safely treated as Prom tags.
-pub(crate) fn accommodate_record_batch_for_target_schema(
+#[cfg(test)]
+fn accommodate_record_batch_for_target_schema(
     record_batch: RecordBatch,
     target_schema: &ArrowSchema,
 ) -> Result<(RecordBatch, Vec<String>)> {
@@ -184,9 +187,8 @@ fn unzip_logical_region_schema(
 /// Build a `Vec<ColumnSchema>` suitable for creating a new Prometheus logical table
 /// from an incoming Arrow schema whose columns follow Prom conventions
 /// (`greptime_timestamp`, `greptime_value`, plus Utf8 tags).
-pub(crate) fn build_prom_create_table_schema(
-    source_schema: &ArrowSchema,
-) -> Result<Vec<ColumnSchema>> {
+#[cfg(test)]
+fn build_prom_create_table_schema(source_schema: &ArrowSchema) -> Result<Vec<ColumnSchema>> {
     source_schema
         .fields()
         .iter()
@@ -226,7 +228,8 @@ pub(crate) fn build_prom_create_table_schema(
 /// Reorder, cast, and fill missing columns so that `record_batch` conforms to
 /// `target_schema`.  Columns present in the target but absent from the source
 /// are filled with null arrays.
-pub(crate) fn align_record_batch_to_schema(
+#[cfg(test)]
+fn align_record_batch_to_schema(
     record_batch: RecordBatch,
     target_schema: &ArrowSchema,
 ) -> Result<RecordBatch> {
@@ -282,7 +285,8 @@ pub(crate) fn align_record_batch_to_schema(
 }
 
 /// Convert a proto `Rows` message into an Arrow `RecordBatch`.
-pub(crate) fn rows_to_record_batch(rows: &Rows) -> Result<RecordBatch> {
+#[cfg(test)]
+fn rows_to_record_batch(rows: &Rows) -> Result<RecordBatch> {
     let row_count = rows.rows.len();
     let column_count = rows.schema.len();
 
@@ -324,6 +328,175 @@ pub(crate) fn rows_to_record_batch(rows: &Rows) -> Result<RecordBatch> {
     }
 
     RecordBatch::try_new(Arc::new(ArrowSchema::new(fields)), columns).context(error::ArrowSnafu)
+}
+
+/// Directly converts proto `Rows` into a `RecordBatch` aligned to the given
+/// `target_schema`, handling Prometheus column renaming (timestamp/value),
+/// reordering, type casting, and null-filling in a single pass.
+///
+/// Returns the aligned `RecordBatch` plus any tag column names present in the
+/// source rows but absent from the target schema (these need DDL ALTER).
+pub(crate) fn rows_to_aligned_record_batch(
+    rows: &Rows,
+    target_schema: &ArrowSchema,
+) -> Result<(RecordBatch, Vec<String>)> {
+    let row_count = rows.rows.len();
+    let column_count = rows.schema.len();
+
+    for (idx, row) in rows.rows.iter().enumerate() {
+        ensure!(
+            row.values.len() == column_count,
+            error::InternalSnafu {
+                err_msg: format!(
+                    "Column count mismatch in row {}, expected {}, got {}",
+                    idx,
+                    column_count,
+                    row.values.len()
+                )
+            }
+        );
+    }
+
+    let (target_ts_name, target_field_name, target_tags) =
+        unzip_logical_region_schema(target_schema)?;
+
+    // Map effective target column name → (source column index, source arrow type).
+    // Handles prom renames: Timestamp → target ts name, Float64 → target field name.
+    let mut source_map: HashMap<&str, (usize, ArrowDataType)> =
+        HashMap::with_capacity(rows.schema.len());
+    let mut missing_columns = Vec::new();
+
+    for (src_idx, col) in rows.schema.iter().enumerate() {
+        let wrapper = ColumnDataTypeWrapper::try_new(col.datatype, col.datatype_extension.clone())?;
+        let src_arrow_type = ConcreteDataType::from(wrapper).as_arrow_type();
+
+        match &src_arrow_type {
+            ArrowDataType::Float64 => {
+                source_map.insert(&target_field_name, (src_idx, src_arrow_type));
+            }
+            ArrowDataType::Timestamp(unit, _) => {
+                ensure!(
+                    unit == &TimeUnit::Millisecond,
+                    error::InvalidPromRemoteRequestSnafu {
+                        msg: format!(
+                            "Unexpected remote write batch timestamp unit, expect millisecond, got: {}",
+                            unit
+                        )
+                    }
+                );
+                source_map.insert(&target_ts_name, (src_idx, src_arrow_type));
+            }
+            ArrowDataType::Utf8 => {
+                if !target_tags.contains(&col.column_name)
+                    && target_schema.column_with_name(&col.column_name).is_none()
+                {
+                    missing_columns.push(col.column_name.clone());
+                }
+                source_map.insert(&col.column_name, (src_idx, src_arrow_type));
+            }
+            other => {
+                return error::InvalidPromRemoteRequestSnafu {
+                    msg: format!(
+                        "Unexpected remote write batch field type {}, field name: {}",
+                        other, col.column_name
+                    ),
+                }
+                .fail();
+            }
+        }
+    }
+
+    // Build columns in target schema order
+    let mut columns = Vec::with_capacity(target_schema.fields().len());
+    for target_field in target_schema.fields() {
+        if let Some((src_idx, src_arrow_type)) = source_map.get(target_field.name().as_str()) {
+            let array = build_arrow_array(
+                rows,
+                *src_idx,
+                &rows.schema[*src_idx].column_name,
+                src_arrow_type.clone(),
+                row_count,
+            )?;
+            if array.data_type() != target_field.data_type() {
+                columns.push(
+                    cast(array.as_ref(), target_field.data_type()).map_err(|err| {
+                        Error::Internal {
+                            err_msg: format!(
+                                "Failed to cast column '{}' from {:?} to {:?}: {}",
+                                target_field.name(),
+                                array.data_type(),
+                                target_field.data_type(),
+                                err
+                            ),
+                        }
+                    })?,
+                );
+            } else {
+                columns.push(array);
+            }
+        } else {
+            columns.push(new_null_array(target_field.data_type(), row_count));
+        }
+    }
+
+    let batch = RecordBatch::try_new(Arc::new(target_schema.clone()), columns)
+        .context(error::ArrowSnafu)?;
+    Ok((batch, missing_columns))
+}
+
+/// Identify tag columns in the proto `rows_schema` that are absent from the
+/// target region schema, without building an intermediate `RecordBatch`.
+pub(crate) fn identify_missing_columns_from_proto(
+    rows_schema: &[ColumnSchema],
+    target_schema: &ArrowSchema,
+) -> Result<Vec<String>> {
+    let (_, _, target_tags) = unzip_logical_region_schema(target_schema)?;
+    let mut missing = Vec::new();
+    for col in rows_schema {
+        let wrapper = ColumnDataTypeWrapper::try_new(col.datatype, col.datatype_extension.clone())?;
+        let arrow_type = ConcreteDataType::from(wrapper).as_arrow_type();
+        if matches!(arrow_type, ArrowDataType::Utf8)
+            && !target_tags.contains(&col.column_name)
+            && target_schema.column_with_name(&col.column_name).is_none()
+        {
+            missing.push(col.column_name.clone());
+        }
+    }
+    Ok(missing)
+}
+
+/// Build a `Vec<ColumnSchema>` suitable for creating a new Prometheus logical table
+/// directly from the proto `rows.schema`, avoiding the round-trip through Arrow schema.
+pub(crate) fn build_prom_create_table_schema_from_proto(
+    rows_schema: &[ColumnSchema],
+) -> Result<Vec<ColumnSchema>> {
+    rows_schema
+        .iter()
+        .map(|col| {
+            let semantic_type = if col.datatype == api::v1::ColumnDataType::TimestampMillisecond as i32 {
+                SemanticType::Timestamp
+            } else if col.datatype == api::v1::ColumnDataType::Float64 as i32 {
+                SemanticType::Field
+            } else {
+                // tag columns must be String type
+                ensure!(col.datatype == api::v1::ColumnDataType::String as i32, error::InvalidPromRemoteRequestSnafu{
+                                        msg: format!(
+                        "Failed to build create table schema, tag column '{}' must be String but got datatype {}",
+                        col.column_name, col.datatype
+                    )
+                });
+                SemanticType::Tag
+            };
+
+            Ok(ColumnSchema {
+                column_name: col.column_name.clone(),
+                datatype: col.datatype,
+                semantic_type: semantic_type as i32,
+                datatype_extension: col.datatype_extension.clone(),
+                options: None,
+            })
+        })
+        .collect()
 }
 
 /// Build a single Arrow array for the given column index from proto `Rows`.
@@ -408,7 +581,8 @@ mod tests {
 
     use super::{
         accommodate_record_batch_for_target_schema, align_record_batch_to_schema,
-        build_prom_create_table_schema, rows_to_record_batch,
+        build_prom_create_table_schema, build_prom_create_table_schema_from_proto,
+        identify_missing_columns_from_proto, rows_to_aligned_record_batch, rows_to_record_batch,
     };
 
     #[test]
@@ -772,5 +946,259 @@ mod tests {
             err.to_string()
                 .contains("Failed to locate field column in target schema")
         );
+    }
+
+    #[test]
+    fn test_rows_to_aligned_record_batch_renames_and_reorders() {
+        let rows = Rows {
+            schema: vec![
+                ColumnSchema {
+                    column_name: "greptime_timestamp".to_string(),
+                    datatype: ColumnDataType::TimestampMillisecond as i32,
+                    semantic_type: SemanticType::Timestamp as i32,
+                    ..Default::default()
+                },
+                ColumnSchema {
+                    column_name: "host".to_string(),
+                    datatype: ColumnDataType::String as i32,
+                    semantic_type: SemanticType::Tag as i32,
+                    ..Default::default()
+                },
+                ColumnSchema {
+                    column_name: "greptime_value".to_string(),
+                    datatype: ColumnDataType::Float64 as i32,
+                    semantic_type: SemanticType::Field as i32,
+                    ..Default::default()
+                },
+            ],
+            rows: vec![
+                Row {
+                    values: vec![
+                        Value {
+                            value_data: Some(ValueData::TimestampMillisecondValue(1000)),
+                        },
+                        Value {
+                            value_data: Some(ValueData::StringValue("h1".to_string())),
+                        },
+                        Value {
+                            value_data: Some(ValueData::F64Value(42.0)),
+                        },
+                    ],
+                },
+                Row {
+                    values: vec![
+                        Value {
+                            value_data: Some(ValueData::TimestampMillisecondValue(2000)),
+                        },
+                        Value {
+                            value_data: Some(ValueData::StringValue("h2".to_string())),
+                        },
+                        Value {
+                            value_data: Some(ValueData::F64Value(99.0)),
+                        },
+                    ],
+                },
+            ],
+        };
+
+        // Target schema has renamed columns and different ordering.
+        let target = ArrowSchema::new(vec![
+            Field::new(
+                "my_ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("host", DataType::Utf8, true),
+            Field::new("my_value", DataType::Float64, true),
+        ]);
+
+        let (batch, missing) = rows_to_aligned_record_batch(&rows, &target).unwrap();
+        assert!(missing.is_empty());
+        assert_eq!(batch.schema().as_ref(), &target);
+        assert_eq!(2, batch.num_rows());
+        assert_eq!(3, batch.num_columns());
+
+        let ts = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap();
+        assert_eq!(ts.value(0), 1000);
+        assert_eq!(ts.value(1), 2000);
+
+        let hosts = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(hosts.value(0), "h1");
+        assert_eq!(hosts.value(1), "h2");
+
+        let values = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert_eq!(values.value(0), 42.0);
+        assert_eq!(values.value(1), 99.0);
+    }
+
+    #[test]
+    fn test_rows_to_aligned_record_batch_fills_nulls_and_detects_missing() {
+        let rows = Rows {
+            schema: vec![
+                ColumnSchema {
+                    column_name: "greptime_timestamp".to_string(),
+                    datatype: ColumnDataType::TimestampMillisecond as i32,
+                    semantic_type: SemanticType::Timestamp as i32,
+                    ..Default::default()
+                },
+                ColumnSchema {
+                    column_name: "host".to_string(),
+                    datatype: ColumnDataType::String as i32,
+                    semantic_type: SemanticType::Tag as i32,
+                    ..Default::default()
+                },
+                ColumnSchema {
+                    column_name: "instance".to_string(),
+                    datatype: ColumnDataType::String as i32,
+                    semantic_type: SemanticType::Tag as i32,
+                    ..Default::default()
+                },
+                ColumnSchema {
+                    column_name: "greptime_value".to_string(),
+                    datatype: ColumnDataType::Float64 as i32,
+                    semantic_type: SemanticType::Field as i32,
+                    ..Default::default()
+                },
+            ],
+            rows: vec![Row {
+                values: vec![
+                    Value {
+                        value_data: Some(ValueData::TimestampMillisecondValue(1000)),
+                    },
+                    Value {
+                        value_data: Some(ValueData::StringValue("h1".to_string())),
+                    },
+                    Value {
+                        value_data: Some(ValueData::StringValue("i1".to_string())),
+                    },
+                    Value {
+                        value_data: Some(ValueData::F64Value(1.0)),
+                    },
+                ],
+            }],
+        };
+
+        // Target schema has "host" but not "instance"; also has "region" which is missing from source.
+        let target = ArrowSchema::new(vec![
+            Field::new(
+                "my_ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("host", DataType::Utf8, true),
+            Field::new("region", DataType::Utf8, true),
+            Field::new("my_value", DataType::Float64, true),
+        ]);
+
+        let (batch, missing) = rows_to_aligned_record_batch(&rows, &target).unwrap();
+        assert_eq!(missing, vec!["instance".to_string()]);
+        assert_eq!(batch.schema().as_ref(), &target);
+        assert_eq!(1, batch.num_rows());
+        assert_eq!(4, batch.num_columns());
+
+        // "region" column should be null-filled.
+        let region = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert!(region.is_null(0));
+    }
+
+    #[test]
+    fn test_identify_missing_columns_from_proto() {
+        let rows_schema = vec![
+            ColumnSchema {
+                column_name: "greptime_timestamp".to_string(),
+                datatype: ColumnDataType::TimestampMillisecond as i32,
+                semantic_type: SemanticType::Timestamp as i32,
+                ..Default::default()
+            },
+            ColumnSchema {
+                column_name: "host".to_string(),
+                datatype: ColumnDataType::String as i32,
+                semantic_type: SemanticType::Tag as i32,
+                ..Default::default()
+            },
+            ColumnSchema {
+                column_name: "instance".to_string(),
+                datatype: ColumnDataType::String as i32,
+                semantic_type: SemanticType::Tag as i32,
+                ..Default::default()
+            },
+            ColumnSchema {
+                column_name: "greptime_value".to_string(),
+                datatype: ColumnDataType::Float64 as i32,
+                semantic_type: SemanticType::Field as i32,
+                ..Default::default()
+            },
+        ];
+
+        let target = ArrowSchema::new(vec![
+            Field::new(
+                "my_ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("host", DataType::Utf8, true),
+            Field::new("my_value", DataType::Float64, true),
+        ]);
+
+        let missing = identify_missing_columns_from_proto(&rows_schema, &target).unwrap();
+        assert_eq!(missing, vec!["instance".to_string()]);
+    }
+
+    #[test]
+    fn test_build_prom_create_table_schema_from_proto() {
+        let rows_schema = vec![
+            ColumnSchema {
+                column_name: "greptime_timestamp".to_string(),
+                datatype: ColumnDataType::TimestampMillisecond as i32,
+                semantic_type: SemanticType::Timestamp as i32,
+                ..Default::default()
+            },
+            ColumnSchema {
+                column_name: "job".to_string(),
+                datatype: ColumnDataType::String as i32,
+                semantic_type: SemanticType::Tag as i32,
+                ..Default::default()
+            },
+            ColumnSchema {
+                column_name: "greptime_value".to_string(),
+                datatype: ColumnDataType::Float64 as i32,
+                semantic_type: SemanticType::Field as i32,
+                ..Default::default()
+            },
+        ];
+
+        let schema = build_prom_create_table_schema_from_proto(&rows_schema).unwrap();
+        assert_eq!(3, schema.len());
+
+        assert_eq!("greptime_timestamp", schema[0].column_name);
+        assert_eq!(SemanticType::Timestamp as i32, schema[0].semantic_type);
+        assert_eq!(
+            ColumnDataType::TimestampMillisecond as i32,
+            schema[0].datatype
+        );
+
+        assert_eq!("job", schema[1].column_name);
+        assert_eq!(SemanticType::Tag as i32, schema[1].semantic_type);
+        assert_eq!(ColumnDataType::String as i32, schema[1].datatype);
+
+        assert_eq!("greptime_value", schema[2].column_name);
+        assert_eq!(SemanticType::Field as i32, schema[2].semantic_type);
+        assert_eq!(ColumnDataType::Float64 as i32, schema[2].datatype);
     }
 }
