@@ -16,38 +16,28 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use api::helper::ColumnDataTypeWrapper;
 use api::v1::meta::Peer;
 use api::v1::region::{
     BulkInsertRequest, RegionRequest, RegionRequestHeader, bulk_insert_request, region_request,
 };
-use api::v1::value::ValueData;
-use api::v1::{ArrowIpc, ColumnSchema, RowInsertRequests, Rows, SemanticType};
-use arrow::array::{
-    ArrayRef, Float64Builder, StringBuilder, TimestampMicrosecondBuilder,
-    TimestampMillisecondBuilder, TimestampNanosecondBuilder, TimestampSecondBuilder,
-    new_null_array,
-};
-use arrow::compute::{cast, concat_batches, filter_record_batch};
-use arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
+use api::v1::{ArrowIpc, ColumnSchema, RowInsertRequests};
+use arrow::compute::{concat_batches, filter_record_batch};
+use arrow::datatypes::{DataType as ArrowDataType, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
-use arrow_schema::TimeUnit;
 use async_trait::async_trait;
 use bytes::Bytes;
 use catalog::CatalogManagerRef;
 use common_grpc::flight::{FlightEncoder, FlightMessage};
 use common_meta::node_manager::NodeManagerRef;
-use common_query::prelude::{GREPTIME_PHYSICAL_TABLE, greptime_timestamp, greptime_value};
+use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{debug, error, info, warn};
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
-use datatypes::data_type::DataType;
-use datatypes::prelude::ConcreteDataType;
 use metric_engine::batch_modifier::{TagColumnInfo, modify_batch_sparse};
 use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::OptionExt;
 use store_api::storage::RegionId;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, mpsc, oneshot};
 
@@ -56,6 +46,10 @@ use crate::error::{Error, Result};
 use crate::metrics::{
     FLUSH_DROPPED_ROWS, FLUSH_ELAPSED, FLUSH_FAILURES, FLUSH_ROWS, FLUSH_TOTAL, PENDING_BATCHES,
     PENDING_ROWS, PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED, PENDING_WORKERS
+};
+use crate::prom_row_builder::{
+    accommodate_record_batch_for_target_schema, align_record_batch_to_schema,
+    build_prom_create_table_schema, rows_to_record_batch,
 };
 
 const PHYSICAL_TABLE_KEY: &str = "physical_table";
@@ -390,8 +384,7 @@ impl PendingRowsBatcher {
                 if !missing_columns.is_empty() {
                     tables_to_alter.push((table_name.to_string(), missing_columns));
                 }
-                region_schemas
-                    .insert(table_name.to_string(), (region_schema, table_id));
+                region_schemas.insert(table_name.to_string(), (region_schema, table_id));
             } else {
                 // Table doesn't exist, collect it for batch creation.
                 let request_schema = {
@@ -435,8 +428,9 @@ impl PendingRowsBatcher {
                 }))
                 .await
             };
-            for ((table_name, _), table_result) in
-                tables_to_create.iter().zip(created_table_results.into_iter())
+            for ((table_name, _), table_result) in tables_to_create
+                .iter()
+                .zip(created_table_results.into_iter())
             {
                 let table = table_result?.with_context(|| error::UnexpectedResultSnafu {
                     reason: format!(
@@ -499,8 +493,9 @@ impl PendingRowsBatcher {
                 }))
                 .await
             };
-            for ((table_name, _), table_result) in
-                tables_to_alter.iter().zip(altered_table_results.into_iter())
+            for ((table_name, _), table_result) in tables_to_alter
+                .iter()
+                .zip(altered_table_results.into_iter())
             {
                 let table = table_result?.with_context(|| error::UnexpectedResultSnafu {
                     reason: format!(
@@ -528,7 +523,7 @@ impl PendingRowsBatcher {
                 let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
                     .with_label_values(&["align_accommodate_record_batch"])
                     .start_timer();
-                accommodate_record_batch_for_target_schema(record_batch, region_schema.as_ref())?
+                accommodate_record_batch_for_target_schema(record_batch, &region_schema)?
             };
 
             let record_batch = {
@@ -597,184 +592,6 @@ impl PendingRowsBatcher {
 
         worker
     }
-}
-
-/// Normalizes an incoming Prometheus record batch against an existing table schema.
-///
-/// This performs a single pass over source fields to:
-/// - remap Prometheus special columns (`greptime_timestamp`, `greptime_value`) to the
-///   target table's effective timestamp/field column names when they differ;
-/// - collect columns that are absent in the target schema and must be added as tag columns.
-///
-/// Returns the normalized record batch plus the list of missing tag column names.
-/// A missing column is accepted only when its source type is `Utf8`; otherwise it returns
-/// an error because non-string missing columns cannot be safely treated as Prom tags.
-fn accommodate_record_batch_for_target_schema(
-    record_batch: RecordBatch,
-    target_schema: &ArrowSchema,
-) -> Result<(RecordBatch, Vec<String>)> {
-    let (target_timestamp_col_name, target_field_col_name, target_tags) =
-        unzip_logical_region_schema(target_schema)?;
-
-    let incoming_schema = record_batch.schema();
-    let mut missing_columns = Vec::new();
-    let mut renamed_fields = Vec::with_capacity(incoming_schema.fields().len());
-    let mut changed = false;
-
-    for source_field in incoming_schema.fields() {
-        match source_field.data_type() {
-            ArrowDataType::Float64 => {
-                if source_field.name() != target_field_col_name.as_str() {
-                    // Field name mismatch
-                    changed = true;
-                    renamed_fields.push(Arc::new(Field::new(
-                        target_field_col_name.clone(),
-                        ArrowDataType::Float64,
-                        false,
-                    )));
-                } else {
-                    renamed_fields.push(source_field.clone());
-                }
-            }
-            ArrowDataType::Timestamp(unit, _) => {
-                ensure!(
-                    unit == &TimeUnit::Millisecond,
-                    error::InvalidPromRemoteRequestSnafu {
-                        msg: format!(
-                            "Unexpected remote write batch timestamp unit, expect milliseond, got: {}",
-                            unit
-                        )
-                    }
-                );
-                if source_field.name() != &target_timestamp_col_name {
-                    // Timestamp column name mismatch
-                    changed = true;
-                    renamed_fields.push(Arc::new(Field::new(
-                        target_timestamp_col_name.clone(),
-                        ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
-                        false,
-                    )));
-                } else {
-                    renamed_fields.push(source_field.clone())
-                }
-            }
-            ArrowDataType::Utf8 => {
-                ensure!(
-                    source_field.data_type() == &ArrowDataType::Utf8,
-                    error::InvalidPromRemoteRequestSnafu {
-                        msg: format!(
-                            "Failed to align record batch schema, missing column '{}' in target schema must be Utf8 but got {:?}",
-                            source_field.name(),
-                            source_field.data_type()
-                        )
-                    }
-                );
-                if !target_tags.contains(source_field.name()) {
-                    missing_columns.push(source_field.name().clone());
-                    changed = true;
-                }
-                renamed_fields.push(source_field.clone());
-            }
-            other => {
-                return error::InvalidPromRemoteRequestSnafu {
-                    msg: format!(
-                        "Unexpected remote write batch field type {}, field name: {}",
-                        other,
-                        source_field.name()
-                    ),
-                }
-                .fail();
-            }
-        }
-    }
-
-    if !changed {
-        // No need to accommodate columns, simply return the original record batch.
-        return Ok((record_batch, missing_columns));
-    }
-
-    let (_, columns, _) = record_batch.into_parts();
-    let renamed_record_batch =
-        RecordBatch::try_new(Arc::new(ArrowSchema::new(renamed_fields)), columns)
-            .context(error::ArrowSnafu)?;
-    Ok((renamed_record_batch, missing_columns))
-}
-
-fn unzip_logical_region_schema(
-    target_schema: &ArrowSchema,
-) -> Result<(String, String, HashSet<String>)> {
-    let mut timestamp_column = None;
-    let mut field_column = None;
-    let mut tag_columns = HashSet::with_capacity(target_schema.fields.len() - 2);
-    for field in target_schema.fields() {
-        if field.name() == greptime_timestamp() {
-            timestamp_column = Some(field.name().clone());
-            continue;
-        }
-
-        if field.name() == greptime_value() {
-            field_column = Some(field.name().clone());
-            continue;
-        }
-
-        if timestamp_column.is_none() && matches!(field.data_type(), ArrowDataType::Timestamp(_, _))
-        {
-            timestamp_column = Some(field.name().clone());
-            continue;
-        }
-
-        if field_column.is_none() && matches!(field.data_type(), ArrowDataType::Float64) {
-            field_column = Some(field.name().clone());
-            continue;
-        }
-        tag_columns.insert(field.name().clone());
-    }
-
-    let timestamp_column = timestamp_column.with_context(|| error::UnexpectedResultSnafu {
-        reason: "Failed to locate timestamp column in target schema".to_string(),
-    })?;
-    let field_column = field_column.with_context(|| error::UnexpectedResultSnafu {
-        reason: "Failed to locate field column in target schema".to_string(),
-    })?;
-
-    Ok((timestamp_column, field_column, tag_columns))
-}
-
-fn build_prom_create_table_schema(source_schema: &ArrowSchema) -> Result<Vec<ColumnSchema>> {
-    source_schema
-        .fields()
-        .iter()
-        .map(|field| {
-            let semantic_type = if field.name() == greptime_timestamp() {
-                SemanticType::Timestamp
-            } else if field.name() == greptime_value() {
-                SemanticType::Field
-            } else {
-                SemanticType::Tag
-            };
-
-            let concrete_type = ConcreteDataType::try_from(field.data_type())?;
-            let (datatype, datatype_extension) = ColumnDataTypeWrapper::try_from(concrete_type)?
-                .into_parts();
-
-            if semantic_type == SemanticType::Tag && datatype != api::v1::ColumnDataType::String {
-                return Err(Error::Internal {
-                    err_msg: format!(
-                        "Failed to build create table schema, tag column '{}' must be String but got {:?}",
-                        field.name(), datatype
-                    ),
-                });
-            }
-
-            Ok(ColumnSchema {
-                column_name: field.name().clone(),
-                datatype: datatype as i32,
-                semantic_type: semantic_type as i32,
-                datatype_extension,
-                options: None,
-            })
-        })
-        .collect()
 }
 
 impl Drop for PendingRowsBatcher {
@@ -1296,12 +1113,7 @@ async fn flush_batch_physical(
                 let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
                     .with_label_values(&["flush_physical_modify_batch"])
                     .start_timer();
-                match modify_batch_sparse(
-                    batch.clone(),
-                    table_id,
-                    &tag_columns,
-                    &non_tag_indices,
-                ) {
+                match modify_batch_sparse(batch.clone(), table_id, &tag_columns, &non_tag_indices) {
                     Ok(batch) => batch,
                     Err(err) => {
                         record_failure!(
@@ -1761,172 +1573,6 @@ fn build_table_batches(requests: RowInsertRequests) -> Result<(Vec<(String, Reco
     Ok((table_batches, total_rows))
 }
 
-fn align_record_batch_to_schema(
-    record_batch: RecordBatch,
-    target_schema: &ArrowSchema,
-) -> Result<RecordBatch> {
-    let source_schema = record_batch.schema();
-    if source_schema.as_ref() == target_schema {
-        return Ok(record_batch);
-    }
-
-    for source_field in source_schema.fields() {
-        ensure!(
-            target_schema
-                .column_with_name(source_field.name())
-                .is_some(),
-            error::UnexpectedResultSnafu {
-                reason: format!(
-                    "Failed to align record batch schema, column '{}' not found in target schema",
-                    source_field.name()
-                ),
-            }
-        );
-    }
-
-    let row_count = record_batch.num_rows();
-    let mut columns = Vec::with_capacity(target_schema.fields().len());
-    for target_field in target_schema.fields() {
-        let column = if let Some((index, source_field)) =
-            source_schema.column_with_name(target_field.name())
-        {
-            let source_column = record_batch.column(index).clone();
-            if source_field.data_type() == target_field.data_type() {
-                source_column
-            } else {
-                cast(source_column.as_ref(), target_field.data_type()).map_err(|err| {
-                    Error::Internal {
-                        err_msg: format!(
-                            "Failed to cast column '{}' to target type {:?}: {}",
-                            target_field.name(),
-                            target_field.data_type(),
-                            err
-                        ),
-                    }
-                })?
-            }
-        } else {
-            new_null_array(target_field.data_type(), row_count)
-        };
-        columns.push(column);
-    }
-
-    RecordBatch::try_new(Arc::new(target_schema.clone()), columns).map_err(|err| Error::Internal {
-        err_msg: format!("Failed to build aligned record batch: {}", err),
-    })
-}
-
-fn rows_to_record_batch(rows: &Rows) -> Result<RecordBatch> {
-    let row_count = rows.rows.len();
-    let column_count = rows.schema.len();
-
-    for (idx, row) in rows.rows.iter().enumerate() {
-        ensure!(
-            row.values.len() == column_count,
-            error::InternalSnafu {
-                err_msg: format!(
-                    "Column count mismatch in row {}, expected {}, got {}",
-                    idx,
-                    column_count,
-                    row.values.len()
-                )
-            }
-        );
-    }
-
-    let mut fields = Vec::with_capacity(column_count);
-    let mut columns = Vec::with_capacity(column_count);
-
-    for (idx, column_schema) in rows.schema.iter().enumerate() {
-        let datatype_wrapper = ColumnDataTypeWrapper::try_new(
-            column_schema.datatype,
-            column_schema.datatype_extension.clone(),
-        )?;
-        let data_type = ConcreteDataType::from(datatype_wrapper);
-        fields.push(Field::new(
-            column_schema.column_name.clone(),
-            data_type.as_arrow_type(),
-            true,
-        ));
-        columns.push(build_arrow_array(
-            rows,
-            idx,
-            &column_schema.column_name,
-            data_type.as_arrow_type(),
-            row_count,
-        )?);
-    }
-
-    RecordBatch::try_new(Arc::new(ArrowSchema::new(fields)), columns).context(error::ArrowSnafu)
-}
-
-fn build_arrow_array(
-    rows: &Rows,
-    col_idx: usize,
-    column_name: &String,
-    column_data_type: arrow::datatypes::DataType,
-    row_count: usize,
-) -> Result<ArrayRef> {
-    macro_rules! build_array {
-        ($builder:expr, $( $pattern:pat => $value:expr ),+ $(,)?) => {{
-            let mut builder = $builder;
-            for row in &rows.rows {
-                match row.values[col_idx].value_data.as_ref() {
-                    $(Some($pattern) => builder.append_value($value),)+
-                    Some(v) => {
-                        return error::InvalidPromRemoteRequestSnafu {
-                            msg: format!("Unexpected value: {:?}", v),
-                        }
-                        .fail();
-                    }
-                    None => builder.append_null(),
-                }
-            }
-            Arc::new(builder.finish()) as ArrayRef
-        }};
-    }
-
-    let array: ArrayRef = match column_data_type {
-        arrow::datatypes::DataType::Float64 => {
-            build_array!(Float64Builder::with_capacity(row_count), ValueData::F64Value(v) => *v)
-        }
-        arrow::datatypes::DataType::Utf8 => build_array!(
-            StringBuilder::with_capacity(row_count, 0),
-            ValueData::StringValue(v) => v
-        ),
-        arrow::datatypes::DataType::Timestamp(u, _) => match u {
-            TimeUnit::Second => build_array!(
-                TimestampSecondBuilder::with_capacity(row_count),
-                ValueData::TimestampSecondValue(v) => *v
-            ),
-            TimeUnit::Millisecond => build_array!(
-                TimestampMillisecondBuilder::with_capacity(row_count),
-                ValueData::TimestampMillisecondValue(v) => *v
-            ),
-            TimeUnit::Microsecond => build_array!(
-                TimestampMicrosecondBuilder::with_capacity(row_count),
-                ValueData::DatetimeValue(v) => *v,
-                ValueData::TimestampMicrosecondValue(v) => *v
-            ),
-            TimeUnit::Nanosecond => build_array!(
-                TimestampNanosecondBuilder::with_capacity(row_count),
-                ValueData::TimestampNanosecondValue(v) => *v
-            ),
-        },
-        ty => {
-            return error::InvalidPromRemoteRequestSnafu {
-                msg: format!(
-                    "Unexpected column type {:?}, column name: {}",
-                    ty, column_name
-                ),
-            }
-            .fail();
-        }
-    };
-
-    Ok(array)
-}
-
 fn record_batch_to_ipc(record_batch: RecordBatch) -> Result<(Bytes, Bytes, Bytes)> {
     let mut encoder = FlightEncoder::default();
     let schema = encoder.encode_schema(record_batch.schema().as_ref());
@@ -1962,13 +1608,6 @@ mod tests {
     use api::v1::flow::{DirtyWindowRequests, FlowRequest, FlowResponse};
     use api::v1::meta::Peer;
     use api::v1::region::{InsertRequests, RegionRequest};
-    use api::v1::value::ValueData;
-    use api::v1::{ColumnDataType, ColumnSchema, Row, Rows, SemanticType, Value};
-    use arrow::array::{
-        Array, Float64Array, Int32Array, Int64Array, StringArray, TimestampMillisecondArray,
-    };
-    use arrow::datatypes::{DataType, Field, Schema as ArrowSchema, TimeUnit};
-    use arrow::record_batch::RecordBatch;
     use async_trait::async_trait;
     use common_meta::error::Result as MetaResult;
     use common_meta::node_manager::{
@@ -1982,9 +1621,8 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::{
-        FlushRegionWrite, FlushWriteResult, accommodate_record_batch_for_target_schema,
-        align_record_batch_to_schema, build_prom_create_table_schema,
-        flush_region_writes_concurrently, rows_to_record_batch, should_dispatch_concurrently,
+        FlushRegionWrite, FlushWriteResult, flush_region_writes_concurrently,
+        should_dispatch_concurrently,
     };
     use super::{
         BatchKey, PendingWorker, WorkerCommand, align_record_batch_to_schema,
