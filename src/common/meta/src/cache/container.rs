@@ -15,6 +15,7 @@
 use std::borrow::Borrow;
 use std::hash::Hash;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use futures::future::{BoxFuture, join_all};
 use moka::future::Cache;
@@ -44,6 +45,7 @@ pub struct CacheContainer<K, V, CacheToken> {
     invalidator: Invalidator<K, V, CacheToken>,
     initializer: Initializer<K, V>,
     token_filter: fn(&CacheToken) -> bool,
+    version: AtomicUsize,
 }
 
 impl<K, V, CacheToken> CacheContainer<K, V, CacheToken>
@@ -66,12 +68,30 @@ where
             invalidator,
             initializer,
             token_filter,
+            version: AtomicUsize::new(0),
         }
     }
 
     /// Returns the `name`.
     pub fn name(&self) -> &str {
         &self.name
+    }
+}
+
+impl<K, V, CacheToken> CacheContainer<K, V, CacheToken> {
+    #[inline]
+    fn get_version(&self) -> usize {
+        self.version.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    fn create_new_version(&self) -> usize {
+        self.version.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    #[inline]
+    fn validate_version(&self, version: usize) -> bool {
+        version == self.get_version()
     }
 }
 
@@ -82,6 +102,7 @@ where
     V: Send + Sync,
 {
     async fn invalidate(&self, _ctx: &Context, caches: &[CacheIdent]) -> Result<()> {
+        self.create_new_version();
         let tasks = caches
             .iter()
             .filter(|token| (self.token_filter)(token))
@@ -119,8 +140,15 @@ where
                 .context(error::ValueNotExistSnafu)?
         };
 
+        let pre_version = self.get_version();
+
         match self.cache.try_get_with(key, init).await {
-            Ok(value) => Ok(Some(value)),
+            Ok(value) => {
+                if !self.validate_version(pre_version) {
+                    self.cache.invalidate(&key).await;
+                }
+                Ok(Some(value))
+            }
             Err(err) => match err.as_ref() {
                 Error::ValueNotExist { .. } => Ok(None),
                 _ => Err(err).context(error::GetCacheSnafu),
@@ -136,6 +164,7 @@ where
 {
     /// Invalidates cache by [CacheToken].
     pub async fn invalidate(&self, caches: &[CacheToken]) -> Result<()> {
+        self.create_new_version();
         let tasks = caches
             .iter()
             .filter(|token| (self.token_filter)(token))
@@ -182,8 +211,15 @@ where
                 .context(error::ValueNotExistSnafu)?
         };
 
+        let pre_version = self.get_version();
+
         match self.cache.try_get_with_by_ref(key, init).await {
-            Ok(value) => Ok(Some(value)),
+            Ok(value) => {
+                if !self.validate_version(pre_version) {
+                    self.cache.invalidate(key).await;
+                }
+                Ok(Some(value))
+            }
             Err(err) => match err.as_ref() {
                 Error::ValueNotExist { .. } => Ok(None),
                 _ => Err(err).context(error::GetCacheSnafu),
@@ -198,6 +234,7 @@ mod tests {
     use std::sync::atomic::{AtomicI32, Ordering};
 
     use moka::future::{Cache, CacheBuilder};
+    use tokio::time::{Duration, sleep};
 
     use super::*;
 
@@ -208,6 +245,10 @@ mod tests {
 
     fn always_true_filter(_: &String) -> bool {
         true
+    }
+
+    fn always_false_filter(_: &String) -> bool {
+        false
     }
 
     #[tokio::test]
@@ -321,6 +362,55 @@ mod tests {
             .unwrap();
         let value = adv_cache.get_by_ref("foo").await.unwrap().unwrap();
         assert_eq!(value, "hi");
+        assert_eq!(counter.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_invalidate_while_loading_wont_keep_stale_value() {
+        let cache: Cache<String, String> = CacheBuilder::new(128).build();
+        let counter = Arc::new(AtomicI32::new(0));
+        let moved_counter = counter.clone();
+        let init: Initializer<String, String> = Arc::new(move |_| {
+            let counter = moved_counter.clone();
+            Box::pin(async move {
+                let n = counter.fetch_add(1, Ordering::Relaxed) + 1;
+                sleep(Duration::from_millis(100)).await;
+                Ok(Some(format!("v{n}")))
+            })
+        });
+        let invalidator: Invalidator<String, String, String> = Box::new(|cache, key| {
+            Box::pin(async move {
+                cache.invalidate(key).await;
+                Ok(())
+            })
+        });
+
+        let adv_cache = Arc::new(CacheContainer::new(
+            "test".to_string(),
+            cache,
+            invalidator,
+            init,
+            always_false_filter,
+        ));
+
+        let moved_adv_cache = adv_cache.clone();
+        let first_get = async move { moved_adv_cache.get_by_ref("foo").await };
+
+        let moved_adv_cache = adv_cache.clone();
+        let controller = async move {
+            sleep(Duration::from_millis(100)).await;
+            moved_adv_cache
+                .invalidate(&["bar".to_string()])
+                .await
+                .unwrap();
+        };
+
+        let (first, _) = tokio::join!(first_get, controller);
+        let first = first.unwrap().unwrap();
+        assert_eq!(first, "v1");
+
+        let second = adv_cache.get_by_ref("foo").await.unwrap().unwrap();
+        assert_eq!(second, "v2");
         assert_eq!(counter.load(Ordering::Relaxed), 2);
     }
 }
