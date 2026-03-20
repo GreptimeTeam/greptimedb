@@ -1145,7 +1145,7 @@ mod tests {
 
     use common_base::Plugins;
     use common_query::{Output, OutputData};
-    use common_recordbatch::adapter::RecordBatchMetrics;
+    use common_recordbatch::adapter::{RecordBatchMetrics, RegionWatermarkEntry};
     use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream};
     use datatypes::data_type::ConcreteDataType;
     use datatypes::prelude::VectorRef;
@@ -1442,7 +1442,10 @@ mod tests {
         )
         .unwrap();
         let expected_metrics = RecordBatchMetrics {
-            region_latest_sequences: Some(vec![(42, 99)]),
+            region_watermarks: vec![RegionWatermarkEntry {
+                region_id: 42,
+                watermark: Some(99),
+            }],
             ..Default::default()
         };
         let output = Output::new_with_stream(Box::pin(MockMetricsStream {
@@ -1457,13 +1460,13 @@ mod tests {
             panic!("expected stream output");
         };
         assert_eq!(
-            stream.metrics().and_then(|m| m.region_latest_sequences),
-            expected_metrics.region_latest_sequences.clone()
+            stream.metrics().map(|m| m.region_watermarks),
+            Some(expected_metrics.region_watermarks.clone())
         );
         while stream.next().await.is_some() {}
         assert_eq!(
-            stream.metrics().and_then(|m| m.region_latest_sequences),
-            expected_metrics.region_latest_sequences
+            stream.metrics().map(|m| m.region_watermarks),
+            Some(expected_metrics.region_watermarks)
         );
     }
 
@@ -1480,7 +1483,10 @@ mod tests {
         )
         .unwrap();
         let expected_metrics = RecordBatchMetrics {
-            region_latest_sequences: Some(vec![(7, 123)]),
+            region_watermarks: vec![RegionWatermarkEntry {
+                region_id: 7,
+                watermark: Some(123),
+            }],
             ..Default::default()
         };
         let output = Output::new_with_stream(Box::pin(MockMetricsStream {
@@ -1497,8 +1503,8 @@ mod tests {
         assert!(stream.metrics().is_none());
         while stream.next().await.is_some() {}
         assert_eq!(
-            stream.metrics().and_then(|m| m.region_latest_sequences),
-            expected_metrics.region_latest_sequences
+            stream.metrics().map(|m| m.region_watermarks),
+            Some(expected_metrics.region_watermarks)
         );
     }
 }
