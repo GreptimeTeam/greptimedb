@@ -184,47 +184,6 @@ fn unzip_logical_region_schema(
     Ok((timestamp_column, field_column, tag_columns))
 }
 
-/// Build a `Vec<ColumnSchema>` suitable for creating a new Prometheus logical table
-/// from an incoming Arrow schema whose columns follow Prom conventions
-/// (`greptime_timestamp`, `greptime_value`, plus Utf8 tags).
-#[cfg(test)]
-fn build_prom_create_table_schema(source_schema: &ArrowSchema) -> Result<Vec<ColumnSchema>> {
-    source_schema
-        .fields()
-        .iter()
-        .map(|field| {
-            let semantic_type = if field.name() == greptime_timestamp() {
-                SemanticType::Timestamp
-            } else if field.name() == greptime_value() {
-                SemanticType::Field
-            } else {
-                SemanticType::Tag
-            };
-
-            let concrete_type = ConcreteDataType::try_from(field.data_type())?;
-            let (datatype, datatype_extension) = ColumnDataTypeWrapper::try_from(concrete_type)?
-                .into_parts();
-
-            if semantic_type == SemanticType::Tag && datatype != api::v1::ColumnDataType::String {
-                return Err(Error::Internal {
-                    err_msg: format!(
-                        "Failed to build create table schema, tag column '{}' must be String but got {:?}",
-                        field.name(), datatype
-                    ),
-                });
-            }
-
-            Ok(ColumnSchema {
-                column_name: field.name().clone(),
-                datatype: datatype as i32,
-                semantic_type: semantic_type as i32,
-                datatype_extension,
-                options: None,
-            })
-        })
-        .collect()
-}
-
 /// Reorder, cast, and fill missing columns so that `record_batch` conforms to
 /// `target_schema`.  Columns present in the target but absent from the source
 /// are filled with null arrays.
@@ -581,8 +540,8 @@ mod tests {
 
     use super::{
         accommodate_record_batch_for_target_schema, align_record_batch_to_schema,
-        build_prom_create_table_schema, build_prom_create_table_schema_from_proto,
-        identify_missing_columns_from_proto, rows_to_aligned_record_batch, rows_to_record_batch,
+        build_prom_create_table_schema_from_proto, identify_missing_columns_from_proto,
+        rows_to_aligned_record_batch, rows_to_record_batch,
     };
 
     #[test]
@@ -788,50 +747,6 @@ mod tests {
                 .name(),
             "my_value"
         );
-    }
-
-    #[test]
-    fn test_build_prom_create_table_schema_from_request_schema() {
-        let source = ArrowSchema::new(vec![
-            Field::new(
-                common_query::prelude::greptime_timestamp(),
-                DataType::Timestamp(TimeUnit::Millisecond, None),
-                false,
-            ),
-            Field::new("job", DataType::Utf8, true),
-            Field::new(
-                common_query::prelude::greptime_value(),
-                DataType::Float64,
-                true,
-            ),
-        ]);
-
-        let schema = build_prom_create_table_schema(&source).unwrap();
-        assert_eq!(3, schema.len());
-
-        assert_eq!(
-            common_query::prelude::greptime_timestamp(),
-            schema[0].column_name
-        );
-        assert_eq!(
-            api::v1::SemanticType::Timestamp as i32,
-            schema[0].semantic_type
-        );
-        assert_eq!(
-            api::v1::ColumnDataType::TimestampMillisecond as i32,
-            schema[0].datatype
-        );
-
-        assert_eq!("job", schema[1].column_name);
-        assert_eq!(api::v1::SemanticType::Tag as i32, schema[1].semantic_type);
-        assert_eq!(api::v1::ColumnDataType::String as i32, schema[1].datatype);
-
-        assert_eq!(
-            common_query::prelude::greptime_value(),
-            schema[2].column_name
-        );
-        assert_eq!(api::v1::SemanticType::Field as i32, schema[2].semantic_type);
-        assert_eq!(api::v1::ColumnDataType::Float64 as i32, schema[2].datatype);
     }
 
     #[test]
