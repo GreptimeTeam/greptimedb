@@ -890,14 +890,13 @@ async fn flush_batch(
     let catalog = ctx.current_catalog().to_string();
     let schema = ctx.current_schema();
 
-    // Attempt physical-table-level flush: transform all logical table batches
-    // into physical format and write them together, reducing catalog lookups
-    // and partition rule fetches from N (per logical table) to 1.
+    // Physical-table-level flush: transform all logical table batches
+    // into physical format and write them together.
     let physical_table_name = ctx
         .extension(PHYSICAL_TABLE_KEY)
         .unwrap_or(GREPTIME_PHYSICAL_TABLE)
         .to_string();
-    let physical_flush_attempted = flush_batch_physical(
+    flush_batch_physical(
         &table_batches,
         total_row_count,
         &catalog,
@@ -910,23 +909,6 @@ async fn flush_batch(
         &mut first_error,
     )
     .await;
-
-    if !physical_flush_attempted {
-        // Fallback: flush per logical table (original path).
-        // This handles non-metric-engine tables, dense encoding, or any
-        // case where the physical flush path cannot be used.
-        flush_batch_per_logical_table(
-            &table_batches,
-            &catalog,
-            &schema,
-            &ctx,
-            &partition_manager,
-            &node_manager,
-            &catalog_manager,
-            &mut first_error,
-        )
-        .await;
-    }
 
     let elapsed = start.elapsed().as_secs_f64();
     FLUSH_ELAPSED.observe(elapsed);
@@ -942,10 +924,8 @@ async fn flush_batch(
 /// table format (sparse primary key encoding) and writing directly to the
 /// physical data regions.
 ///
-/// Returns `true` if the physical flush was attempted (even if some individual
-/// table batches failed). Returns `false` if the physical table could not be
-/// resolved or does not support this path, meaning the caller should fall back
-/// to per-logical-table flushing.
+/// This is the only flush path. Any failure in resolving or transforming the
+/// physical flush inputs is recorded as flush failure and reported to waiters.
 #[allow(clippy::too_many_arguments)]
 async fn flush_batch_physical(
     table_batches: &[TableBatch],
@@ -958,7 +938,7 @@ async fn flush_batch_physical(
     node_manager: &NodeManagerRef,
     catalog_manager: &CatalogManagerRef,
     first_error: &mut Option<String>,
-) -> bool {
+) {
     macro_rules! record_failure {
         ($row_count:expr, $msg:expr) => {{
             let msg = $msg;
@@ -980,18 +960,24 @@ async fn flush_batch_physical(
         {
             Ok(Some(table)) => table,
             Ok(None) => {
-                debug!(
-                    "Physical table '{}' not found, falling back to per-logical-table flush",
-                    physical_table_name
+                record_failure!(
+                    total_row_count,
+                    format!(
+                        "Physical table '{}' not found during pending flush",
+                        physical_table_name
+                    )
                 );
-                return false;
+                return;
             }
             Err(err) => {
-                debug!(
-                    "Failed to resolve physical table '{}': {:?}, falling back",
-                    physical_table_name, err
+                record_failure!(
+                    total_row_count,
+                    format!(
+                        "Failed to resolve physical table '{}' for pending flush: {:?}",
+                        physical_table_name, err
+                    )
                 );
-                return false;
+                return;
             }
         }
     };
@@ -1000,11 +986,14 @@ async fn flush_batch_physical(
     let name_to_ids = match physical_table_info.name_to_ids() {
         Some(ids) => ids,
         None => {
-            debug!(
-                "Physical table '{}' has no column IDs, falling back to per-logical-table flush",
-                physical_table_name
+            record_failure!(
+                total_row_count,
+                format!(
+                    "Physical table '{}' has no column IDs for pending flush",
+                    physical_table_name
+                )
             );
-            return false;
+            return;
         }
     };
 
@@ -1019,11 +1008,14 @@ async fn flush_batch_physical(
         {
             Ok(rule) => rule,
             Err(err) => {
-                debug!(
-                    "Failed to fetch partition rule for physical table '{}': {:?}, falling back",
-                    physical_table_name, err
+                record_failure!(
+                    total_row_count,
+                    format!(
+                        "Failed to fetch partition rule for physical table '{}': {:?}",
+                        physical_table_name, err
+                    )
                 );
-                return false;
+                return;
             }
         }
     };
@@ -1129,7 +1121,16 @@ async fn flush_batch_physical(
     }
 
     if modified_batches.is_empty() {
-        return true;
+        if first_error.is_none() {
+            record_failure!(
+                total_row_count,
+                format!(
+                    "No batches can be transformed for physical table '{}' during pending flush",
+                    physical_table_name
+                )
+            );
+        }
+        return;
     }
 
     // 4. Concatenate all modified batches (all share the same physical schema)
@@ -1145,7 +1146,7 @@ async fn flush_batch_physical(
                     modified_row_count,
                     format!("Failed to concat modified batches: {:?}", err)
                 );
-                return true;
+                return;
             }
         }
     };
@@ -1166,7 +1167,7 @@ async fn flush_batch_physical(
                         physical_table_name, err
                     )
                 );
-                return true;
+                return;
             }
         }
     };
@@ -1274,236 +1275,6 @@ async fn flush_batch_physical(
             }
             FlushWriteResult::Failed { row_count, message } => {
                 record_failure!(row_count, message);
-            }
-        }
-    }
-
-    true
-}
-
-/// Original per-logical-table flush path. Used as fallback when the physical
-/// table flush path cannot be applied.
-#[allow(clippy::too_many_arguments)]
-async fn flush_batch_per_logical_table(
-    table_batches: &[TableBatch],
-    catalog: &str,
-    schema: &str,
-    ctx: &QueryContextRef,
-    partition_manager: &PartitionRuleManagerRef,
-    node_manager: &NodeManagerRef,
-    catalog_manager: &CatalogManagerRef,
-    first_error: &mut Option<String>,
-) {
-    macro_rules! record_failure {
-        ($row_count:expr, $msg:expr) => {{
-            let msg = $msg;
-            if first_error.is_none() {
-                *first_error = Some(msg.clone());
-            }
-            mark_flush_failure($row_count, &msg);
-        }};
-    }
-
-    for table_batch in table_batches {
-        let Some(first_batch) = table_batch.batches.first() else {
-            continue;
-        };
-
-        let schema_ref = first_batch.schema();
-        let record_batch = {
-            let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
-                .with_label_values(&["flush_concat_table_batches"])
-                .start_timer();
-            match concat_batches(&schema_ref, &table_batch.batches) {
-                Ok(batch) => batch,
-                Err(err) => {
-                    record_failure!(
-                        table_batch.row_count,
-                        format!(
-                            "Failed to concat table batch {}: {:?}",
-                            table_batch.table_name, err
-                        )
-                    );
-                    continue;
-                }
-            }
-        };
-
-        let table = {
-            let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
-                .with_label_values(&["flush_resolve_table"])
-                .start_timer();
-            match catalog_manager
-                .table(catalog, schema, &table_batch.table_name, Some(ctx.as_ref()))
-                .await
-            {
-                Ok(Some(table)) => table,
-                Ok(None) => {
-                    record_failure!(
-                        table_batch.row_count,
-                        format!(
-                            "Table not found during pending flush: {}",
-                            table_batch.table_name
-                        )
-                    );
-                    continue;
-                }
-                Err(err) => {
-                    record_failure!(
-                        table_batch.row_count,
-                        format!(
-                            "Failed to resolve table {} for pending flush: {:?}",
-                            table_batch.table_name, err
-                        )
-                    );
-                    continue;
-                }
-            }
-        };
-        let table_info = table.table_info();
-
-        let partition_rule = {
-            let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
-                .with_label_values(&["flush_fetch_partition_rule"])
-                .start_timer();
-            match partition_manager
-                .find_table_partition_rule(&table_info)
-                .await
-            {
-                Ok(rule) => rule,
-                Err(err) => {
-                    record_failure!(
-                        table_batch.row_count,
-                        format!(
-                            "Failed to fetch partition rule for table {}: {:?}",
-                            table_batch.table_name, err
-                        )
-                    );
-                    continue;
-                }
-            }
-        };
-
-        let region_masks = {
-            let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
-                .with_label_values(&["flush_split_record_batch"])
-                .start_timer();
-            match partition_rule.0.split_record_batch(&record_batch) {
-                Ok(masks) => masks,
-                Err(err) => {
-                    record_failure!(
-                        table_batch.row_count,
-                        format!(
-                            "Failed to split record batch for table {}: {:?}",
-                            table_batch.table_name, err
-                        )
-                    );
-                    continue;
-                }
-            }
-        };
-
-        let mut region_writes = Vec::new();
-        for (region_number, mask) in region_masks {
-            if mask.select_none() {
-                continue;
-            }
-
-            let region_batch = if mask.select_all() {
-                record_batch.clone()
-            } else {
-                let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
-                    .with_label_values(&["flush_filter_record_batch"])
-                    .start_timer();
-                match filter_record_batch(&record_batch, mask.array()) {
-                    Ok(batch) => batch,
-                    Err(err) => {
-                        record_failure!(
-                            table_batch.row_count,
-                            format!(
-                                "Failed to filter record batch for table {}: {:?}",
-                                table_batch.table_name, err
-                            )
-                        );
-                        continue;
-                    }
-                }
-            };
-
-            let row_count = region_batch.num_rows();
-            if row_count == 0 {
-                continue;
-            }
-
-            let region_id = RegionId::new(table_info.table_id(), region_number);
-            let datanode = {
-                let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
-                    .with_label_values(&["flush_resolve_region_leader"])
-                    .start_timer();
-                match partition_manager.find_region_leader(region_id).await {
-                    Ok(peer) => peer,
-                    Err(err) => {
-                        record_failure!(
-                            row_count,
-                            format!("Failed to resolve region leader {}: {:?}", region_id, err)
-                        );
-                        continue;
-                    }
-                }
-            };
-
-            let (schema_bytes, data_header, payload) = {
-                let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
-                    .with_label_values(&["flush_encode_ipc"])
-                    .start_timer();
-                match record_batch_to_ipc(region_batch) {
-                    Ok(encoded) => encoded,
-                    Err(err) => {
-                        record_failure!(
-                            row_count,
-                            format!(
-                                "Failed to encode Arrow IPC for region {}: {:?}",
-                                region_id, err
-                            )
-                        );
-                        continue;
-                    }
-                }
-            };
-
-            let request = RegionRequest {
-                header: Some(RegionRequestHeader {
-                    tracing_context: TracingContext::from_current_span().to_w3c(),
-                    ..Default::default()
-                }),
-                body: Some(region_request::Body::BulkInsert(BulkInsertRequest {
-                    region_id: region_id.as_u64(),
-                    partition_expr_version: None,
-                    body: Some(bulk_insert_request::Body::ArrowIpc(ArrowIpc {
-                        schema: schema_bytes,
-                        data_header,
-                        payload,
-                    })),
-                })),
-            };
-
-            region_writes.push(FlushRegionWrite {
-                region_id,
-                row_count,
-                datanode,
-                request,
-            });
-        }
-
-        for result in flush_region_writes_concurrently(node_manager.clone(), region_writes).await {
-            match result {
-                FlushWriteResult::Success { row_count } => {
-                    FLUSH_TOTAL.inc();
-                    FLUSH_ROWS.observe(row_count as f64);
-                }
-                FlushWriteResult::Failed { row_count, message } => {
-                    record_failure!(row_count, message);
-                }
             }
         }
     }
