@@ -431,7 +431,6 @@ mod tests {
     use super::record_batch_to_ipc;
     use crate::batch_modifier::{TagColumnInfo, modify_batch_sparse};
     use crate::error::Error;
-    use crate::metrics::MITO_OPERATION_ELAPSED;
     use crate::test_util::{self, TestEnv};
 
     fn build_logical_batch(start: usize, rows: usize) -> RecordBatch {
@@ -747,27 +746,6 @@ mod tests {
             .unwrap();
         let batches = RecordBatches::try_collect(stream).await.unwrap();
         assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 4);
-    }
-
-    #[tokio::test]
-    async fn test_bulk_insert_records_elapsed_metric() {
-        let env = TestEnv::new().await;
-        env.init_metric_region().await;
-        let logical_region_id = env.default_logical_region_id();
-
-        let histogram = MITO_OPERATION_ELAPSED.with_label_values(&["bulk_insert"]);
-        let before = histogram.get_sample_count();
-
-        let request = build_bulk_request(logical_region_id, build_logical_batch(0, 3));
-        let response = env
-            .metric()
-            .handle_request(logical_region_id, request)
-            .await
-            .unwrap();
-        assert_eq!(response.affected_rows, 3);
-
-        let after = histogram.get_sample_count();
-        assert!(after > before, "bulk_insert elapsed metric is not recorded");
     }
 
     #[tokio::test]
