@@ -82,6 +82,12 @@ fn required_physical_table_for_create_type(create_type: &AutoCreateTableType) ->
     }
 }
 
+fn fill_metric_physical_table_options(table_options: &mut HashMap<String, String>) {
+    // We always enforce flat format in this ingestion path.
+    table_options.insert(SST_FORMAT_KEY.to_string(), "flat".to_string());
+    table_options.insert(PHYSICAL_TABLE_METADATA_KEY.to_string(), "true".to_string());
+}
+
 #[inline]
 fn is_supported(response_type: i32) -> bool {
     // Only supports samples response right now
@@ -604,9 +610,7 @@ impl Instance {
         .map_err(BoxedError::new)
         .context(error::ExecuteGrpcQuerySnafu)?;
         create_table_expr.engine = METRIC_ENGINE_NAME.to_string();
-        create_table_expr
-            .table_options
-            .insert(PHYSICAL_TABLE_METADATA_KEY.to_string(), "true".to_string());
+        fill_metric_physical_table_options(&mut create_table_expr.table_options);
 
         self.statement_executor
             .create_table_inner(&mut create_table_expr, None, ctx)
@@ -720,5 +724,23 @@ mod tests {
 
         let physical = AutoCreateTableType::Physical;
         assert_eq!(None, required_physical_table_for_create_type(&physical));
+    }
+
+    #[test]
+    fn test_metric_physical_table_options_forces_flat_sst_format() {
+        let mut table_options = HashMap::new();
+
+        fill_metric_physical_table_options(&mut table_options);
+
+        assert_eq!(
+            Some("flat"),
+            table_options.get(SST_FORMAT_KEY).map(String::as_str)
+        );
+        assert_eq!(
+            Some("true"),
+            table_options
+                .get(PHYSICAL_TABLE_METADATA_KEY)
+                .map(String::as_str)
+        );
     }
 }
