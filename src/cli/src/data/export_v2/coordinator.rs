@@ -83,9 +83,7 @@ pub async fn export_data(
         manifest.touch();
         storage.write_manifest(manifest).await?;
 
-        if let Err(err) = result {
-            return Err(err);
-        }
+        result?;
     }
 
     Ok(())
