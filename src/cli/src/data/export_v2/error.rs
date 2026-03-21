@@ -79,10 +79,23 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to parse time: invalid format: {}", input))]
+    TimeParseInvalidFormat {
+        input: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to parse time: end_time is before start_time"))]
+    TimeParseEndBeforeStart {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display(
-        "Data export is not implemented yet. Use --schema-only to create a schema snapshot."
+        "chunk_time_window requires both --start-time and --end-time to be specified"
     ))]
-    DataExportNotImplemented {
+    ChunkTimeWindowRequiresBounds {
         #[snafu(implicit)]
         location: Location,
     },
@@ -155,8 +168,10 @@ impl ErrorExt for Error {
             Error::InvalidUri { .. }
             | Error::UnsupportedScheme { .. }
             | Error::CannotResumeSchemaOnly { .. }
-            | Error::DataExportNotImplemented { .. }
             | Error::ManifestVersionMismatch { .. } => StatusCode::InvalidArguments,
+            Error::TimeParseInvalidFormat { .. }
+            | Error::TimeParseEndBeforeStart { .. }
+            | Error::ChunkTimeWindowRequiresBounds { .. } => StatusCode::InvalidArguments,
 
             Error::StorageOperation { .. }
             | Error::ManifestParse { .. }

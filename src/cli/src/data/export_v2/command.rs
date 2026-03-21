@@ -26,12 +26,13 @@ use snafu::{OptionExt, ResultExt};
 
 use crate::Tool;
 use crate::common::ObjectStoreConfig;
+use crate::data::export_v2::coordinator::export_data;
 use crate::data::export_v2::error::{
-    CannotResumeSchemaOnlySnafu, DataExportNotImplementedSnafu, DatabaseSnafu, EmptyResultSnafu,
-    ManifestVersionMismatchSnafu, Result, UnexpectedValueTypeSnafu,
+    CannotResumeSchemaOnlySnafu, ChunkTimeWindowRequiresBoundsSnafu, DatabaseSnafu,
+    EmptyResultSnafu, ManifestVersionMismatchSnafu, Result, UnexpectedValueTypeSnafu,
 };
 use crate::data::export_v2::extractor::SchemaExtractor;
-use crate::data::export_v2::manifest::{DataFormat, MANIFEST_VERSION, Manifest};
+use crate::data::export_v2::manifest::{DataFormat, MANIFEST_VERSION, Manifest, TimeRange};
 use crate::data::path::ddl_path_for_schema;
 use crate::data::snapshot_storage::{OpenDalStorage, SnapshotStorage, validate_uri};
 use crate::data::sql::{escape_sql_identifier, escape_sql_literal};
@@ -84,6 +85,11 @@ pub struct ExportCreateCommand {
     #[clap(long)]
     end_time: Option<String>,
 
+    /// Chunk time window (e.g., 1h, 6h, 1d, 7d).
+    /// Requires both --start-time and --end-time when specified.
+    #[clap(long, value_parser = humantime::parse_duration)]
+    chunk_time_window: Option<Duration>,
+
     /// Data format: parquet, csv, json.
     #[clap(long, value_enum, default_value = "parquet")]
     format: DataFormat,
@@ -92,7 +98,7 @@ pub struct ExportCreateCommand {
     #[clap(long)]
     force: bool,
 
-    /// Concurrency level (for future use).
+    /// Parallelism for COPY DATABASE execution (server-side, per schema per chunk).
     #[clap(long, default_value = "1")]
     parallelism: usize,
 
@@ -127,8 +133,10 @@ impl ExportCreateCommand {
         // Validate URI format
         validate_uri(&self.to).map_err(BoxedError::new)?;
 
-        if !self.schema_only {
-            return DataExportNotImplementedSnafu
+        let time_range = TimeRange::parse(self.start_time.as_deref(), self.end_time.as_deref())
+            .map_err(BoxedError::new)?;
+        if self.chunk_time_window.is_some() && !time_range.is_bounded() {
+            return ChunkTimeWindowRequiresBoundsSnafu
                 .fail()
                 .map_err(BoxedError::new);
         }
@@ -155,12 +163,18 @@ impl ExportCreateCommand {
         );
 
         Ok(Box::new(ExportCreate {
-            catalog: self.catalog.clone(),
-            schemas,
-            schema_only: self.schema_only,
-            _format: self.format,
-            force: self.force,
-            _parallelism: self.parallelism,
+            config: ExportConfig {
+                catalog: self.catalog.clone(),
+                schemas,
+                schema_only: self.schema_only,
+                format: self.format,
+                force: self.force,
+                time_range,
+                chunk_time_window: self.chunk_time_window,
+                parallelism: self.parallelism,
+                snapshot_uri: self.to.clone(),
+                storage_config: self.storage.clone(),
+            },
             storage: Box::new(storage),
             database_client,
         }))
@@ -169,14 +183,22 @@ impl ExportCreateCommand {
 
 /// Export tool implementation.
 pub struct ExportCreate {
+    config: ExportConfig,
+    storage: Box<dyn SnapshotStorage>,
+    database_client: DatabaseClient,
+}
+
+struct ExportConfig {
     catalog: String,
     schemas: Option<Vec<String>>,
     schema_only: bool,
-    _format: DataFormat,
+    format: DataFormat,
     force: bool,
-    _parallelism: usize,
-    storage: Box<dyn SnapshotStorage>,
-    database_client: DatabaseClient,
+    time_range: TimeRange,
+    chunk_time_window: Option<Duration>,
+    parallelism: usize,
+    snapshot_uri: String,
+    storage_config: ObjectStoreConfig,
 }
 
 #[async_trait]
@@ -192,12 +214,12 @@ impl ExportCreate {
         let exists = self.storage.exists().await?;
 
         if exists {
-            if self.force {
+            if self.config.force {
                 info!("Deleting existing snapshot (--force)");
                 self.storage.delete_snapshot().await?;
             } else {
                 // Resume mode - read existing manifest
-                let manifest = self.storage.read_manifest().await?;
+                let mut manifest = self.storage.read_manifest().await?;
 
                 // Check version compatibility
                 if manifest.version != MANIFEST_VERSION {
@@ -209,7 +231,7 @@ impl ExportCreate {
                 }
 
                 // Cannot resume schema-only with data export
-                if manifest.schema_only && !self.schema_only {
+                if manifest.schema_only && !self.config.schema_only {
                     return CannotResumeSchemaOnlySnafu.fail();
                 }
 
@@ -220,22 +242,31 @@ impl ExportCreate {
                     manifest.chunks.len()
                 );
 
-                // For M1, we only handle schema-only exports
-                // M2 will add chunk resume logic
                 if manifest.is_complete() {
                     info!("Snapshot is already complete");
                     return Ok(());
                 }
 
-                // TODO: Resume data export in M2
-                info!("Data export resume not yet implemented (M2)");
+                if manifest.schema_only {
+                    return Ok(());
+                }
+
+                export_data(
+                    self.storage.as_ref(),
+                    &self.database_client,
+                    &self.config.snapshot_uri,
+                    &self.config.storage_config,
+                    &mut manifest,
+                    self.config.parallelism,
+                )
+                .await?;
                 return Ok(());
             }
         }
 
         // 2. Get schema list
-        let extractor = SchemaExtractor::new(&self.database_client, &self.catalog);
-        let schema_snapshot = extractor.extract(self.schemas.as_deref()).await?;
+        let extractor = SchemaExtractor::new(&self.database_client, &self.config.catalog);
+        let schema_snapshot = extractor.extract(self.config.schemas.as_deref()).await?;
 
         let schema_names: Vec<String> = schema_snapshot
             .schemas
@@ -245,7 +276,14 @@ impl ExportCreate {
         info!("Exporting schemas: {:?}", schema_names);
 
         // 3. Create manifest
-        let manifest = Manifest::new_schema_only(self.catalog.clone(), schema_names.clone());
+        let mut manifest = Manifest::new_for_export(
+            self.config.catalog.clone(),
+            schema_names.clone(),
+            self.config.schema_only,
+            self.config.time_range.clone(),
+            self.config.format,
+            self.config.chunk_time_window,
+        )?;
 
         // 4. Write schema files
         self.storage.write_schema(&schema_snapshot).await?;
@@ -259,13 +297,27 @@ impl ExportCreate {
             info!("Exported DDL for schema {} to {}", schema, ddl_path);
         }
 
-        // 6. Write manifest last.
+        // 6. Write manifest after schema artifacts and before any data export.
         //
         // The manifest is the snapshot commit point: only write it after the schema
         // index and all DDL files are durable, so a crash cannot leave a "valid"
-        // snapshot that is missing required schema artifacts.
+        // snapshot that is missing required schema artifacts. For full exports we
+        // still need the manifest before data copy starts, because chunk resume is
+        // tracked by updating this manifest in place.
         self.storage.write_manifest(&manifest).await?;
         info!("Snapshot created: {}", manifest.snapshot_id);
+
+        if !self.config.schema_only {
+            export_data(
+                self.storage.as_ref(),
+                &self.database_client,
+                &self.config.snapshot_uri,
+                &self.config.storage_config,
+                &mut manifest,
+                self.config.parallelism,
+            )
+            .await?;
+        }
 
         Ok(())
     }
@@ -321,7 +373,7 @@ impl ExportCreate {
             "SELECT table_name, table_type FROM information_schema.tables \
              WHERE table_catalog = '{}' AND table_schema = '{}' \
              AND (table_type = 'BASE TABLE' OR table_type = 'VIEW')",
-            escape_sql_literal(&self.catalog),
+            escape_sql_literal(&self.config.catalog),
             escape_sql_literal(schema)
         );
         let records: Option<Vec<Vec<Value>>> = self
@@ -359,7 +411,7 @@ impl ExportCreate {
         let sql = format!(
             "SELECT DISTINCT table_name FROM information_schema.columns \
              WHERE table_catalog = '{}' AND table_schema = '{}' AND column_name = '__tsid'",
-            escape_sql_literal(&self.catalog),
+            escape_sql_literal(&self.config.catalog),
             escape_sql_literal(schema)
         );
         let records: Option<Vec<Vec<Value>>> = self
@@ -392,14 +444,14 @@ impl ExportCreate {
             Some(table) => format!(
                 r#"SHOW CREATE {} "{}"."{}"."{}""#,
                 show_type,
-                escape_sql_identifier(&self.catalog),
+                escape_sql_identifier(&self.config.catalog),
                 escape_sql_identifier(schema),
                 escape_sql_identifier(table)
             ),
             None => format!(
                 r#"SHOW CREATE {} "{}"."{}""#,
                 show_type,
-                escape_sql_identifier(&self.catalog),
+                escape_sql_identifier(&self.config.catalog),
                 escape_sql_identifier(schema)
             ),
         };
@@ -478,19 +530,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_build_rejects_non_schema_only_export() {
+    async fn test_build_rejects_chunk_window_without_bounds() {
         let cmd = ExportCreateCommand::parse_from([
             "export-v2-create",
             "--addr",
             "127.0.0.1:4000",
             "--to",
             "file:///tmp/export-v2-test",
+            "--chunk-time-window",
+            "1h",
         ]);
 
         let result = cmd.build().await;
         assert!(result.is_err());
         let error = result.err().unwrap().to_string();
 
-        assert!(error.contains("Data export is not implemented yet"));
+        assert!(error.contains("chunk_time_window requires both --start-time and --end-time"));
     }
 }
