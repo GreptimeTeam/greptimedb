@@ -39,7 +39,7 @@ use datatypes::prelude::ConcreteDataType;
 use snafu::{OptionExt, ResultExt, ensure};
 
 use crate::error;
-use crate::error::{Error, Result};
+use crate::error::Result;
 
 /// Normalizes an incoming Prometheus record batch against an existing table schema.
 ///
@@ -221,16 +221,7 @@ fn align_record_batch_to_schema(
             if source_field.data_type() == target_field.data_type() {
                 source_column
             } else {
-                cast(source_column.as_ref(), target_field.data_type()).map_err(|err| {
-                    Error::Internal {
-                        err_msg: format!(
-                            "Failed to cast column '{}' to target type {:?}: {}",
-                            target_field.name(),
-                            target_field.data_type(),
-                            err
-                        ),
-                    }
-                })?
+                cast(source_column.as_ref(), target_field.data_type()).context(error::ArrowSnafu)?
             }
         } else {
             new_null_array(target_field.data_type(), row_count)
@@ -238,67 +229,16 @@ fn align_record_batch_to_schema(
         columns.push(column);
     }
 
-    RecordBatch::try_new(Arc::new(target_schema.clone()), columns).map_err(|err| Error::Internal {
-        err_msg: format!("Failed to build aligned record batch: {}", err),
-    })
-}
-
-/// Convert a proto `Rows` message into an Arrow `RecordBatch`.
-#[cfg(test)]
-fn rows_to_record_batch(rows: &Rows) -> Result<RecordBatch> {
-    let row_count = rows.rows.len();
-    let column_count = rows.schema.len();
-
-    for (idx, row) in rows.rows.iter().enumerate() {
-        ensure!(
-            row.values.len() == column_count,
-            error::InternalSnafu {
-                err_msg: format!(
-                    "Column count mismatch in row {}, expected {}, got {}",
-                    idx,
-                    column_count,
-                    row.values.len()
-                )
-            }
-        );
-    }
-
-    let mut fields = Vec::with_capacity(column_count);
-    let mut columns = Vec::with_capacity(column_count);
-
-    for (idx, column_schema) in rows.schema.iter().enumerate() {
-        let datatype_wrapper = ColumnDataTypeWrapper::try_new(
-            column_schema.datatype,
-            column_schema.datatype_extension.clone(),
-        )?;
-        let data_type = ConcreteDataType::from(datatype_wrapper);
-        fields.push(Field::new(
-            column_schema.column_name.clone(),
-            data_type.as_arrow_type(),
-            true,
-        ));
-        columns.push(build_arrow_array(
-            rows,
-            idx,
-            &column_schema.column_name,
-            data_type.as_arrow_type(),
-            row_count,
-        )?);
-    }
-
-    RecordBatch::try_new(Arc::new(ArrowSchema::new(fields)), columns).context(error::ArrowSnafu)
+    RecordBatch::try_new(Arc::new(target_schema.clone()), columns).context(error::ArrowSnafu)
 }
 
 /// Directly converts proto `Rows` into a `RecordBatch` aligned to the given
 /// `target_schema`, handling Prometheus column renaming (timestamp/value),
 /// reordering, type casting, and null-filling in a single pass.
-///
-/// Returns the aligned `RecordBatch` plus any tag column names present in the
-/// source rows but absent from the target schema (these need DDL ALTER).
 pub(crate) fn rows_to_aligned_record_batch(
     rows: &Rows,
     target_schema: &ArrowSchema,
-) -> Result<(RecordBatch, Vec<String>)> {
+) -> Result<RecordBatch> {
     let row_count = rows.rows.len();
     let column_count = rows.schema.len();
 
@@ -316,14 +256,13 @@ pub(crate) fn rows_to_aligned_record_batch(
         );
     }
 
-    let (target_ts_name, target_field_name, target_tags) =
+    let (target_ts_name, target_field_name, _target_tags) =
         unzip_logical_region_schema(target_schema)?;
 
     // Map effective target column name → (source column index, source arrow type).
     // Handles prom renames: Timestamp → target ts name, Float64 → target field name.
     let mut source_map: HashMap<&str, (usize, ArrowDataType)> =
         HashMap::with_capacity(rows.schema.len());
-    let mut missing_columns = Vec::new();
 
     for (src_idx, col) in rows.schema.iter().enumerate() {
         let wrapper = ColumnDataTypeWrapper::try_new(col.datatype, col.datatype_extension.clone())?;
@@ -346,11 +285,6 @@ pub(crate) fn rows_to_aligned_record_batch(
                 source_map.insert(&target_ts_name, (src_idx, src_arrow_type));
             }
             ArrowDataType::Utf8 => {
-                if !target_tags.contains(&col.column_name)
-                    && target_schema.column_with_name(&col.column_name).is_none()
-                {
-                    missing_columns.push(col.column_name.clone());
-                }
                 source_map.insert(&col.column_name, (src_idx, src_arrow_type));
             }
             other => {
@@ -378,17 +312,7 @@ pub(crate) fn rows_to_aligned_record_batch(
             )?;
             if array.data_type() != target_field.data_type() {
                 columns.push(
-                    cast(array.as_ref(), target_field.data_type()).map_err(|err| {
-                        Error::Internal {
-                            err_msg: format!(
-                                "Failed to cast column '{}' from {:?} to {:?}: {}",
-                                target_field.name(),
-                                array.data_type(),
-                                target_field.data_type(),
-                                err
-                            ),
-                        }
-                    })?,
+                    cast(array.as_ref(), target_field.data_type()).context(error::ArrowSnafu)?,
                 );
             } else {
                 columns.push(array);
@@ -400,7 +324,7 @@ pub(crate) fn rows_to_aligned_record_batch(
 
     let batch = RecordBatch::try_new(Arc::new(target_schema.clone()), columns)
         .context(error::ArrowSnafu)?;
-    Ok((batch, missing_columns))
+    Ok(batch)
 }
 
 /// Identify tag columns in the proto `rows_schema` that are absent from the
@@ -541,64 +465,8 @@ mod tests {
     use super::{
         accommodate_record_batch_for_target_schema, align_record_batch_to_schema,
         build_prom_create_table_schema_from_proto, identify_missing_columns_from_proto,
-        rows_to_aligned_record_batch, rows_to_record_batch,
+        rows_to_aligned_record_batch,
     };
-
-    #[test]
-    fn test_rows_to_record_batch() {
-        let rows = Rows {
-            schema: vec![
-                ColumnSchema {
-                    column_name: "ts".to_string(),
-                    datatype: ColumnDataType::TimestampMillisecond as i32,
-                    semantic_type: SemanticType::Timestamp as i32,
-                    ..Default::default()
-                },
-                ColumnSchema {
-                    column_name: "value".to_string(),
-                    datatype: ColumnDataType::Float64 as i32,
-                    semantic_type: SemanticType::Field as i32,
-                    ..Default::default()
-                },
-                ColumnSchema {
-                    column_name: "host".to_string(),
-                    datatype: ColumnDataType::String as i32,
-                    semantic_type: SemanticType::Tag as i32,
-                    ..Default::default()
-                },
-            ],
-            rows: vec![
-                Row {
-                    values: vec![
-                        Value {
-                            value_data: Some(ValueData::TimestampMillisecondValue(1000)),
-                        },
-                        Value {
-                            value_data: Some(ValueData::F64Value(42.0)),
-                        },
-                        Value {
-                            value_data: Some(ValueData::StringValue("h1".to_string())),
-                        },
-                    ],
-                },
-                Row {
-                    values: vec![
-                        Value {
-                            value_data: Some(ValueData::TimestampMillisecondValue(2000)),
-                        },
-                        Value { value_data: None },
-                        Value {
-                            value_data: Some(ValueData::StringValue("h2".to_string())),
-                        },
-                    ],
-                },
-            ],
-        };
-
-        let rb = rows_to_record_batch(&rows).unwrap();
-        assert_eq!(2, rb.num_rows());
-        assert_eq!(3, rb.num_columns());
-    }
 
     #[test]
     fn test_align_record_batch_to_schema_reorder_and_fill_missing() {
@@ -927,8 +795,7 @@ mod tests {
             Field::new("my_value", DataType::Float64, true),
         ]);
 
-        let (batch, missing) = rows_to_aligned_record_batch(&rows, &target).unwrap();
-        assert!(missing.is_empty());
+        let batch = rows_to_aligned_record_batch(&rows, &target).unwrap();
         assert_eq!(batch.schema().as_ref(), &target);
         assert_eq!(2, batch.num_rows());
         assert_eq!(3, batch.num_columns());
@@ -959,7 +826,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rows_to_aligned_record_batch_fills_nulls_and_detects_missing() {
+    fn test_rows_to_aligned_record_batch_fills_nulls() {
         let rows = Rows {
             schema: vec![
                 ColumnSchema {
@@ -1017,8 +884,7 @@ mod tests {
             Field::new("my_value", DataType::Float64, true),
         ]);
 
-        let (batch, missing) = rows_to_aligned_record_batch(&rows, &target).unwrap();
-        assert_eq!(missing, vec!["instance".to_string()]);
+        let batch = rows_to_aligned_record_batch(&rows, &target).unwrap();
         assert_eq!(batch.schema().as_ref(), &target);
         assert_eq!(1, batch.num_rows());
         assert_eq!(4, batch.num_columns());

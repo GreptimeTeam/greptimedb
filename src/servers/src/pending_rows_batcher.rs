@@ -265,7 +265,7 @@ impl PendingRowsBatcher {
                 .clone()
                 .acquire_owned()
                 .await
-                .map_err(|_| Error::BatcherChannelClosed)?
+                .map_err(|_| error::BatcherChannelClosedSnafu.build())?
         };
 
         let (response_tx, response_rx) = oneshot::channel();
@@ -313,7 +313,9 @@ impl PendingRowsBatcher {
                 let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
                     .with_label_values(&["submit_wait_flush_result"])
                     .start_timer();
-                response_rx.await.map_err(|_| Error::BatcherChannelClosed)?
+                response_rx
+                    .await
+                    .map_err(|_| error::BatcherChannelClosedSnafu.build())?
             };
             result.map(|()| total_rows as u64)
         } else {
@@ -640,7 +642,7 @@ impl PendingRowsBatcher {
                     }
                 })?;
 
-            let (record_batch, _missing_columns) = {
+            let record_batch = {
                 let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
                     .with_label_values(&["align_rows_to_record_batch"])
                     .start_timer();
