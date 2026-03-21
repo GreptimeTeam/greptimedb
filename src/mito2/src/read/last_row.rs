@@ -333,10 +333,10 @@ impl FlatRowGroupLastRowCachedReader {
     }
 
     /// Returns the next RecordBatch.
-    pub(crate) async fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
+    pub(crate) fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
         match self {
             FlatRowGroupLastRowCachedReader::Hit(r) => r.next_batch(),
-            FlatRowGroupLastRowCachedReader::Miss(r) => r.next_batch().await,
+            FlatRowGroupLastRowCachedReader::Miss(r) => r.next_batch(),
         }
     }
 
@@ -466,12 +466,12 @@ impl FlatRowGroupLastRowReader {
         Ok(Some(merged))
     }
 
-    async fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
+    fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
         if self.pending.is_full() {
             return self.flush_pending();
         }
 
-        while let Some(batch) = self.reader.next_batch().await? {
+        while let Some(batch) = self.reader.next_batch()? {
             self.selector.on_next(batch, &mut self.pending)?;
             if self.pending.is_full() {
                 return self.flush_pending();

@@ -616,6 +616,15 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to read arrow record batch from parquet file {}", path))]
+    ArrowReader {
+        path: String,
+        #[snafu(source)]
+        error: ArrowError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Column not found, column: {column}"))]
     ColumnNotFound {
         column: String,
@@ -1340,6 +1349,7 @@ impl ErrorExt for Error {
             RegionState { .. } | UpdateManifest { .. } => StatusCode::RegionNotReady,
             JsonOptions { .. } => StatusCode::InvalidArguments,
             EmptyRegionDir { .. } | EmptyManifestDir { .. } => StatusCode::RegionNotFound,
+            ArrowReader { .. } => StatusCode::StorageUnavailable,
             ConvertValue { source, .. } => source.status_code(),
             ApplyBloomFilterIndex { source, .. } => source.status_code(),
             InvalidPartitionExpr { source, .. } => source.status_code(),

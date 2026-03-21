@@ -90,6 +90,7 @@ impl BulkIterContext {
         Ok(Self {
             base: RangeBase {
                 filters: simple_filters,
+                primary_key_filters: None,
                 dyn_filters,
                 read_format,
                 prune_schema: region_metadata.schema.clone(),

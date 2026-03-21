@@ -282,6 +282,15 @@ impl FlatReadFormat {
         }
     }
 
+    /// Returns true if raw parquet batches already use the flat layout with an encoded
+    /// `__primary_key` dictionary column.
+    pub(crate) fn raw_batch_has_primary_key_dictionary(&self) -> bool {
+        match &self.parquet_adapter {
+            ParquetAdapter::Flat(_) => true,
+            ParquetAdapter::PrimaryKeyToFlat(_) => false,
+        }
+    }
+
     /// Creates a sequence array to override.
     pub(crate) fn new_override_sequence_array(&self, length: usize) -> Option<ArrayRef> {
         self.override_sequence
