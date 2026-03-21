@@ -50,6 +50,7 @@ use crate::memtable::partition_tree::merger::{DataBatchKey, DataNode, DataSource
 use crate::metrics::{
     PARTITION_TREE_DATA_BUFFER_FREEZE_STAGE_ELAPSED, PARTITION_TREE_READ_STAGE_ELAPSED,
 };
+use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 
 const PK_INDEX_COLUMN_NAME: &str = "__pk_index";
 
@@ -821,7 +822,11 @@ impl DataPart {
     /// Reads frozen data part and yields [DataBatch]es.
     pub fn read(&self) -> Result<DataPartReader> {
         match self {
-            DataPart::Parquet(data_bytes) => DataPartReader::new(data_bytes.data.clone(), None),
+            // Keep encoded memtable scans aligned with mito/DataFusion batch sizing instead of
+            // parquet-rs's implicit 1024-row default.
+            DataPart::Parquet(data_bytes) => {
+                DataPartReader::new(data_bytes.data.clone(), Some(DEFAULT_READ_BATCH_SIZE))
+            }
         }
     }
 

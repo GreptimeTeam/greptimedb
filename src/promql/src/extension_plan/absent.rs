@@ -49,9 +49,6 @@ use snafu::ResultExt;
 use crate::error::DeserializeSnafu;
 use crate::extension_plan::{Millisecond, resolve_column_name, serialize_column_index};
 
-/// Maximum number of rows per output batch
-const ABSENT_BATCH_SIZE: usize = 8192;
-
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct Absent {
     start: Millisecond,
@@ -390,11 +387,13 @@ impl ExecutionPlan for AbsentExec {
         context: Arc<TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
         let baseline_metric = BaselineMetrics::new(&self.metric, partition);
+        let batch_size = context.session_config().batch_size();
         let input = self.input.execute(partition, context)?;
 
         Ok(Box::pin(AbsentStream {
             end: self.end,
             step: self.step,
+            batch_size,
             time_index_column_index: self
                 .input
                 .schema()
@@ -441,6 +440,7 @@ impl DisplayAs for AbsentExec {
 pub struct AbsentStream {
     end: Millisecond,
     step: Millisecond,
+    batch_size: usize,
     time_index_column_index: usize,
     output_schema: SchemaRef,
     fake_labels: Vec<(String, String)>,
@@ -474,7 +474,7 @@ impl Stream for AbsentStream {
                         self.metric.elapsed_compute().add_elapsed(timer);
 
                         // If we have enough data for a batch, output it
-                        if self.output_timestamps.len() >= ABSENT_BATCH_SIZE {
+                        if self.output_timestamps.len() >= self.batch_size {
                             let timer = std::time::Instant::now();
                             let result = self.flush_output_batch();
                             self.metric.elapsed_compute().add_elapsed(timer);

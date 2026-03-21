@@ -836,6 +836,7 @@ impl ExecutionPlan for RangeSelectExec {
         context: Arc<TaskContext>,
     ) -> DfResult<DfSendableRecordBatchStream> {
         let baseline_metric = BaselineMetrics::new(&self.metric, partition);
+        let batch_size = context.session_config().batch_size();
         let input = self.input.execute(partition, context)?;
         let schema = input.schema();
         let time_index = schema
@@ -852,6 +853,7 @@ impl ExecutionPlan for RangeSelectExec {
                 .collect(),
         )?;
         Ok(Box::pin(RangeSelectStream {
+            batch_size,
             schema: self.schema.clone(),
             range_exec: self.range_exec.clone(),
             input,
@@ -868,6 +870,8 @@ impl ExecutionPlan for RangeSelectExec {
             metric: baseline_metric,
             schema_project: self.schema_project.clone(),
             schema_before_project: self.schema_before_project.clone(),
+            output_batch: None,
+            output_batch_offset: 0,
         }))
     }
 
@@ -881,6 +885,7 @@ impl ExecutionPlan for RangeSelectExec {
 }
 
 struct RangeSelectStream {
+    batch_size: usize,
     /// the schema of output column
     schema: SchemaRef,
     range_exec: Vec<RangeFnExec>,
@@ -907,6 +912,8 @@ struct RangeSelectStream {
     metric: BaselineMetrics,
     schema_project: Option<Vec<usize>>,
     schema_before_project: SchemaRef,
+    output_batch: Option<RecordBatch>,
+    output_batch_offset: usize,
 }
 
 #[derive(Debug)]
@@ -1149,6 +1156,35 @@ impl RangeSelectStream {
         };
         Ok(project_output)
     }
+
+    fn next_output_batch(&mut self) -> DfResult<Option<RecordBatch>> {
+        if self.output_batch.is_none() {
+            self.output_batch = Some(self.generate_output()?);
+            self.output_batch_offset = 0;
+        }
+
+        let num_rows = self.output_batch.as_ref().unwrap().num_rows();
+        if num_rows == 0 {
+            self.output_batch_offset = 0;
+            return Ok(self.output_batch.take());
+        }
+
+        if self.output_batch_offset == 0 && num_rows <= self.batch_size {
+            return Ok(self.output_batch.take());
+        }
+
+        let offset = self.output_batch_offset;
+        let len = (num_rows - offset).min(self.batch_size);
+        let batch = self.output_batch.as_ref().unwrap().slice(offset, len);
+        self.output_batch_offset += len;
+
+        if self.output_batch_offset >= num_rows {
+            self.output_batch = None;
+            self.output_batch_offset = 0;
+        }
+
+        Ok(Some(batch))
+    }
 }
 
 enum ExecutionState {
@@ -1191,13 +1227,16 @@ impl Stream for RangeSelectStream {
                     }
                 }
                 ExecutionState::ProducingOutput => {
-                    let result = self.generate_output();
+                    let result = self.next_output_batch();
                     return match result {
                         // made output
-                        Ok(batch) => {
-                            self.exec_state = ExecutionState::Done;
+                        Ok(Some(batch)) => {
+                            if self.output_batch.is_none() {
+                                self.exec_state = ExecutionState::Done;
+                            }
                             Poll::Ready(Some(Ok(batch)))
                         }
+                        Ok(None) => Poll::Ready(None),
                         // error making output
                         Err(error) => Poll::Ready(Some(Err(error))),
                     };
@@ -1313,15 +1352,15 @@ mod test {
         ))
     }
 
-    async fn do_range_select_test(
+    async fn collect_range_select_test(
         range1: Millisecond,
         range2: Millisecond,
         align: Millisecond,
         fill: Option<Fill>,
         is_float: bool,
         is_gap: bool,
-        expected: String,
-    ) {
+        batch_size: usize,
+    ) -> Vec<RecordBatch> {
         let data_type = if is_float {
             DataType::Float64
         } else {
@@ -1412,11 +1451,25 @@ mod test {
             .into(),
             range_select_exec,
         );
-        let session_context = SessionContext::default();
+        let session_context = SessionContext::new_with_config(
+            datafusion::execution::config::SessionConfig::new().with_batch_size(batch_size),
+        );
+        datafusion::physical_plan::collect(Arc::new(sort_exec), session_context.task_ctx())
+            .await
+            .unwrap()
+    }
+
+    async fn do_range_select_test(
+        range1: Millisecond,
+        range2: Millisecond,
+        align: Millisecond,
+        fill: Option<Fill>,
+        is_float: bool,
+        is_gap: bool,
+        expected: String,
+    ) {
         let result =
-            datafusion::physical_plan::collect(Arc::new(sort_exec), session_context.task_ctx())
-                .await
-                .unwrap();
+            collect_range_select_test(range1, range2, align, fill, is_float, is_gap, 8192).await;
 
         let result_literal = arrow::util::pretty::pretty_format_batches(&result)
             .unwrap()
@@ -1698,6 +1751,18 @@ mod test {
             expected,
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn range_select_respects_session_batch_size() {
+        let result =
+            collect_range_select_test(10_000, 5_000, 5_000, Some(Fill::Null), true, false, 3).await;
+
+        let row_counts = result
+            .iter()
+            .map(|batch| batch.num_rows())
+            .collect::<Vec<_>>();
+        assert_eq!(vec![3, 3, 3, 3], row_counts);
     }
 
     #[test]
