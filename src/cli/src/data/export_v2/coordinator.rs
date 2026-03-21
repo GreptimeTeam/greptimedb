@@ -69,18 +69,22 @@ pub async fn export_data(
         };
         let export_result = export_chunk(&context, chunk_id, time_range).await;
 
-        match export_result {
+        let result = match export_result {
             Ok(files) => {
                 mark_chunk_completed(manifest, idx, files);
-                manifest.touch();
-                storage.write_manifest(manifest).await?;
+                Ok(())
             }
             Err(err) => {
                 mark_chunk_failed(manifest, idx, err.to_string());
-                manifest.touch();
-                storage.write_manifest(manifest).await?;
-                return Err(err);
+                Err(err)
             }
+        };
+
+        manifest.touch();
+        storage.write_manifest(manifest).await?;
+
+        if let Err(err) = result {
+            return Err(err);
         }
     }
 
