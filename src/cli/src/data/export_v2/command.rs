@@ -28,8 +28,8 @@ use crate::Tool;
 use crate::common::ObjectStoreConfig;
 use crate::data::export_v2::coordinator::export_data;
 use crate::data::export_v2::error::{
-    CannotResumeSchemaOnlySnafu, ChunkTimeWindowRequiresBoundsSnafu, DatabaseSnafu,
-    EmptyResultSnafu, ManifestVersionMismatchSnafu, Result, UnexpectedValueTypeSnafu,
+    ChunkTimeWindowRequiresBoundsSnafu, DatabaseSnafu, EmptyResultSnafu,
+    ManifestVersionMismatchSnafu, Result, SchemaOnlyModeMismatchSnafu, UnexpectedValueTypeSnafu,
 };
 use crate::data::export_v2::extractor::SchemaExtractor;
 use crate::data::export_v2::manifest::{DataFormat, MANIFEST_VERSION, Manifest, TimeRange};
@@ -230,9 +230,12 @@ impl ExportCreate {
                     .fail();
                 }
 
-                // Cannot resume schema-only with data export
-                if manifest.schema_only && !self.config.schema_only {
-                    return CannotResumeSchemaOnlySnafu.fail();
+                if manifest.schema_only != self.config.schema_only {
+                    return SchemaOnlyModeMismatchSnafu {
+                        existing_schema_only: manifest.schema_only,
+                        requested_schema_only: self.config.schema_only,
+                    }
+                    .fail();
                 }
 
                 info!(
@@ -546,5 +549,18 @@ mod tests {
         let error = result.err().unwrap().to_string();
 
         assert!(error.contains("chunk_time_window requires both --start-time and --end-time"));
+    }
+
+    #[test]
+    fn test_schema_only_mode_mismatch_error_message() {
+        let error = crate::data::export_v2::error::SchemaOnlyModeMismatchSnafu {
+            existing_schema_only: false,
+            requested_schema_only: true,
+        }
+        .build()
+        .to_string();
+
+        assert!(error.contains("existing: false"));
+        assert!(error.contains("requested: true"));
     }
 }

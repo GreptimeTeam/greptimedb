@@ -72,9 +72,13 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Cannot resume schema-only snapshot with data export. Use --force to recreate."
+        "Cannot resume snapshot with a different schema_only mode (existing: {}, requested: {}). Use --force to recreate.",
+        existing_schema_only,
+        requested_schema_only
     ))]
-    CannotResumeSchemaOnly {
+    SchemaOnlyModeMismatch {
+        existing_schema_only: bool,
+        requested_schema_only: bool,
         #[snafu(implicit)]
         location: Location,
     },
@@ -167,7 +171,7 @@ impl ErrorExt for Error {
         match self {
             Error::InvalidUri { .. }
             | Error::UnsupportedScheme { .. }
-            | Error::CannotResumeSchemaOnly { .. }
+            | Error::SchemaOnlyModeMismatch { .. }
             | Error::ManifestVersionMismatch { .. } => StatusCode::InvalidArguments,
             Error::TimeParseInvalidFormat { .. }
             | Error::TimeParseEndBeforeStart { .. }
