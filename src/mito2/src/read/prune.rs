@@ -432,10 +432,13 @@ impl FlatPruneReader {
         };
         let primary_key = primary_key.to_vec();
         let schema = batch.schema();
-        let mut batches = vec![batch.clone()];
+        let mut batches: Vec<RecordBatch> = Vec::new();
 
         while let Some(next_batch) = self.next_prefiltered_batch()? {
             if batch_single_primary_key(&next_batch)? == Some(primary_key.as_slice()) {
+                if batches.is_empty() {
+                    batches.push(batch.clone());
+                }
                 batches.push(next_batch);
             } else {
                 self.buffered_prefiltered_batch = Some(next_batch);
@@ -443,7 +446,7 @@ impl FlatPruneReader {
             }
         }
 
-        if batches.len() > 1 {
+        if !batches.is_empty() {
             *batch = concat_batches(&schema, &batches).context(ComputeArrowSnafu)?;
         }
 

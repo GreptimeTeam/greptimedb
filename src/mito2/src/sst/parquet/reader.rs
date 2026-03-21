@@ -485,18 +485,19 @@ impl ParquetReaderBuilder {
             vec![]
         };
 
-        let primary_key_filters = self
-            .predicate
-            .as_ref()
-            .map(|predicate| {
-                predicate
-                    .exprs()
-                    .iter()
-                    .filter_map(SimpleFilterEvaluator::try_new)
-                    .collect::<Vec<_>>()
-            })
-            .filter(|filters| !filters.is_empty())
-            .map(Arc::new);
+        let primary_key_filters = self.predicate.as_ref().and_then(|predicate| {
+            let mut filters = predicate
+                .exprs()
+                .iter()
+                .filter_map(SimpleFilterEvaluator::try_new)
+                .collect::<Vec<_>>();
+            RangeBase::retain_usable_primary_key_filters(
+                read_format.metadata(),
+                self.expected_metadata.as_deref(),
+                &mut filters,
+            );
+            (!filters.is_empty()).then_some(Arc::new(filters))
+        });
 
         let dyn_filters = if let Some(predicate) = &self.predicate {
             predicate.dyn_filters().as_ref().clone()

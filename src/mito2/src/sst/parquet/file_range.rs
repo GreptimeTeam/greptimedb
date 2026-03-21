@@ -147,7 +147,7 @@ impl FileRange {
             std::slice::from_ref(curr_row_group),
             read_format,
             self.context.base.expected_metadata.clone(),
-            self.compute_skip_fields(),
+            self.context.should_skip_fields(self.row_group_idx),
         );
 
         // not costly to create a predicate here since dynamic filters are wrapped in Arc
@@ -157,22 +157,6 @@ impl FileRange {
             .first()
             .cloned()
             .unwrap_or(true) // unexpected, not skip just in case
-    }
-
-    fn compute_skip_fields(&self) -> bool {
-        match self.context.base.pre_filter_mode {
-            PreFilterMode::All => false,
-            PreFilterMode::SkipFields => true,
-            PreFilterMode::SkipFieldsOnDelete => {
-                // Check if this specific row group contains delete op
-                row_group_contains_delete(
-                    self.context.reader_builder.parquet_metadata(),
-                    self.row_group_idx,
-                    self.context.reader_builder.file_path(),
-                )
-                .unwrap_or(true)
-            }
-        }
     }
 
     /// Returns a reader to read the [FileRange].
@@ -587,6 +571,9 @@ pub(crate) struct RangeBase {
     /// Filters pushed down.
     pub(crate) filters: Vec<SimpleFilterContext>,
     /// Simple filters that can be compiled into encoded primary-key checks.
+    ///
+    /// This set is pre-validated against the SST/expected metadata and only contains
+    /// tag filters on primary-key columns (excluding partition columns).
     pub(crate) primary_key_filters: Option<Arc<Vec<SimpleFilterEvaluator>>>,
     /// Dynamic filter physical exprs.
     pub(crate) dyn_filters: Vec<Arc<DynamicFilterPhysicalExpr>>,
@@ -622,21 +609,14 @@ impl TagDecodeState {
 }
 
 impl RangeBase {
-    fn usable_primary_key_filters(&self) -> Option<Arc<Vec<SimpleFilterEvaluator>>> {
-        let Some(filters) = &self.primary_key_filters else {
-            return None;
-        };
-        let sst_metadata = self.read_format.metadata();
-        let expected_metadata = self.expected_metadata.as_deref();
-        let usable_filters = filters
-            .iter()
-            .filter(|filter| {
-                Self::is_usable_primary_key_filter(sst_metadata, expected_metadata, filter)
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-
-        (!usable_filters.is_empty()).then_some(Arc::new(usable_filters))
+    pub(crate) fn retain_usable_primary_key_filters(
+        sst_metadata: &RegionMetadataRef,
+        expected_metadata: Option<&RegionMetadata>,
+        filters: &mut Vec<SimpleFilterEvaluator>,
+    ) {
+        filters.retain(|filter| {
+            Self::is_usable_primary_key_filter(sst_metadata, expected_metadata, filter)
+        });
     }
 
     fn is_usable_primary_key_filter(
@@ -691,7 +671,11 @@ impl RangeBase {
         {
             return None;
         }
-        let filters = self.usable_primary_key_filters()?;
+        let filters = self.primary_key_filters.as_ref()?;
+        if filters.is_empty() {
+            return None;
+        }
+        let filters = Arc::clone(filters);
 
         Some(
             self.codec
@@ -1003,7 +987,7 @@ impl RangeBase {
             // Assumes the projection indices align with the input batch schema.
             let column_idx = flat_format.projected_index_by_id(filter_ctx.column_id());
             if let Some(idx) = column_idx {
-                let column = &input.columns().get(idx).unwrap();
+                let column = input.column(idx);
                 let result = filter.evaluate_array(column).context(RecordBatchSnafu)?;
                 mask = mask.bitand(&result);
             } else if filter_ctx.semantic_type() == SemanticType::Tag {
@@ -1344,15 +1328,21 @@ mod tests {
             false,
         )
         .unwrap();
-        let primary_key_filters = exprs
+        let mut primary_key_filters = exprs
             .iter()
             .filter_map(SimpleFilterEvaluator::try_new)
             .collect::<Vec<_>>();
+        RangeBase::retain_usable_primary_key_filters(
+            &metadata,
+            expected_metadata.as_deref(),
+            &mut primary_key_filters,
+        );
+        let primary_key_filters =
+            (!primary_key_filters.is_empty()).then_some(Arc::new(primary_key_filters));
 
         RangeBase {
             filters: vec![],
-            primary_key_filters: (!primary_key_filters.is_empty())
-                .then_some(Arc::new(primary_key_filters)),
+            primary_key_filters,
             dyn_filters: vec![],
             read_format,
             expected_metadata,
