@@ -15,7 +15,7 @@
 use std::fmt::Display;
 use std::sync::Arc;
 
-use datafusion::arrow::array::{Float64Array, TimestampMillisecondArray};
+use datafusion::arrow::array::{Float64Array, Float64Builder, TimestampMillisecondArray};
 use datafusion::arrow::datatypes::TimeUnit;
 use datafusion::common::DataFusionError;
 use datafusion::logical_expr::{ScalarUDF, Volatility};
@@ -94,49 +94,60 @@ impl<const IS_RATE: bool> IDelta<IS_RATE> {
             )),
         )?;
 
-        // calculation
-        let mut result_array = Vec::with_capacity(ts_range.len());
+        let ts_values = ts_range.values();
+        let ts_values = ts_values
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap()
+            .values();
+
+        let value_values = value_range.values();
+        let value_values = value_values
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
+            .values();
+
+        let mut result_builder = Float64Builder::with_capacity(ts_range.len());
 
         for index in 0..ts_range.len() {
-            let timestamps = ts_range.get(index).unwrap();
-            let timestamps = timestamps
-                .as_any()
-                .downcast_ref::<TimestampMillisecondArray>()
-                .unwrap()
-                .values();
-
-            let values = value_range.get(index).unwrap();
-            let values = values
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .unwrap()
-                .values();
+            let Some((ts_offset, len)) = ts_range.get_offset_length(index) else {
+                result_builder.append_null();
+                continue;
+            };
+            let Some((value_offset, value_len)) = value_range.get_offset_length(index) else {
+                result_builder.append_null();
+                continue;
+            };
             error::ensure(
-                timestamps.len() == values.len(),
+                len == value_len,
                 DataFusionError::Execution(format!(
                     "{}: input arrays should have the same length, found {} and {}",
                     Self::name(),
-                    timestamps.len(),
-                    values.len()
+                    len,
+                    value_len
                 )),
             )?;
-
-            let len = timestamps.len();
             if len < 2 {
-                result_array.push(None);
+                result_builder.append_null();
                 continue;
             }
 
-            // if is delta
+            let last_offset = ts_offset + len - 1;
+            let prev_offset = last_offset - 1;
+            let sampled_interval =
+                (ts_values[last_offset] - ts_values[prev_offset]) as f64 / 1000.0;
+
+            let last_value_offset = value_offset + len - 1;
+            let prev_value_offset = last_value_offset - 1;
+            let last_value = value_values[last_value_offset];
+            let prev_value = value_values[prev_value_offset];
+
             if !IS_RATE {
-                result_array.push(Some(values[len - 1] - values[len - 2]));
+                result_builder.append_value(last_value - prev_value);
                 continue;
             }
 
-            // else is rate
-            let sampled_interval = (timestamps[len - 1] - timestamps[len - 2]) as f64 / 1000.0;
-            let last_value = values[len - 1];
-            let prev_value = values[len - 2];
             let result_value = if last_value < prev_value {
                 // counter reset
                 last_value
@@ -144,10 +155,10 @@ impl<const IS_RATE: bool> IDelta<IS_RATE> {
                 last_value - prev_value
             };
 
-            result_array.push(Some(result_value / sampled_interval as f64));
+            result_builder.append_value(result_value / sampled_interval);
         }
 
-        let result = ColumnarValue::Array(Arc::new(Float64Array::from_iter(result_array)));
+        let result = ColumnarValue::Array(Arc::new(result_builder.finish()));
         Ok(result)
     }
 }

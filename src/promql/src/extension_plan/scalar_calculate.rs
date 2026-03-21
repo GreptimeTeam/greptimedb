@@ -459,7 +459,7 @@ impl ExecutionPlan for ScalarCalculateExec {
             input,
             have_multi_series: false,
             done: false,
-            batch: None,
+            batches: Vec::new(),
             tag_value: None,
         }))
     }
@@ -518,7 +518,7 @@ struct ScalarCalculateStream {
     project_index: (usize, usize),
     have_multi_series: bool,
     done: bool,
-    batch: Option<RecordBatch>,
+    batches: Vec<RecordBatch>,
     tag_value: Option<Vec<String>>,
 }
 
@@ -577,17 +577,18 @@ impl ScalarCalculateStream {
 
     fn append_batch(&mut self, input_batch: RecordBatch) -> DataFusionResult<()> {
         let ts_column = input_batch.column(self.project_index.0).clone();
-        let val_column = cast_with_options(
-            input_batch.column(self.project_index.1),
-            &DataType::Float64,
-            &CastOptions::default(),
-        )?;
+        let val_column =
+            if input_batch.column(self.project_index.1).data_type() == &DataType::Float64 {
+                input_batch.column(self.project_index.1).clone()
+            } else {
+                cast_with_options(
+                    input_batch.column(self.project_index.1),
+                    &DataType::Float64,
+                    &CastOptions::default(),
+                )?
+            };
         let input_batch = RecordBatch::try_new(self.schema.clone(), vec![ts_column, val_column])?;
-        if let Some(batch) = &self.batch {
-            self.batch = Some(concat_batches(&self.schema, vec![batch, &input_batch])?);
-        } else {
-            self.batch = Some(input_batch);
-        }
+        self.batches.push(input_batch);
         Ok(())
     }
 }
@@ -609,8 +610,14 @@ impl Stream for ScalarCalculateStream {
                 // inner is done, producing output
                 None => {
                     self.done = true;
-                    return match self.batch.take() {
-                        Some(batch) if !self.have_multi_series => {
+                    return match (!self.have_multi_series).then(|| self.batches.split_off(0)) {
+                        Some(mut batches) if !batches.is_empty() => {
+                            let batch = if batches.len() == 1 {
+                                batches.pop().unwrap()
+                            } else {
+                                let refs = batches.iter().collect::<Vec<_>>();
+                                concat_batches(&self.schema, refs)?
+                            };
                             self.metric.record_output(batch.num_rows());
                             Poll::Ready(Some(Ok(batch)))
                         }

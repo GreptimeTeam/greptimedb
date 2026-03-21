@@ -32,7 +32,7 @@
 use std::fmt::Display;
 use std::sync::Arc;
 
-use datafusion::arrow::array::{Float64Array, TimestampMillisecondArray};
+use datafusion::arrow::array::{Float64Array, Float64Builder, TimestampMillisecondArray};
 use datafusion::arrow::datatypes::TimeUnit;
 use datafusion::common::{DataFusionError, Result as DfResult};
 use datafusion::logical_expr::{ScalarUDF, Volatility};
@@ -121,7 +121,7 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
             .unwrap();
 
         // calculation
-        let mut result_array = Vec::with_capacity(ts_range.len());
+        let mut result_builder = Float64Builder::with_capacity(ts_range.len());
 
         let all_timestamps = ts_range
             .values()
@@ -144,7 +144,7 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
             let values = &all_values[offset..offset + length];
 
             if values.len() < 2 {
-                result_array.push(None);
+                result_builder.append_null();
                 continue;
             }
 
@@ -173,10 +173,10 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
                 factor /= self.range_length as f64 / 1000.0;
             }
 
-            result_array.push(Some(result_value * factor));
+            result_builder.append_value(result_value * factor);
         }
 
-        let result = ColumnarValue::Array(Arc::new(Float64Array::from_iter(result_array)));
+        let result = ColumnarValue::Array(Arc::new(result_builder.finish()));
         Ok(result)
     }
 

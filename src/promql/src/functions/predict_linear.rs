@@ -17,7 +17,7 @@
 
 use std::sync::Arc;
 
-use datafusion::arrow::array::{Float64Array, TimestampMillisecondArray};
+use datafusion::arrow::array::{Float64Array, Float64Builder, TimestampMillisecondArray};
 use datafusion::arrow::datatypes::TimeUnit;
 use datafusion::common::DataFusionError;
 use datafusion::logical_expr::{ScalarUDF, Volatility};
@@ -28,7 +28,7 @@ use datatypes::arrow::array::Array;
 use datatypes::arrow::datatypes::DataType;
 
 use crate::error;
-use crate::functions::{extract_array, linear_regression};
+use crate::functions::{extract_array, linear_regression_slice};
 use crate::range_array::RangeArray;
 
 pub struct PredictLinear;
@@ -130,68 +130,75 @@ impl PredictLinear {
                 Box::new(t_array.iter())
             }
         };
-        let mut result_array = Vec::with_capacity(ts_range.len());
+        let all_timestamps = ts_range
+            .values()
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap()
+            .values();
+        let all_values = value_range
+            .values()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        let mut result_builder = Float64Builder::with_capacity(ts_range.len());
         for (index, t) in t_iter.enumerate() {
-            let (timestamps, values) = get_ts_values(&ts_range, &value_range, index, Self::name())?;
-            let ret = predict_linear_impl(&timestamps, &values, t.unwrap());
-            result_array.push(ret);
+            match predict_linear_impl(
+                &ts_range,
+                &value_range,
+                all_timestamps,
+                all_values,
+                index,
+                t.unwrap(),
+                Self::name(),
+            )? {
+                Some(value) => result_builder.append_value(value),
+                None => result_builder.append_null(),
+            }
         }
 
-        let result = ColumnarValue::Array(Arc::new(Float64Array::from_iter(result_array)));
+        let result = ColumnarValue::Array(Arc::new(result_builder.finish()));
         Ok(result)
     }
 }
 
-fn get_ts_values(
+fn predict_linear_impl(
     ts_range: &RangeArray,
     value_range: &RangeArray,
+    all_timestamps: &[i64],
+    all_values: &Float64Array,
     index: usize,
+    t: i64,
     func_name: &str,
-) -> Result<(TimestampMillisecondArray, Float64Array), DataFusionError> {
-    let timestamps = ts_range
-        .get(index)
-        .unwrap()
-        .as_any()
-        .downcast_ref::<TimestampMillisecondArray>()
-        .unwrap()
-        .clone();
-    let values = value_range
-        .get(index)
-        .unwrap()
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .unwrap()
-        .clone();
+) -> Result<Option<f64>, DataFusionError> {
+    let (ts_offset, ts_len) = ts_range.get_offset_length(index).unwrap();
+    let (value_offset, value_len) = value_range.get_offset_length(index).unwrap();
     error::ensure(
-        timestamps.len() == values.len(),
+        ts_len == value_len,
         DataFusionError::Execution(format!(
             "{}: time and value arrays in a group should have the same length, found {} and {}",
-            func_name,
-            timestamps.len(),
-            values.len()
+            func_name, ts_len, value_len
         )),
     )?;
-    Ok((timestamps, values))
-}
-
-fn predict_linear_impl(
-    timestamps: &TimestampMillisecondArray,
-    values: &Float64Array,
-    t: i64,
-) -> Option<f64> {
-    if timestamps.len() < 2 {
-        return None;
+    if ts_len < 2 {
+        return Ok(None);
     }
 
     // last timestamp is evaluation timestamp
-    let evaluate_ts = timestamps.value(timestamps.len() - 1);
-    let (slope, intercept) = linear_regression(timestamps, values, evaluate_ts);
+    let evaluate_ts = all_timestamps[ts_offset + ts_len - 1];
+    let (slope, intercept) = linear_regression_slice(
+        all_timestamps,
+        all_values,
+        value_offset,
+        value_len,
+        evaluate_ts,
+    );
 
     if slope.is_none() || intercept.is_none() {
-        return None;
+        return Ok(None);
     }
 
-    Some(slope.unwrap() * t as f64 + intercept.unwrap())
+    Ok(Some(slope.unwrap() * t as f64 + intercept.unwrap()))
 }
 
 #[cfg(test)]

@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use datafusion::arrow::array::Float64Array;
+use datafusion::arrow::array::{Float64Array, Float64Builder};
 use datafusion::arrow::datatypes::TimeUnit;
 use datafusion::common::DataFusionError;
 use datafusion::logical_expr::{ScalarUDF, Volatility};
@@ -93,8 +93,13 @@ impl QuantileOverTime {
             )),
         )?;
 
-        // calculation
-        let mut result_array = Vec::with_capacity(ts_range.len());
+        let all_values = value_range
+            .values()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
+            .values();
+        let mut result_builder = Float64Builder::with_capacity(ts_range.len());
 
         match quantile_col {
             ColumnarValue::Scalar(quantile_scalar) => {
@@ -107,25 +112,25 @@ impl QuantileOverTime {
                 };
 
                 for index in 0..ts_range.len() {
-                    let timestamps = ts_range.get(index).unwrap();
-                    let values = value_range.get(index).unwrap();
-                    let values = values
-                        .as_any()
-                        .downcast_ref::<Float64Array>()
-                        .unwrap()
-                        .values();
+                    let (_, ts_len) = ts_range.get_offset_length(index).unwrap();
+                    let (value_offset, value_len) = value_range.get_offset_length(index).unwrap();
                     error::ensure(
-                        timestamps.len() == values.len(),
+                        ts_len == value_len,
                         DataFusionError::Execution(format!(
                             "{}: time and value arrays in a group should have the same length, found {} and {}",
                             Self::name(),
-                            timestamps.len(),
-                            values.len()
+                            ts_len,
+                            value_len
                         )),
                     )?;
 
-                    let result = quantile_impl(values, quantile);
-                    result_array.push(result);
+                    match quantile_impl(
+                        &all_values[value_offset..value_offset + value_len],
+                        quantile,
+                    ) {
+                        Some(value) => result_builder.append_value(value),
+                        None => result_builder.append_null(),
+                    }
                 }
             }
             ColumnarValue::Array(quantile_array) => {
@@ -150,20 +155,15 @@ impl QuantileOverTime {
                     )),
                 )?;
                 for index in 0..ts_range.len() {
-                    let timestamps = ts_range.get(index).unwrap();
-                    let values = value_range.get(index).unwrap();
-                    let values = values
-                        .as_any()
-                        .downcast_ref::<Float64Array>()
-                        .unwrap()
-                        .values();
+                    let (_, ts_len) = ts_range.get_offset_length(index).unwrap();
+                    let (value_offset, value_len) = value_range.get_offset_length(index).unwrap();
                     error::ensure(
-                        timestamps.len() == values.len(),
+                        ts_len == value_len,
                         DataFusionError::Execution(format!(
                             "{}: time and value arrays in a group should have the same length, found {} and {}",
                             Self::name(),
-                            timestamps.len(),
-                            values.len()
+                            ts_len,
+                            value_len
                         )),
                     )?;
                     let quantile = if quantile_array.is_null(index) {
@@ -171,13 +171,18 @@ impl QuantileOverTime {
                     } else {
                         quantile_array.value(index)
                     };
-                    let result = quantile_impl(values, quantile);
-                    result_array.push(result);
+                    match quantile_impl(
+                        &all_values[value_offset..value_offset + value_len],
+                        quantile,
+                    ) {
+                        Some(value) => result_builder.append_value(value),
+                        None => result_builder.append_null(),
+                    }
                 }
             }
         }
 
-        let result = ColumnarValue::Array(Arc::new(Float64Array::from_iter(result_array)));
+        let result = ColumnarValue::Array(Arc::new(result_builder.finish()));
         Ok(result)
     }
 }

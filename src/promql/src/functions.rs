@@ -78,6 +78,16 @@ pub(crate) fn linear_regression(
     values: &Float64Array,
     intercept_time: i64,
 ) -> (Option<f64>, Option<f64>) {
+    linear_regression_slice(times.values(), values, 0, values.len(), intercept_time)
+}
+
+pub(crate) fn linear_regression_slice(
+    times: &[i64],
+    values: &Float64Array,
+    offset: usize,
+    len: usize,
+    intercept_time: i64,
+) -> (Option<f64>, Option<f64>) {
     let mut count: f64 = 0.0;
     let mut sum_x: f64 = 0.0;
     let mut sum_y: f64 = 0.0;
@@ -89,15 +99,16 @@ pub(crate) fn linear_regression(
     let mut comp_x2: f64 = 0.0;
 
     let mut const_y = true;
-    let init_y: f64 = values.value(0);
+    let mut init_y = None;
 
-    for (i, value) in values.iter().enumerate() {
-        let time = times.value(i) as f64;
+    for (i, value) in values.iter().skip(offset).take(len).enumerate() {
+        let time = times[offset + i] as f64;
         if value.is_none() {
             continue;
         }
         let value = value.unwrap();
-        if const_y && i > 0 && value != init_y {
+        let initial = init_y.get_or_insert(value);
+        if const_y && count > 0.0 && value != *initial {
             const_y = false;
         }
         count += 1.0;
@@ -113,6 +124,7 @@ pub(crate) fn linear_regression(
     }
 
     if const_y {
+        let init_y = init_y.unwrap();
         if !init_y.is_finite() {
             return (None, None);
         }

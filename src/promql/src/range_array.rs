@@ -76,13 +76,19 @@ impl RangeArray {
     }
 
     pub fn try_new(dict: DictionaryArray<Int64Type>) -> Result<Self> {
-        let ranges_iter = dict
-            .keys()
-            .iter()
-            .map(|compound_key| compound_key.map(unpack))
-            .collect::<Option<Vec<_>>>()
-            .context(EmptyRangeSnafu)?;
-        Self::check_ranges(dict.values().len(), ranges_iter)?;
+        let value_len = dict.values().len();
+        for compound_key in dict.keys().iter() {
+            let compound_key = compound_key.context(EmptyRangeSnafu)?;
+            let (offset, length) = unpack(compound_key);
+            ensure!(
+                offset as usize + length as usize <= value_len,
+                IllegalRangeSnafu {
+                    offset,
+                    length,
+                    len: value_len
+                }
+            );
+        }
 
         Ok(Self { array: dict })
     }

@@ -17,7 +17,7 @@
 
 use std::sync::Arc;
 
-use datafusion::arrow::array::Float64Array;
+use datafusion::arrow::array::{Float64Array, Float64Builder};
 use datafusion::arrow::datatypes::TimeUnit;
 use datafusion::common::DataFusionError;
 use datafusion::logical_expr::{ScalarUDF, Volatility};
@@ -177,38 +177,43 @@ impl DoubleExponentialSmoothing {
             )),
         )?;
 
-        // calculation
-        let mut result_array = Vec::with_capacity(ts_range.len());
+        let all_values = value_range
+            .values()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
+            .values();
+        let mut result_builder = Float64Builder::with_capacity(ts_range.len());
 
         let sf_iter = FactorIterator::new(sf_col, num_rows);
         let tf_iter = FactorIterator::new(tf_col, num_rows);
 
-        let iter = (0..num_rows)
-            .map(|i| (ts_range.get(i), value_range.get(i)))
-            .zip(sf_iter.zip(tf_iter));
+        let iter = (0..num_rows).zip(sf_iter.zip(tf_iter));
 
-        for ((timestamps, values), (sf, tf)) in iter {
-            let timestamps = timestamps.unwrap();
-            let values = values.unwrap();
-            let values = values
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .unwrap()
-                .values();
+        for (index, (sf, tf)) in iter {
+            let (_, ts_len) = ts_range.get_offset_length(index).unwrap();
+            let (value_offset, value_len) = value_range.get_offset_length(index).unwrap();
             error::ensure(
-                timestamps.len() == values.len(),
+                ts_len == value_len,
                 DataFusionError::Execution(format!(
                     "{}: input arrays should have the same length, found {} and {}",
                     Self::name(),
-                    timestamps.len(),
-                    values.len()
+                    ts_len,
+                    value_len
                 )),
             )?;
 
-            result_array.push(double_exponential_smoothing_impl(values, sf, tf));
+            match double_exponential_smoothing_impl(
+                &all_values[value_offset..value_offset + value_len],
+                sf,
+                tf,
+            ) {
+                Some(value) => result_builder.append_value(value),
+                None => result_builder.append_null(),
+            }
         }
 
-        let result = ColumnarValue::Array(Arc::new(Float64Array::from_iter(result_array)));
+        let result = ColumnarValue::Array(Arc::new(result_builder.finish()));
         Ok(result)
     }
 }
@@ -239,8 +244,6 @@ fn double_exponential_smoothing_impl(values: &[f64], sf: f64, tf: f64) -> Option
         // Can't do the smoothing operation with less than two points.
         return Some(f64::NAN);
     }
-
-    let values = values.to_vec();
 
     let mut s0 = 0.0;
     let mut s1 = values[0];
