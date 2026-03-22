@@ -314,6 +314,85 @@ SHOW CREATE DATABASE alter_database;
 |                | )                                            |
 +----------------+----------------------------------------------+
 
+-- Test sst_format option
+ALTER DATABASE alter_database SET 'sst_format'='flat';
+
+Affected Rows: 0
+
+SHOW CREATE DATABASE alter_database;
+
++----------------+----------------------------------------------+
+| Database       | Create Database                              |
++----------------+----------------------------------------------+
+| alter_database | CREATE DATABASE IF NOT EXISTS alter_database |
+|                | WITH(                                        |
+|                |   'compaction.twcs.time_window' = '30m',     |
+|                |   'compaction.type' = 'twcs',                |
+|                |   sst_format = 'flat'                        |
+|                | )                                            |
++----------------+----------------------------------------------+
+
+USE alter_database;
+
+Affected Rows: 0
+
+CREATE TABLE monitor(ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE monitor;
+
++---------+----------------------------------------+
+| Table   | Create Table                           |
++---------+----------------------------------------+
+| monitor | CREATE TABLE IF NOT EXISTS "monitor" ( |
+|         |   "ts" TIMESTAMP(3) NOT NULL,          |
+|         |   TIME INDEX ("ts")                    |
+|         | )                                      |
+|         |                                        |
+|         | ENGINE=mito                            |
+|         | WITH(                                  |
+|         |   sst_format = 'flat'                  |
+|         | )                                      |
++---------+----------------------------------------+
+
+USE public;
+
+Affected Rows: 0
+
+ALTER DATABASE alter_database SET 'sst_format'='primary_key';
+
+Affected Rows: 0
+
+SHOW CREATE DATABASE alter_database;
+
++----------------+----------------------------------------------+
+| Database       | Create Database                              |
++----------------+----------------------------------------------+
+| alter_database | CREATE DATABASE IF NOT EXISTS alter_database |
+|                | WITH(                                        |
+|                |   'compaction.twcs.time_window' = '30m',     |
+|                |   'compaction.type' = 'twcs',                |
+|                |   sst_format = 'primary_key'                 |
+|                | )                                            |
++----------------+----------------------------------------------+
+
+ALTER DATABASE alter_database UNSET 'sst_format';
+
+Affected Rows: 0
+
+SHOW CREATE DATABASE alter_database;
+
++----------------+----------------------------------------------+
+| Database       | Create Database                              |
++----------------+----------------------------------------------+
+| alter_database | CREATE DATABASE IF NOT EXISTS alter_database |
+|                | WITH(                                        |
+|                |   'compaction.twcs.time_window' = '30m',     |
+|                |   'compaction.type' = 'twcs'                 |
+|                | )                                            |
++----------------+----------------------------------------------+
+
 DROP DATABASE alter_database;
 
 Affected Rows: 0
