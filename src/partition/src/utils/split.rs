@@ -215,6 +215,18 @@ fn is_empty_and_conjunction(expr: &PartitionExpr) -> bool {
         }
     }
 
+    if uppers.iter().any(|(col, upper)| {
+        !lowers.contains_key(col) && is_strict_uint_lower_than_domain_min(upper)
+    }) {
+        return true;
+    }
+
+    if lowers.iter().any(|(col, lower)| {
+        !uppers.contains_key(col) && is_strict_uint_greater_than_domain_max(lower)
+    }) {
+        return true;
+    }
+
     // Check for contradiction between collected lower/upper bounds per column.
     lowers.into_iter().any(|(col, lower)| {
         let Some(upper) = uppers.get(&col) else {
@@ -223,7 +235,15 @@ fn is_empty_and_conjunction(expr: &PartitionExpr) -> bool {
 
         match lower.value.partial_cmp(&upper.value) {
             Some(std::cmp::Ordering::Greater) => true,
-            Some(std::cmp::Ordering::Equal) => !lower.inclusive || !upper.inclusive,
+            Some(std::cmp::Ordering::Equal) => {
+                if !lower.inclusive || !upper.inclusive {
+                    true
+                } else {
+                    not_equals
+                        .get(&col)
+                        .is_some_and(|excluded| excluded.contains(&lower.value))
+                }
+            }
             Some(std::cmp::Ordering::Less) => {
                 match (
                     discrete_value_index(&lower.value),
@@ -266,6 +286,34 @@ fn discrete_value_index(v: &Value) -> Option<i128> {
         Value::Date(x) => Some(x.val() as i128),
         Value::Timestamp(x) => Some((x.value() as i128) * (x.unit().factor() as i128)),
         _ => None,
+    }
+}
+
+fn is_strict_uint_lower_than_domain_min(bound: &UpperBound) -> bool {
+    if bound.inclusive {
+        return false;
+    }
+
+    match &bound.value {
+        Value::UInt8(v) => *v == 0,
+        Value::UInt16(v) => *v == 0,
+        Value::UInt32(v) => *v == 0,
+        Value::UInt64(v) => *v == 0,
+        _ => false,
+    }
+}
+
+fn is_strict_uint_greater_than_domain_max(bound: &LowerBound) -> bool {
+    if bound.inclusive {
+        return false;
+    }
+
+    match &bound.value {
+        Value::UInt8(v) => *v == u8::MAX,
+        Value::UInt16(v) => *v == u16::MAX,
+        Value::UInt32(v) => *v == u32::MAX,
+        Value::UInt64(v) => *v == u64::MAX,
+        _ => false,
     }
 }
 
@@ -790,6 +838,58 @@ mod tests {
         let split = col("d").lt_eq(Value::Date(4.into()));
 
         // right = (d < 5) AND (d > 4) has no date solution, should degrade.
+        let result = split_partition_expr(base, split);
+        assert_eq!(result.unwrap_err(), ExprSplitDegradeReason::EmptyBranch);
+    }
+
+    #[test]
+    fn test_split_degrade_on_singleton_bounds_excluded_by_negated_eq() {
+        // R: a >= 5 AND a <= 5
+        let base = col("a")
+            .gt_eq(Value::Int64(5))
+            .and(col("a").lt_eq(Value::Int64(5)));
+        // S: a <> 5
+        let split = col("a").not_eq(Value::Int64(5));
+
+        // left = (a >= 5 AND a <= 5) AND (a <> 5) is unsatisfiable, should degrade.
+        let result = split_partition_expr(base, split);
+        assert_eq!(result.unwrap_err(), ExprSplitDegradeReason::EmptyBranch);
+    }
+
+    #[test]
+    fn test_split_degrade_on_singleton_bounds_excluded_by_eq() {
+        // R: a >= 5 AND a <= 5
+        let base = col("a")
+            .gt_eq(Value::Int64(5))
+            .and(col("a").lt_eq(Value::Int64(5)));
+        // S: a = 5
+        let split = col("a").eq(Value::Int64(5));
+
+        // right = (a >= 5 AND a <= 5) AND (a <> 5) is unsatisfiable, should degrade.
+        let result = split_partition_expr(base, split);
+        assert_eq!(result.unwrap_err(), ExprSplitDegradeReason::EmptyBranch);
+    }
+
+    #[test]
+    fn test_split_degrade_on_uint_one_sided_impossible_upper_bound() {
+        // R: a < 10 (UInt64 domain)
+        let base = col("a").lt(Value::UInt64(10));
+        // S: a < 0 (impossible on UInt64)
+        let split = col("a").lt(Value::UInt64(0));
+
+        // left = (a < 10) AND (a < 0) is unsatisfiable on UInt64, should degrade.
+        let result = split_partition_expr(base, split);
+        assert_eq!(result.unwrap_err(), ExprSplitDegradeReason::EmptyBranch);
+    }
+
+    #[test]
+    fn test_split_degrade_on_uint_one_sided_impossible_lower_bound() {
+        // R: a < 10 (UInt64 domain)
+        let base = col("a").lt(Value::UInt64(10));
+        // S: a > u64::MAX (impossible on UInt64)
+        let split = col("a").gt(Value::UInt64(u64::MAX));
+
+        // left = (a < 10) AND (a > u64::MAX) is unsatisfiable on UInt64, should degrade.
         let result = split_partition_expr(base, split);
         assert_eq!(result.unwrap_err(), ExprSplitDegradeReason::EmptyBranch);
     }
