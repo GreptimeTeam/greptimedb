@@ -486,6 +486,7 @@ mod tests {
     use common_time::Timestamp;
     use common_time::range::TimestampRange;
     use common_time::timestamp::TimeUnit;
+    use datafusion_common::ScalarValue;
     use datafusion_expr::{Expr, col, lit};
     use smallvec::smallvec;
     use store_api::storage::FileId;
@@ -552,12 +553,18 @@ mod tests {
         (stream_ctx, partition_range)
     }
 
+    /// Helper to create a timestamp millisecond literal.
+    fn ts_lit(val: i64) -> Expr {
+        lit(ScalarValue::TimestampMillisecond(Some(val), None))
+    }
+
     #[tokio::test]
     async fn strips_time_only_filters_when_query_covers_partition_range() {
         let (stream_ctx, part_range) = new_stream_context(
             vec![
-                col("ts").gt_eq(lit(1000)),
-                col("ts").lt(lit(2001)),
+                col("ts").gt_eq(ts_lit(1000)),
+                col("ts").lt(ts_lit(2001)),
+                col("ts").is_not_null(),
                 col("k0").eq(lit("foo")),
             ],
             TimestampRange::with_unit(1000, 2002, TimeUnit::Millisecond),
@@ -570,18 +577,21 @@ mod tests {
 
         let key = build_range_cache_key(&stream_ctx, &part_range).unwrap();
 
-        // Time filters should be cleared when query covers partition range.
+        // Range-reducible time filters should be cleared when query covers partition range.
         assert!(key.scan.time_filters().is_empty());
-        assert_eq!(
-            key.scan.filters(),
-            [col("k0").eq(lit("foo")).to_string()].as_slice()
-        );
+        // Non-range time predicates stay in filters.
+        let mut expected_filters = [
+            col("k0").eq(lit("foo")).to_string(),
+            col("ts").is_not_null().to_string(),
+        ];
+        expected_filters.sort_unstable();
+        assert_eq!(key.scan.filters(), expected_filters.as_slice());
     }
 
     #[tokio::test]
     async fn preserves_time_filters_when_query_does_not_cover_partition_range() {
         let (stream_ctx, part_range) = new_stream_context(
-            vec![col("ts").gt_eq(lit(1000)), col("k0").eq(lit("foo"))],
+            vec![col("ts").gt_eq(ts_lit(1000)), col("k0").eq(lit("foo"))],
             TimestampRange::with_unit(1000, 1500, TimeUnit::Millisecond),
             (
                 Timestamp::new_millisecond(1000),
@@ -595,7 +605,7 @@ mod tests {
         // Time filters should be preserved when query does not cover partition range.
         assert_eq!(
             key.scan.time_filters(),
-            [col("ts").gt_eq(lit(1000)).to_string()].as_slice()
+            [col("ts").gt_eq(ts_lit(1000)).to_string()].as_slice()
         );
         assert_eq!(
             key.scan.filters(),
@@ -606,7 +616,11 @@ mod tests {
     #[tokio::test]
     async fn strips_time_only_filters_when_query_has_no_time_range_limit() {
         let (stream_ctx, part_range) = new_stream_context(
-            vec![col("ts").gt_eq(lit(1000)), col("k0").eq(lit("foo"))],
+            vec![
+                col("ts").gt_eq(ts_lit(1000)),
+                col("ts").is_not_null(),
+                col("k0").eq(lit("foo")),
+            ],
             None,
             (
                 Timestamp::new_millisecond(1000),
@@ -617,12 +631,15 @@ mod tests {
 
         let key = build_range_cache_key(&stream_ctx, &part_range).unwrap();
 
-        // Time filters should be cleared when query has no time range limit.
+        // Range-reducible time filters should be cleared when query has no time range limit.
         assert!(key.scan.time_filters().is_empty());
-        assert_eq!(
-            key.scan.filters(),
-            [col("k0").eq(lit("foo")).to_string()].as_slice()
-        );
+        // Non-range time predicates stay in filters.
+        let mut expected_filters = [
+            col("k0").eq(lit("foo")).to_string(),
+            col("ts").is_not_null().to_string(),
+        ];
+        expected_filters.sort_unstable();
+        assert_eq!(key.scan.filters(), expected_filters.as_slice());
     }
 
     #[test]

@@ -40,7 +40,7 @@ use store_api::region_engine::{PartitionRange, RegionScannerRef};
 use store_api::storage::{
     ColumnId, RegionId, ScanRequest, SequenceRange, TimeSeriesDistribution, TimeSeriesRowSelector,
 };
-use table::predicate::{Predicate, build_time_range_predicate};
+use table::predicate::{Predicate, build_time_range_predicate, extract_time_range_from_expr};
 use tokio::sync::{Semaphore, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -1438,7 +1438,14 @@ pub(crate) fn build_scan_fingerprint(input: &ScanInput) -> Option<ScanRequestFin
         .map(|col| col.column_schema.name.as_str())
         .collect();
 
-    let time_index_name = metadata.time_index_column().column_schema.name.clone();
+    let time_index = metadata.time_index_column();
+    let time_index_name = time_index.column_schema.name.clone();
+    let ts_col_unit = time_index
+        .column_schema
+        .data_type
+        .as_timestamp()
+        .expect("Time index must have timestamp-compatible type")
+        .unit();
 
     let exprs = input
         .predicate_group()
@@ -1463,9 +1470,16 @@ pub(crate) fn build_scan_fingerprint(input: &ScanInput) -> Option<ScanRequestFin
             _ => false,
         };
 
-        if is_time_only {
+        if is_time_only
+            && extract_time_range_from_expr(&time_index_name, ts_col_unit, expr).is_some()
+        {
+            // Range-reducible time predicates can be safely dropped from the
+            // cache key when the query time range covers the partition range.
             time_filters.push(expr.to_string());
         } else {
+            // Non-time filters and non-range time predicates (those that
+            // extract_time_range_from_expr cannot convert to a TimestampRange)
+            // always stay in the cache key.
             filters.push(expr.to_string());
         }
     }
