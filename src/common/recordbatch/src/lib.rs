@@ -673,6 +673,14 @@ impl MemoryTrackedStream {
     }
 
     fn enter_waiting(&mut self, batch: RecordBatch, additional: usize) {
+        debug_assert!(
+            self.waiting.is_none(),
+            "enter_waiting should only be called from the ready state"
+        );
+        debug_assert!(
+            self.tracker.is_some(),
+            "enter_waiting requires a tracker in the ready state"
+        );
         let tracker = self.tracker.take().unwrap();
         self.waiting = Some(Self::start_waiting(tracker, batch, additional));
     }
