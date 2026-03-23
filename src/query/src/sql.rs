@@ -216,9 +216,10 @@ fn replace_column_in_expr(expr: &mut sqlparser::ast::Expr, from_column: &str, to
     let _ = visit_expressions_mut(expr, |e| {
         match e {
             sqlparser::ast::Expr::Identifier(ident)
-                if ident.value.eq_ignore_ascii_case(from_column) => {
-                    ident.value = to_column.to_string();
-                }
+                if ident.value.eq_ignore_ascii_case(from_column) =>
+            {
+                ident.value = to_column.to_string();
+            }
             sqlparser::ast::Expr::CompoundIdentifier(idents) => {
                 if let Some(last) = idents.last_mut()
                     && last.value.eq_ignore_ascii_case(from_column)

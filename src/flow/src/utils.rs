@@ -408,7 +408,9 @@ impl Arrangement {
     pub fn get_next_update_time(&self, now: &Timestamp) -> Option<Timestamp> {
         // iter over batches that only have updates of `timestamp>now` and find the first non empty batch, then get the minimum timestamp in that batch
         for (_ts, batch) in self.spine.range((Bound::Excluded(now), Bound::Unbounded)) {
-            let min_ts = batch.values().flat_map(|v| v.iter().map(|(_, ts, _)| *ts).min())
+            let min_ts = batch
+                .values()
+                .flat_map(|v| v.iter().map(|(_, ts, _)| *ts).min())
                 .min();
 
             if min_ts.is_some() {

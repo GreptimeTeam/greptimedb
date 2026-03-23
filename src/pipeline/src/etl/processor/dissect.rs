@@ -30,8 +30,8 @@ use crate::error::{
 };
 use crate::etl::field::Fields;
 use crate::etl::processor::{
+    FIELD_NAME, FIELDS_NAME, IGNORE_MISSING_NAME, PATTERN_NAME, PATTERNS_NAME, Processor,
     yaml_bool, yaml_new_field, yaml_new_fields, yaml_parse_string, yaml_parse_strings, yaml_string,
-    Processor, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME, PATTERNS_NAME, PATTERN_NAME,
 };
 
 pub(crate) const PROCESSOR_DISSECT: &str = "dissect";

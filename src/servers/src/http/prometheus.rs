@@ -1119,15 +1119,17 @@ fn collect_metric_names(expr: &PromqlExpr, metric_names: &mut HashSet<String>) {
         PromqlExpr::Aggregate(AggregateExpr { modifier, expr, .. }) => {
             match modifier {
                 Some(LabelModifier::Include(labels))
-                    if !labels.labels.contains(&METRIC_NAME.to_string()) => {
-                        metric_names.clear();
-                        return;
-                    }
+                    if !labels.labels.contains(&METRIC_NAME.to_string()) =>
+                {
+                    metric_names.clear();
+                    return;
+                }
                 Some(LabelModifier::Exclude(labels))
-                    if labels.labels.contains(&METRIC_NAME.to_string()) => {
-                        metric_names.clear();
-                        return;
-                    }
+                    if labels.labels.contains(&METRIC_NAME.to_string()) =>
+                {
+                    metric_names.clear();
+                    return;
+                }
                 _ => {}
             }
             collect_metric_names(expr, metric_names)

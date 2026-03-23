@@ -614,9 +614,7 @@ async fn find_dynamic_options(
     region_options: &crate::region::options::RegionOptions,
     schema_metadata_manager: &SchemaMetadataManagerRef,
 ) -> Result<(crate::region::options::CompactionOptions, TimeToLive)> {
-    if let (true, Some(ttl)) =
-        (region_options.compaction_override, region_options.ttl)
-    {
+    if let (true, Some(ttl)) = (region_options.compaction_override, region_options.ttl) {
         debug!(
             "Use region options directly for table {}: compaction={:?}, ttl={:?}",
             table_id, region_options.compaction, region_options.ttl

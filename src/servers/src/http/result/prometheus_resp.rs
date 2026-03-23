@@ -205,9 +205,10 @@ impl PrometheusJsonResponse {
         for (i, column) in batches.schema().column_schemas().iter().enumerate() {
             match column.data_type {
                 ConcreteDataType::Timestamp(datatypes::types::TimestampType::Millisecond(_))
-                    if timestamp_column_index.is_none() => {
-                        timestamp_column_index = Some(i);
-                    }
+                    if timestamp_column_index.is_none() =>
+                {
+                    timestamp_column_index = Some(i);
+                }
                 // Treat all value types as field
                 ConcreteDataType::Float32(_)
                 | ConcreteDataType::Float64(_)
@@ -219,9 +220,10 @@ impl PrometheusJsonResponse {
                 | ConcreteDataType::UInt16(_)
                 | ConcreteDataType::UInt32(_)
                 | ConcreteDataType::UInt64(_)
-                    if first_field_column_index.is_none() => {
-                        first_field_column_index = Some(i);
-                    }
+                    if first_field_column_index.is_none() =>
+                {
+                    first_field_column_index = Some(i);
+                }
                 ConcreteDataType::String(_) => {
                     tag_column_indices.push(i);
                     num_label_columns += 1;

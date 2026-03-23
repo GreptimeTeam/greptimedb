@@ -380,9 +380,8 @@ impl PoisonStore for KvStateStore {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches;
-    use std::env;
     use std::sync::Arc;
+    use std::{assert_matches, env};
 
     use common_procedure::store::state_store::KeyValue;
     use common_telemetry::info;

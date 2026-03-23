@@ -14,7 +14,6 @@
 
 //! Common traits and structures for the procedure framework.
 
-
 pub mod error;
 pub mod event;
 pub mod local;

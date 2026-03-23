@@ -12,10 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::assert_matches;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::vec;
+use std::{assert_matches, vec};
 
 use common_test_util::find_workspace_path;
 use datafusion::assert_batches_eq;
