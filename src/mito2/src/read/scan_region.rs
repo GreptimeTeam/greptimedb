@@ -1870,6 +1870,7 @@ mod tests {
     use std::sync::Arc;
 
     use datafusion::physical_plan::expressions::lit as physical_lit;
+    use datafusion_common::ScalarValue;
     use datafusion_expr::{col, lit};
     use datatypes::value::Value;
     use partition::expr::col as partition_col;
@@ -2056,13 +2057,18 @@ mod tests {
         assert!(scan_region.use_flat_format());
     }
 
+    /// Helper to create a timestamp millisecond literal.
+    fn ts_lit(val: i64) -> datafusion_expr::Expr {
+        lit(ScalarValue::TimestampMillisecond(Some(val), None))
+    }
+
     #[tokio::test]
     async fn test_build_scan_fingerprint_for_eligible_scan() {
         let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
         let input = new_scan_input(
             metadata.clone(),
             vec![
-                col("ts").gt_eq(lit(1000)),
+                col("ts").gt_eq(ts_lit(1000)),
                 col("k0").eq(lit("foo")),
                 col("v0").gt(lit(1)),
             ],
@@ -2092,7 +2098,7 @@ mod tests {
                 col("k0").eq(lit("foo")).to_string(),
                 col("v0").gt(lit(1)).to_string(),
             ],
-            time_filters: vec![col("ts").gt_eq(lit(1000)).to_string()],
+            time_filters: vec![col("ts").gt_eq(ts_lit(1000)).to_string()],
             series_row_selector: Some(TimeSeriesRowSelector::LastRow),
             append_mode: false,
             filter_deleted: false,
