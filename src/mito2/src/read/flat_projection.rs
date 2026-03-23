@@ -265,20 +265,11 @@ impl FlatProjectionMapper {
             if let ArrowDataType::Dictionary(_key_type, value_type) = array.data_type() {
                 // When a string dictionary column contains only a single value, reuse a cached
                 // repeated vector to avoid repeatedly expanding the dictionary.
-                if matches!(
+                if let Some(dict_array) = single_value_string_dictionary(
+                    &array,
+                    &self.output_schema.column_schemas()[output_idx].data_type,
                     value_type.as_ref(),
-                    ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 | ArrowDataType::Utf8View
-                ) && self.output_schema.column_schemas()[output_idx]
-                    .data_type
-                    .is_string()
-                    && let Some(dict_array) = array
-                        .as_any()
-                        .downcast_ref::<datatypes::arrow::array::DictionaryArray<
-                            datatypes::arrow::datatypes::UInt32Type,
-                        >>()
-                    && dict_array.values().len() == 1
-                    && dict_array.null_count() == 0
-                {
+                ) {
                     let dict_values = dict_array.values();
                     let value = if dict_values.is_null(0) {
                         Value::Null
@@ -334,6 +325,28 @@ impl FlatProjectionMapper {
         }
         Ok(columns)
     }
+}
+
+fn single_value_string_dictionary<'a>(
+    array: &'a Arc<dyn Array>,
+    output_type: &ConcreteDataType,
+    value_type: &ArrowDataType,
+) -> Option<&'a datatypes::arrow::array::DictionaryArray<datatypes::arrow::datatypes::UInt32Type>> {
+    if !matches!(
+        value_type,
+        ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 | ArrowDataType::Utf8View
+    ) || !output_type.is_string()
+    {
+        return None;
+    }
+
+    let dict_array = array
+        .as_any()
+        .downcast_ref::<datatypes::arrow::array::DictionaryArray<
+            datatypes::arrow::datatypes::UInt32Type,
+        >>()?;
+
+    (dict_array.values().len() == 1 && dict_array.null_count() == 0).then_some(dict_array)
 }
 
 /// Returns ids and datatypes of columns of the output batch after applying the `projection`.
