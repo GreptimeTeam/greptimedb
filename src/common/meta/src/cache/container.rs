@@ -476,7 +476,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_get_latest_by_ref_returns_fresh_value_after_invalidate() {
+    async fn test_get_by_ref_returns_fresh_value_after_invalidate() {
         let cache: Cache<String, String> = CacheBuilder::new(128).build();
         let counter = Arc::new(AtomicI32::new(0));
         let moved_counter = counter.clone();
