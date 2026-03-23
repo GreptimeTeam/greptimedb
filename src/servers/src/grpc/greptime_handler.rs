@@ -30,7 +30,7 @@ use common_runtime::Runtime;
 use common_runtime::runtime::RuntimeTrait;
 use common_session::ReadPreference;
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
-use common_telemetry::{debug, error, tracing, warn};
+use common_telemetry::{debug, error, tracing};
 use common_time::timezone::parse_timezone;
 use futures_util::StreamExt;
 use session::context::{Channel, QueryContextBuilder, QueryContextRef};
