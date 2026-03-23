@@ -200,7 +200,7 @@ pub(crate) fn quantile_impl(values: &[f64], quantile: f64) -> Option<f64> {
     let length = values.len();
     let rank = quantile * (length - 1) as f64;
 
-    let lower_index = 0.max(rank.floor() as usize);
+    let lower_index = rank.floor() as usize;
     let upper_index = (length - 1).min(lower_index + 1);
     let weight = rank - rank.floor();
 

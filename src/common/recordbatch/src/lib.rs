@@ -701,19 +701,11 @@ impl QueryMemoryTracker {
                     "{} requested, {} used globally ({}%), {} used by this stream (privileged: {}), effective limit: {} ({}%), hard limit: {}",
                     ReadableSize(additional as u64),
                     ReadableSize(current as u64),
-                    if self.limit > 0 {
-                        current * 100 / self.limit
-                    } else {
-                        0
-                    },
+                    (current * 100).checked_div(self.limit).unwrap_or(0),
                     ReadableSize(stream_tracked as u64),
                     is_privileged,
                     ReadableSize(effective_limit as u64),
-                    if self.limit > 0 {
-                        effective_limit * 100 / self.limit
-                    } else {
-                        0
-                    },
+                    (effective_limit * 100).checked_div(self.limit).unwrap_or(0),
                     ReadableSize(self.limit as u64)
                 );
                 error::ExceedMemoryLimitSnafu { msg }.fail()

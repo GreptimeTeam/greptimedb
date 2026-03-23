@@ -19,7 +19,7 @@ pub mod datanode_handler;
 pub mod flownode_handler;
 pub mod region_metadata;
 
-use std::assert_matches::assert_matches;
+use std::assert_matches;
 use std::collections::HashMap;
 
 use api::v1::meta::Partition;

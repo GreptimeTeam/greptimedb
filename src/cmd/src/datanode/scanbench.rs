@@ -662,7 +662,7 @@ impl ScanbenchCommand {
 
                 // Sort ranges within each partition by start time ascending
                 for partition in &mut partitions {
-                    partition.sort_by(|a, b| a.start.cmp(&b.start));
+                    partition.sort_by_key(|a| a.start);
                 }
 
                 scanner

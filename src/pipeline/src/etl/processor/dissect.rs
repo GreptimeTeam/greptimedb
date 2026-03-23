@@ -30,8 +30,8 @@ use crate::error::{
 };
 use crate::etl::field::Fields;
 use crate::etl::processor::{
-    FIELD_NAME, FIELDS_NAME, IGNORE_MISSING_NAME, PATTERN_NAME, PATTERNS_NAME, Processor,
     yaml_bool, yaml_new_field, yaml_new_fields, yaml_parse_string, yaml_parse_strings, yaml_string,
+    Processor, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME, PATTERNS_NAME, PATTERN_NAME,
 };
 
 pub(crate) const PROCESSOR_DISSECT: &str = "dissect";
@@ -527,7 +527,7 @@ impl DissectProcessor {
             };
 
             for (name, mut values) in appends {
-                values.sort_by(|a, b| a.1.cmp(&b.1));
+                values.sort_by_key(|a| a.1);
                 let value = values.into_iter().map(|(a, _)| a).join(sep);
                 map.push((name, VrlValue::Bytes(Bytes::from(value))));
             }

@@ -167,7 +167,7 @@ impl TestEnv {
             primary_key: vec![],
             options: [(PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new())]
                 .into_iter()
-                .chain(options.into_iter())
+                .chain(options)
                 .collect(),
             table_dir: table_dir.to_string(),
             path_type: PathType::Bare, // Use Bare path type for engine regions

@@ -514,8 +514,7 @@ async fn test_prepare_all_type(
     connection: &mut Conn,
 ) {
     let mut column_index = 0;
-    let mut stmt_id = 1;
-    for schema in column_schemas {
+    for (stmt_id, schema) in (1..).zip(column_schemas) {
         let query = format!(
             "SELECT {} FROM all_datatypes WHERE {} = ?",
             schema.name, schema.name
@@ -523,7 +522,6 @@ async fn test_prepare_all_type(
         let statement = connection.prep(query).await;
         let statement = statement.unwrap();
         assert_eq!(stmt_id, statement.id());
-        stmt_id += 1;
 
         let vector_ref = columns.get(column_index).unwrap();
         for vector_index in 0..vector_ref.len() {

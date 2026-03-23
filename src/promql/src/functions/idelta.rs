@@ -144,7 +144,7 @@ impl<const IS_RATE: bool> IDelta<IS_RATE> {
                 last_value - prev_value
             };
 
-            result_array.push(Some(result_value / sampled_interval as f64));
+            result_array.push(Some(result_value / sampled_interval));
         }
 
         let result = ColumnarValue::Array(Arc::new(Float64Array::from_iter(result_array)));

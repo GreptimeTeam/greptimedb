@@ -674,10 +674,8 @@ fn convert_param_value_to_string(param: &ParamValue) -> String {
 
 fn replace_params(params: Vec<String>, query: String) -> String {
     let mut query = query;
-    let mut index = 1;
-    for param in params {
+    for (index, param) in (1..).zip(params) {
         query = query.replace(&format_placeholder(index), &param);
-        index += 1;
     }
     query
 }

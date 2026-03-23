@@ -380,7 +380,7 @@ impl PoisonStore for KvStateStore {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
     use std::env;
     use std::sync::Arc;
 

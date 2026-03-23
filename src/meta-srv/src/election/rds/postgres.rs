@@ -828,7 +828,7 @@ impl PgElection {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
     use std::env;
 
     use common_meta::maybe_skip_postgres_integration_test;

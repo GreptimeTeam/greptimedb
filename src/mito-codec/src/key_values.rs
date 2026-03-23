@@ -18,11 +18,11 @@ use api::v1::{ColumnSchema, Mutation, OpType, Row, Rows};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::ValueRef;
 use memcomparable::Deserializer;
-use store_api::codec::{PrimaryKeyEncoding, infer_primary_key_encoding_from_hint};
+use store_api::codec::{infer_primary_key_encoding_from_hint, PrimaryKeyEncoding};
 use store_api::metadata::RegionMetadata;
 use store_api::storage::SequenceNumber;
 
-use crate::row_converter::{COLUMN_ID_ENCODE_SIZE, SortField};
+use crate::row_converter::{SortField, COLUMN_ID_ENCODE_SIZE};
 
 /// Key value view of a mutation.
 #[derive(Debug)]
@@ -360,7 +360,7 @@ mod tests {
     use api::v1::{self, ColumnDataType, SemanticType};
 
     use super::*;
-    use crate::test_util::{TestRegionMetadataBuilder, i64_value};
+    use crate::test_util::{i64_value, TestRegionMetadataBuilder};
 
     const TS_NAME: &str = "ts";
     const START_SEQ: SequenceNumber = 100;
@@ -431,11 +431,9 @@ mod tests {
         values: &[Option<i64>],
     ) {
         assert_eq!(num_rows, kvs.num_rows());
-        let mut expect_seq = START_SEQ;
         let expect_ts = ValueRef::Int64(ts);
-        for kv in kvs.iter() {
+        for (expect_seq, kv) in (START_SEQ..).zip(kvs.iter()) {
             assert_eq!(expect_seq, kv.sequence());
-            expect_seq += 1;
             assert_eq!(OpType::Put, kv.op_type);
             assert_eq!(keys.len(), kv.num_primary_keys());
             assert_eq!(values.len(), kv.num_fields());

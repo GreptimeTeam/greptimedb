@@ -170,14 +170,13 @@ pub fn collect_plan_metrics(plan: &Arc<dyn ExecutionPlan>, maps: &mut [&mut Hash
             MetricValue::Gauge { name, gauge } => {
                 collect_into_maps(name, gauge.value() as u64, maps);
             }
-            MetricValue::Time { name, time } => {
-                if name.starts_with(GREPTIME_EXEC_PREFIX) {
+            MetricValue::Time { name, time }
+                if name.starts_with(GREPTIME_EXEC_PREFIX) => {
                     // override
                     maps.iter_mut().for_each(|map| {
                         map.insert(name.to_string(), time.value() as u64);
                     });
                 }
-            }
             _ => {}
         });
     }

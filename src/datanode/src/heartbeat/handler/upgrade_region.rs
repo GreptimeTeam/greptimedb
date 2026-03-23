@@ -184,7 +184,7 @@ impl UpgradeRegionsHandler {
         {
             Ok(responses) => {
                 replies.extend(
-                    Self::convert_responses_to_replies(responses, &catchup_regions).into_iter(),
+                    Self::convert_responses_to_replies(responses, &catchup_regions),
                 );
             }
             Err(_) => {

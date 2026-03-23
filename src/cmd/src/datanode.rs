@@ -356,7 +356,7 @@ impl StartCommand {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
     use std::io::Write;
     use std::time::Duration;
 

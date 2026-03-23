@@ -656,7 +656,7 @@ impl MitoRegion {
             .unwrap_or_default();
         let files = manifest_files
             .into_iter()
-            .chain(staging_files.into_iter())
+            .chain(staging_files)
             .collect::<HashMap<_, _>>();
 
         files

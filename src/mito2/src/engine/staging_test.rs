@@ -14,7 +14,7 @@
 
 //! Integration tests for staging state functionality.
 
-use std::assert_matches::assert_matches;
+use std::assert_matches;
 use std::fs;
 use std::sync::Arc;
 use std::time::Duration;

@@ -380,7 +380,7 @@ fn record_batch_to_ipc(record_batch: &RecordBatch) -> Result<(Bytes, Bytes, Byte
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
     use std::sync::Arc;
 
     use api::v1::ArrowIpc;

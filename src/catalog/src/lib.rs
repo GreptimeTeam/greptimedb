@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(assert_matches)]
 #![feature(try_blocks)]
 
 use std::any::Any;

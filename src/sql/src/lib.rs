@@ -13,8 +13,6 @@
 // limitations under the License.
 
 #![feature(box_patterns)]
-#![feature(assert_matches)]
-#![feature(if_let_guard)]
 
 pub mod ast;
 pub mod dialect;

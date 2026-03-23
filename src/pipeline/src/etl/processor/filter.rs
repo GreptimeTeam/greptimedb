@@ -159,10 +159,8 @@ impl Processor for FilterProcessor {
             let val = val.as_object_mut().context(ValueMustBeMapSnafu)?;
             let index = field.input_field();
             match val.get(index) {
-                Some(VrlValue::Bytes(b)) => {
-                    if self.match_target(&String::from_utf8_lossy(b)) {
-                        return Ok(VrlValue::Null);
-                    }
+                Some(VrlValue::Bytes(b)) if self.match_target(&String::from_utf8_lossy(b)) => {
+                    return Ok(VrlValue::Null);
                 }
                 Some(v) => {
                     return ProcessorExpectStringSnafu {

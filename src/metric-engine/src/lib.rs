@@ -50,7 +50,7 @@
 //!              └─────────────────────┘
 //! ```
 
-#![feature(assert_matches)]
+#![recursion_limit = "256"]
 
 mod batch_modifier;
 pub mod config;

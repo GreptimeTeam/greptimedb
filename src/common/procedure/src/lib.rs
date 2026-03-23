@@ -14,7 +14,6 @@
 
 //! Common traits and structures for the procedure framework.
 
-#![feature(assert_matches)]
 
 pub mod error;
 pub mod event;

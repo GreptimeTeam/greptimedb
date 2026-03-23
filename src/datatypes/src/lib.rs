@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(assert_matches)]
-#![feature(box_patterns)]
-
 pub mod arrow_array;
 pub mod data_type;
 pub mod duration;

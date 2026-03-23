@@ -148,9 +148,7 @@ impl CatalogManager for MemoryCatalogManager {
         Ok(self
             .catalogs
             .read()
-            .unwrap()
-            .iter()
-            .flat_map(|(_, schema_entries)| schema_entries.values())
+            .unwrap().values().flat_map(|schema_entries| schema_entries.values())
             .flat_map(|tables| tables.values())
             .find(|t| t.table_info().ident.table_id == table_id)
             .map(|t| t.table_info()))
