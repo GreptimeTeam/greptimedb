@@ -368,6 +368,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid query context extension: {}", reason))]
+    InvalidQueryContextExtension {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(transparent)]
     Datatypes {
         source: datatypes::error::Error,
@@ -399,7 +406,8 @@ impl ErrorExt for Error {
             | ColumnSchemaNoDefault { .. }
             | CteColumnSchemaMismatch { .. }
             | ConvertValue { .. }
-            | TryIntoDuration { .. } => StatusCode::InvalidArguments,
+            | TryIntoDuration { .. }
+            | InvalidQueryContextExtension { .. } => StatusCode::InvalidArguments,
 
             BuildBackend { .. } | ListObjects { .. } => StatusCode::StorageUnavailable,
 
