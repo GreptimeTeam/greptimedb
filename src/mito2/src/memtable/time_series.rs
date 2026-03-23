@@ -284,7 +284,7 @@ impl Memtable for TimeSeriesMemtable {
                 .map(|c| c.column_id)
                 .collect()
         };
-        let adapter_context = Arc::new(BatchToRecordBatchContext::new(
+        let batch_to_record_batch = Arc::new(BatchToRecordBatchContext::new(
             self.region_metadata.clone(),
             read_column_ids,
         ));
@@ -295,15 +295,9 @@ impl Memtable for TimeSeriesMemtable {
             dedup: self.dedup,
             merge_mode: self.merge_mode,
             sequence,
-            batch_to_record_batch: adapter_context.clone(),
+            batch_to_record_batch,
         });
-        let context = Arc::new(MemtableRangeContext::new_with_batch_to_record_batch(
-            self.id,
-            builder,
-            predicate,
-            Some(adapter_context),
-        ));
-
+        let context = Arc::new(MemtableRangeContext::new(self.id, builder, predicate));
         let range_stats = self.stats();
         let range = MemtableRange::new(context, range_stats);
         Ok(MemtableRanges {
@@ -1270,6 +1264,10 @@ impl IterBuilder for TimeSeriesIterBuilder {
         } else {
             Ok(Box::new(iter))
         }
+    }
+
+    fn is_record_batch(&self) -> bool {
+        true
     }
 
     fn build_record_batch(
