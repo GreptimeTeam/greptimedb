@@ -29,6 +29,7 @@ use crate::error::{ComputeArrowSnafu, Result, UnexpectedSnafu};
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::PrimaryKeyArray;
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn matching_row_ranges_by_primary_key(
     input: &RecordBatch,
     pk_filter: &mut dyn PrimaryKeyFilter,
@@ -39,14 +40,14 @@ pub(crate) fn matching_row_ranges_by_primary_key(
         .as_any()
         .downcast_ref::<PrimaryKeyArray>()
         .context(UnexpectedSnafu {
-            reason: "Primary key column is not a dictionary array".to_string(),
+            reason: "Primary key column is not a dictionary array",
         })?;
     let pk_values = pk_dict_array
         .values()
         .as_any()
         .downcast_ref::<BinaryArray>()
         .context(UnexpectedSnafu {
-            reason: "Primary key values are not binary array".to_string(),
+            reason: "Primary key values are not binary array",
         })?;
     let keys = pk_dict_array.keys();
     let key_values = keys.values();
@@ -80,6 +81,7 @@ pub(crate) fn matching_row_ranges_by_primary_key(
     Ok(matched_row_ranges)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn prefilter_flat_batch_by_primary_key(
     input: RecordBatch,
     pk_filter: &mut dyn PrimaryKeyFilter,
@@ -120,6 +122,7 @@ pub(crate) fn prefilter_flat_batch_by_primary_key(
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn retain_usable_primary_key_filters(
     sst_metadata: &RegionMetadataRef,
     expected_metadata: Option<&RegionMetadata>,
@@ -128,6 +131,7 @@ pub(crate) fn retain_usable_primary_key_filters(
     filters.retain(|filter| is_usable_primary_key_filter(sst_metadata, expected_metadata, filter));
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn is_usable_primary_key_filter(
     sst_metadata: &RegionMetadataRef,
     expected_metadata: Option<&RegionMetadata>,
@@ -170,6 +174,7 @@ pub(crate) fn is_usable_primary_key_filter(
             .is_some()
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct CachedPrimaryKeyFilter {
     inner: Box<dyn PrimaryKeyFilter>,
     last_primary_key: Vec<u8>,
@@ -177,6 +182,7 @@ pub(crate) struct CachedPrimaryKeyFilter {
 }
 
 impl CachedPrimaryKeyFilter {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn new(inner: Box<dyn PrimaryKeyFilter>) -> Self {
         Self {
             inner,
@@ -202,6 +208,7 @@ impl PrimaryKeyFilter for CachedPrimaryKeyFilter {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn batch_single_primary_key(batch: &RecordBatch) -> Result<Option<&[u8]>> {
     let primary_key_index = primary_key_column_index(batch.num_columns());
     let pk_dict_array = batch
@@ -209,14 +216,14 @@ pub(crate) fn batch_single_primary_key(batch: &RecordBatch) -> Result<Option<&[u
         .as_any()
         .downcast_ref::<PrimaryKeyArray>()
         .context(UnexpectedSnafu {
-            reason: "Primary key column is not a dictionary array".to_string(),
+            reason: "Primary key column is not a dictionary array",
         })?;
     let pk_values = pk_dict_array
         .values()
         .as_any()
         .downcast_ref::<BinaryArray>()
         .context(UnexpectedSnafu {
-            reason: "Primary key values are not binary array".to_string(),
+            reason: "Primary key values are not binary array",
         })?;
     let keys = pk_dict_array.keys();
     if keys.is_empty() {
