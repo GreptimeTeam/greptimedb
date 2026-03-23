@@ -186,8 +186,7 @@ where
         metrics::CACHE_CONTAINER_CACHE_GET
             .with_label_values(&[&self.name])
             .inc();
-        let moved_init = self.initializer.clone();
-        let init = init(moved_init, key, &self.name);
+        let init = init(self.initializer.clone(), key, &self.name);
 
         match self.cache.try_get_with::<_, Error>(key, init).await {
             Ok(value) => Ok(Some(value)),
@@ -268,8 +267,7 @@ where
         metrics::CACHE_CONTAINER_CACHE_GET
             .with_label_values(&[&self.name])
             .inc();
-        let moved_init = self.initializer.clone();
-        let init = init(moved_init, key.to_owned(), &self.name);
+        let init = init(self.initializer.clone(), key.to_owned(), &self.name);
 
         match self.cache.try_get_with_by_ref(key, init).await {
             Ok(value) => Ok(Some(value)),
