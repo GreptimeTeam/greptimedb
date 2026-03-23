@@ -1642,6 +1642,7 @@ fn drop_lines_with_inconsistent_results(input: String) -> String {
         "metadata_cache_size =",
         "content_cache_size =",
         "result_cache_size =",
+        "range_result_cache_size =",
         "name =",
         "recovery_parallelism =",
         "max_background_index_builds =",
