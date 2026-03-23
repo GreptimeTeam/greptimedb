@@ -16,10 +16,13 @@ use std::borrow::Borrow;
 use std::hash::Hash;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
+use backon::{BackoffBuilder, ExponentialBuilder};
 use futures::future::{BoxFuture, join_all};
 use moka::future::Cache;
 use snafu::{OptionExt, ResultExt};
+use tokio::time::sleep;
 
 use crate::cache_invalidator::{CacheInvalidator, Context};
 use crate::error::{self, Error, Result};
@@ -45,7 +48,15 @@ pub struct CacheContainer<K, V, CacheToken> {
     invalidator: Invalidator<K, V, CacheToken>,
     initializer: Initializer<K, V>,
     token_filter: fn(&CacheToken) -> bool,
-    version: AtomicUsize,
+    version: Arc<AtomicUsize>,
+}
+
+fn latest_get_backoff() -> impl Iterator<Item = Duration> {
+    ExponentialBuilder::default()
+        .with_min_delay(Duration::from_millis(100))
+        .with_max_delay(Duration::from_millis(1000))
+        .with_max_times(3)
+        .build()
 }
 
 impl<K, V, CacheToken> CacheContainer<K, V, CacheToken>
@@ -68,7 +79,7 @@ where
             invalidator,
             initializer,
             token_filter,
-            version: AtomicUsize::new(0),
+            version: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -79,19 +90,63 @@ where
 }
 
 impl<K, V, CacheToken> CacheContainer<K, V, CacheToken> {
-    #[inline]
-    fn get_version(&self) -> usize {
-        self.version.load(Ordering::Relaxed)
-    }
-
-    #[inline]
-    fn create_new_version(&self) -> usize {
+    fn inc_version(&self) -> usize {
         self.version.fetch_add(1, Ordering::Relaxed) + 1
     }
+}
 
-    #[inline]
-    fn validate_version(&self, version: usize) -> bool {
-        version == self.get_version()
+async fn init<'a, K, V>(init: Initializer<K, V>, key: K, cache_name: &'a str) -> Result<V>
+where
+    K: Send + Sync + 'a,
+    V: Send + 'a,
+{
+    metrics::CACHE_CONTAINER_CACHE_MISS
+        .with_label_values(&[cache_name])
+        .inc();
+    let _timer = metrics::CACHE_CONTAINER_LOAD_CACHE
+        .with_label_values(&[cache_name])
+        .start_timer();
+    init(&key)
+        .await
+        .transpose()
+        .context(error::ValueNotExistSnafu)?
+}
+
+async fn init_with_retry<'a, K, V>(
+    init: Initializer<K, V>,
+    key: K,
+    mut backoff: impl Iterator<Item = Duration> + 'a,
+    version: Arc<AtomicUsize>,
+    cache_name: &'a str,
+) -> Result<V>
+where
+    K: Send + Sync + 'a,
+    V: Send + 'a,
+{
+    let mut attempts = 1usize;
+    loop {
+        let pre_version = version.load(Ordering::Relaxed);
+        metrics::CACHE_CONTAINER_CACHE_MISS
+            .with_label_values(&[cache_name])
+            .inc();
+        let _timer = metrics::CACHE_CONTAINER_LOAD_CACHE
+            .with_label_values(&[cache_name])
+            .start_timer();
+        let value = init(&key)
+            .await
+            .transpose()
+            .context(error::ValueNotExistSnafu)??;
+
+        if pre_version == version.load(Ordering::Relaxed) {
+            return Ok(value);
+        }
+
+        if let Some(duration) = backoff.next() {
+            sleep(duration).await;
+            attempts += 1;
+        } else {
+            return error::GetLatestCacheRetryExceededSnafu { attempts }.fail();
+        }
     }
 }
 
@@ -108,7 +163,7 @@ where
             .map(|token| (self.invalidator)(&self.cache, token))
             .collect::<Vec<_>>();
         if !tasks.is_empty() {
-            self.create_new_version();
+            self.inc_version();
             join_all(tasks)
                 .await
                 .into_iter()
@@ -124,35 +179,44 @@ where
     K: Copy + Hash + Eq + Send + Sync + 'static,
     V: Clone + Send + Sync + 'static,
 {
-    /// Returns a _clone_ of the value corresponding to the key.
+    /// Returns a value from cache and may return stale/dirty value.
+    ///
+    /// This method prioritizes low latency and does not guarantee latest value.
     pub async fn get(&self, key: K) -> Result<Option<V>> {
         metrics::CACHE_CONTAINER_CACHE_GET
             .with_label_values(&[&self.name])
             .inc();
         let moved_init = self.initializer.clone();
-        let moved_key = key;
-        let init = async move {
-            metrics::CACHE_CONTAINER_CACHE_MISS
-                .with_label_values(&[&self.name])
-                .inc();
-            let _timer = metrics::CACHE_CONTAINER_LOAD_CACHE
-                .with_label_values(&[&self.name])
-                .start_timer();
-            moved_init(&moved_key)
-                .await
-                .transpose()
-                .context(error::ValueNotExistSnafu)?
-        };
+        let init = init(moved_init, key, &self.name);
 
-        let pre_version = self.get_version();
+        match self.cache.try_get_with::<_, Error>(key, init).await {
+            Ok(value) => Ok(Some(value)),
+            Err(err) => match err.as_ref() {
+                Error::ValueNotExist { .. } => Ok(None),
+                _ => Err(err).context(error::GetCacheSnafu),
+            },
+        }
+    }
+
+    /// Returns the latest value for key.
+    ///
+    /// This method guarantees latest-read semantics by retrying on version change
+    /// with exponential backoff until retry limit is reached.
+    pub async fn get_latest(&self, key: K) -> Result<Option<V>> {
+        metrics::CACHE_CONTAINER_CACHE_GET
+            .with_label_values(&[&self.name])
+            .inc();
+
+        let init = init_with_retry(
+            self.initializer.clone(),
+            key,
+            latest_get_backoff(),
+            self.version.clone(),
+            &self.name,
+        );
 
         match self.cache.try_get_with(key, init).await {
-            Ok(value) => {
-                if !self.validate_version(pre_version) {
-                    self.cache.invalidate(&key).await;
-                }
-                Ok(Some(value))
-            }
+            Ok(value) => Ok(Some(value)),
             Err(err) => match err.as_ref() {
                 Error::ValueNotExist { .. } => Ok(None),
                 _ => Err(err).context(error::GetCacheSnafu),
@@ -174,7 +238,7 @@ where
             .map(|token| (self.invalidator)(&self.cache, token))
             .collect::<Vec<_>>();
         if !tasks.is_empty() {
-            self.create_new_version();
+            self.inc_version();
             join_all(tasks)
                 .await
                 .into_iter()
@@ -193,7 +257,9 @@ where
         self.cache.contains_key(key)
     }
 
-    /// Returns a _clone_ of the value corresponding to the key.
+    /// Returns a value from cache by reference and may return stale/dirty value.
+    ///
+    /// This method prioritizes low latency and does not guarantee latest value.
     pub async fn get_by_ref<Q>(&self, key: &Q) -> Result<Option<V>>
     where
         K: Borrow<Q>,
@@ -203,31 +269,41 @@ where
             .with_label_values(&[&self.name])
             .inc();
         let moved_init = self.initializer.clone();
-        let moved_key = key.to_owned();
-
-        let init = async move {
-            metrics::CACHE_CONTAINER_CACHE_MISS
-                .with_label_values(&[&self.name])
-                .inc();
-            let _timer = metrics::CACHE_CONTAINER_LOAD_CACHE
-                .with_label_values(&[&self.name])
-                .start_timer();
-
-            moved_init(&moved_key)
-                .await
-                .transpose()
-                .context(error::ValueNotExistSnafu)?
-        };
-
-        let pre_version = self.get_version();
+        let init = init(moved_init, key.to_owned(), &self.name);
 
         match self.cache.try_get_with_by_ref(key, init).await {
-            Ok(value) => {
-                if !self.validate_version(pre_version) {
-                    self.cache.invalidate(key).await;
-                }
-                Ok(Some(value))
-            }
+            Ok(value) => Ok(Some(value)),
+
+            Err(err) => match err.as_ref() {
+                Error::ValueNotExist { .. } => Ok(None),
+                _ => Err(err).context(error::GetCacheSnafu),
+            },
+        }
+    }
+
+    /// Returns the latest value for key reference.
+    ///
+    /// This method guarantees latest-read semantics by retrying on version change
+    /// with exponential backoff until retry limit is reached.
+    pub async fn get_latest_by_ref<Q>(&self, key: &Q) -> Result<Option<V>>
+    where
+        K: Borrow<Q>,
+        Q: ToOwned<Owned = K> + Hash + Eq + ?Sized,
+    {
+        metrics::CACHE_CONTAINER_CACHE_GET
+            .with_label_values(&[&self.name])
+            .inc();
+
+        let init = init_with_retry(
+            self.initializer.clone(),
+            key.to_owned(),
+            latest_get_backoff(),
+            self.version.clone(),
+            &self.name,
+        );
+
+        match self.cache.try_get_with_by_ref(key, init).await {
+            Ok(value) => Ok(Some(value)),
             Err(err) => match err.as_ref() {
                 Error::ValueNotExist { .. } => Ok(None),
                 _ => Err(err).context(error::GetCacheSnafu),
@@ -242,7 +318,6 @@ mod tests {
     use std::sync::atomic::{AtomicI32, Ordering};
 
     use moka::future::{Cache, CacheBuilder};
-    use tokio::time::{Duration, sleep};
 
     use super::*;
 
@@ -253,10 +328,6 @@ mod tests {
 
     fn always_true_filter(_: &String) -> bool {
         true
-    }
-
-    fn always_false_filter(_: &String) -> bool {
-        false
     }
 
     #[tokio::test]
@@ -374,7 +445,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_invalidate_while_loading_wont_keep_stale_value() {
+    async fn test_get_latest_by_ref_returns_fresh_value_after_invalidate() {
         let cache: Cache<String, String> = CacheBuilder::new(128).build();
         let counter = Arc::new(AtomicI32::new(0));
         let moved_counter = counter.clone();
@@ -398,27 +469,17 @@ mod tests {
             cache,
             invalidator,
             init,
-            always_false_filter,
+            always_true_filter,
         ));
 
-        let moved_adv_cache = adv_cache.clone();
-        let first_get = async move { moved_adv_cache.get_by_ref("foo").await };
+        let moved_cache = adv_cache.clone();
+        let get_task = tokio::spawn(async move { moved_cache.get_latest_by_ref("foo").await });
 
-        let moved_adv_cache = adv_cache.clone();
-        let controller = async move {
-            sleep(Duration::from_millis(100)).await;
-            moved_adv_cache
-                .invalidate(&["bar".to_string()])
-                .await
-                .unwrap();
-        };
+        sleep(Duration::from_millis(50)).await;
+        adv_cache.invalidate(&["foo".to_string()]).await.unwrap();
 
-        let (first, _) = tokio::join!(first_get, controller);
-        let first = first.unwrap().unwrap();
-        assert_eq!(first, "v1");
-
-        let second = adv_cache.get_by_ref("foo").await.unwrap().unwrap();
-        assert_eq!(second, "v2");
+        let value = get_task.await.unwrap().unwrap().unwrap();
+        assert_eq!(value, "v2");
         assert_eq!(counter.load(Ordering::Relaxed), 2);
     }
 }

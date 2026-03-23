@@ -76,7 +76,7 @@ impl PartitionRuleManager {
     ) -> Result<Arc<PhysicalTableRouteValue>> {
         match self
             .table_route_cache
-            .get(table_id)
+            .get_latest(table_id)
             .await
             .context(error::TableRouteManagerSnafu)?
             .context(error::TableRouteNotFoundSnafu { table_id })?
@@ -87,7 +87,7 @@ impl PartitionRuleManager {
                 let physical_table_id = logical_table_route.physical_table_id();
                 let physical_table_route = self
                     .table_route_cache
-                    .get(physical_table_id)
+                    .get_latest(physical_table_id)
                     .await
                     .context(error::TableRouteManagerSnafu)?
                     .context(error::TableRouteNotFoundSnafu { table_id })?;
@@ -132,7 +132,7 @@ impl PartitionRuleManager {
     ) -> Result<Arc<PhysicalPartitionInfo>> {
         let cached = self
             .partition_info_cache
-            .get(table_id)
+            .get_latest(table_id)
             .await
             .context(error::GetPartitionInfoSnafu)?
             .context(error::TableRouteNotFoundSnafu { table_id })?;
@@ -141,7 +141,7 @@ impl PartitionRuleManager {
             CachedPartitionInfo::Logical(physical_table_id) => {
                 let cached = self
                     .partition_info_cache
-                    .get(physical_table_id)
+                    .get_latest(physical_table_id)
                     .await
                     .context(error::GetPartitionInfoSnafu)?
                     .context(error::TableRouteNotFoundSnafu {
