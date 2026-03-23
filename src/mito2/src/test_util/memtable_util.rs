@@ -31,7 +31,6 @@ use store_api::metadata::{
     ColumnMetadata, RegionMetadata, RegionMetadataBuilder, RegionMetadataRef,
 };
 use store_api::storage::{ColumnId, RegionId, SequenceNumber, SequenceRange};
-use table::predicate::Predicate;
 
 use crate::error::Result;
 use crate::memtable::bulk::part::BulkPart;

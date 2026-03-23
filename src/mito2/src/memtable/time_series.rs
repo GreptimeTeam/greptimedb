@@ -61,6 +61,8 @@ use crate::metrics::{
     READ_STAGE_ELAPSED,
 };
 use crate::read::dedup::LastNonNullIter;
+use crate::read::prune::PruneTimeIterator;
+use crate::read::scan_region::PredicateGroup;
 use crate::read::{Batch, BatchBuilder, BatchColumn};
 use crate::region::options::MergeMode;
 
@@ -291,7 +293,7 @@ impl Memtable for TimeSeriesMemtable {
         let builder = Box::new(TimeSeriesIterBuilder {
             series_set: self.series_set.clone(),
             projection,
-            predicate: predicate.predicate().cloned(),
+            predicate: predicate.clone(),
             dedup: self.dedup,
             merge_mode: self.merge_mode,
             sequence,
@@ -439,7 +441,7 @@ impl SeriesSet {
     fn iter_series(
         &self,
         projection: HashSet<ColumnId>,
-        predicate: Option<Predicate>,
+        predicate: PredicateGroup,
         dedup: bool,
         merge_mode: MergeMode,
         sequence: Option<SequenceRange>,
@@ -456,7 +458,7 @@ impl SeriesSet {
             self.region_metadata.clone(),
             self.series.clone(),
             projection,
-            predicate,
+            predicate.predicate().cloned(),
             primary_key_schema,
             primary_key_datatypes,
             self.codec.clone(),
@@ -1241,7 +1243,7 @@ impl From<ValueBuilder> for Values {
 struct TimeSeriesIterBuilder {
     series_set: SeriesSet,
     projection: HashSet<ColumnId>,
-    predicate: Option<Predicate>,
+    predicate: PredicateGroup,
     dedup: bool,
     sequence: Option<SequenceRange>,
     merge_mode: MergeMode,
@@ -1272,9 +1274,16 @@ impl IterBuilder for TimeSeriesIterBuilder {
 
     fn build_record_batch(
         &self,
+        time_range: Option<(Timestamp, Timestamp)>,
         metrics: Option<MemScanMetrics>,
     ) -> Result<BoxedRecordBatchIterator> {
         let iter = self.build(metrics)?;
+        let iter: BoxedBatchIterator = if let Some(time_range) = time_range {
+            let time_filters = self.predicate.time_filters();
+            Box::new(PruneTimeIterator::new(iter, time_range, time_filters))
+        } else {
+            iter
+        };
         Ok(self.batch_to_record_batch.adapt_iter(iter))
     }
 }
@@ -2046,7 +2055,7 @@ mod tests {
         TimeSeriesIterBuilder {
             series_set: memtable.series_set.clone(),
             projection: field_projection,
-            predicate: None,
+            predicate: PredicateGroup::default(),
             dedup,
             merge_mode,
             sequence,
@@ -2064,7 +2073,7 @@ mod tests {
 
         let builder = build_iter_builder(&schema, &memtable, None, true, MergeMode::LastRow, None);
 
-        let mut iter = builder.build_record_batch(None).unwrap();
+        let mut iter = builder.build_record_batch(None, None).unwrap();
         let rb = iter.next().transpose().unwrap().unwrap();
         assert_eq!(10, rb.num_rows());
 
@@ -2110,7 +2119,7 @@ mod tests {
             None,
         );
 
-        let mut iter = builder.build_record_batch(None).unwrap();
+        let mut iter = builder.build_record_batch(None, None).unwrap();
         let rb = iter.next().transpose().unwrap().unwrap();
         assert_eq!(5, rb.num_rows());
 
@@ -2141,7 +2150,7 @@ mod tests {
 
         let builder = build_iter_builder(&schema, &memtable, None, true, MergeMode::LastRow, None);
 
-        let iter = builder.build_record_batch(None).unwrap();
+        let iter = builder.build_record_batch(None, None).unwrap();
         let mut total_rows = 0;
         for rb in iter {
             let rb = rb.unwrap();
@@ -2163,7 +2172,7 @@ mod tests {
 
         let builder = build_iter_builder(&schema, &memtable, None, true, MergeMode::LastRow, None);
 
-        let iter = builder.build_record_batch(None).unwrap();
+        let iter = builder.build_record_batch(None, None).unwrap();
         let total_rows: usize = iter.map(|rb| rb.unwrap().num_rows()).sum();
         assert_eq!(5, total_rows);
     }
@@ -2179,7 +2188,7 @@ mod tests {
 
         let builder = build_iter_builder(&schema, &memtable, None, false, MergeMode::LastRow, None);
 
-        let iter = builder.build_record_batch(None).unwrap();
+        let iter = builder.build_record_batch(None, None).unwrap();
         let total_rows: usize = iter.map(|rb| rb.unwrap().num_rows()).sum();
         assert_eq!(10, total_rows);
     }
@@ -2204,7 +2213,7 @@ mod tests {
             Some(SequenceRange::Gt { min: 4 }),
         );
 
-        let iter = builder.build_record_batch(None).unwrap();
+        let iter = builder.build_record_batch(None, None).unwrap();
         let total_rows: usize = iter.map(|rb| rb.unwrap().num_rows()).sum();
         assert_eq!(0, total_rows);
 
@@ -2218,7 +2227,7 @@ mod tests {
             Some(SequenceRange::LtEq { max: 2 }),
         );
 
-        let iter = builder.build_record_batch(None).unwrap();
+        let iter = builder.build_record_batch(None, None).unwrap();
         let total_rows: usize = iter.map(|rb| rb.unwrap().num_rows()).sum();
         assert_eq!(3, total_rows);
     }
@@ -2237,7 +2246,7 @@ mod tests {
 
         let builder = build_iter_builder(&schema, &memtable, None, true, MergeMode::LastRow, None);
 
-        let mut iter = builder.build_record_batch(None).unwrap();
+        let mut iter = builder.build_record_batch(None, None).unwrap();
         let rb = iter.next().transpose().unwrap().unwrap();
         assert_eq!(3, rb.num_rows());
 

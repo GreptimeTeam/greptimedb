@@ -537,11 +537,15 @@ pub trait IterBuilder: Send + Sync {
     }
 
     /// Returns the record batch iterator to read the range.
+    /// ## Note
+    /// Implementations should ensure the iterator yields data within given time range.
     fn build_record_batch(
         &self,
+        time_range: Option<(Timestamp, Timestamp)>,
         metrics: Option<MemScanMetrics>,
     ) -> Result<BoxedRecordBatchIterator> {
         let _metrics = metrics;
+        let _ = time_range;
         UnsupportedOperationSnafu {
             err_msg: "Record batch iterator is not supported by this memtable",
         }
@@ -700,7 +704,7 @@ impl MemtableRange {
         metrics: Option<MemScanMetrics>,
     ) -> Result<BoxedRecordBatchIterator> {
         if self.context.builder.is_record_batch() {
-            return self.context.builder.build_record_batch(metrics);
+            return self.context.builder.build_record_batch(time_range, metrics);
         }
 
         if let Some(context) = self.context.batch_to_record_batch.as_ref() {
