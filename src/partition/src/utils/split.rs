@@ -215,15 +215,17 @@ fn is_empty_and_conjunction(expr: &PartitionExpr) -> bool {
         }
     }
 
-    if uppers.iter().any(|(col, upper)| {
-        !lowers.contains_key(col) && is_strict_uint_lower_than_domain_min(upper)
-    }) {
+    if uppers
+        .iter()
+        .any(|(col, upper)| !lowers.contains_key(col) && is_strictly_less_than_domain_min(upper))
+    {
         return true;
     }
 
-    if lowers.iter().any(|(col, lower)| {
-        !uppers.contains_key(col) && is_strict_uint_greater_than_domain_max(lower)
-    }) {
+    if lowers
+        .iter()
+        .any(|(col, lower)| !uppers.contains_key(col) && is_strictly_greater_than_domain_max(lower))
+    {
         return true;
     }
 
@@ -289,30 +291,53 @@ fn discrete_value_index(v: &Value) -> Option<i128> {
     }
 }
 
-fn is_strict_uint_lower_than_domain_min(bound: &UpperBound) -> bool {
+fn is_strictly_less_than_domain_min(bound: &UpperBound) -> bool {
     if bound.inclusive {
         return false;
     }
 
-    match &bound.value {
+    is_domain_min_value(&bound.value)
+}
+
+fn is_strictly_greater_than_domain_max(bound: &LowerBound) -> bool {
+    if bound.inclusive {
+        return false;
+    }
+
+    is_domain_max_value(&bound.value)
+}
+
+fn is_domain_min_value(v: &Value) -> bool {
+    match v {
+        Value::String(s) => s.is_empty(),
+        Value::Float32(v) => v.0 == f32::MIN,
+        Value::Float64(v) => v.0 == f64::MIN,
         Value::UInt8(v) => *v == 0,
         Value::UInt16(v) => *v == 0,
         Value::UInt32(v) => *v == 0,
         Value::UInt64(v) => *v == 0,
+        Value::Int8(v) => *v == i8::MIN,
+        Value::Int16(v) => *v == i16::MIN,
+        Value::Int32(v) => *v == i32::MIN,
+        Value::Int64(v) => *v == i64::MIN,
+        // TODO(weny): handle Date/Timestamp datatypes
         _ => false,
     }
 }
 
-fn is_strict_uint_greater_than_domain_max(bound: &LowerBound) -> bool {
-    if bound.inclusive {
-        return false;
-    }
-
-    match &bound.value {
+fn is_domain_max_value(v: &Value) -> bool {
+    match v {
+        Value::Float32(v) => v.0 == f32::MAX,
+        Value::Float64(v) => v.0 == f64::MAX,
         Value::UInt8(v) => *v == u8::MAX,
         Value::UInt16(v) => *v == u16::MAX,
         Value::UInt32(v) => *v == u32::MAX,
         Value::UInt64(v) => *v == u64::MAX,
+        Value::Int8(v) => *v == i8::MAX,
+        Value::Int16(v) => *v == i16::MAX,
+        Value::Int32(v) => *v == i32::MAX,
+        Value::Int64(v) => *v == i64::MAX,
+        // TODO(weny): handle Date/Timestamp datatypes
         _ => false,
     }
 }
@@ -437,7 +462,7 @@ fn validate_atomic(expr: &PartitionExpr) -> Result<()> {
                 is_supported_value(v),
                 error::InvalidExprSnafu { expr: expr.clone() }
             );
-            if is_nan_value(v)
+            if (is_nan_value(v) || is_infinite_value(v))
                 && matches!(
                     expr.op(),
                     RestrictedOp::Lt | RestrictedOp::LtEq | RestrictedOp::Gt | RestrictedOp::GtEq
@@ -474,6 +499,14 @@ fn is_nan_value(v: &Value) -> bool {
     match v {
         Value::Float32(x) => x.0.is_nan(),
         Value::Float64(x) => x.0.is_nan(),
+        _ => false,
+    }
+}
+
+fn is_infinite_value(v: &Value) -> bool {
+    match v {
+        Value::Float32(x) => x.0.is_infinite(),
+        Value::Float64(x) => x.0.is_infinite(),
         _ => false,
     }
 }
@@ -895,6 +928,90 @@ mod tests {
     }
 
     #[test]
+    fn test_split_degrade_on_int_one_sided_impossible_upper_bound() {
+        // R: a < 10 (Int64 domain)
+        let base = col("a").lt(Value::Int64(10));
+        // S: a < i64::MIN (impossible on Int64)
+        let split = col("a").lt(Value::Int64(i64::MIN));
+
+        // left = (a < 10) AND (a < i64::MIN) is unsatisfiable on Int64, should degrade.
+        let result = split_partition_expr(base, split);
+        assert_eq!(result.unwrap_err(), ExprSplitDegradeReason::EmptyBranch);
+    }
+
+    #[test]
+    fn test_split_degrade_on_int_one_sided_impossible_lower_bound() {
+        // R: a < 10 (Int64 domain)
+        let base = col("a").lt(Value::Int64(10));
+        // S: a > i64::MAX (impossible on Int64)
+        let split = col("a").gt(Value::Int64(i64::MAX));
+
+        // left = (a < 10) AND (a > i64::MAX) is unsatisfiable on Int64, should degrade.
+        let result = split_partition_expr(base, split);
+        assert_eq!(result.unwrap_err(), ExprSplitDegradeReason::EmptyBranch);
+    }
+
+    #[test]
+    fn test_split_degrade_on_string_one_sided_impossible_upper_bound() {
+        // R: s < "z" (String domain)
+        let base = col("s").lt(Value::String("z".into()));
+        // S: s < "" (impossible on String)
+        let split = col("s").lt(Value::String("".into()));
+
+        // left = (s < "z") AND (s < "") is unsatisfiable, should degrade.
+        let result = split_partition_expr(base, split);
+        assert_eq!(result.unwrap_err(), ExprSplitDegradeReason::EmptyBranch);
+    }
+
+    #[test]
+    fn test_split_degrade_on_float64_one_sided_impossible_upper_bound() {
+        // R: a < 10.0 (Float64 domain)
+        let base = col("a").lt(Value::Float64(OrderedFloat(10.0)));
+        // S: a < f64::MIN (impossible with finite-only float policy)
+        let split = col("a").lt(Value::Float64(OrderedFloat(f64::MIN)));
+
+        // left = (a < 10.0) AND (a < f64::MIN) is unsatisfiable, should degrade.
+        let result = split_partition_expr(base, split);
+        assert_eq!(result.unwrap_err(), ExprSplitDegradeReason::EmptyBranch);
+    }
+
+    #[test]
+    fn test_split_degrade_on_float64_one_sided_impossible_lower_bound() {
+        // R: a < 10.0 (Float64 domain)
+        let base = col("a").lt(Value::Float64(OrderedFloat(10.0)));
+        // S: a > f64::MAX (impossible with finite-only float policy)
+        let split = col("a").gt(Value::Float64(OrderedFloat(f64::MAX)));
+
+        // left = (a < 10.0) AND (a > f64::MAX) is unsatisfiable, should degrade.
+        let result = split_partition_expr(base, split);
+        assert_eq!(result.unwrap_err(), ExprSplitDegradeReason::EmptyBranch);
+    }
+
+    #[test]
+    fn test_split_degrade_on_float32_one_sided_impossible_upper_bound() {
+        // R: a < 10.0f32 (Float32 domain)
+        let base = col("a").lt(Value::Float32(OrderedFloat(10.0)));
+        // S: a < f32::MIN (impossible with finite-only float policy)
+        let split = col("a").lt(Value::Float32(OrderedFloat(f32::MIN)));
+
+        // left = (a < 10.0f32) AND (a < f32::MIN) is unsatisfiable, should degrade.
+        let result = split_partition_expr(base, split);
+        assert_eq!(result.unwrap_err(), ExprSplitDegradeReason::EmptyBranch);
+    }
+
+    #[test]
+    fn test_split_degrade_on_float32_one_sided_impossible_lower_bound() {
+        // R: a < 10.0f32 (Float32 domain)
+        let base = col("a").lt(Value::Float32(OrderedFloat(10.0)));
+        // S: a > f32::MAX (impossible with finite-only float policy)
+        let split = col("a").gt(Value::Float32(OrderedFloat(f32::MAX)));
+
+        // left = (a < 10.0f32) AND (a > f32::MAX) is unsatisfiable, should degrade.
+        let result = split_partition_expr(base, split);
+        assert_eq!(result.unwrap_err(), ExprSplitDegradeReason::EmptyBranch);
+    }
+
+    #[test]
     fn test_simplify_same_upper_bound_prefers_strict() {
         // a <= 10 AND a < 10 => a < 10
         let expr = col("a")
@@ -978,6 +1095,15 @@ mod tests {
         // NaN cannot be used in range predicates.
         let expr = col("a").lt(Value::Float64(OrderedFloat(f64::NAN)));
         assert!(validate_supported_expr(&expr).is_err());
+    }
+
+    #[test]
+    fn test_validate_supported_expr_infinite_range_rejected() {
+        // Infinity cannot be used in range predicates under finite-only float policy.
+        let pos_inf = col("a").gt(Value::Float64(OrderedFloat(f64::INFINITY)));
+        let neg_inf = col("a").lt(Value::Float32(OrderedFloat(f32::NEG_INFINITY)));
+        assert!(validate_supported_expr(&pos_inf).is_err());
+        assert!(validate_supported_expr(&neg_inf).is_err());
     }
 
     #[test]
