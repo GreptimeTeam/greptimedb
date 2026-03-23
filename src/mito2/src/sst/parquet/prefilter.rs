@@ -139,7 +139,8 @@ pub(crate) fn is_usable_primary_key_filter(
 
     let sst_column = match expected_metadata {
         Some(expected_metadata) => {
-            let Some(expected_column) = expected_metadata.column_by_name(filter.column_name()) else {
+            let Some(expected_column) = expected_metadata.column_by_name(filter.column_name())
+            else {
                 return false;
             };
             let Some(sst_column) = sst_metadata.column_by_id(expected_column.column_id) else {
@@ -239,8 +240,8 @@ mod tests {
     use common_recordbatch::filter::SimpleFilterEvaluator;
     use datafusion_expr::{col, lit};
     use datatypes::arrow::array::{
-        ArrayRef, BinaryArray, DictionaryArray, TimestampMillisecondArray, UInt8Array,
-        UInt32Array, UInt64Array,
+        ArrayRef, BinaryArray, DictionaryArray, TimestampMillisecondArray, UInt8Array, UInt32Array,
+        UInt64Array,
     };
     use datatypes::arrow::datatypes::{Schema, UInt32Type};
     use datatypes::arrow::record_batch::RecordBatch;
@@ -251,19 +252,22 @@ mod tests {
     use store_api::storage::ColumnSchema;
 
     use super::*;
-    use crate::sst::parquet::format::ReadFormat;
     use crate::sst::internal_fields;
+    use crate::sst::parquet::format::ReadFormat;
     use crate::test_util::sst_util::{
         new_primary_key, sst_region_metadata, sst_region_metadata_with_encoding,
     };
 
     fn new_test_filters(exprs: &[datafusion_expr::Expr]) -> Vec<SimpleFilterEvaluator> {
-        exprs.iter()
+        exprs
+            .iter()
             .filter_map(SimpleFilterEvaluator::try_new)
             .collect()
     }
 
-    fn expected_metadata_with_reused_tag_name(old_metadata: &RegionMetadata) -> Arc<RegionMetadata> {
+    fn expected_metadata_with_reused_tag_name(
+        old_metadata: &RegionMetadata,
+    ) -> Arc<RegionMetadata> {
         let mut builder = RegionMetadataBuilder::new(old_metadata.region_id);
         builder
             .push_column_metadata(ColumnMetadata {
@@ -322,7 +326,11 @@ mod tests {
             .field(arrow_schema.index_of("ts").unwrap())
             .clone();
         let mut fields = vec![field_column, time_index_column];
-        fields.extend(internal_fields().into_iter().map(|field| field.as_ref().clone()));
+        fields.extend(
+            internal_fields()
+                .into_iter()
+                .map(|field| field.as_ref().clone()),
+        );
         let schema = Arc::new(Schema::new(fields));
 
         let mut dict_values = Vec::new();
@@ -375,7 +383,8 @@ mod tests {
     #[test]
     fn test_retain_usable_primary_key_filters_skips_non_tag_filters() {
         let metadata = Arc::new(sst_region_metadata());
-        let mut filters = new_test_filters(&[col("field_0").eq(lit(1_u64)), col("ts").gt(lit(0_i64))]);
+        let mut filters =
+            new_test_filters(&[col("field_0").eq(lit(1_u64)), col("ts").gt(lit(0_i64))]);
 
         retain_usable_primary_key_filters(&metadata, None, &mut filters);
 
@@ -388,14 +397,20 @@ mod tests {
         let expected_metadata = expected_metadata_with_reused_tag_name(&metadata);
         let mut filters = new_test_filters(&[col("tag_0").eq(lit("b"))]);
 
-        retain_usable_primary_key_filters(&metadata, Some(expected_metadata.as_ref()), &mut filters);
+        retain_usable_primary_key_filters(
+            &metadata,
+            Some(expected_metadata.as_ref()),
+            &mut filters,
+        );
 
         assert!(filters.is_empty());
     }
 
     #[test]
     fn test_is_usable_primary_key_filter_skips_legacy_primary_key_batches() {
-        let metadata = Arc::new(sst_region_metadata_with_encoding(PrimaryKeyEncoding::Sparse));
+        let metadata = Arc::new(sst_region_metadata_with_encoding(
+            PrimaryKeyEncoding::Sparse,
+        ));
         let read_format = ReadFormat::new_flat(
             metadata.clone(),
             metadata.column_metadatas.iter().map(|c| c.column_id),
@@ -414,8 +429,8 @@ mod tests {
     fn test_prefilter_primary_key_drops_single_dictionary_batch() {
         let metadata = Arc::new(sst_region_metadata());
         let filters = Arc::new(new_test_filters(&[col("tag_0").eq(lit("b"))]));
-        let mut primary_key_filter = build_primary_key_codec(metadata.as_ref())
-            .primary_key_filter(&metadata, filters);
+        let mut primary_key_filter =
+            build_primary_key_codec(metadata.as_ref()).primary_key_filter(&metadata, filters);
         let pk_a = new_primary_key(&["a", "x"]);
         let batch = new_raw_batch(&[pk_a.as_slice(), pk_a.as_slice()], &[10, 11]);
 
@@ -428,11 +443,11 @@ mod tests {
     #[test]
     fn test_prefilter_primary_key_builds_mask_for_fragmented_matches() {
         let metadata = Arc::new(sst_region_metadata());
-        let filters = Arc::new(new_test_filters(&[
-            col("tag_0").eq(lit("a")).or(col("tag_0").eq(lit("c"))),
-        ]));
-        let mut primary_key_filter = build_primary_key_codec(metadata.as_ref())
-            .primary_key_filter(&metadata, filters);
+        let filters = Arc::new(new_test_filters(&[col("tag_0")
+            .eq(lit("a"))
+            .or(col("tag_0").eq(lit("c")))]));
+        let mut primary_key_filter =
+            build_primary_key_codec(metadata.as_ref()).primary_key_filter(&metadata, filters);
         let pk_a = new_primary_key(&["a", "x"]);
         let pk_b = new_primary_key(&["b", "x"]);
         let pk_c = new_primary_key(&["c", "x"]);
@@ -451,8 +466,9 @@ mod tests {
             &[10, 11, 12, 13, 14, 15, 16, 17],
         );
 
-        let filtered =
-            prefilter_flat_batch_by_primary_key(batch, primary_key_filter.as_mut()).unwrap().unwrap();
+        let filtered = prefilter_flat_batch_by_primary_key(batch, primary_key_filter.as_mut())
+            .unwrap()
+            .unwrap();
 
         assert_eq!(filtered.num_rows(), 4);
         assert_eq!(field_values(&filtered), vec![10, 11, 14, 15]);
@@ -492,7 +508,10 @@ mod tests {
         let pk_b = new_primary_key(&["b", "x"]);
 
         let batch = new_raw_batch(&[pk_a.as_slice(), pk_a.as_slice()], &[10, 11]);
-        assert_eq!(batch_single_primary_key(&batch).unwrap(), Some(pk_a.as_slice()));
+        assert_eq!(
+            batch_single_primary_key(&batch).unwrap(),
+            Some(pk_a.as_slice())
+        );
 
         let batch = new_raw_batch(&[pk_a.as_slice(), pk_b.as_slice()], &[10, 11]);
         assert_eq!(batch_single_primary_key(&batch).unwrap(), None);
