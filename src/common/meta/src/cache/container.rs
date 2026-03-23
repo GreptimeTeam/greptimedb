@@ -102,15 +102,19 @@ where
     V: Send + Sync,
 {
     async fn invalidate(&self, _ctx: &Context, caches: &[CacheIdent]) -> Result<()> {
-        self.create_new_version();
         let tasks = caches
             .iter()
             .filter(|token| (self.token_filter)(token))
-            .map(|token| (self.invalidator)(&self.cache, token));
-        join_all(tasks)
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>>>()?;
+            .map(|token| (self.invalidator)(&self.cache, token))
+            .collect::<Vec<_>>();
+        if !tasks.is_empty() {
+            self.create_new_version();
+            join_all(tasks)
+                .await
+                .into_iter()
+                .collect::<Result<Vec<_>>>()?;
+        }
+
         Ok(())
     }
 }
@@ -164,15 +168,19 @@ where
 {
     /// Invalidates cache by [CacheToken].
     pub async fn invalidate(&self, caches: &[CacheToken]) -> Result<()> {
-        self.create_new_version();
         let tasks = caches
             .iter()
             .filter(|token| (self.token_filter)(token))
-            .map(|token| (self.invalidator)(&self.cache, token));
-        join_all(tasks)
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>>>()?;
+            .map(|token| (self.invalidator)(&self.cache, token))
+            .collect::<Vec<_>>();
+        if !tasks.is_empty() {
+            self.create_new_version();
+            join_all(tasks)
+                .await
+                .into_iter()
+                .collect::<Result<Vec<_>>>()?;
+        }
+
         Ok(())
     }
 
