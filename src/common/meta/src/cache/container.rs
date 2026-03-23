@@ -39,6 +39,22 @@ pub type Invalidator<K, V, CacheToken> =
 /// Initializes value (i.e., fetches from remote).
 pub type Initializer<K, V> = Arc<dyn Fn(&'_ K) -> BoxFuture<'_, Result<Option<V>>> + Send + Sync>;
 
+#[derive(Debug, Clone, Copy)]
+/// Initialization strategy for cache-miss loading.
+///
+/// This strategy is selected when building [CacheContainer] and remains immutable
+/// for the lifetime of the container instance.
+pub enum InitStrategy {
+    /// Fast path: load once without version conflict retry.
+    ///
+    /// Under concurrent invalidation, callers may observe stale/dirty value.
+    Unchecked,
+    /// Strict path: retry load when version changes during initialization.
+    ///
+    /// This avoids returning dirty value under invalidate/load races.
+    VersionChecked,
+}
+
 /// [CacheContainer] provides ability to:
 /// - Cache value loaded by [Initializer].
 /// - Invalidate caches by [Invalidator].
@@ -49,6 +65,7 @@ pub struct CacheContainer<K, V, CacheToken> {
     initializer: Initializer<K, V>,
     token_filter: fn(&CacheToken) -> bool,
     version: Arc<AtomicUsize>,
+    init_strategy: InitStrategy,
 }
 
 fn latest_get_backoff() -> impl Iterator<Item = Duration> {
@@ -65,13 +82,37 @@ where
     V: Send + Sync,
     CacheToken: Send + Sync,
 {
-    /// Constructs an [CacheContainer].
+    /// Constructs an [CacheContainer] with [InitStrategy::Unchecked].
+    ///
+    /// This keeps the historical behavior and can return stale/dirty value under
+    /// concurrent invalidation.
     pub fn new(
         name: String,
         cache: Cache<K, V>,
         invalidator: Invalidator<K, V, CacheToken>,
         initializer: Initializer<K, V>,
         token_filter: fn(&CacheToken) -> bool,
+    ) -> Self {
+        Self::with_strategy(
+            name,
+            cache,
+            invalidator,
+            initializer,
+            token_filter,
+            InitStrategy::Unchecked,
+        )
+    }
+
+    /// Constructs an [CacheContainer] with explicit [InitStrategy].
+    ///
+    /// The strategy is fixed at construction time and cannot be changed later.
+    pub fn with_strategy(
+        name: String,
+        cache: Cache<K, V>,
+        invalidator: Invalidator<K, V, CacheToken>,
+        initializer: Initializer<K, V>,
+        token_filter: fn(&CacheToken) -> bool,
+        init_strategy: InitStrategy,
     ) -> Self {
         Self {
             name,
@@ -80,6 +121,7 @@ where
             initializer,
             token_filter,
             version: Arc::new(AtomicUsize::new(0)),
+            init_strategy,
         }
     }
 
@@ -179,42 +221,39 @@ where
     K: Copy + Hash + Eq + Send + Sync + 'static,
     V: Clone + Send + Sync + 'static,
 {
-    /// Returns a value from cache and may return stale/dirty value.
+    /// Returns a value from cache for copyable keys.
     ///
-    /// This method prioritizes low latency and does not guarantee latest value.
+    /// With [InitStrategy::Unchecked], this method prioritizes latency and may
+    /// return stale/dirty value. With [InitStrategy::VersionChecked], this method
+    /// retries initialization on version change and avoids dirty returns.
     pub async fn get(&self, key: K) -> Result<Option<V>> {
         metrics::CACHE_CONTAINER_CACHE_GET
             .with_label_values(&[&self.name])
             .inc();
-        let init = init(self.initializer.clone(), key, &self.name);
 
-        match self.cache.try_get_with::<_, Error>(key, init).await {
-            Ok(value) => Ok(Some(value)),
-            Err(err) => match err.as_ref() {
-                Error::ValueNotExist { .. } => Ok(None),
-                _ => Err(err).context(error::GetCacheSnafu),
-            },
-        }
-    }
+        let result = match self.init_strategy {
+            InitStrategy::Unchecked => {
+                self.cache
+                    .try_get_with(key, init(self.initializer.clone(), key, &self.name))
+                    .await
+            }
+            InitStrategy::VersionChecked => {
+                self.cache
+                    .try_get_with(
+                        key,
+                        init_with_retry(
+                            self.initializer.clone(),
+                            key,
+                            latest_get_backoff(),
+                            self.version.clone(),
+                            &self.name,
+                        ),
+                    )
+                    .await
+            }
+        };
 
-    /// Returns the latest value for key.
-    ///
-    /// This method guarantees latest-read semantics by retrying on version change
-    /// with exponential backoff until retry limit is reached.
-    pub async fn get_latest(&self, key: K) -> Result<Option<V>> {
-        metrics::CACHE_CONTAINER_CACHE_GET
-            .with_label_values(&[&self.name])
-            .inc();
-
-        let init = init_with_retry(
-            self.initializer.clone(),
-            key,
-            latest_get_backoff(),
-            self.version.clone(),
-            &self.name,
-        );
-
-        match self.cache.try_get_with(key, init).await {
+        match result {
             Ok(value) => Ok(Some(value)),
             Err(err) => match err.as_ref() {
                 Error::ValueNotExist { .. } => Ok(None),
@@ -256,9 +295,11 @@ where
         self.cache.contains_key(key)
     }
 
-    /// Returns a value from cache by reference and may return stale/dirty value.
+    /// Returns a value from cache by key reference.
     ///
-    /// This method prioritizes low latency and does not guarantee latest value.
+    /// With [InitStrategy::Unchecked], this method prioritizes latency and may
+    /// return stale/dirty value. With [InitStrategy::VersionChecked], this method
+    /// retries initialization on version change and avoids dirty returns.
     pub async fn get_by_ref<Q>(&self, key: &Q) -> Result<Option<V>>
     where
         K: Borrow<Q>,
@@ -267,40 +308,32 @@ where
         metrics::CACHE_CONTAINER_CACHE_GET
             .with_label_values(&[&self.name])
             .inc();
-        let init = init(self.initializer.clone(), key.to_owned(), &self.name);
+        let result = match self.init_strategy {
+            InitStrategy::Unchecked => {
+                self.cache
+                    .try_get_with_by_ref(
+                        key,
+                        init(self.initializer.clone(), key.to_owned(), &self.name),
+                    )
+                    .await
+            }
+            InitStrategy::VersionChecked => {
+                self.cache
+                    .try_get_with_by_ref(
+                        key,
+                        init_with_retry(
+                            self.initializer.clone(),
+                            key.to_owned(),
+                            latest_get_backoff(),
+                            self.version.clone(),
+                            &self.name,
+                        ),
+                    )
+                    .await
+            }
+        };
 
-        match self.cache.try_get_with_by_ref(key, init).await {
-            Ok(value) => Ok(Some(value)),
-
-            Err(err) => match err.as_ref() {
-                Error::ValueNotExist { .. } => Ok(None),
-                _ => Err(err).context(error::GetCacheSnafu),
-            },
-        }
-    }
-
-    /// Returns the latest value for key reference.
-    ///
-    /// This method guarantees latest-read semantics by retrying on version change
-    /// with exponential backoff until retry limit is reached.
-    pub async fn get_latest_by_ref<Q>(&self, key: &Q) -> Result<Option<V>>
-    where
-        K: Borrow<Q>,
-        Q: ToOwned<Owned = K> + Hash + Eq + ?Sized,
-    {
-        metrics::CACHE_CONTAINER_CACHE_GET
-            .with_label_values(&[&self.name])
-            .inc();
-
-        let init = init_with_retry(
-            self.initializer.clone(),
-            key.to_owned(),
-            latest_get_backoff(),
-            self.version.clone(),
-            &self.name,
-        );
-
-        match self.cache.try_get_with_by_ref(key, init).await {
+        match result {
             Ok(value) => Ok(Some(value)),
             Err(err) => match err.as_ref() {
                 Error::ValueNotExist { .. } => Ok(None),
@@ -462,16 +495,17 @@ mod tests {
             })
         });
 
-        let adv_cache = Arc::new(CacheContainer::new(
+        let adv_cache = Arc::new(CacheContainer::with_strategy(
             "test".to_string(),
             cache,
             invalidator,
             init,
             always_true_filter,
+            InitStrategy::VersionChecked,
         ));
 
         let moved_cache = adv_cache.clone();
-        let get_task = tokio::spawn(async move { moved_cache.get_latest_by_ref("foo").await });
+        let get_task = tokio::spawn(async move { moved_cache.get_by_ref("foo").await });
 
         sleep(Duration::from_millis(50)).await;
         adv_cache.invalidate(&["foo".to_string()]).await.unwrap();
