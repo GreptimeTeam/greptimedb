@@ -625,12 +625,12 @@ allow_stale_entries = false
 ## Supports absolute size (e.g., "2GB") or percentage of system memory (e.g., "20%").
 ## Setting it to 0 disables the limit.
 scan_memory_limit = "50%"
-## Behavior when scan memory tracking cannot immediately acquire memory.
-## Supported values:
-## - "fail"
-## - "wait" (same as "wait(10s)", not unlimited)
-## - "wait(3s)"
-## - "wait(500ms)"
+## Controls what happens when a scan cannot get memory immediately.
+## "fail" (default) fails fast and is the recommended option for most users.
+## "wait" / "wait(<duration>)" waits for memory to become available. This is mainly
+## for advanced tuning in bursty workloads where temporary contention is common and
+## higher latency is acceptable.
+## "wait" means "wait(10s)", not unlimited waiting.
 scan_memory_on_exhausted = "fail"
 
 ## Minimum time interval between two compactions.
