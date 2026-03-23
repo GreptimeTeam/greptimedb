@@ -132,8 +132,8 @@ where
 }
 
 impl<K, V, CacheToken> CacheContainer<K, V, CacheToken> {
-    fn inc_version(&self) -> usize {
-        self.version.fetch_add(1, Ordering::Relaxed) + 1
+    fn inc_version(&self) {
+        self.version.fetch_add(1, Ordering::Relaxed);
     }
 }
 
