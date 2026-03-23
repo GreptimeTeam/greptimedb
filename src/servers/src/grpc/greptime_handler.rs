@@ -159,7 +159,6 @@ impl GreptimeRequestHandler {
                     result_sender.try_send(result.map_err(|e| Status::from_error(Box::new(e))))
                     && let TrySendError::Closed(_) = e
                 {
-                    warn!(r#""DoPut" client maybe unreachable, abort handling its message"#);
                     break;
                 }
             }
