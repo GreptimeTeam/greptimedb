@@ -17,7 +17,7 @@ init_regions_in_background = false
 ## Parallelism of initializing regions.
 init_regions_parallelism = 16
 
-## The maximum current queries allowed to be executed. Zero means unlimited.
+## The maximum concurrent queries allowed to be executed. Zero means unlimited.
 max_concurrent_queries = 0
 
 ## Enable telemetry to collect anonymous usage data. Enabled by default.
