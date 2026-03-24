@@ -63,7 +63,10 @@ impl cluster_server::Cluster for Metasrv {
         let leader_addr = &self.options().grpc.server_addr;
         let (leader, followers) = match self.election() {
             Some(election) => {
-                let nodes = election.all_candidates().await?;
+                let nodes = election
+                    .all_candidates()
+                    .await
+                    .context(error::KvBackendSnafu)?;
                 let followers = nodes
                     .into_iter()
                     .filter(|node_info| &node_info.addr != leader_addr)

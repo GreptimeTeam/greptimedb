@@ -24,6 +24,8 @@ use common_base::Plugins;
 use common_config::Configurable;
 #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
 use common_meta::distributed_time_constants::META_LEASE_SECS;
+use common_meta::election::CANDIDATE_LEASE_SECS;
+use common_meta::election::etcd::EtcdElection;
 use common_meta::kv_backend::chroot::ChrootKvBackend;
 use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::kv_backend::memory::MemoryKvBackend;
@@ -42,9 +44,6 @@ use tonic::codec::CompressionEncoding;
 use tonic::transport::server::{Router, TcpIncoming};
 
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
-#[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
-use crate::election::CANDIDATE_LEASE_SECS;
-use crate::election::etcd::EtcdElection;
 use crate::error::OtherSnafu;
 use crate::metasrv::builder::MetasrvBuilder;
 use crate::metasrv::{
@@ -281,7 +280,8 @@ pub async fn metasrv_builder(
                 etcd_client,
                 opts.store_key_prefix.clone(),
             )
-            .await?;
+            .await
+            .context(error::KvBackendSnafu)?;
 
             (kv_backend, Some(election))
         }
@@ -290,10 +290,10 @@ pub async fn metasrv_builder(
             use std::time::Duration;
 
             use common_meta::distributed_time_constants::POSTGRES_KEEP_ALIVE_SECS;
+            use common_meta::election::rds::postgres::{ElectionPgClient, PgElection};
             use common_meta::kv_backend::rds::PgStore;
             use deadpool_postgres::{Config, ManagerConfig, RecyclingMethod};
 
-            use crate::election::rds::postgres::{ElectionPgClient, PgElection};
             use crate::utils::postgres::create_postgres_pool;
 
             let candidate_lease_ttl = Duration::from_secs(CANDIDATE_LEASE_SECS);
@@ -321,7 +321,8 @@ pub async fn metasrv_builder(
                 execution_timeout,
                 idle_session_timeout,
                 statement_timeout,
-            )?;
+            )
+            .context(error::KvBackendSnafu)?;
             let election = PgElection::with_pg_client(
                 opts.grpc.server_addr.clone(),
                 election_client,
@@ -332,7 +333,8 @@ pub async fn metasrv_builder(
                 &opts.meta_table_name,
                 opts.meta_election_lock_id,
             )
-            .await?;
+            .await
+            .context(error::KvBackendSnafu)?;
 
             let pool = create_postgres_pool(&opts.store_addrs, Some(cfg), opts.backend_tls.clone())
                 .await?;
@@ -352,9 +354,9 @@ pub async fn metasrv_builder(
         (None, BackendImpl::MysqlStore) => {
             use std::time::Duration;
 
+            use common_meta::election::rds::mysql::{ElectionMysqlClient, MySqlElection};
             use common_meta::kv_backend::rds::MySqlStore;
 
-            use crate::election::rds::mysql::{ElectionMysqlClient, MySqlElection};
             use crate::utils::mysql::create_mysql_pool;
 
             let pool = create_mysql_pool(&opts.store_addrs, opts.backend_tls.as_ref()).await?;
@@ -389,7 +391,8 @@ pub async fn metasrv_builder(
                 meta_lease_ttl,
                 &election_table_name,
             )
-            .await?;
+            .await
+            .context(error::KvBackendSnafu)?;
             (kv_backend, Some(election))
         }
     };
