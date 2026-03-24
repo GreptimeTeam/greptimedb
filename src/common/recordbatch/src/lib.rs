@@ -24,7 +24,7 @@ pub mod util;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use adapter::RecordBatchMetrics;
 use arc_swap::ArcSwapOption;
@@ -443,23 +443,16 @@ impl fmt::Debug for QueryMemoryTracker {
 }
 
 impl QueryMemoryTracker {
-    /// Create a new memory tracker with the given limit.
-    ///
-    /// # Arguments
-    /// * `limit` - Maximum memory usage in bytes (hard limit for all streams). 0 means unlimited.
-    /// * `on_exhausted_policy` - Behavior when a stream cannot immediately acquire memory.
-    pub fn new(limit: usize, on_exhausted_policy: OnExhaustedPolicy) -> Self {
-        let metrics = CallbackMemoryMetrics::default();
-        let manager = MemoryManager::with_granularity(
-            limit as u64,
-            PermitGranularity::Kilobyte,
-            metrics.clone(),
-        );
-
-        Self {
-            manager,
-            metrics,
+    /// Create a builder for a query memory tracker.
+    pub fn builder(
+        limit: usize,
+        on_exhausted_policy: OnExhaustedPolicy,
+    ) -> QueryMemoryTrackerBuilder {
+        QueryMemoryTrackerBuilder {
+            limit,
             on_exhausted_policy,
+            on_update: None,
+            on_reject: None,
         }
     }
 
@@ -470,34 +463,6 @@ impl QueryMemoryTracker {
             tracked_bytes: 0,
         }
     }
-
-    /// Set a callback to be called whenever the usage changes successfully.
-    /// The callback receives the new total usage in bytes.
-    ///
-    /// # Note
-    /// The callback is called after both successful `track()` and stream drop.
-    /// Usage is exact in unlimited mode and 1KB-aligned in limited mode.
-    pub fn with_on_update<F>(self, on_update: F) -> Self
-    where
-        F: Fn(usize) + Send + Sync + 'static,
-    {
-        self.metrics.set_on_update(on_update);
-        self
-    }
-
-    /// Set a callback to be called when memory allocation is rejected.
-    ///
-    /// # Note
-    /// This is only called when `track()` fails due to exceeding the limit.
-    /// It is never called when `limit == 0` (unlimited mode).
-    pub fn with_on_reject<F>(self, on_reject: F) -> Self
-    where
-        F: Fn() + Send + Sync + 'static,
-    {
-        self.metrics.set_on_reject(on_reject);
-        self
-    }
-
     /// Get the current memory usage in bytes.
     pub fn current(&self) -> usize {
         self.manager.used_bytes() as usize
@@ -523,6 +488,59 @@ impl QueryMemoryTracker {
             ReadableSize(limit as u64)
         );
         error::ExceedMemoryLimitSnafu { msg }.build()
+    }
+}
+
+/// Builder for constructing a [`QueryMemoryTracker`] with optional callbacks.
+pub struct QueryMemoryTrackerBuilder {
+    limit: usize,
+    on_exhausted_policy: OnExhaustedPolicy,
+    on_update: Option<UpdateCallback>,
+    on_reject: Option<RejectCallback>,
+}
+
+impl QueryMemoryTrackerBuilder {
+    /// Set a callback to be called whenever the usage changes successfully.
+    /// The callback receives the new total usage in bytes.
+    ///
+    /// # Note
+    /// The callback is called after both successful `track()` and stream drop.
+    /// Usage is exact in unlimited mode and 1KB-aligned in limited mode.
+    pub fn on_update<F>(mut self, on_update: F) -> Self
+    where
+        F: Fn(usize) + Send + Sync + 'static,
+    {
+        self.on_update = Some(Arc::new(on_update));
+        self
+    }
+
+    /// Set a callback to be called when memory allocation is rejected.
+    ///
+    /// # Note
+    /// This is only called when `track()` fails due to exceeding the limit.
+    /// It is never called when `limit == 0` (unlimited mode).
+    pub fn on_reject<F>(mut self, on_reject: F) -> Self
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        self.on_reject = Some(Arc::new(on_reject));
+        self
+    }
+
+    /// Build a [`QueryMemoryTracker`] from this builder.
+    pub fn build(self) -> QueryMemoryTracker {
+        let metrics = CallbackMemoryMetrics::new(self.on_update, self.on_reject);
+        let manager = MemoryManager::with_granularity(
+            self.limit as u64,
+            PermitGranularity::Kilobyte,
+            metrics.clone(),
+        );
+
+        QueryMemoryTracker {
+            manager,
+            metrics,
+            on_exhausted_policy: self.on_exhausted_policy,
+        }
     }
 }
 
@@ -589,7 +607,7 @@ type PendingTrackFuture = Pin<
     Box<dyn Future<Output = (StreamMemoryTracker, RecordBatch, usize, MemoryAcquireResult)> + Send>,
 >;
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct CallbackMemoryMetrics {
     inner: Arc<CallbackMemoryMetricsInner>,
 }
@@ -597,33 +615,27 @@ struct CallbackMemoryMetrics {
 type UpdateCallback = Arc<dyn Fn(usize) + Send + Sync>;
 type RejectCallback = Arc<dyn Fn() + Send + Sync>;
 
-#[derive(Default)]
 struct CallbackMemoryMetricsInner {
-    on_update: Mutex<Option<UpdateCallback>>,
-    on_reject: Mutex<Option<RejectCallback>>,
+    on_update: Option<UpdateCallback>,
+    on_reject: Option<RejectCallback>,
 }
 
 impl CallbackMemoryMetrics {
-    fn set_on_update<F>(&self, on_update: F)
-    where
-        F: Fn(usize) + Send + Sync + 'static,
-    {
-        *self.inner.on_update.lock().unwrap() = Some(Arc::new(on_update));
-    }
-
-    fn set_on_reject<F>(&self, on_reject: F)
-    where
-        F: Fn() + Send + Sync + 'static,
-    {
-        *self.inner.on_reject.lock().unwrap() = Some(Arc::new(on_reject));
+    fn new(on_update: Option<UpdateCallback>, on_reject: Option<RejectCallback>) -> Self {
+        Self {
+            inner: Arc::new(CallbackMemoryMetricsInner {
+                on_update,
+                on_reject,
+            }),
+        }
     }
 
     fn has_on_update(&self) -> bool {
-        self.inner.on_update.lock().unwrap().is_some()
+        self.inner.on_update.is_some()
     }
 
     fn has_on_reject(&self) -> bool {
-        self.inner.on_reject.lock().unwrap().is_some()
+        self.inner.on_reject.is_some()
     }
 }
 
@@ -631,15 +643,13 @@ impl MemoryMetrics for CallbackMemoryMetrics {
     fn set_limit(&self, _: i64) {}
 
     fn set_in_use(&self, bytes: i64) {
-        let callback = self.inner.on_update.lock().unwrap().clone();
-        if let Some(callback) = callback {
+        if let Some(callback) = &self.inner.on_update {
             callback(bytes.max(0) as usize);
         }
     }
 
     fn inc_rejected(&self, _: &str) {
-        let callback = self.inner.on_reject.lock().unwrap().clone();
-        if let Some(callback) = callback {
+        if let Some(callback) = &self.inner.on_reject {
             callback();
         }
     }
@@ -889,7 +899,8 @@ mod tests {
 
     #[test]
     fn test_query_memory_tracker_basic() {
-        let tracker = Arc::new(QueryMemoryTracker::new(10 * MB, OnExhaustedPolicy::Fail));
+        let tracker =
+            Arc::new(QueryMemoryTracker::builder(10 * MB, OnExhaustedPolicy::Fail).build());
 
         let mut stream1 = tracker.new_stream_tracker();
         assert!(stream1.try_track(5 * MB).is_ok());
@@ -906,7 +917,8 @@ mod tests {
 
     #[test]
     fn test_query_memory_tracker_shared_global_limit() {
-        let tracker = Arc::new(QueryMemoryTracker::new(10 * MB, OnExhaustedPolicy::Fail));
+        let tracker =
+            Arc::new(QueryMemoryTracker::builder(10 * MB, OnExhaustedPolicy::Fail).build());
         let mut stream1 = tracker.new_stream_tracker();
         let mut stream2 = tracker.new_stream_tracker();
 
@@ -930,7 +942,8 @@ mod tests {
 
     #[test]
     fn test_query_memory_tracker_hard_limit() {
-        let tracker = Arc::new(QueryMemoryTracker::new(10 * MB, OnExhaustedPolicy::Fail));
+        let tracker =
+            Arc::new(QueryMemoryTracker::builder(10 * MB, OnExhaustedPolicy::Fail).build());
         let mut stream = tracker.new_stream_tracker();
 
         assert!(stream.try_track(9 * MB).is_ok());
@@ -951,7 +964,7 @@ mod tests {
 
     #[test]
     fn test_query_memory_tracker_unlimited() {
-        let tracker = Arc::new(QueryMemoryTracker::new(0, OnExhaustedPolicy::Fail));
+        let tracker = Arc::new(QueryMemoryTracker::builder(0, OnExhaustedPolicy::Fail).build());
         let mut stream = tracker.new_stream_tracker();
 
         assert!(stream.try_track(10 * MB).is_ok());
@@ -962,7 +975,8 @@ mod tests {
 
     #[test]
     fn test_query_memory_tracker_rounds_to_kilobytes() {
-        let tracker = Arc::new(QueryMemoryTracker::new(10 * MB, OnExhaustedPolicy::Fail));
+        let tracker =
+            Arc::new(QueryMemoryTracker::builder(10 * MB, OnExhaustedPolicy::Fail).build());
         let mut stream = tracker.new_stream_tracker();
 
         assert!(stream.try_track(1_537).is_ok());
@@ -974,12 +988,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_memory_tracked_stream_waits_for_capacity() {
-        let tracker = QueryMemoryTracker::new(
+        let tracker = QueryMemoryTracker::builder(
             MB,
             OnExhaustedPolicy::Wait {
                 timeout: Duration::from_millis(200),
             },
-        );
+        )
+        .build();
         let batch = large_string_batch(700 * 1024);
         let expected_bytes = aligned_tracked_bytes(batch.buffer_memory_size());
 
@@ -1014,12 +1029,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_memory_tracked_stream_wait_times_out() {
-        let tracker = QueryMemoryTracker::new(
+        let tracker = QueryMemoryTracker::builder(
             MB,
             OnExhaustedPolicy::Wait {
                 timeout: Duration::from_millis(50),
             },
-        );
+        )
+        .build();
         let batch = large_string_batch(700 * 1024);
 
         let mut stream1 = MemoryTrackedStream::new(

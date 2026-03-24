@@ -227,13 +227,14 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
         let total_memory = get_total_memory_bytes().max(0) as u64;
         let scan_memory_limit = config.scan_memory_limit.resolve(total_memory) as usize;
         let scan_memory_tracker =
-            QueryMemoryTracker::new(scan_memory_limit, config.scan_memory_on_exhausted)
-                .with_on_update(|usage| {
+            QueryMemoryTracker::builder(scan_memory_limit, config.scan_memory_on_exhausted)
+                .on_update(|usage| {
                     SCAN_MEMORY_USAGE_BYTES.set(usage as i64);
                 })
-                .with_on_reject(|| {
+                .on_reject(|| {
                     SCAN_REQUESTS_REJECTED_TOTAL.inc();
-                });
+                })
+                .build();
 
         let inner = EngineInner {
             workers,
@@ -1375,13 +1376,14 @@ impl MitoEngine {
         let total_memory = get_total_memory_bytes().max(0) as u64;
         let scan_memory_limit = config.scan_memory_limit.resolve(total_memory) as usize;
         let scan_memory_tracker =
-            QueryMemoryTracker::new(scan_memory_limit, config.scan_memory_on_exhausted)
-                .with_on_update(|usage| {
+            QueryMemoryTracker::builder(scan_memory_limit, config.scan_memory_on_exhausted)
+                .on_update(|usage| {
                     SCAN_MEMORY_USAGE_BYTES.set(usage as i64);
                 })
-                .with_on_reject(|| {
+                .on_reject(|| {
                     SCAN_REQUESTS_REJECTED_TOTAL.inc();
-                });
+                })
+                .build();
         Ok(MitoEngine {
             inner: Arc::new(EngineInner {
                 workers: WorkerGroup::start_for_test(
