@@ -60,9 +60,13 @@ pub enum FlowIncrementalMode {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FlowQueryExtensions {
+    /// Maps region id -> lower exclusive sequence bound for incremental reads.
     pub incremental_after_seqs: Option<HashMap<u64, u64>>,
+    /// Incremental read mode requested by the caller.
     pub incremental_mode: Option<FlowIncrementalMode>,
+    /// Whether the caller expects per-region watermark metadata in terminal metrics.
     pub return_region_seq: bool,
+    /// Optional sink table id used to distinguish source scans from sink reads.
     pub sink_table_id: Option<TableId>,
 }
 

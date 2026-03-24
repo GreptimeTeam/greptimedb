@@ -1432,8 +1432,10 @@ pub struct QueryContext {
     pub timezone: String,
     pub extensions: HashMap<String, String>,
     pub channel: u8,
+    /// Maps region id -> snapshot upper bound sequence for that region.
     #[serde(default)]
     pub snapshot_seqs: HashMap<u64, u64>,
+    /// Maps region id -> minimal SST sequence allowed for that region.
     #[serde(default)]
     pub sst_min_sequences: HashMap<u64, u64>,
 }
