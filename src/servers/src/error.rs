@@ -703,7 +703,7 @@ impl ErrorExt for Error {
             #[cfg(not(windows))]
             UpdateJemallocMetrics { .. } => StatusCode::Internal,
 
-            CollectRecordbatch { .. } => StatusCode::EngineExecuteQuery,
+            CollectRecordbatch { source, .. } => source.status_code(),
 
             ExecuteQuery { source, .. }
             | ExecutePlan { source, .. }

@@ -59,7 +59,8 @@ use crate::error::{
     TableNotFoundSnafu, TableReadOnlySnafu, UnsupportedExprSnafu,
 };
 use crate::executor::QueryExecutor;
-use crate::metrics::{OnDone, QUERY_STAGE_ELAPSED};
+use crate::metrics::{OnDone, QUERY_STAGE_ELAPSED, RegionWatermarkMetricsStream};
+use crate::options::FlowQueryExtensions;
 use crate::physical_wrapper::PhysicalPlanWrapperRef;
 use crate::planner::{DfLogicalPlanner, LogicalPlanner};
 use crate::query_engine::{DescribeResult, QueryEngineContext, QueryEngineState};
@@ -131,7 +132,9 @@ impl DatafusionQueryEngine {
         let output = self
             .exec_query_plan((*dml.input).clone(), query_ctx.clone())
             .await?;
-        let mut stream = match output.data {
+        let common_query::Output { data, meta } = output;
+        let input_plan = meta.plan;
+        let mut stream = match data {
             OutputData::RecordBatches(batches) => batches.as_stream(),
             OutputData::Stream(stream) => stream,
             _ => unreachable!(),
@@ -167,7 +170,7 @@ impl DatafusionQueryEngine {
         }
         Ok(Output::new(
             OutputData::AffectedRows(affected_rows),
-            OutputMeta::new_with_cost(insert_cost),
+            OutputMeta::new(input_plan, insert_cost),
         ))
     }
 
@@ -552,6 +555,11 @@ impl QueryExecutor for DatafusionQueryEngine {
         plan: &Arc<dyn ExecutionPlan>,
     ) -> Result<SendableRecordBatchStream> {
         let explain_verbose = ctx.query_ctx().explain_verbose();
+        let should_collect_region_watermark =
+            FlowQueryExtensions::from_extensions(&ctx.query_ctx().extensions())
+                .map(|extensions| extensions.should_collect_region_watermark())
+                .map_err(BoxedError::new)
+                .context(QueryExecutionSnafu)?;
         let output_partitions = plan.properties().output_partitioning().partition_count();
         if explain_verbose {
             common_telemetry::info!("Executing query plan, output_partitions: {output_partitions}");
@@ -587,7 +595,14 @@ impl QueryExecutor for DatafusionQueryEngine {
                         );
                     }
                 });
-                Ok(Box::pin(stream))
+                if should_collect_region_watermark {
+                    Ok(Box::pin(RegionWatermarkMetricsStream::new(
+                        Box::pin(stream),
+                        plan.clone(),
+                    )))
+                } else {
+                    Ok(Box::pin(stream))
+                }
             }
             _ => {
                 // merge into a single partition
@@ -616,7 +631,14 @@ impl QueryExecutor for DatafusionQueryEngine {
                         );
                     }
                 });
-                Ok(Box::pin(stream))
+                if should_collect_region_watermark {
+                    Ok(Box::pin(RegionWatermarkMetricsStream::new(
+                        Box::pin(stream),
+                        plan.clone(),
+                    )))
+                } else {
+                    Ok(Box::pin(stream))
+                }
             }
         }
     }

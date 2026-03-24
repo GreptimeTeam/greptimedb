@@ -17,8 +17,10 @@ mod catalog;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::ops::Deref;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use api::region::RegionResponse;
@@ -36,7 +38,8 @@ use common_error::status_code::StatusCode;
 use common_meta::datanode::TopicStatsReporter;
 use common_query::OutputData;
 use common_query::request::QueryRequest;
-use common_recordbatch::SendableRecordBatchStream;
+use common_recordbatch::adapter::RecordBatchMetrics;
+use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use common_runtime::Runtime;
 use common_telemetry::tracing::{self, info_span};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
@@ -45,6 +48,7 @@ use dashmap::DashMap;
 use datafusion::datasource::TableProvider;
 use datafusion_common::tree_node::TreeNode;
 use either::Either;
+use futures_util::Stream;
 use futures_util::future::try_join_all;
 use metric_engine::engine::MetricEngine;
 use mito2::engine::{MITO_ENGINE_NAME, MitoEngine};
@@ -53,6 +57,7 @@ use query::QueryEngineRef;
 pub use query::dummy_catalog::{
     DummyCatalogList, DummyTableProviderFactory, TableProviderFactoryRef,
 };
+use query::options::{FLOW_INCREMENTAL_AFTER_SEQS, FLOW_RETURN_REGION_SEQ};
 use serde_json;
 use servers::error::{
     self as servers_error, ExecuteGrpcRequestSnafu, Result as ServerResult, SuspendedSnafu,
@@ -219,7 +224,6 @@ impl RegionServer {
         self.inner.handle_request(region_id, request).await
     }
 
-    /// Returns a table provider for the region. Will set snapshot sequence if available in the context.
     async fn table_provider(
         &self,
         region_id: RegionId,
@@ -236,9 +240,11 @@ impl RegionServer {
             RegionNotReadySnafu { region_id }
         );
 
+        let engine = status.into_engine();
+
         self.inner
             .table_provider_factory
-            .create(region_id, status.into_engine(), ctx)
+            .create(region_id, engine, ctx)
             .await
             .context(ExecuteLogicalPlanSnafu)
     }
@@ -278,16 +284,30 @@ impl RegionServer {
             .await
             .context(DecodeLogicalPlanSnafu)?;
 
-        self.inner
+        let stream = self
+            .inner
             .handle_read(
                 QueryRequest {
                     header: request.header,
                     region_id,
                     plan,
                 },
-                query_ctx,
+                query_ctx.clone(),
             )
-            .await
+            .await?;
+
+        let region_latest_seq = if should_return_region_seq(&query_ctx) {
+            query_ctx.get_snapshot(region_id.as_u64())
+        } else {
+            None
+        };
+
+        if let Some(seq) = region_latest_seq {
+            Ok(Box::pin(RegionWatermarkStream::new(stream, region_id, seq))
+                as SendableRecordBatchStream)
+        } else {
+            Ok(stream)
+        }
     }
 
     #[tracing::instrument(skip_all)]
@@ -745,6 +765,312 @@ impl RegionServer {
 
     pub(crate) fn suspend_state(&self) -> Arc<AtomicBool> {
         self.suspend.clone()
+    }
+}
+
+fn should_return_region_seq(query_ctx: &QueryContext) -> bool {
+    query_ctx
+        .extension(FLOW_RETURN_REGION_SEQ)
+        .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+        || query_ctx.extension(FLOW_INCREMENTAL_AFTER_SEQS).is_some()
+}
+
+/// Wraps a region read stream so terminal metrics can carry the scan-open watermark.
+struct RegionWatermarkStream {
+    stream: SendableRecordBatchStream,
+    region_id: u64,
+    snapshot_seq: u64,
+    finished: AtomicBool,
+}
+
+impl RegionWatermarkStream {
+    fn new(stream: SendableRecordBatchStream, region_id: RegionId, latest_sequence: u64) -> Self {
+        Self {
+            stream,
+            region_id: region_id.as_u64(),
+            snapshot_seq: latest_sequence,
+            finished: AtomicBool::new(false),
+        }
+    }
+
+    fn merged_metrics(&self, mut metrics: RecordBatchMetrics) -> RecordBatchMetrics {
+        let entry = if let Some(entry) = metrics
+            .region_watermarks
+            .iter_mut()
+            .find(|entry| entry.region_id == self.region_id)
+        {
+            entry
+        } else {
+            metrics
+                .region_watermarks
+                .push(common_recordbatch::adapter::RegionWatermarkEntry {
+                    region_id: self.region_id,
+                    watermark: None,
+                });
+            metrics.region_watermarks.last_mut().unwrap()
+        };
+
+        entry.watermark = Some(self.snapshot_seq);
+        metrics
+    }
+}
+
+impl RecordBatchStream for RegionWatermarkStream {
+    fn name(&self) -> &str {
+        self.stream.name()
+    }
+
+    fn schema(&self) -> datatypes::schema::SchemaRef {
+        self.stream.schema()
+    }
+
+    fn output_ordering(&self) -> Option<&[OrderOption]> {
+        self.stream.output_ordering()
+    }
+
+    fn metrics(&self) -> Option<RecordBatchMetrics> {
+        let base = self.stream.metrics();
+        if !self.finished.load(Ordering::Relaxed) {
+            return base;
+        }
+
+        Some(self.merged_metrics(base.unwrap_or_default()))
+    }
+}
+
+impl Stream for RegionWatermarkStream {
+    type Item = common_recordbatch::error::Result<RecordBatch>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match Pin::new(&mut self.stream).poll_next(cx) {
+            Poll::Ready(None) => {
+                self.finished.store(true, Ordering::Relaxed);
+                Poll::Ready(None)
+            }
+            other => other,
+        }
+    }
+}
+
+#[cfg(test)]
+mod watermark_tests {
+    use std::collections::HashMap;
+    use std::sync::{Arc, RwLock};
+
+    use api::v1::Rows;
+    use common_recordbatch::{RecordBatch, RecordBatches};
+    use datatypes::prelude::{ConcreteDataType, VectorRef};
+    use datatypes::schema::{ColumnSchema, Schema};
+    use datatypes::vectors::Int32Vector;
+    use futures_util::StreamExt;
+    use mito2::config::MitoConfig;
+    use mito2::test_util::{self, CreateRequestBuilder, TestEnv};
+    use session::context::QueryContextBuilder;
+    use store_api::region_engine::RegionEngine;
+    use store_api::region_request::RegionRequest;
+
+    use super::*;
+
+    #[cfg(test)]
+    fn bind_snapshot_bound_region_seq(
+        query_ctx: &QueryContext,
+        region_id: RegionId,
+        sampled_sequence: u64,
+    ) -> u64 {
+        if let Some(snapshot_seq) = query_ctx.get_snapshot(region_id.as_u64()) {
+            snapshot_seq
+        } else {
+            query_ctx.set_snapshot(region_id.as_u64(), sampled_sequence);
+            sampled_sequence
+        }
+    }
+    #[test]
+    fn test_should_return_region_seq() {
+        let ctx = QueryContextBuilder::default()
+            .extensions(HashMap::from([(
+                FLOW_RETURN_REGION_SEQ.to_string(),
+                "true".to_string(),
+            )]))
+            .build();
+        assert!(should_return_region_seq(&ctx));
+
+        let ctx = QueryContextBuilder::default()
+            .extensions(HashMap::from([(
+                FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+                r#"{"1":10}"#.to_string(),
+            )]))
+            .build();
+        assert!(should_return_region_seq(&ctx));
+
+        let ctx = QueryContextBuilder::default().build();
+        assert!(!should_return_region_seq(&ctx));
+    }
+
+    #[test]
+    fn test_full_query_and_incremental_queries_require_region_seq() {
+        let ctx = QueryContextBuilder::default()
+            .extensions(HashMap::from([(
+                FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+                r#"{"1":10}"#.to_string(),
+            )]))
+            .build();
+        assert!(should_return_region_seq(&ctx));
+
+        let ctx = QueryContextBuilder::default()
+            .extensions(HashMap::from([(
+                FLOW_RETURN_REGION_SEQ.to_string(),
+                "true".to_string(),
+            )]))
+            .build();
+        assert!(should_return_region_seq(&ctx));
+
+        let ctx = QueryContextBuilder::default().build();
+        assert!(!should_return_region_seq(&ctx));
+    }
+
+    #[test]
+    fn test_bind_snapshot_bound_region_seq_reuses_existing_snapshot() {
+        let region_id = RegionId::new(42, 7);
+        let ctx = QueryContextBuilder::default()
+            .snapshot_seqs(Arc::new(RwLock::new(HashMap::from([(
+                region_id.as_u64(),
+                42_u64,
+            )]))))
+            .build();
+
+        let seq = bind_snapshot_bound_region_seq(&ctx, region_id, 99);
+
+        assert_eq!(seq, 42);
+        assert_eq!(ctx.get_snapshot(region_id.as_u64()), Some(42));
+    }
+
+    #[test]
+    fn test_bind_snapshot_bound_region_seq_sets_sampled_sequence() {
+        let region_id = RegionId::new(42, 7);
+        let ctx = QueryContextBuilder::default().build();
+
+        let seq = bind_snapshot_bound_region_seq(&ctx, region_id, 99);
+
+        assert_eq!(seq, 99);
+        assert_eq!(ctx.get_snapshot(region_id.as_u64()), Some(99));
+    }
+
+    #[tokio::test]
+    async fn test_region_watermark_stream_only_sets_terminal_metrics() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "v",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+        let values: VectorRef = Arc::new(Int32Vector::from_slice([1, 2]));
+        let batch = RecordBatch::new(schema.clone(), vec![values]).unwrap();
+        let stream = RecordBatches::try_new(schema, vec![batch])
+            .unwrap()
+            .as_stream();
+
+        let region_id = RegionId::new(42, 7);
+        let wrapped = RegionWatermarkStream::new(stream, region_id, 99);
+        let mut pinned = Box::pin(wrapped);
+
+        assert!(pinned.as_ref().get_ref().metrics().is_none());
+        while pinned.next().await.is_some() {}
+
+        let metrics = pinned.as_ref().get_ref().metrics().unwrap();
+        assert_eq!(
+            metrics.region_watermarks,
+            vec![common_recordbatch::adapter::RegionWatermarkEntry {
+                region_id: region_id.as_u64(),
+                watermark: Some(99),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_region_watermark_stream_sets_watermark_from_snapshot() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "v",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+        let values: VectorRef = Arc::new(Int32Vector::from_slice([1, 2]));
+        let batch = RecordBatch::new(schema.clone(), vec![values]).unwrap();
+        let stream = RecordBatches::try_new(schema, vec![batch])
+            .unwrap()
+            .as_stream();
+
+        let region_id = RegionId::new(42, 7);
+        let wrapped = RegionWatermarkStream::new(stream, region_id, 99);
+        let mut pinned = Box::pin(wrapped);
+
+        while pinned.next().await.is_some() {}
+
+        let metrics = pinned.as_ref().get_ref().metrics().unwrap();
+        assert_eq!(
+            metrics.region_watermarks,
+            vec![common_recordbatch::adapter::RegionWatermarkEntry {
+                region_id: region_id.as_u64(),
+                watermark: Some(99),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_region_watermark_stream_keeps_watermark_after_late_flush() {
+        let mut env =
+            TestEnv::with_prefix("test_region_watermark_stream_keeps_watermark_after_late_flush")
+                .await;
+        let engine = env.create_engine(MitoConfig::default()).await;
+
+        let region_id = RegionId::new(1, 1);
+        let request = CreateRequestBuilder::new().build();
+        let column_schemas = test_util::rows_schema(&request);
+        engine
+            .handle_request(region_id, RegionRequest::Create(request))
+            .await
+            .unwrap();
+
+        let initial_rows = Rows {
+            schema: column_schemas.clone(),
+            rows: test_util::build_rows(0, 3),
+        };
+        test_util::put_rows(&engine, region_id, initial_rows).await;
+        test_util::flush_region(&engine, region_id, None).await;
+
+        let snapshot_seq = engine.find_region(region_id).unwrap().flushed_sequence();
+
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "v",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+        let values: VectorRef = Arc::new(Int32Vector::from_slice([1, 2]));
+        let batch = RecordBatch::new(schema.clone(), vec![values]).unwrap();
+        let stream = RecordBatches::try_new(schema, vec![batch])
+            .unwrap()
+            .as_stream();
+
+        let wrapped = RegionWatermarkStream::new(stream, region_id, snapshot_seq);
+        let mut pinned = Box::pin(wrapped);
+
+        assert!(pinned.next().await.is_some());
+
+        let late_rows = Rows {
+            schema: column_schemas,
+            rows: test_util::build_rows(3, 5),
+        };
+        test_util::put_rows(&engine, region_id, late_rows).await;
+        test_util::flush_region(&engine, region_id, None).await;
+
+        assert!(pinned.next().await.is_none());
+
+        let metrics = pinned.as_ref().get_ref().metrics().unwrap();
+        assert_eq!(
+            metrics.region_watermarks,
+            vec![common_recordbatch::adapter::RegionWatermarkEntry {
+                region_id: region_id.as_u64(),
+                watermark: Some(snapshot_seq),
+            }]
+        );
     }
 }
 

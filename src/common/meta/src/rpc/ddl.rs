@@ -1432,6 +1432,10 @@ pub struct QueryContext {
     pub timezone: String,
     pub extensions: HashMap<String, String>,
     pub channel: u8,
+    #[serde(default)]
+    pub snapshot_seqs: HashMap<u64, u64>,
+    #[serde(default)]
+    pub sst_min_sequences: HashMap<u64, u64>,
 }
 
 impl QueryContext {
@@ -1459,6 +1463,14 @@ impl QueryContext {
     pub fn channel(&self) -> u8 {
         self.channel
     }
+
+    pub fn snapshot_seqs(&self) -> &HashMap<u64, u64> {
+        &self.snapshot_seqs
+    }
+
+    pub fn sst_min_sequences(&self) -> &HashMap<u64, u64> {
+        &self.sst_min_sequences
+    }
 }
 
 /// Lightweight query context for flow operations containing only essential fields.
@@ -1466,12 +1478,17 @@ impl QueryContext {
 /// for flow creation and execution.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct FlowQueryContext {
-    /// Current catalog name - needed for flow metadata and recovery
     pub catalog: String,
-    /// Current schema name - needed for table resolution during flow execution
     pub schema: String,
-    /// Timezone for timestamp operations in the flow
     pub timezone: String,
+    #[serde(default)]
+    pub extensions: HashMap<String, String>,
+    #[serde(default)]
+    pub channel: u8,
+    #[serde(default)]
+    pub snapshot_seqs: HashMap<u64, u64>,
+    #[serde(default)]
+    pub sst_min_sequences: HashMap<u64, u64>,
 }
 
 impl<'de> Deserialize<'de> for FlowQueryContext {
@@ -1492,6 +1509,14 @@ impl<'de> Deserialize<'de> for FlowQueryContext {
             catalog: String,
             schema: String,
             timezone: String,
+            #[serde(default)]
+            extensions: HashMap<String, String>,
+            #[serde(default)]
+            channel: u8,
+            #[serde(default)]
+            snapshot_seqs: HashMap<u64, u64>,
+            #[serde(default)]
+            sst_min_sequences: HashMap<u64, u64>,
         }
 
         match ContextCompat::deserialize(deserializer)? {
@@ -1499,6 +1524,10 @@ impl<'de> Deserialize<'de> for FlowQueryContext {
                 catalog: helper.catalog,
                 schema: helper.schema,
                 timezone: helper.timezone,
+                extensions: helper.extensions,
+                channel: helper.channel,
+                snapshot_seqs: helper.snapshot_seqs,
+                sst_min_sequences: helper.sst_min_sequences,
             }),
             ContextCompat::Full(full_ctx) => Ok(full_ctx.into()),
         }
@@ -1507,12 +1536,21 @@ impl<'de> Deserialize<'de> for FlowQueryContext {
 
 impl From<PbQueryContext> for QueryContext {
     fn from(pb_ctx: PbQueryContext) -> Self {
+        let snapshot_sequences = pb_ctx.snapshot_seqs;
         Self {
             current_catalog: pb_ctx.current_catalog,
             current_schema: pb_ctx.current_schema,
             timezone: pb_ctx.timezone,
             extensions: pb_ctx.extensions,
             channel: pb_ctx.channel as u8,
+            snapshot_seqs: snapshot_sequences
+                .as_ref()
+                .map(|x| x.snapshot_seqs.clone())
+                .unwrap_or_default(),
+            sst_min_sequences: snapshot_sequences
+                .as_ref()
+                .map(|x| x.sst_min_sequences.clone())
+                .unwrap_or_default(),
         }
     }
 }
@@ -1525,6 +1563,8 @@ impl From<QueryContext> for PbQueryContext {
             timezone,
             extensions,
             channel,
+            snapshot_seqs,
+            sst_min_sequences,
         }: QueryContext,
     ) -> Self {
         PbQueryContext {
@@ -1533,7 +1573,10 @@ impl From<QueryContext> for PbQueryContext {
             timezone,
             extensions,
             channel: channel as u32,
-            snapshot_seqs: None,
+            snapshot_seqs: Some(api::v1::SnapshotSequences {
+                snapshot_seqs,
+                sst_min_sequences,
+            }),
             explain: None,
         }
     }
@@ -1545,6 +1588,10 @@ impl From<QueryContext> for FlowQueryContext {
             catalog: ctx.current_catalog,
             schema: ctx.current_schema,
             timezone: ctx.timezone,
+            extensions: ctx.extensions,
+            channel: ctx.channel,
+            snapshot_seqs: ctx.snapshot_seqs,
+            sst_min_sequences: ctx.sst_min_sequences,
         }
     }
 }
@@ -1555,8 +1602,10 @@ impl From<FlowQueryContext> for QueryContext {
             current_catalog: flow_ctx.catalog,
             current_schema: flow_ctx.schema,
             timezone: flow_ctx.timezone,
-            extensions: HashMap::new(),
-            channel: 0, // Use default channel for flows
+            extensions: flow_ctx.extensions,
+            channel: flow_ctx.channel,
+            snapshot_seqs: flow_ctx.snapshot_seqs,
+            sst_min_sequences: flow_ctx.sst_min_sequences,
         }
     }
 }
@@ -1720,6 +1769,8 @@ mod tests {
             timezone: "UTC".to_string(),
             extensions,
             channel: 5,
+            snapshot_seqs: HashMap::from([(10, 100)]),
+            sst_min_sequences: HashMap::from([(10, 90)]),
         };
 
         let flow_ctx: FlowQueryContext = query_ctx.into();
@@ -1727,6 +1778,9 @@ mod tests {
         assert_eq!(flow_ctx.catalog, "test_catalog");
         assert_eq!(flow_ctx.schema, "test_schema");
         assert_eq!(flow_ctx.timezone, "UTC");
+        assert_eq!(flow_ctx.channel, 5);
+        assert_eq!(flow_ctx.snapshot_seqs, HashMap::from([(10, 100)]));
+        assert_eq!(flow_ctx.sst_min_sequences, HashMap::from([(10, 90)]));
     }
 
     #[test]
@@ -1735,6 +1789,10 @@ mod tests {
             catalog: "prod_catalog".to_string(),
             schema: "public".to_string(),
             timezone: "America/New_York".to_string(),
+            extensions: HashMap::from([("k".to_string(), "v".to_string())]),
+            channel: 7,
+            snapshot_seqs: HashMap::from([(11, 111)]),
+            sst_min_sequences: HashMap::from([(11, 101)]),
         };
 
         let query_ctx: QueryContext = flow_ctx.clone().into();
@@ -1742,8 +1800,13 @@ mod tests {
         assert_eq!(query_ctx.current_catalog, "prod_catalog");
         assert_eq!(query_ctx.current_schema, "public");
         assert_eq!(query_ctx.timezone, "America/New_York");
-        assert!(query_ctx.extensions.is_empty());
-        assert_eq!(query_ctx.channel, 0);
+        assert_eq!(
+            query_ctx.extensions,
+            HashMap::from([("k".to_string(), "v".to_string())])
+        );
+        assert_eq!(query_ctx.channel, 7);
+        assert_eq!(query_ctx.snapshot_seqs, HashMap::from([(11, 111)]));
+        assert_eq!(query_ctx.sst_min_sequences, HashMap::from([(11, 101)]));
 
         // Test roundtrip conversion
         let flow_ctx_roundtrip: FlowQueryContext = query_ctx.into();
@@ -1756,6 +1819,10 @@ mod tests {
             catalog: "test_catalog".to_string(),
             schema: "test_schema".to_string(),
             timezone: "UTC".to_string(),
+            extensions: HashMap::new(),
+            channel: 0,
+            snapshot_seqs: HashMap::new(),
+            sst_min_sequences: HashMap::new(),
         };
 
         let serialized = serde_json::to_string(&flow_ctx).unwrap();
@@ -1776,6 +1843,10 @@ mod tests {
             catalog: "pb_catalog".to_string(),
             schema: "pb_schema".to_string(),
             timezone: "Asia/Tokyo".to_string(),
+            extensions: HashMap::from([("x".to_string(), "y".to_string())]),
+            channel: 6,
+            snapshot_seqs: HashMap::from([(3, 30)]),
+            sst_min_sequences: HashMap::from([(3, 21)]),
         };
 
         let pb_ctx: PbQueryContext = flow_ctx.into();
@@ -1783,9 +1854,44 @@ mod tests {
         assert_eq!(pb_ctx.current_catalog, "pb_catalog");
         assert_eq!(pb_ctx.current_schema, "pb_schema");
         assert_eq!(pb_ctx.timezone, "Asia/Tokyo");
-        assert!(pb_ctx.extensions.is_empty());
-        assert_eq!(pb_ctx.channel, 0);
-        assert!(pb_ctx.snapshot_seqs.is_none());
+        assert_eq!(
+            pb_ctx.extensions,
+            HashMap::from([("x".to_string(), "y".to_string())])
+        );
+        assert_eq!(pb_ctx.channel, 6);
+        assert_eq!(
+            pb_ctx.snapshot_seqs,
+            Some(api::v1::SnapshotSequences {
+                snapshot_seqs: HashMap::from([(3, 30)]),
+                sst_min_sequences: HashMap::from([(3, 21)]),
+            })
+        );
         assert!(pb_ctx.explain.is_none());
+    }
+
+    #[test]
+    fn test_pb_query_context_roundtrip_with_snapshot_sequences() {
+        let pb = PbQueryContext {
+            current_catalog: "c1".to_string(),
+            current_schema: "s1".to_string(),
+            timezone: "UTC".to_string(),
+            extensions: HashMap::from([("flow.return_region_seq".to_string(), "true".to_string())]),
+            channel: 3,
+            snapshot_seqs: Some(api::v1::SnapshotSequences {
+                snapshot_seqs: HashMap::from([(1, 100)]),
+                sst_min_sequences: HashMap::from([(1, 90)]),
+            }),
+            explain: None,
+        };
+
+        let query_ctx: QueryContext = pb.clone().into();
+        let pb_roundtrip: PbQueryContext = query_ctx.into();
+
+        assert_eq!(pb_roundtrip.current_catalog, pb.current_catalog);
+        assert_eq!(pb_roundtrip.current_schema, pb.current_schema);
+        assert_eq!(pb_roundtrip.timezone, pb.timezone);
+        assert_eq!(pb_roundtrip.extensions, pb.extensions);
+        assert_eq!(pb_roundtrip.channel, pb.channel);
+        assert_eq!(pb_roundtrip.snapshot_seqs, pb.snapshot_seqs);
     }
 }

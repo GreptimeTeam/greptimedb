@@ -14,7 +14,7 @@
 
 //! Batching mode task state, which changes frequently
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::Duration;
 
 use common_telemetry::debug;
@@ -49,6 +49,8 @@ pub struct TaskState {
     /// Dirty Time windows need to be updated
     /// mapping of `start -> end` and non-overlapping
     pub(crate) dirty_time_windows: DirtyTimeWindows,
+    checkpoint_mode: CheckpointMode,
+    checkpoints: BTreeMap<u64, u64>,
     exec_state: ExecState,
     /// Shutdown receiver
     pub(crate) shutdown_rx: oneshot::Receiver<()>,
@@ -63,6 +65,8 @@ impl TaskState {
             last_query_duration: Duration::from_secs(0),
             last_exec_time_millis: None,
             dirty_time_windows: Default::default(),
+            checkpoint_mode: CheckpointMode::FullSnapshot,
+            checkpoints: Default::default(),
             exec_state: ExecState::Idle,
             shutdown_rx,
             task_handle: None,
@@ -82,6 +86,78 @@ impl TaskState {
 
     pub fn last_execution_time_millis(&self) -> Option<i64> {
         self.last_exec_time_millis
+    }
+
+    pub fn checkpoint_mode(&self) -> CheckpointMode {
+        self.checkpoint_mode
+    }
+
+    pub fn checkpoints(&self) -> &BTreeMap<u64, u64> {
+        &self.checkpoints
+    }
+
+    pub fn mark_full_snapshot(&mut self) {
+        self.checkpoint_mode = CheckpointMode::FullSnapshot;
+    }
+
+    pub fn advance_checkpoints(&mut self, watermark_map: HashMap<u64, u64>) {
+        self.checkpoints = watermark_map.into_iter().collect();
+        self.checkpoint_mode = CheckpointMode::Incremental;
+    }
+
+    pub fn advance_incremental_checkpoints_with_participation(
+        &mut self,
+        participating_regions: &BTreeSet<u64>,
+        watermark_map: HashMap<u64, u64>,
+    ) {
+        for region_id in participating_regions {
+            if let Some(seq) = watermark_map.get(region_id) {
+                self.checkpoints.insert(*region_id, *seq);
+            }
+        }
+        self.checkpoint_mode = CheckpointMode::Incremental;
+    }
+
+    pub fn can_advance_incremental_checkpoints(&self, watermark_map: &HashMap<u64, u64>) -> bool {
+        !self.checkpoints.is_empty()
+            && self.checkpoints.len() == watermark_map.len()
+            && self.checkpoints.iter().all(|(region_id, checkpoint)| {
+                watermark_map
+                    .get(region_id)
+                    .is_some_and(|seq| seq >= checkpoint)
+            })
+    }
+
+    pub fn can_advance_full_snapshot_checkpoints(
+        &self,
+        participating_regions: &BTreeSet<u64>,
+        watermark_map: &HashMap<u64, u64>,
+    ) -> bool {
+        !participating_regions.is_empty()
+            && participating_regions.len() == watermark_map.len()
+            && participating_regions
+                .iter()
+                .all(|region_id| watermark_map.contains_key(region_id))
+    }
+
+    pub fn can_advance_incremental_checkpoints_with_participation(
+        &self,
+        participating_regions: &BTreeSet<u64>,
+        watermark_map: &HashMap<u64, u64>,
+    ) -> bool {
+        !self.checkpoints.is_empty()
+            && !participating_regions.is_empty()
+            && participating_regions.len() == watermark_map.len()
+            && participating_regions
+                .iter()
+                .all(|region_id| self.checkpoints.contains_key(region_id))
+            && participating_regions.iter().all(|region_id| {
+                let checkpoint = self.checkpoints.get(region_id);
+                watermark_map
+                    .get(region_id)
+                    .zip(checkpoint)
+                    .is_some_and(|(seq, checkpoint)| seq >= checkpoint)
+            })
     }
 
     /// Compute the next query delay based on the time window size or the last query duration.
@@ -559,6 +635,12 @@ enum ExecState {
     Executing,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckpointMode {
+    FullSnapshot,
+    Incremental,
+}
+
 /// Filter Expression's information
 #[derive(Debug, Clone)]
 pub struct FilterExprInfo {
@@ -600,6 +682,127 @@ mod test {
 
         state.after_query_exec(std::time::Duration::from_millis(1), true);
         assert!(state.last_execution_time_millis().is_some());
+    }
+
+    #[test]
+    fn test_task_state_checkpoint_mode_and_advancement() {
+        let query_ctx = QueryContext::arc();
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let mut state = TaskState::new(query_ctx, rx);
+
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+        assert!(state.checkpoints().is_empty());
+
+        state.advance_checkpoints(HashMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]));
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::Incremental);
+        assert_eq!(
+            state.checkpoints(),
+            &BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)])
+        );
+
+        state.mark_full_snapshot();
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+        assert_eq!(
+            state.checkpoints(),
+            &BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)])
+        );
+    }
+
+    #[test]
+    fn test_incremental_checkpoint_advancement_requires_complete_map() {
+        let query_ctx = QueryContext::arc();
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let mut state = TaskState::new(query_ctx, rx);
+        state.advance_checkpoints(HashMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]));
+
+        assert!(!state.can_advance_incremental_checkpoints(&HashMap::from([(1_u64, 11_u64)])));
+        assert!(!state.can_advance_incremental_checkpoints(&HashMap::from([
+            (1_u64, 11_u64),
+            (2_u64, 19_u64),
+        ])));
+        assert!(state.can_advance_incremental_checkpoints(&HashMap::from([
+            (1_u64, 11_u64),
+            (2_u64, 20_u64),
+        ])));
+    }
+
+    #[test]
+    fn test_full_snapshot_checkpoint_advancement_requires_participating_regions() {
+        let query_ctx = QueryContext::arc();
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let state = TaskState::new(query_ctx, rx);
+
+        assert!(!state.can_advance_full_snapshot_checkpoints(&BTreeSet::new(), &HashMap::new()));
+        assert!(!state.can_advance_full_snapshot_checkpoints(
+            &BTreeSet::from([1_u64, 2_u64]),
+            &HashMap::from([(1_u64, 10_u64)]),
+        ));
+        assert!(state.can_advance_full_snapshot_checkpoints(
+            &BTreeSet::from([1_u64, 2_u64]),
+            &HashMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]),
+        ));
+    }
+
+    #[test]
+    fn test_incremental_checkpoint_advancement_requires_participation_alignment() {
+        let query_ctx = QueryContext::arc();
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let mut state = TaskState::new(query_ctx, rx);
+        state.advance_checkpoints(HashMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]));
+
+        assert!(
+            state.can_advance_incremental_checkpoints_with_participation(
+                &BTreeSet::from([1_u64]),
+                &HashMap::from([(1_u64, 11_u64)]),
+            )
+        );
+        assert!(
+            !state.can_advance_incremental_checkpoints_with_participation(
+                &BTreeSet::from([1_u64, 2_u64]),
+                &HashMap::from([(1_u64, 11_u64)]),
+            )
+        );
+        assert!(
+            !state.can_advance_incremental_checkpoints_with_participation(
+                &BTreeSet::from([3_u64]),
+                &HashMap::from([(3_u64, 11_u64)]),
+            )
+        );
+        assert!(
+            !state.can_advance_incremental_checkpoints_with_participation(
+                &BTreeSet::from([1_u64]),
+                &HashMap::from([(1_u64, 9_u64)]),
+            )
+        );
+        assert!(
+            state.can_advance_incremental_checkpoints_with_participation(
+                &BTreeSet::from([1_u64, 2_u64]),
+                &HashMap::from([(1_u64, 11_u64), (2_u64, 21_u64)]),
+            )
+        );
+    }
+
+    #[test]
+    fn test_incremental_checkpoint_advancement_merges_participating_subset() {
+        let query_ctx = QueryContext::arc();
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let mut state = TaskState::new(query_ctx, rx);
+        state.advance_checkpoints(HashMap::from([
+            (1_u64, 10_u64),
+            (2_u64, 20_u64),
+            (3_u64, 30_u64),
+        ]));
+
+        state.advance_incremental_checkpoints_with_participation(
+            &BTreeSet::from([1_u64, 3_u64]),
+            HashMap::from([(1_u64, 12_u64), (3_u64, 35_u64)]),
+        );
+
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::Incremental);
+        assert_eq!(
+            state.checkpoints(),
+            &BTreeMap::from([(1_u64, 12_u64), (2_u64, 20_u64), (3_u64, 35_u64)])
+        );
     }
 
     #[test]

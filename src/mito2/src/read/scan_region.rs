@@ -38,7 +38,8 @@ use snafu::{OptionExt as _, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{PartitionRange, RegionScannerRef};
 use store_api::storage::{
-    ColumnId, RegionId, ScanRequest, SequenceRange, TimeSeriesDistribution, TimeSeriesRowSelector,
+    ColumnId, RegionId, ScanRequest, SequenceNumber, SequenceRange, TimeSeriesDistribution,
+    TimeSeriesRowSelector,
 };
 use table::predicate::{Predicate, build_time_range_predicate, extract_time_range_from_expr};
 use tokio::sync::{Semaphore, mpsc};
@@ -147,6 +148,14 @@ impl Scanner {
             Scanner::Seq(seq_scan) => seq_scan.input().index_ids(),
             Scanner::Unordered(unordered_scan) => unordered_scan.input().index_ids(),
             Scanner::Series(series_scan) => series_scan.input().index_ids(),
+        }
+    }
+
+    pub(crate) fn snapshot_sequence(&self) -> Option<SequenceNumber> {
+        match self {
+            Scanner::Seq(seq_scan) => seq_scan.input().snapshot_sequence,
+            Scanner::Unordered(unordered_scan) => unordered_scan.input().snapshot_sequence,
+            Scanner::Series(series_scan) => series_scan.input().snapshot_sequence,
         }
     }
 
@@ -552,6 +561,12 @@ impl ScanRegion {
             .with_merge_mode(self.version.options.merge_mode())
             .with_series_row_selector(self.request.series_row_selector)
             .with_distribution(self.request.distribution)
+            .with_snapshot_sequence(
+                self.request
+                    .snapshot_on_scan
+                    .then_some(self.request.memtable_max_sequence)
+                    .flatten(),
+            )
             .with_flat_format(flat_format);
         #[cfg(feature = "vector_index")]
         let input = input
@@ -857,6 +872,8 @@ pub struct ScanInput {
     pub(crate) distribution: Option<TimeSeriesDistribution>,
     /// Whether to use flat format.
     pub(crate) flat_format: bool,
+    /// Snapshot upper bound bound at scan open and propagated back to the caller.
+    pub(crate) snapshot_sequence: Option<SequenceNumber>,
     /// Whether this scan is for compaction.
     pub(crate) compaction: bool,
     #[cfg(feature = "enterprise")]
@@ -894,6 +911,7 @@ impl ScanInput {
             series_row_selector: None,
             distribution: None,
             flat_format: false,
+            snapshot_sequence: None,
             compaction: false,
             #[cfg(feature = "enterprise")]
             extension_ranges: Vec::new(),
@@ -1063,6 +1081,15 @@ impl ScanInput {
     #[must_use]
     pub(crate) fn with_flat_format(mut self, flat_format: bool) -> Self {
         self.flat_format = flat_format;
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn with_snapshot_sequence(
+        mut self,
+        snapshot_sequence: Option<SequenceNumber>,
+    ) -> Self {
+        self.snapshot_sequence = snapshot_sequence;
         self
     }
 

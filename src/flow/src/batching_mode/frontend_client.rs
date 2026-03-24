@@ -21,17 +21,18 @@ use std::time::SystemTime;
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use api::v1::{CreateTableExpr, QueryRequest};
-use client::{Client, Database};
+use client::{Client, Database, OutputWithMetrics};
 use common_error::ext::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager, load_client_tls_config};
 use common_meta::cluster::{NodeInfo, NodeInfoKey, Role};
 use common_meta::peer::Peer;
 use common_meta::rpc::store::RangeRequest;
-use common_query::Output;
+use common_query::{Output, OutputData};
 use common_telemetry::warn;
 use meta_client::client::MetaClient;
 use query::datafusion::QUERY_PARALLELISM_HINT;
-use query::options::QueryOptions;
+use query::metrics::terminal_recordbatch_metrics_from_plan;
+use query::options::{FlowQueryExtensions, QueryOptions};
 use rand::rng;
 use rand::seq::SliceRandom;
 use servers::query_handler::grpc::GrpcQueryHandler;
@@ -179,6 +180,27 @@ pub struct DatabaseWithPeer {
     pub peer: Peer,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FlowQueryFailure {
+    pub stale_cursor: Option<FlowStaleCursorDetail>,
+}
+
+impl FlowQueryFailure {
+    pub fn is_stale_cursor(&self) -> bool {
+        self.stale_cursor.is_some()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FlowStaleCursorDetail {
+    pub region_id: Option<String>,
+    pub given_seq: Option<u64>,
+    pub min_readable_seq: Option<u64>,
+}
+
+const STALE_CURSOR_TOKEN: &str = "STALE_CURSOR";
+const STALE_CURSOR_RETRY_HINT: &str = "FALLBACK_FULL_RECOMPUTE";
+
 impl DatabaseWithPeer {
     fn new(database: Database, peer: Peer) -> Self {
         Self { database, peer }
@@ -199,6 +221,13 @@ impl DatabaseWithPeer {
 }
 
 impl FrontendClient {
+    /// TODO(discord9): better way to detect stale cursor error instead of parsing the error message
+    pub fn inspect_query_error(err: &Error) -> FlowQueryFailure {
+        let debug = format!("{err:?}");
+        let stale_cursor = parse_stale_cursor_detail(&debug);
+        FlowQueryFailure { stale_cursor }
+    }
+
     /// scan for available frontend from metadata
     pub(crate) async fn scan_for_frontend(&self) -> Result<Vec<(NodeInfoKey, NodeInfo)>, Error> {
         let Self::Distributed { meta_client, .. } = self else {
@@ -379,6 +408,79 @@ impl FrontendClient {
         }
     }
 
+    pub async fn query_with_terminal_metrics(
+        &self,
+        catalog: &str,
+        schema: &str,
+        request: QueryRequest,
+        extensions: &[(&str, &str)],
+    ) -> Result<OutputWithMetrics, Error> {
+        let flow_extensions = build_flow_extensions(extensions)?;
+        match self {
+            FrontendClient::Distributed {
+                query, batch_opts, ..
+            } => {
+                let query_parallelism = query.parallelism.to_string();
+                let mut hints = vec![
+                    (QUERY_PARALLELISM_HINT, query_parallelism.as_str()),
+                    (READ_PREFERENCE_HINT, batch_opts.read_preference.as_ref()),
+                ];
+                hints.extend_from_slice(extensions);
+                let db = self.get_random_active_frontend(catalog, schema).await?;
+                db.database
+                    .query_with_terminal_metrics(request, &hints)
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)
+            }
+            FrontendClient::Standalone {
+                database_client,
+                query,
+            } => {
+                let mut extensions_map = HashMap::from([(
+                    QUERY_PARALLELISM_HINT.to_string(),
+                    query.parallelism.to_string(),
+                )]);
+                for (key, value) in extensions {
+                    extensions_map.insert((*key).to_string(), (*value).to_string());
+                }
+                let ctx = QueryContextBuilder::default()
+                    .current_catalog(catalog.to_string())
+                    .current_schema(schema.to_string())
+                    .extensions(extensions_map)
+                    .build();
+                let ctx = Arc::new(ctx);
+                let database_client = {
+                    database_client
+                        .handler
+                        .lock()
+                        .map_err(|e| {
+                            UnexpectedSnafu {
+                                reason: format!("Failed to lock database client: {e}"),
+                            }
+                            .build()
+                        })?
+                        .as_ref()
+                        .context(UnexpectedSnafu {
+                            reason: "Standalone's frontend instance is not set",
+                        })?
+                        .upgrade()
+                        .context(UnexpectedSnafu {
+                            reason: "Failed to upgrade database client",
+                        })?
+                };
+                database_client
+                    .do_query(Request::Query(request), ctx)
+                    .await
+                    .map(|output| {
+                        wrap_standalone_output_with_terminal_metrics(output, &flow_extensions)
+                    })
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)
+            }
+        }
+    }
+
     /// Handle a request to frontend
     pub(crate) async fn handle(
         &self,
@@ -469,6 +571,39 @@ impl FrontendClient {
     }
 }
 
+fn build_flow_extensions(extensions: &[(&str, &str)]) -> Result<FlowQueryExtensions, Error> {
+    let flow_extensions = HashMap::from_iter(
+        extensions
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string())),
+    );
+    FlowQueryExtensions::from_extensions(&flow_extensions)
+        .map_err(BoxedError::new)
+        .context(ExternalSnafu)
+}
+
+fn wrap_standalone_output_with_terminal_metrics(
+    output: Output,
+    flow_extensions: &FlowQueryExtensions,
+) -> OutputWithMetrics {
+    let should_collect_region_watermark = flow_extensions.should_collect_region_watermark();
+    let terminal_metrics =
+        if should_collect_region_watermark && !matches!(&output.data, OutputData::Stream(_)) {
+            output
+                .meta
+                .plan
+                .clone()
+                .and_then(terminal_recordbatch_metrics_from_plan)
+        } else {
+            None
+        };
+    let result = OutputWithMetrics::from_output(output);
+    if let Some(metrics) = terminal_metrics {
+        result.metrics.update(Some(metrics));
+    }
+    result
+}
+
 /// Describe a peer of frontend
 #[derive(Debug, Default)]
 pub(crate) enum PeerDesc {
@@ -491,17 +626,100 @@ impl std::fmt::Display for PeerDesc {
     }
 }
 
+fn parse_stale_cursor_detail(message: &str) -> Option<FlowStaleCursorDetail> {
+    if !message.contains(STALE_CURSOR_TOKEN) || !message.contains(STALE_CURSOR_RETRY_HINT) {
+        return None;
+    }
+
+    Some(FlowStaleCursorDetail {
+        region_id: extract_segment(message, "region: ", ", given_seq:"),
+        given_seq: extract_u64_segment(message, "given_seq: ", ", min_readable_seq:"),
+        min_readable_seq: extract_u64_segment(message, "min_readable_seq: ", ", retry_hint:"),
+    })
+}
+
+fn extract_segment(message: &str, start: &str, end: &str) -> Option<String> {
+    let start_idx = message.find(start)? + start.len();
+    let tail = &message[start_idx..];
+    let end_idx = tail.find(end)?;
+    Some(tail[..end_idx].trim().to_string())
+}
+
+fn extract_u64_segment(message: &str, start: &str, end: &str) -> Option<u64> {
+    extract_segment(message, start, end)?.parse().ok()
+}
+
 #[cfg(test)]
 mod tests {
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
     use std::time::Duration;
 
-    use common_query::Output;
+    use common_error::ext::PlainError;
+    use common_error::status_code::StatusCode;
+    use common_query::{Output, OutputData};
+    use common_recordbatch::adapter::RecordBatchMetrics;
+    use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream};
+    use datatypes::prelude::{ConcreteDataType, VectorRef};
+    use datatypes::schema::{ColumnSchema, Schema};
+    use datatypes::vectors::Int32Vector;
+    use futures::StreamExt;
+    use snafu::GenerateImplicitData;
     use tokio::time::timeout;
 
     use super::*;
 
     #[derive(Debug)]
     struct NoopHandler;
+
+    struct MockMetricsStream {
+        schema: datatypes::schema::SchemaRef,
+        batch: Option<RecordBatch>,
+        metrics: RecordBatchMetrics,
+        terminal_metrics_only: bool,
+    }
+
+    impl futures::Stream for MockMetricsStream {
+        type Item = common_recordbatch::error::Result<RecordBatch>;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            Poll::Ready(self.batch.take().map(Ok))
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            (
+                usize::from(self.batch.is_some()),
+                Some(usize::from(self.batch.is_some())),
+            )
+        }
+    }
+
+    impl RecordBatchStream for MockMetricsStream {
+        fn name(&self) -> &str {
+            "MockMetricsStream"
+        }
+
+        fn schema(&self) -> datatypes::schema::SchemaRef {
+            self.schema.clone()
+        }
+
+        fn output_ordering(&self) -> Option<&[OrderOption]> {
+            None
+        }
+
+        fn metrics(&self) -> Option<RecordBatchMetrics> {
+            if self.terminal_metrics_only && self.batch.is_some() {
+                return None;
+            }
+            Some(self.metrics.clone())
+        }
+    }
+
+    #[derive(Debug)]
+    struct MetricsHandler;
+
+    #[derive(Debug)]
+    struct ExtensionAwareHandler;
 
     #[async_trait::async_trait]
     impl GrpcQueryHandlerWithBoxedError for NoopHandler {
@@ -511,6 +729,50 @@ mod tests {
             _ctx: QueryContextRef,
         ) -> std::result::Result<Output, BoxedError> {
             Ok(Output::new_with_affected_rows(0))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl GrpcQueryHandlerWithBoxedError for MetricsHandler {
+        async fn do_query(
+            &self,
+            _query: Request,
+            _ctx: QueryContextRef,
+        ) -> std::result::Result<Output, BoxedError> {
+            let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+                "v",
+                ConcreteDataType::int32_datatype(),
+                false,
+            )]));
+            let batch = RecordBatch::new(
+                schema.clone(),
+                vec![Arc::new(Int32Vector::from_slice([1, 2])) as VectorRef],
+            )
+            .unwrap();
+            Ok(Output::new_with_stream(Box::pin(MockMetricsStream {
+                schema,
+                batch: Some(batch),
+                metrics: RecordBatchMetrics {
+                    region_watermarks: vec![common_recordbatch::adapter::RegionWatermarkEntry {
+                        region_id: 42,
+                        watermark: Some(99),
+                    }],
+                    ..Default::default()
+                },
+                terminal_metrics_only: true,
+            })))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl GrpcQueryHandlerWithBoxedError for ExtensionAwareHandler {
+        async fn do_query(
+            &self,
+            _query: Request,
+            ctx: QueryContextRef,
+        ) -> std::result::Result<Output, BoxedError> {
+            assert_eq!(ctx.extension("flow.return_region_seq"), Some("true"));
+            Ok(Output::new_with_affected_rows(1))
         }
     }
 
@@ -558,5 +820,119 @@ mod tests {
                 .await
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn test_inspect_query_error_detects_stale_cursor() {
+        let err = Error::External {
+            source: BoxedError::new(PlainError::new(
+                "STALE_CURSOR: incremental query stale, region: 4398046511104(1024, 0), given_seq: 9, min_readable_seq: 18, retry_hint: FALLBACK_FULL_RECOMPUTE".to_string(),
+                StatusCode::EngineExecuteQuery,
+            )),
+            location: snafu::Location::generate(),
+        };
+
+        let failure = FrontendClient::inspect_query_error(&err);
+        assert!(failure.is_stale_cursor());
+        assert_eq!(
+            failure.stale_cursor,
+            Some(FlowStaleCursorDetail {
+                region_id: Some("4398046511104(1024, 0)".to_string()),
+                given_seq: Some(9),
+                min_readable_seq: Some(18),
+            })
+        );
+    }
+
+    #[test]
+    fn test_inspect_query_error_ignores_non_stale_error() {
+        let err = Error::External {
+            source: BoxedError::new(PlainError::new(
+                "ordinary query failure".to_string(),
+                StatusCode::EngineExecuteQuery,
+            )),
+            location: snafu::Location::generate(),
+        };
+
+        let failure = FrontendClient::inspect_query_error(&err);
+        assert!(!failure.is_stale_cursor());
+        assert_eq!(failure.stale_cursor, None);
+    }
+
+    #[tokio::test]
+    async fn test_query_with_terminal_metrics_tracks_watermark_in_standalone_mode() {
+        let handler: Arc<dyn GrpcQueryHandlerWithBoxedError> = Arc::new(MetricsHandler);
+        let client =
+            FrontendClient::from_grpc_handler(Arc::downgrade(&handler), QueryOptions::default());
+
+        let result = client
+            .query_with_terminal_metrics(
+                "greptime",
+                "public",
+                QueryRequest {
+                    query: Some(Query::Sql("select 1".to_string())),
+                },
+                &[],
+            )
+            .await
+            .unwrap();
+
+        let terminal_metrics = result.metrics.clone();
+        assert!(!result.metrics.is_ready());
+        assert!(terminal_metrics.get().is_none());
+
+        let OutputData::Stream(mut stream) = result.output.data else {
+            panic!("expected stream output");
+        };
+        while stream.next().await.is_some() {}
+
+        assert!(terminal_metrics.is_ready());
+        assert_eq!(
+            terminal_metrics.region_watermark_map(),
+            Some(HashMap::from([(42_u64, 99_u64)]))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_query_with_terminal_metrics_forwards_flow_extensions_in_standalone_mode() {
+        let handler: Arc<dyn GrpcQueryHandlerWithBoxedError> = Arc::new(ExtensionAwareHandler);
+        let client =
+            FrontendClient::from_grpc_handler(Arc::downgrade(&handler), QueryOptions::default());
+
+        let result = client
+            .query_with_terminal_metrics(
+                "greptime",
+                "public",
+                QueryRequest {
+                    query: Some(Query::Sql("insert into t select 1".to_string())),
+                },
+                &[("flow.return_region_seq", "true")],
+            )
+            .await
+            .unwrap();
+
+        assert!(result.metrics.is_ready());
+        assert!(result.region_watermark_map().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_query_with_terminal_metrics_rejects_invalid_flow_extensions() {
+        let handler: Arc<dyn GrpcQueryHandlerWithBoxedError> = Arc::new(NoopHandler);
+        let client =
+            FrontendClient::from_grpc_handler(Arc::downgrade(&handler), QueryOptions::default());
+
+        let err = client
+            .query_with_terminal_metrics(
+                "greptime",
+                "public",
+                QueryRequest {
+                    query: Some(Query::Sql("select 1".to_string())),
+                },
+                &[("flow.return_region_seq", "not-a-bool")],
+            )
+            .await
+            .unwrap_err();
+
+        assert!(format!("{err:?}").contains("Invalid value for flow.return_region_seq"));
     }
 }
