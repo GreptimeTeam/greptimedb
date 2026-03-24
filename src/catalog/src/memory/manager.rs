@@ -132,15 +132,13 @@ impl CatalogManager for MemoryCatalogManager {
         table_name: &str,
         _query_ctx: Option<&QueryContext>,
     ) -> Result<Option<TableRef>> {
-        let result = try {
-            self.catalogs
-                .read()
-                .unwrap()
-                .get(catalog)?
-                .get(schema)?
-                .get(table_name)
-                .cloned()?
-        };
+        let catalogs = self.catalogs.read().unwrap();
+        let result = catalogs
+            .get(catalog)
+            .and_then(|c| c.get(schema))
+            .and_then(|s| s.get(table_name))
+            .cloned();
+
         Ok(result)
     }
 
