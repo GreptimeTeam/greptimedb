@@ -149,7 +149,15 @@ impl PendingRowsBatcher {
         worker_channel_capacity: usize,
         max_inflight_requests: usize,
     ) -> Option<Arc<Self>> {
-        if flush_interval.is_zero() {
+        // Disable the batcher if flush is disabled or configuration is invalid.
+        // Zero values for these knobs either cause panics (e.g., zero-capacity channels)
+        // or deadlocks (e.g., semaphores with no permits).
+        if flush_interval.is_zero()
+            || max_batch_rows == 0
+            || max_concurrent_flushes == 0
+            || worker_channel_capacity == 0
+            || max_inflight_requests == 0
+        {
             return None;
         }
 

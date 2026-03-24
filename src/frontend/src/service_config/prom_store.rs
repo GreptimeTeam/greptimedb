@@ -53,7 +53,7 @@ impl Default for PromStoreOptions {
         Self {
             enable: true,
             with_metric_engine: true,
-            pending_rows_flush_interval: Duration::from_secs(2),
+            pending_rows_flush_interval: Duration::ZERO,
             max_batch_rows: default_max_batch_rows(),
             max_concurrent_flushes: default_max_concurrent_flushes(),
             worker_channel_capacity: default_worker_channel_capacity(),
