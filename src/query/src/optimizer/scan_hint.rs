@@ -375,10 +375,10 @@ impl TreeNodeVisitor<'_> for ScanHintVisitor {
             LogicalPlan::Filter(_) => {
                 self.vector_search.on_filter_exit();
             }
-            LogicalPlan::Subquery(_) | LogicalPlan::SubqueryAlias(_) => {
-                if is_branching_for_vector(_node) {
-                    self.vector_search.on_branching_exit();
-                }
+            LogicalPlan::Subquery(_) | LogicalPlan::SubqueryAlias(_)
+                if is_branching_for_vector(_node) =>
+            {
+                self.vector_search.on_branching_exit();
             }
             _ if _node.inputs().len() > 1 => {
                 self.vector_search.on_branching_exit();
