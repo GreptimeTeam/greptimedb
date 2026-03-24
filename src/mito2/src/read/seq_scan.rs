@@ -184,7 +184,7 @@ impl SeqScan {
             partition_ranges.len(),
             sources.len()
         );
-        Self::build_flat_reader_from_sources(stream_ctx, sources, None, None, true).await
+        Self::build_flat_reader_from_sources(stream_ctx, sources, None, None, false).await
     }
 
     /// Builds a reader to read sources. If `semaphore` is provided, reads sources in parallel
@@ -238,15 +238,16 @@ impl SeqScan {
         Ok(reader)
     }
 
-    /// Builds a flat reader to read sources that returns RecordBatch. If `semaphore` is provided, reads sources in parallel
-    /// if possible.
+    /// Builds a flat reader to read sources that returns RecordBatch.
+    /// If `semaphore` is provided, reads sources in parallel if possible.
+    /// If `skip_dedup` is true, the merged stream is returned without applying flat dedup.
     #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
     pub(crate) async fn build_flat_reader_from_sources(
         stream_ctx: &StreamContext,
         mut sources: Vec<BoxedRecordBatchStream>,
         semaphore: Option<Arc<Semaphore>>,
         part_metrics: Option<&PartitionMetrics>,
-        dedup: bool,
+        skip_dedup: bool,
     ) -> Result<BoxedRecordBatchStream> {
         if let Some(semaphore) = semaphore.as_ref() {
             // Read sources in parallel.
@@ -265,7 +266,7 @@ impl SeqScan {
             FlatMergeReader::new(schema, sources, DEFAULT_READ_BATCH_SIZE, metrics_reporter)
                 .await?;
 
-        let dedup = dedup && !stream_ctx.input.append_mode;
+        let dedup = !skip_dedup && !stream_ctx.input.append_mode;
         let dedup_metrics_reporter = part_metrics.map(|m| m.dedup_metrics_reporter());
         let reader = if dedup {
             match stream_ctx.input.merge_mode {
@@ -339,7 +340,7 @@ impl SeqScan {
             sources,
             merge_semaphore,
             Some(part_metrics),
-            true,
+            false,
         )
         .await?;
 

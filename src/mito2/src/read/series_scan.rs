@@ -522,7 +522,7 @@ impl SeriesDistributor {
             range_streams,
             self.semaphore.clone(),
             Some(&part_metrics),
-            false,
+            true,
         )
         .await?;
         let mut metrics = SeriesDistributorMetrics::default();
