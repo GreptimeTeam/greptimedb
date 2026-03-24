@@ -714,6 +714,16 @@ pub enum Error {
     #[snafu(display("Failed to get cache"))]
     GetCache { source: Arc<Error> },
 
+    #[snafu(display(
+        "Failed to get latest cache value after {} attempts due to concurrent invalidation",
+        attempts
+    ))]
+    GetLatestCacheRetryExceeded {
+        attempts: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[cfg(feature = "pg_kvbackend")]
     #[snafu(display("Failed to execute via Postgres, sql: {}", sql))]
     PostgresExecution {
@@ -1063,6 +1073,7 @@ impl ErrorExt for Error {
             | ConnectEtcd { .. }
             | MoveValues { .. }
             | GetCache { .. }
+            | GetLatestCacheRetryExceeded { .. }
             | SerializeToJson { .. }
             | DeserializeFromJson { .. } => StatusCode::Internal,
 
@@ -1243,7 +1254,10 @@ impl Error {
 
     /// Determine whether it is a retry later type through [StatusCode]
     pub fn is_retry_later(&self) -> bool {
-        matches!(self, Error::RetryLater { .. })
+        matches!(
+            self,
+            Error::RetryLater { .. } | Error::GetLatestCacheRetryExceeded { .. }
+        )
     }
 
     /// Determine whether it needs to clean poisons.

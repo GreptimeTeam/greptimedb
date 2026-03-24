@@ -71,11 +71,13 @@ fn init_factory(table_name_manager: TableNameManagerRef) -> Initializer<TableNam
 
 fn invalidator<'a>(
     cache: &'a Cache<TableName, TableId>,
-    ident: &'a CacheIdent,
+    idents: &'a [&CacheIdent],
 ) -> BoxFuture<'a, Result<()>> {
     Box::pin(async move {
-        if let CacheIdent::TableName(table_name) = ident {
-            cache.invalidate(table_name).await
+        for ident in idents {
+            if let CacheIdent::TableName(table_name) = ident {
+                cache.invalidate(table_name).await
+            }
         }
         Ok(())
     })
