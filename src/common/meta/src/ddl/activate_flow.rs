@@ -44,6 +44,11 @@ use crate::lock_key::{CatalogLock, FlowLock, FlowNameLock};
 use crate::metrics;
 use crate::peer::Peer;
 
+/// Activates a pending flow after all source tables become available.
+///
+/// The procedure resolves missing source tables, validates the final activation
+/// mode, creates the runtime flow on flownodes, updates metadata to active, and
+/// invalidates related caches.
 pub struct ActivatePendingFlowProcedure {
     pub context: DdlContext,
     pub data: ActivatePendingFlowData,
@@ -104,6 +109,10 @@ impl ActivatePendingFlowProcedure {
             .get_raw(self.data.flow_id)
             .await?
         else {
+            common_telemetry::debug!(
+                "Pending flow {} no longer exists during activation",
+                self.data.flow_id
+            );
             return Ok(Status::done());
         };
 
@@ -123,6 +132,12 @@ impl ActivatePendingFlowProcedure {
 
         let resolution =
             resolve_pending_flow_sources(&self.context, current_flow_info.get_inner_ref()).await?;
+        common_telemetry::debug!(
+            "Resolved pending flow {} source tables: {} resolved, {} unresolved",
+            self.data.flow_id,
+            resolution.resolved_table_ids.len(),
+            resolution.unresolved_source_table_names.len()
+        );
         if !resolution.unresolved_source_table_names.is_empty() {
             update_pending_flow_metadata(
                 &self.context,
@@ -136,19 +151,21 @@ impl ActivatePendingFlowProcedure {
             return Ok(Status::done());
         }
 
-        if let Some(reason) =
-            validate_batching_activation(&self.context, &resolution.resolved_table_ids).await?
-        {
-            update_pending_flow_metadata(
-                &self.context,
-                self.data.flow_id,
-                &current_flow_info,
-                resolution.resolved_table_ids,
-                vec![],
-                Some(reason),
-            )
-            .await?;
-            return Ok(Status::done());
+        if get_flow_type(current_flow_info.get_inner_ref()) == FlowType::Batching {
+            if let Some(reason) =
+                validate_batching_activation(&self.context, &resolution.resolved_table_ids).await?
+            {
+                update_pending_flow_metadata(
+                    &self.context,
+                    self.data.flow_id,
+                    &current_flow_info,
+                    resolution.resolved_table_ids,
+                    vec![],
+                    Some(reason),
+                )
+                .await?;
+                return Ok(Status::done());
+            }
         }
 
         self.data.peers = self.context.flow_metadata_allocator.alloc_peers(1).await?;
@@ -171,6 +188,11 @@ impl ActivatePendingFlowProcedure {
             self.data.flow_id,
             flow_info.get_inner_ref(),
             &self.data.resolved_table_ids,
+        );
+        debug_assert_eq!(
+            self.data.resolved_table_ids.len(),
+            flow_info.get_inner_ref().all_source_table_names().len(),
+            "All source tables must be resolved before pending flow activation"
         );
         create_flow_on_peers(
             &self.context,
@@ -258,12 +280,12 @@ impl Procedure for ActivatePendingFlowProcedure {
             // we should lock the flow name to avoid concurrent modification with create/replace flow procedure
             LockKey::new(vec![
                 CatalogLock::Read(&self.data.catalog_name).into(),
-                FlowLock::Write(self.data.flow_id).into(),
                 FlowNameLock::new(
                     flow_info.get_inner_ref().catalog_name(),
                     flow_info.get_inner_ref().flow_name(),
                 )
                 .into(),
+                FlowLock::Write(self.data.flow_id).into(),
             ])
         } else {
             LockKey::new(vec![
@@ -368,7 +390,7 @@ fn build_create_request(
     let mut flow_options = flow_info.options.clone();
     flow_options.insert(
         FlowType::FLOW_TYPE_KEY.to_string(),
-        FlowType::Batching.to_string(),
+        get_flow_type(flow_info).to_string(),
     );
     CreateRequest {
         flow_id: Some(api::v1::FlowId { id: flow_id }),
@@ -425,6 +447,7 @@ fn build_active_flow_info(
     peers: &[Peer],
     resolved_table_ids: &[TableId],
 ) -> (FlowInfoValue, Vec<(FlowPartitionId, FlowRouteValue)>) {
+    let flow_type = get_flow_type(current_flow_info);
     let flownode_ids = peers
         .iter()
         .enumerate()
@@ -442,13 +465,23 @@ fn build_active_flow_info(
     new_flow_info.flownode_ids = flownode_ids;
     new_flow_info.status = FlowStatus::Active;
     new_flow_info.last_activation_error = None;
-    new_flow_info.options.insert(
-        FlowType::FLOW_TYPE_KEY.to_string(),
-        FlowType::Batching.to_string(),
-    );
+    new_flow_info
+        .options
+        .insert(FlowType::FLOW_TYPE_KEY.to_string(), flow_type.to_string());
     new_flow_info.updated_time = chrono::Utc::now();
 
     (new_flow_info, flow_routes)
+}
+
+fn get_flow_type(flow_info: &FlowInfoValue) -> FlowType {
+    match flow_info
+        .options()
+        .get(FlowType::FLOW_TYPE_KEY)
+        .map(String::as_str)
+    {
+        Some(FlowType::STREAMING) => FlowType::Streaming,
+        _ => FlowType::Batching,
+    }
 }
 
 async fn invalidate_flow_cache(

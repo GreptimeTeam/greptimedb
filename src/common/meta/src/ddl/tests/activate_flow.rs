@@ -22,6 +22,7 @@ use common_time::TimeToLive;
 use table::table_name::TableName;
 
 use crate::ddl::activate_flow::ActivatePendingFlowProcedure;
+use crate::ddl::create_flow::FlowType;
 use crate::ddl::test_util::create_table::test_create_table_task;
 use crate::ddl::tests::create_flow::create_test_flow;
 use crate::key::table_route::TableRouteValue;
@@ -254,5 +255,96 @@ async fn test_activate_pending_flow_uses_replace_semantics() {
     for req in create_requests.iter() {
         assert!(!req.create_if_not_exists);
         assert!(req.or_replace);
+    }
+}
+
+#[tokio::test]
+async fn test_activate_pending_flow_preserves_streaming_type() {
+    let source_table_names = vec![TableName::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        "activate_streaming_source_table",
+    )];
+    let sink_table_name = TableName::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        "activate_streaming_sink_table",
+    );
+
+    let handler = RecordingFlownodeHandler::default();
+    let node_manager = Arc::new(MockFlownodeManager::new(handler.clone()));
+    let ddl_context = new_ddl_context(node_manager);
+
+    let flow_id = create_test_flow(
+        &ddl_context,
+        "activate_streaming_pending_flow",
+        source_table_names,
+        sink_table_name,
+    )
+    .await;
+
+    let pending_flow_info = ddl_context
+        .flow_metadata_manager
+        .flow_info_manager()
+        .get_raw(flow_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut updated_flow_info = pending_flow_info.get_inner_ref().clone();
+    updated_flow_info.options.insert(
+        FlowType::FLOW_TYPE_KEY.to_string(),
+        FlowType::Streaming.to_string(),
+    );
+    ddl_context
+        .flow_metadata_manager
+        .update_flow_metadata(flow_id, &pending_flow_info, &updated_flow_info, vec![])
+        .await
+        .unwrap();
+
+    let create_table_task = test_create_table_task("activate_streaming_source_table", 1028);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            create_table_task.table_info.clone(),
+            TableRouteValue::physical(vec![]),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+
+    let mut procedure = ActivatePendingFlowProcedure::new(
+        flow_id,
+        DEFAULT_CATALOG_NAME.to_string(),
+        ddl_context.clone(),
+    );
+    let output = execute_procedure_until_done(&mut procedure).await.unwrap();
+    let activated_flow_id = output.downcast_ref::<u32>().unwrap();
+    assert_eq!(*activated_flow_id, flow_id);
+
+    let activated_flow = ddl_context
+        .flow_metadata_manager
+        .flow_info_manager()
+        .get(flow_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(activated_flow.is_active());
+    assert_eq!(
+        activated_flow
+            .options()
+            .get(FlowType::FLOW_TYPE_KEY)
+            .map(String::as_str),
+        Some(FlowType::STREAMING)
+    );
+
+    let create_requests = handler.create_requests.lock().unwrap();
+    assert!(!create_requests.is_empty());
+    for req in create_requests.iter() {
+        assert_eq!(
+            req.flow_options
+                .get(FlowType::FLOW_TYPE_KEY)
+                .map(String::as_str),
+            Some(FlowType::STREAMING)
+        );
     }
 }

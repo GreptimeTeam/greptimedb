@@ -441,27 +441,24 @@ pub fn get_workspace_root() -> String {
 }
 
 fn get_target_dir_from_cargo_config() -> Option<PathBuf> {
-    let workspace_root = get_workspace_root();
-    let output = Command::new("cargo")
-        .current_dir(&workspace_root)
-        .args([
-            "config",
-            "get",
-            "build.target-dir",
-            "-Z",
-            "unstable-options",
-            "--format",
-            "json-value",
-        ])
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
+    if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR") {
+        let target_dir = PathBuf::from(target_dir);
+        return if target_dir.is_absolute() {
+            Some(target_dir)
+        } else {
+            Some(PathBuf::from(get_workspace_root()).join(target_dir))
+        };
     }
 
-    let target_dir = std::str::from_utf8(&output.stdout).ok()?.trim();
-    let target_dir: String = serde_json::from_str(target_dir).ok()?;
+    let workspace_root = get_workspace_root();
+    let cargo_config = PathBuf::from(&workspace_root).join(".cargo/config.toml");
+    let cargo_config = std::fs::read_to_string(cargo_config).ok()?;
+    let cargo_config: toml::Value = toml::from_str(&cargo_config).ok()?;
+    let target_dir = cargo_config
+        .get("build")?
+        .get("target-dir")?
+        .as_str()?
+        .to_string();
     let target_dir = PathBuf::from(target_dir);
 
     if target_dir.is_absolute() {

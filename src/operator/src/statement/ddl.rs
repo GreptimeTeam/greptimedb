@@ -657,8 +657,10 @@ impl StatementExecutor {
     }
 
     /// Determine the flow type based on the SQL query
+    /// Determines the flow type from source-table state and SQL shape.
     ///
-    /// If it contains aggregation or distinct, then it is a batch flow, otherwise it is a streaming flow
+    /// Missing source tables keep the flow pending and default it to batching.
+    /// Otherwise, aggregation, distinct, and TQL queries are batching; the rest are streaming.
     async fn determine_flow_type(
         &self,
         expr: &CreateFlowExpr,
@@ -700,6 +702,10 @@ impl StatementExecutor {
         }
 
         if has_missing_source_table {
+            info!(
+                "Flow `{}` defaults to batching because some source tables are not available yet",
+                expr.flow_name
+            );
             return Ok(FlowType::Batching);
         }
 

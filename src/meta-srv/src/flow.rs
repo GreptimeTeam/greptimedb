@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common_meta::ddl_manager::DdlManagerRef;
+use common_meta::key::table_name::TableNameKey;
 use common_telemetry::{error, info};
 use futures::TryStreamExt;
 use snafu::ResultExt;
@@ -79,41 +80,84 @@ impl PendingFlowReconcileManager {
 
     async fn handle_tick(&self) -> Result<()> {
         let ddl_context = self.ddl_manager.create_context();
-        let flow_infos = ddl_context
+        let ddl_manager = self.ddl_manager.clone();
+        ddl_context
             .flow_metadata_manager
             .flow_info_manager()
             .flow_infos()
-            .try_collect::<Vec<_>>()
+            .try_for_each(move |(flow_id, flow_info)| {
+                let ddl_context = ddl_context.clone();
+                let ddl_manager = ddl_manager.clone();
+                async move {
+                    if !flow_info.is_pending() {
+                        return Ok(());
+                    }
+
+                    let current_flow_info = ddl_context
+                        .flow_metadata_manager
+                        .flow_info_manager()
+                        .get_raw(flow_id)
+                        .await;
+                    let current_flow_info = match current_flow_info {
+                        Ok(current_flow_info) => current_flow_info,
+                        Err(e) => {
+                            error!(e; "Failed to load flow metadata for pending flow {}", flow_id);
+                            return Ok(());
+                        }
+                    };
+                    let Some(current_flow_info) = current_flow_info else {
+                        return Ok(());
+                    };
+                    if !current_flow_info.get_inner_ref().is_pending() {
+                        return Ok(());
+                    }
+
+                    let unresolved_source_table_names = current_flow_info
+                        .get_inner_ref()
+                        .unresolved_source_table_names();
+                    if !unresolved_source_table_names.is_empty() {
+                        let unresolved_table_keys = unresolved_source_table_names
+                            .iter()
+                            .map(|name| {
+                                TableNameKey::new(
+                                    &name.catalog_name,
+                                    &name.schema_name,
+                                    &name.table_name,
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        let resolved_tables = ddl_context
+                            .table_metadata_manager
+                            .table_name_manager()
+                            .batch_get(unresolved_table_keys)
+                            .await;
+                        let resolved_tables = match resolved_tables {
+                            Ok(resolved_tables) => resolved_tables,
+                            Err(e) => {
+                                error!(e; "Failed to resolve source tables for pending flow {}", flow_id);
+                                return Ok(());
+                            }
+                        };
+                        if resolved_tables.iter().all(|table_id| table_id.is_none()) {
+                            return Ok(());
+                        }
+                    }
+
+                    if let Err(e) = ddl_manager
+                        .submit_activate_pending_flow_task(
+                            flow_id,
+                            current_flow_info.get_inner_ref().catalog_name().clone(),
+                        )
+                        .await
+                    {
+                        error!(e; "Failed to reconcile pending flow {}", flow_id);
+                    }
+
+                    Ok(())
+                }
+            })
             .await
             .context(PendingFlowReconcileSnafu)?;
-        let pending_flows = flow_infos
-            .into_iter()
-            .filter_map(|(flow_id, flow_info)| {
-                flow_info
-                    .is_pending()
-                    .then_some((flow_id, flow_info.catalog_name().clone()))
-            })
-            .collect::<Vec<_>>();
-
-        for (flow_id, catalog_name) in pending_flows {
-            let current_flow_info = ddl_context
-                .flow_metadata_manager
-                .flow_info_manager()
-                .get_raw(flow_id)
-                .await
-                .context(PendingFlowReconcileSnafu)?;
-            let Some(current_flow_info) = current_flow_info else {
-                continue;
-            };
-            if !current_flow_info.get_inner_ref().is_pending() {
-                continue;
-            }
-            let _ = self
-                .ddl_manager
-                .submit_activate_pending_flow_task(flow_id, catalog_name)
-                .await
-                .context(PendingFlowReconcileSnafu)?;
-        }
 
         Ok(())
     }

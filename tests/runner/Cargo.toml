@@ -32,3 +32,4 @@ tinytemplate = "1.2"
 tokio.workspace = true
 tokio-postgres = { workspace = true }
 tokio-stream.workspace = true
+toml.workspace = true

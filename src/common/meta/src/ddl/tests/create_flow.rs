@@ -124,6 +124,10 @@ async fn test_create_flow_source_table_not_found() {
         .unwrap();
     assert!(flow_info.is_pending());
     assert_eq!(flow_info.unresolved_source_table_names().len(), 1);
+    assert_eq!(
+        flow_info.unresolved_source_table_names()[0].table_name,
+        "my_table"
+    );
 }
 
 pub(crate) async fn create_test_flow(
