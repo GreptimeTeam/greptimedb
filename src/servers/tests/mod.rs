@@ -18,7 +18,6 @@ use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use async_trait::async_trait;
 use catalog::memory::MemoryCatalogManager;
-use common_base::AffectedRows;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_grpc::flight::do_put::DoPutResponse;
 use common_query::Output;
@@ -147,15 +146,6 @@ impl GrpcQueryHandler for DummyInstance {
             Request::Ddl(_) => unimplemented!(),
         };
         Ok(output)
-    }
-
-    async fn put_record_batch(
-        &self,
-        _request: servers::grpc::flight::PutRecordBatchRequest,
-        _table_ref: &mut Option<TableRef>,
-        _ctx: QueryContextRef,
-    ) -> Result<AffectedRows> {
-        unimplemented!()
     }
 
     fn handle_put_record_batch_stream(

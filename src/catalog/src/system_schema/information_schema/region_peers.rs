@@ -267,7 +267,7 @@ impl InformationSchemaRegionPeersBuilder {
             ];
 
             if !predicates.eval(&row) {
-                return;
+                continue;
             }
 
             self.table_catalogs.push(Some(table_catalog));

@@ -34,6 +34,7 @@ fn env_usize(name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+use common_time::Timestamp;
 use datatypes::arrow::datatypes::SchemaRef;
 use mito_codec::key_values::KeyValue;
 use rayon::prelude::*;
@@ -792,6 +793,7 @@ impl IterBuilder for BulkRangeIterBuilder {
 
     fn build_record_batch(
         &self,
+        _time_range: Option<(Timestamp, Timestamp)>,
         metrics: Option<MemScanMetrics>,
     ) -> Result<BoxedRecordBatchIterator> {
         let series_count = self.part.estimated_series_count();
@@ -825,6 +827,7 @@ impl IterBuilder for MultiBulkRangeIterBuilder {
 
     fn build_record_batch(
         &self,
+        _time_range: Option<(Timestamp, Timestamp)>,
         metrics: Option<MemScanMetrics>,
     ) -> Result<BoxedRecordBatchIterator> {
         self.part
@@ -864,6 +867,7 @@ impl IterBuilder for EncodedBulkRangeIterBuilder {
 
     fn build_record_batch(
         &self,
+        _time_range: Option<(Timestamp, Timestamp)>,
         metrics: Option<MemScanMetrics>,
     ) -> Result<BoxedRecordBatchIterator> {
         if let Some(iter) = self

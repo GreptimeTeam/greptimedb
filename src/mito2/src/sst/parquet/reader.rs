@@ -34,22 +34,21 @@ use mito_codec::row_converter::build_primary_key_codec;
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, RowSelection};
 use parquet::arrow::{FieldLevels, ProjectionMask, parquet_to_arrow_field_levels};
-use parquet::file::metadata::{KeyValue, PageIndexPolicy, ParquetMetaData};
+use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData};
 use partition::expr::PartitionExpr;
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::region_request::PathType;
 use store_api::storage::{ColumnId, FileId};
 use table::predicate::Predicate;
 
-use crate::cache::CacheStrategy;
 use crate::cache::index::result_cache::PredicateKey;
+use crate::cache::{CacheStrategy, CachedSstMeta};
 #[cfg(feature = "vector_index")]
 use crate::error::ApplyVectorIndexSnafu;
 use crate::error::{
-    ArrowReaderSnafu, InvalidMetadataSnafu, InvalidParquetSnafu, ReadDataPartSnafu,
-    ReadParquetSnafu, Result, SerializePartitionExprSnafu,
+    ArrowReaderSnafu, ReadDataPartSnafu, ReadParquetSnafu, Result, SerializePartitionExprSnafu,
 };
 use crate::metrics::{
     PRECISE_FILTER_ROWS_TOTAL, READ_ROW_GROUPS_TOTAL, READ_ROWS_IN_ROW_GROUP_TOTAL,
@@ -70,6 +69,7 @@ use crate::sst::index::inverted_index::applier::{
 };
 #[cfg(feature = "vector_index")]
 use crate::sst::index::vector_index::applier::VectorIndexApplierRef;
+use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 use crate::sst::parquet::file_range::{
     FileRangeContext, FileRangeContextRef, PartitionFilterContext, PreFilterMode, RangeBase,
     row_group_contains_delete,
@@ -79,7 +79,6 @@ use crate::sst::parquet::metadata::MetadataLoader;
 use crate::sst::parquet::row_group::{InMemoryRowGroup, ParquetFetchMetrics};
 use crate::sst::parquet::row_selection::RowGroupSelection;
 use crate::sst::parquet::stats::RowGroupPruningStats;
-use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, PARQUET_METADATA_KEY};
 use crate::sst::tag_maybe_to_dictionary_field;
 
 const INDEX_TYPE_FULLTEXT: &str = "fulltext";
@@ -340,7 +339,7 @@ impl ParquetReaderBuilder {
         let file_size = self.file_handle.meta_ref().file_size;
 
         // Loads parquet metadata of the file.
-        let (parquet_meta, cache_miss) = self
+        let (sst_meta, cache_miss) = self
             .read_parquet_metadata(
                 &file_path,
                 file_size,
@@ -348,9 +347,8 @@ impl ParquetReaderBuilder {
                 self.page_index_policy,
             )
             .await?;
-        // Decodes region metadata.
-        let key_value_meta = parquet_meta.file_metadata().key_value_metadata();
-        let region_meta = Arc::new(Self::get_region_metadata(&file_path, key_value_meta)?);
+        let parquet_meta = sst_meta.parquet_metadata();
+        let region_meta = sst_meta.region_metadata();
         let region_partition_expr_str = self
             .expected_metadata
             .as_ref()
@@ -601,42 +599,15 @@ impl ParquetReaderBuilder {
         }))
     }
 
-    /// Decodes region metadata from key value.
-    fn get_region_metadata(
-        file_path: &str,
-        key_value_meta: Option<&Vec<KeyValue>>,
-    ) -> Result<RegionMetadata> {
-        let key_values = key_value_meta.context(InvalidParquetSnafu {
-            file: file_path,
-            reason: "missing key value meta",
-        })?;
-        let meta_value = key_values
-            .iter()
-            .find(|kv| kv.key == PARQUET_METADATA_KEY)
-            .with_context(|| InvalidParquetSnafu {
-                file: file_path,
-                reason: format!("key {} not found", PARQUET_METADATA_KEY),
-            })?;
-        let json = meta_value
-            .value
-            .as_ref()
-            .with_context(|| InvalidParquetSnafu {
-                file: file_path,
-                reason: format!("No value for key {}", PARQUET_METADATA_KEY),
-            })?;
-
-        RegionMetadata::from_json(json).context(InvalidMetadataSnafu)
-    }
-
     /// Reads parquet metadata of specific file.
-    /// Returns (metadata, cache_miss_flag).
+    /// Returns (fused metadata, cache_miss_flag).
     async fn read_parquet_metadata(
         &self,
         file_path: &str,
         file_size: u64,
         cache_metrics: &mut MetadataCacheMetrics,
         page_index_policy: PageIndexPolicy,
-    ) -> Result<(Arc<ParquetMetaData>, bool)> {
+    ) -> Result<(Arc<CachedSstMeta>, bool)> {
         let start = Instant::now();
         let _t = READ_STAGE_ELAPSED
             .with_label_values(&["read_parquet_metadata"])
@@ -646,7 +617,7 @@ impl ParquetReaderBuilder {
         // Tries to get from cache with metrics tracking.
         if let Some(metadata) = self
             .cache_strategy
-            .get_parquet_meta_data(file_id, cache_metrics, page_index_policy)
+            .get_sst_meta_data(file_id, cache_metrics, page_index_policy)
             .await
         {
             cache_metrics.metadata_load_cost += start.elapsed();
@@ -659,10 +630,10 @@ impl ParquetReaderBuilder {
         metadata_loader.with_page_index_policy(page_index_policy);
         let metadata = metadata_loader.load(cache_metrics).await?;
 
-        let metadata = Arc::new(metadata);
+        let metadata = Arc::new(CachedSstMeta::try_new(file_path, metadata)?);
         // Cache the metadata.
         self.cache_strategy
-            .put_parquet_meta_data(file_id, metadata.clone());
+            .put_sst_meta_data(file_id, metadata.clone());
 
         cache_metrics.metadata_load_cost += start.elapsed();
         Ok((metadata, true))

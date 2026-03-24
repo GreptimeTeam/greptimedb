@@ -40,7 +40,7 @@ use store_api::region_engine::{PartitionRange, RegionScannerRef};
 use store_api::storage::{
     ColumnId, RegionId, ScanRequest, SequenceRange, TimeSeriesDistribution, TimeSeriesRowSelector,
 };
-use table::predicate::{Predicate, build_time_range_predicate};
+use table::predicate::{Predicate, build_time_range_predicate, extract_time_range_from_expr};
 use tokio::sync::{Semaphore, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -1420,7 +1420,6 @@ fn pre_filter_mode(append_mode: bool, merge_mode: MergeMode) -> PreFilterMode {
 
 /// Builds a [ScanRequestFingerprint] from a [ScanInput] if the scan is eligible
 /// for partition range caching.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn build_scan_fingerprint(input: &ScanInput) -> Option<ScanRequestFingerprint> {
     let eligible = input.flat_format
         && !input.compaction
@@ -1439,7 +1438,14 @@ pub(crate) fn build_scan_fingerprint(input: &ScanInput) -> Option<ScanRequestFin
         .map(|col| col.column_schema.name.as_str())
         .collect();
 
-    let time_index_name = metadata.time_index_column().column_schema.name.clone();
+    let time_index = metadata.time_index_column();
+    let time_index_name = time_index.column_schema.name.clone();
+    let ts_col_unit = time_index
+        .column_schema
+        .data_type
+        .as_timestamp()
+        .expect("Time index must have timestamp-compatible type")
+        .unit();
 
     let exprs = input
         .predicate_group()
@@ -1464,9 +1470,16 @@ pub(crate) fn build_scan_fingerprint(input: &ScanInput) -> Option<ScanRequestFin
             _ => false,
         };
 
-        if is_time_only {
+        if is_time_only
+            && extract_time_range_from_expr(&time_index_name, ts_col_unit, expr).is_some()
+        {
+            // Range-reducible time predicates can be safely dropped from the
+            // cache key when the query time range covers the partition range.
             time_filters.push(expr.to_string());
         } else {
+            // Non-time filters and non-range time predicates (those that
+            // extract_time_range_from_expr cannot convert to a TimestampRange)
+            // always stay in the cache key.
             filters.push(expr.to_string());
         }
     }
@@ -1511,6 +1524,10 @@ pub struct StreamContext {
     pub input: ScanInput,
     /// Metadata for partition ranges.
     pub(crate) ranges: Vec<RangeMeta>,
+    /// Precomputed scan fingerprint for partition range caching.
+    /// `None` when the scan is not eligible for caching.
+    #[allow(dead_code)]
+    pub(crate) scan_fingerprint: Option<ScanRequestFingerprint>,
 
     // Metrics:
     /// The start time of the query.
@@ -1523,10 +1540,12 @@ impl StreamContext {
         let query_start = input.query_start.unwrap_or_else(Instant::now);
         let ranges = RangeMeta::seq_scan_ranges(&input);
         READ_SST_COUNT.observe(input.num_files() as f64);
+        let scan_fingerprint = build_scan_fingerprint(&input);
 
         Self {
             input,
             ranges,
+            scan_fingerprint,
             query_start,
         }
     }
@@ -1536,10 +1555,12 @@ impl StreamContext {
         let query_start = input.query_start.unwrap_or_else(Instant::now);
         let ranges = RangeMeta::unordered_scan_ranges(&input);
         READ_SST_COUNT.observe(input.num_files() as f64);
+        let scan_fingerprint = build_scan_fingerprint(&input);
 
         Self {
             input,
             ranges,
+            scan_fingerprint,
             query_start,
         }
     }
@@ -1849,6 +1870,7 @@ mod tests {
     use std::sync::Arc;
 
     use datafusion::physical_plan::expressions::lit as physical_lit;
+    use datafusion_common::ScalarValue;
     use datafusion_expr::{col, lit};
     use datatypes::value::Value;
     use partition::expr::col as partition_col;
@@ -2035,13 +2057,18 @@ mod tests {
         assert!(scan_region.use_flat_format());
     }
 
+    /// Helper to create a timestamp millisecond literal.
+    fn ts_lit(val: i64) -> datafusion_expr::Expr {
+        lit(ScalarValue::TimestampMillisecond(Some(val), None))
+    }
+
     #[tokio::test]
     async fn test_build_scan_fingerprint_for_eligible_scan() {
         let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
         let input = new_scan_input(
             metadata.clone(),
             vec![
-                col("ts").gt_eq(lit(1000)),
+                col("ts").gt_eq(ts_lit(1000)),
                 col("k0").eq(lit("foo")),
                 col("v0").gt(lit(1)),
             ],
@@ -2071,7 +2098,7 @@ mod tests {
                 col("k0").eq(lit("foo")).to_string(),
                 col("v0").gt(lit(1)).to_string(),
             ],
-            time_filters: vec![col("ts").gt_eq(lit(1000)).to_string()],
+            time_filters: vec![col("ts").gt_eq(ts_lit(1000)).to_string()],
             series_row_selector: Some(TimeSeriesRowSelector::LastRow),
             append_mode: false,
             filter_deleted: false,

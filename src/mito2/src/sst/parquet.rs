@@ -29,6 +29,7 @@ pub mod flat_format;
 pub mod format;
 pub(crate) mod helper;
 pub(crate) mod metadata;
+pub mod prefilter;
 pub mod reader;
 pub mod row_group;
 pub mod row_selection;
@@ -383,8 +384,12 @@ mod tests {
         .page_index_policy(PageIndexPolicy::Optional);
         let reader = builder.build().await.unwrap().unwrap();
         let reader_metadata = reader.parquet_metadata();
+        let cached_writer_metadata =
+            crate::cache::CachedSstMeta::try_new("test.sst", Arc::unwrap_or_clone(writer_metadata))
+                .unwrap()
+                .parquet_metadata();
 
-        assert_parquet_metadata_equal(writer_metadata, reader_metadata);
+        assert_parquet_metadata_equal(cached_writer_metadata, reader_metadata);
     }
 
     #[tokio::test]

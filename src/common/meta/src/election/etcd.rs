@@ -16,8 +16,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use common_meta::distributed_time_constants::{META_KEEP_ALIVE_INTERVAL_SECS, META_LEASE_SECS};
-use common_meta::key::{CANDIDATES_ROOT, ELECTION_KEY};
 use common_telemetry::{error, info, warn};
 use etcd_client::{
     Client, GetOptions, LeaderKey as EtcdLeaderKey, LeaseKeepAliveStream, LeaseKeeper, PutOptions,
@@ -27,13 +25,15 @@ use tokio::sync::broadcast;
 use tokio::sync::broadcast::Receiver;
 use tokio::time::{MissedTickBehavior, timeout};
 
+use crate::distributed_time_constants::{META_KEEP_ALIVE_INTERVAL_SECS, META_LEASE_SECS};
 use crate::election::{
-    CANDIDATE_LEASE_SECS, Election, KEEP_ALIVE_INTERVAL_SECS, LeaderChangeMessage, LeaderKey,
-    listen_leader_change, send_leader_change_and_set_flags,
+    CANDIDATE_LEASE_SECS, Election, ElectionRef, KEEP_ALIVE_INTERVAL_SECS, LeaderChangeMessage,
+    LeaderKey, LeaderValue, MetasrvNodeInfo, listen_leader_change,
+    send_leader_change_and_set_flags,
 };
 use crate::error;
 use crate::error::Result;
-use crate::metasrv::{ElectionRef, LeaderValue, MetasrvNodeInfo};
+use crate::key::{CANDIDATES_ROOT, ELECTION_KEY};
 
 impl LeaderKey for EtcdLeaderKey {
     fn name(&self) -> &[u8] {
@@ -253,7 +253,7 @@ impl Election for EtcdElection {
                 .leader(self.election_key())
                 .await
                 .context(error::EtcdFailedSnafu)?;
-            let leader_value = res.kv().context(error::NoLeaderSnafu)?.value();
+            let leader_value = res.kv().context(error::ElectionNoLeaderSnafu)?.value();
             Ok(leader_value.into())
         }
     }
@@ -279,7 +279,7 @@ impl EtcdElection {
             ensure!(
                 res.ttl() > 0,
                 error::UnexpectedSnafu {
-                    violated: "Failed to refresh the lease",
+                    err_msg: "Failed to refresh the lease".to_string(),
                 }
             );
 

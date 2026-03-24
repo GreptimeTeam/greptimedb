@@ -36,7 +36,7 @@ fn parse_value_and_expire_time(value: &str) -> Result<(String, Timestamp)> {
             .split(LEASE_SEP)
             .collect_tuple()
             .with_context(|| UnexpectedSnafu {
-                violated: format!(
+                err_msg: format!(
                     "Invalid value {}, expect node info || {} || expire time",
                     value, LEASE_SEP
                 ),
@@ -45,7 +45,7 @@ fn parse_value_and_expire_time(value: &str) -> Result<(String, Timestamp)> {
     let expire_time = match Timestamp::from_str(expire_time, None) {
         Ok(ts) => ts,
         Err(_) => UnexpectedSnafu {
-            violated: format!("Invalid timestamp: {}", expire_time),
+            err_msg: format!("Invalid timestamp: {}", expire_time),
         }
         .fail()?,
     };

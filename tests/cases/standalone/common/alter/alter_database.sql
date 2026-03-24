@@ -90,5 +90,25 @@ ALTER DATABASE alter_database UNSET 'ttl';
 
 SHOW CREATE DATABASE alter_database;
 
-DROP DATABASE alter_database;
+-- Test sst_format option
+ALTER DATABASE alter_database SET 'sst_format'='flat';
 
+SHOW CREATE DATABASE alter_database;
+
+USE alter_database;
+
+CREATE TABLE monitor(ts TIMESTAMP TIME INDEX);
+
+SHOW CREATE TABLE monitor;
+
+USE public;
+
+ALTER DATABASE alter_database SET 'sst_format'='primary_key';
+
+SHOW CREATE DATABASE alter_database;
+
+ALTER DATABASE alter_database UNSET 'sst_format';
+
+SHOW CREATE DATABASE alter_database;
+
+DROP DATABASE alter_database;

@@ -99,7 +99,8 @@ impl ConvertBatchStream {
                         let mapper = self.projection_mapper.as_flat().unwrap();
 
                         for batch in flat_batch.batches {
-                            self.pending.push_back(mapper.convert(&batch)?);
+                            self.pending
+                                .push_back(mapper.convert(&batch, &self.cache_strategy)?);
                         }
                     }
                 }
@@ -114,7 +115,7 @@ impl ConvertBatchStream {
                 // Safety: Only flat format returns this batch.
                 let mapper = self.projection_mapper.as_flat().unwrap();
 
-                mapper.convert(&df_record_batch)
+                mapper.convert(&df_record_batch, &self.cache_strategy)
             }
         }
     }

@@ -60,11 +60,13 @@ fn init_factory(view_info_manager: ViewInfoManagerRef) -> Initializer<TableId, A
 
 fn invalidator<'a>(
     cache: &'a Cache<TableId, Arc<ViewInfoValue>>,
-    ident: &'a CacheIdent,
+    idents: &'a [&CacheIdent],
 ) -> BoxFuture<'a, Result<()>> {
     Box::pin(async move {
-        if let CacheIdent::TableId(view_id) = ident {
-            cache.invalidate(view_id).await
+        for ident in idents {
+            if let CacheIdent::TableId(view_id) = ident {
+                cache.invalidate(view_id).await
+            }
         }
         Ok(())
     })
