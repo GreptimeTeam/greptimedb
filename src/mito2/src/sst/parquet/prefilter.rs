@@ -137,6 +137,8 @@ pub(crate) fn is_usable_primary_key_filter(
     expected_metadata: Option<&RegionMetadata>,
     filter: &SimpleFilterEvaluator,
 ) -> bool {
+    // TODO(yingwen): The primary key filter always skips the partition column. Consider using a flag
+    // to control this behavior. We can remove this behavior after we remove the PartitionTreeMemtable.
     if is_partition_column(filter.column_name()) {
         return false;
     }
