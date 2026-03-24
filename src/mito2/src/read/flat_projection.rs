@@ -18,18 +18,21 @@ use std::sync::Arc;
 
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
-use common_recordbatch::error::{ArrowComputeSnafu, ExternalSnafu};
+use common_recordbatch::error::{ArrowComputeSnafu, ExternalSnafu, NewDfRecordBatchSnafu};
 use common_recordbatch::{DfRecordBatch, RecordBatch};
-use datatypes::arrow::datatypes::Field;
+use datatypes::arrow::array::Array;
+use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field};
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::schema::{Schema, SchemaRef};
+use datatypes::value::Value;
 use datatypes::vectors::Helper;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
 
+use crate::cache::CacheStrategy;
 use crate::error::{InvalidRequestSnafu, RecordBatchSnafu, Result};
-use crate::read::projection::read_column_ids_from_projection;
+use crate::read::projection::{read_column_ids_from_projection, repeated_vector_with_cache};
 use crate::sst::parquet::flat_format::sst_column_id_indices;
 use crate::sst::parquet::format::FormatProjection;
 use crate::sst::{
@@ -248,12 +251,55 @@ impl FlatProjectionMapper {
     pub(crate) fn convert(
         &self,
         batch: &datatypes::arrow::record_batch::RecordBatch,
+        cache_strategy: &CacheStrategy,
     ) -> common_recordbatch::error::Result<RecordBatch> {
         if self.is_empty_projection {
             return RecordBatch::new_with_count(self.output_schema.clone(), batch.num_rows());
         }
-        let columns = self.project_vectors(batch)?;
-        RecordBatch::new(self.output_schema.clone(), columns)
+        // Construct output record batch directly from Arrow arrays to avoid
+        // Arrow -> Vector -> Arrow roundtrips in the hot path.
+        let mut arrays = Vec::with_capacity(self.output_schema.num_columns());
+        for (output_idx, index) in self.batch_indices.iter().enumerate() {
+            let mut array = batch.column(*index).clone();
+            // Cast dictionary values to the target type.
+            if let ArrowDataType::Dictionary(_key_type, value_type) = array.data_type() {
+                // When a string dictionary column contains only a single value, reuse a cached
+                // repeated vector to avoid repeatedly expanding the dictionary.
+                if let Some(dict_array) = single_value_string_dictionary(
+                    &array,
+                    &self.output_schema.column_schemas()[output_idx].data_type,
+                    value_type.as_ref(),
+                ) {
+                    let dict_values = dict_array.values();
+                    let value = if dict_values.is_null(0) {
+                        Value::Null
+                    } else {
+                        Value::from(datatypes::arrow_array::string_array_value(dict_values, 0))
+                    };
+
+                    let repeated = repeated_vector_with_cache(
+                        &self.output_schema.column_schemas()[output_idx].data_type,
+                        &value,
+                        batch.num_rows(),
+                        cache_strategy,
+                    )?;
+                    array = repeated.to_arrow_array();
+                } else {
+                    let casted = datatypes::arrow::compute::cast(&array, value_type)
+                        .context(ArrowComputeSnafu)?;
+                    array = casted;
+                }
+            }
+            arrays.push(array);
+        }
+
+        let df_record_batch =
+            DfRecordBatch::try_new(self.output_schema.arrow_schema().clone(), arrays)
+                .context(NewDfRecordBatchSnafu)?;
+        Ok(RecordBatch::from_df_record_batch(
+            self.output_schema.clone(),
+            df_record_batch,
+        ))
     }
 
     /// Projects columns from the input batch and converts them into vectors.
@@ -279,6 +325,28 @@ impl FlatProjectionMapper {
         }
         Ok(columns)
     }
+}
+
+fn single_value_string_dictionary<'a>(
+    array: &'a Arc<dyn Array>,
+    output_type: &ConcreteDataType,
+    value_type: &ArrowDataType,
+) -> Option<&'a datatypes::arrow::array::DictionaryArray<datatypes::arrow::datatypes::UInt32Type>> {
+    if !matches!(
+        value_type,
+        ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 | ArrowDataType::Utf8View
+    ) || !output_type.is_string()
+    {
+        return None;
+    }
+
+    let dict_array = array
+        .as_any()
+        .downcast_ref::<datatypes::arrow::array::DictionaryArray<
+            datatypes::arrow::datatypes::UInt32Type,
+        >>()?;
+
+    (dict_array.values().len() == 1 && dict_array.null_count() == 0).then_some(dict_array)
 }
 
 /// Returns ids and datatypes of columns of the output batch after applying the `projection`.
