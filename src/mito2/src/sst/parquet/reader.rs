@@ -1686,8 +1686,6 @@ impl RowGroupReaderBuilder {
         row_selection: Option<RowSelection>,
         fetch_metrics: Option<&ParquetFetchMetrics>,
     ) -> Result<ParquetRecordBatchStream<SstAsyncFileReader>> {
-        let fetch_start = Instant::now();
-
         // Create async file reader with caching support.
         let async_reader = SstAsyncFileReader::new(
             self.file_handle.file_id(),
@@ -1716,11 +1714,6 @@ impl RowGroupReaderBuilder {
         let stream = builder.build().context(ReadParquetSnafu {
             path: &self.file_path,
         })?;
-
-        // Record elapsed time for building the stream (actual fetch happens lazily).
-        if let Some(metrics) = fetch_metrics {
-            metrics.data.lock().unwrap().total_fetch_elapsed += fetch_start.elapsed();
-        }
 
         Ok(stream)
     }

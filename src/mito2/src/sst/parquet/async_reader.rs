@@ -82,6 +82,10 @@ impl SstAsyncFileReader {
 
     /// Fetches byte ranges from page cache, write cache, or object store.
     async fn fetch_bytes_with_cache(&self, ranges: Vec<Range<u64>>) -> ParquetResult<Vec<Bytes>> {
+        let fetch_start = self
+            .fetch_metrics
+            .as_ref()
+            .map(|_| std::time::Instant::now());
         let _timer = READ_STAGE_FETCH_PAGES.start_timer();
 
         let page_key = PageKey::new(
@@ -99,6 +103,9 @@ impl SstAsyncFileReader {
                 metrics_data.pages_to_fetch_mem += ranges.len();
                 metrics_data.page_size_to_fetch_mem += total_size;
                 metrics_data.page_size_needed += total_size;
+                if let Some(start) = fetch_start {
+                    metrics_data.total_fetch_elapsed += start.elapsed();
+                }
             }
             return Ok(pages.compressed.clone());
         }
@@ -166,6 +173,10 @@ impl SstAsyncFileReader {
         let page_value = PageValue::new(pages.clone(), total_range_size);
         self.cache_strategy
             .put_pages(page_key, Arc::new(page_value));
+
+        if let (Some(metrics), Some(start)) = (&self.fetch_metrics, fetch_start) {
+            metrics.data.lock().unwrap().total_fetch_elapsed += start.elapsed();
+        }
 
         Ok(pages)
     }
