@@ -209,7 +209,6 @@ impl RangeScanCacheValue {
 }
 
 /// Row groups and whether all sources are file-only for a partition range.
-#[allow(dead_code)]
 pub(crate) struct PartitionRangeRowGroups {
     /// Sorted (file_id, row_group_index) pairs.
     pub(crate) row_groups: Vec<(FileId, i64)>,
@@ -217,7 +216,6 @@ pub(crate) struct PartitionRangeRowGroups {
 }
 
 /// Collects (file_id, row_group_index) pairs from a partition range's row group indices.
-#[allow(dead_code)]
 pub(crate) fn collect_partition_range_row_groups(
     stream_ctx: &StreamContext,
     part_range: &PartitionRange,
@@ -244,7 +242,6 @@ pub(crate) fn collect_partition_range_row_groups(
 }
 
 /// Builds a cache key for the given partition range if it is eligible for caching.
-#[allow(dead_code)]
 pub(crate) fn build_range_cache_key(
     stream_ctx: &StreamContext,
     part_range: &PartitionRange,
@@ -283,7 +280,6 @@ pub(crate) fn build_range_cache_key(
     })
 }
 
-#[allow(dead_code)]
 fn query_time_range_covers_partition_range(
     query_time_range: Option<&TimestampRange>,
     partition_time_range: FileTimeRange,
@@ -297,7 +293,6 @@ fn query_time_range_covers_partition_range(
 }
 
 /// Returns a stream that replays cached record batches.
-#[allow(dead_code)]
 pub(crate) fn cached_flat_range_stream(value: Arc<RangeScanCacheValue>) -> BoxedRecordBatchStream {
     Box::pin(futures::stream::iter(
         value.batches.clone().into_iter().map(Ok),
@@ -407,7 +402,6 @@ impl CacheBatchBuffer {
 }
 
 /// Wraps a stream to cache its output for future range cache hits.
-#[allow(dead_code)]
 pub(crate) fn cache_flat_range_stream(
     mut stream: BoxedRecordBatchStream,
     cache_strategy: CacheStrategy,

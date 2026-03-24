@@ -1276,13 +1276,24 @@ pub(crate) fn should_split_flat_batches_for_merge(
             // This is a file range.
             let file_index = index.index - stream_ctx.input.num_memtables();
             let file = &stream_ctx.input.files[file_index];
-            if file.meta_ref().num_rows < SPLIT_ROW_THRESHOLD || file.meta_ref().num_series == 0 {
+            let file_meta = file.meta_ref();
+            if file_meta.level == 0 {
+                // Always split level 0 files.
+                num_files_to_split += 1;
+            } else if file_meta.num_rows < SPLIT_ROW_THRESHOLD || file_meta.num_series == 0 {
                 // If the file doesn't have enough rows, or the number of series is unavailable, skips it.
                 continue;
             }
-            debug_assert!(file.meta_ref().num_rows > 0);
-            if !can_split_series(file.meta_ref().num_rows, file.meta_ref().num_series) {
+            debug_assert!(file_meta.num_rows > 0);
+            if !can_split_series(file_meta.num_rows, file_meta.num_series) {
                 // We can't split batches in a file.
+                common_telemetry::trace!(
+                    "Can't split series for file {}, level: {}, num_rows: {}, num_series: {}",
+                    file_meta.file_id,
+                    file_meta.level,
+                    file_meta.num_rows,
+                    file_meta.num_series,
+                );
                 return false;
             } else {
                 num_files_to_split += 1;

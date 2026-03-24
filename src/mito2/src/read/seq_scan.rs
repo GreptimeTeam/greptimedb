@@ -43,6 +43,9 @@ use crate::read::last_row::{FlatLastRowReader, LastRowReader};
 use crate::read::merge::MergeReaderBuilder;
 use crate::read::pruner::{PartitionPruner, Pruner};
 use crate::read::range::RangeMeta;
+use crate::read::range_cache::{
+    build_range_cache_key, cache_flat_range_stream, cached_flat_range_stream,
+};
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{
     PartitionMetrics, PartitionMetricsList, SplitRecordBatchStream, scan_file_ranges,
@@ -181,7 +184,7 @@ impl SeqScan {
             partition_ranges.len(),
             sources.len()
         );
-        Self::build_flat_reader_from_sources(stream_ctx, sources, None, None).await
+        Self::build_flat_reader_from_sources(stream_ctx, sources, None, None, true).await
     }
 
     /// Builds a reader to read sources. If `semaphore` is provided, reads sources in parallel
@@ -243,6 +246,7 @@ impl SeqScan {
         mut sources: Vec<BoxedRecordBatchStream>,
         semaphore: Option<Arc<Semaphore>>,
         part_metrics: Option<&PartitionMetrics>,
+        dedup: bool,
     ) -> Result<BoxedRecordBatchStream> {
         if let Some(semaphore) = semaphore.as_ref() {
             // Read sources in parallel.
@@ -261,7 +265,7 @@ impl SeqScan {
             FlatMergeReader::new(schema, sources, DEFAULT_READ_BATCH_SIZE, metrics_reporter)
                 .await?;
 
-        let dedup = !stream_ctx.input.append_mode;
+        let dedup = dedup && !stream_ctx.input.append_mode;
         let dedup_metrics_reporter = part_metrics.map(|m| m.dedup_metrics_reporter());
         let reader = if dedup {
             match stream_ctx.input.merge_mode {
@@ -297,6 +301,57 @@ impl SeqScan {
         };
 
         Ok(reader)
+    }
+
+    /// Builds a flat read stream for one partition range.
+    pub(crate) async fn build_flat_partition_range_read(
+        stream_ctx: &Arc<StreamContext>,
+        part_range: &PartitionRange,
+        compaction: bool,
+        part_metrics: &PartitionMetrics,
+        partition_pruner: Arc<PartitionPruner>,
+        file_scan_semaphore: Option<Arc<Semaphore>>,
+        merge_semaphore: Option<Arc<Semaphore>>,
+    ) -> Result<BoxedRecordBatchStream> {
+        let cache_key = build_range_cache_key(stream_ctx, part_range);
+
+        if let Some(key) = cache_key.as_ref() {
+            if let Some(value) = stream_ctx.input.cache_strategy.get_range_result(key) {
+                part_metrics.inc_range_cache_hit();
+                return Ok(cached_flat_range_stream(value));
+            }
+            part_metrics.inc_range_cache_miss();
+        }
+
+        let mut sources = Vec::new();
+        build_flat_sources(
+            stream_ctx,
+            part_range,
+            compaction,
+            part_metrics,
+            partition_pruner,
+            &mut sources,
+            file_scan_semaphore,
+        )
+        .await?;
+        let stream = Self::build_flat_reader_from_sources(
+            stream_ctx,
+            sources,
+            merge_semaphore,
+            Some(part_metrics),
+            true,
+        )
+        .await?;
+
+        Ok(match cache_key {
+            Some(key) => cache_flat_range_stream(
+                stream,
+                stream_ctx.input.cache_strategy.clone(),
+                key,
+                part_metrics.clone(),
+            ),
+            None => stream,
+        })
     }
 
     /// Scans the given partition when the part list is set properly.
@@ -502,20 +557,16 @@ impl SeqScan {
 
             // Scans each part.
             for part_range in partition_ranges {
-                let mut sources = Vec::new();
-                build_flat_sources(
+                let mut reader = Self::build_flat_partition_range_read(
                     &stream_ctx,
                     &part_range,
                     compaction,
                     &part_metrics,
                     partition_pruner.clone(),
-                    &mut sources,
                     file_scan_semaphore.clone(),
-                ).await?;
-
-                let mut reader =
-                    Self::build_flat_reader_from_sources(&stream_ctx, sources, semaphore.clone(), Some(&part_metrics))
-                        .await?;
+                    semaphore.clone(),
+                )
+                .await?;
 
                 let mut metrics = ScannerMetrics {
                     scan_cost: fetch_start.elapsed(),

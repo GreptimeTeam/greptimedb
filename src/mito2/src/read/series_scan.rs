@@ -41,13 +41,13 @@ use tokio::sync::mpsc::error::{SendTimeoutError, TrySendError};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
 use crate::error::{
-    Error, InvalidSenderSnafu, PartitionOutOfRangeSnafu, Result, ScanMultiTimesSnafu,
+    Error, InvalidSenderSnafu, JoinSnafu, PartitionOutOfRangeSnafu, Result, ScanMultiTimesSnafu,
     ScanSeriesSnafu, TooManyFilesToReadSnafu,
 };
 use crate::read::pruner::{PartitionPruner, Pruner};
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{PartitionMetrics, PartitionMetricsList, SeriesDistributorMetrics};
-use crate::read::seq_scan::{SeqScan, build_flat_sources, build_sources};
+use crate::read::seq_scan::{SeqScan, build_sources};
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
 use crate::read::{Batch, ScannerMetrics};
 use crate::sst::parquet::flat_format::primary_key_column_index;
@@ -480,30 +480,49 @@ impl SeriesDistributor {
         // build part cost.
         let mut fetch_start = Instant::now();
 
-        // Scans all parts.
-        let mut sources = Vec::with_capacity(self.partitions.len());
+        // Builds one deduped stream per partition range, then merges across ranges.
+        let build_start = Instant::now();
+        let mut tasks = Vec::new();
         for partition in &self.partitions {
-            sources.reserve(partition.len());
             for part_range in partition {
-                build_flat_sources(
-                    &self.stream_ctx,
-                    part_range,
-                    false,
-                    &part_metrics,
-                    partition_pruner.clone(),
-                    &mut sources,
-                    self.semaphore.clone(),
-                )
-                .await?;
+                let stream_ctx = self.stream_ctx.clone();
+                let part_range = *part_range;
+                let part_metrics = part_metrics.clone();
+                let partition_pruner = partition_pruner.clone();
+                let file_scan_semaphore = self.semaphore.clone();
+                let merge_semaphore = self.semaphore.clone();
+                tasks.push(common_runtime::spawn_global(async move {
+                    SeqScan::build_flat_partition_range_read(
+                        &stream_ctx,
+                        &part_range,
+                        false,
+                        &part_metrics,
+                        partition_pruner,
+                        file_scan_semaphore,
+                        merge_semaphore,
+                    )
+                    .await
+                }));
             }
         }
+        let mut range_streams = Vec::with_capacity(tasks.len());
+        for task in tasks {
+            range_streams.push(task.await.context(JoinSnafu)??);
+        }
+        common_telemetry::debug!(
+            "SeriesDistributor built {} range_streams, region: {}, build cost: {:?}",
+            range_streams.len(),
+            self.stream_ctx.input.region_metadata().region_id,
+            build_start.elapsed(),
+        );
 
-        // Builds a flat reader that merge sources from all parts.
+        // Each partition range stream is already deduped, so skip dedup here.
         let mut reader = SeqScan::build_flat_reader_from_sources(
             &self.stream_ctx,
-            sources,
+            range_streams,
             self.semaphore.clone(),
             Some(&part_metrics),
+            false,
         )
         .await?;
         let mut metrics = SeriesDistributorMetrics::default();

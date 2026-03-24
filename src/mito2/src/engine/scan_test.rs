@@ -12,11 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
+
 use api::v1::Rows;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+use datatypes::arrow::array::AsArray;
+use datatypes::arrow::datatypes::{Float64Type, TimestampMillisecondType};
 use futures::TryStreamExt;
 use store_api::region_engine::{PrepareRequest, RegionEngine, RegionScanner};
 use store_api::region_request::RegionRequest;
@@ -472,43 +476,51 @@ async fn test_series_scan_flat() {
         }
     }
 
-    let mut check_result = |expected| {
-        let batches =
-            RecordBatches::try_new(schema.clone().unwrap(), partition_batches.remove(0)).unwrap();
-        assert_eq!(expected, batches.pretty_print().unwrap());
-    };
+    let schema = schema.unwrap();
+    let mut series_to_partition = BTreeMap::new();
+    let mut actual_rows = Vec::new();
 
-    // Output series order is 0, 1, 2, 3, 3600, 3601, 3602, 4, 5, 7200, 7201, 7202
-    let expected = "\
-+-------+---------+---------------------+
-| tag_0 | field_0 | ts                  |
-+-------+---------+---------------------+
-| 0     | 0.0     | 1970-01-01T00:00:00 |
-| 1     | 1.0     | 1970-01-01T00:00:01 |
-| 2     | 2.0     | 1970-01-01T00:00:02 |
-| 3     | 3.0     | 1970-01-01T00:00:03 |
-| 7200  | 7200.0  | 1970-01-01T02:00:00 |
-| 7201  | 7201.0  | 1970-01-01T02:00:01 |
-| 7202  | 7202.0  | 1970-01-01T02:00:02 |
-+-------+---------+---------------------+";
-    check_result(expected);
+    for (partition, batches) in partition_batches.into_iter().enumerate() {
+        let batches = RecordBatches::try_new(schema.clone(), batches).unwrap();
+        let mut partition_series = Vec::new();
 
-    let expected = "\
-+-------+---------+---------------------+
-| tag_0 | field_0 | ts                  |
-+-------+---------+---------------------+
-| 3600  | 3600.0  | 1970-01-01T01:00:00 |
-| 3601  | 3601.0  | 1970-01-01T01:00:01 |
-| 3602  | 3602.0  | 1970-01-01T01:00:02 |
-+-------+---------+---------------------+";
-    check_result(expected);
+        for batch in batches.iter() {
+            let tags = batch.column_by_name("tag_0").unwrap().as_string::<i32>();
+            let fields = batch
+                .column_by_name("field_0")
+                .unwrap()
+                .as_primitive::<Float64Type>();
+            let ts = batch
+                .column_by_name("ts")
+                .unwrap()
+                .as_primitive::<TimestampMillisecondType>();
 
-    let expected = "\
-+-------+---------+---------------------+
-| tag_0 | field_0 | ts                  |
-+-------+---------+---------------------+
-| 4     | 4.0     | 1970-01-01T00:00:04 |
-| 5     | 5.0     | 1970-01-01T00:00:05 |
-+-------+---------+---------------------+";
-    check_result(expected);
+            for row in 0..batch.num_rows() {
+                let tag = tags.value(row).to_string();
+                let field = fields.value(row);
+                let ts = ts.value(row);
+                partition_series.push(tag.clone());
+                actual_rows.push((tag, field.to_bits(), ts));
+            }
+        }
+
+        partition_series.sort();
+        partition_series.dedup();
+        for tag in partition_series {
+            let prev = series_to_partition.insert(tag.clone(), partition);
+            assert_eq!(
+                None, prev,
+                "series {tag} appears in multiple partitions: {prev:?} and {partition}"
+            );
+        }
+    }
+
+    let mut expected_rows = Vec::new();
+    for value in [0_i64, 1, 2, 3, 4, 5, 3600, 3601, 3602, 7200, 7201, 7202] {
+        expected_rows.push((value.to_string(), (value as f64).to_bits(), value * 1000));
+    }
+
+    actual_rows.sort();
+    expected_rows.sort();
+    assert_eq!(expected_rows, actual_rows);
 }
