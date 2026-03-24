@@ -71,8 +71,8 @@ pub struct CacheContainer<K, V, CacheToken> {
 
 fn latest_get_backoff() -> impl Iterator<Item = Duration> {
     ExponentialBuilder::default()
-        .with_min_delay(Duration::from_millis(100))
-        .with_max_delay(Duration::from_millis(1000))
+        .with_min_delay(Duration::from_millis(10))
+        .with_max_delay(Duration::from_millis(100))
         .with_max_times(3)
         .build()
 }

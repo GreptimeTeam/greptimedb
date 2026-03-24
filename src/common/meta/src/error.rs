@@ -1254,7 +1254,10 @@ impl Error {
 
     /// Determine whether it is a retry later type through [StatusCode]
     pub fn is_retry_later(&self) -> bool {
-        matches!(self, Error::RetryLater { .. })
+        matches!(
+            self,
+            Error::RetryLater { .. } | Error::GetLatestCacheRetryExceeded { .. }
+        )
     }
 
     /// Determine whether it needs to clean poisons.
