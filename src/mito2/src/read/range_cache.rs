@@ -18,22 +18,28 @@ use std::mem;
 use std::sync::Arc;
 
 use async_stream::try_stream;
+use common_telemetry::warn;
 use common_time::range::TimestampRange;
-use datatypes::arrow::array::{Array, AsArray, DictionaryArray};
-use datatypes::arrow::datatypes::UInt32Type;
+use datatypes::arrow::compute::concat_batches;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
 use futures::TryStreamExt;
+use snafu::ResultExt;
 use store_api::region_engine::PartitionRange;
 use store_api::storage::{ColumnId, FileId, RegionId, TimeSeriesRowSelector};
+use tokio::sync::{mpsc, oneshot};
 
 use crate::cache::CacheStrategy;
+use crate::error::{ComputeArrowSnafu, Result, UnexpectedSnafu};
 use crate::read::BoxedRecordBatchStream;
 use crate::read::scan_region::StreamContext;
 use crate::read::scan_util::PartitionMetrics;
 use crate::region::options::MergeMode;
 use crate::sst::file::FileTimeRange;
-use crate::sst::parquet::flat_format::primary_key_column_index;
+use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
+
+const RANGE_CACHE_COMPACT_THRESHOLD_BYTES: usize = 2 * 1024 * 1024;
+const RANGE_CACHE_SKIP_BYTES: usize = 512 * 1024 * 1024;
 
 /// Fingerprint of the scan request fields that affect partition range cache reuse.
 ///
@@ -187,23 +193,43 @@ impl RangeScanCacheKey {
 }
 
 /// Cached result for one range scan.
+#[derive(Debug)]
+pub(crate) struct CachedBatchSlice {
+    batch: RecordBatch,
+    slice_lengths: Vec<usize>,
+}
+
+impl CachedBatchSlice {
+    fn metadata_size(&self) -> usize {
+        self.slice_lengths.capacity() * mem::size_of::<usize>()
+    }
+}
+
 pub(crate) struct RangeScanCacheValue {
-    pub(crate) batches: Vec<RecordBatch>,
-    /// Precomputed size of all batches, accounting for shared dictionary values.
+    cached_batches: Vec<CachedBatchSlice>,
+    /// Precomputed size of all compacted batches.
     estimated_batches_size: usize,
 }
 
 impl RangeScanCacheValue {
-    pub(crate) fn new(batches: Vec<RecordBatch>, estimated_batches_size: usize) -> Self {
+    pub(crate) fn new(
+        cached_batches: Vec<CachedBatchSlice>,
+        estimated_batches_size: usize,
+    ) -> Self {
         Self {
-            batches,
+            cached_batches,
             estimated_batches_size,
         }
     }
 
     pub(crate) fn estimated_size(&self) -> usize {
         mem::size_of::<Self>()
-            + self.batches.capacity() * mem::size_of::<RecordBatch>()
+            + self.cached_batches.capacity() * mem::size_of::<CachedBatchSlice>()
+            + self
+                .cached_batches
+                .iter()
+                .map(CachedBatchSlice::metadata_size)
+                .sum::<usize>()
             + self.estimated_batches_size
     }
 }
@@ -294,110 +320,234 @@ fn query_time_range_covers_partition_range(
 
 /// Returns a stream that replays cached record batches.
 pub(crate) fn cached_flat_range_stream(value: Arc<RangeScanCacheValue>) -> BoxedRecordBatchStream {
-    Box::pin(futures::stream::iter(
-        value.batches.clone().into_iter().map(Ok),
-    ))
+    Box::pin(try_stream! {
+        for cached_batch in &value.cached_batches {
+            let mut offset = 0;
+            for &len in &cached_batch.slice_lengths {
+                yield cached_batch.batch.slice(offset, len);
+                offset += len;
+            }
+        }
+    })
 }
 
-/// Returns true if two primary key dictionary arrays share the same underlying
-/// values buffers by pointer comparison.
-///
-/// The primary key column is always `DictionaryArray<UInt32Type>` with `Binary` values.
-fn pk_values_ptr_eq(a: &DictionaryArray<UInt32Type>, b: &DictionaryArray<UInt32Type>) -> bool {
-    let a = a.values().as_binary::<i32>();
-    let b = b.values().as_binary::<i32>();
-    let values_eq = a.values().ptr_eq(b.values()) && a.offsets().ptr_eq(b.offsets());
-    match (a.nulls(), b.nulls()) {
-        (Some(a), Some(b)) => values_eq && a.inner().ptr_eq(b.inner()),
-        (None, None) => values_eq,
-        _ => false,
+enum CacheConcatCommand {
+    Compact(Vec<RecordBatch>),
+    Finish {
+        pending: Vec<RecordBatch>,
+        key: RangeScanCacheKey,
+        cache_strategy: CacheStrategy,
+        part_metrics: PartitionMetrics,
+        result_tx: Option<oneshot::Sender<Option<Arc<RangeScanCacheValue>>>>,
+    },
+}
+
+#[derive(Default)]
+struct CacheConcatState {
+    cached_batches: Vec<CachedBatchSlice>,
+    estimated_size: usize,
+}
+
+impl CacheConcatState {
+    async fn compact(
+        &mut self,
+        batches: Vec<RecordBatch>,
+        limiter: &crate::cache::RangeResultMemoryLimiter,
+    ) -> Result<()> {
+        if batches.is_empty() {
+            return Ok(());
+        }
+
+        let input_size = batches
+            .iter()
+            .map(RecordBatch::get_array_memory_size)
+            .sum::<usize>();
+        let _permit = limiter.acquire(input_size).await.map_err(|_| {
+            UnexpectedSnafu {
+                reason: "range result memory limiter is unexpectedly closed",
+            }
+            .build()
+        })?;
+
+        let compacted = compact_record_batches(batches)?;
+        self.estimated_size += compacted
+            .iter()
+            .map(|batch| batch.batch.get_array_memory_size())
+            .sum::<usize>();
+        self.cached_batches.extend(compacted);
+        Ok(())
+    }
+
+    fn finish(self) -> RangeScanCacheValue {
+        RangeScanCacheValue::new(self.cached_batches, self.estimated_size)
     }
 }
 
-/// Buffers record batches for caching, tracking memory size while deduplicating
-/// shared dictionary values across batches.
-///
-/// Uses the primary key column as a proxy to detect dictionary sharing: if the PK
-/// column's dictionary values are pointer-equal across batches, we assume all
-/// dictionary columns share their values and deduct the total dictionary values size.
-struct CacheBatchBuffer {
+fn compact_record_batches(batches: Vec<RecordBatch>) -> Result<Vec<CachedBatchSlice>> {
+    if batches.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let slice_lengths = batches.iter().map(RecordBatch::num_rows).collect();
+    Ok(vec![build_cached_batch_slice(batches, slice_lengths)?])
+}
+
+fn build_cached_batch_slice(
     batches: Vec<RecordBatch>,
-    /// Running total of batch memory.
-    total_size: usize,
-    /// The first batch's PK dictionary array, for pointer comparison.
-    /// `None` if no dictionary PK column exists or no batch has been added yet.
-    first_pk_dict: Option<DictionaryArray<UInt32Type>>,
-    /// Sum of `get_array_memory_size()` of all dictionary value arrays from the first batch.
-    total_dict_values_size: usize,
-    /// Whether the PK dictionary is still shared across all batches seen so far.
-    shared: bool,
+    slice_lengths: Vec<usize>,
+) -> Result<CachedBatchSlice> {
+    let batch = if batches.len() == 1 {
+        batches.into_iter().next().unwrap()
+    } else {
+        let schema = batches[0].schema();
+        concat_batches(&schema, &batches).context(ComputeArrowSnafu)?
+    };
+
+    Ok(CachedBatchSlice {
+        batch,
+        slice_lengths,
+    })
+}
+
+async fn run_cache_concat_task(
+    mut rx: mpsc::UnboundedReceiver<CacheConcatCommand>,
+    limiter: Arc<crate::cache::RangeResultMemoryLimiter>,
+) {
+    let mut state = CacheConcatState::default();
+
+    while let Some(cmd) = rx.recv().await {
+        match cmd {
+            CacheConcatCommand::Compact(batches) => {
+                if let Err(err) = state.compact(batches, &limiter).await {
+                    warn!(err; "Failed to compact range cache batches");
+                    return;
+                }
+            }
+            CacheConcatCommand::Finish {
+                pending,
+                key,
+                cache_strategy,
+                part_metrics,
+                result_tx,
+            } => {
+                let result = state
+                    .compact(pending, &limiter)
+                    .await
+                    .map(|()| state.finish());
+                if let Err(err) = &result {
+                    warn!(err; "Failed to finalize range cache batches");
+                }
+
+                let value = result.ok().map(Arc::new);
+                if let Some(value) = &value {
+                    part_metrics
+                        .inc_range_cache_size(key.estimated_size() + value.estimated_size());
+                    cache_strategy.put_range_result(key, value.clone());
+                }
+                if let Some(tx) = result_tx {
+                    let _ = tx.send(value);
+                }
+                return;
+            }
+        }
+    }
+}
+
+struct CacheBatchBuffer {
+    buffered_batches: Vec<RecordBatch>,
+    buffered_rows: usize,
+    buffered_size: usize,
+    total_weight: usize,
+    sender: Option<mpsc::UnboundedSender<CacheConcatCommand>>,
 }
 
 impl CacheBatchBuffer {
-    fn new() -> Self {
+    fn new(cache_strategy: &CacheStrategy) -> Self {
+        let sender = cache_strategy
+            .range_result_memory_limiter()
+            .map(|limiter| {
+                let (tx, rx) = mpsc::unbounded_channel();
+                common_runtime::spawn_global(run_cache_concat_task(rx, limiter.clone()));
+                tx
+            });
+
         Self {
-            batches: Vec::new(),
-            total_size: 0,
-            first_pk_dict: None,
-            total_dict_values_size: 0,
-            shared: true,
+            buffered_batches: Vec::new(),
+            buffered_rows: 0,
+            buffered_size: 0,
+            total_weight: 0,
+            sender,
         }
     }
 
-    fn push(&mut self, batch: RecordBatch) {
-        if self.batches.is_empty() {
-            self.init_first_batch(&batch);
-        } else {
-            self.add_subsequent_batch(&batch);
+    fn push(&mut self, batch: RecordBatch) -> Result<()> {
+        if self.sender.is_none() {
+            return Ok(());
         }
-        self.batches.push(batch);
-    }
 
-    fn init_first_batch(&mut self, batch: &RecordBatch) {
-        self.total_size += batch.get_array_memory_size();
-
-        let pk_col_idx = primary_key_column_index(batch.num_columns());
-        let mut total_dict_values_size = 0;
-        for col_idx in 0..batch.num_columns() {
-            let col = batch.column(col_idx);
-            if let Some(dict) = col.as_any().downcast_ref::<DictionaryArray<UInt32Type>>() {
-                total_dict_values_size += dict.values().get_array_memory_size();
-                if col_idx == pk_col_idx {
-                    self.first_pk_dict = Some(dict.clone());
-                }
-            }
-        }
-        self.total_dict_values_size = total_dict_values_size;
-    }
-
-    fn add_subsequent_batch(&mut self, batch: &RecordBatch) {
         let batch_size = batch.get_array_memory_size();
-
-        if self.shared
-            && let Some(first_pk_dict) = &self.first_pk_dict
-        {
-            let pk_col_idx = primary_key_column_index(batch.num_columns());
-            let col = batch.column(pk_col_idx);
-            if let Some(dict) = col.as_any().downcast_ref::<DictionaryArray<UInt32Type>>()
-                && pk_values_ptr_eq(first_pk_dict, dict)
-            {
-                // PK dict is shared, deduct all dict values sizes.
-                self.total_size += batch_size - self.total_dict_values_size;
-                return;
-            }
-            // Dictionary diverged.
-            self.shared = false;
+        self.total_weight += batch_size;
+        if self.total_weight > RANGE_CACHE_SKIP_BYTES {
+            self.buffered_batches.clear();
+            self.buffered_rows = 0;
+            self.buffered_size = 0;
+            self.sender = None;
+            return Ok(());
         }
 
-        self.total_size += batch_size;
+        self.buffered_rows += batch.num_rows();
+        self.buffered_size += batch_size;
+        self.buffered_batches.push(batch);
+
+        if self.buffered_rows > DEFAULT_READ_BATCH_SIZE
+            || self.buffered_size > RANGE_CACHE_COMPACT_THRESHOLD_BYTES
+        {
+            self.notify_compact();
+        }
+
+        Ok(())
     }
 
-    fn estimated_batches_size(&self) -> usize {
-        self.total_size
+    fn notify_compact(&mut self) {
+        if self.buffered_batches.is_empty() || self.sender.is_none() {
+            return;
+        }
+
+        let batches = mem::take(&mut self.buffered_batches);
+        self.buffered_rows = 0;
+        self.buffered_size = 0;
+
+        let Some(sender) = &self.sender else {
+            return;
+        };
+        if sender.send(CacheConcatCommand::Compact(batches)).is_err() {
+            self.sender = None;
+        }
     }
 
-    fn into_batches(self) -> Vec<RecordBatch> {
-        self.batches
+    fn finish(
+        mut self,
+        key: RangeScanCacheKey,
+        cache_strategy: CacheStrategy,
+        part_metrics: PartitionMetrics,
+        result_tx: Option<oneshot::Sender<Option<Arc<RangeScanCacheValue>>>>,
+    ) {
+        let Some(sender) = self.sender.take() else {
+            return;
+        };
+
+        if sender
+            .send(CacheConcatCommand::Finish {
+                pending: mem::take(&mut self.buffered_batches),
+                key,
+                cache_strategy,
+                part_metrics,
+                result_tx,
+            })
+            .is_err()
+        {
+            self.sender = None;
+        }
     }
 }
 
@@ -409,17 +559,13 @@ pub(crate) fn cache_flat_range_stream(
     part_metrics: PartitionMetrics,
 ) -> BoxedRecordBatchStream {
     Box::pin(try_stream! {
-        let mut buffer = CacheBatchBuffer::new();
+        let mut buffer = CacheBatchBuffer::new(&cache_strategy);
         while let Some(batch) = stream.try_next().await? {
-            buffer.push(batch.clone());
+            buffer.push(batch.clone())?;
             yield batch;
         }
 
-        let estimated_size = buffer.estimated_batches_size();
-        let batches = buffer.into_batches();
-        let value = Arc::new(RangeScanCacheValue::new(batches, estimated_size));
-        part_metrics.inc_range_cache_size(key.estimated_size() + value.estimated_size());
-        cache_strategy.put_range_result(key, value);
+        buffer.finish(key, cache_strategy, part_metrics, None);
     })
 }
 
@@ -480,10 +626,11 @@ mod tests {
     use common_time::Timestamp;
     use common_time::range::TimestampRange;
     use common_time::timestamp::TimeUnit;
+    use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
     use datafusion_common::ScalarValue;
     use datafusion_expr::{Expr, col, lit};
     use smallvec::smallvec;
-    use store_api::storage::FileId;
+    use store_api::storage::{FileId, RegionId};
 
     use super::*;
     use crate::cache::CacheManager;
@@ -500,6 +647,44 @@ mod tests {
                 .range_result_cache_size(1024)
                 .build(),
         ))
+    }
+
+    fn test_cache_context(strategy: &CacheStrategy) -> (RangeScanCacheKey, PartitionMetrics) {
+        let region_id = RegionId::new(1, 1);
+        let key = RangeScanCacheKey {
+            region_id,
+            row_groups: vec![],
+            scan: ScanRequestFingerprintBuilder {
+                read_column_ids: vec![],
+                read_column_types: vec![],
+                filters: vec![],
+                time_filters: vec![],
+                series_row_selector: None,
+                append_mode: false,
+                filter_deleted: false,
+                merge_mode: MergeMode::LastRow,
+                partition_expr_version: 0,
+            }
+            .build(),
+        };
+
+        let metrics_set = ExecutionPlanMetricsSet::new();
+        let part_metrics =
+            PartitionMetrics::new(region_id, 0, "test", Instant::now(), false, &metrics_set);
+
+        assert!(strategy.get_range_result(&key).is_none());
+        (key, part_metrics)
+    }
+
+    async fn finish_cache_batch_buffer(
+        buffer: CacheBatchBuffer,
+        key: RangeScanCacheKey,
+        cache_strategy: CacheStrategy,
+        part_metrics: PartitionMetrics,
+    ) -> Option<Arc<RangeScanCacheValue>> {
+        let (tx, rx) = oneshot::channel();
+        buffer.finish(key, cache_strategy, part_metrics, Some(tx));
+        rx.await.context(crate::error::RecvSnafu).ok().flatten()
     }
 
     async fn new_stream_context(
@@ -682,169 +867,176 @@ mod tests {
         );
     }
 
-    /// Creates a test schema with 5 columns where the primary key dictionary column
-    /// is at index 2 (`num_columns - 3`), matching the flat format layout.
-    ///
-    /// Layout: `[field0: Int64, field1: Int64, pk: Dictionary<UInt32,Binary>, ts: Int64, seq: Int64]`
-    fn dict_test_schema() -> Arc<datatypes::arrow::datatypes::Schema> {
+    fn test_schema() -> Arc<datatypes::arrow::datatypes::Schema> {
         use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
-        Arc::new(Schema::new(vec![
-            Field::new("field0", ArrowDataType::Int64, false),
-            Field::new("field1", ArrowDataType::Int64, false),
-            Field::new(
-                "pk",
-                ArrowDataType::Dictionary(
-                    Box::new(ArrowDataType::UInt32),
-                    Box::new(ArrowDataType::Binary),
-                ),
-                false,
-            ),
-            Field::new("ts", ArrowDataType::Int64, false),
-            Field::new("seq", ArrowDataType::Int64, false),
-        ]))
+
+        Arc::new(Schema::new(vec![Field::new(
+            "value",
+            ArrowDataType::Int64,
+            false,
+        )]))
     }
 
-    /// Helper to create a record batch with a dictionary column at the primary key position.
-    fn make_dict_batch(
-        schema: Arc<datatypes::arrow::datatypes::Schema>,
-        dict_values: &datatypes::arrow::array::BinaryArray,
-        keys: &[u32],
-        int_values: &[i64],
-    ) -> RecordBatch {
-        use datatypes::arrow::array::{Int64Array, UInt32Array};
+    fn make_batch(values: &[i64]) -> RecordBatch {
+        use datatypes::arrow::array::Int64Array;
 
-        let key_array = UInt32Array::from(keys.to_vec());
-        let dict_array: DictionaryArray<UInt32Type> =
-            DictionaryArray::new(key_array, Arc::new(dict_values.clone()));
-        let int_array = Int64Array::from(int_values.to_vec());
-        let zeros = Int64Array::from(vec![0i64; int_values.len()]);
         RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(zeros.clone()),
-                Arc::new(int_array),
-                Arc::new(dict_array),
-                Arc::new(zeros.clone()),
-                Arc::new(zeros),
-            ],
+            test_schema(),
+            vec![Arc::new(Int64Array::from(values.to_vec()))],
         )
         .unwrap()
     }
 
-    /// Computes the total `get_array_memory_size()` of all dictionary value arrays in a batch.
-    fn compute_total_dict_values_size(batch: &RecordBatch) -> usize {
-        batch
-            .columns()
-            .iter()
-            .filter_map(|col| {
-                col.as_any()
-                    .downcast_ref::<DictionaryArray<UInt32Type>>()
-                    .map(|dict| dict.values().get_array_memory_size())
-            })
-            .sum()
-    }
-
-    #[test]
-    fn cache_batch_buffer_empty() {
-        let buffer = CacheBatchBuffer::new();
-        assert_eq!(buffer.estimated_batches_size(), 0);
-        assert!(buffer.into_batches().is_empty());
-    }
-
-    #[test]
-    fn cache_batch_buffer_single_batch() {
+    fn make_large_binary_batch(rows: usize, bytes_per_row: usize) -> RecordBatch {
         use datatypes::arrow::array::BinaryArray;
+        use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
 
-        let schema = dict_test_schema();
-        let dict_values = BinaryArray::from_vec(vec![b"a", b"b", b"c"]);
-        let batch = make_dict_batch(schema, &dict_values, &[0, 1, 2], &[10, 20, 30]);
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            ArrowDataType::Binary,
+            false,
+        )]));
+        let payload = vec![b'x'; bytes_per_row];
+        let values = (0..rows).map(|_| payload.as_slice()).collect::<Vec<_>>();
 
-        let full_size = batch.get_array_memory_size();
-
-        let mut buffer = CacheBatchBuffer::new();
-        buffer.push(batch);
-        assert_eq!(buffer.estimated_batches_size(), full_size);
-        assert_eq!(buffer.into_batches().len(), 1);
+        RecordBatch::try_new(schema, vec![Arc::new(BinaryArray::from_vec(values))]).unwrap()
     }
 
     #[test]
-    fn cache_batch_buffer_shared_dictionary() {
-        use datatypes::arrow::array::BinaryArray;
+    fn compact_record_batches_keeps_original_boundaries() {
+        let batches = vec![make_batch(&[1, 2]), make_batch(&[3]), make_batch(&[4, 5])];
 
-        let schema = dict_test_schema();
-        let dict_values = BinaryArray::from_vec(vec![b"alpha", b"beta", b"gamma"]);
+        let compacted = compact_record_batches(batches).unwrap();
 
-        // Two batches sharing the same dictionary values array.
-        let batch1 = make_dict_batch(schema.clone(), &dict_values, &[0, 1], &[10, 20]);
-        let batch2 = make_dict_batch(schema, &dict_values, &[1, 2], &[30, 40]);
+        assert_eq!(compacted.len(), 1);
+        assert_eq!(compacted[0].batch.num_rows(), 5);
+        assert_eq!(compacted[0].slice_lengths, vec![2, 1, 2]);
+    }
 
-        let batch1_full = batch1.get_array_memory_size();
-        let batch2_full = batch2.get_array_memory_size();
+    #[tokio::test]
+    async fn cached_flat_range_stream_replays_original_batches() {
+        let value = Arc::new(RangeScanCacheValue::new(
+            vec![CachedBatchSlice {
+                batch: make_batch(&[1, 2, 3]),
+                slice_lengths: vec![2, 1],
+            }],
+            make_batch(&[1, 2, 3]).get_array_memory_size(),
+        ));
 
-        // The total dictionary values size that should be deduplicated for the second batch.
-        let dict_values_size = compute_total_dict_values_size(&batch2);
+        let replayed = cached_flat_range_stream(value)
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
 
-        let mut buffer = CacheBatchBuffer::new();
-        buffer.push(batch1);
-        buffer.push(batch2);
+        assert_eq!(replayed.len(), 2);
+        assert_eq!(replayed[0].num_rows(), 2);
+        assert_eq!(replayed[1].num_rows(), 1);
+    }
 
-        // Second batch's dict values should not be counted again.
+    #[tokio::test]
+    async fn cache_batch_buffer_finishes_pending_batches() {
+        let strategy = test_cache_strategy();
+        let batch = make_batch(&[1, 2, 3]);
+        let expected_size = batch.get_array_memory_size();
+        let (key, part_metrics) = test_cache_context(&strategy);
+
+        let mut buffer = CacheBatchBuffer::new(&strategy);
+        buffer.push(batch).unwrap();
+
+        let value = finish_cache_batch_buffer(buffer, key.clone(), strategy.clone(), part_metrics)
+            .await
+            .unwrap();
+        assert_eq!(value.cached_batches.len(), 1);
+        assert_eq!(value.cached_batches[0].slice_lengths, vec![3]);
+        assert_eq!(value.estimated_batches_size, expected_size);
+        assert!(Arc::ptr_eq(
+            &value,
+            &strategy.get_range_result(&key).unwrap()
+        ));
+    }
+
+    #[tokio::test]
+    async fn cache_batch_buffer_compacts_when_rows_exceed_default_batch_size() {
+        let strategy = test_cache_strategy();
+        let batch = make_batch(&vec![1; DEFAULT_READ_BATCH_SIZE / 2 + 1]);
+        let (key, part_metrics) = test_cache_context(&strategy);
+
+        let mut buffer = CacheBatchBuffer::new(&strategy);
+        buffer.push(batch.clone()).unwrap();
+        buffer.push(batch).unwrap();
+
+        assert_eq!(buffer.buffered_rows, 0);
+        assert!(buffer.buffered_batches.is_empty());
+
+        let value = finish_cache_batch_buffer(buffer, key, strategy, part_metrics)
+            .await
+            .unwrap();
+        assert_eq!(value.cached_batches.len(), 1);
         assert_eq!(
-            buffer.estimated_batches_size(),
-            batch1_full + batch2_full - dict_values_size
+            value.cached_batches[0].slice_lengths,
+            vec![
+                DEFAULT_READ_BATCH_SIZE / 2 + 1,
+                DEFAULT_READ_BATCH_SIZE / 2 + 1
+            ]
         );
-        assert_eq!(buffer.into_batches().len(), 2);
     }
 
-    #[test]
-    fn cache_batch_buffer_non_shared_dictionary() {
-        use datatypes::arrow::array::BinaryArray;
+    #[tokio::test]
+    async fn cache_batch_buffer_compacts_when_buffered_size_exceeds_threshold() {
+        let strategy = test_cache_strategy();
+        let large_batch = make_large_binary_batch(DEFAULT_READ_BATCH_SIZE, 4096);
+        let (key, part_metrics) = test_cache_context(&strategy);
 
-        let schema = dict_test_schema();
-        let dict_values1 = BinaryArray::from_vec(vec![b"a", b"b"]);
-        let dict_values2 = BinaryArray::from_vec(vec![b"x", b"y"]);
+        let mut buffer = CacheBatchBuffer::new(&strategy);
+        buffer.push(large_batch.clone()).unwrap();
 
-        let batch1 = make_dict_batch(schema.clone(), &dict_values1, &[0, 1], &[10, 20]);
-        let batch2 = make_dict_batch(schema, &dict_values2, &[0, 1], &[30, 40]);
+        assert_eq!(buffer.buffered_rows, 0);
+        assert!(buffer.buffered_batches.is_empty());
 
-        let batch1_full = batch1.get_array_memory_size();
-        let batch2_full = batch2.get_array_memory_size();
-
-        let mut buffer = CacheBatchBuffer::new();
-        buffer.push(batch1);
-        buffer.push(batch2);
-
-        // Different dictionaries: full size for both.
-        assert_eq!(buffer.estimated_batches_size(), batch1_full + batch2_full);
-    }
-
-    #[test]
-    fn cache_batch_buffer_shared_then_diverged() {
-        use datatypes::arrow::array::BinaryArray;
-
-        let schema = dict_test_schema();
-        let shared_values = BinaryArray::from_vec(vec![b"a", b"b", b"c"]);
-        let different_values = BinaryArray::from_vec(vec![b"x", b"y"]);
-
-        let batch1 = make_dict_batch(schema.clone(), &shared_values, &[0], &[1]);
-        let batch2 = make_dict_batch(schema.clone(), &shared_values, &[1], &[2]);
-        let batch3 = make_dict_batch(schema, &different_values, &[0], &[3]);
-
-        let size1 = batch1.get_array_memory_size();
-        let size2 = batch2.get_array_memory_size();
-        let size3 = batch3.get_array_memory_size();
-
-        let dict_values_size = compute_total_dict_values_size(&batch2);
-
-        let mut buffer = CacheBatchBuffer::new();
-        buffer.push(batch1);
-        buffer.push(batch2);
-        buffer.push(batch3);
-
-        // batch2 shares dict with batch1 (dedup), batch3 does not (full size).
+        let value = finish_cache_batch_buffer(buffer, key, strategy, part_metrics)
+            .await
+            .unwrap();
+        assert_eq!(value.cached_batches.len(), 1);
         assert_eq!(
-            buffer.estimated_batches_size(),
-            size1 + (size2 - dict_values_size) + size3
+            value.cached_batches[0].slice_lengths,
+            vec![large_batch.num_rows()]
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_batch_buffer_uses_compacted_size_for_weight() {
+        let strategy = test_cache_strategy();
+        let batch1 = make_batch(&[1, 2]);
+        let batch2 = make_batch(&[3, 4]);
+        let (key, part_metrics) = test_cache_context(&strategy);
+        let expected = concat_batches(&test_schema(), &[batch1.clone(), batch2.clone()])
+            .unwrap()
+            .get_array_memory_size();
+
+        let mut buffer = CacheBatchBuffer::new(&strategy);
+        buffer.push(batch1).unwrap();
+        buffer.push(batch2).unwrap();
+
+        let value = finish_cache_batch_buffer(buffer, key, strategy, part_metrics)
+            .await
+            .unwrap();
+        assert_eq!(value.estimated_batches_size, expected);
+    }
+
+    #[tokio::test]
+    async fn cache_batch_buffer_skips_cache_when_weight_exceeds_limit() {
+        let strategy = test_cache_strategy();
+        let (key, part_metrics) = test_cache_context(&strategy);
+        let mut buffer = CacheBatchBuffer::new(&strategy);
+        buffer.total_weight = RANGE_CACHE_SKIP_BYTES;
+
+        buffer.push(make_batch(&[1])).unwrap();
+
+        assert!(buffer.sender.is_none());
+        assert!(
+            finish_cache_batch_buffer(buffer, key, strategy, part_metrics)
+                .await
+                .is_none()
         );
     }
 }

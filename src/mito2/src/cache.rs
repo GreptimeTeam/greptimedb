@@ -28,6 +28,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use common_base::readable_size::ReadableSize;
 use common_telemetry::warn;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::value::Value;
@@ -72,6 +73,44 @@ const INDEX_TYPE: &str = "index";
 const SELECTOR_RESULT_TYPE: &str = "selector_result";
 /// Metrics type key for range scan result cache.
 const RANGE_RESULT_TYPE: &str = "range_result";
+const RANGE_RESULT_CONCAT_MEMORY_LIMIT: ReadableSize = ReadableSize::mb(512);
+const RANGE_RESULT_CONCAT_MEMORY_PERMIT: ReadableSize = ReadableSize::kb(1);
+
+#[derive(Debug)]
+pub(crate) struct RangeResultMemoryLimiter {
+    semaphore: Arc<tokio::sync::Semaphore>,
+}
+
+impl Default for RangeResultMemoryLimiter {
+    fn default() -> Self {
+        Self::new(
+            RANGE_RESULT_CONCAT_MEMORY_LIMIT.as_bytes() as usize,
+            RANGE_RESULT_CONCAT_MEMORY_PERMIT.as_bytes() as usize,
+        )
+    }
+}
+
+impl RangeResultMemoryLimiter {
+    pub(crate) fn new(limit_bytes: usize, permit_bytes: usize) -> Self {
+        let permit_bytes = permit_bytes.max(1);
+        let permits = limit_bytes.div_ceil(permit_bytes).max(1);
+        Self {
+            semaphore: Arc::new(tokio::sync::Semaphore::new(permits)),
+        }
+    }
+
+    pub(crate) fn permit_bytes(&self) -> usize {
+        RANGE_RESULT_CONCAT_MEMORY_PERMIT.as_bytes() as usize
+    }
+
+    pub(crate) async fn acquire(
+        &self,
+        bytes: usize,
+    ) -> std::result::Result<tokio::sync::SemaphorePermit<'_>, tokio::sync::AcquireError> {
+        let permits = bytes.div_ceil(self.permit_bytes()).max(1) as u32;
+        self.semaphore.acquire_many(permits).await
+    }
+}
 
 /// Cached SST metadata combines the parquet footer with the decoded region metadata.
 ///
@@ -373,6 +412,15 @@ impl CacheStrategy {
         }
     }
 
+    pub(crate) fn range_result_memory_limiter(
+        &self,
+    ) -> Option<&Arc<RangeResultMemoryLimiter>> {
+        match self {
+            CacheStrategy::EnableAll(cache_manager) => Some(cache_manager.range_result_memory_limiter()),
+            CacheStrategy::Compaction(_) | CacheStrategy::Disabled => None,
+        }
+    }
+
     /// Calls [CacheManager::write_cache()].
     /// It returns None if the strategy is [CacheStrategy::Disabled].
     pub fn write_cache(&self) -> Option<&WriteCacheRef> {
@@ -476,6 +524,8 @@ pub struct CacheManager {
     selector_result_cache: Option<SelectorResultCache>,
     /// Cache for range scan outputs in flat format.
     range_result_cache: Option<RangeResultCache>,
+    /// Shared memory limiter for async range-result cache tasks.
+    range_result_memory_limiter: Arc<RangeResultMemoryLimiter>,
     /// Cache for index result.
     index_result_cache: Option<IndexResultCache>,
 }
@@ -735,6 +785,12 @@ impl CacheManager {
         }
     }
 
+    pub(crate) fn range_result_memory_limiter(
+        &self,
+    ) -> &Arc<RangeResultMemoryLimiter> {
+        &self.range_result_memory_limiter
+    }
+
     /// Gets the write cache.
     pub(crate) fn write_cache(&self) -> Option<&WriteCacheRef> {
         self.write_cache.as_ref()
@@ -969,6 +1025,7 @@ impl CacheManagerBuilder {
             puffin_metadata_cache: Some(Arc::new(puffin_metadata_cache)),
             selector_result_cache,
             range_result_cache,
+            range_result_memory_limiter: Arc::new(RangeResultMemoryLimiter::default()),
             index_result_cache,
         }
     }
