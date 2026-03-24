@@ -21,8 +21,7 @@ use std::sync::Arc;
 use arrow_schema::DataType;
 use async_trait::async_trait;
 use catalog::table_source::DfTableSourceProvider;
-use common_error::ext::{BoxedError, PlainError};
-use common_error::status_code::StatusCode;
+use common_error::ext::BoxedError;
 use common_telemetry::tracing;
 use datafusion::common::{DFSchema, plan_err};
 use datafusion::execution::context::SessionState;
@@ -291,12 +290,9 @@ impl DfLogicalPlanner {
             .context(QueryPlanSnafu)?;
 
         let context = QueryEngineContext::new(self.session_state.clone(), query_ctx);
-        self.engine_state
-            .optimize_by_extension_rules(plan, &context)
-            .map_err(|error| {
-                BoxedError::new(PlainError::new(error.to_string(), StatusCode::Unexpected))
-            })
-            .context(QueryPlanSnafu)
+        Ok(self
+            .engine_state
+            .optimize_by_extension_rules(plan, &context)?)
     }
 
     #[tracing::instrument(skip_all)]

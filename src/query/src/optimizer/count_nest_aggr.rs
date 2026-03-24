@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeSet;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use datafusion::config::ConfigOptions;
@@ -94,11 +94,11 @@ impl CountNestAggrRule {
         if inner_agg.aggr_expr.len() != 1 || inner_agg.group_expr.is_empty() {
             return Ok(None);
         }
-        let (inner_agg_name, inner_value_expr) =
+        let (inner_is_count, inner_value_expr) =
             match Self::aggregate_if(&inner_agg.aggr_expr[0], |name| {
                 Self::is_supported_inner_aggregate(name)
             }) {
-                Some((name, arg)) => (name, arg),
+                Some((name, arg)) => (name == "count", arg),
                 None => return Ok(None),
             };
         let Expr::Column(_) = inner_value_expr else {
@@ -146,9 +146,12 @@ impl CountNestAggrRule {
 
         let mut required_input_columns =
             Self::collect_required_input_columns(&presence_group_exprs, inner_value_expr);
-        let presence_source = Self::prune_projection_chain_to_instant(
+        required_input_columns.extend(Self::collect_required_instant_columns(
             inner_agg.input.as_ref(),
-            &mut required_input_columns,
+        ));
+        let presence_source = Self::rebuild_projection_chain_to_instant(
+            inner_agg.input.as_ref(),
+            &required_input_columns,
         )?;
 
         let outer_value_name = outer_agg
@@ -157,7 +160,7 @@ impl CountNestAggrRule {
             .name()
             .clone();
         let mut presence_input = LogicalPlanBuilder::from(presence_source);
-        if inner_agg_name != "count" {
+        if !inner_is_count {
             presence_input = presence_input.filter(inner_value_expr.clone().is_not_null())?;
         }
         let presence_input = presence_input
@@ -176,8 +179,8 @@ impl CountNestAggrRule {
         Ok(Some(rewritten))
     }
 
-    fn collect_required_input_columns(group_exprs: &[Expr], value_expr: &Expr) -> BTreeSet<String> {
-        let mut required = BTreeSet::new();
+    fn collect_required_input_columns(group_exprs: &[Expr], value_expr: &Expr) -> HashSet<String> {
+        let mut required = HashSet::new();
 
         for expr in group_exprs {
             if let Expr::Column(column) = expr {
@@ -191,6 +194,42 @@ impl CountNestAggrRule {
         }
 
         required
+    }
+
+    fn collect_required_instant_columns(plan: &LogicalPlan) -> HashSet<String> {
+        let mut required = HashSet::new();
+        Self::collect_required_instant_columns_into(plan, &mut required);
+        required
+    }
+
+    fn collect_required_instant_columns_into(plan: &LogicalPlan, required: &mut HashSet<String>) {
+        match plan {
+            LogicalPlan::Projection(projection) => {
+                Self::collect_required_instant_columns_into(projection.input.as_ref(), required);
+            }
+            LogicalPlan::Extension(extension) => {
+                for expr in extension.node.expressions() {
+                    if let Expr::Column(column) = expr {
+                        required.insert(column.name);
+                    }
+                }
+
+                if extension.node.as_any().is::<SeriesDivide>()
+                    && extension.node.inputs()[0]
+                        .schema()
+                        .fields()
+                        .iter()
+                        .any(|field| field.name() == DATA_SCHEMA_TSID_COLUMN_NAME)
+                {
+                    required.insert(DATA_SCHEMA_TSID_COLUMN_NAME.to_string());
+                }
+
+                if let Some(input) = extension.node.inputs().into_iter().next() {
+                    Self::collect_required_instant_columns_into(input, required);
+                }
+            }
+            _ => {}
+        }
     }
 
     fn aggregate_if<F>(expr: &Expr, accept_name: F) -> Option<(&str, &Expr)>
@@ -233,13 +272,13 @@ impl CountNestAggrRule {
         }
     }
 
-    fn prune_projection_chain_to_instant(
+    fn rebuild_projection_chain_to_instant(
         plan: &LogicalPlan,
-        required_columns: &mut BTreeSet<String>,
+        required_columns: &HashSet<String>,
     ) -> Result<LogicalPlan> {
         match plan {
             LogicalPlan::Projection(projection) => {
-                let input = Self::prune_projection_chain_to_instant(
+                let input = Self::rebuild_projection_chain_to_instant(
                     projection.input.as_ref(),
                     required_columns,
                 )?;
@@ -264,7 +303,7 @@ impl CountNestAggrRule {
 
     fn prune_instant_input(
         plan: &LogicalPlan,
-        required_columns: &mut BTreeSet<String>,
+        required_columns: &HashSet<String>,
     ) -> Result<LogicalPlan> {
         match plan {
             LogicalPlan::Extension(extension) => {
@@ -278,19 +317,6 @@ impl CountNestAggrRule {
 
                 if let Some(divide) = extension.node.as_any().downcast_ref::<SeriesDivide>() {
                     let divide_input = extension.node.inputs()[0].clone();
-                    for expr in extension.node.expressions() {
-                        if let Expr::Column(column) = expr {
-                            required_columns.insert(column.name.clone());
-                        }
-                    }
-                    if divide_input
-                        .schema()
-                        .fields()
-                        .iter()
-                        .any(|field| field.name() == DATA_SCHEMA_TSID_COLUMN_NAME)
-                    {
-                        required_columns.insert(DATA_SCHEMA_TSID_COLUMN_NAME.to_string());
-                    }
 
                     let projection_exprs = divide_input
                         .schema()
