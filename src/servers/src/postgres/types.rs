@@ -235,7 +235,7 @@ pub(super) fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
     match origin {
         &ConcreteDataType::Null(_) => Ok(Type::UNKNOWN),
         &ConcreteDataType::Boolean(_) => Ok(Type::BOOL),
-        &ConcreteDataType::Int8(_) => Ok(Type::CHAR),
+        &ConcreteDataType::Int8(_) => Ok(Type::INT2),
         &ConcreteDataType::Int16(_) | &ConcreteDataType::UInt8(_) => Ok(Type::INT2),
         &ConcreteDataType::Int32(_) | &ConcreteDataType::UInt16(_) => Ok(Type::INT4),
         &ConcreteDataType::Int64(_) | &ConcreteDataType::UInt32(_) => Ok(Type::INT8),
@@ -253,7 +253,7 @@ pub(super) fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
         ConcreteDataType::List(list) => match list.item_type() {
             &ConcreteDataType::Null(_) => Ok(Type::UNKNOWN),
             &ConcreteDataType::Boolean(_) => Ok(Type::BOOL_ARRAY),
-            &ConcreteDataType::Int8(_) => Ok(Type::CHAR_ARRAY),
+            &ConcreteDataType::Int8(_) => Ok(Type::INT2_ARRAY),
             &ConcreteDataType::Int16(_) | &ConcreteDataType::UInt8(_) => Ok(Type::INT2_ARRAY),
             &ConcreteDataType::Int32(_) | &ConcreteDataType::UInt16(_) => Ok(Type::INT4_ARRAY),
             &ConcreteDataType::Int64(_) | &ConcreteDataType::UInt32(_) => Ok(Type::INT8_ARRAY),
@@ -1151,7 +1151,7 @@ mod test {
         let pg_field_info = vec![
             FieldInfo::new("nulls".into(), None, None, Type::UNKNOWN, FieldFormat::Text),
             FieldInfo::new("bools".into(), None, None, Type::BOOL, FieldFormat::Text),
-            FieldInfo::new("int8s".into(), None, None, Type::CHAR, FieldFormat::Text),
+            FieldInfo::new("int8s".into(), None, None, Type::INT2, FieldFormat::Text),
             FieldInfo::new("int16s".into(), None, None, Type::INT2, FieldFormat::Text),
             FieldInfo::new("int32s".into(), None, None, Type::INT4, FieldFormat::Text),
             FieldInfo::new("int64s".into(), None, None, Type::INT8, FieldFormat::Text),
@@ -1230,7 +1230,7 @@ mod test {
                 Type::NUMERIC,
                 FieldFormat::Text,
             ),
-            FieldInfo::new("int8s".into(), None, None, Type::CHAR, FieldFormat::Text),
+            FieldInfo::new("int8s".into(), None, None, Type::INT2, FieldFormat::Text),
             FieldInfo::new("int16s".into(), None, None, Type::INT2, FieldFormat::Text),
             FieldInfo::new("int32s".into(), None, None, Type::INT4, FieldFormat::Text),
             FieldInfo::new("int64s".into(), None, None, Type::INT8, FieldFormat::Text),
