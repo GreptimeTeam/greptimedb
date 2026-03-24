@@ -42,22 +42,32 @@ impl<T: AsRef<[u8]>> From<T> for LeaderValue {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetasrvNodeInfo {
+    // The metasrv's address
     pub addr: String,
+    // The node build version
     pub version: String,
+    // The node build git commit hash
     pub git_commit: String,
+    // The node start timestamp in milliseconds
     pub start_time_ms: u64,
+    // The node total cpu millicores
     #[serde(default)]
     pub total_cpu_millicores: i64,
+    // The node total memory bytes
     #[serde(default)]
     pub total_memory_bytes: i64,
+    /// The node build cpu usage millicores
     #[serde(default)]
     pub cpu_usage_millicores: i64,
+    /// The node build memory usage bytes
     #[serde(default)]
     pub memory_usage_bytes: i64,
+    // The node hostname
     #[serde(default)]
     pub hostname: String,
 }
 
+// TODO(zyy17): Allow deprecated fields for backward compatibility. Remove this when the deprecated top-level fields are removed from the proto.
 #[allow(deprecated)]
 impl From<MetasrvNodeInfo> for api::v1::meta::MetasrvNodeInfo {
     fn from(node_info: MetasrvNodeInfo) -> Self {
@@ -66,11 +76,14 @@ impl From<MetasrvNodeInfo> for api::v1::meta::MetasrvNodeInfo {
                 addr: node_info.addr,
                 ..Default::default()
             }),
+            // TODO(zyy17): The following top-level fields are deprecated. They are kept for backward compatibility and will be removed in a future version.
+            // New code should use the fields in `info.NodeInfo` instead.
             version: node_info.version.clone(),
             git_commit: node_info.git_commit.clone(),
             start_time_ms: node_info.start_time_ms,
             cpus: node_info.total_cpu_millicores as u32,
             memory_bytes: node_info.total_memory_bytes as u64,
+            // The canonical location for node information.
             info: Some(api::v1::meta::NodeInfo {
                 version: node_info.version,
                 git_commit: node_info.git_commit,
