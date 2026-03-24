@@ -167,7 +167,9 @@ TQL ANALYZE (0, 10, '5s')  sum(irate(tsid_metric[1h])) / scalar(count(sum(tsid_m
 |_|_|_AggregateExec: mode=FinalPartitioned, gby=[ts@0 as ts, job@1 as job], aggr=[] REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[ts@0 as ts, job@1 as job], aggr=[] REDACTED
-|_|_|_ProjectionExec: expr=[ts@3 as ts, job@1 as job] REDACTED
+|_|_|_ProjectionExec: expr=[ts@1 as ts, job@0 as job] REDACTED
+|_|_|_FilterExec: val@0 IS NOT NULL, projection=[job@1, ts@2] REDACTED
+|_|_|_ProjectionExec: expr=[val@0 as val, job@1 as job, ts@3 as ts] REDACTED
 |_|_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
 |_|_|_ProjectionExec: expr=[val@1 as val, job@3 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
