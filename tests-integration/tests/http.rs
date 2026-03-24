@@ -1482,7 +1482,7 @@ enable = true
 [prom_store]
 enable = true
 with_metric_engine = true
-pending_rows_flush_interval = "2s"
+pending_rows_flush_interval = "0s"
 max_batch_rows = 100000
 max_concurrent_flushes = 256
 worker_channel_capacity = 65526

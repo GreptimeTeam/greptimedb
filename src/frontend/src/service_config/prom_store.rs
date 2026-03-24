@@ -77,7 +77,7 @@ mod tests {
         let default = PromStoreOptions::default();
         assert!(default.enable);
         assert!(default.with_metric_engine);
-        assert_eq!(default.pending_rows_flush_interval, Duration::from_secs(2));
+        assert_eq!(default.pending_rows_flush_interval, Duration::ZERO);
         assert_eq!(default.max_batch_rows, default_max_batch_rows());
         assert_eq!(
             default.max_concurrent_flushes,
