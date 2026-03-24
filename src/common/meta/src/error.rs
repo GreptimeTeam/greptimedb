@@ -338,6 +338,24 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Metasrv election has no leader at this moment"))]
+    ElectionNoLeader {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Metasrv election leader lease expired"))]
+    ElectionLeaderLeaseExpired {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Metasrv election leader lease changed during election"))]
+    ElectionLeaderLeaseChanged {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Table already exists, table: {}", table_name))]
     TableAlreadyExists {
         table_name: String,
@@ -742,6 +760,15 @@ pub enum Error {
     },
 
     #[cfg(feature = "pg_kvbackend")]
+    #[snafu(display("Failed to get Postgres client"))]
+    GetPostgresClient {
+        #[snafu(source)]
+        error: deadpool::managed::PoolError<tokio_postgres::Error>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "pg_kvbackend")]
     #[snafu(display("Failed to {} Postgres transaction", operation))]
     PostgresTransaction {
         #[snafu(source)]
@@ -796,6 +823,24 @@ pub enum Error {
     },
 
     #[cfg(feature = "mysql_kvbackend")]
+    #[snafu(display("Failed to decode sql value"))]
+    DecodeSqlValue {
+        #[snafu(source)]
+        error: sqlx::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "mysql_kvbackend")]
+    #[snafu(display("Failed to acquire mysql client from pool"))]
+    AcquireMySqlClient {
+        #[snafu(source)]
+        error: sqlx::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "mysql_kvbackend")]
     #[snafu(display("Failed to {} MySql transaction", operation))]
     MySqlTransaction {
         #[snafu(source)]
@@ -808,6 +853,15 @@ pub enum Error {
     #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
     #[snafu(display("Rds transaction retry failed"))]
     RdsTransactionRetryFailed {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
+    #[snafu(display("Sql execution timeout, sql: {}, duration: {:?}", sql, duration))]
+    SqlExecutionTimeout {
+        sql: String,
+        duration: std::time::Duration,
         #[snafu(implicit)]
         location: Location,
     },
@@ -1064,7 +1118,10 @@ impl ErrorExt for Error {
             | MoveValues { .. }
             | GetCache { .. }
             | SerializeToJson { .. }
-            | DeserializeFromJson { .. } => StatusCode::Internal,
+            | DeserializeFromJson { .. }
+            | ElectionNoLeader { .. }
+            | ElectionLeaderLeaseExpired { .. }
+            | ElectionLeaderLeaseChanged { .. } => StatusCode::Internal,
 
             NoLeader { .. } => StatusCode::TableUnavailable,
             ValueNotExist { .. }
@@ -1187,15 +1244,18 @@ impl ErrorExt for Error {
             PostgresExecution { .. }
             | CreatePostgresPool { .. }
             | GetPostgresConnection { .. }
+            | GetPostgresClient { .. }
             | PostgresTransaction { .. }
             | PostgresTlsConfig { .. }
             | InvalidTlsConfig { .. } => StatusCode::Internal,
             #[cfg(feature = "mysql_kvbackend")]
-            MySqlExecution { .. } | CreateMySqlPool { .. } | MySqlTransaction { .. } => {
-                StatusCode::Internal
-            }
+            MySqlExecution { .. }
+            | CreateMySqlPool { .. }
+            | DecodeSqlValue { .. }
+            | AcquireMySqlClient { .. }
+            | MySqlTransaction { .. } => StatusCode::Internal,
             #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
-            RdsTransactionRetryFailed { .. } => StatusCode::Internal,
+            RdsTransactionRetryFailed { .. } | SqlExecutionTimeout { .. } => StatusCode::Internal,
             DatanodeTableInfoNotFound { .. } => StatusCode::Internal,
         }
     }

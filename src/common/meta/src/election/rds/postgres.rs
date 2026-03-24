@@ -16,7 +16,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use common_meta::key::{CANDIDATES_ROOT, ELECTION_KEY};
 use common_telemetry::{error, info, warn};
 use common_time::Timestamp;
 use deadpool_postgres::{Manager, Pool};
@@ -28,13 +27,15 @@ use tokio_postgres::types::ToSql;
 
 use crate::election::rds::{LEASE_SEP, Lease, RdsLeaderKey, parse_value_and_expire_time};
 use crate::election::{
-    Election, LeaderChangeMessage, listen_leader_change, send_leader_change_and_set_flags,
+    Election, ElectionRef, LeaderChangeMessage, LeaderValue, MetasrvNodeInfo, listen_leader_change,
+    send_leader_change_and_set_flags,
 };
 use crate::error::{
-    DeserializeFromJsonSnafu, GetPostgresClientSnafu, NoLeaderSnafu, PostgresExecutionSnafu,
-    Result, SerializeToJsonSnafu, SqlExecutionTimeoutSnafu, UnexpectedSnafu,
+    DeserializeFromJsonSnafu, ElectionNoLeaderSnafu, GetPostgresClientSnafu,
+    PostgresExecutionSnafu, Result, SerializeToJsonSnafu, SqlExecutionTimeoutSnafu,
+    UnexpectedSnafu,
 };
-use crate::metasrv::{ElectionRef, LeaderValue, MetasrvNodeInfo};
+use crate::key::{CANDIDATES_ROOT, ELECTION_KEY};
 
 struct ElectionSqlFactory<'a> {
     lock_id: u64,
@@ -404,13 +405,13 @@ impl Election for PgElection {
                 .get_value_with_lease(&key)
                 .await?
                 .context(UnexpectedSnafu {
-                    violated: format!("Failed to get lease for key: {:?}", key),
+                    err_msg: format!("Failed to get lease for key: {:?}", key),
                 })?;
 
             ensure!(
                 lease.expire_time > lease.current,
                 UnexpectedSnafu {
-                    violated: format!(
+                    err_msg: format!(
                         "Candidate lease expired at {:?} (current time {:?}), key: {:?}",
                         lease.expire_time, lease.current, key
                     ),
@@ -464,11 +465,11 @@ impl Election for PgElection {
                 .query(&self.sql_set.campaign, &[])
                 .await?;
             let row = res.first().context(UnexpectedSnafu {
-                violated: "Failed to get the result of acquiring advisory lock",
+                err_msg: "Failed to get the result of acquiring advisory lock".to_string(),
             })?;
             let is_leader = row.try_get(0).map_err(|_| {
                 UnexpectedSnafu {
-                    violated: "Failed to get the result of get lock",
+                    err_msg: "Failed to get the result of get lock".to_string(),
                 }
                 .build()
             })?;
@@ -500,10 +501,10 @@ impl Election for PgElection {
         } else {
             let key = self.election_key();
             if let Some(lease) = self.get_value_with_lease(&key).await? {
-                ensure!(lease.expire_time > lease.current, NoLeaderSnafu);
+                ensure!(lease.expire_time > lease.current, ElectionNoLeaderSnafu);
                 Ok(lease.leader_value.as_bytes().into())
             } else {
-                NoLeaderSnafu.fail()
+                ElectionNoLeaderSnafu.fail()
             }
         }
     }
@@ -537,7 +538,7 @@ impl PgElection {
             let current_time = match Timestamp::from_str(current_time_str, None) {
                 Ok(ts) => ts,
                 Err(_) => UnexpectedSnafu {
-                    violated: format!("Invalid timestamp: {}", current_time_str),
+                    err_msg: format!("Invalid timestamp: {}", current_time_str),
                 }
                 .fail()?,
             };
@@ -576,7 +577,7 @@ impl PgElection {
             current = match Timestamp::from_str(current_time_str, None) {
                 Ok(ts) => ts,
                 Err(_) => UnexpectedSnafu {
-                    violated: format!("Invalid timestamp: {}", current_time_str),
+                    err_msg: format!("Invalid timestamp: {}", current_time_str),
                 }
                 .fail()?,
             };
@@ -613,7 +614,7 @@ impl PgElection {
         ensure!(
             res == 1,
             UnexpectedSnafu {
-                violated: format!("Failed to update key: {}", String::from_utf8_lossy(key)),
+                err_msg: format!("Failed to update key: {}", String::from_utf8_lossy(key)),
             }
         );
 
@@ -742,9 +743,9 @@ impl PgElection {
         let lease = self
             .get_value_with_lease(&key)
             .await?
-            .context(NoLeaderSnafu)?;
+            .context(ElectionNoLeaderSnafu)?;
         // Case 2
-        ensure!(lease.expire_time > lease.current, NoLeaderSnafu);
+        ensure!(lease.expire_time > lease.current, ElectionNoLeaderSnafu);
         // Case 3
         Ok(())
     }
@@ -831,11 +832,11 @@ mod tests {
     use std::assert_matches::assert_matches;
     use std::env;
 
-    use common_meta::maybe_skip_postgres_integration_test;
+    use deadpool_postgres::{Config, Runtime};
+    use tokio_postgres::NoTls;
 
     use super::*;
-    use crate::error;
-    use crate::utils::postgres::create_postgres_pool;
+    use crate::{error, maybe_skip_postgres_integration_test};
 
     async fn create_postgres_client(
         table_name: Option<&str>,
@@ -846,11 +847,13 @@ mod tests {
         let endpoint = env::var("GT_POSTGRES_ENDPOINTS").unwrap_or_default();
         if endpoint.is_empty() {
             return UnexpectedSnafu {
-                violated: "Postgres endpoint is empty".to_string(),
+                err_msg: "Postgres endpoint is empty".to_string(),
             }
             .fail();
         }
-        let pool = create_postgres_pool(&[endpoint], None, None).await.unwrap();
+        let mut cfg = Config::new();
+        cfg.url = Some(endpoint);
+        let pool = cfg.create_pool(Some(Runtime::Tokio1), NoTls).unwrap();
         let mut pg_client = ElectionPgClient::new(
             pool,
             execution_timeout,

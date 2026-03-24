@@ -21,7 +21,6 @@ pub mod bootstrap;
 pub mod cache_invalidator;
 pub mod cluster;
 pub mod discovery;
-pub mod election;
 pub mod error;
 pub mod events;
 mod failure_detector;

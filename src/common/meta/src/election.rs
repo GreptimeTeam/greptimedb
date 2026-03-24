@@ -21,14 +21,71 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use common_telemetry::{error, info, warn};
+use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::broadcast::{self, Receiver, Sender};
 
 use crate::error::Result;
-use crate::metasrv::MetasrvNodeInfo;
 
-pub(crate) const CANDIDATE_LEASE_SECS: u64 = 600;
+pub const CANDIDATE_LEASE_SECS: u64 = 600;
 const KEEP_ALIVE_INTERVAL_SECS: u64 = CANDIDATE_LEASE_SECS / 2;
+
+/// The value of the leader. It is used to store the leader's address.
+pub struct LeaderValue(pub String);
+
+impl<T: AsRef<[u8]>> From<T> for LeaderValue {
+    fn from(value: T) -> Self {
+        let string = String::from_utf8_lossy(value.as_ref());
+        Self(string.to_string())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetasrvNodeInfo {
+    pub addr: String,
+    pub version: String,
+    pub git_commit: String,
+    pub start_time_ms: u64,
+    #[serde(default)]
+    pub total_cpu_millicores: i64,
+    #[serde(default)]
+    pub total_memory_bytes: i64,
+    #[serde(default)]
+    pub cpu_usage_millicores: i64,
+    #[serde(default)]
+    pub memory_usage_bytes: i64,
+    #[serde(default)]
+    pub hostname: String,
+}
+
+#[allow(deprecated)]
+impl From<MetasrvNodeInfo> for api::v1::meta::MetasrvNodeInfo {
+    fn from(node_info: MetasrvNodeInfo) -> Self {
+        Self {
+            peer: Some(api::v1::meta::Peer {
+                addr: node_info.addr,
+                ..Default::default()
+            }),
+            version: node_info.version.clone(),
+            git_commit: node_info.git_commit.clone(),
+            start_time_ms: node_info.start_time_ms,
+            cpus: node_info.total_cpu_millicores as u32,
+            memory_bytes: node_info.total_memory_bytes as u64,
+            info: Some(api::v1::meta::NodeInfo {
+                version: node_info.version,
+                git_commit: node_info.git_commit,
+                start_time_ms: node_info.start_time_ms,
+                total_cpu_millicores: node_info.total_cpu_millicores,
+                total_memory_bytes: node_info.total_memory_bytes,
+                cpu_usage_millicores: node_info.cpu_usage_millicores,
+                memory_usage_bytes: node_info.memory_usage_bytes,
+                cpus: node_info.total_cpu_millicores as u32,
+                memory_bytes: node_info.total_memory_bytes as u64,
+                hostname: node_info.hostname,
+            }),
+        }
+    }
+}
 
 /// Messages sent when the leader changes.
 #[derive(Debug, Clone)]
@@ -168,3 +225,5 @@ pub trait Election: Send + Sync {
 
     fn subscribe_leader_change(&self) -> Receiver<LeaderChangeMessage>;
 }
+
+pub type ElectionRef = Arc<dyn Election<Leader = LeaderValue>>;
