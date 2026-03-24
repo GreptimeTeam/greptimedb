@@ -24,11 +24,11 @@ use object_store::ObjectStore;
 use parquet::arrow::async_reader::AsyncFileReader;
 use parquet::errors::{ParquetError, Result as ParquetResult};
 use parquet::file::metadata::ParquetMetaData;
-use store_api::storage::{FileId, RegionId};
 
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::{CacheStrategy, PageKey, PageValue};
 use crate::metrics::{READ_STAGE_ELAPSED, READ_STAGE_FETCH_PAGES};
+use crate::sst::file::RegionFileId;
 use crate::sst::parquet::helper::fetch_byte_ranges;
 use crate::sst::parquet::row_group::{ParquetFetchMetrics, compute_total_range_size};
 
@@ -37,10 +37,8 @@ use crate::sst::parquet::row_group::{ParquetFetchMetrics, compute_total_range_si
 /// This reader provides async byte access to parquet data in object storage,
 /// with caching support (page cache and write cache).
 pub struct SstAsyncFileReader {
-    /// Region ID for cache key.
-    region_id: RegionId,
-    /// File ID for cache key.
-    file_id: FileId,
+    /// Region file ID for cache key.
+    region_file_id: RegionFileId,
     /// Path to the parquet file in object storage.
     file_path: String,
     /// Object store for reading data.
@@ -49,7 +47,7 @@ pub struct SstAsyncFileReader {
     cache_strategy: CacheStrategy,
     /// Cached parquet metadata.
     metadata: Arc<ParquetMetaData>,
-    /// Row group index for cache key (set before reading a row group).
+    /// Row group index for cache key.
     row_group_idx: usize,
     /// Optional metrics for tracking fetch operations.
     fetch_metrics: Option<ParquetFetchMetrics>,
@@ -58,29 +56,22 @@ pub struct SstAsyncFileReader {
 impl SstAsyncFileReader {
     /// Creates a new [SstAsyncFileReader].
     pub fn new(
-        region_id: RegionId,
-        file_id: FileId,
+        region_file_id: RegionFileId,
         file_path: String,
         object_store: ObjectStore,
         cache_strategy: CacheStrategy,
         metadata: Arc<ParquetMetaData>,
+        row_group_idx: usize,
     ) -> Self {
         Self {
-            region_id,
-            file_id,
+            region_file_id,
             file_path,
             object_store,
             cache_strategy,
             metadata,
-            row_group_idx: 0,
+            row_group_idx,
             fetch_metrics: None,
         }
-    }
-
-    /// Sets the row group index for cache key.
-    pub fn with_row_group_idx(mut self, row_group_idx: usize) -> Self {
-        self.row_group_idx = row_group_idx;
-        self
     }
 
     /// Sets the fetch metrics.
@@ -89,17 +80,15 @@ impl SstAsyncFileReader {
         self
     }
 
-    /// Fetches byte ranges with caching support.
-    ///
-    /// This method:
-    /// 1. Checks page cache first
-    /// 2. Falls back to write cache if available
-    /// 3. Falls back to object store
-    /// 4. Stores fetched data in page cache
+    /// Fetches byte ranges from page cache, write cache, or object store.
     async fn fetch_bytes_with_cache(&self, ranges: Vec<Range<u64>>) -> ParquetResult<Vec<Bytes>> {
         let _timer = READ_STAGE_FETCH_PAGES.start_timer();
 
-        let page_key = PageKey::new(self.file_id, self.row_group_idx, ranges.clone());
+        let page_key = PageKey::new(
+            self.region_file_id.file_id(),
+            self.row_group_idx,
+            ranges.clone(),
+        );
 
         // Check page cache first.
         if let Some(pages) = self.cache_strategy.get_pages(&page_key) {
@@ -118,7 +107,11 @@ impl SstAsyncFileReader {
         let (total_range_size, unaligned_size) = compute_total_range_size(&ranges);
 
         // Check write cache.
-        let key = IndexKey::new(self.region_id, self.file_id, FileType::Parquet);
+        let key = IndexKey::new(
+            self.region_file_id.region_id(),
+            self.region_file_id.file_id(),
+            FileType::Parquet,
+        );
         let fetch_write_cache_start = self
             .fetch_metrics
             .as_ref()

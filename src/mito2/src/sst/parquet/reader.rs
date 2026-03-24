@@ -48,9 +48,7 @@ use crate::cache::index::result_cache::PredicateKey;
 use crate::cache::{CacheStrategy, CachedSstMeta};
 #[cfg(feature = "vector_index")]
 use crate::error::ApplyVectorIndexSnafu;
-use crate::error::{
-    ReadDataPartSnafu, ReadParquetSnafu, Result, SerializePartitionExprSnafu,
-};
+use crate::error::{ReadDataPartSnafu, ReadParquetSnafu, Result, SerializePartitionExprSnafu};
 use crate::metrics::{
     PRECISE_FILTER_ROWS_TOTAL, READ_ROW_GROUPS_TOTAL, READ_ROWS_IN_ROW_GROUP_TOTAL,
     READ_ROWS_TOTAL, READ_STAGE_ELAPSED,
@@ -1692,14 +1690,13 @@ impl RowGroupReaderBuilder {
 
         // Create async file reader with caching support.
         let async_reader = SstAsyncFileReader::new(
-            self.file_handle.region_id(),
-            self.file_handle.file_id().file_id(),
+            self.file_handle.file_id(),
             self.file_path.clone(),
             self.object_store.clone(),
             self.cache_strategy.clone(),
             self.parquet_meta.clone(),
+            row_group_idx,
         )
-        .with_row_group_idx(row_group_idx)
         .with_fetch_metrics(fetch_metrics.cloned());
 
         // Build the async stream using ArrowReaderBuilder API.
