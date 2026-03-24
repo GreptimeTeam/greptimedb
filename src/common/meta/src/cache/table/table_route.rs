@@ -100,11 +100,13 @@ fn init_factory(
 
 fn invalidator<'a>(
     cache: &'a Cache<TableId, Arc<TableRoute>>,
-    ident: &'a CacheIdent,
+    idents: &'a [&CacheIdent],
 ) -> BoxFuture<'a, Result<()>> {
     Box::pin(async move {
-        if let CacheIdent::TableId(table_id) = ident {
-            cache.invalidate(table_id).await
+        for ident in idents {
+            if let CacheIdent::TableId(table_id) = ident {
+                cache.invalidate(table_id).await
+            }
         }
         Ok(())
     })

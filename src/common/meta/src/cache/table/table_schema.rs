@@ -65,7 +65,7 @@ fn init_factory(table_info_manager: TableInfoManager) -> Initializer<TableId, Ar
 /// Never invalidates table id schema cache.
 fn invalidator<'a>(
     _cache: &'a Cache<TableId, Arc<SchemaName>>,
-    _ident: &'a CacheIdent,
+    _idents: &'a [&CacheIdent],
 ) -> BoxFuture<'a, error::Result<()>> {
     Box::pin(std::future::ready(Ok(())))
 }

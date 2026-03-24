@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use backon::{BackoffBuilder, ExponentialBuilder};
-use futures::future::{BoxFuture, join_all};
+use futures::future::BoxFuture;
 use moka::future::Cache;
 use snafu::{OptionExt, ResultExt};
 use tokio::time::sleep;
@@ -33,8 +33,9 @@ use crate::metrics;
 pub type TokenFilter<CacheToken> = Box<dyn Fn(&CacheToken) -> bool + Send + Sync>;
 
 /// Invalidates cached values by [CacheToken]s.
-pub type Invalidator<K, V, CacheToken> =
-    Box<dyn for<'a> Fn(&'a Cache<K, V>, &'a CacheToken) -> BoxFuture<'a, Result<()>> + Send + Sync>;
+pub type Invalidator<K, V, CacheToken> = Box<
+    dyn for<'a> Fn(&'a Cache<K, V>, &'a [&CacheToken]) -> BoxFuture<'a, Result<()>> + Send + Sync,
+>;
 
 /// Initializes value (i.e., fetches from remote).
 pub type Initializer<K, V> = Arc<dyn Fn(&'_ K) -> BoxFuture<'_, Result<Option<V>>> + Send + Sync>;
@@ -199,17 +200,13 @@ where
     V: Send + Sync,
 {
     async fn invalidate(&self, _ctx: &Context, caches: &[CacheIdent]) -> Result<()> {
-        let tasks = caches
+        let idents = caches
             .iter()
             .filter(|token| (self.token_filter)(token))
-            .map(|token| (self.invalidator)(&self.cache, token))
             .collect::<Vec<_>>();
-        if !tasks.is_empty() {
+        if !idents.is_empty() {
             self.inc_version();
-            join_all(tasks)
-                .await
-                .into_iter()
-                .collect::<Result<Vec<_>>>()?;
+            (self.invalidator)(&self.cache, &idents).await?;
         }
 
         Ok(())
@@ -270,17 +267,13 @@ where
 {
     /// Invalidates cache by [CacheToken].
     pub async fn invalidate(&self, caches: &[CacheToken]) -> Result<()> {
-        let tasks = caches
+        let idents = caches
             .iter()
             .filter(|token| (self.token_filter)(token))
-            .map(|token| (self.invalidator)(&self.cache, token))
             .collect::<Vec<_>>();
-        if !tasks.is_empty() {
+        if !idents.is_empty() {
             self.inc_version();
-            join_all(tasks)
-                .await
-                .into_iter()
-                .collect::<Result<Vec<_>>>()?;
+            (self.invalidator)(&self.cache, &idents).await?;
         }
 
         Ok(())
@@ -447,9 +440,11 @@ mod tests {
             moved_counter.fetch_add(1, Ordering::Relaxed);
             Box::pin(async { Ok(Some("hi".to_string())) })
         });
-        let invalidator: Invalidator<String, String, String> = Box::new(|cache, key| {
+        let invalidator: Invalidator<String, String, String> = Box::new(|cache, keys| {
             Box::pin(async move {
-                cache.invalidate(key).await;
+                for key in keys {
+                    cache.invalidate(*key).await;
+                }
                 Ok(())
             })
         });
@@ -488,9 +483,11 @@ mod tests {
                 Ok(Some(format!("v{n}")))
             })
         });
-        let invalidator: Invalidator<String, String, String> = Box::new(|cache, key| {
+        let invalidator: Invalidator<String, String, String> = Box::new(|cache, keys| {
             Box::pin(async move {
-                cache.invalidate(key).await;
+                for key in keys {
+                    cache.invalidate(*key).await;
+                }
                 Ok(())
             })
         });
