@@ -246,12 +246,12 @@ fn bench_primary_key_filter(c: &mut Criterion) {
 
         let dense_pk = encode_dense_pk(&metadata, &row);
         let dense_codec = DensePrimaryKeyCodec::new(&metadata);
-        let mut dense_fast = dense_codec.primary_key_filter(&metadata, filters.clone());
+        let mut dense_fast = dense_codec.primary_key_filter(&metadata, filters.clone(), false);
         let mut dense_offsets = Vec::new();
 
         let sparse_pk = encode_sparse_pk(&metadata, &row);
         let sparse_codec = SparsePrimaryKeyCodec::new(&metadata);
-        let mut sparse_fast = sparse_codec.primary_key_filter(&metadata, filters.clone());
+        let mut sparse_fast = sparse_codec.primary_key_filter(&metadata, filters.clone(), false);
         let mut sparse_offsets = std::collections::HashMap::new();
 
         let mut group = c.benchmark_group(format!("primary_key_filter/{case_name}"));
