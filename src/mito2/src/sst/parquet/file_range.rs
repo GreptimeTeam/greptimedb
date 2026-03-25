@@ -20,7 +20,6 @@ use std::ops::BitAnd;
 use std::sync::Arc;
 
 use api::v1::{OpType, SemanticType};
-use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_telemetry::error;
 use datafusion::physical_plan::PhysicalExpr;
 use datafusion::physical_plan::expressions::DynamicFilterPhysicalExpr;
@@ -189,10 +188,12 @@ impl FileRange {
             .context
             .reader_builder
             .build(
-                self.row_group_idx,
-                self.row_selection.clone(),
-                fetch_metrics,
-                self.context.build_context(skip_fields),
+                self.context.build_context(
+                    self.row_group_idx,
+                    self.row_selection.clone(),
+                    fetch_metrics,
+                    skip_fields,
+                ),
             )
             .await?;
 
@@ -251,10 +252,12 @@ impl FileRange {
             .context
             .reader_builder
             .build(
-                self.row_group_idx,
-                self.row_selection.clone(),
-                fetch_metrics,
-                self.context.build_context(skip_fields),
+                self.context.build_context(
+                    self.row_group_idx,
+                    self.row_selection.clone(),
+                    fetch_metrics,
+                    skip_fields,
+                ),
             )
             .await?;
 
@@ -411,13 +414,19 @@ impl FileRangeContext {
     }
 
     /// Creates a [RowGroupBuildContext] for building row group readers with prefiltering.
-    pub(crate) fn build_context(&self, skip_fields: bool) -> RowGroupBuildContext<'_> {
+    pub(crate) fn build_context<'a>(
+        &'a self,
+        row_group_idx: usize,
+        row_selection: Option<RowSelection>,
+        fetch_metrics: Option<&'a ParquetFetchMetrics>,
+        skip_fields: bool,
+    ) -> RowGroupBuildContext<'a> {
         RowGroupBuildContext {
             filters: &self.base.filters,
-            read_format: &self.base.read_format,
-            codec: &self.base.codec,
             skip_fields,
-            primary_key_filters: self.base.primary_key_filters.as_ref(),
+            row_group_idx,
+            row_selection,
+            fetch_metrics,
         }
     }
 
@@ -452,10 +461,6 @@ pub(crate) struct PartitionFilterContext {
 pub(crate) struct RangeBase {
     /// Filters pushed down.
     pub(crate) filters: Vec<SimpleFilterContext>,
-    /// Simple filters that can be compiled into encoded primary-key checks.
-    /// Pre-validated against the SST/expected metadata — only tag filters on
-    /// primary-key columns (excluding partition columns).
-    pub(crate) primary_key_filters: Option<Arc<Vec<SimpleFilterEvaluator>>>,
     /// Dynamic filter physical exprs.
     pub(crate) dyn_filters: Vec<Arc<DynamicFilterPhysicalExpr>>,
     /// Helper to read the SST.

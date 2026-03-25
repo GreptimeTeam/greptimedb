@@ -27,7 +27,7 @@ use datatypes::arrow::array::{BinaryArray, BooleanArray};
 use datatypes::arrow::record_batch::RecordBatch;
 use futures::StreamExt;
 use mito_codec::primary_key_filter::is_partition_column;
-use mito_codec::row_converter::PrimaryKeyFilter;
+use mito_codec::row_converter::{PrimaryKeyCodec, PrimaryKeyFilter};
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::RowSelection;
 use parquet::schema::types::SchemaDescriptor;
@@ -36,22 +36,11 @@ use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 
 use crate::error::{ComputeArrowSnafu, ReadParquetSnafu, Result, UnexpectedSnafu};
 use crate::sst::parquet::flat_format::primary_key_column_index;
-use crate::sst::parquet::format::PrimaryKeyArray;
+use crate::sst::parquet::format::{PrimaryKeyArray, ReadFormat};
 use crate::sst::parquet::reader::{RowGroupBuildContext, RowGroupReaderBuilder};
-use crate::sst::parquet::row_group::ParquetFetchMetrics;
 use crate::sst::parquet::row_selection::row_selection_from_row_ranges;
 
 pub(crate) fn matching_row_ranges_by_primary_key(
-    input: &RecordBatch,
-    pk_filter: &mut dyn PrimaryKeyFilter,
-) -> Result<Vec<Range<usize>>> {
-    let primary_key_index = primary_key_column_index(input.num_columns());
-    matching_row_ranges_at_pk_index(input, primary_key_index, pk_filter)
-}
-
-/// Like [matching_row_ranges_by_primary_key] but takes the PK column index directly.
-/// Used when the batch has a custom projection (e.g. PK-only prefilter projection).
-fn matching_row_ranges_at_pk_index(
     input: &RecordBatch,
     pk_column_index: usize,
     pk_filter: &mut dyn PrimaryKeyFilter,
@@ -111,7 +100,8 @@ pub(crate) fn prefilter_flat_batch_by_primary_key(
         return Ok(Some(input));
     }
 
-    let matched_row_ranges = matching_row_ranges_by_primary_key(&input, pk_filter)?;
+    let pk_column_index = primary_key_column_index(input.num_columns());
+    let matched_row_ranges = matching_row_ranges_by_primary_key(&input, pk_column_index, pk_filter)?;
     if matched_row_ranges.is_empty() {
         return Ok(None);
     }
@@ -271,29 +261,44 @@ pub(crate) struct PrefilterContext {
     pk_column_index: usize,
 }
 
-impl PrefilterContext {
-    /// Creates a new [PrefilterContext] if prefiltering is applicable.
+/// Pre-built state for constructing [PrefilterContext] per row group.
+///
+/// Fields invariant across row groups (projection mask, codec, metadata, filters)
+/// are computed once. A fresh [PrefilterContext] with its own mutable PK filter
+/// is created via [PrefilterContextBuilder::build()] for each row group.
+pub(crate) struct PrefilterContextBuilder {
+    pk_projection: ProjectionMask,
+    pk_column_index: usize,
+    codec: Arc<dyn PrimaryKeyCodec>,
+    metadata: RegionMetadataRef,
+    pk_filters: Arc<Vec<SimpleFilterEvaluator>>,
+}
+
+impl PrefilterContextBuilder {
+    /// Creates a builder if prefiltering is applicable.
     ///
     /// Returns `None` if:
     /// - No primary key filters are available
     /// - The read format doesn't use flat layout with dictionary-encoded PKs
     /// - The primary key is empty
     pub(crate) fn new(
-        build_ctx: &RowGroupBuildContext<'_>,
+        read_format: &ReadFormat,
+        codec: &Arc<dyn PrimaryKeyCodec>,
+        primary_key_filters: Option<&Arc<Vec<SimpleFilterEvaluator>>>,
         parquet_schema: &SchemaDescriptor,
     ) -> Option<Self> {
-        let pk_filters = build_ctx.primary_key_filters?;
+        let pk_filters = primary_key_filters?;
         if pk_filters.is_empty() {
             return None;
         }
 
-        let metadata = build_ctx.read_format.metadata();
+        let metadata = read_format.metadata();
         if metadata.primary_key.is_empty() {
             return None;
         }
 
         // Only flat format with dictionary-encoded PKs supports PK prefiltering.
-        let flat_format = build_ctx.read_format.as_flat()?;
+        let flat_format = read_format.as_flat()?;
         if !flat_format.raw_batch_has_primary_key_dictionary() {
             return None;
         }
@@ -303,20 +308,29 @@ impl PrefilterContext {
         let pk_index = primary_key_column_index(num_parquet_columns);
         let pk_projection = ProjectionMask::roots(parquet_schema, [pk_index]);
 
-        // Create the PK filter and wrap in cache.
-        let pk_filter = build_ctx
-            .codec
-            .primary_key_filter(metadata, Arc::clone(pk_filters));
-        let pk_filter = Box::new(CachedPrimaryKeyFilter::new(pk_filter));
-
         // The PK column is the only column in the projection, so its index is 0.
         let pk_column_index = 0;
 
         Some(Self {
-            pk_filter,
             pk_projection,
             pk_column_index,
+            codec: Arc::clone(codec),
+            metadata: metadata.clone(),
+            pk_filters: Arc::clone(pk_filters),
         })
+    }
+
+    /// Builds a [PrefilterContext] for a specific row group.
+    pub(crate) fn build(&self) -> PrefilterContext {
+        let pk_filter = self
+            .codec
+            .primary_key_filter(&self.metadata, Arc::clone(&self.pk_filters));
+        let pk_filter = Box::new(CachedPrimaryKeyFilter::new(pk_filter));
+        PrefilterContext {
+            pk_filter,
+            pk_projection: self.pk_projection.clone(),
+            pk_column_index: self.pk_column_index,
+        }
     }
 }
 
@@ -335,24 +349,22 @@ pub(crate) struct PrefilterResult {
 pub(crate) async fn execute_prefilter(
     prefilter_ctx: &mut PrefilterContext,
     reader_builder: &RowGroupReaderBuilder,
-    row_group_idx: usize,
-    row_selection: Option<RowSelection>,
-    fetch_metrics: Option<&ParquetFetchMetrics>,
+    build_ctx: &RowGroupBuildContext<'_>,
 ) -> Result<PrefilterResult> {
     // Reads PK column only.
     let mut pk_stream = reader_builder
         .build_with_projection(
-            row_group_idx,
-            row_selection.clone(),
+            build_ctx.row_group_idx,
+            build_ctx.row_selection.clone(),
             prefilter_ctx.pk_projection.clone(),
-            fetch_metrics,
+            build_ctx.fetch_metrics,
         )
         .await?;
 
     // Applies PK filter to each batch and collect matching row ranges.
     let total_rows = reader_builder
         .parquet_metadata()
-        .row_group(row_group_idx)
+        .row_group(build_ctx.row_group_idx)
         .num_rows() as usize;
     let mut matched_row_ranges: Vec<Range<usize>> = Vec::new();
     let mut row_offset = 0;
@@ -368,7 +380,7 @@ pub(crate) async fn execute_prefilter(
         }
         rows_before_filter += batch_num_rows;
 
-        let ranges = matching_row_ranges_at_pk_index(
+        let ranges = matching_row_ranges_by_primary_key(
             &batch,
             prefilter_ctx.pk_column_index,
             prefilter_ctx.pk_filter.as_mut(),
@@ -392,7 +404,7 @@ pub(crate) async fn execute_prefilter(
             row_selection_from_row_ranges(matched_row_ranges.into_iter(), total_rows);
 
         // Intersect with original row selection if present.
-        match row_selection {
+        match &build_ctx.row_selection {
             Some(original) => original.intersection(&prefilter_selection),
             None => prefilter_selection,
         }
