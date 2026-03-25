@@ -24,6 +24,7 @@ use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
 use crate::sst::file::FileTimeRange;
 use crate::sst::index::IndexOutput;
 
+pub(crate) mod async_reader;
 pub mod file_range;
 pub mod flat_format;
 pub mod format;
