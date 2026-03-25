@@ -27,7 +27,6 @@ use api::v1::{
 use async_stream::try_stream;
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
-use common_base::AffectedRows;
 use common_error::ext::BoxedError;
 use common_grpc::flight::do_put::DoPutResponse;
 use common_query::Output;
@@ -258,62 +257,6 @@ impl GrpcQueryHandler for Instance {
         result
             .map_err(BoxedError::new)
             .context(server_error::ExecuteGrpcQuerySnafu)
-    }
-
-    async fn put_record_batch(
-        &self,
-        request: servers::grpc::flight::PutRecordBatchRequest,
-        table_ref: &mut Option<TableRef>,
-        ctx: QueryContextRef,
-    ) -> server_error::Result<AffectedRows> {
-        let result: Result<AffectedRows> = async {
-            let table = if let Some(table) = table_ref {
-                table.clone()
-            } else {
-                let table = self
-                    .catalog_manager()
-                    .table(
-                        &request.table_name.catalog_name,
-                        &request.table_name.schema_name,
-                        &request.table_name.table_name,
-                        None,
-                    )
-                    .await
-                    .context(CatalogSnafu)?
-                    .with_context(|| TableNotFoundSnafu {
-                        table_name: request.table_name.to_string(),
-                    })?;
-                *table_ref = Some(table.clone());
-                table
-            };
-
-            let interceptor_ref = self.plugins.get::<GrpcQueryInterceptorRef<Error>>();
-            let interceptor = interceptor_ref.as_ref();
-            interceptor.pre_bulk_insert(table.clone(), ctx.clone())?;
-
-            self.plugins
-                .get::<PermissionCheckerRef>()
-                .as_ref()
-                .check_permission(ctx.current_user(), PermissionReq::BulkInsert)
-                .context(PermissionSnafu)?;
-
-            // do we check limit for bulk insert?
-
-            self.inserter
-                .handle_bulk_insert(
-                    table,
-                    request.flight_data,
-                    request.record_batch,
-                    request.schema_bytes,
-                )
-                .await
-                .context(TableOperationSnafu)
-        }
-        .await;
-
-        result
-            .map_err(BoxedError::new)
-            .context(server_error::ExecuteGrpcRequestSnafu)
     }
 
     fn handle_put_record_batch_stream(

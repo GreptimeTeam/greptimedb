@@ -19,6 +19,7 @@ pub mod datanode;
 pub mod ddl;
 pub mod ddl_manager;
 pub mod distributed_time_constants;
+pub mod election;
 pub mod error;
 pub mod flow_name;
 pub mod heartbeat;

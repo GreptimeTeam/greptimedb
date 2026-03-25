@@ -121,10 +121,12 @@ pub fn new_partition_info_cache(
     CacheContainer::new(
         name,
         cache,
-        Box::new(|cache, ident| {
+        Box::new(|cache, idents| {
             Box::pin(async move {
-                if let CacheIdent::TableId(table_id) = ident {
-                    cache.invalidate(table_id).await
+                for ident in idents {
+                    if let CacheIdent::TableId(table_id) = ident {
+                        cache.invalidate(table_id).await
+                    }
                 }
                 Ok(())
             })

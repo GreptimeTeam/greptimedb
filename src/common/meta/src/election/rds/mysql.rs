@@ -16,7 +16,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use common_meta::key::{CANDIDATES_ROOT, ELECTION_KEY};
 use common_telemetry::{error, info, warn};
 use common_time::Timestamp;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -29,14 +28,15 @@ use tokio::time::MissedTickBehavior;
 
 use crate::election::rds::{LEASE_SEP, Lease, RdsLeaderKey, parse_value_and_expire_time};
 use crate::election::{
-    Election, LeaderChangeMessage, listen_leader_change, send_leader_change_and_set_flags,
+    Election, ElectionRef, LeaderChangeMessage, LeaderValue, MetasrvNodeInfo, listen_leader_change,
+    send_leader_change_and_set_flags,
 };
 use crate::error::{
     AcquireMySqlClientSnafu, DecodeSqlValueSnafu, DeserializeFromJsonSnafu,
-    LeaderLeaseChangedSnafu, LeaderLeaseExpiredSnafu, MySqlExecutionSnafu, NoLeaderSnafu, Result,
-    SerializeToJsonSnafu, SqlExecutionTimeoutSnafu, UnexpectedSnafu,
+    ElectionLeaderLeaseChangedSnafu, ElectionLeaderLeaseExpiredSnafu, ElectionNoLeaderSnafu,
+    MySqlExecutionSnafu, Result, SerializeToJsonSnafu, SqlExecutionTimeoutSnafu, UnexpectedSnafu,
 };
-use crate::metasrv::{ElectionRef, LeaderValue, MetasrvNodeInfo};
+use crate::key::{CANDIDATES_ROOT, ELECTION_KEY};
 
 struct ElectionSqlFactory<'a> {
     table_name: &'a str,
@@ -592,7 +592,7 @@ impl Election for MySqlElection {
             ensure!(
                 lease.expire_time > lease.current,
                 UnexpectedSnafu {
-                    violated: format!(
+                    err_msg: format!(
                         "Candidate lease expired at {:?} (current time: {:?}), key: {:?}",
                         lease.expire_time,
                         lease.current,
@@ -667,10 +667,10 @@ impl Election for MySqlElection {
             let client = self.client.lock().await;
             let mut executor = Executor::Default(client);
             if let Some(lease) = self.get_value_with_lease(&key, &mut executor).await? {
-                ensure!(lease.expire_time > lease.current, NoLeaderSnafu);
+                ensure!(lease.expire_time > lease.current, ElectionNoLeaderSnafu);
                 Ok(lease.leader_value.as_bytes().into())
             } else {
-                NoLeaderSnafu.fail()
+                ElectionNoLeaderSnafu.fail()
             }
         }
     }
@@ -705,7 +705,7 @@ impl MySqlElection {
         let current_time = match Timestamp::from_str(&current_time_str, None) {
             Ok(ts) => ts,
             Err(_) => UnexpectedSnafu {
-                violated: format!("Invalid timestamp: {}", current_time_str),
+                err_msg: format!("Invalid timestamp: {}", current_time_str),
             }
             .fail()?,
         };
@@ -740,7 +740,7 @@ impl MySqlElection {
             current = match Timestamp::from_str(current_time_str, None) {
                 Ok(ts) => ts,
                 Err(_) => UnexpectedSnafu {
-                    violated: format!("Invalid timestamp: {}", current_time_str),
+                    err_msg: format!("Invalid timestamp: {}", current_time_str),
                 }
                 .fail()?,
             };
@@ -777,7 +777,7 @@ impl MySqlElection {
         ensure!(
             res == 1,
             UnexpectedSnafu {
-                violated: format!("Failed to update key: {}", String::from_utf8_lossy(key)),
+                err_msg: format!("Failed to update key: {}", String::from_utf8_lossy(key)),
             }
         );
 
@@ -920,9 +920,12 @@ impl MySqlElection {
     ///   will be released.
     /// - **Case 2**: If all checks pass, the function returns without performing any actions.
     fn lease_check(&self, lease: &Option<Lease>) -> Result<Lease> {
-        let lease = lease.as_ref().context(NoLeaderSnafu)?;
+        let lease = lease.as_ref().context(ElectionNoLeaderSnafu)?;
         // Case 1: Lease expired
-        ensure!(lease.expire_time > lease.current, LeaderLeaseExpiredSnafu);
+        ensure!(
+            lease.expire_time > lease.current,
+            ElectionLeaderLeaseExpiredSnafu
+        );
         // Case 2: Everything is fine
         Ok(lease.clone())
     }
@@ -960,7 +963,7 @@ impl MySqlElection {
         let remote_lease = self.get_value_with_lease(&key, &mut executor).await?;
         ensure!(
             expected_lease.map(|lease| lease.origin) == remote_lease.map(|lease| lease.origin),
-            LeaderLeaseChangedSnafu
+            ElectionLeaderLeaseChangedSnafu
         );
         self.delete_value(&key, &mut executor).await?;
         self.put_value_with_lease(
@@ -986,12 +989,11 @@ impl MySqlElection {
 mod tests {
     use std::{assert_matches, env};
 
-    use common_meta::maybe_skip_mysql_integration_test;
     use common_telemetry::init_default_ut_logging;
+    use sqlx::MySqlPool;
 
     use super::*;
-    use crate::error;
-    use crate::utils::mysql::create_mysql_pool;
+    use crate::{error, maybe_skip_mysql_integration_test};
 
     async fn create_mysql_client(
         table_name: Option<&str>,
@@ -1002,11 +1004,11 @@ mod tests {
         let endpoint = env::var("GT_MYSQL_ENDPOINTS").unwrap_or_default();
         if endpoint.is_empty() {
             return UnexpectedSnafu {
-                violated: "MySQL endpoint is empty".to_string(),
+                err_msg: "MySQL endpoint is empty".to_string(),
             }
             .fail();
         }
-        let pool = create_mysql_pool(&[endpoint], None).await.unwrap();
+        let pool = MySqlPool::connect(&endpoint).await.unwrap();
         let mut client = ElectionMysqlClient::new(
             pool,
             execution_timeout,
@@ -1301,7 +1303,7 @@ mod tests {
         let err = elected(&leader_mysql_election, table_name, Some(incorrect_lease))
             .await
             .unwrap_err();
-        assert_matches!(err, error::Error::LeaderLeaseChanged { .. });
+        assert_matches!(err, error::Error::ElectionLeaderLeaseChanged { .. });
         let lease = get_lease(&leader_mysql_election).await;
         assert!(lease.is_none());
         drop_table(&leader_mysql_election.client, table_name).await;

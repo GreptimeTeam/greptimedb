@@ -50,7 +50,7 @@ pub struct EncodedBulkPartIter {
 
 impl EncodedBulkPartIter {
     /// Creates a new [BulkPartIter].
-    pub(crate) fn try_new(
+    pub fn try_new(
         encoded_part: &EncodedBulkPart,
         context: BulkIterContextRef,
         mut row_groups_to_read: VecDeque<usize>,

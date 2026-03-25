@@ -58,11 +58,13 @@ fn init_factory(schema_manager: SchemaManager) -> Initializer<SchemaName, Arc<Sc
 
 fn invalidator<'a>(
     cache: &'a Cache<SchemaName, Arc<SchemaNameValue>>,
-    ident: &'a CacheIdent,
+    idents: &'a [&CacheIdent],
 ) -> BoxFuture<'a, crate::error::Result<()>> {
     Box::pin(async move {
-        if let CacheIdent::SchemaName(schema_name) = ident {
-            cache.invalidate(schema_name).await
+        for ident in idents {
+            if let CacheIdent::SchemaName(schema_name) = ident {
+                cache.invalidate(schema_name).await
+            }
         }
         Ok(())
     })

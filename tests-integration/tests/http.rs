@@ -148,6 +148,7 @@ macro_rules! http_tests {
                 test_jaeger_query_api_for_trace_v1,
 
                 test_influxdb_write,
+                test_influxdb_write_with_hints,
                 test_http_memory_limit,
             );
         )*
@@ -1641,6 +1642,7 @@ fn drop_lines_with_inconsistent_results(input: String) -> String {
         "metadata_cache_size =",
         "content_cache_size =",
         "result_cache_size =",
+        "range_result_cache_size =",
         "name =",
         "recovery_parallelism =",
         "max_background_index_builds =",
@@ -3634,6 +3636,43 @@ transform:
         "[[\"d_table_2436\"],[\"demo\"],[\"numbers\"]]",
     )
     .await;
+
+    guard.remove_all().await;
+}
+
+pub async fn test_influxdb_write_with_hints(storage_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(storage_type, "test_influxdb_write_with_hints").await;
+
+    let client = TestClient::new(app).await;
+
+    let result = client
+        .post("/v1/influxdb/write?db=public")
+        .header("x-greptime-hints", "sst_format=flat,ttl=30d,skip_wal=true")
+        .body("sst_fmt_table,host=host1 cpu=1.2 1664370459457010101")
+        .send()
+        .await;
+    assert_eq!(result.status(), 204);
+
+    let res = client
+        .get("/v1/sql?sql=show create table sst_fmt_table")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let resp = res.text().await;
+    assert!(
+        resp.contains("sst_format = 'flat'"),
+        "expected sst_format = 'flat' in SHOW CREATE TABLE output, got: {resp}"
+    );
+    assert!(
+        resp.contains("ttl = '30days'"),
+        "expected ttl = '30days' in SHOW CREATE TABLE output, got: {resp}"
+    );
+    assert!(
+        resp.contains("skip_wal = 'true'"),
+        "expected skip_wal = 'true' in SHOW CREATE TABLE output, got: {resp}"
+    );
 
     guard.remove_all().await;
 }

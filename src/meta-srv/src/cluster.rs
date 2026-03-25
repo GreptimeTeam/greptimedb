@@ -247,7 +247,7 @@ impl MetaPeerClient {
         // Safety: when self.is_leader() == false, election must not empty.
         let election = self.election.as_ref().unwrap();
 
-        let leader_addr = election.leader().await?.0;
+        let leader_addr = election.leader().await.context(error::KvBackendSnafu)?.0;
 
         let channel = self
             .channel_manager
@@ -279,7 +279,7 @@ impl MetaPeerClient {
         // Safety: when self.is_leader() == false, election must not empty.
         let election = self.election.as_ref().unwrap();
 
-        let leader_addr = election.leader().await?.0;
+        let leader_addr = election.leader().await.context(error::KvBackendSnafu)?.0;
 
         let channel = self
             .channel_manager
