@@ -1840,6 +1840,8 @@ impl SimpleFilterContext {
         expr: &Expr,
     ) -> Option<Self> {
         let filter = SimpleFilterEvaluator::try_new(expr)?;
+        // Parquet PK prefilter always supports the partition column. Only
+        // PartitionTreeMemtable skips it after partition pruning.
         let usable_primary_key_filter =
             is_usable_primary_key_filter(sst_meta, expected_meta, &filter);
         let (column_metadata, maybe_filter) = match expected_meta {

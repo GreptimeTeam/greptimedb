@@ -41,8 +41,12 @@ struct PrimaryKeyFilterInner {
 }
 
 impl PrimaryKeyFilterInner {
-    fn new(metadata: RegionMetadataRef, filters: Arc<Vec<SimpleFilterEvaluator>>) -> Self {
-        let compiled_filters = Self::compile_filters(&metadata, &filters);
+    fn new(
+        metadata: RegionMetadataRef,
+        filters: Arc<Vec<SimpleFilterEvaluator>>,
+        skip_partition_column: bool,
+    ) -> Self {
+        let compiled_filters = Self::compile_filters(&metadata, &filters, skip_partition_column);
         Self {
             filters,
             compiled_filters,
@@ -52,6 +56,7 @@ impl PrimaryKeyFilterInner {
     fn compile_filters(
         metadata: &RegionMetadataRef,
         filters: &[SimpleFilterEvaluator],
+        skip_partition_column: bool,
     ) -> Vec<CompiledPrimaryKeyFilter> {
         if filters.is_empty() || metadata.primary_key.is_empty() {
             return Vec::new();
@@ -59,7 +64,7 @@ impl PrimaryKeyFilterInner {
 
         let mut compiled_filters = Vec::with_capacity(filters.len());
         for (filter_idx, filter) in filters.iter().enumerate() {
-            if is_partition_column(filter.column_name()) {
+            if skip_partition_column && is_partition_column(filter.column_name()) {
                 continue;
             }
 
@@ -258,9 +263,10 @@ impl DensePrimaryKeyFilter {
         metadata: RegionMetadataRef,
         filters: Arc<Vec<SimpleFilterEvaluator>>,
         codec: DensePrimaryKeyCodec,
+        skip_partition_column: bool,
     ) -> Self {
         Self {
-            inner: PrimaryKeyFilterInner::new(metadata, filters),
+            inner: PrimaryKeyFilterInner::new(metadata, filters, skip_partition_column),
             codec,
             offsets_buf: Vec::new(),
         }
@@ -311,9 +317,10 @@ impl SparsePrimaryKeyFilter {
         metadata: RegionMetadataRef,
         filters: Arc<Vec<SimpleFilterEvaluator>>,
         codec: SparsePrimaryKeyCodec,
+        skip_partition_column: bool,
     ) -> Self {
         Self {
-            inner: PrimaryKeyFilterInner::new(metadata, filters),
+            inner: PrimaryKeyFilterInner::new(metadata, filters, skip_partition_column),
             codec,
             offsets_map: HashMap::new(),
         }
@@ -369,6 +376,7 @@ mod tests {
     use datatypes::schema::ColumnSchema;
     use datatypes::value::{OrderedFloat, ValueRef};
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+    use store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME;
     use store_api::storage::{ColumnId, RegionId};
 
     use super::*;
@@ -421,6 +429,36 @@ mod tests {
             .primary_key(vec![1, 2, 3]);
         let metadata = builder.build().unwrap();
         Arc::new(metadata)
+    }
+
+    fn setup_partitioned_metadata() -> RegionMetadataRef {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                    ConcreteDataType::uint32_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 10,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("tag", ConcreteDataType::string_datatype(), true),
+                semantic_type: SemanticType::Tag,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    greptime_timestamp(),
+                    ConcreteDataType::timestamp_nanosecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 2,
+            })
+            .primary_key(vec![10, 1]);
+        Arc::new(builder.build().unwrap())
     }
 
     fn create_test_row() -> Vec<(ColumnId, ValueRef<'static>)> {
@@ -479,7 +517,7 @@ mod tests {
         )]);
         let pk = encode_sparse_pk(&metadata, create_test_row());
         let codec = SparsePrimaryKeyCodec::new(&metadata);
-        let mut filter = SparsePrimaryKeyFilter::new(metadata, filters, codec);
+        let mut filter = SparsePrimaryKeyFilter::new(metadata, filters, codec, false);
         assert!(filter.matches(&pk));
     }
 
@@ -492,7 +530,7 @@ mod tests {
         )]);
         let pk = encode_sparse_pk(&metadata, create_test_row());
         let codec = SparsePrimaryKeyCodec::new(&metadata);
-        let mut filter = SparsePrimaryKeyFilter::new(metadata, filters, codec);
+        let mut filter = SparsePrimaryKeyFilter::new(metadata, filters, codec, false);
         assert!(!filter.matches(&pk));
     }
 
@@ -505,7 +543,7 @@ mod tests {
         )]);
         let pk = encode_sparse_pk(&metadata, create_test_row());
         let codec = SparsePrimaryKeyCodec::new(&metadata);
-        let mut filter = SparsePrimaryKeyFilter::new(metadata, filters, codec);
+        let mut filter = SparsePrimaryKeyFilter::new(metadata, filters, codec, false);
         assert!(filter.matches(&pk));
     }
 
@@ -518,7 +556,7 @@ mod tests {
         )]);
         let pk = encode_dense_pk(&metadata, create_test_row());
         let codec = DensePrimaryKeyCodec::new(&metadata);
-        let mut filter = DensePrimaryKeyFilter::new(metadata, filters, codec);
+        let mut filter = DensePrimaryKeyFilter::new(metadata, filters, codec, false);
         assert!(filter.matches(&pk));
     }
 
@@ -531,7 +569,7 @@ mod tests {
         )]);
         let pk = encode_dense_pk(&metadata, create_test_row());
         let codec = DensePrimaryKeyCodec::new(&metadata);
-        let mut filter = DensePrimaryKeyFilter::new(metadata, filters, codec);
+        let mut filter = DensePrimaryKeyFilter::new(metadata, filters, codec, false);
         assert!(!filter.matches(&pk));
     }
 
@@ -544,7 +582,7 @@ mod tests {
         )]);
         let pk = encode_dense_pk(&metadata, create_test_row());
         let codec = DensePrimaryKeyCodec::new(&metadata);
-        let mut filter = DensePrimaryKeyFilter::new(metadata, filters, codec);
+        let mut filter = DensePrimaryKeyFilter::new(metadata, filters, codec, false);
         assert!(filter.matches(&pk));
     }
 
@@ -563,7 +601,8 @@ mod tests {
 
         for (op, value, expected) in cases {
             let filters = Arc::new(vec![create_filter_with_op("pod", op, value)]);
-            let mut filter = DensePrimaryKeyFilter::new(metadata.clone(), filters, codec.clone());
+            let mut filter =
+                DensePrimaryKeyFilter::new(metadata.clone(), filters, codec.clone(), false);
             assert_eq!(expected, filter.matches(&pk));
         }
     }
@@ -583,7 +622,8 @@ mod tests {
 
         for (op, value, expected) in cases {
             let filters = Arc::new(vec![create_filter_with_op("pod", op, value)]);
-            let mut filter = SparsePrimaryKeyFilter::new(metadata.clone(), filters, codec.clone());
+            let mut filter =
+                SparsePrimaryKeyFilter::new(metadata.clone(), filters, codec.clone(), false);
             assert_eq!(expected, filter.matches(&pk));
         }
     }
@@ -616,7 +656,51 @@ mod tests {
             .unwrap();
 
         let filters = Arc::new(vec![create_filter_with_op("f", Operator::Eq, 0.0_f64)]);
-        let mut filter = DensePrimaryKeyFilter::new(metadata, filters, codec);
+        let mut filter = DensePrimaryKeyFilter::new(metadata, filters, codec, false);
+
+        assert!(filter.matches(&pk));
+    }
+
+    #[test]
+    fn test_dense_primary_key_filter_matches_partition_column_by_default() {
+        let metadata = setup_partitioned_metadata();
+        let codec = DensePrimaryKeyCodec::new(&metadata);
+        let mut pk = Vec::new();
+        codec
+            .encode_to_vec(
+                [ValueRef::UInt32(42), ValueRef::String("host-a")].into_iter(),
+                &mut pk,
+            )
+            .unwrap();
+
+        let filters = Arc::new(vec![create_filter_with_op(
+            DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+            Operator::Eq,
+            42_u32,
+        )]);
+        let mut filter = DensePrimaryKeyFilter::new(metadata, filters, codec, false);
+
+        assert!(filter.matches(&pk));
+    }
+
+    #[test]
+    fn test_dense_primary_key_filter_can_skip_partition_column() {
+        let metadata = setup_partitioned_metadata();
+        let codec = DensePrimaryKeyCodec::new(&metadata);
+        let mut pk = Vec::new();
+        codec
+            .encode_to_vec(
+                [ValueRef::UInt32(42), ValueRef::String("host-a")].into_iter(),
+                &mut pk,
+            )
+            .unwrap();
+
+        let filters = Arc::new(vec![create_filter_with_op(
+            DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+            Operator::Eq,
+            7_u32,
+        )]);
+        let mut filter = DensePrimaryKeyFilter::new(metadata, filters, codec, true);
 
         assert!(filter.matches(&pk));
     }

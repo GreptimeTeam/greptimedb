@@ -120,6 +120,7 @@ pub trait PrimaryKeyCodec: Send + Sync + Debug {
         &self,
         metadata: &RegionMetadataRef,
         filters: Arc<Vec<SimpleFilterEvaluator>>,
+        skip_partition_column: bool,
     ) -> Box<dyn PrimaryKeyFilter>;
 
     /// Returns the estimated size of the primary key.

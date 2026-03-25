@@ -26,7 +26,6 @@ use common_recordbatch::filter::SimpleFilterEvaluator;
 use datatypes::arrow::array::BinaryArray;
 use datatypes::arrow::record_batch::RecordBatch;
 use futures::StreamExt;
-use mito_codec::primary_key_filter::is_partition_column;
 use mito_codec::row_converter::{PrimaryKeyCodec, PrimaryKeyFilter};
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::RowSelection;
@@ -91,17 +90,15 @@ pub(crate) fn matching_row_ranges_by_primary_key(
     Ok(matched_row_ranges)
 }
 
+/// Returns whether a filter can be applied by parquet primary-key prefiltering.
+///
+/// Unlike `PartitionTreeMemtable`, parquet prefilter always supports predicates
+/// on the partition column.
 pub(crate) fn is_usable_primary_key_filter(
     sst_metadata: &RegionMetadataRef,
     expected_metadata: Option<&RegionMetadata>,
     filter: &SimpleFilterEvaluator,
 ) -> bool {
-    // TODO(yingwen): The primary key filter always skips the partition column. Consider using a flag
-    // to control this behavior. We can remove this behavior after we remove the PartitionTreeMemtable.
-    if is_partition_column(filter.column_name()) {
-        return false;
-    }
-
     let sst_column = match expected_metadata {
         Some(expected_metadata) => {
             let Some(expected_column) = expected_metadata.column_by_name(filter.column_name())
@@ -242,9 +239,11 @@ impl PrefilterContextBuilder {
 
     /// Builds a [PrefilterContext] for a specific row group.
     pub(crate) fn build(&self) -> PrefilterContext {
-        let pk_filter = self
-            .codec
-            .primary_key_filter(&self.metadata, Arc::clone(&self.pk_filters));
+        // Parquet PK prefilter always supports the partition column. Only
+        // PartitionTreeMemtable skips it after partition pruning.
+        let pk_filter =
+            self.codec
+                .primary_key_filter(&self.metadata, Arc::clone(&self.pk_filters), false);
         let pk_filter = Box::new(CachedPrimaryKeyFilter::new(pk_filter));
         PrefilterContext {
             pk_filter,
@@ -366,6 +365,19 @@ mod tests {
         assert!(read_format.as_flat().is_some());
 
         let filter = SimpleFilterEvaluator::try_new(&col("tag_0").eq(lit("b"))).unwrap();
+        assert!(is_usable_primary_key_filter(&metadata, None, &filter));
+    }
+
+    #[test]
+    fn test_is_usable_primary_key_filter_supports_partition_column_by_default() {
+        let metadata = Arc::new(sst_region_metadata_with_encoding(
+            PrimaryKeyEncoding::Sparse,
+        ));
+        let filter = SimpleFilterEvaluator::try_new(
+            &col(store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME).eq(lit(1_u32)),
+        )
+        .unwrap();
+
         assert!(is_usable_primary_key_filter(&metadata, None, &filter));
     }
 
