@@ -973,8 +973,23 @@ impl ManifestContext {
 
             // This is an edit from flush.
             if let Some(flushed_entry_id) = edit.flushed_entry_id {
+                // A flush edit is valid after truncate in two cases:
+                // 1. `flushed_entry_id` moves past `truncated_entry_id`, meaning it definitely
+                //    flushed data newer than the truncate point.
+                // 2. `flushed_entry_id` equals `truncated_entry_id`, but `flushed_sequence`
+                //    increases. This happens in skip-WAL tables where entry id can stay at 0,
+                //    while sequence still advances for post-truncate writes.
+                //
+                // We still reject stale flushes from before truncate:
+                // if entry id is equal and sequence does not advance, the flush is outdated.
+                let is_newer_entry = truncated_entry_id < flushed_entry_id;
+                let is_same_entry_with_newer_sequence = truncated_entry_id == flushed_entry_id
+                    && edit.flushed_sequence.is_some_and(|flushed_sequence| {
+                        manifest.flushed_sequence < flushed_sequence
+                    });
+
                 ensure!(
-                    truncated_entry_id < flushed_entry_id,
+                    is_newer_entry || is_same_entry_with_newer_sequence,
                     RegionTruncatedSnafu {
                         region_id: manifest.metadata.region_id,
                     }
