@@ -703,6 +703,8 @@ impl RangeBase {
                 continue;
             }
 
+            // Flat parquet PK prefiltering already applied these tag predicates while refining
+            // row selection, so skip them here to avoid decoding/evaluating the same condition twice.
             if skip_prefiltered_pk_filters && filter_ctx.usable_primary_key_filter() {
                 continue;
             }
