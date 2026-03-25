@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use common_query::{Output, OutputData};
 use common_recordbatch::RecordBatch;
 use common_recordbatch::error::Result as RecordBatchResult;
-use common_telemetry::{debug, tracing};
+use common_telemetry::{info, tracing};
 use datafusion::sql::sqlparser::ast::{CopyOption, CopyTarget, Statement as SqlParserStatement};
 use datafusion_common::ParamValues;
 use datafusion_pg_catalog::sql::PostgresCompatibilityParser;
@@ -628,7 +628,7 @@ impl ErrorHandler for PostgresServerHandlerInner {
     where
         C: ClientInfo,
     {
-        debug!("Postgres interface error {}", error)
+        info!("Postgres interface error {}", error)
     }
 }
 
