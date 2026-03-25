@@ -30,6 +30,10 @@ CREATE VIEW test_view as SELECT * FROM public.numbers;
 
 Affected Rows: 0
 
+CREATE VIEW test_view2 as SELECT * FROM test_view;
+
+Affected Rows: 0
+
 --- View already exists ----
 CREATE VIEW test_view as SELECT * FROM public.numbers;
 
@@ -51,6 +55,7 @@ SHOW TABLES;
 | numbers          |
 | test_table       |
 | test_view        |
+| test_view2       |
 +------------------+
 
 SHOW FULL TABLES;
@@ -61,6 +66,7 @@ SHOW FULL TABLES;
 | numbers          | LOCAL TEMPORARY |
 | test_table       | BASE TABLE      |
 | test_view        | VIEW            |
+| test_view2       | VIEW            |
 +------------------+-----------------+
 
 -- psql: \dv
@@ -124,17 +130,19 @@ SELECT * FROM INFORMATION_SCHEMA.TABLES ORDER BY TABLE_NAME, TABLE_TYPE;
 |greptime|information_schema|tables|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|DATETIME||utf8_bin|ID|||Y|
 |greptime|public|test_table|BASETABLE|ID|ID|ID|ID|ID|ID|mito|ID|Fixed|ID|ID|ID|DATETIME|DATETIME||utf8_bin|ID|||N|
 |greptime|public|test_view|VIEW|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|DATETIME||utf8_bin|ID|||N|
+|greptime|public|test_view2|VIEW|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|DATETIME||utf8_bin|ID|||N|
 |greptime|information_schema|views|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|DATETIME||utf8_bin|ID|||Y|
 +++++++++++++++++++++++++
 
 -- SQLNESS REPLACE (\s\d+\s) ID
 -- SQLNESS REPLACE (\s[\-0-9T:\.]{15,}) DATETIME
-SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'VIEW';
+SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'VIEW' ORDER BY TABLE_NAME;
 
 +---------------+--------------+------------+------------+----------+-------------+-----------------+--------------+------------------+----------------+--------+---------+------------+------------+-----------+----------------+---------------------+---------------------+------------+-----------------+----------+----------------+---------------+-----------+
 | table_catalog | table_schema | table_name | table_type | table_id | data_length | max_data_length | index_length | max_index_length | avg_row_length | engine | version | row_format | table_rows | data_free | auto_increment | create_time         | update_time         | check_time | table_collation | checksum | create_options | table_comment | temporary |
 +---------------+--------------+------------+------------+----------+-------------+-----------------+--------------+------------------+----------------+--------+---------+------------+------------+-----------+----------------+---------------------+---------------------+------------+-----------------+----------+----------------+---------------+-----------+
 | greptime      | public       | test_view  | VIEW       |ID    |ID          |ID              |ID           |ID               |ID             |        |ID     | Fixed      |ID         |ID        |ID             |DATETIME |DATETIME |            | utf8_bin        |ID       |                |               | N         |
+| greptime      | public       | test_view2 | VIEW       |ID    |ID          |ID              |ID           |ID               |ID             |        |ID     | Fixed      |ID         |ID        |ID             |DATETIME |DATETIME |            | utf8_bin        |ID       |                |               | N         |
 +---------------+--------------+------------+------------+----------+-------------+-----------------+--------------+------------------+----------------+--------+---------+------------+------------+-----------+----------------+---------------------+---------------------+------------+-----------------+----------+----------------+---------------+-----------+
 
 SHOW COLUMNS FROM test_view;
@@ -169,7 +177,28 @@ SELECT * FROM test_view LIMIT 10;
 | 9      |
 +--------+
 
+SELECT * FROM test_view2 LIMIT 10;
+
++--------+
+| number |
++--------+
+| 0      |
+| 1      |
+| 2      |
+| 3      |
+| 4      |
+| 5      |
+| 6      |
+| 7      |
+| 8      |
+| 9      |
++--------+
+
 DROP VIEW test_view;
+
+Affected Rows: 0
+
+DROP VIEW test_view2;
 
 Affected Rows: 0
 
