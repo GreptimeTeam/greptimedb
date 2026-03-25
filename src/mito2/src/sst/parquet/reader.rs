@@ -30,7 +30,7 @@ use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::DataType;
 use futures::StreamExt;
-use mito_codec::row_converter::build_primary_key_codec;
+use mito_codec::row_converter::{PrimaryKeyCodec, build_primary_key_codec};
 use object_store::ObjectStore;
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions, RowSelection};
@@ -76,6 +76,9 @@ use crate::sst::parquet::file_range::{
 };
 use crate::sst::parquet::format::{ReadFormat, need_override_sequence};
 use crate::sst::parquet::metadata::MetadataLoader;
+use crate::sst::parquet::prefilter::{
+    PrefilterContext, execute_prefilter, retain_usable_primary_key_filters,
+};
 use crate::sst::parquet::row_group::ParquetFetchMetrics;
 use crate::sst::parquet::row_selection::RowGroupSelection;
 use crate::sst::parquet::stats::RowGroupPruningStats;
@@ -493,12 +496,28 @@ impl ParquetReaderBuilder {
 
         let codec = build_primary_key_codec(read_format.metadata());
 
+        // Extract primary key filters from the predicate for prefiltering.
+        let primary_key_filters = self.predicate.as_ref().and_then(|predicate| {
+            let mut pk_filters = predicate
+                .exprs()
+                .iter()
+                .filter_map(SimpleFilterEvaluator::try_new)
+                .collect::<Vec<_>>();
+            retain_usable_primary_key_filters(
+                &region_meta,
+                self.expected_metadata.as_deref(),
+                &mut pk_filters,
+            );
+            (!pk_filters.is_empty()).then_some(Arc::new(pk_filters))
+        });
+
         let partition_filter = self.build_partition_filter(&read_format, &prune_schema)?;
 
         let context = FileRangeContext::new(
             reader_builder,
             RangeBase {
                 filters,
+                primary_key_filters,
                 dyn_filters,
                 read_format,
                 expected_metadata: self.expected_metadata.clone(),
@@ -1660,6 +1679,20 @@ pub(crate) struct RowGroupReaderBuilder {
     cache_strategy: CacheStrategy,
 }
 
+/// Context passed to [RowGroupReaderBuilder::build()] carrying all information
+/// needed for prefiltering decisions.
+pub(crate) struct RowGroupBuildContext<'a> {
+    /// Simple filters pushed down. Used by prefilter in PR3.
+    #[allow(dead_code)]
+    pub(crate) filters: &'a [SimpleFilterContext],
+    pub(crate) read_format: &'a ReadFormat,
+    pub(crate) codec: &'a Arc<dyn PrimaryKeyCodec>,
+    /// Whether to skip field filters. Used by prefilter in PR3.
+    #[allow(dead_code)]
+    pub(crate) skip_fields: bool,
+    pub(crate) primary_key_filters: Option<&'a Arc<Vec<SimpleFilterEvaluator>>>,
+}
+
 impl RowGroupReaderBuilder {
     /// Path of the file to read.
     pub(crate) fn file_path(&self) -> &str {
@@ -1680,10 +1713,64 @@ impl RowGroupReaderBuilder {
     }
 
     /// Builds a [ParquetRecordBatchStream] to read the row group at `row_group_idx`.
+    ///
+    /// If prefiltering is applicable (based on `build_ctx`), this performs a two-phase read:
+    /// 1. Reads only the prefilter columns (e.g. PK column), applies filters to get a refined row selection
+    /// 2. Reads the full projection with the refined row selection
     pub(crate) async fn build(
         &self,
         row_group_idx: usize,
         row_selection: Option<RowSelection>,
+        fetch_metrics: Option<&ParquetFetchMetrics>,
+        build_ctx: RowGroupBuildContext<'_>,
+    ) -> Result<ParquetRecordBatchStream<SstAsyncFileReader>> {
+        let parquet_schema = self.parquet_meta.file_metadata().schema_descr();
+        let prefilter_ctx = PrefilterContext::new(&build_ctx, parquet_schema);
+
+        let Some(mut prefilter_ctx) = prefilter_ctx else {
+            // No prefilter applicable, build stream with full projection.
+            return self
+                .build_with_projection(
+                    row_group_idx,
+                    row_selection,
+                    self.projection.clone(),
+                    fetch_metrics,
+                )
+                .await;
+        };
+
+        let prefilter_start = Instant::now();
+        let prefilter_result = execute_prefilter(
+            &mut prefilter_ctx,
+            self,
+            row_group_idx,
+            row_selection,
+            fetch_metrics,
+        )
+        .await?;
+        if let Some(metrics) = fetch_metrics {
+            let mut data = metrics.data.lock().unwrap();
+            data.prefilter_cost += prefilter_start.elapsed();
+            data.prefilter_filtered_rows += prefilter_result.filtered_rows;
+        }
+
+        let refined_selection = Some(prefilter_result.refined_selection);
+
+        self.build_with_projection(
+            row_group_idx,
+            refined_selection,
+            self.projection.clone(),
+            fetch_metrics,
+        )
+        .await
+    }
+
+    /// Builds a [ParquetRecordBatchStream] with a custom projection mask.
+    pub(crate) async fn build_with_projection(
+        &self,
+        row_group_idx: usize,
+        row_selection: Option<RowSelection>,
+        projection: ProjectionMask,
         fetch_metrics: Option<&ParquetFetchMetrics>,
     ) -> Result<ParquetRecordBatchStream<SstAsyncFileReader>> {
         // Create async file reader with caching support.
@@ -1704,7 +1791,7 @@ impl RowGroupReaderBuilder {
         );
         builder = builder
             .with_row_groups(vec![row_group_idx])
-            .with_projection(self.projection.clone())
+            .with_projection(projection)
             .with_batch_size(DEFAULT_READ_BATCH_SIZE);
 
         if let Some(selection) = row_selection {
@@ -1856,6 +1943,7 @@ impl ParquetReader {
                 return Ok(None);
             };
 
+            let skip_fields = self.context.should_skip_fields(row_group_idx);
             let parquet_reader = self
                 .context
                 .reader_builder()
@@ -1863,10 +1951,9 @@ impl ParquetReader {
                     row_group_idx,
                     Some(row_selection),
                     Some(&self.fetch_metrics),
+                    self.context.build_context(skip_fields),
                 )
                 .await?;
-
-            let skip_fields = self.context.should_skip_fields(row_group_idx);
             self.reader = Some(FlatPruneReader::new_with_row_group_reader(
                 self.context.clone(),
                 FlatRowGroupReader::new(self.context.clone(), parquet_reader),
@@ -1889,11 +1976,16 @@ impl ParquetReader {
         debug_assert!(context.read_format().as_flat().is_some());
         let fetch_metrics = ParquetFetchMetrics::default();
         let reader = if let Some((row_group_idx, row_selection)) = selection.pop_first() {
+            let skip_fields = context.should_skip_fields(row_group_idx);
             let parquet_reader = context
                 .reader_builder()
-                .build(row_group_idx, Some(row_selection), Some(&fetch_metrics))
+                .build(
+                    row_group_idx,
+                    Some(row_selection),
+                    Some(&fetch_metrics),
+                    context.build_context(skip_fields),
+                )
                 .await?;
-            let skip_fields = context.should_skip_fields(row_group_idx);
             Some(FlatPruneReader::new_with_row_group_reader(
                 context.clone(),
                 FlatRowGroupReader::new(context.clone(), parquet_reader),

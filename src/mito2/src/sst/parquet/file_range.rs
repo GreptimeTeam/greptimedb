@@ -20,6 +20,7 @@ use std::ops::BitAnd;
 use std::sync::Arc;
 
 use api::v1::{OpType, SemanticType};
+use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_telemetry::error;
 use datafusion::physical_plan::PhysicalExpr;
 use datafusion::physical_plan::expressions::DynamicFilterPhysicalExpr;
@@ -53,7 +54,8 @@ use crate::sst::parquet::flat_format::{
 };
 use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::reader::{
-    FlatRowGroupReader, MaybeFilter, RowGroupReader, RowGroupReaderBuilder, SimpleFilterContext,
+    FlatRowGroupReader, MaybeFilter, RowGroupBuildContext, RowGroupReader, RowGroupReaderBuilder,
+    SimpleFilterContext,
 };
 use crate::sst::parquet::row_group::ParquetFetchMetrics;
 use crate::sst::parquet::stats::RowGroupPruningStats;
@@ -181,6 +183,8 @@ impl FileRange {
         if !self.in_dynamic_filter_range() {
             return Ok(None);
         }
+        // Compute skip_fields once for this row group
+        let skip_fields = self.context.should_skip_fields(self.row_group_idx);
         let parquet_reader = self
             .context
             .reader_builder
@@ -188,6 +192,7 @@ impl FileRange {
                 self.row_group_idx,
                 self.row_selection.clone(),
                 fetch_metrics,
+                self.context.build_context(skip_fields),
             )
             .await?;
 
@@ -209,9 +214,6 @@ impl FileRange {
             // No selector provided, use RowGroupReader
             false
         };
-
-        // Compute skip_fields once for this row group
-        let skip_fields = self.context.should_skip_fields(self.row_group_idx);
 
         let prune_reader = if use_last_row_reader {
             // Row group is PUT only, use LastRowReader to skip unnecessary rows.
@@ -243,6 +245,8 @@ impl FileRange {
         if !self.in_dynamic_filter_range() {
             return Ok(None);
         }
+        // Compute skip_fields once for this row group
+        let skip_fields = self.context.should_skip_fields(self.row_group_idx);
         let parquet_reader = self
             .context
             .reader_builder
@@ -250,6 +254,7 @@ impl FileRange {
                 self.row_group_idx,
                 self.row_selection.clone(),
                 fetch_metrics,
+                self.context.build_context(skip_fields),
             )
             .await?;
 
@@ -270,9 +275,6 @@ impl FileRange {
         } else {
             false
         };
-
-        // Compute skip_fields once for this row group
-        let skip_fields = self.context.should_skip_fields(self.row_group_idx);
 
         let flat_prune_reader = if use_last_row_reader {
             let flat_row_group_reader =
@@ -408,6 +410,17 @@ impl FileRangeContext {
         row_group_contains_delete(metadata, row_group_index, self.reader_builder.file_path())
     }
 
+    /// Creates a [RowGroupBuildContext] for building row group readers with prefiltering.
+    pub(crate) fn build_context(&self, skip_fields: bool) -> RowGroupBuildContext<'_> {
+        RowGroupBuildContext {
+            filters: &self.base.filters,
+            read_format: &self.base.read_format,
+            codec: &self.base.codec,
+            skip_fields,
+            primary_key_filters: self.base.primary_key_filters.as_ref(),
+        }
+    }
+
     /// Returns the estimated memory size of this context.
     /// Mainly accounts for the parquet metadata size.
     pub(crate) fn memory_size(&self) -> usize {
@@ -439,6 +452,10 @@ pub(crate) struct PartitionFilterContext {
 pub(crate) struct RangeBase {
     /// Filters pushed down.
     pub(crate) filters: Vec<SimpleFilterContext>,
+    /// Simple filters that can be compiled into encoded primary-key checks.
+    /// Pre-validated against the SST/expected metadata — only tag filters on
+    /// primary-key columns (excluding partition columns).
+    pub(crate) primary_key_filters: Option<Arc<Vec<SimpleFilterEvaluator>>>,
     /// Dynamic filter physical exprs.
     pub(crate) dyn_filters: Vec<Arc<DynamicFilterPhysicalExpr>>,
     /// Helper to read the SST.

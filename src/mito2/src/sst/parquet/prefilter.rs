@@ -12,31 +12,52 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Helpers for parquet prefiltering.
+//! Prefilter framework for parquet reader.
+//!
+//! Prefilter optimization reduces I/O by reading only a subset of columns first
+//! (the prefilter phase), applying filters to compute a refined row selection,
+//! then reading the remaining columns with the refined selection.
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use api::v1::SemanticType;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use datatypes::arrow::array::{BinaryArray, BooleanArray};
 use datatypes::arrow::record_batch::RecordBatch;
+use futures::StreamExt;
 use mito_codec::primary_key_filter::is_partition_column;
 use mito_codec::row_converter::PrimaryKeyFilter;
+use parquet::arrow::ProjectionMask;
+use parquet::arrow::arrow_reader::RowSelection;
+use parquet::schema::types::SchemaDescriptor;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 
-use crate::error::{ComputeArrowSnafu, Result, UnexpectedSnafu};
+use crate::error::{ComputeArrowSnafu, ReadParquetSnafu, Result, UnexpectedSnafu};
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::PrimaryKeyArray;
+use crate::sst::parquet::reader::{RowGroupBuildContext, RowGroupReaderBuilder};
+use crate::sst::parquet::row_group::ParquetFetchMetrics;
+use crate::sst::parquet::row_selection::row_selection_from_row_ranges;
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn matching_row_ranges_by_primary_key(
     input: &RecordBatch,
     pk_filter: &mut dyn PrimaryKeyFilter,
 ) -> Result<Vec<Range<usize>>> {
     let primary_key_index = primary_key_column_index(input.num_columns());
+    matching_row_ranges_at_pk_index(input, primary_key_index, pk_filter)
+}
+
+/// Like [matching_row_ranges_by_primary_key] but takes the PK column index directly.
+/// Used when the batch has a custom projection (e.g. PK-only prefilter projection).
+fn matching_row_ranges_at_pk_index(
+    input: &RecordBatch,
+    pk_column_index: usize,
+    pk_filter: &mut dyn PrimaryKeyFilter,
+) -> Result<Vec<Range<usize>>> {
     let pk_dict_array = input
-        .column(primary_key_index)
+        .column(pk_column_index)
         .as_any()
         .downcast_ref::<PrimaryKeyArray>()
         .context(UnexpectedSnafu {
@@ -81,7 +102,7 @@ pub(crate) fn matching_row_ranges_by_primary_key(
     Ok(matched_row_ranges)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[allow(dead_code)]
 pub(crate) fn prefilter_flat_batch_by_primary_key(
     input: RecordBatch,
     pk_filter: &mut dyn PrimaryKeyFilter,
@@ -122,7 +143,6 @@ pub(crate) fn prefilter_flat_batch_by_primary_key(
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn retain_usable_primary_key_filters(
     sst_metadata: &RegionMetadataRef,
     expected_metadata: Option<&RegionMetadata>,
@@ -131,7 +151,6 @@ pub(crate) fn retain_usable_primary_key_filters(
     filters.retain(|filter| is_usable_primary_key_filter(sst_metadata, expected_metadata, filter));
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn is_usable_primary_key_filter(
     sst_metadata: &RegionMetadataRef,
     expected_metadata: Option<&RegionMetadata>,
@@ -176,7 +195,6 @@ pub(crate) fn is_usable_primary_key_filter(
             .is_some()
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct CachedPrimaryKeyFilter {
     inner: Box<dyn PrimaryKeyFilter>,
     last_primary_key: Vec<u8>,
@@ -184,7 +202,6 @@ pub(crate) struct CachedPrimaryKeyFilter {
 }
 
 impl CachedPrimaryKeyFilter {
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn new(inner: Box<dyn PrimaryKeyFilter>) -> Self {
         Self {
             inner,
@@ -210,7 +227,7 @@ impl PrimaryKeyFilter for CachedPrimaryKeyFilter {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[allow(dead_code)]
 pub(crate) fn batch_single_primary_key(batch: &RecordBatch) -> Result<Option<&[u8]>> {
     let primary_key_index = primary_key_column_index(batch.num_columns());
     let pk_dict_array = batch
@@ -238,6 +255,153 @@ pub(crate) fn batch_single_primary_key(batch: &RecordBatch) -> Result<Option<&[u
     }
 
     Ok(Some(pk_values.value(first_key as usize)))
+}
+
+/// Context for prefiltering a row group.
+///
+/// Currently supports primary key (PK) filtering only.
+/// Will be extended with simple column filters and physical filters in the future.
+pub(crate) struct PrefilterContext {
+    /// PK filter instance.
+    pk_filter: Box<dyn PrimaryKeyFilter>,
+    /// Projection mask for reading only the PK column.
+    pk_projection: ProjectionMask,
+    /// Index of the PK column within the prefilter projection batch.
+    /// This is 0 when we project only the PK column.
+    pk_column_index: usize,
+}
+
+impl PrefilterContext {
+    /// Creates a new [PrefilterContext] if prefiltering is applicable.
+    ///
+    /// Returns `None` if:
+    /// - No primary key filters are available
+    /// - The read format doesn't use flat layout with dictionary-encoded PKs
+    /// - The primary key is empty
+    pub(crate) fn new(
+        build_ctx: &RowGroupBuildContext<'_>,
+        parquet_schema: &SchemaDescriptor,
+    ) -> Option<Self> {
+        let pk_filters = build_ctx.primary_key_filters?;
+        if pk_filters.is_empty() {
+            return None;
+        }
+
+        let metadata = build_ctx.read_format.metadata();
+        if metadata.primary_key.is_empty() {
+            return None;
+        }
+
+        // Only flat format with dictionary-encoded PKs supports PK prefiltering.
+        let flat_format = build_ctx.read_format.as_flat()?;
+        if !flat_format.raw_batch_has_primary_key_dictionary() {
+            return None;
+        }
+
+        // Compute PK-only projection mask.
+        let num_parquet_columns = parquet_schema.num_columns();
+        let pk_index = primary_key_column_index(num_parquet_columns);
+        let pk_projection = ProjectionMask::roots(parquet_schema, [pk_index]);
+
+        // Create the PK filter and wrap in cache.
+        let pk_filter = build_ctx
+            .codec
+            .primary_key_filter(metadata, Arc::clone(pk_filters));
+        let pk_filter = Box::new(CachedPrimaryKeyFilter::new(pk_filter));
+
+        // The PK column is the only column in the projection, so its index is 0.
+        let pk_column_index = 0;
+
+        Some(Self {
+            pk_filter,
+            pk_projection,
+            pk_column_index,
+        })
+    }
+}
+
+/// Result of prefiltering a row group.
+pub(crate) struct PrefilterResult {
+    /// Refined row selection after prefiltering.
+    pub(crate) refined_selection: RowSelection,
+    /// Number of rows filtered out by prefiltering.
+    pub(crate) filtered_rows: usize,
+}
+
+/// Executes prefiltering on a row group.
+///
+/// Reads only the prefilter columns (currently the PK dictionary column),
+/// applies filters, and returns a refined [RowSelection].
+pub(crate) async fn execute_prefilter(
+    prefilter_ctx: &mut PrefilterContext,
+    reader_builder: &RowGroupReaderBuilder,
+    row_group_idx: usize,
+    row_selection: Option<RowSelection>,
+    fetch_metrics: Option<&ParquetFetchMetrics>,
+) -> Result<PrefilterResult> {
+    // Reads PK column only.
+    let mut pk_stream = reader_builder
+        .build_with_projection(
+            row_group_idx,
+            row_selection.clone(),
+            prefilter_ctx.pk_projection.clone(),
+            fetch_metrics,
+        )
+        .await?;
+
+    // Applies PK filter to each batch and collect matching row ranges.
+    let total_rows = reader_builder
+        .parquet_metadata()
+        .row_group(row_group_idx)
+        .num_rows() as usize;
+    let mut matched_row_ranges: Vec<Range<usize>> = Vec::new();
+    let mut row_offset = 0;
+    let mut rows_before_filter = 0usize;
+
+    while let Some(batch_result) = pk_stream.next().await {
+        let batch = batch_result.context(ReadParquetSnafu {
+            path: reader_builder.file_path(),
+        })?;
+        let batch_num_rows = batch.num_rows();
+        if batch_num_rows == 0 {
+            continue;
+        }
+        rows_before_filter += batch_num_rows;
+
+        let ranges = matching_row_ranges_at_pk_index(
+            &batch,
+            prefilter_ctx.pk_column_index,
+            prefilter_ctx.pk_filter.as_mut(),
+        )?;
+        matched_row_ranges.extend(
+            ranges
+                .into_iter()
+                .map(|range| (range.start + row_offset)..(range.end + row_offset)),
+        );
+        row_offset += batch_num_rows;
+    }
+
+    // Converts matched ranges to RowSelection.
+    let rows_selected: usize = matched_row_ranges.iter().map(|r| r.end - r.start).sum();
+    let filtered_rows = rows_before_filter.saturating_sub(rows_selected);
+
+    let refined_selection = if rows_selected == 0 {
+        RowSelection::from(vec![])
+    } else {
+        let prefilter_selection =
+            row_selection_from_row_ranges(matched_row_ranges.into_iter(), total_rows);
+
+        // Intersect with original row selection if present.
+        match row_selection {
+            Some(original) => original.intersection(&prefilter_selection),
+            None => prefilter_selection,
+        }
+    };
+
+    Ok(PrefilterResult {
+        refined_selection,
+        filtered_rows,
+    })
 }
 
 #[cfg(test)]
