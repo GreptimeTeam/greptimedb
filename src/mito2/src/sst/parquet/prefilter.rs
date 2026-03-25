@@ -101,7 +101,8 @@ pub(crate) fn prefilter_flat_batch_by_primary_key(
     }
 
     let pk_column_index = primary_key_column_index(input.num_columns());
-    let matched_row_ranges = matching_row_ranges_by_primary_key(&input, pk_column_index, pk_filter)?;
+    let matched_row_ranges =
+        matching_row_ranges_by_primary_key(&input, pk_column_index, pk_filter)?;
     if matched_row_ranges.is_empty() {
         return Ok(None);
     }
@@ -131,14 +132,6 @@ pub(crate) fn prefilter_flat_batch_by_primary_key(
     } else {
         Ok(Some(filtered))
     }
-}
-
-pub(crate) fn retain_usable_primary_key_filters(
-    sst_metadata: &RegionMetadataRef,
-    expected_metadata: Option<&RegionMetadata>,
-    filters: &mut Vec<SimpleFilterEvaluator>,
-) {
-    filters.retain(|filter| is_usable_primary_key_filter(sst_metadata, expected_metadata, filter));
 }
 
 pub(crate) fn is_usable_primary_key_filter(
@@ -421,7 +414,6 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use api::v1::SemanticType;
     use common_recordbatch::filter::SimpleFilterEvaluator;
     use datafusion_expr::{col, lit};
     use datatypes::arrow::array::{
@@ -430,11 +422,9 @@ mod tests {
     };
     use datatypes::arrow::datatypes::{Schema, UInt32Type};
     use datatypes::arrow::record_batch::RecordBatch;
-    use datatypes::prelude::ConcreteDataType;
     use mito_codec::row_converter::{PrimaryKeyFilter, build_primary_key_codec};
     use store_api::codec::PrimaryKeyEncoding;
-    use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
-    use store_api::storage::ColumnSchema;
+    use store_api::metadata::RegionMetadata;
 
     use super::*;
     use crate::sst::internal_fields;
@@ -448,52 +438,6 @@ mod tests {
             .iter()
             .filter_map(SimpleFilterEvaluator::try_new)
             .collect()
-    }
-
-    fn expected_metadata_with_reused_tag_name(
-        old_metadata: &RegionMetadata,
-    ) -> Arc<RegionMetadata> {
-        let mut builder = RegionMetadataBuilder::new(old_metadata.region_id);
-        builder
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new(
-                    "tag_0".to_string(),
-                    ConcreteDataType::string_datatype(),
-                    true,
-                ),
-                semantic_type: SemanticType::Tag,
-                column_id: 10,
-            })
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new(
-                    "tag_1".to_string(),
-                    ConcreteDataType::string_datatype(),
-                    true,
-                ),
-                semantic_type: SemanticType::Tag,
-                column_id: 1,
-            })
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new(
-                    "field_0".to_string(),
-                    ConcreteDataType::uint64_datatype(),
-                    true,
-                ),
-                semantic_type: SemanticType::Field,
-                column_id: 2,
-            })
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new(
-                    "ts".to_string(),
-                    ConcreteDataType::timestamp_millisecond_datatype(),
-                    false,
-                ),
-                semantic_type: SemanticType::Timestamp,
-                column_id: 3,
-            })
-            .primary_key(vec![10, 1]);
-
-        Arc::new(builder.build().unwrap())
     }
 
     fn new_raw_batch_with_metadata(
@@ -563,32 +507,6 @@ mod tests {
             .unwrap()
             .values()
             .to_vec()
-    }
-
-    #[test]
-    fn test_retain_usable_primary_key_filters_skips_non_tag_filters() {
-        let metadata = Arc::new(sst_region_metadata());
-        let mut filters =
-            new_test_filters(&[col("field_0").eq(lit(1_u64)), col("ts").gt(lit(0_i64))]);
-
-        retain_usable_primary_key_filters(&metadata, None, &mut filters);
-
-        assert!(filters.is_empty());
-    }
-
-    #[test]
-    fn test_retain_usable_primary_key_filters_skips_reused_expected_tag_name() {
-        let metadata = Arc::new(sst_region_metadata());
-        let expected_metadata = expected_metadata_with_reused_tag_name(&metadata);
-        let mut filters = new_test_filters(&[col("tag_0").eq(lit("b"))]);
-
-        retain_usable_primary_key_filters(
-            &metadata,
-            Some(expected_metadata.as_ref()),
-            &mut filters,
-        );
-
-        assert!(filters.is_empty());
     }
 
     #[test]
