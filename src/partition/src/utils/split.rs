@@ -46,6 +46,11 @@ pub enum ExprSplitDegradeReason {
 /// - `left = R AND S`
 /// - `right = R AND NOT(S)`
 ///
+/// Supported shape:
+/// - `split_expr` must be a single atomic range predicate (`<`, `<=`, `>`, `>=`).
+/// - `base_expr` must be a pure `AND` tree of atomic range predicates, possibly
+///   across unrelated columns.
+///
 /// Returns [`ExprSplitDegradeReason`] when this cannot safely process the shape/type.
 pub fn split_partition_expr(
     base_expr: PartitionExpr,
@@ -55,6 +60,10 @@ pub fn split_partition_expr(
     let split = split_expr.canonicalize();
 
     if validate_supported_expr(&base).is_err() || validate_supported_expr(&split).is_err() {
+        return Err(ExprSplitDegradeReason::UnsupportedType);
+    }
+
+    if !validate_base_expr_shape(&base) || !validate_split_expr_shape(&split) {
         return Err(ExprSplitDegradeReason::UnsupportedType);
     }
 
@@ -341,6 +350,43 @@ fn validate_atomic(expr: &PartitionExpr) -> Result<()> {
         }
         _ => error::InvalidExprSnafu { expr: expr.clone() }.fail(),
     }
+}
+
+/// Validates that `base_expr` stays within the range-only split contract.
+///
+/// Scope and intent:
+/// - The split utility only handles interval-style partition predicates.
+/// - `base_expr` may mention multiple columns, but it must remain a pure `AND`
+///   tree of atomic range predicates.
+fn validate_base_expr_shape(expr: &PartitionExpr) -> bool {
+    let mut atoms = Vec::new();
+    if !collect_and_atoms(expr, &mut atoms) {
+        return false;
+    }
+
+    atoms
+        .into_iter()
+        .all(|atom| is_atomic_range_expr(&atom.canonicalize()))
+}
+
+/// Validates that `split_expr` is a single atomic range predicate.
+///
+/// This restriction keeps `NOT(split_expr)` in the same range-only subset so the
+/// resulting left/right branches stay within the supported contract.
+fn validate_split_expr_shape(expr: &PartitionExpr) -> bool {
+    is_atomic_range_expr(expr)
+}
+
+/// Returns whether `expr` is an atomic `column op value` range predicate.
+///
+/// Supported operators are limited to `<`, `<=`, `>`, and `>=`.
+fn is_atomic_range_expr(expr: &PartitionExpr) -> bool {
+    atom_col_op_val(expr).is_some_and(|(_, op, _)| {
+        matches!(
+            op,
+            RestrictedOp::Lt | RestrictedOp::LtEq | RestrictedOp::Gt | RestrictedOp::GtEq
+        )
+    })
 }
 
 fn is_supported_value(v: &Value) -> bool {
@@ -763,6 +809,23 @@ mod tests {
     }
 
     #[test]
+    fn test_split_base_expr_allows_unrelated_range_columns() {
+        // R: a > 20 AND b < 20
+        let base = col("a")
+            .gt(Value::Int64(20))
+            .and(col("b").lt(Value::Int64(20)));
+        // S: a < 30
+        let split = col("a").lt(Value::Int64(30));
+
+        let (left, right) = split_partition_expr(base, split).unwrap();
+
+        // left keeps the unrelated `b < 20` bound while splitting column `a`.
+        assert_eq!(left.to_string(), "a > 20 AND a < 30 AND b < 20");
+        // right also preserves the unrelated column bound.
+        assert_eq!(right.to_string(), "a >= 30 AND b < 20");
+    }
+
+    #[test]
     fn test_split_degrade_on_unsupported_type() {
         // intentionally excludes boolean from split-able value types.
         let base = col("a").eq(Value::Boolean(true));
@@ -810,15 +873,14 @@ mod tests {
     }
 
     #[test]
-    fn test_split_degrade_on_eq_neq_conflict() {
-        // R: a = 5
+    fn test_split_rejects_eq_in_base_expr() {
+        // R: a = 5 falls outside the range-only base_expr contract.
         let base = col("a").eq(Value::Int64(5));
-        // S: a = 5
-        let split = col("a").eq(Value::Int64(5));
+        // S: a < 6 remains a valid range split.
+        let split = col("a").lt(Value::Int64(6));
 
-        // right = (a = 5) AND (a <> 5) is unsatisfiable, should degrade.
         let result = split_partition_expr(base, split);
-        assert_eq!(result.unwrap_err(), ExprSplitDegradeReason::EmptyBranch);
+        assert_eq!(result.unwrap_err(), ExprSplitDegradeReason::UnsupportedType);
     }
 
     #[test]
@@ -854,31 +916,29 @@ mod tests {
     }
 
     #[test]
-    fn test_split_degrade_on_singleton_bounds_excluded_by_negated_eq() {
+    fn test_split_rejects_not_eq_in_split_expr() {
         // R: a >= 5 AND a <= 5
         let base = col("a")
             .gt_eq(Value::Int64(5))
             .and(col("a").lt_eq(Value::Int64(5)));
-        // S: a <> 5
+        // S: a <> 5 falls outside the range-only split_expr contract.
         let split = col("a").not_eq(Value::Int64(5));
 
-        // left = (a >= 5 AND a <= 5) AND (a <> 5) is unsatisfiable, should degrade.
         let result = split_partition_expr(base, split);
-        assert_eq!(result.unwrap_err(), ExprSplitDegradeReason::EmptyBranch);
+        assert_eq!(result.unwrap_err(), ExprSplitDegradeReason::UnsupportedType);
     }
 
     #[test]
-    fn test_split_degrade_on_singleton_bounds_excluded_by_eq() {
+    fn test_split_rejects_eq_in_split_expr() {
         // R: a >= 5 AND a <= 5
         let base = col("a")
             .gt_eq(Value::Int64(5))
             .and(col("a").lt_eq(Value::Int64(5)));
-        // S: a = 5
+        // S: a = 5 falls outside the range-only split_expr contract.
         let split = col("a").eq(Value::Int64(5));
 
-        // right = (a >= 5 AND a <= 5) AND (a <> 5) is unsatisfiable, should degrade.
         let result = split_partition_expr(base, split);
-        assert_eq!(result.unwrap_err(), ExprSplitDegradeReason::EmptyBranch);
+        assert_eq!(result.unwrap_err(), ExprSplitDegradeReason::UnsupportedType);
     }
 
     #[test]
@@ -1154,8 +1214,8 @@ mod tests {
     }
 
     #[test]
-    fn test_split_nested_base_or_and() {
-        // base: (a < 10) OR (a >= 20 AND a < 30)
+    fn test_split_rejects_or_in_base_expr() {
+        // R: (a < 10) OR (a >= 20 AND a < 30) falls outside the AND-only base_expr contract.
         let base = PartitionExpr::new(
             Operand::Expr(col("a").lt(Value::Int64(10))),
             RestrictedOp::Or,
@@ -1165,21 +1225,18 @@ mod tests {
                     .and(col("a").lt(Value::Int64(30))),
             ),
         );
-        // split: a < 5
+        // S: a < 5
         let split = col("a").lt(Value::Int64(5));
 
         let result = split_partition_expr(base, split);
-        assert_eq!(
-            result.unwrap_err(),
-            ExprSplitDegradeReason::ColliderRejected
-        );
+        assert_eq!(result.unwrap_err(), ExprSplitDegradeReason::UnsupportedType);
     }
 
     #[test]
-    fn test_split_nested_split_expr_or_and() {
-        // base: a < 10
+    fn test_split_rejects_or_in_split_expr() {
+        // R: a < 10
         let base = col("a").lt(Value::Int64(10));
-        // split: (a < 5) OR (a >= 8 AND a < 9)
+        // S: (a < 5) OR (a >= 8 AND a < 9) falls outside the atomic split_expr contract.
         let split = PartitionExpr::new(
             Operand::Expr(col("a").lt(Value::Int64(5))),
             RestrictedOp::Or,
@@ -1191,9 +1248,6 @@ mod tests {
         );
 
         let result = split_partition_expr(base, split);
-        assert_eq!(
-            result.unwrap_err(),
-            ExprSplitDegradeReason::ColliderRejected
-        );
+        assert_eq!(result.unwrap_err(), ExprSplitDegradeReason::UnsupportedType);
     }
 }
