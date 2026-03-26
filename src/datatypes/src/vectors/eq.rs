@@ -259,6 +259,22 @@ mod tests {
         ])));
     }
 
+    // Regression: second arm must downcast `rhs` (was `lhs`), or same-length ConstantVectors
+    // with different inners compare equal.
+    #[test]
+    fn test_constant_vector_eq_compares_both_inners() {
+        assert_vector_ref_ne(
+            Arc::new(ConstantVector::new(
+                Arc::new(BooleanVector::from(vec![true])),
+                5,
+            )),
+            Arc::new(ConstantVector::new(
+                Arc::new(BooleanVector::from(vec![false])),
+                5,
+            )),
+        );
+    }
+
     #[test]
     fn test_vector_ne() {
         assert_vector_ref_ne(
