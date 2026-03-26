@@ -98,11 +98,10 @@ impl IndexApplier for PredicatesIndexApplier {
 
         let mut bitmap = bm_vec.pop().unwrap(); // SAFETY: `fst_ranges` is not empty
         for bm in bm_vec {
-            if bm.count_ones() == 0 {
+            bitmap.intersect(bm);
+            if bitmap.count_ones() == 0 {
                 break;
             }
-
-            bitmap.intersect(bm);
         }
 
         output.matched_segment_ids = bitmap;
