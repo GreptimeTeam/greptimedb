@@ -311,10 +311,10 @@ impl PendingRowsBatcher {
     }
 
     fn get_or_spawn_worker(&self, key: BatchKey) -> PendingWorker {
-        if let Some(worker) = self.workers.get(&key) {
-            if !worker.tx.is_closed() {
-                return worker.clone();
-            }
+        if let Some(worker) = self.workers.get(&key)
+            && !worker.tx.is_closed()
+        {
+            return worker.clone();
         }
 
         let entry = self.workers.entry(key.clone());
