@@ -138,6 +138,11 @@ lazy_static! {
         "Number of pending rows waiting to be flushed"
     )
     .unwrap();
+    pub static ref PENDING_WORKERS: IntGauge = register_int_gauge!(
+        "greptime_prom_store_pending_workers",
+        "Number of active pending rows batch workers"
+    )
+    .unwrap();
     pub static ref FLUSH_TOTAL: IntCounter = register_int_counter!(
         "greptime_prom_store_flush_total",
         "Total number of batch flushes"

@@ -37,7 +37,7 @@ use common_grpc::flight::{FlightEncoder, FlightMessage};
 use common_meta::node_manager::NodeManagerRef;
 use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
 use common_telemetry::tracing_context::TracingContext;
-use common_telemetry::{error, info, warn};
+use common_telemetry::{debug, error, info, warn};
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 use datatypes::data_type::DataType;
@@ -52,12 +52,13 @@ use crate::error;
 use crate::error::{Error, Result};
 use crate::metrics::{
     FLUSH_DROPPED_ROWS, FLUSH_ELAPSED, FLUSH_FAILURES, FLUSH_ROWS, FLUSH_TOTAL, PENDING_BATCHES,
-    PENDING_ROWS, PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED,
+    PENDING_ROWS, PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED, PENDING_WORKERS,
 };
 
 const PHYSICAL_TABLE_KEY: &str = "physical_table";
 /// Whether wait for ingestion result before reply to client.
 const PENDING_ROWS_BATCH_SYNC_ENV: &str = "PENDING_ROWS_BATCH_SYNC";
+const WORKER_IDLE_TIMEOUT_MULTIPLIER: u32 = 3;
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 struct BatchKey {
@@ -124,7 +125,7 @@ fn batch_key_from_ctx(ctx: &QueryContextRef) -> BatchKey {
 
 /// Prometheus remote write pending rows batcher.
 pub struct PendingRowsBatcher {
-    workers: DashMap<BatchKey, PendingWorker>,
+    workers: Arc<DashMap<BatchKey, PendingWorker>>,
     flush_interval: Duration,
     max_batch_rows: usize,
     partition_manager: PartitionRuleManagerRef,
@@ -167,8 +168,11 @@ impl PendingRowsBatcher {
             .as_deref()
             .and_then(|v| v.parse::<bool>().ok())
             .unwrap_or(true);
+        let workers = Arc::new(DashMap::new());
+        PENDING_WORKERS.set(workers.len() as i64);
+
         Some(Arc::new(Self {
-            workers: DashMap::new(),
+            workers,
             flush_interval,
             max_batch_rows,
             partition_manager,
@@ -213,24 +217,42 @@ impl PendingRowsBatcher {
 
         let (response_tx, response_rx) = oneshot::channel();
 
-        let worker = self.get_or_spawn_worker(batch_key_from_ctx(&ctx));
-        let cmd = WorkerCommand::Submit {
+        let batch_key = batch_key_from_ctx(&ctx);
+        let mut cmd = Some(WorkerCommand::Submit {
             table_batches,
             total_rows,
             ctx,
             response_tx,
             _permit: permit,
-        };
+        });
 
         {
             let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
                 .with_label_values(&["submit_send_to_worker"])
                 .start_timer();
-            worker
-                .tx
-                .send(cmd)
-                .await
-                .map_err(|_| Error::BatcherChannelClosed)?;
+
+            for _ in 0..2 {
+                let worker = self.get_or_spawn_worker(batch_key.clone());
+                let Some(worker_cmd) = cmd.take() else {
+                    break;
+                };
+
+                match worker.tx.send(worker_cmd).await {
+                    Ok(()) => break,
+                    Err(err) => {
+                        cmd = Some(err.0);
+                        remove_worker_if_same_channel(
+                            self.workers.as_ref(),
+                            &batch_key,
+                            &worker.tx,
+                        );
+                    }
+                }
+            }
+
+            if cmd.is_some() {
+                return Err(Error::BatcherChannelClosed);
+            }
         }
 
         if self.pending_rows_batch_sync {
@@ -290,31 +312,57 @@ impl PendingRowsBatcher {
 
     fn get_or_spawn_worker(&self, key: BatchKey) -> PendingWorker {
         if let Some(worker) = self.workers.get(&key) {
-            return worker.clone();
+            if !worker.tx.is_closed() {
+                return worker.clone();
+            }
         }
 
-        let entry = self.workers.entry(key);
+        let entry = self.workers.entry(key.clone());
         match entry {
-            Entry::Occupied(worker) => worker.get().clone(),
+            Entry::Occupied(mut worker) => {
+                if worker.get().tx.is_closed() {
+                    let new_worker = self.spawn_worker(key);
+                    worker.insert(new_worker.clone());
+                    PENDING_WORKERS.set(self.workers.len() as i64);
+                    new_worker
+                } else {
+                    worker.get().clone()
+                }
+            }
             Entry::Vacant(vacant) => {
-                let (tx, rx) = mpsc::channel(self.worker_channel_capacity);
-                let worker = PendingWorker { tx };
-
-                start_worker(
-                    rx,
-                    self.shutdown.clone(),
-                    self.partition_manager.clone(),
-                    self.node_manager.clone(),
-                    self.catalog_manager.clone(),
-                    self.flush_interval,
-                    self.max_batch_rows,
-                    self.flush_semaphore.clone(),
-                );
+                let worker = self.spawn_worker(key);
 
                 vacant.insert(worker.clone());
+                PENDING_WORKERS.set(self.workers.len() as i64);
                 worker
             }
         }
+    }
+
+    fn spawn_worker(&self, key: BatchKey) -> PendingWorker {
+        let (tx, rx) = mpsc::channel(self.worker_channel_capacity);
+        let worker = PendingWorker { tx: tx.clone() };
+        let worker_idle_timeout = self
+            .flush_interval
+            .checked_mul(WORKER_IDLE_TIMEOUT_MULTIPLIER)
+            .unwrap_or(self.flush_interval);
+
+        start_worker(
+            key,
+            worker.tx.clone(),
+            self.workers.clone(),
+            rx,
+            self.shutdown.clone(),
+            self.partition_manager.clone(),
+            self.node_manager.clone(),
+            self.catalog_manager.clone(),
+            self.flush_interval,
+            worker_idle_timeout,
+            self.max_batch_rows,
+            self.flush_semaphore.clone(),
+        );
+
+        worker
     }
 }
 
@@ -338,12 +386,16 @@ impl PendingBatch {
 
 #[allow(clippy::too_many_arguments)]
 fn start_worker(
+    key: BatchKey,
+    worker_tx: mpsc::Sender<WorkerCommand>,
+    workers: Arc<DashMap<BatchKey, PendingWorker>>,
     mut rx: mpsc::Receiver<WorkerCommand>,
     shutdown: broadcast::Sender<()>,
     partition_manager: PartitionRuleManagerRef,
     node_manager: NodeManagerRef,
     catalog_manager: CatalogManagerRef,
     flush_interval: Duration,
+    worker_idle_timeout: Duration,
     max_batch_rows: usize,
     flush_semaphore: Arc<Semaphore>,
 ) {
@@ -351,12 +403,17 @@ fn start_worker(
         let mut batch = PendingBatch::new();
         let mut interval = tokio::time::interval(flush_interval);
         let mut shutdown_rx = shutdown.subscribe();
+        let idle_deadline = tokio::time::Instant::now() + worker_idle_timeout;
+        let idle_timer = tokio::time::sleep_until(idle_deadline);
+        tokio::pin!(idle_timer);
 
         loop {
             tokio::select! {
                 cmd = rx.recv() => {
                     match cmd {
                         Some(WorkerCommand::Submit { table_batches, total_rows, ctx, response_tx, _permit }) => {
+                            idle_timer.as_mut().reset(tokio::time::Instant::now() + worker_idle_timeout);
+
                             if batch.total_row_count == 0 {
                                 batch.created_at = Some(Instant::now());
                                 batch.ctx = Some(ctx);
@@ -402,6 +459,22 @@ fn start_worker(
                         }
                     }
                 }
+                _ = &mut idle_timer => {
+                    if !should_close_worker_on_idle_timeout(batch.total_row_count, rx.len()) {
+                        idle_timer
+                            .as_mut()
+                            .reset(tokio::time::Instant::now() + worker_idle_timeout);
+                        continue;
+                    }
+
+                    debug!(
+                        "Closing idle pending rows worker due to timeout: catalog={}, schema={}, physical_table={}",
+                        key.catalog,
+                        key.schema,
+                        key.physical_table
+                    );
+                    break;
+                }
                 _ = interval.tick() => {
                     if let Some(created_at) = batch.created_at
                         && batch.total_row_count > 0
@@ -429,7 +502,30 @@ fn start_worker(
                 }
             }
         }
+
+        remove_worker_if_same_channel(workers.as_ref(), &key, &worker_tx);
     });
+}
+
+fn remove_worker_if_same_channel(
+    workers: &DashMap<BatchKey, PendingWorker>,
+    key: &BatchKey,
+    worker_tx: &mpsc::Sender<WorkerCommand>,
+) -> bool {
+    if let Some(worker) = workers.get(key)
+        && worker.tx.same_channel(worker_tx)
+    {
+        drop(worker);
+        workers.remove(key);
+        PENDING_WORKERS.set(workers.len() as i64);
+        return true;
+    }
+
+    false
+}
+
+fn should_close_worker_on_idle_timeout(total_row_count: usize, queued_requests: usize) -> bool {
+    total_row_count == 0 && queued_requests == 0
 }
 
 fn drain_batch(batch: &mut PendingBatch) -> Option<FlushBatch> {
@@ -988,8 +1084,13 @@ mod tests {
     use arrow::array::{Array, Float64Array, Int32Array, Int64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
     use arrow::record_batch::RecordBatch;
+    use dashmap::DashMap;
+    use tokio::sync::mpsc;
 
-    use super::{align_record_batch_to_schema, rows_to_record_batch};
+    use super::{
+        BatchKey, PendingWorker, WorkerCommand, align_record_batch_to_schema,
+        remove_worker_if_same_channel, rows_to_record_batch, should_close_worker_on_idle_timeout,
+    };
 
     #[test]
     fn test_rows_to_record_batch() {
@@ -1102,5 +1203,51 @@ mod tests {
             .unwrap();
         assert_eq!(Some(7), value.iter().next().flatten());
         assert!(value.is_null(1));
+    }
+
+    #[test]
+    fn test_remove_worker_if_same_channel_removes_matching_entry() {
+        let workers = DashMap::new();
+        let key = BatchKey {
+            catalog: "greptime".to_string(),
+            schema: "public".to_string(),
+            physical_table: "phy".to_string(),
+        };
+
+        let (tx, _rx) = mpsc::channel::<WorkerCommand>(1);
+        workers.insert(key.clone(), PendingWorker { tx: tx.clone() });
+
+        assert!(remove_worker_if_same_channel(&workers, &key, &tx));
+        assert!(!workers.contains_key(&key));
+    }
+
+    #[test]
+    fn test_remove_worker_if_same_channel_keeps_newer_entry() {
+        let workers = DashMap::new();
+        let key = BatchKey {
+            catalog: "greptime".to_string(),
+            schema: "public".to_string(),
+            physical_table: "phy".to_string(),
+        };
+
+        let (stale_tx, _stale_rx) = mpsc::channel::<WorkerCommand>(1);
+        let (fresh_tx, _fresh_rx) = mpsc::channel::<WorkerCommand>(1);
+        workers.insert(
+            key.clone(),
+            PendingWorker {
+                tx: fresh_tx.clone(),
+            },
+        );
+
+        assert!(!remove_worker_if_same_channel(&workers, &key, &stale_tx));
+        assert!(workers.contains_key(&key));
+        assert!(workers.get(&key).unwrap().tx.same_channel(&fresh_tx));
+    }
+
+    #[test]
+    fn test_worker_idle_timeout_close_decision() {
+        assert!(should_close_worker_on_idle_timeout(0, 0));
+        assert!(!should_close_worker_on_idle_timeout(1, 0));
+        assert!(!should_close_worker_on_idle_timeout(0, 1));
     }
 }
