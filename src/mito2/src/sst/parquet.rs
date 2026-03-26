@@ -1127,9 +1127,7 @@ mod tests {
         for (tag_0, tag_1, ts) in rows {
             tag_0_builder.append_value(*tag_0);
             tag_1_builder.append_value(*tag_1);
-            pk_builder
-                .append(&new_primary_key(&[tag_0, tag_1]))
-                .unwrap();
+            pk_builder.append(new_primary_key(&[tag_0, tag_1])).unwrap();
             field_values.push(*ts as u64);
             timestamps.push(*ts);
         }
@@ -1723,7 +1721,10 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let selection = RowGroupSelection::from_row_ranges(vec![(0, vec![0..6])], row_group_size);
+        let selection = RowGroupSelection::from_row_ranges(
+            vec![(0, std::iter::once(0..6).collect())],
+            row_group_size,
+        );
 
         let mut reader = ParquetReader::new(Arc::new(context), selection)
             .await
@@ -1782,7 +1783,10 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let selection = RowGroupSelection::from_row_ranges(vec![(0, vec![0..8])], row_group_size);
+        let selection = RowGroupSelection::from_row_ranges(
+            vec![(0, std::iter::once(0..8).collect())],
+            row_group_size,
+        );
 
         let mut reader = ParquetReader::new(Arc::new(context), selection)
             .await
