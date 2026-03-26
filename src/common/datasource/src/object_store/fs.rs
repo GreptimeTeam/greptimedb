@@ -26,7 +26,7 @@ pub fn build_fs_backend(root: &str) -> Result<ObjectStore> {
         .layer(object_store::layers::LoggingLayer::new(
             DefaultLoggingInterceptor,
         ))
-        .layer(object_store::layers::TracingLayer)
+        .layer(object_store::layers::TracingLayer::new())
         .layer(object_store::layers::build_prometheus_metrics_layer(true))
         .finish();
     Ok(object_store)

@@ -110,7 +110,7 @@ pub fn build_s3_backend(
         .layer(object_store::layers::LoggingLayer::new(
             DefaultLoggingInterceptor,
         ))
-        .layer(object_store::layers::TracingLayer)
+        .layer(object_store::layers::TracingLayer::new())
         .layer(object_store::layers::build_prometheus_metrics_layer(true))
         .finish())
 }

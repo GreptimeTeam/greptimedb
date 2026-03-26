@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use clap::{Parser, Subcommand};
 use common_error::ext::BoxedError;
 use common_meta::snapshot::MetadataSnapshotManager;
-use object_store::{ObjectStore, Scheme};
+use object_store::ObjectStore;
 
 use crate::Tool;
 use crate::common::{ObjectStoreConfig, StoreConfig, new_fs_object_store};
@@ -276,7 +276,7 @@ fn build_object_store_and_resolve_file_path(
         None => new_fs_object_store(fs_root)?,
     };
 
-    let file_path = if matches!(object_store.info().scheme(), Scheme::Fs) {
+    let file_path = if object_store.info().scheme() == "fs" {
         resolve_relative_path_with_current_dir(file_path).map_err(BoxedError::new)?
     } else {
         file_path.to_string()

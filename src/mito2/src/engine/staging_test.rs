@@ -26,8 +26,8 @@ use common_recordbatch::RecordBatches;
 use datatypes::value::Value;
 use object_store::Buffer;
 use object_store::layers::mock::{
-    Entry, Error as MockError, ErrorKind, List, Lister, Metadata, MockLayerBuilder,
-    Result as MockResult, Write, Writer,
+    Delete, Deleter, Error as MockError, ErrorKind, Metadata,
+    MockLayerBuilder, OpDelete, Result as MockResult, Write, Writer,
 };
 use partition::expr::{PartitionExpr, col};
 use store_api::region_engine::{RegionEngine, SettableRegionRoleState};
@@ -707,20 +707,6 @@ async fn test_enter_staging_clean_staging_manifest_error() {
     test_enter_staging_clean_staging_manifest_error_with_format(true).await;
 }
 
-struct MockLister {
-    path: String,
-    inner: Lister,
-}
-
-impl List for MockLister {
-    async fn next(&mut self) -> MockResult<Option<Entry>> {
-        if self.path.contains("staging") {
-            return Err(MockError::new(ErrorKind::Unexpected, "mock error"));
-        }
-        self.inner.next().await
-    }
-}
-
 struct MockWriter {
     path: String,
     inner: Writer,
@@ -740,6 +726,23 @@ impl Write for MockWriter {
 
     async fn abort(&mut self) -> MockResult<()> {
         self.inner.abort().await
+    }
+}
+
+struct MockDeleter {
+    inner: Deleter,
+}
+
+impl Delete for MockDeleter {
+    async fn delete(&mut self, path: &str, args: OpDelete) -> MockResult<()> {
+        if path.contains("staging") {
+            return Err(MockError::new(ErrorKind::Unexpected, "mock error"));
+        }
+        self.inner.delete(path, args).await
+    }
+
+    async fn close(&mut self) -> MockResult<()> {
+        self.inner.close().await
     }
 }
 
@@ -784,12 +787,7 @@ async fn test_enter_staging_error(env: &mut TestEnv, flat_format: bool) {
 
 async fn test_enter_staging_clean_staging_manifest_error_with_format(flat_format: bool) {
     let mock_layer = MockLayerBuilder::default()
-        .lister_factory(Arc::new(|path, _args, lister| {
-            Box::new(MockLister {
-                path: path.to_string(),
-                inner: lister,
-            })
-        }))
+        .deleter_factory(Arc::new(|deleter| Box::new(MockDeleter { inner: deleter })))
         .build()
         .unwrap();
     let mut env = TestEnv::new().await.with_mock_layer(mock_layer);

@@ -205,7 +205,8 @@ impl ParquetFetchMetrics {
 }
 
 pub(crate) struct RowGroupBase<'a> {
-    metadata: &'a RowGroupMetaData,
+    pub(crate) parquet_meta: &'a ParquetMetaData,
+    pub(crate) metadata: &'a RowGroupMetaData,
     pub(crate) offset_index: Option<&'a [OffsetIndexMetaData]>,
     /// Compressed page of each column.
     column_chunks: Vec<Option<Arc<ColumnChunkData>>>,
@@ -225,6 +226,7 @@ impl<'a> RowGroupBase<'a> {
             .map(|x| x[row_group_idx].as_slice());
 
         Self {
+            parquet_meta,
             metadata,
             offset_index,
             column_chunks: vec![None; metadata.columns().len()],
@@ -598,6 +600,14 @@ impl RowGroups for InMemoryRowGroup<'_> {
         Ok(Box::new(ColumnChunkIterator {
             reader: Some(Ok(Box::new(page_reader))),
         }))
+    }
+
+    fn row_groups(&self) -> Box<dyn Iterator<Item = &RowGroupMetaData> + '_> {
+        Box::new(std::iter::once(self.base.metadata))
+    }
+
+    fn metadata(&self) -> &ParquetMetaData {
+        self.base.parquet_meta
     }
 }
 

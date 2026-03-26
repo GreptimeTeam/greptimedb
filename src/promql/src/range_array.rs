@@ -225,7 +225,7 @@ impl RangeArray {
     }
 }
 
-impl Array for RangeArray {
+unsafe impl Array for RangeArray {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }

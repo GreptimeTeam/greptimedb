@@ -431,7 +431,7 @@ impl AccessLayer {
                 let file_size = if file_size == 0 { None } else { Some(file_size) };
                 let last_modified_ms = metadata
                     .last_modified()
-                    .map(|ts| Timestamp::new_millisecond(ts.timestamp_millis()));
+                    .map(|ts| Timestamp::new_millisecond(ts.into_inner().as_millisecond()));
 
                 let entry = StorageSstEntry {
                     file_path: path.to_string(),

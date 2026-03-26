@@ -83,7 +83,7 @@ pub fn build_oss_backend(
                 .with_notify(object_store::util::PrintDetailedError),
         )
         .layer(object_store::layers::LoggingLayer::default())
-        .layer(object_store::layers::TracingLayer)
+        .layer(object_store::layers::TracingLayer::new())
         .layer(object_store::layers::build_prometheus_metrics_layer(true))
         .finish();
 
