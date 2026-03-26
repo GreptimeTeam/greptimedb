@@ -312,7 +312,7 @@ lazy_static! {
         "maximum bytes allowed for all concurrent request bodies and messages"
     ).unwrap();
 
-    /// Total number of rejected requests due to memory exhaustion.
+    /// Total number of requests rejected due to memory exhaustion.
     pub static ref REQUEST_MEMORY_REJECTED: IntCounterVec = register_int_counter_vec!(
         "greptime_servers_request_memory_rejected_total",
         "number of requests rejected due to memory limit",

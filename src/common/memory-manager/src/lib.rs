@@ -45,5 +45,5 @@ impl MemoryMetrics for NoOpMetrics {
     fn set_in_use(&self, _: i64) {}
 
     #[inline(always)]
-    fn inc_rejected(&self, _: &str) {}
+    fn inc_exhausted(&self, _: &str) {}
 }

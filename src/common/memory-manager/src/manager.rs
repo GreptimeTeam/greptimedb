@@ -29,7 +29,8 @@ use crate::policy::OnExhaustedPolicy;
 pub trait MemoryMetrics: Clone + Send + Sync + 'static {
     fn set_limit(&self, bytes: i64);
     fn set_in_use(&self, bytes: i64);
-    fn inc_rejected(&self, reason: &str);
+    /// Record that immediate memory acquisition failed due to exhausted quota.
+    fn inc_exhausted(&self, reason: &str);
 }
 
 /// Generic memory manager for quota-controlled operations.
@@ -171,7 +172,7 @@ impl<M: MemoryMetrics> MemoryManager<M> {
                         Some(MemoryGuard::limited(quota.clone(), permit))
                     }
                     Err(TryAcquireError::NoPermits) | Err(TryAcquireError::Closed) => {
-                        quota.metrics.inc_rejected("try_acquire");
+                        quota.metrics.inc_exhausted("try_acquire");
                         None
                     }
                 }
