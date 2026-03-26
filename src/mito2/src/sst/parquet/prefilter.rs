@@ -37,7 +37,7 @@ use crate::error::{ReadParquetSnafu, Result, UnexpectedSnafu};
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::{PrimaryKeyArray, ReadFormat};
 use crate::sst::parquet::reader::{RowGroupBuildContext, RowGroupReaderBuilder};
-use crate::sst::parquet::row_selection::row_selection_from_row_ranges;
+use crate::sst::parquet::row_selection::row_selection_from_row_ranges_exact;
 
 pub(crate) fn matching_row_ranges_by_primary_key(
     input: &RecordBatch,
@@ -281,10 +281,6 @@ pub(crate) async fn execute_prefilter(
         .await?;
 
     // Applies PK filter to each batch and collect matching row ranges.
-    let total_rows = reader_builder
-        .parquet_metadata()
-        .row_group(build_ctx.row_group_idx)
-        .num_rows() as usize;
     let mut matched_row_ranges: Vec<Range<usize>> = Vec::new();
     let mut row_offset = 0;
     let mut rows_before_filter = 0usize;
@@ -319,12 +315,17 @@ pub(crate) async fn execute_prefilter(
     let refined_selection = if rows_selected == 0 {
         RowSelection::from(vec![])
     } else {
+        // Build the prefilter selection relative to the yielded rows
+        // (not total_rows), since matched_row_ranges are offsets within
+        // the rows actually read from the stream.
         let prefilter_selection =
-            row_selection_from_row_ranges(matched_row_ranges.into_iter(), total_rows);
+            row_selection_from_row_ranges_exact(matched_row_ranges.into_iter(), rows_before_filter);
 
-        // Intersect with original row selection if present.
+        // Use and_then to apply prefilter selection within the context
+        // of the original selection, since prefilter offsets are relative
+        // to the original selection's selected rows.
         match &build_ctx.row_selection {
-            Some(original) => original.intersection(&prefilter_selection),
+            Some(original) => original.and_then(&prefilter_selection),
             None => prefilter_selection,
         }
     };
