@@ -5278,6 +5278,128 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
     )
     .await;
 
+    let coercion_table_name = "trace_type_coercion";
+    let coercion_req = make_trace_v1_request(
+        "type-coercion",
+        vec![make_trace_v1_span(
+            "00000000000000000000000000000001",
+            "0000000000000001",
+            "coercion-seed",
+            1_736_480_942_444_376_000,
+            1_736_480_942_444_499_000,
+            vec![
+                make_double_attr("attr_float", 1.5),
+                make_int_attr("attr_int", 10),
+                make_bool_attr("attr_bool", true),
+            ],
+        )],
+    );
+    let res = send_trace_v1_req(&client, coercion_table_name, coercion_req, false).await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    let coercion_req = make_trace_v1_request(
+        "type-coercion",
+        vec![make_trace_v1_span(
+            "00000000000000000000000000000002",
+            "0000000000000002",
+            "coercion-apply",
+            1_736_480_942_444_589_000,
+            1_736_480_942_444_712_000,
+            vec![
+                make_int_attr("attr_float", 2),
+                make_string_attr("attr_int", "20"),
+                make_string_attr("attr_bool", "false"),
+            ],
+        )],
+    );
+    let res = send_trace_v1_req(&client, coercion_table_name, coercion_req, false).await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    validate_data(
+        "otlp_traces_v1_type_coercion_rows",
+        &client,
+        &format!(
+            "select trace_id, \"span_attributes.attr_int\", \"span_attributes.attr_bool\" from {} order by trace_id;",
+            coercion_table_name
+        ),
+        r#"[["00000000000000000000000000000001",10,true],["00000000000000000000000000000002",20,false]]"#,
+    )
+    .await;
+    validate_data(
+        "otlp_traces_v1_type_coercion_float_sum",
+        &client,
+        &format!(
+            "select sum(\"span_attributes.attr_float\") from {};",
+            coercion_table_name
+        ),
+        r#"[[3.5]]"#,
+    )
+    .await;
+    validate_data(
+        "otlp_traces_v1_type_coercion_schema",
+        &client,
+        "select column_name, lower(data_type), semantic_type from information_schema.columns where table_name = 'trace_type_coercion' and column_name in ('span_attributes.attr_bool', 'span_attributes.attr_float', 'span_attributes.attr_int') order by column_name;",
+        r#"[["span_attributes.attr_bool","boolean","FIELD"],["span_attributes.attr_float","double","FIELD"],["span_attributes.attr_int","bigint","FIELD"]]"#,
+    )
+    .await;
+
+    let abort_table_name = "trace_type_abort";
+    let abort_seed_req = make_trace_v1_request(
+        "type-abort",
+        vec![make_trace_v1_span(
+            "00000000000000000000000000000011",
+            "0000000000000011",
+            "abort-seed",
+            1_736_480_942_444_800_000,
+            1_736_480_942_444_900_000,
+            vec![make_int_attr("attr_int", 10)],
+        )],
+    );
+    let res = send_trace_v1_req(&client, abort_table_name, abort_seed_req, false).await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    let abort_req = make_trace_v1_request(
+        "type-abort",
+        vec![
+            make_trace_v1_span(
+                "00000000000000000000000000000012",
+                "0000000000000012",
+                "abort-parseable",
+                1_736_480_942_445_000_000,
+                1_736_480_942_445_100_000,
+                vec![make_string_attr("attr_int", "20")],
+            ),
+            make_trace_v1_span(
+                "00000000000000000000000000000013",
+                "0000000000000013",
+                "abort-unparsable",
+                1_736_480_942_445_200_000,
+                1_736_480_942_445_300_000,
+                vec![make_string_attr("attr_int", "not_a_number")],
+            ),
+        ],
+    );
+    let res = send_trace_v1_req(&client, abort_table_name, abort_req, false).await;
+    assert_eq!(StatusCode::BAD_REQUEST, res.status());
+    let body: Value = res.json().await;
+    assert!(
+        body["error"].as_str().unwrap().contains(
+            "failed to coerce trace column 'span_attributes.attr_int' in table 'trace_type_abort'"
+        ),
+        "unexpected error body: {body}"
+    );
+
+    validate_data(
+        "otlp_traces_v1_type_abort_rows",
+        &client,
+        &format!(
+            "select trace_id, \"span_attributes.attr_int\" from {} order by trace_id;",
+            abort_table_name
+        ),
+        r#"[["00000000000000000000000000000011",10]]"#,
+    )
+    .await;
+
     guard.remove_all().await;
 }
 
@@ -7508,6 +7630,115 @@ async fn send_req(
     }
 
     req.header("content-length", len).send().await
+}
+
+async fn send_trace_v1_req(
+    client: &TestClient,
+    table_name: &str,
+    req: ExportTraceServiceRequest,
+    with_gzip: bool,
+) -> TestResponse {
+    send_req(
+        client,
+        vec![
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/x-protobuf"),
+            ),
+            (
+                HeaderName::from_static("x-greptime-pipeline-name"),
+                HeaderValue::from_static(GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME),
+            ),
+            (
+                HeaderName::from_static("x-greptime-trace-table-name"),
+                HeaderValue::from_str(table_name).unwrap(),
+            ),
+        ],
+        "/v1/otlp/v1/traces",
+        req.encode_to_vec(),
+        with_gzip,
+    )
+    .await
+}
+
+fn make_trace_v1_request(service_name: &str, spans: Vec<Value>) -> ExportTraceServiceRequest {
+    serde_json::from_value(json!({
+        "resourceSpans": [{
+            "resource": {
+                "attributes": [{
+                    "key": "service.name",
+                    "value": { "stringValue": service_name }
+                }]
+            },
+            "scopeSpans": [{
+                "scope": {
+                    "name": "trace-v1-type-tests"
+                },
+                "spans": spans
+            }],
+            "schemaUrl": "https://opentelemetry.io/schemas/1.4.0"
+        }]
+    }))
+    .unwrap()
+}
+
+fn make_trace_v1_span(
+    trace_id: &str,
+    span_id: &str,
+    name: &str,
+    start_time_unix_nano: i64,
+    end_time_unix_nano: i64,
+    attributes: Vec<Value>,
+) -> Value {
+    json!({
+        "traceId": trace_id,
+        "spanId": span_id,
+        "name": name,
+        "kind": 2,
+        "startTimeUnixNano": start_time_unix_nano.to_string(),
+        "endTimeUnixNano": end_time_unix_nano.to_string(),
+        "attributes": attributes,
+        "status": {
+            "message": "",
+            "code": 0
+        }
+    })
+}
+
+fn make_string_attr(key: &str, value: &str) -> Value {
+    json!({
+        "key": key,
+        "value": {
+            "stringValue": value
+        }
+    })
+}
+
+fn make_int_attr(key: &str, value: i64) -> Value {
+    json!({
+        "key": key,
+        "value": {
+            "intValue": value.to_string()
+        }
+    })
+}
+
+fn make_double_attr(key: &str, value: f64) -> Value {
+    json!({
+        "key": key,
+        "value": {
+            "doubleValue": value
+        }
+    })
+}
+
+fn make_bool_attr(key: &str, value: bool) -> Value {
+    json!({
+        "key": key,
+        "value": {
+            "boolValue": value
+        }
+    })
 }
 
 fn get_rows_from_output(output: &str) -> String {

@@ -248,6 +248,16 @@ fn coerce_column_values(
         .collect()
 }
 
+fn is_supported_trace_coercion(request_type: ColumnDataType, target_type: ColumnDataType) -> bool {
+    matches!(
+        (request_type, target_type),
+        (ColumnDataType::Int64, ColumnDataType::Float64)
+            | (ColumnDataType::String, ColumnDataType::Int64)
+            | (ColumnDataType::String, ColumnDataType::Float64)
+            | (ColumnDataType::String, ColumnDataType::Boolean)
+    )
+}
+
 impl Instance {
     /// Coerce request column types and values to match the existing table schema
     /// for compatible type pairs. This handles the cross-batch case where a prior
@@ -297,6 +307,11 @@ impl Instance {
                     continue;
                 };
                 let target_type = wrapper.datatype();
+
+                if !is_supported_trace_coercion(request_type, target_type) {
+                    continue;
+                }
+
                 let coerced_values = coerce_column_values(
                     rows.rows.iter().filter_map(|row| {
                         row.values
@@ -335,7 +350,7 @@ mod tests {
     use api::v1::ColumnDataType;
     use api::v1::value::ValueData;
 
-    use super::{coerce_column_values, coerce_value_data};
+    use super::{coerce_column_values, coerce_value_data, is_supported_trace_coercion};
 
     #[test]
     fn test_coerce_int64_to_float64() {
@@ -422,5 +437,29 @@ mod tests {
             ColumnDataType::String,
         );
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_is_supported_trace_coercion() {
+        assert!(is_supported_trace_coercion(
+            ColumnDataType::Int64,
+            ColumnDataType::Float64
+        ));
+        assert!(is_supported_trace_coercion(
+            ColumnDataType::String,
+            ColumnDataType::Int64
+        ));
+        assert!(is_supported_trace_coercion(
+            ColumnDataType::String,
+            ColumnDataType::Float64
+        ));
+        assert!(is_supported_trace_coercion(
+            ColumnDataType::String,
+            ColumnDataType::Boolean
+        ));
+        assert!(!is_supported_trace_coercion(
+            ColumnDataType::Binary,
+            ColumnDataType::Json
+        ));
     }
 }
