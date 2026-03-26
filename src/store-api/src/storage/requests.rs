@@ -112,6 +112,8 @@ pub struct ScanRequest {
     /// Optional constraint on the sequence number of the rows to read.
     /// If set, only rows with a sequence number **lesser or equal** to this value
     /// will be returned.
+    /// This is the effective memtable upper bound used by the scan, whether provided
+    /// explicitly or bound on scan open.
     pub memtable_max_sequence: Option<SequenceNumber>,
     /// Optional constraint on the minimal sequence number in the memtable.
     /// If set, only the memtables that contain sequences **greater than** this value will be scanned
@@ -119,6 +121,8 @@ pub struct ScanRequest {
     /// Optional constraint on the minimal sequence number in the SST files.
     /// If set, only the SST files that contain sequences greater than this value will be scanned.
     pub sst_min_sequence: Option<SequenceNumber>,
+    /// Whether to bind the effective snapshot upper bound when opening the scan.
+    pub snapshot_on_scan: bool,
     /// Optional hint for the distribution of time-series data.
     pub distribution: Option<TimeSeriesDistribution>,
     /// Optional hint for KNN vector search. When set, the scan should use
@@ -193,6 +197,14 @@ impl Display for ScanRequest {
                 "{}sst_min_sequence: {}",
                 delimiter.as_str(),
                 sst_min_sequence
+            )?;
+        }
+        if self.snapshot_on_scan {
+            write!(
+                f,
+                "{}snapshot_on_scan: {}",
+                delimiter.as_str(),
+                self.snapshot_on_scan
             )?;
         }
         if let Some(distribution) = &self.distribution {
@@ -277,6 +289,15 @@ mod tests {
         assert_eq!(
             request.to_string(),
             "ScanRequest { force_flat_format: true }"
+        );
+
+        let request = ScanRequest {
+            snapshot_on_scan: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            request.to_string(),
+            "ScanRequest { snapshot_on_scan: true }"
         );
     }
 }
