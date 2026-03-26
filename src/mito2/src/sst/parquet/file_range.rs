@@ -37,6 +37,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, TimeSeriesRowSelector};
 use table::predicate::Predicate;
 
+use crate::cache::CacheStrategy;
 use crate::error::{
     ComputeArrowSnafu, DataTypeMismatchSnafu, DecodeSnafu, DecodeStatsSnafu,
     EvalPartitionFilterSnafu, NewRecordBatchSnafu, RecordBatchSnafu, Result, StatsNotPresentSnafu,
@@ -278,10 +279,17 @@ impl FileRange {
         let flat_prune_reader = if use_last_row_reader {
             let flat_row_group_reader =
                 FlatRowGroupReader::new(self.context.clone(), parquet_reader);
+            // Flat PK prefilter makes the input stream predicate-dependent, so cached
+            // selector results are not reusable across queries with different filters.
+            let cache_strategy = if self.context.reader_builder.has_flat_primary_key_prefilter() {
+                CacheStrategy::Disabled
+            } else {
+                self.context.reader_builder.cache_strategy().clone()
+            };
             let reader = FlatRowGroupLastRowCachedReader::new(
                 self.file_handle().file_id().file_id(),
                 self.row_group_idx,
-                self.context.reader_builder.cache_strategy().clone(),
+                cache_strategy,
                 self.context.read_format().projection_indices(),
                 flat_row_group_reader,
             );
