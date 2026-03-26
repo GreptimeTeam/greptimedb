@@ -123,13 +123,6 @@ fn is_empty_and_conjunction(expr: &PartitionExpr) -> bool {
         has_conflict: _,
     } = collected;
 
-    if uppers
-        .iter()
-        .any(|(col, upper)| !lowers.contains_key(col) && is_strictly_less_than_domain_min(upper))
-    {
-        return true;
-    }
-
     if lowers
         .iter()
         .any(|(col, lower)| !uppers.contains_key(col) && is_strictly_greater_than_domain_max(lower))
@@ -197,37 +190,12 @@ fn discrete_value_index(v: &Value) -> Option<i128> {
     }
 }
 
-fn is_strictly_less_than_domain_min(bound: &UpperBound) -> bool {
-    if bound.inclusive {
-        return false;
-    }
-
-    is_domain_min_value(&bound.value)
-}
-
 fn is_strictly_greater_than_domain_max(bound: &LowerBound) -> bool {
     if bound.inclusive {
         return false;
     }
 
     is_domain_max_value(&bound.value)
-}
-
-fn is_domain_min_value(v: &Value) -> bool {
-    match v {
-        Value::String(s) => s.is_empty(),
-        Value::Float32(v) => v.0 == f32::MIN,
-        Value::Float64(v) => v.0 == f64::MIN,
-        Value::UInt8(v) => *v == 0,
-        Value::UInt16(v) => *v == 0,
-        Value::UInt32(v) => *v == 0,
-        Value::UInt64(v) => *v == 0,
-        Value::Int8(v) => *v == i8::MIN,
-        Value::Int16(v) => *v == i16::MIN,
-        Value::Int32(v) => *v == i32::MIN,
-        Value::Int64(v) => *v == i64::MIN,
-        _ => false,
-    }
 }
 
 fn is_domain_max_value(v: &Value) -> bool {
@@ -917,12 +885,13 @@ mod tests {
     fn test_split_degrade_on_uint_one_sided_impossible_upper_bound() {
         // R: a < 10 (UInt64 domain)
         let base = col("a").lt(Value::UInt64(10));
-        // S: a < 0 (impossible on UInt64)
+        // S: a < 0 is still satisfiable by NULL under null-first partition semantics.
+        // The split keeps a nullable left branch instead of degrading it as empty.
         let split = col("a").lt(Value::UInt64(0));
 
-        // left = (a < 10) AND (a < 0) is unsatisfiable on UInt64, should degrade.
-        let result = split_partition_expr(base, split);
-        assert_eq!(result.unwrap_err(), ExprSplitDegradeReason::EmptyBranch);
+        let (left, right) = split_partition_expr(base, split).unwrap();
+        assert_eq!(left.to_string(), "a < 0");
+        assert_eq!(right.to_string(), "a >= 0 AND a < 10");
     }
 
     #[test]
@@ -941,12 +910,13 @@ mod tests {
     fn test_split_degrade_on_int_one_sided_impossible_upper_bound() {
         // R: a < 10 (Int64 domain)
         let base = col("a").lt(Value::Int64(10));
-        // S: a < i64::MIN (impossible on Int64)
+        // S: a < i64::MIN is still satisfiable by NULL under null-first partition semantics.
+        // The split keeps a nullable left branch instead of degrading it as empty.
         let split = col("a").lt(Value::Int64(i64::MIN));
 
-        // left = (a < 10) AND (a < i64::MIN) is unsatisfiable on Int64, should degrade.
-        let result = split_partition_expr(base, split);
-        assert_eq!(result.unwrap_err(), ExprSplitDegradeReason::EmptyBranch);
+        let (left, right) = split_partition_expr(base, split).unwrap();
+        assert_eq!(left.to_string(), format!("a < {}", i64::MIN));
+        assert_eq!(right.to_string(), format!("a >= {} AND a < 10", i64::MIN));
     }
 
     #[test]
@@ -965,24 +935,26 @@ mod tests {
     fn test_split_degrade_on_string_one_sided_impossible_upper_bound() {
         // R: s < "z" (String domain)
         let base = col("s").lt(Value::String("z".into()));
-        // S: s < "" (impossible on String)
+        // S: s < "" is still satisfiable by NULL under null-first partition semantics.
+        // The split keeps a nullable left branch instead of degrading it as empty.
         let split = col("s").lt(Value::String("".into()));
 
-        // left = (s < "z") AND (s < "") is unsatisfiable, should degrade.
-        let result = split_partition_expr(base, split);
-        assert_eq!(result.unwrap_err(), ExprSplitDegradeReason::EmptyBranch);
+        let (left, right) = split_partition_expr(base, split).unwrap();
+        assert_eq!(left.to_string(), "s < ");
+        assert_eq!(right.to_string(), "s >=  AND s < z");
     }
 
     #[test]
     fn test_split_degrade_on_float64_one_sided_impossible_upper_bound() {
         // R: a < 10.0 (Float64 domain)
         let base = col("a").lt(Value::Float64(OrderedFloat(10.0)));
-        // S: a < f64::MIN (impossible with finite-only float policy)
+        // S: a < f64::MIN is still satisfiable by NULL under null-first partition semantics.
+        // The split keeps a nullable left branch instead of degrading it as empty.
         let split = col("a").lt(Value::Float64(OrderedFloat(f64::MIN)));
 
-        // left = (a < 10.0) AND (a < f64::MIN) is unsatisfiable, should degrade.
-        let result = split_partition_expr(base, split);
-        assert_eq!(result.unwrap_err(), ExprSplitDegradeReason::EmptyBranch);
+        let (left, right) = split_partition_expr(base, split).unwrap();
+        assert_eq!(left.to_string(), format!("a < {}", f64::MIN));
+        assert_eq!(right.to_string(), format!("a >= {} AND a < 10", f64::MIN));
     }
 
     #[test]
@@ -1001,12 +973,13 @@ mod tests {
     fn test_split_degrade_on_float32_one_sided_impossible_upper_bound() {
         // R: a < 10.0f32 (Float32 domain)
         let base = col("a").lt(Value::Float32(OrderedFloat(10.0)));
-        // S: a < f32::MIN (impossible with finite-only float policy)
+        // S: a < f32::MIN is still satisfiable by NULL under null-first partition semantics.
+        // The split keeps a nullable left branch instead of degrading it as empty.
         let split = col("a").lt(Value::Float32(OrderedFloat(f32::MIN)));
 
-        // left = (a < 10.0f32) AND (a < f32::MIN) is unsatisfiable, should degrade.
-        let result = split_partition_expr(base, split);
-        assert_eq!(result.unwrap_err(), ExprSplitDegradeReason::EmptyBranch);
+        let (left, right) = split_partition_expr(base, split).unwrap();
+        assert_eq!(left.to_string(), format!("a < {}", f32::MIN));
+        assert_eq!(right.to_string(), format!("a >= {} AND a < 10", f32::MIN));
     }
 
     #[test]
