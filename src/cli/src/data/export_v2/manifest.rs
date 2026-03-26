@@ -145,6 +145,13 @@ impl ChunkMeta {
         }
     }
 
+    /// Creates a skipped chunk with the given id and time range.
+    pub fn skipped(id: u32, time_range: TimeRange) -> Self {
+        let mut chunk = Self::new(id, time_range);
+        chunk.mark_skipped();
+        chunk
+    }
+
     /// Marks this chunk as in progress.
     pub fn mark_in_progress(&mut self) {
         self.status = ChunkStatus::InProgress;
@@ -393,10 +400,13 @@ impl Manifest {
 }
 
 fn generate_single_chunk(time_range: &TimeRange) -> Vec<ChunkMeta> {
-    if let (Some(start), Some(end)) = (time_range.start, time_range.end)
-        && start >= end
-    {
-        return Vec::new();
+    if let (Some(start), Some(end)) = (time_range.start, time_range.end) {
+        if start == end {
+            return vec![ChunkMeta::skipped(1, time_range.clone())];
+        }
+        if start > end {
+            return Vec::new();
+        }
     }
     vec![ChunkMeta::new(1, time_range.clone())]
 }
@@ -428,6 +438,26 @@ mod tests {
         assert!(manifest.schema_only);
         assert!(manifest.chunks.is_empty());
         assert!(manifest.is_complete());
+    }
+
+    #[test]
+    fn test_generate_single_chunk_zero_width_range_is_skipped() {
+        let ts = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+        let chunks = generate_single_chunk(&TimeRange::new(Some(ts), Some(ts)));
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].status, ChunkStatus::Skipped);
+        assert_eq!(chunks[0].time_range.start, Some(ts));
+        assert_eq!(chunks[0].time_range.end, Some(ts));
+    }
+
+    #[test]
+    fn test_generate_single_chunk_invalid_range_is_empty() {
+        let start = Utc.with_ymd_and_hms(2025, 1, 1, 1, 0, 0).unwrap();
+        let end = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+        let chunks = generate_single_chunk(&TimeRange::new(Some(start), Some(end)));
+
+        assert!(chunks.is_empty());
     }
 
     #[test]

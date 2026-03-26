@@ -23,7 +23,11 @@ pub fn generate_chunks(time_range: &TimeRange, window: Duration) -> Vec<ChunkMet
         return vec![ChunkMeta::new(1, time_range.clone())];
     };
 
-    if start >= end {
+    if start == end {
+        return vec![ChunkMeta::skipped(1, time_range.clone())];
+    }
+
+    if start > end {
         return Vec::new();
     }
 
@@ -53,6 +57,7 @@ mod tests {
     use chrono::{TimeZone, Utc};
 
     use super::*;
+    use crate::data::export_v2::manifest::ChunkStatus;
 
     #[test]
     fn test_generate_chunks_unbounded() {
@@ -81,6 +86,17 @@ mod tests {
     fn test_generate_chunks_empty_range() {
         let start = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
         let range = TimeRange::new(Some(start), Some(start));
+        let chunks = generate_chunks(&range, Duration::from_secs(3600));
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].status, ChunkStatus::Skipped);
+        assert_eq!(chunks[0].time_range, range);
+    }
+
+    #[test]
+    fn test_generate_chunks_invalid_range_is_empty() {
+        let start = Utc.with_ymd_and_hms(2025, 1, 1, 1, 0, 0).unwrap();
+        let end = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+        let range = TimeRange::new(Some(start), Some(end));
         let chunks = generate_chunks(&range, Duration::from_secs(3600));
         assert!(chunks.is_empty());
     }
