@@ -39,7 +39,7 @@ pub trait Ranged {
         let (lhs_start, lhs_end) = self.range();
         let (rhs_start, rhs_end) = other.range();
 
-        lhs_start.max(rhs_start) < lhs_end.min(rhs_end)
+        lhs_start.max(rhs_start) <= lhs_end.min(rhs_end)
     }
 }
 
