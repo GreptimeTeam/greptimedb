@@ -14,6 +14,9 @@
 
 use std::sync::Arc;
 
+use api::helper::ColumnDataTypeWrapper;
+use api::v1::value::ValueData;
+use api::v1::{ColumnDataType, RowInsertRequests};
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use client::Output;
@@ -24,7 +27,7 @@ use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
 use pipeline::{GreptimePipelineParams, PipelineWay};
-use servers::error::{self, AuthSnafu, Result as ServerResult};
+use servers::error::{self, AuthSnafu, CatalogSnafu, Result as ServerResult};
 use servers::http::prom_store::PHYSICAL_TABLE_PARAM;
 use servers::interceptor::{OpenTelemetryProtocolInterceptor, OpenTelemetryProtocolInterceptorRef};
 use servers::otlp;
@@ -124,7 +127,7 @@ impl OpenTelemetryProtocolHandler for Instance {
 
         let is_trace_v1_model = matches!(pipeline, PipelineWay::OtlpTraceDirectV1);
 
-        let (requests, rows) = otlp::trace::to_grpc_insert_requests(
+        let (mut requests, rows) = otlp::trace::to_grpc_insert_requests(
             request,
             pipeline,
             pipeline_params,
@@ -136,6 +139,8 @@ impl OpenTelemetryProtocolHandler for Instance {
         OTLP_TRACES_ROWS.inc_by(rows as u64);
 
         if is_trace_v1_model {
+            self.coerce_trace_numeric_columns(&mut requests, &ctx)
+                .await?;
             self.handle_trace_inserts(requests, ctx)
                 .await
                 .map_err(BoxedError::new)
@@ -198,5 +203,192 @@ impl OpenTelemetryProtocolHandler for Instance {
         }
 
         Ok(outputs)
+    }
+}
+
+/// Try to coerce a single `ValueData` to a target `ColumnDataType`.
+/// Returns the coerced value on success, or `None` if coercion is not possible.
+fn coerce_value_data(
+    value: &Option<ValueData>,
+    target: ColumnDataType,
+    request_type: ColumnDataType,
+) -> Option<Option<ValueData>> {
+    let Some(v) = value else {
+        return Some(None);
+    };
+    match (request_type, target, v) {
+        // Int64 -> Float64
+        (ColumnDataType::Int64, ColumnDataType::Float64, ValueData::I64Value(n)) => {
+            Some(Some(ValueData::F64Value(*n as f64)))
+        }
+        // String -> Int64
+        (ColumnDataType::String, ColumnDataType::Int64, ValueData::StringValue(s)) => {
+            s.parse::<i64>().ok().map(|n| Some(ValueData::I64Value(n)))
+        }
+        // String -> Float64
+        (ColumnDataType::String, ColumnDataType::Float64, ValueData::StringValue(s)) => {
+            s.parse::<f64>().ok().map(|n| Some(ValueData::F64Value(n)))
+        }
+        // String -> Boolean
+        (ColumnDataType::String, ColumnDataType::Boolean, ValueData::StringValue(s)) => s
+            .parse::<bool>()
+            .ok()
+            .map(|b| Some(ValueData::BoolValue(b))),
+        _ => None,
+    }
+}
+
+impl Instance {
+    /// Coerce request column types and values to match the existing table schema
+    /// for compatible type pairs. This handles the cross-batch case where a prior
+    /// batch created the table with one type (e.g. Float64) but the current batch
+    /// has a different type (e.g. Int64) for the same column.
+    async fn coerce_trace_numeric_columns(
+        &self,
+        requests: &mut RowInsertRequests,
+        ctx: &QueryContextRef,
+    ) -> ServerResult<()> {
+        let catalog = ctx.current_catalog();
+        let schema = ctx.current_schema();
+
+        for req in &mut requests.inserts {
+            let table = self
+                .catalog_manager
+                .table(catalog, &schema, &req.table_name, None)
+                .await
+                .context(CatalogSnafu)?;
+
+            let Some(table) = table else {
+                continue;
+            };
+            let table_schema = table.schema();
+
+            let Some(rows) = req.rows.as_mut() else {
+                continue;
+            };
+
+            for (col_idx, col_schema) in rows.schema.iter_mut().enumerate() {
+                let Some(table_col) = table_schema.column_schema_by_name(&col_schema.column_name)
+                else {
+                    continue;
+                };
+
+                let Ok(wrapper) = ColumnDataTypeWrapper::try_from(table_col.data_type.clone())
+                else {
+                    continue;
+                };
+                let table_datatype = wrapper.datatype() as i32;
+
+                if col_schema.datatype == table_datatype {
+                    continue;
+                }
+
+                let Some(request_type) = ColumnDataType::try_from(col_schema.datatype).ok() else {
+                    continue;
+                };
+                let target_type = wrapper.datatype();
+
+                let mut all_coerced = true;
+                for row in &mut rows.rows {
+                    if col_idx >= row.values.len() {
+                        continue;
+                    }
+                    let value = &row.values[col_idx].value_data;
+                    if let Some(coerced) = coerce_value_data(value, target_type, request_type) {
+                        row.values[col_idx].value_data = coerced;
+                    } else {
+                        all_coerced = false;
+                        break;
+                    }
+                }
+
+                if all_coerced {
+                    col_schema.datatype = table_datatype;
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use api::v1::ColumnDataType;
+    use api::v1::value::ValueData;
+
+    use super::coerce_value_data;
+
+    #[test]
+    fn test_coerce_int64_to_float64() {
+        let result = coerce_value_data(
+            &Some(ValueData::I64Value(42)),
+            ColumnDataType::Float64,
+            ColumnDataType::Int64,
+        );
+        assert_eq!(result, Some(Some(ValueData::F64Value(42.0))));
+    }
+
+    #[test]
+    fn test_coerce_string_to_int64() {
+        let result = coerce_value_data(
+            &Some(ValueData::StringValue("123".to_string())),
+            ColumnDataType::Int64,
+            ColumnDataType::String,
+        );
+        assert_eq!(result, Some(Some(ValueData::I64Value(123))));
+    }
+
+    #[test]
+    fn test_coerce_string_to_float64() {
+        let result = coerce_value_data(
+            &Some(ValueData::StringValue("1.5".to_string())),
+            ColumnDataType::Float64,
+            ColumnDataType::String,
+        );
+        assert_eq!(result, Some(Some(ValueData::F64Value(1.5))));
+    }
+
+    #[test]
+    fn test_coerce_string_to_boolean() {
+        let result = coerce_value_data(
+            &Some(ValueData::StringValue("true".to_string())),
+            ColumnDataType::Boolean,
+            ColumnDataType::String,
+        );
+        assert_eq!(result, Some(Some(ValueData::BoolValue(true))));
+
+        let result = coerce_value_data(
+            &Some(ValueData::StringValue("false".to_string())),
+            ColumnDataType::Boolean,
+            ColumnDataType::String,
+        );
+        assert_eq!(result, Some(Some(ValueData::BoolValue(false))));
+    }
+
+    #[test]
+    fn test_coerce_unparseable_string() {
+        let result = coerce_value_data(
+            &Some(ValueData::StringValue("not_a_number".to_string())),
+            ColumnDataType::Int64,
+            ColumnDataType::String,
+        );
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_coerce_float64_to_int64_not_supported() {
+        let result = coerce_value_data(
+            &Some(ValueData::F64Value(1.5)),
+            ColumnDataType::Int64,
+            ColumnDataType::Float64,
+        );
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_coerce_none_value() {
+        let result = coerce_value_data(&None, ColumnDataType::Float64, ColumnDataType::Int64);
+        assert_eq!(result, Some(None));
     }
 }

@@ -77,6 +77,12 @@ impl TableData {
     pub fn into_schema_and_rows(self) -> (Vec<ColumnSchema>, Vec<Row>) {
         (self.schema, self.rows)
     }
+
+    pub fn column_datatype(&self, name: &str) -> Option<i32> {
+        self.column_indexes
+            .get(name)
+            .map(|idx| self.schema[*idx].datatype)
+    }
 }
 
 pub struct MultiTableData {
