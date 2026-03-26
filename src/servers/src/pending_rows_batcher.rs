@@ -31,7 +31,7 @@ use common_grpc::flight::{FlightEncoder, FlightMessage};
 use common_meta::node_manager::NodeManagerRef;
 use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
 use common_telemetry::tracing_context::TracingContext;
-use common_telemetry::{debug, error, info, warn};
+use common_telemetry::{debug, error, warn};
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 use metric_engine::batch_modifier::{TagColumnInfo, modify_batch_sparse};
@@ -45,7 +45,8 @@ use crate::error;
 use crate::error::{Error, Result};
 use crate::metrics::{
     FLUSH_DROPPED_ROWS, FLUSH_ELAPSED, FLUSH_FAILURES, FLUSH_ROWS, FLUSH_TOTAL, PENDING_BATCHES,
-    PENDING_ROWS, PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED, PENDING_WORKERS
+    PENDING_ROWS, PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED, PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED,
+    PENDING_WORKERS,
 };
 use crate::prom_row_builder::{
     build_prom_create_table_schema_from_proto, identify_missing_columns_from_proto,
@@ -1481,18 +1482,15 @@ mod tests {
     };
     use common_query::request::QueryRequest;
     use common_recordbatch::SendableRecordBatchStream;
-    use store_api::storage::RegionId;
-    use tokio::time::sleep;
     use dashmap::DashMap;
+    use store_api::storage::RegionId;
     use tokio::sync::mpsc;
+    use tokio::time::sleep;
 
     use super::{
-        FlushRegionWrite, FlushWriteResult, PendingRowsBatcher, flush_region_writes_concurrently,
-        should_dispatch_concurrently,
-    };
-    use super::{
-        BatchKey, PendingWorker, WorkerCommand, align_record_batch_to_schema,
-        remove_worker_if_same_channel, rows_to_record_batch, should_close_worker_on_idle_timeout,
+        BatchKey, FlushRegionWrite, FlushWriteResult, PendingRowsBatcher, PendingWorker,
+        WorkerCommand, flush_region_writes_concurrently, remove_worker_if_same_channel,
+        should_close_worker_on_idle_timeout, should_dispatch_concurrently,
     };
 
     fn mock_rows(row_count: usize, schema_name: &str) -> Rows {
@@ -1630,119 +1628,6 @@ mod tests {
     }
 
     #[test]
-    fn test_rows_to_record_batch() {
-        let rows = Rows {
-            schema: vec![
-                ColumnSchema {
-                    column_name: "ts".to_string(),
-                    datatype: ColumnDataType::TimestampMillisecond as i32,
-                    semantic_type: SemanticType::Timestamp as i32,
-                    ..Default::default()
-                },
-                ColumnSchema {
-                    column_name: "value".to_string(),
-                    datatype: ColumnDataType::Float64 as i32,
-                    semantic_type: SemanticType::Field as i32,
-                    ..Default::default()
-                },
-                ColumnSchema {
-                    column_name: "host".to_string(),
-                    datatype: ColumnDataType::String as i32,
-                    semantic_type: SemanticType::Tag as i32,
-                    ..Default::default()
-                },
-            ],
-            rows: vec![
-                Row {
-                    values: vec![
-                        Value {
-                            value_data: Some(ValueData::TimestampMillisecondValue(1000)),
-                        },
-                        Value {
-                            value_data: Some(ValueData::F64Value(42.0)),
-                        },
-                        Value {
-                            value_data: Some(ValueData::StringValue("h1".to_string())),
-                        },
-                    ],
-                },
-                Row {
-                    values: vec![
-                        Value {
-                            value_data: Some(ValueData::TimestampMillisecondValue(2000)),
-                        },
-                        Value { value_data: None },
-                        Value {
-                            value_data: Some(ValueData::StringValue("h2".to_string())),
-                        },
-                    ],
-                },
-            ],
-        };
-
-        let rb = rows_to_record_batch(&rows).unwrap();
-        assert_eq!(2, rb.num_rows());
-        assert_eq!(3, rb.num_columns());
-    }
-
-    #[test]
-    fn test_align_record_batch_to_schema_reorder_and_fill_missing() {
-        let source_schema = Arc::new(ArrowSchema::new(vec![
-            Field::new("host", DataType::Utf8, true),
-            Field::new("value", DataType::Float64, true),
-        ]));
-        let source = RecordBatch::try_new(
-            source_schema,
-            vec![
-                Arc::new(StringArray::from(vec!["h1"])),
-                Arc::new(Float64Array::from(vec![42.0])),
-            ],
-        )
-        .unwrap();
-
-        let target = ArrowSchema::new(vec![
-            Field::new("ts", DataType::Int64, true),
-            Field::new("host", DataType::Utf8, true),
-            Field::new("value", DataType::Float64, true),
-        ]);
-
-        let aligned = align_record_batch_to_schema(source, &target).unwrap();
-        assert_eq!(aligned.schema().as_ref(), &target);
-        assert_eq!(1, aligned.num_rows());
-        assert_eq!(3, aligned.num_columns());
-        let ts = aligned
-            .column(0)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-        assert!(ts.is_null(0));
-    }
-
-    #[test]
-    fn test_align_record_batch_to_schema_cast_column_type() {
-        let source_schema = Arc::new(ArrowSchema::new(vec![Field::new(
-            "value",
-            DataType::Int32,
-            true,
-        )]));
-        let source = RecordBatch::try_new(
-            source_schema,
-            vec![Arc::new(Int32Array::from(vec![Some(7), None]))],
-        )
-        .unwrap();
-
-        let target = ArrowSchema::new(vec![Field::new("value", DataType::Int64, true)]);
-        let aligned = align_record_batch_to_schema(source, &target).unwrap();
-        let value = aligned
-            .column(0)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-        assert_eq!(Some(7), value.iter().next().flatten());
-        assert!(value.is_null(1));
-    }
-
-    #[test]
     fn test_remove_worker_if_same_channel_removes_matching_entry() {
         let workers = DashMap::new();
         let key = BatchKey {
@@ -1786,257 +1671,6 @@ mod tests {
         assert!(should_close_worker_on_idle_timeout(0, 0));
         assert!(!should_close_worker_on_idle_timeout(1, 0));
         assert!(!should_close_worker_on_idle_timeout(0, 1));
-    }
-
-
-    #[test]
-    fn test_prepare_record_batch_for_target_schema_collects_missing_tag_columns() {
-        let source = ArrowSchema::new(vec![
-            Field::new(
-                "greptime_timestamp",
-                DataType::Timestamp(TimeUnit::Millisecond, None),
-                false,
-            ),
-            Field::new("host", DataType::Utf8, true),
-            Field::new("instance", DataType::Utf8, true),
-            Field::new("greptime_value", DataType::Float64, true),
-        ]);
-        let target = ArrowSchema::new(vec![
-            Field::new(
-                "my_ts",
-                DataType::Timestamp(TimeUnit::Millisecond, None),
-                false,
-            ),
-            Field::new("host", DataType::Utf8, true),
-            Field::new("my_value", DataType::Float64, true),
-        ]);
-
-        let record_batch = RecordBatch::try_new(
-            Arc::new(source),
-            vec![
-                Arc::new(TimestampMillisecondArray::from(vec![Some(1000)])),
-                Arc::new(StringArray::from(vec!["h1"])),
-                Arc::new(StringArray::from(vec!["i1"])),
-                Arc::new(Float64Array::from(vec![1.0])),
-            ],
-        )
-        .unwrap();
-
-        let (_, missing) =
-            accommodate_record_batch_for_target_schema(record_batch, &target).unwrap();
-        assert_eq!(missing, vec!["instance".to_string()]);
-    }
-
-    #[test]
-    fn test_prepare_record_batch_for_target_schema_reject_non_utf8_missing_column() {
-        let source = ArrowSchema::new(vec![
-            Field::new(
-                "greptime_timestamp",
-                DataType::Timestamp(TimeUnit::Millisecond, None),
-                false,
-            ),
-            Field::new("code", DataType::Utf8, true),
-            Field::new("greptime_value", DataType::Float64, true),
-        ]);
-        let target = ArrowSchema::new(vec![
-            Field::new(
-                "my_ts",
-                DataType::Timestamp(TimeUnit::Millisecond, None),
-                false,
-            ),
-            Field::new("host", DataType::Utf8, true),
-            Field::new("my_value", DataType::Float64, true),
-        ]);
-
-        let record_batch = RecordBatch::try_new(
-            Arc::new(source),
-            vec![
-                Arc::new(TimestampMillisecondArray::from(vec![Some(1000)])),
-                Arc::new(StringArray::from(vec!["1"])),
-                Arc::new(Float64Array::from(vec![1.0])),
-            ],
-        )
-        .unwrap();
-        let (rb, mut missing) =
-            accommodate_record_batch_for_target_schema(record_batch, &target).unwrap();
-        assert_eq!(missing.len(), 1);
-        assert_eq!(missing.swap_remove(0).as_str(), "code");
-        assert_eq!(
-            rb.schema()
-                .fields
-                .iter()
-                .find(|f| matches!(f.data_type(), DataType::Timestamp(_, _)))
-                .unwrap()
-                .name(),
-            "my_ts"
-        );
-        assert_eq!(
-            rb.schema()
-                .fields
-                .iter()
-                .find(|f| matches!(f.data_type(), DataType::Float64))
-                .unwrap()
-                .name(),
-            "my_value"
-        );
-    }
-
-    #[test]
-    fn test_build_prom_create_table_schema_from_request_schema() {
-        let source = ArrowSchema::new(vec![
-            Field::new(
-                common_query::prelude::greptime_timestamp(),
-                DataType::Timestamp(TimeUnit::Millisecond, None),
-                false,
-            ),
-            Field::new("job", DataType::Utf8, true),
-            Field::new(
-                common_query::prelude::greptime_value(),
-                DataType::Float64,
-                true,
-            ),
-        ]);
-
-        let schema = build_prom_create_table_schema(&source).unwrap();
-        assert_eq!(3, schema.len());
-
-        assert_eq!(
-            common_query::prelude::greptime_timestamp(),
-            schema[0].column_name
-        );
-        assert_eq!(
-            api::v1::SemanticType::Timestamp as i32,
-            schema[0].semantic_type
-        );
-        assert_eq!(
-            api::v1::ColumnDataType::TimestampMillisecond as i32,
-            schema[0].datatype
-        );
-
-        assert_eq!("job", schema[1].column_name);
-        assert_eq!(api::v1::SemanticType::Tag as i32, schema[1].semantic_type);
-        assert_eq!(api::v1::ColumnDataType::String as i32, schema[1].datatype);
-
-        assert_eq!(
-            common_query::prelude::greptime_value(),
-            schema[2].column_name
-        );
-        assert_eq!(api::v1::SemanticType::Field as i32, schema[2].semantic_type);
-        assert_eq!(api::v1::ColumnDataType::Float64 as i32, schema[2].datatype);
-    }
-
-    #[test]
-    fn test_prepare_record_batch_for_target_schema_renames_prom_special_columns() {
-        let source_schema = Arc::new(ArrowSchema::new(vec![
-            Field::new(
-                "greptime_timestamp",
-                DataType::Timestamp(TimeUnit::Millisecond, None),
-                false,
-            ),
-            Field::new("host", DataType::Utf8, true),
-            Field::new("greptime_value", DataType::Float64, true),
-        ]));
-        let source = RecordBatch::try_new(
-            source_schema,
-            vec![
-                Arc::new(TimestampMillisecondArray::from(vec![
-                    Some(1000),
-                    Some(2000),
-                ])),
-                Arc::new(StringArray::from(vec!["h1", "h2"])),
-                Arc::new(Float64Array::from(vec![Some(1.0), Some(2.0)])),
-            ],
-        )
-        .unwrap();
-
-        let target = ArrowSchema::new(vec![
-            Field::new(
-                "my_ts",
-                DataType::Timestamp(TimeUnit::Millisecond, None),
-                false,
-            ),
-            Field::new("host", DataType::Utf8, true),
-            Field::new("my_value", DataType::Float64, true),
-        ]);
-
-        let (prepared, missing) =
-            accommodate_record_batch_for_target_schema(source, &target).unwrap();
-        assert!(missing.is_empty());
-        let aligned = align_record_batch_to_schema(prepared, &target).unwrap();
-
-        assert_eq!(aligned.schema().as_ref(), &target);
-        assert_eq!(2, aligned.num_rows());
-        assert_eq!(3, aligned.num_columns());
-    }
-
-    #[test]
-    fn test_prepare_record_batch_for_target_schema_requires_timestamp_column() {
-        let source_schema = Arc::new(ArrowSchema::new(vec![
-            Field::new(
-                "greptime_timestamp",
-                DataType::Timestamp(TimeUnit::Millisecond, None),
-                false,
-            ),
-            Field::new("host", DataType::Utf8, true),
-            Field::new("greptime_value", DataType::Float64, true),
-        ]));
-        let source = RecordBatch::try_new(
-            source_schema,
-            vec![
-                Arc::new(TimestampMillisecondArray::from(vec![Some(1000)])),
-                Arc::new(StringArray::from(vec!["h1"])),
-                Arc::new(Float64Array::from(vec![Some(1.0)])),
-            ],
-        )
-        .unwrap();
-
-        let target = ArrowSchema::new(vec![
-            Field::new("host", DataType::Utf8, true),
-            Field::new("my_value", DataType::Float64, true),
-        ]);
-
-        let err = accommodate_record_batch_for_target_schema(source, &target).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("Failed to locate timestamp column in target schema")
-        );
-    }
-
-    #[test]
-    fn test_prepare_record_batch_for_target_schema_requires_field_column() {
-        let source_schema = Arc::new(ArrowSchema::new(vec![
-            Field::new(
-                "greptime_timestamp",
-                DataType::Timestamp(TimeUnit::Millisecond, None),
-                false,
-            ),
-            Field::new("host", DataType::Utf8, true),
-            Field::new("greptime_value", DataType::Float64, true),
-        ]));
-        let source = RecordBatch::try_new(
-            source_schema,
-            vec![
-                Arc::new(TimestampMillisecondArray::from(vec![Some(1000)])),
-                Arc::new(StringArray::from(vec!["h1"])),
-                Arc::new(Float64Array::from(vec![Some(1.0)])),
-            ],
-        )
-        .unwrap();
-
-        let target = ArrowSchema::new(vec![
-            Field::new(
-                "my_ts",
-                DataType::Timestamp(TimeUnit::Millisecond, None),
-                false,
-            ),
-            Field::new("host", DataType::Utf8, true),
-        ]);
-
-        let err = accommodate_record_batch_for_target_schema(source, &target).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("Failed to locate field column in target schema")
-        );
     }
 
     #[tokio::test]
