@@ -22,7 +22,7 @@ futures.workspace = true
 humantime-serde.workspace = true
 lazy_static.workspace = true
 moka = { workspace = true, features = ["future"] }
-opendal = { version = "0.54", features = [
+opendal = { git = "https://github.com/apache/opendal.git", rev = "7f32b1ba925666827b125d94f15af6f79847a58b", features = [
     "layers-tracing",
     "layers-prometheus",
     "services-azblob",
