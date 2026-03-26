@@ -151,6 +151,11 @@ pub struct MitoConfig {
     /// Memory limit for table scans across all queries. Setting it to 0 disables the limit.
     /// Supports absolute size (e.g., "2GB") or percentage (e.g., "50%").
     pub scan_memory_limit: MemoryLimit,
+    /// Behavior when scan memory tracking cannot acquire memory from the budget.
+    /// `wait` means `wait(10s)`, not unlimited waiting.
+    /// Defaults to [`OnExhaustedPolicy::Fail`], which intentionally differs from
+    /// [`OnExhaustedPolicy::default()`].
+    pub scan_memory_on_exhausted: OnExhaustedPolicy,
 
     /// Index configs.
     pub index: IndexConfig,
@@ -216,6 +221,7 @@ impl Default for MitoConfig {
             max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
             allow_stale_entries: false,
             scan_memory_limit: MemoryLimit::default(),
+            scan_memory_on_exhausted: OnExhaustedPolicy::Fail,
             index: IndexConfig::default(),
             inverted_index: InvertedIndexConfig::default(),
             fulltext_index: FulltextIndexConfig::default(),
