@@ -463,13 +463,11 @@ struct CacheBatchBuffer {
 
 impl CacheBatchBuffer {
     fn new(cache_strategy: &CacheStrategy) -> Self {
-        let sender = cache_strategy
-            .range_result_memory_limiter()
-            .map(|limiter| {
-                let (tx, rx) = mpsc::unbounded_channel();
-                common_runtime::spawn_global(run_cache_concat_task(rx, limiter.clone()));
-                tx
-            });
+        let sender = cache_strategy.range_result_memory_limiter().map(|limiter| {
+            let (tx, rx) = mpsc::unbounded_channel();
+            common_runtime::spawn_global(run_cache_concat_task(rx, limiter.clone()));
+            tx
+        });
 
         Self {
             buffered_batches: Vec::new(),

@@ -412,11 +412,11 @@ impl CacheStrategy {
         }
     }
 
-    pub(crate) fn range_result_memory_limiter(
-        &self,
-    ) -> Option<&Arc<RangeResultMemoryLimiter>> {
+    pub(crate) fn range_result_memory_limiter(&self) -> Option<&Arc<RangeResultMemoryLimiter>> {
         match self {
-            CacheStrategy::EnableAll(cache_manager) => Some(cache_manager.range_result_memory_limiter()),
+            CacheStrategy::EnableAll(cache_manager) => {
+                Some(cache_manager.range_result_memory_limiter())
+            }
             CacheStrategy::Compaction(_) | CacheStrategy::Disabled => None,
         }
     }
@@ -785,9 +785,7 @@ impl CacheManager {
         }
     }
 
-    pub(crate) fn range_result_memory_limiter(
-        &self,
-    ) -> &Arc<RangeResultMemoryLimiter> {
+    pub(crate) fn range_result_memory_limiter(&self) -> &Arc<RangeResultMemoryLimiter> {
         &self.range_result_memory_limiter
     }
 
