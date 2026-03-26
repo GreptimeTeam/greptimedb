@@ -67,7 +67,7 @@ fn equal(lhs: &dyn Vector, rhs: &dyn Vector) -> bool {
                 .downcast_ref::<ConstantVector>()
                 .unwrap()
                 .inner(),
-            &**lhs
+            &**rhs
                 .as_any()
                 .downcast_ref::<ConstantVector>()
                 .unwrap()
