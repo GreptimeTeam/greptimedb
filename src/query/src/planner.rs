@@ -857,4 +857,16 @@ mod tests {
         let type_1 = types.get("$1").unwrap();
         assert_eq!(type_1, &Some(DataType::Utf8));
     }
+
+    #[tokio::test]
+    async fn test_get_inferred_parameter_types_insert() {
+        let plan = parse_sql_to_plan("INSERT INTO test (id, name) VALUES ($1, $2), ($3, $4)").await;
+        let types = DfLogicalPlanner::get_inferred_parameter_types(&plan).unwrap();
+
+        assert_eq!(types.len(), 4);
+        assert_eq!(types.get("$1"), Some(&Some(DataType::Int32)));
+        assert_eq!(types.get("$2"), Some(&Some(DataType::Utf8)));
+        assert_eq!(types.get("$3"), Some(&Some(DataType::Int32)));
+        assert_eq!(types.get("$4"), Some(&Some(DataType::Utf8)));
+    }
 }
