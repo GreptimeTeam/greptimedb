@@ -115,6 +115,9 @@ pub fn split_partition_expr(
 /// Notes:
 /// - This is still a conservative fast path focused on conjunction emptiness
 ///   detection for split degradation.
+/// - `split_partition_expr` currently restricts its main path to range-only
+///   conjunctions, but this helper remains slightly more general so shared
+///   bound collection and direct conflict checks stay reusable.
 fn is_empty_and_conjunction(expr: &PartitionExpr) -> bool {
     let Some(collected) = collect_conjunction_bounds(expr) else {
         return false;
@@ -556,6 +559,11 @@ fn atom_col_op_val(expr: &PartitionExpr) -> Option<(String, RestrictedOp, Value)
 ///   need to rebuild the conjunction.
 /// - `has_conflict` is set when atomic constraints already contradict each
 ///   other (for example `a = 1 AND a <> 1`).
+///
+/// Notes:
+/// - This helper is intentionally a bit more general than the current
+///   `split_partition_expr` contract, which now only feeds range-only
+///   conjunctions into the main split path.
 fn collect_conjunction_bounds(expr: &PartitionExpr) -> Option<CollectedConjunction> {
     let mut atoms = Vec::new();
     if !collect_and_atoms(expr, &mut atoms) {
@@ -1134,15 +1142,16 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_supported_expr_nan_range_rejected() {
-        // NaN cannot be used in range predicates.
+    fn test_validate_supported_expr_nan_comparison_rejected() {
+        // NaN cannot be used in any supported comparison predicate.
         let expr = col("a").lt(Value::Float64(OrderedFloat(f64::NAN)));
         assert!(validate_supported_expr(&expr).is_err());
     }
 
     #[test]
-    fn test_validate_supported_expr_infinite_range_rejected() {
-        // Infinity cannot be used in range predicates under finite-only float policy.
+    fn test_validate_supported_expr_infinite_comparison_rejected() {
+        // Infinity cannot be used in any supported comparison predicate under
+        // finite-only float policy.
         let pos_inf = col("a").gt(Value::Float64(OrderedFloat(f64::INFINITY)));
         let neg_inf = col("a").lt(Value::Float32(OrderedFloat(f32::NEG_INFINITY)));
         assert!(validate_supported_expr(&pos_inf).is_err());
