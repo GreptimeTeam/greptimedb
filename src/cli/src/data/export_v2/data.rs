@@ -14,6 +14,7 @@
 
 use common_base::secrets::{ExposeSecret, SecretString};
 use common_telemetry::info;
+use object_store::util::{join_path, normalize_path};
 use snafu::ResultExt;
 use url::Url;
 
@@ -55,8 +56,7 @@ pub(super) fn build_copy_target(
 
     match scheme {
         StorageScheme::File => {
-            let root = url.path().trim_end_matches('/');
-            let location = format!("{}/{}", root, suffix);
+            let location = normalize_path(&format!("{}/{}", url.path(), suffix));
             Ok(CopyTarget {
                 location,
                 connection: String::new(),
@@ -167,15 +167,7 @@ fn extract_bucket_root(url: &Url, snapshot_uri: &str) -> Result<(String, String)
 }
 
 fn join_root(root: &str, suffix: &str) -> String {
-    if root.is_empty() {
-        suffix.to_string()
-    } else {
-        format!(
-            "{}/{}",
-            root.trim_end_matches('/'),
-            suffix.trim_start_matches('/')
-        )
-    }
+    join_path(root, suffix).trim_start_matches('/').to_string()
 }
 
 fn build_s3_connection(storage: &ObjectStoreConfig) -> (String, Vec<Option<String>>) {

@@ -201,7 +201,7 @@ impl fmt::Display for DataFormat {
 impl str::FromStr for DataFormat {
     type Err = String;
 
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "parquet" => Ok(DataFormat::Parquet),
             "csv" => Ok(DataFormat::Csv),
