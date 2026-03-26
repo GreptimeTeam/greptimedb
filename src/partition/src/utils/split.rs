@@ -107,111 +107,22 @@ pub fn split_partition_expr(
 /// - This is still a conservative fast path focused on conjunction emptiness
 ///   detection for split degradation.
 fn is_empty_and_conjunction(expr: &PartitionExpr) -> bool {
-    let mut atoms = Vec::new();
-    // Only handle conjunction trees. If expression contains OR, skip here.
-    if !collect_and_atoms(expr, &mut atoms) {
+    let Some(collected) = collect_conjunction_bounds(expr) else {
         return false;
+    };
+
+    if collected.has_conflict {
+        return true;
     }
 
-    let mut lowers: BTreeMap<String, LowerBound> = BTreeMap::new();
-    let mut uppers: BTreeMap<String, UpperBound> = BTreeMap::new();
-    let mut equals: BTreeMap<String, Value> = BTreeMap::new();
-    let mut not_equals: BTreeMap<String, HashSet<Value>> = BTreeMap::new();
-
-    for atom in atoms {
-        let atom = atom.canonicalize();
-        let Some((col, op, val)) = atom_col_op_val(&atom) else {
-            continue;
-        };
-
-        match op {
-            // Keep the tightest upper bound for this column.
-            RestrictedOp::Lt | RestrictedOp::LtEq => {
-                let candidate = UpperBound {
-                    value: val,
-                    inclusive: matches!(op, RestrictedOp::LtEq),
-                };
-                match uppers.get_mut(&col) {
-                    Some(current) => {
-                        if prefer_upper(&candidate, current) {
-                            *current = candidate;
-                        }
-                    }
-                    None => {
-                        uppers.insert(col, candidate);
-                    }
-                }
-            }
-            // Keep the tightest lower bound for this column.
-            RestrictedOp::Gt | RestrictedOp::GtEq => {
-                let candidate = LowerBound {
-                    value: val,
-                    inclusive: matches!(op, RestrictedOp::GtEq),
-                };
-                match lowers.get_mut(&col) {
-                    Some(current) => {
-                        if prefer_lower(&candidate, current) {
-                            *current = candidate;
-                        }
-                    }
-                    None => {
-                        lowers.insert(col, candidate);
-                    }
-                }
-            }
-            // Equality means both lower and upper are fixed at the same point.
-            RestrictedOp::Eq => {
-                if let Some(existing) = equals.get(&col)
-                    && existing != &val
-                {
-                    return true;
-                }
-                if not_equals
-                    .get(&col)
-                    .is_some_and(|excluded| excluded.contains(&val))
-                {
-                    return true;
-                }
-                equals.insert(col.clone(), val.clone());
-
-                let lower = LowerBound {
-                    value: val.clone(),
-                    inclusive: true,
-                };
-                let upper = UpperBound {
-                    value: val,
-                    inclusive: true,
-                };
-                match lowers.get_mut(&col) {
-                    Some(current) => {
-                        if prefer_lower(&lower, current) {
-                            *current = lower;
-                        }
-                    }
-                    None => {
-                        lowers.insert(col.clone(), lower);
-                    }
-                }
-                match uppers.get_mut(&col) {
-                    Some(current) => {
-                        if prefer_upper(&upper, current) {
-                            *current = upper;
-                        }
-                    }
-                    None => {
-                        uppers.insert(col, upper);
-                    }
-                }
-            }
-            RestrictedOp::NotEq => {
-                if equals.get(&col).is_some_and(|eq| eq == &val) {
-                    return true;
-                }
-                not_equals.entry(col).or_default().insert(val);
-            }
-            RestrictedOp::And | RestrictedOp::Or => {}
-        }
-    }
+    let CollectedConjunction {
+        lowers,
+        uppers,
+        equals: _,
+        not_equals,
+        passthrough: _,
+        has_conflict: _,
+    } = collected;
 
     if uppers
         .iter()
@@ -510,6 +421,15 @@ struct UpperBound {
     inclusive: bool,
 }
 
+struct CollectedConjunction {
+    lowers: BTreeMap<String, LowerBound>,
+    uppers: BTreeMap<String, UpperBound>,
+    equals: BTreeMap<String, Value>,
+    not_equals: BTreeMap<String, HashSet<Value>>,
+    passthrough: Vec<PartitionExpr>,
+    has_conflict: bool,
+}
+
 /// Simplifies conjunction-only range predicates by keeping the tightest bounds per column.
 ///
 /// This pass is intentionally conservative and only runs when the whole expression
@@ -532,68 +452,18 @@ struct UpperBound {
 /// - `a >= 10 AND a > 10` => `a > 10`
 /// - `a < 10 AND a < 5`   => `a < 5`
 fn simplify_and_bounds(expr: PartitionExpr) -> PartitionExpr {
-    let mut atoms = Vec::new();
-    if !collect_and_atoms(&expr, &mut atoms) {
+    let Some(collected) = collect_conjunction_bounds(&expr) else {
         return expr;
-    }
+    };
 
-    let mut passthrough = Vec::new();
-    let mut lowers: BTreeMap<String, LowerBound> = BTreeMap::new();
-    let mut uppers: BTreeMap<String, UpperBound> = BTreeMap::new();
-    let mut seen = HashSet::new();
-
-    for atom in atoms {
-        let atom = atom.canonicalize();
-        let Some((col, op, val)) = atom_col_op_val(&atom) else {
-            let key = atom.to_string();
-            if seen.insert(key) {
-                passthrough.push(atom);
-            }
-            continue;
-        };
-
-        // Keep only the tightest lower/upper range for each column.
-        match op {
-            RestrictedOp::Lt | RestrictedOp::LtEq => {
-                let candidate = UpperBound {
-                    value: val,
-                    inclusive: matches!(op, RestrictedOp::LtEq),
-                };
-                match uppers.get_mut(&col) {
-                    Some(current) => {
-                        if prefer_upper(&candidate, current) {
-                            *current = candidate;
-                        }
-                    }
-                    None => {
-                        uppers.insert(col, candidate);
-                    }
-                }
-            }
-            RestrictedOp::Gt | RestrictedOp::GtEq => {
-                let candidate = LowerBound {
-                    value: val,
-                    inclusive: matches!(op, RestrictedOp::GtEq),
-                };
-                match lowers.get_mut(&col) {
-                    Some(current) => {
-                        if prefer_lower(&candidate, current) {
-                            *current = candidate;
-                        }
-                    }
-                    None => {
-                        lowers.insert(col, candidate);
-                    }
-                }
-            }
-            _ => {
-                let key = atom.to_string();
-                if seen.insert(key) {
-                    passthrough.push(atom);
-                }
-            }
-        }
-    }
+    let CollectedConjunction {
+        lowers,
+        uppers,
+        equals: _,
+        not_equals: _,
+        passthrough,
+        has_conflict: _,
+    } = collected;
 
     let mut out = passthrough;
     out.extend(lowers.into_iter().map(|(col, lower)| {
@@ -656,6 +526,143 @@ fn atom_col_op_val(expr: &PartitionExpr) -> Option<(String, RestrictedOp, Value)
             Some((col.clone(), expr.op().clone(), v.clone()))
         }
         _ => None,
+    }
+}
+
+fn collect_conjunction_bounds(expr: &PartitionExpr) -> Option<CollectedConjunction> {
+    let mut atoms = Vec::new();
+    if !collect_and_atoms(expr, &mut atoms) {
+        return None;
+    }
+
+    let mut lowers = BTreeMap::new();
+    let mut uppers = BTreeMap::new();
+    let mut equals = BTreeMap::new();
+    let mut not_equals: BTreeMap<String, HashSet<Value>> = BTreeMap::new();
+    let mut passthrough = Vec::new();
+    let mut seen = HashSet::new();
+    let mut has_conflict = false;
+
+    for atom in atoms {
+        let atom = atom.canonicalize();
+        let Some((col, op, val)) = atom_col_op_val(&atom) else {
+            push_unique_expr(&mut passthrough, &mut seen, atom);
+            continue;
+        };
+
+        match op {
+            RestrictedOp::Lt | RestrictedOp::LtEq => update_upper_bound(
+                &mut uppers,
+                col,
+                UpperBound {
+                    value: val,
+                    inclusive: matches!(op, RestrictedOp::LtEq),
+                },
+            ),
+            RestrictedOp::Gt | RestrictedOp::GtEq => update_lower_bound(
+                &mut lowers,
+                col,
+                LowerBound {
+                    value: val,
+                    inclusive: matches!(op, RestrictedOp::GtEq),
+                },
+            ),
+            RestrictedOp::Eq => {
+                if let Some(existing) = equals.get(&col)
+                    && existing != &val
+                {
+                    has_conflict = true;
+                }
+                if not_equals
+                    .get(&col)
+                    .is_some_and(|excluded| excluded.contains(&val))
+                {
+                    has_conflict = true;
+                }
+                equals.insert(col.clone(), val.clone());
+                update_lower_bound(
+                    &mut lowers,
+                    col.clone(),
+                    LowerBound {
+                        value: val.clone(),
+                        inclusive: true,
+                    },
+                );
+                update_upper_bound(
+                    &mut uppers,
+                    col,
+                    UpperBound {
+                        value: val,
+                        inclusive: true,
+                    },
+                );
+                push_unique_expr(&mut passthrough, &mut seen, atom);
+            }
+            RestrictedOp::NotEq => {
+                if equals.get(&col).is_some_and(|eq| eq == &val) {
+                    has_conflict = true;
+                }
+                not_equals.entry(col).or_default().insert(val);
+                push_unique_expr(&mut passthrough, &mut seen, atom);
+            }
+            RestrictedOp::And | RestrictedOp::Or => {
+                push_unique_expr(&mut passthrough, &mut seen, atom);
+            }
+        }
+    }
+
+    Some(CollectedConjunction {
+        lowers,
+        uppers,
+        equals,
+        not_equals,
+        passthrough,
+        has_conflict,
+    })
+}
+
+fn push_unique_expr(
+    out: &mut Vec<PartitionExpr>,
+    seen: &mut HashSet<String>,
+    expr: PartitionExpr,
+) {
+    let key = expr.to_string();
+    if seen.insert(key) {
+        out.push(expr);
+    }
+}
+
+fn update_upper_bound(
+    uppers: &mut BTreeMap<String, UpperBound>,
+    col: String,
+    candidate: UpperBound,
+) {
+    match uppers.get_mut(&col) {
+        Some(current) => {
+            if prefer_upper(&candidate, current) {
+                *current = candidate;
+            }
+        }
+        None => {
+            uppers.insert(col, candidate);
+        }
+    }
+}
+
+fn update_lower_bound(
+    lowers: &mut BTreeMap<String, LowerBound>,
+    col: String,
+    candidate: LowerBound,
+) {
+    match lowers.get_mut(&col) {
+        Some(current) => {
+            if prefer_lower(&candidate, current) {
+                *current = candidate;
+            }
+        }
+        None => {
+            lowers.insert(col, candidate);
+        }
     }
 }
 
