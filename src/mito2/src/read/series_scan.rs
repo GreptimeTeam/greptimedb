@@ -168,7 +168,7 @@ impl SeriesScan {
             }
         );
 
-        self.maybe_start_distributor(metrics_set, &self.metrics_list);
+        self.maybe_start_distributor(metrics_set, &self.metrics_list, ctx.explain_verbose);
 
         let mut receiver = self.take_receiver(partition)?;
         let stream = try_stream! {
@@ -214,6 +214,7 @@ impl SeriesScan {
         &self,
         metrics_set: &ExecutionPlanMetricsSet,
         metrics_list: &Arc<PartitionMetricsList>,
+        explain_verbose: bool,
     ) {
         let mut rx_list = self.receivers.lock().unwrap();
         if !rx_list.is_empty() {
@@ -229,6 +230,7 @@ impl SeriesScan {
             senders,
             metrics_set: metrics_set.clone(),
             metrics_list: metrics_list.clone(),
+            explain_verbose,
         };
         let region_id = distributor.stream_ctx.input.mapper.metadata().region_id;
         let span = tracing::info_span!("SeriesScan::distributor", region_id = %region_id);
@@ -430,6 +432,8 @@ struct SeriesDistributor {
     /// distributor.
     metrics_set: ExecutionPlanMetricsSet,
     metrics_list: Arc<PartitionMetricsList>,
+    /// Whether to use verbose logging and collect detailed metrics.
+    explain_verbose: bool,
 }
 
 impl SeriesDistributor {
@@ -470,7 +474,7 @@ impl SeriesDistributor {
 
         let part_metrics = new_partition_metrics(
             &self.stream_ctx,
-            false,
+            self.explain_verbose,
             &self.metrics_set,
             self.partitions.len(),
             &self.metrics_list,
@@ -576,7 +580,7 @@ impl SeriesDistributor {
 
         let part_metrics = new_partition_metrics(
             &self.stream_ctx,
-            false,
+            self.explain_verbose,
             &self.metrics_set,
             self.partitions.len(),
             &self.metrics_list,
