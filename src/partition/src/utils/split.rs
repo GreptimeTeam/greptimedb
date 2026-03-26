@@ -38,8 +38,6 @@ pub enum ExprSplitDegradeReason {
     UnsupportedNotExpansion,
     ColliderRejected,
     EmptyBranch,
-    ValidationFailed,
-    SimplifyFailed,
 }
 
 /// Splits one partition expression with a split predicate.
@@ -458,12 +456,7 @@ fn validate_atomic(expr: &PartitionExpr) -> Result<()> {
                 is_supported_value(v),
                 error::InvalidExprSnafu { expr: expr.clone() }
             );
-            if (is_nan_value(v) || is_infinite_value(v))
-                && matches!(
-                    expr.op(),
-                    RestrictedOp::Lt | RestrictedOp::LtEq | RestrictedOp::Gt | RestrictedOp::GtEq
-                )
-            {
+            if is_nan_value(v) || is_infinite_value(v) {
                 return error::InvalidExprSnafu { expr: expr.clone() }.fail();
             }
             Ok(())
@@ -1104,6 +1097,20 @@ mod tests {
         // Infinity cannot be used in range predicates under finite-only float policy.
         let pos_inf = col("a").gt(Value::Float64(OrderedFloat(f64::INFINITY)));
         let neg_inf = col("a").lt(Value::Float32(OrderedFloat(f32::NEG_INFINITY)));
+        assert!(validate_supported_expr(&pos_inf).is_err());
+        assert!(validate_supported_expr(&neg_inf).is_err());
+    }
+
+    #[test]
+    fn test_validate_supported_expr_nan_eq_rejected() {
+        let expr = col("a").eq(Value::Float64(OrderedFloat(f64::NAN)));
+        assert!(validate_supported_expr(&expr).is_err());
+    }
+
+    #[test]
+    fn test_validate_supported_expr_infinite_eq_rejected() {
+        let pos_inf = col("a").eq(Value::Float64(OrderedFloat(f64::INFINITY)));
+        let neg_inf = col("a").not_eq(Value::Float32(OrderedFloat(f32::NEG_INFINITY)));
         assert!(validate_supported_expr(&pos_inf).is_err());
         assert!(validate_supported_expr(&neg_inf).is_err());
     }
