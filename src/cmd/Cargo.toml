@@ -115,9 +115,3 @@ temp-env = "0.3"
 tempfile.workspace = true
 file-engine.workspace = true
 mito2.workspace = true
-
-[target.'cfg(not(windows))'.dev-dependencies]
-rexpect = "0.5"
-
-[package.metadata.cargo-udeps.ignore]
-development = ["rexpect"]
