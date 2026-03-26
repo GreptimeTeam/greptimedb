@@ -1548,6 +1548,7 @@ sst_write_buffer_size = "8MiB"
 parallel_scan_channel_size = 32
 max_concurrent_scan_files = 384
 allow_stale_entries = false
+scan_memory_on_exhausted = "fail"
 min_compaction_interval = "0s"
 default_experimental_flat_format = false
 
