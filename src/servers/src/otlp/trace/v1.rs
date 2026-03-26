@@ -573,7 +573,7 @@ mod tests {
             Some((ColumnDataType::Boolean, ValueData::BoolValue(true)))
         );
 
-        // Unparseable string -> Int64 returns None
+        // Unparsable string -> Int64 returns None
         let result = coerce_to_existing_type(
             ColumnDataType::Int64 as i32,
             ColumnDataType::String,

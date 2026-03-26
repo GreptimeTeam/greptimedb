@@ -385,7 +385,7 @@ mod tests {
     }
 
     #[test]
-    fn test_coerce_unparseable_string() {
+    fn test_coerce_unparsable_string() {
         let result = coerce_value_data(
             &Some(ValueData::StringValue("not_a_number".to_string())),
             ColumnDataType::Int64,
