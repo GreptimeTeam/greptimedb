@@ -102,8 +102,8 @@ pub fn split_partition_expr(
 /// - After bounds are collected, the conjunction is empty iff for any column:
 ///   - lower value is greater than upper value, or
 ///   - lower value equals upper value but at least one bound is exclusive.
-/// - For discrete domains (`Int*`, `UInt*`, `Date`, `Timestamp`), adjacent open
-///   bounds with no representable value in between are also treated as empty.
+/// - For discrete domains (`Int*`, `UInt*`), adjacent open bounds with no
+///   representable value in between are also treated as empty.
 ///
 /// Notes:
 /// - This is still a conservative fast path focused on conjunction emptiness
@@ -285,8 +285,6 @@ fn discrete_value_index(v: &Value) -> Option<i128> {
         Value::UInt16(x) => Some(*x as i128),
         Value::UInt32(x) => Some(*x as i128),
         Value::UInt64(x) => Some(*x as i128),
-        Value::Date(x) => Some(x.val() as i128),
-        Value::Timestamp(x) => Some((x.value() as i128) * (x.unit().factor() as i128)),
         _ => None,
     }
 }
@@ -320,7 +318,6 @@ fn is_domain_min_value(v: &Value) -> bool {
         Value::Int16(v) => *v == i16::MIN,
         Value::Int32(v) => *v == i32::MIN,
         Value::Int64(v) => *v == i64::MIN,
-        // TODO(weny): handle Date/Timestamp datatypes
         _ => false,
     }
 }
@@ -337,7 +334,6 @@ fn is_domain_max_value(v: &Value) -> bool {
         Value::Int16(v) => *v == i16::MAX,
         Value::Int32(v) => *v == i32::MAX,
         Value::Int64(v) => *v == i64::MAX,
-        // TODO(weny): handle Date/Timestamp datatypes
         _ => false,
     }
 }
@@ -490,8 +486,6 @@ fn is_supported_value(v: &Value) -> bool {
             | Value::Float32(_)
             | Value::Float64(_)
             | Value::String(_)
-            | Value::Timestamp(_)
-            | Value::Date(_)
     )
 }
 
@@ -864,15 +858,23 @@ mod tests {
     }
 
     #[test]
-    fn test_split_degrade_on_discrete_gap_date() {
-        // R: d < 5
+    fn test_split_degrade_on_unsupported_date_type() {
+        // Date is intentionally excluded from split-supported value types.
         let base = col("d").lt(Value::Date(5.into()));
-        // S: d <= 4
         let split = col("d").lt_eq(Value::Date(4.into()));
 
-        // right = (d < 5) AND (d > 4) has no date solution, should degrade.
         let result = split_partition_expr(base, split);
-        assert_eq!(result.unwrap_err(), ExprSplitDegradeReason::EmptyBranch);
+        assert_eq!(result.unwrap_err(), ExprSplitDegradeReason::UnsupportedType);
+    }
+
+    #[test]
+    fn test_split_degrade_on_unsupported_timestamp_type() {
+        // Timestamp is intentionally excluded from split-supported value types.
+        let base = col("ts").lt(Value::Timestamp(0.into()));
+        let split = col("ts").lt_eq(Value::Timestamp(1.into()));
+
+        let result = split_partition_expr(base, split);
+        assert_eq!(result.unwrap_err(), ExprSplitDegradeReason::UnsupportedType);
     }
 
     #[test]
