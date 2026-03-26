@@ -118,7 +118,6 @@ fn is_empty_and_conjunction(expr: &PartitionExpr) -> bool {
     let CollectedConjunction {
         lowers,
         uppers,
-        equals: _,
         not_equals,
         passthrough: _,
         has_conflict: _,
@@ -424,7 +423,6 @@ struct UpperBound {
 struct CollectedConjunction {
     lowers: BTreeMap<String, LowerBound>,
     uppers: BTreeMap<String, UpperBound>,
-    equals: BTreeMap<String, Value>,
     not_equals: BTreeMap<String, HashSet<Value>>,
     passthrough: Vec<PartitionExpr>,
     has_conflict: bool,
@@ -459,7 +457,6 @@ fn simplify_and_bounds(expr: PartitionExpr) -> PartitionExpr {
     let CollectedConjunction {
         lowers,
         uppers,
-        equals: _,
         not_equals: _,
         passthrough,
         has_conflict: _,
@@ -614,18 +611,13 @@ fn collect_conjunction_bounds(expr: &PartitionExpr) -> Option<CollectedConjuncti
     Some(CollectedConjunction {
         lowers,
         uppers,
-        equals,
         not_equals,
         passthrough,
         has_conflict,
     })
 }
 
-fn push_unique_expr(
-    out: &mut Vec<PartitionExpr>,
-    seen: &mut HashSet<String>,
-    expr: PartitionExpr,
-) {
+fn push_unique_expr(out: &mut Vec<PartitionExpr>, seen: &mut HashSet<String>, expr: PartitionExpr) {
     let key = expr.to_string();
     if seen.insert(key) {
         out.push(expr);
