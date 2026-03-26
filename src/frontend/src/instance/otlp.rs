@@ -238,6 +238,16 @@ fn coerce_value_data(
     }
 }
 
+fn coerce_column_values(
+    values: impl Iterator<Item = Option<ValueData>>,
+    target: ColumnDataType,
+    request_type: ColumnDataType,
+) -> Option<Vec<Option<ValueData>>> {
+    values
+        .map(|value| coerce_value_data(&value, target, request_type))
+        .collect()
+}
+
 impl Instance {
     /// Coerce request column types and values to match the existing table schema
     /// for compatible type pairs. This handles the cross-batch case where a prior
@@ -287,24 +297,32 @@ impl Instance {
                     continue;
                 };
                 let target_type = wrapper.datatype();
-
-                let mut all_coerced = true;
-                for row in &mut rows.rows {
-                    if col_idx >= row.values.len() {
-                        continue;
+                let coerced_values = coerce_column_values(
+                    rows.rows.iter().filter_map(|row| {
+                        row.values
+                            .get(col_idx)
+                            .map(|value| value.value_data.clone())
+                    }),
+                    target_type,
+                    request_type,
+                )
+                .ok_or_else(|| {
+                    error::InvalidParameterSnafu {
+                        reason: format!(
+                            "failed to coerce trace column '{}' in table '{}' from {:?} to {:?}",
+                            col_schema.column_name, req.table_name, request_type, target_type
+                        ),
                     }
-                    let value = &row.values[col_idx].value_data;
-                    if let Some(coerced) = coerce_value_data(value, target_type, request_type) {
-                        row.values[col_idx].value_data = coerced;
-                    } else {
-                        all_coerced = false;
-                        break;
+                    .build()
+                })?;
+
+                for (row, coerced_value) in rows.rows.iter_mut().zip(coerced_values) {
+                    if col_idx < row.values.len() {
+                        row.values[col_idx].value_data = coerced_value;
                     }
                 }
 
-                if all_coerced {
-                    col_schema.datatype = table_datatype;
-                }
+                col_schema.datatype = table_datatype;
             }
         }
 
@@ -317,7 +335,7 @@ mod tests {
     use api::v1::ColumnDataType;
     use api::v1::value::ValueData;
 
-    use super::coerce_value_data;
+    use super::{coerce_column_values, coerce_value_data};
 
     #[test]
     fn test_coerce_int64_to_float64() {
@@ -390,5 +408,19 @@ mod tests {
     fn test_coerce_none_value() {
         let result = coerce_value_data(&None, ColumnDataType::Float64, ColumnDataType::Int64);
         assert_eq!(result, Some(None));
+    }
+
+    #[test]
+    fn test_coerce_column_values_aborts_on_parse_failure() {
+        let result = coerce_column_values(
+            vec![
+                Some(ValueData::StringValue("1.5".to_string())),
+                Some(ValueData::StringValue("not_a_number".to_string())),
+            ]
+            .into_iter(),
+            ColumnDataType::Float64,
+            ColumnDataType::String,
+        );
+        assert_eq!(result, None);
     }
 }
