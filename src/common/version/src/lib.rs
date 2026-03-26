@@ -109,6 +109,10 @@ pub const fn version() -> &'static str {
     BUILD_INFO.version
 }
 
+pub const fn product_name() -> &'static str {
+    env!("GREPTIME_PRODUCT_NAME")
+}
+
 pub const fn verbose_version() -> &'static str {
     const_format::formatcp!(
         "\nbranch: {}\ncommit: {}\nclean: {}\nversion: {}",

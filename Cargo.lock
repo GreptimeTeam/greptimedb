@@ -2055,6 +2055,7 @@ dependencies = [
  "common-time",
  "common-version",
  "common-wal",
+ "const_format",
  "datafusion",
  "datafusion-common",
  "datafusion-physical-plan",
@@ -7301,7 +7302,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07033963ba89ebaf1584d767badaa2e8fcec21aedea6b8c0346d487d49c28667"
 dependencies = [
  "cfg-if",
- "windows-targets 0.48.5",
+ "windows-targets 0.52.6",
 ]
 
 [[package]]
