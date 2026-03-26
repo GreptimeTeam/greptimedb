@@ -54,6 +54,7 @@ common-telemetry = { workspace = true, features = [
 common-time.workspace = true
 common-version.workspace = true
 common-wal.workspace = true
+const_format.workspace = true
 datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-physical-plan.workspace = true

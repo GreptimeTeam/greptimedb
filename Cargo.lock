@@ -2055,6 +2055,7 @@ dependencies = [
  "common-time",
  "common-version",
  "common-wal",
+ "const_format",
  "datafusion",
  "datafusion-common",
  "datafusion-physical-plan",

@@ -50,7 +50,11 @@ pub(crate) struct GreptimeDBStartupParameters {
 impl GreptimeDBStartupParameters {
     fn new() -> GreptimeDBStartupParameters {
         GreptimeDBStartupParameters {
-            version: format!("16.3-greptimedb-{}", common_version::version()),
+            version: format!(
+                "16.3-{}-{}",
+                common_version::product_name(),
+                common_version::version()
+            ),
         }
     }
 }
