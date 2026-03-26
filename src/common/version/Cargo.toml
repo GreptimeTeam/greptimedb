@@ -16,6 +16,5 @@ serde = { workspace = true, optional = true }
 shadow-rs.workspace = true
 
 [build-dependencies]
-build-data = "0.2"
 cargo-manifest = "0.19"
-shadow-rs.workspace = true
+git2 = { version = "0.20", default-features = false }

@@ -20,8 +20,8 @@ use snafu::ResultExt;
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::options::GlobalOptions;
-use crate::{error, App, Result};
-pub const APP_NAME: &str = "greptime-cli";
+use crate::{App, Result, error};
+pub const APP_NAME: &str = const_format::concatcp!(common_version::product_name(), "-cli");
 use async_trait::async_trait;
 
 pub struct Instance {

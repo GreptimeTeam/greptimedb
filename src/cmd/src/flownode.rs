@@ -33,6 +33,7 @@ use common_meta::key::TableMetadataManager;
 use common_telemetry::info;
 use common_telemetry::logging::{TracingOptions, DEFAULT_LOGGING_DIR};
 use common_version::{short_version, verbose_version};
+use const_format::concatcp;
 use flow::{
     get_flow_auth_options, FlownodeBuilder, FlownodeInstance, FlownodeServiceBuilder,
     FrontendClient, FrontendInvoker,
@@ -48,7 +49,7 @@ use crate::error::{
 use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{create_resource_limit_metrics, log_versions, maybe_activate_heap_profile, App};
 
-pub const APP_NAME: &str = "greptime-flownode";
+pub const APP_NAME: &str = concatcp!(common_version::product_name(), "-flownode");
 
 type FlownodeOptions = GreptimeOptions<flow::FlownodeOptions>;
 

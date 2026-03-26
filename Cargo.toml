@@ -119,6 +119,7 @@ chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10.1"
 clap = { version = "4.4", features = ["derive"] }
 config = "0.13.0"
+const_format = "0.2"
 crossbeam-utils = "0.8"
 dashmap = "6.1"
 datafusion = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "12c0381babd52c681043957e9d6ee083a03f7646" }
