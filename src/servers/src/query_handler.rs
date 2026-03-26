@@ -44,6 +44,12 @@ use pipeline::{GreptimePipelineParams, Pipeline, PipelineInfo, PipelineVersion, 
 use serde_json::Value;
 use session::context::{QueryContext, QueryContextRef};
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DashboardDefinition {
+    pub name: String,
+    pub definition: String,
+}
+
 use crate::error::Result;
 use crate::http::jaeger::QueryTraceParams;
 use crate::influxdb::InfluxdbRequest;
@@ -174,6 +180,18 @@ pub trait PipelineHandler {
         version: PipelineVersion,
         query_ctx: QueryContextRef,
     ) -> Result<(String, TimestampNanosecond)>;
+}
+
+/// Handling dashboard as code CRUD
+pub type DashboardHandlerRef = Arc<dyn DashboardHandler + Send + Sync>;
+
+#[async_trait]
+pub trait DashboardHandler {
+    async fn save(&self, name: &str, definition: &str, ctx: QueryContextRef) -> Result<()>;
+
+    async fn list(&self, ctx: QueryContextRef) -> Result<Vec<DashboardDefinition>>;
+
+    async fn delete(&self, name: &str, ctx: QueryContextRef) -> Result<()>;
 }
 
 /// Handle log query requests.

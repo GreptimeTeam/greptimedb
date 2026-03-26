@@ -5,16 +5,15 @@ set -o pipefail
 
 ARTIFACTS_DIR=$1
 VERSION=$2
-AWS_S3_BUCKET=$3
 RELEASE_DIRS="releases/greptimedb"
 GREPTIMEDB_REPO="GreptimeTeam/greptimedb"
 
 # Check if necessary variables are set.
 function check_vars() {
-  for var in AWS_S3_BUCKET VERSION ARTIFACTS_DIR; do
+  for var in VERSION ARTIFACTS_DIR; do
     if [ -z "${!var}" ]; then
       echo "$var is not set or empty."
-      echo "Usage: $0 <artifacts-dir> <version> <aws-s3-bucket>"
+      echo "Usage: $0 <artifacts-dir> <version>"
       exit 1
     fi
   done
@@ -33,8 +32,13 @@ function upload_artifacts() {
   #    ├── greptime-darwin-amd64-v0.2.0.sha256sum
   #    └── greptime-darwin-amd64-v0.2.0.tar.gz
   find "$ARTIFACTS_DIR" -type f \( -name "*.tar.gz" -o -name "*.sha256sum" \) | while IFS= read -r file; do
-    s5cmd cp \
-      "$file" "s3://$AWS_S3_BUCKET/$RELEASE_DIRS/$VERSION/$(basename "$file")"
+    filename=$(basename "$file")
+    TARGET_URL="$PROXY_URL/$RELEASE_DIRS/$VERSION"
+
+    curl -X PUT \
+      -u "$PROXY_USERNAME:$PROXY_PASSWORD" \
+      -F "file=@$file" \
+      "$TARGET_URL"
   done
 }
 
@@ -45,16 +49,24 @@ function update_version_info() {
     if [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
       echo "Updating latest-version.txt"
       echo "$VERSION" > latest-version.txt
-      s5cmd cp \
-        latest-version.txt "s3://$AWS_S3_BUCKET/$RELEASE_DIRS/latest-version.txt"
+      TARGET_URL="$PROXY_URL/$RELEASE_DIRS"
+
+      curl -X PUT \
+        -u "$PROXY_USERNAME:$PROXY_PASSWORD" \
+        -F "file=@latest-version.txt" \
+        "$TARGET_URL"
     fi
 
     # If it's the nightly release, update latest-nightly-version.txt.
     if [[ "$VERSION" == *"nightly"* ]]; then
       echo "Updating latest-nightly-version.txt"
       echo "$VERSION" > latest-nightly-version.txt
-      s5cmd cp \
-        latest-nightly-version.txt "s3://$AWS_S3_BUCKET/$RELEASE_DIRS/latest-nightly-version.txt"
+
+      TARGET_URL="$PROXY_URL/$RELEASE_DIRS"
+      curl -X PUT \
+        -u "$PROXY_USERNAME:$PROXY_PASSWORD" \
+        -F "file=@latest-nightly-version.txt" \
+        "$TARGET_URL"
     fi
   fi
 }
@@ -93,10 +105,10 @@ function main() {
 }
 
 # Usage example:
-#   AWS_ACCESS_KEY_ID=<your_access_key_id> \
-#   AWS_SECRET_ACCESS_KEY=<your_secret_access_key> \
-#   AWS_DEFAULT_REGION=<your_region> \
+#   PROXY_URL=<proxy_url> \
+#   PROXY_USERNAME=<proxy_username> \
+#   PROXY_PASSWORD=<proxy_password> \
 #   UPDATE_VERSION_INFO=true \
 #   DOWNLOAD_ARTIFACTS_FROM_GITHUB=false \
-#     ./upload-artifacts-to-s3.sh <artifacts-dir> <version> <aws-s3-bucket>
+#     ./upload-artifacts-to-s3.sh <artifacts-dir> <version>
 main

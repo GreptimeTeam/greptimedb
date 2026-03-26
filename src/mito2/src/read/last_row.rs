@@ -21,6 +21,7 @@ use datatypes::arrow::array::{Array, BinaryArray};
 use datatypes::arrow::compute::concat_batches;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::vectors::UInt32Vector;
+use futures::{Stream, TryStreamExt};
 use snafu::ResultExt;
 use store_api::storage::{FileId, TimeSeriesRowSelector};
 
@@ -30,7 +31,7 @@ use crate::cache::{
 };
 use crate::error::{ComputeArrowSnafu, Result};
 use crate::memtable::partition_tree::data::timestamp_array_to_i64_slice;
-use crate::read::{Batch, BatchReader, BoxedBatchReader};
+use crate::read::{Batch, BatchReader, BoxedBatchReader, BoxedRecordBatchStream};
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 use crate::sst::parquet::flat_format::{primary_key_column_index, time_index_column_index};
 use crate::sst::parquet::format::{PrimaryKeyArray, primary_key_offsets};
@@ -332,10 +333,10 @@ impl FlatRowGroupLastRowCachedReader {
     }
 
     /// Returns the next RecordBatch.
-    pub(crate) fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
+    pub(crate) async fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
         match self {
             FlatRowGroupLastRowCachedReader::Hit(r) => r.next_batch(),
-            FlatRowGroupLastRowCachedReader::Miss(r) => r.next_batch(),
+            FlatRowGroupLastRowCachedReader::Miss(r) => r.next_batch().await,
         }
     }
 
@@ -465,12 +466,12 @@ impl FlatRowGroupLastRowReader {
         Ok(Some(merged))
     }
 
-    fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
+    async fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
         if self.pending.is_full() {
             return self.flush_pending();
         }
 
-        while let Some(batch) = self.reader.next_batch()? {
+        while let Some(batch) = self.reader.next_batch().await? {
             self.selector.on_next(batch, &mut self.pending)?;
             if self.pending.is_full() {
                 return self.flush_pending();
@@ -607,6 +608,41 @@ impl FlatLastTimestampSelector {
             return;
         };
         output_buffer.extend_from_slice(&state.slices);
+    }
+}
+
+/// Reader that keeps only the last row of each time series from a flat RecordBatch stream.
+/// Assumes input is sorted, deduped, and contains no delete operations.
+pub(crate) struct FlatLastRowReader {
+    stream: BoxedRecordBatchStream,
+    selector: FlatLastTimestampSelector,
+    pending: BatchBuffer,
+}
+
+impl FlatLastRowReader {
+    /// Creates a new `FlatLastRowReader`.
+    pub(crate) fn new(stream: BoxedRecordBatchStream) -> Self {
+        Self {
+            stream,
+            selector: FlatLastTimestampSelector::default(),
+            pending: BatchBuffer::new(),
+        }
+    }
+
+    /// Converts the reader into a stream of RecordBatches.
+    pub(crate) fn into_stream(mut self) -> impl Stream<Item = Result<RecordBatch>> {
+        async_stream::try_stream! {
+            while let Some(batch) = self.stream.try_next().await? {
+                self.selector.on_next(batch, &mut self.pending)?;
+                if self.pending.is_full() {
+                    yield self.pending.concat()?;
+                }
+            }
+            self.selector.finish(&mut self.pending)?;
+            if !self.pending.is_empty() {
+                yield self.pending.concat()?;
+            }
+        }
     }
 }
 

@@ -39,7 +39,7 @@ use crate::error::{PartitionOutOfRangeSnafu, Result, TooManyFilesToReadSnafu, Un
 use crate::read::dedup::{DedupReader, LastNonNull, LastRow};
 use crate::read::flat_dedup::{FlatDedupReader, FlatLastNonNull, FlatLastRow};
 use crate::read::flat_merge::FlatMergeReader;
-use crate::read::last_row::LastRowReader;
+use crate::read::last_row::{FlatLastRowReader, LastRowReader};
 use crate::read::merge::MergeReaderBuilder;
 use crate::read::pruner::{PartitionPruner, Pruner};
 use crate::read::range::RangeMeta;
@@ -128,28 +128,6 @@ impl SeqScan {
         Ok(Box::pin(futures::stream::iter(streams).flatten()))
     }
 
-    /// Builds a [BoxedBatchReader] from sequential scan for compaction.
-    ///
-    /// # Panics
-    /// Panics if the compaction flag is not set.
-    pub async fn build_reader_for_compaction(&self) -> Result<BoxedBatchReader> {
-        assert!(self.stream_ctx.input.compaction);
-
-        let metrics_set = ExecutionPlanMetricsSet::new();
-        let part_metrics = self.new_partition_metrics(false, &metrics_set, 0);
-        debug_assert_eq!(1, self.properties.partitions.len());
-        let partition_ranges = &self.properties.partitions[0];
-
-        let reader = Self::merge_all_ranges_for_compaction(
-            &self.stream_ctx,
-            partition_ranges,
-            &part_metrics,
-            self.pruner.clone(),
-        )
-        .await?;
-        Ok(Box::new(reader))
-    }
-
     /// Builds a [BoxedRecordBatchStream] from sequential scan for flat format compaction.
     ///
     /// # Panics
@@ -170,40 +148,6 @@ impl SeqScan {
         )
         .await?;
         Ok(reader)
-    }
-
-    /// Builds a merge reader that reads all ranges.
-    /// Callers MUST not split ranges before calling this method.
-    async fn merge_all_ranges_for_compaction(
-        stream_ctx: &Arc<StreamContext>,
-        partition_ranges: &[PartitionRange],
-        part_metrics: &PartitionMetrics,
-        pruner: Arc<Pruner>,
-    ) -> Result<BoxedBatchReader> {
-        pruner.add_partition_ranges(partition_ranges);
-        let partition_pruner = Arc::new(PartitionPruner::new(pruner, partition_ranges));
-
-        let mut sources = Vec::new();
-        for part_range in partition_ranges {
-            build_sources(
-                stream_ctx,
-                part_range,
-                true,
-                part_metrics,
-                partition_pruner.clone(),
-                &mut sources,
-                None,
-            )
-            .await?;
-        }
-
-        common_telemetry::debug!(
-            "Build reader to read all parts, region_id: {}, num_part_ranges: {}, num_sources: {}",
-            stream_ctx.input.mapper.metadata().region_id,
-            partition_ranges.len(),
-            sources.len()
-        );
-        Self::build_reader_from_sources(stream_ctx, sources, None, None).await
     }
 
     /// Builds a merge reader that reads all flat ranges.
@@ -343,6 +287,13 @@ impl SeqScan {
             }
         } else {
             Box::pin(reader.into_stream()) as _
+        };
+
+        let reader = match &stream_ctx.input.series_row_selector {
+            Some(TimeSeriesRowSelector::LastRow) => {
+                Box::pin(FlatLastRowReader::new(reader).into_stream()) as _
+            }
+            None => reader,
         };
 
         Ok(reader)

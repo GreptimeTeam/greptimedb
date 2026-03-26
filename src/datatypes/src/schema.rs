@@ -16,8 +16,8 @@ mod column_schema;
 pub mod constraint;
 
 use std::collections::HashMap;
-use std::fmt;
 use std::sync::Arc;
+use std::{fmt, mem};
 
 use arrow::datatypes::{Field, Schema as ArrowSchema};
 use datafusion_common::DFSchemaRef;
@@ -177,6 +177,26 @@ impl Schema {
         &self.arrow_schema.metadata
     }
 
+    /// Returns the estimated memory footprint of this schema.
+    pub fn estimated_size(&self) -> usize {
+        mem::size_of_val(self)
+            + mem::size_of::<ColumnSchema>() * self.column_schemas.capacity()
+            + self
+                .column_schemas
+                .iter()
+                .map(|column_schema| {
+                    column_schema.estimated_size() - mem::size_of::<ColumnSchema>()
+                })
+                .sum::<usize>()
+            + mem::size_of::<(String, usize)>() * self.name_to_index.capacity()
+            + self
+                .name_to_index
+                .keys()
+                .map(|name| name.capacity())
+                .sum::<usize>()
+            + arrow_schema_size(self.arrow_schema.as_ref())
+    }
+
     /// Generate a new projected schema
     ///
     /// # Panic
@@ -211,6 +231,17 @@ impl Schema {
             version: self.version,
         })
     }
+}
+
+fn arrow_schema_size(schema: &ArrowSchema) -> usize {
+    mem::size_of_val(schema)
+        + schema.fields.size()
+        + mem::size_of::<(String, String)>() * schema.metadata.capacity()
+        + schema
+            .metadata
+            .iter()
+            .map(|(key, value)| key.capacity() + value.capacity())
+            .sum::<usize>()
 }
 
 #[derive(Default)]

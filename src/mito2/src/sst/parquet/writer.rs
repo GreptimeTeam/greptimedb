@@ -50,7 +50,7 @@ use crate::config::{IndexBuildMode, IndexConfig};
 use crate::error::{
     InvalidMetadataSnafu, OpenDalSnafu, Result, UnexpectedSnafu, WriteParquetSnafu,
 };
-use crate::read::{Batch, FlatSource, Source};
+use crate::read::FlatSource;
 use crate::sst::file::RegionFileId;
 use crate::sst::index::{IndexOutput, Indexer, IndexerBuilder};
 use crate::sst::parquet::flat_format::{FlatWriteFormat, time_index_column_index};
@@ -59,6 +59,35 @@ use crate::sst::parquet::{PARQUET_METADATA_KEY, SstInfo, WriteOptions};
 use crate::sst::{
     DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY, FlatSchemaOptions, SeriesEstimator,
 };
+
+/// Converts a flat RecordBatch for writing to parquet.
+enum FlatBatchConverter {
+    /// Write as-is in flat format.
+    Flat(FlatWriteFormat),
+    /// Convert flat batch to primary-key format by stripping tag columns.
+    PrimaryKey {
+        format: PrimaryKeyWriteFormat,
+        num_fields: usize,
+    },
+}
+
+impl FlatBatchConverter {
+    fn arrow_schema(&self) -> &SchemaRef {
+        match self {
+            FlatBatchConverter::Flat(f) => f.arrow_schema(),
+            FlatBatchConverter::PrimaryKey { format, .. } => format.arrow_schema(),
+        }
+    }
+
+    fn convert_batch(&self, batch: &RecordBatch) -> Result<RecordBatch> {
+        match self {
+            FlatBatchConverter::Flat(f) => f.convert_batch(batch),
+            FlatBatchConverter::PrimaryKey { format, num_fields } => {
+                format.convert_flat_batch(batch, *num_fields)
+            }
+        }
+    }
+}
 
 /// Parquet SST writer.
 pub struct ParquetWriter<'a, F: WriterFactory, I: IndexerBuilder, P: FilePathProvider> {
@@ -240,81 +269,6 @@ where
         Ok(())
     }
 
-    /// Iterates source and writes all rows to Parquet file.
-    ///
-    /// Returns the [SstInfo] if the SST is written.
-    pub async fn write_all(
-        &mut self,
-        source: Source,
-        override_sequence: Option<SequenceNumber>, // override the `sequence` field from `Source`
-        opts: &WriteOptions,
-    ) -> Result<SstInfoArray> {
-        let res = self
-            .write_all_without_cleaning(source, override_sequence, opts)
-            .await;
-        if res.is_err() {
-            // Clean tmp files explicitly on failure.
-            let file_id = self.current_file;
-            if let Some(cleaner) = &self.file_cleaner {
-                cleaner.clean_by_file_id(file_id).await;
-            }
-        }
-        res
-    }
-
-    async fn write_all_without_cleaning(
-        &mut self,
-        mut source: Source,
-        override_sequence: Option<SequenceNumber>, // override the `sequence` field from `Source`
-        opts: &WriteOptions,
-    ) -> Result<SstInfoArray> {
-        let mut results = smallvec![];
-        let write_format = PrimaryKeyWriteFormat::new(self.metadata.clone())
-            .with_override_sequence(override_sequence);
-        let mut stats = SourceStats::default();
-
-        while let Some(res) = self
-            .write_next_batch(&mut source, &write_format, opts)
-            .await
-            .transpose()
-        {
-            match res {
-                Ok(mut batch) => {
-                    stats.update(&batch);
-                    let start = Instant::now();
-                    // safety: self.current_indexer must be set when first batch has been written.
-                    match self.index_config.build_mode {
-                        IndexBuildMode::Sync => {
-                            self.current_indexer
-                                .as_mut()
-                                .unwrap()
-                                .update(&mut batch)
-                                .await;
-                        }
-                        IndexBuildMode::Async => {}
-                    }
-                    self.metrics.update_index += start.elapsed();
-                    if let Some(max_file_size) = opts.max_file_size
-                        && self.bytes_written.load(Ordering::Relaxed) > max_file_size
-                    {
-                        self.finish_current_file(&mut results, &mut stats).await?;
-                    }
-                }
-                Err(e) => {
-                    if let Some(indexer) = &mut self.current_indexer {
-                        indexer.abort().await;
-                    }
-                    return Err(e);
-                }
-            }
-        }
-
-        self.finish_current_file(&mut results, &mut stats).await?;
-
-        // object_store.write will make sure all bytes are written or an error is raised.
-        Ok(results)
-    }
-
     /// Iterates FlatSource and writes all RecordBatch in flat format to Parquet file.
     ///
     /// Returns the [SstInfo] if the SST is written.
@@ -324,11 +278,15 @@ where
         override_sequence: Option<SequenceNumber>,
         opts: &WriteOptions,
     ) -> Result<SstInfoArray> {
-        let res = self
-            .write_all_flat_without_cleaning(source, override_sequence, opts)
-            .await;
+        let converter = FlatBatchConverter::Flat(
+            FlatWriteFormat::new(
+                self.metadata.clone(),
+                &FlatSchemaOptions::from_encoding(self.metadata.primary_key_encoding),
+            )
+            .with_override_sequence(override_sequence),
+        );
+        let res = self.write_all_flat_inner(source, &converter, opts).await;
         if res.is_err() {
-            // Clean tmp files explicitly on failure.
             let file_id = self.current_file;
             if let Some(cleaner) = &self.file_cleaner {
                 cleaner.clean_by_file_id(file_id).await;
@@ -337,36 +295,58 @@ where
         res
     }
 
-    async fn write_all_flat_without_cleaning(
+    /// Iterates FlatSource and writes all RecordBatch in primary-key format to Parquet file.
+    ///
+    /// Returns the [SstInfo] if the SST is written.
+    pub async fn write_all_flat_as_primary_key(
         &mut self,
-        mut source: FlatSource,
+        source: FlatSource,
         override_sequence: Option<SequenceNumber>,
         opts: &WriteOptions,
     ) -> Result<SstInfoArray> {
+        let num_fields = self.metadata.field_columns().count();
+        let converter = FlatBatchConverter::PrimaryKey {
+            format: PrimaryKeyWriteFormat::new(self.metadata.clone())
+                .with_override_sequence(override_sequence),
+            num_fields,
+        };
+        let res = self.write_all_flat_inner(source, &converter, opts).await;
+        if res.is_err() {
+            let file_id = self.current_file;
+            if let Some(cleaner) = &self.file_cleaner {
+                cleaner.clean_by_file_id(file_id).await;
+            }
+        }
+        res
+    }
+
+    async fn write_all_flat_inner(
+        &mut self,
+        mut source: FlatSource,
+        converter: &FlatBatchConverter,
+        opts: &WriteOptions,
+    ) -> Result<SstInfoArray> {
         let mut results = smallvec![];
-        let flat_format = FlatWriteFormat::new(
-            self.metadata.clone(),
-            &FlatSchemaOptions::from_encoding(self.metadata.primary_key_encoding),
-        )
-        .with_override_sequence(override_sequence);
         let mut stats = SourceStats::default();
 
         while let Some(record_batch) = self
-            .write_next_flat_batch(&mut source, &flat_format, opts)
+            .write_next_flat_batch(&mut source, converter, opts)
             .await
             .transpose()
         {
             match record_batch {
                 Ok(batch) => {
                     stats.update_flat(&batch)?;
-                    let start = Instant::now();
-                    // safety: self.current_indexer must be set when first batch has been written.
-                    self.current_indexer
-                        .as_mut()
-                        .unwrap()
-                        .update_flat(&batch)
-                        .await;
-                    self.metrics.update_index += start.elapsed();
+                    if matches!(self.index_config.build_mode, IndexBuildMode::Sync) {
+                        let start = Instant::now();
+                        // safety: self.current_indexer must be set when first batch has been written.
+                        self.current_indexer
+                            .as_mut()
+                            .unwrap()
+                            .update_flat(&batch)
+                            .await;
+                        self.metrics.update_index += start.elapsed();
+                    }
                     if let Some(max_file_size) = opts.max_file_size
                         && self.bytes_written.load(Ordering::Relaxed) > max_file_size
                     {
@@ -411,34 +391,10 @@ where
             .set_column_compression(op_type_col, Compression::UNCOMPRESSED)
     }
 
-    async fn write_next_batch(
-        &mut self,
-        source: &mut Source,
-        write_format: &PrimaryKeyWriteFormat,
-        opts: &WriteOptions,
-    ) -> Result<Option<Batch>> {
-        let start = Instant::now();
-        let Some(batch) = source.next_batch().await? else {
-            return Ok(None);
-        };
-        self.metrics.iter_source += start.elapsed();
-
-        let arrow_batch = write_format.convert_batch(&batch)?;
-
-        let start = Instant::now();
-        self.maybe_init_writer(write_format.arrow_schema(), opts)
-            .await?
-            .write(&arrow_batch)
-            .await
-            .context(WriteParquetSnafu)?;
-        self.metrics.write_batch += start.elapsed();
-        Ok(Some(batch))
-    }
-
     async fn write_next_flat_batch(
         &mut self,
         source: &mut FlatSource,
-        flat_format: &FlatWriteFormat,
+        converter: &FlatBatchConverter,
         opts: &WriteOptions,
     ) -> Result<Option<RecordBatch>> {
         let start = Instant::now();
@@ -447,15 +403,16 @@ where
         };
         self.metrics.iter_source += start.elapsed();
 
-        let arrow_batch = flat_format.convert_batch(&record_batch)?;
+        let arrow_batch = converter.convert_batch(&record_batch)?;
 
         let start = Instant::now();
-        self.maybe_init_writer(flat_format.arrow_schema(), opts)
+        self.maybe_init_writer(converter.arrow_schema(), opts)
             .await?
             .write(&arrow_batch)
             .await
             .context(WriteParquetSnafu)?;
         self.metrics.write_batch += start.elapsed();
+        // Return original flat batch for stats/indexer which use flat layout.
         Ok(Some(record_batch))
     }
 
@@ -515,26 +472,6 @@ struct SourceStats {
 }
 
 impl SourceStats {
-    fn update(&mut self, batch: &Batch) {
-        if batch.is_empty() {
-            return;
-        }
-
-        self.num_rows += batch.num_rows();
-        self.series_estimator.update(batch);
-        // Safety: batch is not empty.
-        let (min_in_batch, max_in_batch) = (
-            batch.first_timestamp().unwrap(),
-            batch.last_timestamp().unwrap(),
-        );
-        if let Some(time_range) = &mut self.time_range {
-            time_range.0 = time_range.0.min(min_in_batch);
-            time_range.1 = time_range.1.max(max_in_batch);
-        } else {
-            self.time_range = Some((min_in_batch, max_in_batch));
-        }
-    }
-
     fn update_flat(&mut self, record_batch: &RecordBatch) -> Result<()> {
         if record_batch.num_rows() == 0 {
             return Ok(());

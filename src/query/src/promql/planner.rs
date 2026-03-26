@@ -3323,28 +3323,55 @@ impl PromPlanner {
     fn prom_token_to_binary_expr_builder(
         token: TokenType,
     ) -> Result<Box<dyn Fn(DfExpr, DfExpr) -> Result<DfExpr>>> {
+        let cast_float = |expr| {
+            if matches!(
+                &expr,
+                DfExpr::Cast(Cast {
+                    data_type: ArrowDataType::Float64,
+                    ..
+                })
+            ) || matches!(&expr, DfExpr::Literal(ScalarValue::Float64(_), _))
+            {
+                expr
+            } else {
+                DfExpr::Cast(Cast {
+                    expr: Box::new(expr),
+                    data_type: ArrowDataType::Float64,
+                })
+            }
+        };
         match token.id() {
-            token::T_ADD => Ok(Box::new(|lhs, rhs| Ok(lhs + rhs))),
-            token::T_SUB => Ok(Box::new(|lhs, rhs| Ok(lhs - rhs))),
-            token::T_MUL => Ok(Box::new(|lhs, rhs| Ok(lhs * rhs))),
-            token::T_DIV => Ok(Box::new(|lhs, rhs| Ok(lhs / rhs))),
-            token::T_MOD => Ok(Box::new(|lhs: DfExpr, rhs| Ok(lhs % rhs))),
+            token::T_ADD => Ok(Box::new(move |lhs, rhs| {
+                Ok(cast_float(lhs) + cast_float(rhs))
+            })),
+            token::T_SUB => Ok(Box::new(move |lhs, rhs| {
+                Ok(cast_float(lhs) - cast_float(rhs))
+            })),
+            token::T_MUL => Ok(Box::new(move |lhs, rhs| {
+                Ok(cast_float(lhs) * cast_float(rhs))
+            })),
+            token::T_DIV => Ok(Box::new(move |lhs, rhs| {
+                Ok(cast_float(lhs) / cast_float(rhs))
+            })),
+            token::T_MOD => Ok(Box::new(move |lhs: DfExpr, rhs| {
+                Ok(cast_float(lhs) % cast_float(rhs))
+            })),
             token::T_EQLC => Ok(Box::new(|lhs, rhs| Ok(lhs.eq(rhs)))),
             token::T_NEQ => Ok(Box::new(|lhs, rhs| Ok(lhs.not_eq(rhs)))),
             token::T_GTR => Ok(Box::new(|lhs, rhs| Ok(lhs.gt(rhs)))),
             token::T_LSS => Ok(Box::new(|lhs, rhs| Ok(lhs.lt(rhs)))),
             token::T_GTE => Ok(Box::new(|lhs, rhs| Ok(lhs.gt_eq(rhs)))),
             token::T_LTE => Ok(Box::new(|lhs, rhs| Ok(lhs.lt_eq(rhs)))),
-            token::T_POW => Ok(Box::new(|lhs, rhs| {
+            token::T_POW => Ok(Box::new(move |lhs, rhs| {
                 Ok(DfExpr::ScalarFunction(ScalarFunction {
                     func: datafusion_functions::math::power(),
-                    args: vec![lhs, rhs],
+                    args: vec![cast_float(lhs), cast_float(rhs)],
                 }))
             })),
-            token::T_ATAN2 => Ok(Box::new(|lhs, rhs| {
+            token::T_ATAN2 => Ok(Box::new(move |lhs, rhs| {
                 Ok(DfExpr::ScalarFunction(ScalarFunction {
                     func: datafusion_functions::math::atan2(),
-                    args: vec![lhs, rhs],
+                    args: vec![cast_float(lhs), cast_float(rhs)],
                 }))
             })),
             _ => UnexpectedTokenSnafu { token }.fail(),
@@ -4029,6 +4056,7 @@ mod test {
     use table::test_util::EmptyTable;
 
     use super::*;
+    use crate::QueryEngineContext;
     use crate::options::QueryOptions;
     use crate::parser::QueryLanguageParser;
 
@@ -4044,6 +4072,64 @@ mod test {
             Plugins::default(),
             QueryOptions::default(),
         )
+    }
+
+    async fn build_optimized_promql_plan(
+        table_provider: DfTableSourceProvider,
+        eval_stmt: &EvalStmt,
+    ) -> LogicalPlan {
+        let state = build_query_engine_state();
+        let raw_plan = PromPlanner::stmt_to_plan(table_provider, eval_stmt, &state)
+            .await
+            .unwrap();
+        let context = QueryEngineContext::new(state.session_state(), QueryContext::arc());
+        state
+            .optimize_by_extension_rules(raw_plan, &context)
+            .unwrap()
+    }
+
+    async fn build_optimized_tsid_plan(
+        query: &str,
+        num_tag: usize,
+        num_field: usize,
+        end_secs: u64,
+        lookback_secs: u64,
+    ) -> String {
+        let eval_stmt = EvalStmt {
+            expr: parser::parse(query).unwrap(),
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(end_secs))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(lookback_secs),
+        };
+        let table_provider = build_test_table_provider_with_tsid(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            num_tag,
+            num_field,
+        )
+        .await;
+
+        build_optimized_promql_plan(table_provider, &eval_stmt)
+            .await
+            .display_indent_schema()
+            .to_string()
+    }
+
+    async fn assert_nested_count_rewrite_applies(query: &str, expected_outer_agg: &str) {
+        let plan_str = build_optimized_tsid_plan(query, 2, 1, 100_000, 1).await;
+
+        assert!(plan_str.contains("PromSeriesDivide: tags=[\"__tsid\"]"));
+        assert!(plan_str.contains("Projection: some_metric.timestamp, some_metric.tag_0"));
+        assert!(plan_str.contains("Distinct:"));
+        assert!(plan_str.contains(expected_outer_agg), "{plan_str}");
+        assert!(!plan_str.contains("PromSeriesDivide: tags=[\"tag_0\"]"));
+    }
+
+    async fn assert_nested_count_rewrite_missing(query: &str, num_tag: usize, lookback_secs: u64) {
+        let plan_str = build_optimized_tsid_plan(query, num_tag, 1, 100_000, lookback_secs).await;
+        assert!(!plan_str.contains("Distinct:"), "{plan_str}");
     }
 
     async fn build_test_table_provider(
@@ -4659,6 +4745,117 @@ mod test {
     }
 
     #[tokio::test]
+    async fn scalar_count_count_range_keeps_full_window() {
+        let plan_str = build_optimized_tsid_plan(
+            "scalar(count(count(some_metric) by (tag_0)))",
+            1,
+            1,
+            100_000,
+            1,
+        )
+        .await;
+        assert!(plan_str.contains("ScalarCalculate: tags=[]"));
+        assert!(plan_str.contains("PromInstantManipulate: range=[0..100000000]"));
+        assert!(!plan_str.contains("PromInstantManipulate: range=[99999000..99999000]"));
+    }
+
+    #[tokio::test]
+    async fn scalar_count_count_rewrite_applies_inside_binary_expr_for_tsid_input() {
+        let plan_str = build_optimized_tsid_plan(
+            "sum(irate(some_metric[1h])) / scalar(count(count(some_metric) by (tag_0)))",
+            2,
+            1,
+            10,
+            300,
+        )
+        .await;
+        assert!(plan_str.contains("Distinct:"), "{plan_str}");
+    }
+
+    #[tokio::test]
+    async fn nested_count_rewrite_keeps_full_series_key_with_tsid_input() {
+        assert_nested_count_rewrite_applies(
+            "count(count(some_metric) by (tag_0))",
+            "Aggregate: groupBy=[[some_metric.timestamp]], aggr=[[count(Int64(1)) AS count(count(some_metric.field_0))]]"
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn nested_sum_count_rewrite_keeps_full_series_key_with_tsid_input() {
+        assert_nested_count_rewrite_applies(
+            "count(sum(some_metric) by (tag_0))",
+            "Aggregate: groupBy=[[some_metric.timestamp]], aggr=[[count(Int64(1)) AS count(sum(some_metric.field_0))]]"
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn nested_supported_inner_aggs_rewrite_apply_for_tsid_input() {
+        for (query, expected_outer_agg) in [
+            (
+                "count(avg(some_metric) by (tag_0))",
+                "Aggregate: groupBy=[[some_metric.timestamp]], aggr=[[count(Int64(1)) AS count(avg(some_metric.field_0))]]",
+            ),
+            (
+                "count(min(some_metric) by (tag_0))",
+                "Aggregate: groupBy=[[some_metric.timestamp]], aggr=[[count(Int64(1)) AS count(min(some_metric.field_0))]]",
+            ),
+            (
+                "count(max(some_metric) by (tag_0))",
+                "Aggregate: groupBy=[[some_metric.timestamp]], aggr=[[count(Int64(1)) AS count(max(some_metric.field_0))]]",
+            ),
+            (
+                "count(stddev(some_metric) by (tag_0))",
+                "Aggregate: groupBy=[[some_metric.timestamp]], aggr=[[count(Int64(1)) AS count(stddev_pop(some_metric.field_0))]]",
+            ),
+            (
+                "count(stdvar(some_metric) by (tag_0))",
+                "Aggregate: groupBy=[[some_metric.timestamp]], aggr=[[count(Int64(1)) AS count(var_pop(some_metric.field_0))]]",
+            ),
+        ] {
+            assert_nested_count_rewrite_applies(query, expected_outer_agg).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn nested_non_count_inner_aggs_rewrite_filter_null_values_for_tsid_input() {
+        let count_plan =
+            build_optimized_tsid_plan("count(count(some_metric) by (tag_0))", 2, 1, 100_000, 1)
+                .await;
+        assert!(
+            !count_plan.contains("some_metric.field_0 IS NOT NULL"),
+            "{count_plan}"
+        );
+
+        for query in [
+            "count(sum(some_metric) by (tag_0))",
+            "count(avg(some_metric) by (tag_0))",
+            "count(min(some_metric) by (tag_0))",
+            "count(max(some_metric) by (tag_0))",
+            "count(stddev(some_metric) by (tag_0))",
+            "count(stdvar(some_metric) by (tag_0))",
+        ] {
+            let plan_str = build_optimized_tsid_plan(query, 2, 1, 100_000, 1).await;
+            assert!(
+                plan_str.contains("Filter: some_metric.field_0 IS NOT NULL"),
+                "{query}: {plan_str}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn nested_unsupported_or_non_direct_inner_aggs_do_not_rewrite() {
+        assert_nested_count_rewrite_missing("count(group(some_metric) by (tag_0))", 2, 1).await;
+        assert_nested_count_rewrite_missing(
+            "count(sum(irate(some_metric[1h])) by (tag_0))",
+            2,
+            300,
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn physical_table_name_is_not_leaked_in_plan() {
         let prom_expr = parser::parse("some_metric").unwrap();
         let eval_stmt = EvalStmt {
@@ -5169,7 +5366,7 @@ mod test {
                 .unwrap();
 
         let expected = String::from(
-            "Projection: rhs.tag_0, rhs.timestamp, lhs.field_0 + rhs.field_0 AS lhs.field_0 + rhs.field_0 [tag_0:Utf8, timestamp:Timestamp(ms), lhs.field_0 + rhs.field_0:Float64;N]\
+            "Projection: rhs.tag_0, rhs.timestamp, CAST(lhs.field_0 AS Float64) + CAST(rhs.field_0 AS Float64) AS lhs.field_0 + rhs.field_0 [tag_0:Utf8, timestamp:Timestamp(ms), lhs.field_0 + rhs.field_0:Float64;N]\
             \n  Inner Join: lhs.tag_0 = rhs.tag_0, lhs.timestamp = rhs.timestamp [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n    SubqueryAlias: lhs [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n      PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
@@ -5224,7 +5421,7 @@ mod test {
     async fn binary_op_literal_column() {
         let query = r#"1 + some_metric{tag_0="bar"}"#;
         let expected = String::from(
-            "Projection: some_metric.tag_0, some_metric.timestamp, Float64(1) + some_metric.field_0 AS Float64(1) + field_0 [tag_0:Utf8, timestamp:Timestamp(ms), Float64(1) + field_0:Float64;N]\
+            "Projection: some_metric.tag_0, some_metric.timestamp, Float64(1) + CAST(some_metric.field_0 AS Float64) AS Float64(1) + field_0 [tag_0:Utf8, timestamp:Timestamp(ms), Float64(1) + field_0:Float64;N]\
             \n  PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n    PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n      Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
@@ -5262,7 +5459,7 @@ mod test {
     async fn bool_with_additional_arithmetic() {
         let query = "some_metric + (1 == bool 2)";
         let expected = String::from(
-            "Projection: some_metric.tag_0, some_metric.timestamp, some_metric.field_0 + CAST(Float64(1) = Float64(2) AS Float64) AS field_0 + Float64(1) = Float64(2) [tag_0:Utf8, timestamp:Timestamp(ms), field_0 + Float64(1) = Float64(2):Float64;N]\
+            "Projection: some_metric.tag_0, some_metric.timestamp, CAST(some_metric.field_0 AS Float64) + CAST(Float64(1) = Float64(2) AS Float64) AS field_0 + Float64(1) = Float64(2) [tag_0:Utf8, timestamp:Timestamp(ms), field_0 + Float64(1) = Float64(2):Float64;N]\
             \n  PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n    PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n      Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
@@ -5372,7 +5569,7 @@ mod test {
             PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
                 .await
                 .unwrap();
-        let expected = "Projection: http_server_requests_seconds_count.uri, http_server_requests_seconds_count.kubernetes_namespace, http_server_requests_seconds_count.kubernetes_pod_name, http_server_requests_seconds_count.greptime_timestamp, http_server_requests_seconds_sum.greptime_value / http_server_requests_seconds_count.greptime_value AS http_server_requests_seconds_sum.greptime_value / http_server_requests_seconds_count.greptime_value\
+        let expected = "Projection: http_server_requests_seconds_count.uri, http_server_requests_seconds_count.kubernetes_namespace, http_server_requests_seconds_count.kubernetes_pod_name, http_server_requests_seconds_count.greptime_timestamp, CAST(http_server_requests_seconds_sum.greptime_value AS Float64) / CAST(http_server_requests_seconds_count.greptime_value AS Float64) AS http_server_requests_seconds_sum.greptime_value / http_server_requests_seconds_count.greptime_value\
             \n  Inner Join: http_server_requests_seconds_sum.greptime_timestamp = http_server_requests_seconds_count.greptime_timestamp, http_server_requests_seconds_sum.uri = http_server_requests_seconds_count.uri\
             \n    SubqueryAlias: http_server_requests_seconds_sum\
             \n      PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[greptime_timestamp]\
@@ -5763,7 +5960,7 @@ mod test {
 
         let query = "some_alt_metric{__schema__=\"greptime_private\"} / some_metric";
         let expected = String::from(
-            "Projection: some_metric.tag_0, some_metric.timestamp, greptime_private.some_alt_metric.field_0 / some_metric.field_0 AS greptime_private.some_alt_metric.field_0 / some_metric.field_0 [tag_0:Utf8, timestamp:Timestamp(ms), greptime_private.some_alt_metric.field_0 / some_metric.field_0:Float64;N]\
+            "Projection: some_metric.tag_0, some_metric.timestamp, CAST(greptime_private.some_alt_metric.field_0 AS Float64) / CAST(some_metric.field_0 AS Float64) AS greptime_private.some_alt_metric.field_0 / some_metric.field_0 [tag_0:Utf8, timestamp:Timestamp(ms), greptime_private.some_alt_metric.field_0 / some_metric.field_0:Float64;N]\
             \n  Inner Join: greptime_private.some_alt_metric.tag_0 = some_metric.tag_0, greptime_private.some_alt_metric.timestamp = some_metric.timestamp [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n    SubqueryAlias: greptime_private.some_alt_metric [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n      PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\

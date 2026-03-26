@@ -106,6 +106,7 @@ macro_rules! http_tests {
                 test_config_api,
                 test_dynamic_tracer_toggle,
                 test_dashboard_path,
+                test_dashboard_api,
                 test_prometheus_remote_write,
                 test_prometheus_remote_special_labels,
                 test_prometheus_remote_schema_labels,
@@ -147,6 +148,7 @@ macro_rules! http_tests {
                 test_jaeger_query_api_for_trace_v1,
 
                 test_influxdb_write,
+                test_influxdb_write_with_hints,
                 test_http_memory_limit,
             );
         )*
@@ -1640,6 +1642,7 @@ fn drop_lines_with_inconsistent_results(input: String) -> String {
         "metadata_cache_size =",
         "content_cache_size =",
         "result_cache_size =",
+        "range_result_cache_size =",
         "name =",
         "recovery_parallelism =",
         "max_background_index_builds =",
@@ -1719,6 +1722,121 @@ pub async fn test_dashboard_path(store_type: StorageType) {
 
 #[cfg(not(feature = "dashboard"))]
 pub async fn test_dashboard_path(_: StorageType) {}
+
+#[cfg(feature = "dashboard")]
+pub async fn test_dashboard_api(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "dashboard_api").await;
+    let client = TestClient::new(app).await;
+
+    // 1. List dashboards - should be empty initially
+    let res = client.get("/v1/dashboards").send().await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: Value = res.json().await;
+    let dashboards = body.get("dashboards").unwrap().as_array().unwrap();
+    assert!(dashboards.is_empty());
+
+    // 2. Save a dashboard
+    let dashboard_definition = r#"{"title": "My Dashboard", "panels": []}"#;
+    let res = client
+        .post("/v1/dashboards/test_dashboard")
+        .body(dashboard_definition)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: Value = res.json().await;
+    let dashboards = body.get("dashboards").unwrap().as_array().unwrap();
+    assert_eq!(dashboards.len(), 1);
+    assert_eq!(dashboards[0].get("name").unwrap(), "test_dashboard");
+
+    // 3. Save another dashboard
+    let res = client
+        .post("/v1/dashboards/another_dashboard")
+        .body(r#"{"title": "Another Dashboard"}"#)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // 4. List dashboards - should have 2
+    let res = client.get("/v1/dashboards").send().await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: Value = res.json().await;
+    let dashboards = body.get("dashboards").unwrap().as_array().unwrap();
+    assert_eq!(dashboards.len(), 2);
+
+    let names: Vec<&str> = dashboards
+        .iter()
+        .map(|d| d.get("name").unwrap().as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"test_dashboard"));
+    assert!(names.contains(&"another_dashboard"));
+
+    // 5. Update a dashboard by posting again with new definition
+    let updated_definition = r#"{"title": "Updated Dashboard", "panels": [{"id": 1}]}"#;
+    let res = client
+        .post("/v1/dashboards/test_dashboard")
+        .body(updated_definition)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body: Value = res.json().await;
+    let dashboards = body.get("dashboards").unwrap().as_array().unwrap();
+    assert_eq!(dashboards.len(), 1);
+    assert_eq!(dashboards[0].get("name").unwrap(), "test_dashboard");
+
+    // Verify the definition was updated by listing again
+    let res = client.get("/v1/dashboards").send().await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: Value = res.json().await;
+    let dashboards = body.get("dashboards").unwrap().as_array().unwrap();
+    assert_eq!(dashboards.len(), 2);
+
+    // Find test_dashboard and verify it has updated definition
+    let test_db = dashboards
+        .iter()
+        .find(|d| d.get("name").unwrap() == "test_dashboard")
+        .unwrap();
+    assert_eq!(
+        test_db.get("definition").unwrap(),
+        r#"{"title": "Updated Dashboard", "panels": [{"id": 1}]}"#
+    );
+
+    // 6. Delete one dashboard
+    let res = client.delete("/v1/dashboards/test_dashboard").send().await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: Value = res.json().await;
+    let dashboards = body.get("dashboards").unwrap().as_array().unwrap();
+    assert_eq!(dashboards.len(), 1);
+    assert_eq!(dashboards[0].get("name").unwrap(), "test_dashboard");
+
+    // 7. List dashboards - should have 1
+    let res = client.get("/v1/dashboards").send().await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: Value = res.json().await;
+    let dashboards = body.get("dashboards").unwrap().as_array().unwrap();
+    assert_eq!(dashboards.len(), 1);
+    assert_eq!(dashboards[0].get("name").unwrap(), "another_dashboard");
+
+    // 8. Delete the remaining dashboard
+    let res = client
+        .delete("/v1/dashboards/another_dashboard")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // 9. List dashboards - should be empty
+    let res = client.get("/v1/dashboards").send().await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: Value = res.json().await;
+    let dashboards = body.get("dashboards").unwrap().as_array().unwrap();
+    assert!(dashboards.is_empty());
+
+    guard.remove_all().await;
+}
+
+#[cfg(not(feature = "dashboard"))]
+pub async fn test_dashboard_api(_: StorageType) {}
 
 pub async fn test_prometheus_remote_write(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
@@ -3518,6 +3636,43 @@ transform:
         "[[\"d_table_2436\"],[\"demo\"],[\"numbers\"]]",
     )
     .await;
+
+    guard.remove_all().await;
+}
+
+pub async fn test_influxdb_write_with_hints(storage_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(storage_type, "test_influxdb_write_with_hints").await;
+
+    let client = TestClient::new(app).await;
+
+    let result = client
+        .post("/v1/influxdb/write?db=public")
+        .header("x-greptime-hints", "sst_format=flat,ttl=30d,skip_wal=true")
+        .body("sst_fmt_table,host=host1 cpu=1.2 1664370459457010101")
+        .send()
+        .await;
+    assert_eq!(result.status(), 204);
+
+    let res = client
+        .get("/v1/sql?sql=show create table sst_fmt_table")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let resp = res.text().await;
+    assert!(
+        resp.contains("sst_format = 'flat'"),
+        "expected sst_format = 'flat' in SHOW CREATE TABLE output, got: {resp}"
+    );
+    assert!(
+        resp.contains("ttl = '30days'"),
+        "expected ttl = '30days' in SHOW CREATE TABLE output, got: {resp}"
+    );
+    assert!(
+        resp.contains("skip_wal = 'true'"),
+        "expected skip_wal = 'true' in SHOW CREATE TABLE output, got: {resp}"
+    );
 
     guard.remove_all().await;
 }

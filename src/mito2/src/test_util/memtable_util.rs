@@ -30,8 +30,7 @@ use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt, SortFi
 use store_api::metadata::{
     ColumnMetadata, RegionMetadata, RegionMetadataBuilder, RegionMetadataRef,
 };
-use store_api::storage::{ColumnId, RegionId, SequenceNumber, SequenceRange};
-use table::predicate::Predicate;
+use store_api::storage::{ColumnId, RegionId, SequenceNumber};
 
 use crate::error::Result;
 use crate::memtable::bulk::part::BulkPart;
@@ -81,16 +80,6 @@ impl Memtable for EmptyMemtable {
 
     fn write_bulk(&self, _part: BulkPart) -> Result<()> {
         Ok(())
-    }
-
-    #[cfg(any(test, feature = "test"))]
-    fn iter(
-        &self,
-        _projection: Option<&[ColumnId]>,
-        _filters: Option<Predicate>,
-        _sequence: Option<SequenceRange>,
-    ) -> Result<BoxedBatchIterator> {
-        Ok(Box::new(std::iter::empty()))
     }
 
     fn ranges(

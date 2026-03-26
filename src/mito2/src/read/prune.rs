@@ -80,11 +80,6 @@ impl PruneReader {
         }
     }
 
-    pub(crate) fn reset_source(&mut self, source: Source, skip_fields: bool) {
-        self.source = source;
-        self.skip_fields = skip_fields;
-    }
-
     /// Merge metrics with the inner reader and return the merged metrics.
     pub(crate) fn metrics(&self) -> ReaderMetrics {
         let mut metrics = self.metrics.clone();
@@ -252,10 +247,10 @@ pub enum FlatSource {
 }
 
 impl FlatSource {
-    fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
+    async fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
         match self {
-            FlatSource::RowGroup(r) => r.next_batch(),
-            FlatSource::LastRow(r) => r.next_batch(),
+            FlatSource::RowGroup(r) => r.next_batch().await,
+            FlatSource::LastRow(r) => r.next_batch().await,
         }
     }
 }
@@ -302,13 +297,16 @@ impl FlatPruneReader {
         self.metrics.clone()
     }
 
-    pub(crate) fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
-        while let Some(record_batch) = {
+    pub(crate) async fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
+        loop {
             let start = std::time::Instant::now();
-            let batch = self.source.next_batch()?;
+            let batch = self.source.next_batch().await?;
             self.metrics.scan_cost += start.elapsed();
-            batch
-        } {
+
+            let Some(record_batch) = batch else {
+                return Ok(None);
+            };
+
             // Update metrics for the received batch
             self.metrics.num_rows += record_batch.num_rows();
             self.metrics.num_batches += 1;
@@ -322,8 +320,6 @@ impl FlatPruneReader {
                 }
             }
         }
-
-        Ok(None)
     }
 
     /// Prunes batches by the pushed down predicate and returns RecordBatch.

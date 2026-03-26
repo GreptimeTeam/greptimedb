@@ -20,13 +20,14 @@ use clap::Parser;
 use colored::Colorize;
 use datanode::config::RegionEngineConfig;
 use datanode::store;
-use either::Either;
+use futures::stream;
 use mito2::access_layer::{
     AccessLayer, AccessLayerRef, Metrics, OperationType, SstWriteRequest, WriteType,
 };
 use mito2::cache::{CacheManager, CacheManagerRef};
 use mito2::config::{FulltextIndexConfig, MitoConfig, Mode};
-use mito2::read::Source;
+use mito2::read::FlatSource;
+use mito2::sst::FormatType;
 use mito2::sst::file::{FileHandle, FileMeta};
 use mito2::sst::file_purger::{FilePurger, FilePurgerRef};
 use mito2::sst::index::intermediate::IntermediateManager;
@@ -210,6 +211,7 @@ impl ObjbenchCommand {
             object_store.clone(),
         )
         .expected_metadata(Some(region_meta.clone()))
+        .flat_format(true)
         .build()
         .await
         .map_err(|e| {
@@ -231,6 +233,10 @@ impl ObjbenchCommand {
         let reader_build_elapsed = reader_build_start.elapsed();
         let total_rows = reader.parquet_metadata().file_metadata().num_rows();
         println!("{} Reader built in {:?}", "✓".green(), reader_build_elapsed);
+        let reader_stream = Box::pin(stream::try_unfold(reader, |mut reader| async move {
+            let batch = reader.next_record_batch().await?;
+            Ok(batch.map(|batch| (batch, reader)))
+        }));
 
         // Build write request
         let fulltext_index_config = FulltextIndexConfig {
@@ -241,10 +247,11 @@ impl ObjbenchCommand {
         let write_req = SstWriteRequest {
             op_type: OperationType::Flush,
             metadata: region_meta,
-            source: Either::Left(Source::Reader(Box::new(reader))),
+            source: FlatSource::Stream(reader_stream),
             cache_manager,
             storage: None,
             max_sequence: None,
+            sst_write_format: FormatType::PrimaryKey,
             index_options: Default::default(),
             index_config: mito_engine_config.index.clone(),
             inverted_index_config: MitoConfig::default().inverted_index,

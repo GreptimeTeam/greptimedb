@@ -21,7 +21,7 @@ use std::sync::Arc;
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
 use common_recordbatch::RecordBatch;
-use common_recordbatch::error::ExternalSnafu;
+use common_recordbatch::error::{DataTypesSnafu, ExternalSnafu};
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::schema::{Schema, SchemaRef};
 use datatypes::value::Value;
@@ -37,7 +37,7 @@ use crate::read::Batch;
 use crate::read::flat_projection::FlatProjectionMapper;
 
 /// Only cache vector when its length `<=` this value.
-const MAX_VECTOR_LENGTH_TO_CACHE: usize = 16384;
+pub(crate) const MAX_VECTOR_LENGTH_TO_CACHE: usize = 16384;
 
 /// Wrapper enum for different projection mapper implementations.
 pub enum ProjectionMapper {
@@ -423,7 +423,7 @@ enum BatchIndex {
 }
 
 /// Gets a vector with repeated values from specific cache or creates a new one.
-fn repeated_vector_with_cache(
+pub(crate) fn repeated_vector_with_cache(
     data_type: &ConcreteDataType,
     value: &Value,
     num_rows: usize,
@@ -450,7 +450,7 @@ fn repeated_vector_with_cache(
 }
 
 /// Returns a vector with repeated values.
-fn new_repeated_vector(
+pub(crate) fn new_repeated_vector(
     data_type: &ConcreteDataType,
     value: &Value,
     num_rows: usize,
@@ -458,8 +458,7 @@ fn new_repeated_vector(
     let mut mutable_vector = data_type.create_mutable_vector(1);
     mutable_vector
         .try_push_value_ref(&value.as_value_ref())
-        .map_err(BoxedError::new)
-        .context(ExternalSnafu)?;
+        .context(DataTypesSnafu)?;
     // This requires an additional allocation.
     let base_vector = mutable_vector.to_vector();
     Ok(base_vector.replicate(&[num_rows]))
@@ -809,6 +808,7 @@ mod tests {
                 .num_fields(2)
                 .build(),
         );
+        let cache = CacheStrategy::Disabled;
         let mapper = ProjectionMapper::all(&metadata, true).unwrap();
         assert_eq!([0, 1, 2, 3, 4], mapper.column_ids());
         assert_eq!(
@@ -823,7 +823,7 @@ mod tests {
         );
 
         let batch = new_flat_batch(Some(0), &[(1, 1), (2, 2)], &[(3, 3), (4, 4)], 3);
-        let record_batch = mapper.as_flat().unwrap().convert(&batch).unwrap();
+        let record_batch = mapper.as_flat().unwrap().convert(&batch, &cache).unwrap();
         let expect = "\
 +---------------------+----+----+----+----+
 | ts                  | k0 | k1 | v0 | v1 |
@@ -843,6 +843,7 @@ mod tests {
                 .num_fields(2)
                 .build(),
         );
+        let cache = CacheStrategy::Disabled;
         // Columns v1, k0
         let mapper = ProjectionMapper::new(&metadata, [4, 1].into_iter(), true).unwrap();
         assert_eq!([4, 1], mapper.column_ids());
@@ -856,7 +857,7 @@ mod tests {
         );
 
         let batch = new_flat_batch(None, &[(1, 1)], &[(4, 4)], 3);
-        let record_batch = mapper.as_flat().unwrap().convert(&batch).unwrap();
+        let record_batch = mapper.as_flat().unwrap().convert(&batch, &cache).unwrap();
         let expect = "\
 +----+----+
 | v1 | k0 |
@@ -876,6 +877,7 @@ mod tests {
                 .num_fields(2)
                 .build(),
         );
+        let cache = CacheStrategy::Disabled;
         // Output columns v1, k0. Read also includes v0.
         let mapper = ProjectionMapper::new_with_read_columns(
             &metadata,
@@ -887,7 +889,7 @@ mod tests {
         assert_eq!([4, 1, 3], mapper.column_ids());
 
         let batch = new_flat_batch(None, &[(1, 1)], &[(3, 3), (4, 4)], 3);
-        let record_batch = mapper.as_flat().unwrap().convert(&batch).unwrap();
+        let record_batch = mapper.as_flat().unwrap().convert(&batch, &cache).unwrap();
         let expect = "\
 +----+----+
 | v1 | k0 |
@@ -907,6 +909,7 @@ mod tests {
                 .num_fields(2)
                 .build(),
         );
+        let cache = CacheStrategy::Disabled;
         // Empty projection
         let mapper = ProjectionMapper::new(&metadata, [].into_iter(), true).unwrap();
         assert_eq!([0], mapper.column_ids()); // Should still read the time index column
@@ -918,7 +921,7 @@ mod tests {
         );
 
         let batch = new_flat_batch(Some(0), &[], &[], 3);
-        let record_batch = flat_mapper.convert(&batch).unwrap();
+        let record_batch = flat_mapper.convert(&batch, &cache).unwrap();
         assert_eq!(3, record_batch.num_rows());
         assert_eq!(0, record_batch.num_columns());
         assert!(record_batch.schema.is_empty());

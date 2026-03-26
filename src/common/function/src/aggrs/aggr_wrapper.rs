@@ -25,7 +25,7 @@
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use arrow::array::StructArray;
+use arrow::array::{ArrayRef, BooleanArray, StructArray};
 use arrow_schema::{FieldRef, Fields};
 use common_telemetry::debug;
 use datafusion::functions_aggregate::all_default_aggregate_functions;
@@ -38,8 +38,8 @@ use datafusion_common::{Column, ScalarValue};
 use datafusion_expr::expr::{AggregateFunction, AggregateFunctionParams};
 use datafusion_expr::function::StateFieldsArgs;
 use datafusion_expr::{
-    Accumulator, Aggregate, AggregateUDF, AggregateUDFImpl, Expr, ExprSchemable, LogicalPlan,
-    Signature,
+    Accumulator, Aggregate, AggregateUDF, AggregateUDFImpl, EmitTo, Expr, ExprSchemable,
+    GroupsAccumulator, LogicalPlan, Signature,
 };
 use datafusion_physical_expr::aggregate::AggregateFunctionExpr;
 use datatypes::arrow::datatypes::{DataType, Field};
@@ -322,6 +322,14 @@ impl StateWrapper {
             );
         })
     }
+
+    fn fix_inner_acc_args<'b>(
+        &self,
+        mut acc_args: datafusion_expr::function::AccumulatorArgs<'b>,
+    ) -> datafusion_common::Result<datafusion_expr::function::AccumulatorArgs<'b>> {
+        acc_args.return_field = self.deduce_aggr_return_type(&acc_args)?;
+        Ok(acc_args)
+    }
 }
 
 impl AggregateUDFImpl for StateWrapper {
@@ -331,13 +339,30 @@ impl AggregateUDFImpl for StateWrapper {
     ) -> datafusion_common::Result<Box<dyn Accumulator>> {
         // fix and recover proper acc args for the original aggregate function.
         let state_type = acc_args.return_type().clone();
-        let inner = {
-            let mut new_acc_args = acc_args.clone();
-            new_acc_args.return_field = self.deduce_aggr_return_type(&acc_args)?;
-            self.inner.accumulator(new_acc_args)?
-        };
+        let inner = self.inner.accumulator(self.fix_inner_acc_args(acc_args)?)?;
 
         Ok(Box::new(StateAccum::new(inner, state_type)?))
+    }
+
+    fn groups_accumulator_supported(
+        &self,
+        acc_args: datafusion_expr::function::AccumulatorArgs,
+    ) -> bool {
+        self.fix_inner_acc_args(acc_args)
+            .map(|args| self.inner.inner().groups_accumulator_supported(args))
+            .unwrap_or(false)
+    }
+
+    fn create_groups_accumulator(
+        &self,
+        acc_args: datafusion_expr::function::AccumulatorArgs,
+    ) -> datafusion_common::Result<Box<dyn GroupsAccumulator>> {
+        let state_type = acc_args.return_type().clone();
+        let inner = self
+            .inner
+            .inner()
+            .create_groups_accumulator(self.fix_inner_acc_args(acc_args)?)?;
+        Ok(Box::new(StateGroupsAccum::new(inner, state_type)?))
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -460,6 +485,118 @@ impl AggregateUDFImpl for StateWrapper {
 pub struct StateAccum {
     inner: Box<dyn Accumulator>,
     state_fields: Fields,
+}
+
+pub struct StateGroupsAccum {
+    inner: Box<dyn GroupsAccumulator>,
+    state_fields: Fields,
+}
+
+impl StateGroupsAccum {
+    fn new(
+        inner: Box<dyn GroupsAccumulator>,
+        state_type: DataType,
+    ) -> datafusion_common::Result<Self> {
+        let DataType::Struct(fields) = state_type else {
+            return Err(datafusion_common::DataFusionError::Internal(format!(
+                "Expected a struct type for state, got: {:?}",
+                state_type
+            )));
+        };
+        Ok(Self {
+            inner,
+            state_fields: fields,
+        })
+    }
+
+    fn wrap_state_arrays(&self, arrays: Vec<ArrayRef>) -> datafusion_common::Result<ArrayRef> {
+        let array_type = arrays
+            .iter()
+            .map(|array| array.data_type().clone())
+            .collect::<Vec<_>>();
+        let expected_type = self
+            .state_fields
+            .iter()
+            .map(|field| field.data_type().clone())
+            .collect::<Vec<_>>();
+        if array_type != expected_type {
+            debug!(
+                "State mismatch, expected: {}, got: {} for expected fields: {:?} and given array types: {:?}",
+                self.state_fields.len(),
+                arrays.len(),
+                self.state_fields,
+                array_type,
+            );
+            let guess_schema = arrays
+                .iter()
+                .enumerate()
+                .map(|(index, array)| {
+                    Field::new(
+                        format!("col_{index}[mismatch_state]").as_str(),
+                        array.data_type().clone(),
+                        true,
+                    )
+                })
+                .collect::<Fields>();
+            let array = StructArray::try_new(guess_schema, arrays, None)?;
+            return Ok(Arc::new(array));
+        }
+
+        Ok(Arc::new(StructArray::try_new(
+            self.state_fields.clone(),
+            arrays,
+            None,
+        )?))
+    }
+}
+
+impl GroupsAccumulator for StateGroupsAccum {
+    fn update_batch(
+        &mut self,
+        values: &[ArrayRef],
+        group_indices: &[usize],
+        opt_filter: Option<&BooleanArray>,
+        total_num_groups: usize,
+    ) -> datafusion_common::Result<()> {
+        self.inner
+            .update_batch(values, group_indices, opt_filter, total_num_groups)
+    }
+
+    fn merge_batch(
+        &mut self,
+        values: &[ArrayRef],
+        group_indices: &[usize],
+        opt_filter: Option<&BooleanArray>,
+        total_num_groups: usize,
+    ) -> datafusion_common::Result<()> {
+        self.inner
+            .merge_batch(values, group_indices, opt_filter, total_num_groups)
+    }
+
+    fn evaluate(&mut self, emit_to: EmitTo) -> datafusion_common::Result<ArrayRef> {
+        let state = self.inner.state(emit_to)?;
+        self.wrap_state_arrays(state)
+    }
+
+    fn state(&mut self, emit_to: EmitTo) -> datafusion_common::Result<Vec<ArrayRef>> {
+        self.inner.state(emit_to)
+    }
+
+    fn convert_to_state(
+        &self,
+        values: &[ArrayRef],
+        opt_filter: Option<&BooleanArray>,
+    ) -> datafusion_common::Result<Vec<ArrayRef>> {
+        self.inner.convert_to_state(values, opt_filter)
+    }
+
+    fn supports_convert_to_state(&self) -> bool {
+        self.inner.supports_convert_to_state()
+    }
+
+    fn size(&self) -> usize {
+        self.inner.size()
+    }
 }
 
 impl StateAccum {

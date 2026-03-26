@@ -427,8 +427,8 @@ SELECT min(val) as min_computed, max(val) as max_computed FROM computed;
 |               |   Aggregate: groupBy=[[]], aggr=[[min(computed.val), max(computed.val)]]                                                    |
 |               |     SubqueryAlias: computed                                                                                                 |
 |               |       Projection: metric.ts AS ts, val * Float64(2) + Float64(1) AS val                                                     |
-|               |         Projection: metric.ts, val * Float64(2) + Float64(1) AS val * Float64(2) + Float64(1)                               |
-|               |           Projection: metric.ts, metric.val * Float64(2) AS val * Float64(2)                                                |
+|               |         Projection: metric.ts, CAST(val * Float64(2) AS Float64) + Float64(1) AS val * Float64(2) + Float64(1)              |
+|               |           Projection: metric.ts, CAST(metric.val AS Float64) * Float64(2) AS val * Float64(2)                               |
 |               |             PromInstantManipulate: range=[0..40000], lookback=[300000], interval=[10000], time index=[ts]                   |
 |               |               PromSeriesDivide: tags=[]                                                                                     |
 |               |                 Filter: metric.ts >= TimestampMillisecond(-299999, None) AND metric.ts <= TimestampMillisecond(40000, None) |

@@ -244,15 +244,19 @@ impl WriteCache {
         .await
         .with_file_cleaner(cleaner);
 
-        let sst_info = match write_request.source {
-            either::Left(source) => {
+        let sst_info = match write_request.sst_write_format {
+            crate::sst::FormatType::PrimaryKey => {
                 writer
-                    .write_all(source, write_request.max_sequence, write_opts)
+                    .write_all_flat_as_primary_key(
+                        write_request.source,
+                        write_request.max_sequence,
+                        write_opts,
+                    )
                     .await?
             }
-            either::Right(flat_source) => {
+            crate::sst::FormatType::Flat => {
                 writer
-                    .write_all_flat(flat_source, write_request.max_sequence, write_opts)
+                    .write_all_flat(write_request.source, write_request.max_sequence, write_opts)
                     .await?
             }
         };
@@ -509,12 +513,13 @@ mod tests {
     use crate::cache::test_util::{assert_parquet_metadata_equal, new_fs_store};
     use crate::cache::{CacheManager, CacheStrategy};
     use crate::error::InvalidBatchSnafu;
-    use crate::read::Source;
+    use crate::read::FlatSource;
     use crate::region::options::IndexOptions;
     use crate::sst::parquet::reader::ParquetReaderBuilder;
     use crate::test_util::TestEnv;
     use crate::test_util::sst_util::{
-        new_batch_by_range, new_source, sst_file_handle_with_file_id, sst_region_metadata,
+        new_flat_source_from_record_batches, new_record_batch_by_range,
+        sst_file_handle_with_file_id, sst_region_metadata,
     };
 
     #[tokio::test]
@@ -532,21 +537,22 @@ mod tests {
             .create_write_cache(local_store.clone(), ReadableSize::mb(10))
             .await;
 
-        // Create Source
+        // Create source.
         let metadata = Arc::new(sst_region_metadata());
         let region_id = metadata.region_id;
-        let source = new_source(&[
-            new_batch_by_range(&["a", "d"], 0, 60),
-            new_batch_by_range(&["b", "f"], 0, 40),
-            new_batch_by_range(&["b", "h"], 100, 200),
+        let source = new_flat_source_from_record_batches(vec![
+            new_record_batch_by_range(&["a", "d"], 0, 60),
+            new_record_batch_by_range(&["b", "f"], 0, 40),
+            new_record_batch_by_range(&["b", "h"], 100, 200),
         ]);
 
         let write_request = SstWriteRequest {
             op_type: OperationType::Flush,
             metadata,
-            source: either::Left(source),
+            source,
             storage: None,
             max_sequence: None,
+            sst_write_format: Default::default(),
             cache_manager: Default::default(),
             index_options: IndexOptions::default(),
             index_config: Default::default(),
@@ -636,19 +642,20 @@ mod tests {
         // Create source
         let metadata = Arc::new(sst_region_metadata());
 
-        let source = new_source(&[
-            new_batch_by_range(&["a", "d"], 0, 60),
-            new_batch_by_range(&["b", "f"], 0, 40),
-            new_batch_by_range(&["b", "h"], 100, 200),
+        let source = new_flat_source_from_record_batches(vec![
+            new_record_batch_by_range(&["a", "d"], 0, 60),
+            new_record_batch_by_range(&["b", "f"], 0, 40),
+            new_record_batch_by_range(&["b", "h"], 100, 200),
         ]);
 
         // Write to local cache and upload sst to mock remote store
         let write_request = SstWriteRequest {
             op_type: OperationType::Flush,
             metadata,
-            source: either::Left(source),
+            source,
             storage: None,
             max_sequence: None,
+            sst_write_format: Default::default(),
             cache_manager: cache_manager.clone(),
             index_options: IndexOptions::default(),
             index_config: Default::default(),
@@ -686,9 +693,15 @@ mod tests {
         .cache(CacheStrategy::EnableAll(cache_manager.clone()))
         .page_index_policy(PageIndexPolicy::Optional);
         let reader = builder.build().await.unwrap().unwrap();
+        let cached_write_parquet_metadata = crate::cache::CachedSstMeta::try_new(
+            "test.sst",
+            Arc::unwrap_or_clone(write_parquet_metadata),
+        )
+        .unwrap()
+        .parquet_metadata();
 
         // Check parquet metadata
-        assert_parquet_metadata_equal(write_parquet_metadata, reader.parquet_metadata());
+        assert_parquet_metadata_equal(cached_write_parquet_metadata, reader.parquet_metadata());
     }
 
     #[tokio::test]
@@ -715,9 +728,9 @@ mod tests {
         let metadata = Arc::new(sst_region_metadata());
 
         // Creates a source that can return an error to abort the writer.
-        let source = Source::Iter(Box::new(
+        let source = FlatSource::Iter(Box::new(
             [
-                Ok(new_batch_by_range(&["a", "d"], 0, 60)),
+                Ok(new_record_batch_by_range(&["a", "d"], 0, 60)),
                 InvalidBatchSnafu {
                     reason: "Abort the writer",
                 }
@@ -730,9 +743,10 @@ mod tests {
         let write_request = SstWriteRequest {
             op_type: OperationType::Flush,
             metadata,
-            source: either::Left(source),
+            source,
             storage: None,
             max_sequence: None,
+            sst_write_format: Default::default(),
             cache_manager: cache_manager.clone(),
             index_options: IndexOptions::default(),
             index_config: Default::default(),

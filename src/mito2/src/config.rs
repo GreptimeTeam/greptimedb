@@ -116,6 +116,8 @@ pub struct MitoConfig {
     pub page_cache_size: ReadableSize,
     /// Cache size for time series selector (e.g. `last_value()`). Setting it to 0 to disable the cache.
     pub selector_result_cache_size: ReadableSize,
+    /// Cache size for flat range scan results. Setting it to 0 to disable the cache.
+    pub range_result_cache_size: ReadableSize,
     /// Whether to enable the write cache.
     pub enable_write_cache: bool,
     /// File system path for write cache dir's root, defaults to `{data_home}`.
@@ -200,6 +202,7 @@ impl Default for MitoConfig {
             vector_cache_size: ReadableSize::mb(512),
             page_cache_size: ReadableSize::mb(512),
             selector_result_cache_size: ReadableSize::mb(512),
+            range_result_cache_size: ReadableSize::mb(512),
             enable_write_cache: false,
             write_cache_path: String::new(),
             write_cache_size: ReadableSize::gb(5),
@@ -336,6 +339,7 @@ impl MitoConfig {
         self.vector_cache_size = mem_cache_size;
         self.page_cache_size = page_cache_size;
         self.selector_result_cache_size = mem_cache_size;
+        self.range_result_cache_size = mem_cache_size;
 
         self.index.adjust_buffer_and_cache_size(sys_memory);
     }

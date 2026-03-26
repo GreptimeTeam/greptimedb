@@ -355,25 +355,6 @@ impl DatafusionQueryEngine {
     }
 
     #[tracing::instrument(skip_all)]
-    pub fn optimize(
-        &self,
-        context: &QueryEngineContext,
-        plan: &LogicalPlan,
-    ) -> Result<LogicalPlan> {
-        let _timer = metrics::OPTIMIZE_LOGICAL_ELAPSED.start_timer();
-
-        // Optimized by extension rules
-        let optimized_plan = self
-            .state
-            .optimize_by_extension_rules(plan.clone(), context)?;
-
-        // Optimized by datafusion optimizer
-        let optimized_plan = self.state.session_state().optimize(&optimized_plan)?;
-
-        Ok(optimized_plan)
-    }
-
-    #[tracing::instrument(skip_all)]
     fn optimize_physical_plan(
         &self,
         ctx: &mut QueryEngineContext,
@@ -444,32 +425,17 @@ impl QueryEngine for DatafusionQueryEngine {
     async fn describe(
         &self,
         plan: LogicalPlan,
-        query_ctx: QueryContextRef,
+        _query_ctx: QueryContextRef,
     ) -> Result<DescribeResult> {
-        let ctx = self.engine_context(query_ctx);
-        if let Ok(optimised_plan) = self.optimize(&ctx, &plan) {
-            let schema = optimised_plan
-                .schema()
-                .clone()
-                .try_into()
-                .context(ConvertSchemaSnafu)?;
-            Ok(DescribeResult {
-                schema,
-                logical_plan: optimised_plan,
-            })
-        } else {
-            // Table's like those in information_schema cannot be optimized when
-            // it contains parameters. So we fallback to original plans.
-            let schema = plan
-                .schema()
-                .clone()
-                .try_into()
-                .context(ConvertSchemaSnafu)?;
-            Ok(DescribeResult {
-                schema,
-                logical_plan: plan,
-            })
-        }
+        let schema = plan
+            .schema()
+            .clone()
+            .try_into()
+            .context(ConvertSchemaSnafu)?;
+        Ok(DescribeResult {
+            schema,
+            logical_plan: plan,
+        })
     }
 
     async fn execute(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output> {
@@ -924,7 +890,7 @@ mod tests {
             )
         );
         assert_eq!(
-            "Limit: skip=0, fetch=20\n  Aggregate: groupBy=[[]], aggr=[[sum(CAST(numbers.number AS UInt64))]]\n    TableScan: numbers projection=[number]",
+            "Limit: skip=0, fetch=20\n  Projection: sum(numbers.number)\n    Aggregate: groupBy=[[]], aggr=[[sum(numbers.number)]]\n      TableScan: numbers",
             format!("{}", logical_plan.display_indent())
         );
     }

@@ -109,6 +109,11 @@ harness = false
 required-features = ["test"]
 
 [[bench]]
+name = "bench_cache_stream"
+harness = false
+required-features = ["test"]
+
+[[bench]]
 name = "bench_filter_time_partition"
 harness = false
 required-features = ["test"]
