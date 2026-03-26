@@ -381,7 +381,7 @@ mod test {
 +-------------------+
 | @@version_comment |
 +-------------------+
-| Greptime          |
+| GreptimeDB        |
 +-------------------+";
         test(query, expected);
 
