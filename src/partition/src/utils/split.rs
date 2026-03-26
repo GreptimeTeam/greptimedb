@@ -526,6 +526,22 @@ fn atom_col_op_val(expr: &PartitionExpr) -> Option<(String, RestrictedOp, Value)
     }
 }
 
+/// Collects per-column bounds and passthrough atoms from a pure `AND` tree.
+///
+/// Scope and intent:
+/// - This helper is shared by [`is_empty_and_conjunction`] and
+///   [`simplify_and_bounds`] so both paths interpret conjunction atoms the same
+///   way.
+/// - It only handles conjunction-only expressions. If any `OR` is present, it
+///   returns `None` and lets callers keep their conservative fallback behavior.
+///
+/// Behavior:
+/// - Tightest lower/upper bounds are recorded per column.
+/// - `=` contributes both a lower and an upper bound at the same value.
+/// - `!=` and non-range atoms are preserved in `passthrough` for callers that
+///   need to rebuild the conjunction.
+/// - `has_conflict` is set when atomic constraints already contradict each
+///   other (for example `a = 1 AND a <> 1`).
 fn collect_conjunction_bounds(expr: &PartitionExpr) -> Option<CollectedConjunction> {
     let mut atoms = Vec::new();
     if !collect_and_atoms(expr, &mut atoms) {
