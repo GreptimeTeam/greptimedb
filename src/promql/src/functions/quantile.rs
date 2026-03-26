@@ -100,6 +100,7 @@ impl QuantileOverTime {
             .unwrap()
             .values();
         let mut result_builder = Float64Builder::with_capacity(ts_range.len());
+        let mut scratch = Vec::new();
 
         match quantile_col {
             ColumnarValue::Scalar(quantile_scalar) => {
@@ -124,9 +125,10 @@ impl QuantileOverTime {
                         )),
                     )?;
 
-                    match quantile_impl(
+                    match quantile_with_scratch(
                         &all_values[value_offset..value_offset + value_len],
                         quantile,
+                        &mut scratch,
                     ) {
                         Some(value) => result_builder.append_value(value),
                         None => result_builder.append_null(),
@@ -171,9 +173,10 @@ impl QuantileOverTime {
                     } else {
                         quantile_array.value(index)
                     };
-                    match quantile_impl(
+                    match quantile_with_scratch(
                         &all_values[value_offset..value_offset + value_len],
                         quantile,
+                        &mut scratch,
                     ) {
                         Some(value) => result_builder.append_value(value),
                         None => result_builder.append_null(),
@@ -189,6 +192,13 @@ impl QuantileOverTime {
 
 /// Refer to <https://github.com/prometheus/prometheus/blob/6e2905a4d4ff9b47b1f6d201333f5bd53633f921/promql/quantile.go#L357-L386>
 pub(crate) fn quantile_impl(values: &[f64], quantile: f64) -> Option<f64> {
+    let mut scratch = Vec::new();
+    quantile_with_scratch(values, quantile, &mut scratch)
+}
+
+/// Same as [quantile_impl] but reuses a caller-provided scratch buffer to avoid
+/// per-call allocation.
+fn quantile_with_scratch(values: &[f64], quantile: f64, scratch: &mut Vec<f64>) -> Option<f64> {
     if quantile.is_nan() || values.is_empty() {
         return Some(f64::NAN);
     }
@@ -199,17 +209,18 @@ pub(crate) fn quantile_impl(values: &[f64], quantile: f64) -> Option<f64> {
         return Some(f64::INFINITY);
     }
 
-    let mut values = values.to_vec();
-    values.sort_unstable_by(f64::total_cmp);
+    scratch.clear();
+    scratch.extend_from_slice(values);
+    scratch.sort_unstable_by(f64::total_cmp);
 
-    let length = values.len();
+    let length = scratch.len();
     let rank = quantile * (length - 1) as f64;
 
     let lower_index = 0.max(rank.floor() as usize);
     let upper_index = (length - 1).min(lower_index + 1);
     let weight = rank - rank.floor();
 
-    let result = values[lower_index] * (1.0 - weight) + values[upper_index] * weight;
+    let result = scratch[lower_index] * (1.0 - weight) + scratch[upper_index] * weight;
     Some(result)
 }
 
