@@ -18,12 +18,11 @@ use std::sync::Arc;
 use datatypes::arrow::array::{Array, BinaryBuilder, StringArray, UInt64Array};
 use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use datatypes::arrow::record_batch::RecordBatch;
-use datatypes::value::ValueRef;
 use fxhash::FxHasher;
 use mito_codec::row_converter::SparsePrimaryKeyCodec;
 use snafu::ResultExt;
 use store_api::storage::ColumnId;
-use store_api::storage::consts::{PRIMARY_KEY_COLUMN_NAME, ReservedColumnId};
+use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 
 use crate::error::{EncodePrimaryKeySnafu, Result, UnexpectedRequestSnafu};
 
@@ -112,7 +111,6 @@ fn build_tag_arrays<'a>(
 }
 
 /// Modifies a RecordBatch for sparse primary key encoding.
-#[allow(dead_code)]
 pub(crate) fn modify_batch_sparse(
     batch: RecordBatch,
     table_id: u32,
@@ -128,24 +126,17 @@ pub(crate) fn modify_batch_sparse(
     let mut buffer = Vec::new();
     for row in 0..num_rows {
         buffer.clear();
-        let internal = [
-            (ReservedColumnId::table_id(), ValueRef::UInt32(table_id)),
-            (
-                ReservedColumnId::tsid(),
-                ValueRef::UInt64(tsid_array.value(row)),
-            ),
-        ];
         codec
-            .encode_to_vec(internal.into_iter(), &mut buffer)
+            .encode_internal(table_id, tsid_array.value(row), &mut buffer)
             .context(EncodePrimaryKeySnafu)?;
 
         let tags = sorted_tag_columns
             .iter()
             .zip(tag_arrays.iter())
             .filter(|(_, arr)| !arr.is_null(row))
-            .map(|(tc, arr)| (tc.column_id, ValueRef::String(arr.value(row))));
+            .map(|(tc, arr)| (tc.column_id, arr.value(row).as_bytes()));
         codec
-            .encode_to_vec(tags, &mut buffer)
+            .encode_raw_tag_value(tags, &mut buffer)
             .context(EncodePrimaryKeySnafu)?;
 
         pk_builder.append_value(&buffer);

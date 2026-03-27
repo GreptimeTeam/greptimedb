@@ -56,6 +56,9 @@ pub enum Error {
     #[snafu(display("Internal error: {}", err_msg))]
     Internal { err_msg: String },
 
+    #[snafu(display("Pending rows batcher channel closed"))]
+    BatcherChannelClosed,
+
     #[snafu(display("Unsupported data type: {}, reason: {}", data_type, reason))]
     UnsupportedDataType {
         data_type: ConcreteDataType,
@@ -684,6 +687,7 @@ impl ErrorExt for Error {
         use Error::*;
         match self {
             Internal { .. }
+            | BatcherChannelClosed
             | InternalIo { .. }
             | TokioIo { .. }
             | StartHttp { .. }

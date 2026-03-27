@@ -86,6 +86,11 @@ pub struct PromStoreResponse {
 
 #[async_trait]
 pub trait PromStoreProtocolHandler {
+    /// Runs pre-write checks/hooks for prometheus remote write requests.
+    async fn pre_write(&self, _request: &RowInsertRequests, _ctx: QueryContextRef) -> Result<()> {
+        Ok(())
+    }
+
     /// Handling prometheus remote write requests
     async fn write(
         &self,

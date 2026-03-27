@@ -161,12 +161,11 @@ impl Instance {
 
 #[async_trait]
 impl PromStoreProtocolHandler for Instance {
-    async fn write(
+    async fn pre_write(
         &self,
-        request: RowInsertRequests,
+        request: &RowInsertRequests,
         ctx: QueryContextRef,
-        with_metric_engine: bool,
-    ) -> ServerResult<Output> {
+    ) -> ServerResult<()> {
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()
@@ -175,7 +174,17 @@ impl PromStoreProtocolHandler for Instance {
         let interceptor_ref = self
             .plugins
             .get::<PromStoreProtocolInterceptorRef<servers::error::Error>>();
-        interceptor_ref.pre_write(&request, ctx.clone())?;
+        interceptor_ref.pre_write(request, ctx)?;
+        Ok(())
+    }
+
+    async fn write(
+        &self,
+        request: RowInsertRequests,
+        ctx: QueryContextRef,
+        with_metric_engine: bool,
+    ) -> ServerResult<Output> {
+        self.pre_write(&request, ctx.clone()).await?;
 
         let output = if with_metric_engine {
             let physical_table = ctx
