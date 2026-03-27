@@ -33,7 +33,7 @@ use parquet::schema::types::SchemaDescriptor;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 
-use crate::error::{ReadParquetSnafu, Result, UnexpectedSnafu};
+use crate::error::{DecodeSnafu, ReadParquetSnafu, Result, UnexpectedSnafu};
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::{PrimaryKeyArray, ReadFormat};
 use crate::sst::parquet::reader::{RowGroupBuildContext, RowGroupReaderBuilder};
@@ -74,7 +74,10 @@ pub(crate) fn matching_row_ranges_by_primary_key(
             end += 1;
         }
 
-        if pk_filter.matches(pk_values.value(key as usize)) {
+        if pk_filter
+            .matches(pk_values.value(key as usize))
+            .context(DecodeSnafu)?
+        {
             if let Some(last) = matched_row_ranges.last_mut()
                 && last.end == start
             {
@@ -149,18 +152,18 @@ impl CachedPrimaryKeyFilter {
 }
 
 impl PrimaryKeyFilter for CachedPrimaryKeyFilter {
-    fn matches(&mut self, pk: &[u8]) -> bool {
+    fn matches(&mut self, pk: &[u8]) -> mito_codec::error::Result<bool> {
         if let Some(last_match) = self.last_match
             && self.last_primary_key == pk
         {
-            return last_match;
+            return Ok(last_match);
         }
 
-        let matched = self.inner.matches(pk);
+        let matched = self.inner.matches(pk)?;
         self.last_primary_key.clear();
         self.last_primary_key.extend_from_slice(pk);
         self.last_match = Some(matched);
-        matched
+        Ok(matched)
     }
 }
 
@@ -388,9 +391,9 @@ mod tests {
     }
 
     impl PrimaryKeyFilter for CountingPrimaryKeyFilter {
-        fn matches(&mut self, pk: &[u8]) -> bool {
+        fn matches(&mut self, pk: &[u8]) -> mito_codec::error::Result<bool> {
             self.hits.fetch_add(1, Ordering::Relaxed);
-            pk == self.expected.as_slice()
+            Ok(pk == self.expected.as_slice())
         }
     }
 
@@ -403,9 +406,13 @@ mod tests {
             expected: expected.clone(),
         }));
 
-        assert!(filter.matches(expected.as_slice()));
-        assert!(filter.matches(expected.as_slice()));
-        assert!(!filter.matches(new_primary_key(&["b", "x"]).as_slice()));
+        assert!(filter.matches(expected.as_slice()).unwrap());
+        assert!(filter.matches(expected.as_slice()).unwrap());
+        assert!(
+            !filter
+                .matches(new_primary_key(&["b", "x"]).as_slice())
+                .unwrap()
+        );
 
         assert_eq!(hits.load(Ordering::Relaxed), 2);
     }

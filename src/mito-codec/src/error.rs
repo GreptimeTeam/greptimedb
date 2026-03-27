@@ -72,6 +72,14 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to evaluate filter"))]
+    EvaluateFilter {
+        #[snafu(source(from(common_recordbatch::error::Error, Box::new)))]
+        source: Box<common_recordbatch::error::Error>,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -86,6 +94,7 @@ impl ErrorExt for Error {
                 StatusCode::InvalidArguments
             }
             NotSupportedField { .. } | UnsupportedOperation { .. } => StatusCode::Unsupported,
+            EvaluateFilter { source, .. } => source.status_code(),
         }
     }
 

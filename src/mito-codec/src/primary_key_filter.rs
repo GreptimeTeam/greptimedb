@@ -20,11 +20,12 @@ use common_recordbatch::filter::SimpleFilterEvaluator;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::value::Value;
 use memcomparable::Serializer;
+use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME;
 use store_api::storage::ColumnId;
 
-use crate::error::Result;
+use crate::error::{EvaluateFilterSnafu, Result};
 use crate::row_converter::{
     DensePrimaryKeyCodec, PrimaryKeyFilter, SortField, SparsePrimaryKeyCodec,
 };
@@ -96,43 +97,36 @@ impl PrimaryKeyFilterInner {
         compiled_filters
     }
 
-    fn evaluate_filters<'a>(&self, accessor: &mut impl PrimaryKeyValueAccessor<'a>) -> bool {
+    fn evaluate_filters<'a>(
+        &self,
+        accessor: &mut impl PrimaryKeyValueAccessor<'a>,
+    ) -> Result<bool> {
         if self.compiled_filters.is_empty() {
-            return true;
+            return Ok(true);
         }
 
         for compiled in &self.compiled_filters {
             let filter = &self.filters[compiled.filter_idx];
 
             let passed = if let Some(fast_path) = &compiled.fast_path {
-                let encoded_value = match accessor.encoded_value(compiled) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        common_telemetry::error!(e; "Failed to decode primary key");
-                        return true;
-                    }
-                };
+                let encoded_value = accessor.encoded_value(compiled)?;
                 fast_path.matches(encoded_value)
             } else {
-                let value = match accessor.decode_value(compiled) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        common_telemetry::error!(e; "Failed to decode primary key");
-                        return true;
-                    }
-                };
+                let value = accessor.decode_value(compiled)?;
 
                 // Safety: arrow schema and datatypes are constructed from the same source.
                 let scalar_value = value.try_to_scalar_value(&compiled.data_type).unwrap();
-                filter.evaluate_scalar(&scalar_value).unwrap_or(true)
+                filter
+                    .evaluate_scalar(&scalar_value)
+                    .context(EvaluateFilterSnafu)?
             };
 
             if !passed {
-                return false;
+                return Ok(false);
             }
         }
 
-        true
+        Ok(true)
     }
 }
 
@@ -274,7 +268,7 @@ impl DensePrimaryKeyFilter {
 }
 
 impl PrimaryKeyFilter for DensePrimaryKeyFilter {
-    fn matches(&mut self, pk: &[u8]) -> bool {
+    fn matches(&mut self, pk: &[u8]) -> Result<bool> {
         self.offsets_buf.clear();
         let mut accessor = DensePrimaryKeyValueAccessor {
             pk,
@@ -328,7 +322,7 @@ impl SparsePrimaryKeyFilter {
 }
 
 impl PrimaryKeyFilter for SparsePrimaryKeyFilter {
-    fn matches(&mut self, pk: &[u8]) -> bool {
+    fn matches(&mut self, pk: &[u8]) -> Result<bool> {
         self.offsets_map.clear();
         let mut accessor = SparsePrimaryKeyValueAccessor {
             pk,
@@ -518,7 +512,7 @@ mod tests {
         let pk = encode_sparse_pk(&metadata, create_test_row());
         let codec = SparsePrimaryKeyCodec::new(&metadata);
         let mut filter = SparsePrimaryKeyFilter::new(metadata, filters, codec, false);
-        assert!(filter.matches(&pk));
+        assert!(filter.matches(&pk).unwrap());
     }
 
     #[test]
@@ -531,7 +525,7 @@ mod tests {
         let pk = encode_sparse_pk(&metadata, create_test_row());
         let codec = SparsePrimaryKeyCodec::new(&metadata);
         let mut filter = SparsePrimaryKeyFilter::new(metadata, filters, codec, false);
-        assert!(!filter.matches(&pk));
+        assert!(!filter.matches(&pk).unwrap());
     }
 
     #[test]
@@ -544,7 +538,7 @@ mod tests {
         let pk = encode_sparse_pk(&metadata, create_test_row());
         let codec = SparsePrimaryKeyCodec::new(&metadata);
         let mut filter = SparsePrimaryKeyFilter::new(metadata, filters, codec, false);
-        assert!(filter.matches(&pk));
+        assert!(filter.matches(&pk).unwrap());
     }
 
     #[test]
@@ -557,7 +551,7 @@ mod tests {
         let pk = encode_dense_pk(&metadata, create_test_row());
         let codec = DensePrimaryKeyCodec::new(&metadata);
         let mut filter = DensePrimaryKeyFilter::new(metadata, filters, codec, false);
-        assert!(filter.matches(&pk));
+        assert!(filter.matches(&pk).unwrap());
     }
 
     #[test]
@@ -570,7 +564,7 @@ mod tests {
         let pk = encode_dense_pk(&metadata, create_test_row());
         let codec = DensePrimaryKeyCodec::new(&metadata);
         let mut filter = DensePrimaryKeyFilter::new(metadata, filters, codec, false);
-        assert!(!filter.matches(&pk));
+        assert!(!filter.matches(&pk).unwrap());
     }
 
     #[test]
@@ -583,7 +577,7 @@ mod tests {
         let pk = encode_dense_pk(&metadata, create_test_row());
         let codec = DensePrimaryKeyCodec::new(&metadata);
         let mut filter = DensePrimaryKeyFilter::new(metadata, filters, codec, false);
-        assert!(filter.matches(&pk));
+        assert!(filter.matches(&pk).unwrap());
     }
 
     #[test]
@@ -603,7 +597,7 @@ mod tests {
             let filters = Arc::new(vec![create_filter_with_op("pod", op, value)]);
             let mut filter =
                 DensePrimaryKeyFilter::new(metadata.clone(), filters, codec.clone(), false);
-            assert_eq!(expected, filter.matches(&pk));
+            assert_eq!(expected, filter.matches(&pk).unwrap());
         }
     }
 
@@ -624,7 +618,7 @@ mod tests {
             let filters = Arc::new(vec![create_filter_with_op("pod", op, value)]);
             let mut filter =
                 SparsePrimaryKeyFilter::new(metadata.clone(), filters, codec.clone(), false);
-            assert_eq!(expected, filter.matches(&pk));
+            assert_eq!(expected, filter.matches(&pk).unwrap());
         }
     }
 
@@ -658,7 +652,7 @@ mod tests {
         let filters = Arc::new(vec![create_filter_with_op("f", Operator::Eq, 0.0_f64)]);
         let mut filter = DensePrimaryKeyFilter::new(metadata, filters, codec, false);
 
-        assert!(filter.matches(&pk));
+        assert!(filter.matches(&pk).unwrap());
     }
 
     #[test]
@@ -680,7 +674,7 @@ mod tests {
         )]);
         let mut filter = DensePrimaryKeyFilter::new(metadata, filters, codec, false);
 
-        assert!(filter.matches(&pk));
+        assert!(filter.matches(&pk).unwrap());
     }
 
     #[test]
@@ -702,6 +696,6 @@ mod tests {
         )]);
         let mut filter = DensePrimaryKeyFilter::new(metadata, filters, codec, true);
 
-        assert!(filter.matches(&pk));
+        assert!(filter.matches(&pk).unwrap());
     }
 }

@@ -257,7 +257,7 @@ fn bench_primary_key_filter(c: &mut Criterion) {
         let mut group = c.benchmark_group(format!("primary_key_filter/{case_name}"));
 
         group.bench_function("dense/fast", |b| {
-            b.iter(|| black_box(dense_fast.matches(black_box(&dense_pk))))
+            b.iter(|| black_box(dense_fast.matches(black_box(&dense_pk)).unwrap()))
         });
         group.bench_function("dense/scalar", |b| {
             b.iter(|| {
@@ -272,7 +272,7 @@ fn bench_primary_key_filter(c: &mut Criterion) {
         });
 
         group.bench_function("sparse/fast", |b| {
-            b.iter(|| black_box(sparse_fast.matches(black_box(&sparse_pk))))
+            b.iter(|| black_box(sparse_fast.matches(black_box(&sparse_pk)).unwrap()))
         });
         group.bench_function("sparse/scalar", |b| {
             b.iter(|| {

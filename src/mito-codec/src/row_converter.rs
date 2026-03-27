@@ -53,7 +53,7 @@ pub trait PrimaryKeyCodecExt {
 
 pub trait PrimaryKeyFilter: Send + Sync {
     /// Returns true if the primary key matches the filter.
-    fn matches(&mut self, pk: &[u8]) -> bool;
+    fn matches(&mut self, pk: &[u8]) -> Result<bool>;
 }
 
 /// Composite values decoded from primary key bytes.
