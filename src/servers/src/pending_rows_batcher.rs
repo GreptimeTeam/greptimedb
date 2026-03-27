@@ -60,25 +60,6 @@ const WORKER_IDLE_TIMEOUT_MULTIPLIER: u32 = 3;
 
 #[async_trait]
 pub trait PendingRowsSchemaAlterer: Send + Sync {
-    async fn create_table_if_missing(
-        &self,
-        catalog: &str,
-        schema: &str,
-        table_name: &str,
-        request_schema: &[ColumnSchema],
-        with_metric_engine: bool,
-        ctx: QueryContextRef,
-    ) -> Result<()>;
-
-    async fn add_missing_prom_tag_columns(
-        &self,
-        catalog: &str,
-        schema: &str,
-        table_name: &str,
-        columns: &[String],
-        ctx: QueryContextRef,
-    ) -> Result<()>;
-
     /// Batch-create multiple logical tables that are missing.
     /// Each entry is `(table_name, request_schema)`.
     async fn create_tables_if_missing_batch(

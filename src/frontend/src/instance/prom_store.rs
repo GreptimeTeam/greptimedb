@@ -199,123 +199,6 @@ impl Instance {
 
 #[async_trait]
 impl PendingRowsSchemaAlterer for Instance {
-    async fn create_table_if_missing(
-        &self,
-        catalog: &str,
-        schema: &str,
-        table_name: &str,
-        request_schema: &[api::v1::ColumnSchema],
-        with_metric_engine: bool,
-        ctx: QueryContextRef,
-    ) -> ServerResult<()> {
-        let table = self
-            .catalog_manager()
-            .table(catalog, schema, table_name, Some(ctx.as_ref()))
-            .await
-            .map_err(BoxedError::new)
-            .context(error::ExecuteGrpcQuerySnafu)?;
-        if table.is_some() {
-            return Ok(());
-        }
-
-        let create_type = auto_create_table_type_for_prom_remote_write(&ctx, with_metric_engine);
-        if let Some(physical_table) = required_physical_table_for_create_type(&create_type) {
-            self.create_metric_physical_table_if_missing(
-                catalog,
-                schema,
-                physical_table,
-                ctx.clone(),
-            )
-            .await?;
-        }
-
-        let table_ref = TableReference::full(catalog, schema, table_name);
-        let engine = if matches!(create_type, AutoCreateTableType::Logical(_)) {
-            METRIC_ENGINE_NAME
-        } else {
-            common_catalog::consts::default_engine()
-        };
-        let mut create_table_expr = build_create_table_expr(&table_ref, request_schema, engine)
-            .map_err(BoxedError::new)
-            .context(error::ExecuteGrpcQuerySnafu)?;
-
-        let mut table_options = std::collections::HashMap::with_capacity(4);
-        fill_table_options_for_create(&mut table_options, &create_type, &ctx);
-        match create_type {
-            AutoCreateTableType::Logical(_) => {
-                create_table_expr.table_options.extend(table_options);
-                self.statement_executor
-                    .create_logical_tables(&[create_table_expr], ctx)
-                    .await
-                    .map_err(BoxedError::new)
-                    .context(error::ExecuteGrpcQuerySnafu)?;
-            }
-            AutoCreateTableType::Physical => {
-                // Pending-rows writes benefit from the flat SST format to leverage bulk memtables,
-                // so we force `sst_format=flat` only when auto-creating physical tables.
-                table_options.insert(SST_FORMAT_KEY.to_string(), "flat".to_string());
-                create_table_expr.table_options.extend(table_options);
-                self.statement_executor
-                    .create_table_inner(&mut create_table_expr, None, ctx)
-                    .await
-                    .map_err(BoxedError::new)
-                    .context(error::ExecuteGrpcQuerySnafu)?;
-            }
-            _ => {
-                unreachable!("prom remote write only supports logical or physical auto-create");
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn add_missing_prom_tag_columns(
-        &self,
-        catalog: &str,
-        schema: &str,
-        table_name: &str,
-        columns: &[String],
-        ctx: QueryContextRef,
-    ) -> ServerResult<()> {
-        if columns.is_empty() {
-            return Ok(());
-        }
-
-        let add_columns = AddColumns {
-            add_columns: columns
-                .iter()
-                .map(|column_name| AddColumn {
-                    column_def: Some(ColumnDef {
-                        name: column_name.clone(),
-                        data_type: ColumnDataType::String as i32,
-                        is_nullable: true,
-                        semantic_type: SemanticType::Tag as i32,
-                        comment: String::new(),
-                        ..Default::default()
-                    }),
-                    location: None,
-                    add_if_not_exists: true,
-                })
-                .collect(),
-        };
-
-        self.statement_executor
-            .alter_table_inner(
-                AlterTableExpr {
-                    catalog_name: catalog.to_string(),
-                    schema_name: schema.to_string(),
-                    table_name: table_name.to_string(),
-                    kind: Some(Kind::AddColumns(add_columns)),
-                },
-                ctx,
-            )
-            .await
-            .map_err(BoxedError::new)
-            .context(error::ExecuteGrpcQuerySnafu)?;
-
-        Ok(())
-    }
-
     async fn create_tables_if_missing_batch(
         &self,
         catalog: &str,
@@ -395,8 +278,14 @@ impl PendingRowsSchemaAlterer for Instance {
                         .context(error::ExecuteGrpcQuerySnafu)?;
                 }
             }
-            _ => {
-                unreachable!("prom remote write only supports logical or physical auto-create");
+            create_type => {
+                return error::InvalidPromRemoteRequestSnafu {
+                    msg: format!(
+                        "prom remote write only supports logical or physical auto-create: {}",
+                        create_type.as_str()
+                    ),
+                }
+                .fail();
             }
         }
 
