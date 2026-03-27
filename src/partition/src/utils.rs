@@ -12,21 +12,4 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(assert_matches)]
-//! Structs and traits for partitioning rule.
-
-pub mod cache;
-pub mod checker;
-pub mod collider;
-pub mod error;
-pub mod expr;
-pub mod manager;
-pub mod multi_dim;
-pub mod overlap;
-pub mod partition;
-pub mod simplify;
-pub mod splitter;
-pub mod subtask;
-pub mod utils;
-
-pub use crate::partition::{PartitionRule, PartitionRuleRef};
+pub mod split;
