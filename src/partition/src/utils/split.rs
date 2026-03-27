@@ -715,6 +715,7 @@ fn prefer_lower(candidate: &LowerBound, current: &LowerBound) -> bool {
 }
 
 /// Folds a list of expressions into a left-associated AND tree.
+/// Returns `None` if the input list is empty.
 fn fold_and_exprs(mut exprs: Vec<PartitionExpr>) -> Option<PartitionExpr> {
     exprs.drain(..).reduce(|acc, next| acc.and(next))
 }
