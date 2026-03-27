@@ -79,6 +79,7 @@ const RANGE_RESULT_CONCAT_MEMORY_PERMIT: ReadableSize = ReadableSize::kb(1);
 #[derive(Debug)]
 pub(crate) struct RangeResultMemoryLimiter {
     semaphore: Arc<tokio::sync::Semaphore>,
+    permit_bytes: usize,
 }
 
 impl Default for RangeResultMemoryLimiter {
@@ -96,11 +97,12 @@ impl RangeResultMemoryLimiter {
         let permits = limit_bytes.div_ceil(permit_bytes).max(1);
         Self {
             semaphore: Arc::new(tokio::sync::Semaphore::new(permits)),
+            permit_bytes,
         }
     }
 
     pub(crate) fn permit_bytes(&self) -> usize {
-        RANGE_RESULT_CONCAT_MEMORY_PERMIT.as_bytes() as usize
+        self.permit_bytes
     }
 
     pub(crate) async fn acquire(
