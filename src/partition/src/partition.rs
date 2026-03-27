@@ -29,7 +29,7 @@ pub type PartitionRuleRef = Arc<dyn PartitionRule>;
 pub trait PartitionRule: Sync + Send {
     fn as_any(&self) -> &dyn Any;
 
-    fn partition_columns(&self) -> Vec<String>;
+    fn partition_columns(&self) -> &[String];
 
     /// Finds the target region by the partition values.
     ///

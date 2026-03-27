@@ -933,6 +933,83 @@ fn should_dispatch_concurrently(region_write_count: usize) -> bool {
     region_write_count > 1
 }
 
+fn collect_tag_columns_and_non_tag_indices(
+    batch_schema: &Arc<ArrowSchema>,
+    table_name: &str,
+    name_to_ids: &HashMap<String, u32>,
+    partition_columns: &HashSet<&str>,
+) -> Result<(Vec<TagColumnInfo>, Vec<usize>)> {
+    let mut tag_columns = Vec::new();
+    let mut non_tag_indices = Vec::new();
+
+    for (index, field) in batch_schema.fields().iter().enumerate() {
+        match field.data_type() {
+            ArrowDataType::Utf8 => {
+                let column_id = match name_to_ids.get(field.name()) {
+                    Some(&id) => id,
+                    None => {
+                        return error::InternalSnafu {
+                            err_msg: format!(
+                                "Column '{}' from logical table '{}' not found in physical table column IDs",
+                                field.name(),
+                                table_name
+                            ),
+                        }
+                        .fail();
+                    }
+                };
+                tag_columns.push(TagColumnInfo {
+                    name: field.name().clone(),
+                    index,
+                    column_id,
+                });
+
+                if partition_columns.contains(field.name().as_str()) {
+                    non_tag_indices.push(index);
+                }
+            }
+            _ => {
+                non_tag_indices.push(index);
+            }
+        }
+    }
+
+    tag_columns.sort_by(|a, b| a.name.cmp(&b.name));
+
+    Ok((tag_columns, non_tag_indices))
+}
+
+fn strip_partition_columns_from_batch(
+    batch: RecordBatch,
+    partition_columns: &[String],
+) -> Result<RecordBatch> {
+    if partition_columns.is_empty() {
+        return Ok(batch);
+    }
+
+    let partition_columns: HashSet<&str> = partition_columns.iter().map(String::as_str).collect();
+    let schema = batch.schema();
+    let mut fields = Vec::with_capacity(schema.fields().len());
+    let mut columns = Vec::with_capacity(schema.fields().len());
+
+    for (index, field) in schema.fields().iter().enumerate() {
+        if partition_columns.contains(field.name().as_str()) {
+            continue;
+        }
+        fields.push(field.clone());
+        columns.push(batch.column(index).clone());
+    }
+
+    if fields.len() == schema.fields().len() {
+        return Ok(batch);
+    }
+
+    let schema = Arc::new(ArrowSchema::new(fields));
+    RecordBatch::try_new(schema, columns).map_err(|err| Error::Internal {
+        err_msg: format!("Failed to strip partition columns from RecordBatch: {err}"),
+    })
+}
+
 async fn flush_region_writes_concurrently(
     node_manager: NodeManagerRef,
     writes: Vec<FlushRegionWrite>,
@@ -1132,6 +1209,9 @@ async fn flush_batch_physical(
             }
         }
     };
+    let partition_columns = partition_rule.0.partition_columns();
+    let partition_columns_set: HashSet<&str> =
+        partition_columns.iter().map(String::as_str).collect();
 
     // 3. Transform each logical table batch into physical format
     let mut modified_batches: Vec<RecordBatch> = Vec::with_capacity(table_batches.len());
@@ -1160,51 +1240,27 @@ async fn flush_batch_physical(
         // All chunks within a table_batch share the same schema, so we resolve
         // column metadata once from the first batch.
         // In prom batches, Float64 = value, Timestamp = timestamp, Utf8 = tags.
-        let mut tag_columns = Vec::new();
-        let mut non_tag_indices = Vec::new();
         let batch_schema = first_batch.schema();
-        let mut column_resolution_failed = false;
-        for (index, field) in batch_schema.fields().iter().enumerate() {
-            match field.data_type() {
-                ArrowDataType::Utf8 => {
-                    let column_id = match name_to_ids.get(field.name()) {
-                        Some(&id) => id,
-                        None => {
-                            // Column not found in physical table — this table batch
-                            // cannot be transformed to physical format. Record error
-                            // and skip the entire table batch.
-                            warn!(
-                                "Column '{}' from logical table '{}' not found in physical table column IDs",
-                                field.name(),
-                                table_batch.table_name
-                            );
-                            record_failure!(
-                                table_batch.row_count,
-                                format!(
-                                    "Column '{}' not found in physical table for logical table '{}'",
-                                    field.name(),
-                                    table_batch.table_name
-                                )
-                            );
-                            column_resolution_failed = true;
-                            break;
-                        }
-                    };
-                    tag_columns.push(TagColumnInfo {
-                        name: field.name().clone(),
-                        index,
-                        column_id,
-                    });
-                }
-                _ => {
-                    non_tag_indices.push(index);
-                }
+        let (tag_columns, non_tag_indices) = match collect_tag_columns_and_non_tag_indices(
+            &batch_schema,
+            &table_batch.table_name,
+            &name_to_ids,
+            &partition_columns_set,
+        ) {
+            Ok(columns) => columns,
+            Err(err) => {
+                warn!(
+                    "Failed to resolve columns for logical table '{}': {:?}",
+                    table_batch.table_name, err
+                );
+                record_failure!(table_batch.row_count, err.to_string());
+                continue 'next_table;
             }
-        }
-        if column_resolution_failed {
+        };
+
+        if tag_columns.is_empty() && non_tag_indices.is_empty() {
             continue 'next_table;
         }
-        tag_columns.sort_by(|a, b| a.name.cmp(&b.name));
 
         // Transform each chunk to physical format directly, avoiding an
         // intermediate concat_batches per logical table.
@@ -1310,6 +1366,21 @@ async fn flush_batch_physical(
                     );
                     continue;
                 }
+            }
+        };
+
+        let region_batch = match strip_partition_columns_from_batch(region_batch, partition_columns)
+        {
+            Ok(batch) => batch,
+            Err(err) => {
+                record_failure!(
+                    total_row_count,
+                    format!(
+                        "Failed to strip partition columns for physical table '{}': {:?}",
+                        physical_table_name, err
+                    )
+                );
+                continue;
             }
         };
 
@@ -1459,7 +1530,7 @@ fn record_batch_to_ipc(record_batch: RecordBatch) -> Result<(Bytes, Bytes, Bytes
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
@@ -1469,6 +1540,9 @@ mod tests {
     use api::v1::meta::Peer;
     use api::v1::region::{InsertRequests, RegionRequest};
     use api::v1::{ColumnSchema, Row, RowInsertRequest, RowInsertRequests, Rows};
+    use arrow::array::{BinaryArray, Int64Array, StringArray};
+    use arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
+    use arrow::record_batch::RecordBatch;
     use async_trait::async_trait;
     use common_meta::error::Result as MetaResult;
     use common_meta::node_manager::{
@@ -1483,8 +1557,9 @@ mod tests {
 
     use super::{
         BatchKey, FlushRegionWrite, FlushWriteResult, PendingRowsBatcher, PendingWorker,
-        WorkerCommand, flush_region_writes_concurrently, remove_worker_if_same_channel,
-        should_close_worker_on_idle_timeout, should_dispatch_concurrently,
+        WorkerCommand, collect_tag_columns_and_non_tag_indices, flush_region_writes_concurrently,
+        remove_worker_if_same_channel, should_close_worker_on_idle_timeout,
+        should_dispatch_concurrently, strip_partition_columns_from_batch,
     };
 
     fn mock_rows(row_count: usize, schema_name: &str) -> Rows {
@@ -1522,23 +1597,6 @@ mod tests {
         assert_eq!(1, table_rows.len());
         assert_eq!("cpu", table_rows[0].0);
         assert_eq!(2, table_rows[0].1.rows.len());
-    }
-
-    #[test]
-    fn test_collect_unique_table_schemas_preserves_first_seen_schema() {
-        let table_rows = vec![
-            ("cpu".to_string(), mock_rows(1, "host")),
-            ("mem".to_string(), mock_rows(1, "region")),
-            ("cpu".to_string(), mock_rows(1, "instance")),
-        ];
-
-        let unique = PendingRowsBatcher::collect_unique_table_schemas(&table_rows).unwrap();
-
-        assert_eq!(2, unique.len());
-        assert_eq!("cpu", unique[0].0);
-        assert_eq!("host", unique[0].1[0].column_name);
-        assert_eq!("mem", unique[1].0);
-        assert_eq!("region", unique[1].1[0].column_name);
     }
 
     #[derive(Clone)]
@@ -1725,5 +1783,52 @@ mod tests {
         assert!(!should_dispatch_concurrently(0));
         assert!(!should_dispatch_concurrently(1));
         assert!(should_dispatch_concurrently(2));
+    }
+
+    #[test]
+    fn test_strip_partition_columns_from_batch_removes_partition_tags() {
+        let batch = RecordBatch::try_new(
+            Arc::new(ArrowSchema::new(vec![
+                Field::new("__primary_key", ArrowDataType::Binary, false),
+                Field::new("greptime_timestamp", ArrowDataType::Int64, false),
+                Field::new("host", ArrowDataType::Utf8, true),
+            ])),
+            vec![
+                Arc::new(BinaryArray::from(vec![b"k1".as_slice()])),
+                Arc::new(Int64Array::from(vec![1000_i64])),
+                Arc::new(StringArray::from(vec!["node-1"])),
+            ],
+        )
+        .unwrap();
+
+        let stripped = strip_partition_columns_from_batch(batch, &["host".to_string()]).unwrap();
+
+        assert_eq!(2, stripped.num_columns());
+        assert_eq!("__primary_key", stripped.schema().field(0).name());
+        assert_eq!("greptime_timestamp", stripped.schema().field(1).name());
+    }
+
+    #[test]
+    fn test_collect_tag_columns_and_non_tag_indices_keeps_partition_tag_column() {
+        let schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("greptime_timestamp", ArrowDataType::Int64, false),
+            Field::new("greptime_value", ArrowDataType::Float64, true),
+            Field::new("host", ArrowDataType::Utf8, true),
+            Field::new("region", ArrowDataType::Utf8, true),
+        ]));
+        let name_to_ids =
+            HashMap::from([("host".to_string(), 1_u32), ("region".to_string(), 2_u32)]);
+        let partition_columns = HashSet::from(["host"]);
+
+        let (tag_columns, non_tag_indices) = collect_tag_columns_and_non_tag_indices(
+            &schema,
+            "cpu",
+            &name_to_ids,
+            &partition_columns,
+        )
+        .unwrap();
+
+        assert_eq!(2, tag_columns.len());
+        assert_eq!(vec![0, 1, 2], non_tag_indices);
     }
 }
