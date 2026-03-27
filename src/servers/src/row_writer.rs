@@ -78,6 +78,18 @@ impl TableData {
         (self.schema, self.rows)
     }
 
+    pub fn rows_mut(&mut self) -> &mut Vec<Row> {
+        &mut self.rows
+    }
+
+    pub fn column_index(&self, name: &str) -> Option<usize> {
+        self.column_indexes.get(name).copied()
+    }
+
+    pub fn column_schema_mut(&mut self, index: usize) -> Option<&mut ColumnSchema> {
+        self.schema.get_mut(index)
+    }
+
     pub fn column_datatype(&self, name: &str) -> Option<i32> {
         self.column_indexes
             .get(name)

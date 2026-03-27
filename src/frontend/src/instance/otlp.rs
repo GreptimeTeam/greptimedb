@@ -221,6 +221,18 @@ fn coerce_value_data(
         (ColumnDataType::Int64, ColumnDataType::Float64, ValueData::I64Value(n)) => {
             Some(Some(ValueData::F64Value(*n as f64)))
         }
+        // Int64 -> String
+        (ColumnDataType::Int64, ColumnDataType::String, ValueData::I64Value(n)) => {
+            Some(Some(ValueData::StringValue(n.to_string())))
+        }
+        // Float64 -> String
+        (ColumnDataType::Float64, ColumnDataType::String, ValueData::F64Value(n)) => {
+            Some(Some(ValueData::StringValue(n.to_string())))
+        }
+        // Boolean -> String
+        (ColumnDataType::Boolean, ColumnDataType::String, ValueData::BoolValue(b)) => {
+            Some(Some(ValueData::StringValue(b.to_string())))
+        }
         // String -> Int64
         (ColumnDataType::String, ColumnDataType::Int64, ValueData::StringValue(s)) => {
             s.parse::<i64>().ok().map(|n| Some(ValueData::I64Value(n)))
@@ -252,6 +264,9 @@ fn is_supported_trace_coercion(request_type: ColumnDataType, target_type: Column
     matches!(
         (request_type, target_type),
         (ColumnDataType::Int64, ColumnDataType::Float64)
+            | (ColumnDataType::Int64, ColumnDataType::String)
+            | (ColumnDataType::Float64, ColumnDataType::String)
+            | (ColumnDataType::Boolean, ColumnDataType::String)
             | (ColumnDataType::String, ColumnDataType::Int64)
             | (ColumnDataType::String, ColumnDataType::Float64)
             | (ColumnDataType::String, ColumnDataType::Boolean)
@@ -373,6 +388,19 @@ mod tests {
     }
 
     #[test]
+    fn test_coerce_int64_to_string() {
+        let result = coerce_value_data(
+            &Some(ValueData::I64Value(123)),
+            ColumnDataType::String,
+            ColumnDataType::Int64,
+        );
+        assert_eq!(
+            result,
+            Some(Some(ValueData::StringValue("123".to_string())))
+        );
+    }
+
+    #[test]
     fn test_coerce_string_to_float64() {
         let result = coerce_value_data(
             &Some(ValueData::StringValue("1.5".to_string())),
@@ -380,6 +408,19 @@ mod tests {
             ColumnDataType::String,
         );
         assert_eq!(result, Some(Some(ValueData::F64Value(1.5))));
+    }
+
+    #[test]
+    fn test_coerce_float64_to_string() {
+        let result = coerce_value_data(
+            &Some(ValueData::F64Value(1.5)),
+            ColumnDataType::String,
+            ColumnDataType::Float64,
+        );
+        assert_eq!(
+            result,
+            Some(Some(ValueData::StringValue("1.5".to_string())))
+        );
     }
 
     #[test]
@@ -397,6 +438,19 @@ mod tests {
             ColumnDataType::String,
         );
         assert_eq!(result, Some(Some(ValueData::BoolValue(false))));
+    }
+
+    #[test]
+    fn test_coerce_boolean_to_string() {
+        let result = coerce_value_data(
+            &Some(ValueData::BoolValue(true)),
+            ColumnDataType::String,
+            ColumnDataType::Boolean,
+        );
+        assert_eq!(
+            result,
+            Some(Some(ValueData::StringValue("true".to_string())))
+        );
     }
 
     #[test]
@@ -444,6 +498,18 @@ mod tests {
         assert!(is_supported_trace_coercion(
             ColumnDataType::Int64,
             ColumnDataType::Float64
+        ));
+        assert!(is_supported_trace_coercion(
+            ColumnDataType::Int64,
+            ColumnDataType::String
+        ));
+        assert!(is_supported_trace_coercion(
+            ColumnDataType::Float64,
+            ColumnDataType::String
+        ));
+        assert!(is_supported_trace_coercion(
+            ColumnDataType::Boolean,
+            ColumnDataType::String
         ));
         assert!(is_supported_trace_coercion(
             ColumnDataType::String,

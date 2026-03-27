@@ -5315,6 +5315,124 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
     let res = send_trace_v1_req(&client, coercion_table_name, coercion_req, false).await;
     assert_eq!(StatusCode::OK, res.status());
 
+    let string_target_table_name = "trace_type_coercion_to_string";
+    let string_target_seed_req = make_trace_v1_request(
+        "type-coercion-string",
+        vec![make_trace_v1_span(
+            "00000000000000000000000000000021",
+            "0000000000000021",
+            "string-target-seed",
+            1_736_480_942_444_720_000,
+            1_736_480_942_444_820_000,
+            vec![
+                make_string_attr("attr_int", "seed"),
+                make_string_attr("attr_float", "seed"),
+                make_string_attr("attr_bool", "seed"),
+            ],
+        )],
+    );
+    let res = send_trace_v1_req(
+        &client,
+        string_target_table_name,
+        string_target_seed_req,
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    let string_target_req = make_trace_v1_request(
+        "type-coercion-string",
+        vec![make_trace_v1_span(
+            "00000000000000000000000000000022",
+            "0000000000000022",
+            "string-target-apply",
+            1_736_480_942_444_830_000,
+            1_736_480_942_444_930_000,
+            vec![
+                make_int_attr("attr_int", 20),
+                make_double_attr("attr_float", 2.5),
+                make_bool_attr("attr_bool", false),
+            ],
+        )],
+    );
+    let res = send_trace_v1_req(&client, string_target_table_name, string_target_req, false).await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    validate_data(
+        "otlp_traces_v1_type_coercion_to_string_rows",
+        &client,
+        &format!(
+            "select trace_id, \"span_attributes.attr_bool\", \"span_attributes.attr_float\", \"span_attributes.attr_int\" from {} order by trace_id;",
+            string_target_table_name
+        ),
+        r#"[["00000000000000000000000000000021","seed","seed","seed"],["00000000000000000000000000000022","false","2.5","20"]]"#,
+    )
+    .await;
+    validate_data(
+        "otlp_traces_v1_type_coercion_to_string_schema",
+        &client,
+        "select column_name, lower(data_type), semantic_type from information_schema.columns where table_name = 'trace_type_coercion_to_string' and column_name in ('span_attributes.attr_bool', 'span_attributes.attr_float', 'span_attributes.attr_int') order by column_name;",
+        r#"[["span_attributes.attr_bool","string","FIELD"],["span_attributes.attr_float","string","FIELD"],["span_attributes.attr_int","string","FIELD"]]"#,
+    )
+    .await;
+
+    let intra_batch_prefer_non_string_table_name = "trace_type_prefer_non_string";
+    let intra_batch_prefer_non_string_req = make_trace_v1_request(
+        "type-prefer-non-string",
+        vec![
+            make_trace_v1_span(
+                "00000000000000000000000000000031",
+                "0000000000000031",
+                "prefer-non-string-seed",
+                1_736_480_942_444_940_000,
+                1_736_480_942_445_040_000,
+                vec![
+                    make_string_attr("attr_int", "10"),
+                    make_string_attr("attr_float", "1.5"),
+                    make_string_attr("attr_bool", "true"),
+                ],
+            ),
+            make_trace_v1_span(
+                "00000000000000000000000000000032",
+                "0000000000000032",
+                "prefer-non-string-apply",
+                1_736_480_942_445_050_000,
+                1_736_480_942_445_150_000,
+                vec![
+                    make_int_attr("attr_int", 20),
+                    make_double_attr("attr_float", 2.5),
+                    make_bool_attr("attr_bool", false),
+                ],
+            ),
+        ],
+    );
+    let res = send_trace_v1_req(
+        &client,
+        intra_batch_prefer_non_string_table_name,
+        intra_batch_prefer_non_string_req,
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    validate_data(
+        "otlp_traces_v1_prefer_non_string_rows",
+        &client,
+        &format!(
+            "select trace_id, \"span_attributes.attr_bool\", \"span_attributes.attr_float\", \"span_attributes.attr_int\" from {} order by trace_id;",
+            intra_batch_prefer_non_string_table_name
+        ),
+        r#"[["00000000000000000000000000000031",true,1.5,10],["00000000000000000000000000000032",false,2.5,20]]"#,
+    )
+    .await;
+    validate_data(
+        "otlp_traces_v1_prefer_non_string_schema",
+        &client,
+        "select column_name, lower(data_type), semantic_type from information_schema.columns where table_name = 'trace_type_prefer_non_string' and column_name in ('span_attributes.attr_bool', 'span_attributes.attr_float', 'span_attributes.attr_int') order by column_name;",
+        r#"[["span_attributes.attr_bool","boolean","FIELD"],["span_attributes.attr_float","double","FIELD"],["span_attributes.attr_int","bigint","FIELD"]]"#,
+    )
+    .await;
+
     validate_data(
         "otlp_traces_v1_type_coercion_rows",
         &client,

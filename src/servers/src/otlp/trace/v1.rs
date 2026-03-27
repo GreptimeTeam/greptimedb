@@ -23,7 +23,7 @@ use opentelemetry_proto::tonic::common::v1::any_value::Value as OtlpValue;
 use pipeline::{GreptimePipelineParams, PipelineWay};
 use session::context::QueryContextRef;
 
-use crate::error::Result;
+use crate::error::{InvalidParameterSnafu, Result};
 use crate::otlp::trace::attributes::Attributes;
 use crate::otlp::trace::span::{TraceSpan, parse};
 use crate::otlp::trace::{
@@ -244,6 +244,33 @@ fn coerce_to_existing_type(
         {
             Some((ColumnDataType::Float64, ValueData::F64Value(*v as f64)))
         }
+        // Int64 -> String
+        (dt, ColumnDataType::Int64, ValueData::I64Value(v))
+            if dt == ColumnDataType::String as i32 =>
+        {
+            Some((
+                ColumnDataType::String,
+                ValueData::StringValue(v.to_string()),
+            ))
+        }
+        // Float64 -> String
+        (dt, ColumnDataType::Float64, ValueData::F64Value(v))
+            if dt == ColumnDataType::String as i32 =>
+        {
+            Some((
+                ColumnDataType::String,
+                ValueData::StringValue(v.to_string()),
+            ))
+        }
+        // Boolean -> String
+        (dt, ColumnDataType::Boolean, ValueData::BoolValue(v))
+            if dt == ColumnDataType::String as i32 =>
+        {
+            Some((
+                ColumnDataType::String,
+                ValueData::StringValue(v.to_string()),
+            ))
+        }
         // String -> Int64
         (dt, ColumnDataType::String, ValueData::StringValue(s))
             if dt == ColumnDataType::Int64 as i32 =>
@@ -270,6 +297,66 @@ fn coerce_to_existing_type(
         }
         _ => None,
     }
+}
+
+fn prefer_incoming_non_string_type(
+    existing_datatype: i32,
+    incoming_datatype: ColumnDataType,
+) -> bool {
+    existing_datatype == ColumnDataType::String as i32
+        && incoming_datatype != ColumnDataType::String
+}
+
+fn coerce_string_value_to_type(target: ColumnDataType, value: &ValueData) -> Option<ValueData> {
+    let ValueData::StringValue(s) = value else {
+        return None;
+    };
+
+    match target {
+        ColumnDataType::Int64 => s.parse::<i64>().ok().map(ValueData::I64Value),
+        ColumnDataType::Float64 => s.parse::<f64>().ok().map(ValueData::F64Value),
+        ColumnDataType::Boolean => s.parse::<bool>().ok().map(ValueData::BoolValue),
+        _ => None,
+    }
+}
+
+fn promote_string_column_to_type(
+    writer: &mut TableData,
+    key: &str,
+    target: ColumnDataType,
+) -> Result<()> {
+    let Some(column_index) = writer.column_index(key) else {
+        return Ok(());
+    };
+
+    for row in writer.rows_mut() {
+        let Some(value) = row
+            .values
+            .get_mut(column_index)
+            .and_then(|value| value.value_data.as_mut())
+        else {
+            continue;
+        };
+
+        let Some(coerced) = coerce_string_value_to_type(target, value) else {
+            return InvalidParameterSnafu {
+                reason: format!(
+                    "failed to coerce existing trace column '{}' from {:?} to {:?}",
+                    key,
+                    ColumnDataType::String,
+                    target
+                ),
+            }
+            .fail();
+        };
+        *value = coerced;
+    }
+
+    if let Some(column_schema) = writer.column_schema_mut(column_index) {
+        column_schema.datatype = target as i32;
+    }
+
+    Ok(())
 }
 
 pub(crate) fn write_attributes(
@@ -303,6 +390,11 @@ pub(crate) fn write_attributes(
                 )?;
             }
             Some(OtlpValue::BoolValue(v)) => {
+                if let Some(existing) = writer.column_datatype(&key)
+                    && prefer_incoming_non_string_type(existing, ColumnDataType::Boolean)
+                {
+                    promote_string_column_to_type(writer, &key, ColumnDataType::Boolean)?;
+                }
                 row_writer::write_fields(
                     writer,
                     std::iter::once(make_column_data(
@@ -315,12 +407,17 @@ pub(crate) fn write_attributes(
             }
             Some(OtlpValue::IntValue(v)) => {
                 let (datatype, value_data) = if let Some(existing) = writer.column_datatype(&key) {
-                    coerce_to_existing_type(
-                        existing,
-                        ColumnDataType::Int64,
-                        &ValueData::I64Value(v),
-                    )
-                    .unwrap_or((ColumnDataType::Int64, ValueData::I64Value(v)))
+                    if prefer_incoming_non_string_type(existing, ColumnDataType::Int64) {
+                        promote_string_column_to_type(writer, &key, ColumnDataType::Int64)?;
+                        (ColumnDataType::Int64, ValueData::I64Value(v))
+                    } else {
+                        coerce_to_existing_type(
+                            existing,
+                            ColumnDataType::Int64,
+                            &ValueData::I64Value(v),
+                        )
+                        .unwrap_or((ColumnDataType::Int64, ValueData::I64Value(v)))
+                    }
                 } else {
                     (ColumnDataType::Int64, ValueData::I64Value(v))
                 };
@@ -331,6 +428,11 @@ pub(crate) fn write_attributes(
                 )?;
             }
             Some(OtlpValue::DoubleValue(v)) => {
+                if let Some(existing) = writer.column_datatype(&key)
+                    && prefer_incoming_non_string_type(existing, ColumnDataType::Float64)
+                {
+                    promote_string_column_to_type(writer, &key, ColumnDataType::Float64)?;
+                }
                 row_writer::write_fields(
                     writer,
                     std::iter::once(make_column_data(
@@ -453,6 +555,39 @@ mod tests {
     }
 
     #[test]
+    fn test_prefer_int_over_existing_string_within_batch() {
+        let mut writer = TableData::new(4, 2);
+
+        let attrs1 = Attributes::from(vec![make_kv(
+            "val",
+            OtlpValue::StringValue("10".to_string()),
+        )]);
+        let mut row1 = writer.alloc_one_row();
+        write_attributes(&mut writer, "attr", attrs1, &mut row1).unwrap();
+        writer.add_row(row1);
+
+        let attrs2 = Attributes::from(vec![make_kv("val", OtlpValue::IntValue(20))]);
+        let mut row2 = writer.alloc_one_row();
+        write_attributes(&mut writer, "attr", attrs2, &mut row2).unwrap();
+        writer.add_row(row2);
+
+        let (schema, rows) = writer.into_schema_and_rows();
+        let col_idx = schema
+            .iter()
+            .position(|c| c.column_name == "attr.val")
+            .unwrap();
+        assert_eq!(schema[col_idx].datatype, ColumnDataType::Int64 as i32);
+        assert_eq!(
+            rows[0].values[col_idx].value_data,
+            Some(ValueData::I64Value(10))
+        );
+        assert_eq!(
+            rows[1].values[col_idx].value_data,
+            Some(ValueData::I64Value(20))
+        );
+    }
+
+    #[test]
     fn test_coerce_string_to_float_within_batch() {
         let mut writer = TableData::new(4, 2);
 
@@ -482,6 +617,39 @@ mod tests {
     }
 
     #[test]
+    fn test_prefer_float_over_existing_string_within_batch() {
+        let mut writer = TableData::new(4, 2);
+
+        let attrs1 = Attributes::from(vec![make_kv(
+            "val",
+            OtlpValue::StringValue("1.5".to_string()),
+        )]);
+        let mut row1 = writer.alloc_one_row();
+        write_attributes(&mut writer, "attr", attrs1, &mut row1).unwrap();
+        writer.add_row(row1);
+
+        let attrs2 = Attributes::from(vec![make_kv("val", OtlpValue::DoubleValue(2.5))]);
+        let mut row2 = writer.alloc_one_row();
+        write_attributes(&mut writer, "attr", attrs2, &mut row2).unwrap();
+        writer.add_row(row2);
+
+        let (schema, rows) = writer.into_schema_and_rows();
+        let col_idx = schema
+            .iter()
+            .position(|c| c.column_name == "attr.val")
+            .unwrap();
+        assert_eq!(schema[col_idx].datatype, ColumnDataType::Float64 as i32);
+        assert_eq!(
+            rows[0].values[col_idx].value_data,
+            Some(ValueData::F64Value(1.5))
+        );
+        assert_eq!(
+            rows[1].values[col_idx].value_data,
+            Some(ValueData::F64Value(2.5))
+        );
+    }
+
+    #[test]
     fn test_coerce_string_to_bool_within_batch() {
         let mut writer = TableData::new(4, 2);
 
@@ -504,6 +672,39 @@ mod tests {
             .position(|c| c.column_name == "attr.val")
             .unwrap();
         assert_eq!(schema[col_idx].datatype, ColumnDataType::Boolean as i32);
+        assert_eq!(
+            rows[1].values[col_idx].value_data,
+            Some(ValueData::BoolValue(false))
+        );
+    }
+
+    #[test]
+    fn test_prefer_bool_over_existing_string_within_batch() {
+        let mut writer = TableData::new(4, 2);
+
+        let attrs1 = Attributes::from(vec![make_kv(
+            "val",
+            OtlpValue::StringValue("true".to_string()),
+        )]);
+        let mut row1 = writer.alloc_one_row();
+        write_attributes(&mut writer, "attr", attrs1, &mut row1).unwrap();
+        writer.add_row(row1);
+
+        let attrs2 = Attributes::from(vec![make_kv("val", OtlpValue::BoolValue(false))]);
+        let mut row2 = writer.alloc_one_row();
+        write_attributes(&mut writer, "attr", attrs2, &mut row2).unwrap();
+        writer.add_row(row2);
+
+        let (schema, rows) = writer.into_schema_and_rows();
+        let col_idx = schema
+            .iter()
+            .position(|c| c.column_name == "attr.val")
+            .unwrap();
+        assert_eq!(schema[col_idx].datatype, ColumnDataType::Boolean as i32);
+        assert_eq!(
+            rows[0].values[col_idx].value_data,
+            Some(ValueData::BoolValue(true))
+        );
         assert_eq!(
             rows[1].values[col_idx].value_data,
             Some(ValueData::BoolValue(false))
@@ -562,6 +763,34 @@ mod tests {
             Some((ColumnDataType::Float64, ValueData::F64Value(1.5)))
         );
 
+        // Int64 -> String
+        let result = coerce_to_existing_type(
+            ColumnDataType::String as i32,
+            ColumnDataType::Int64,
+            &ValueData::I64Value(123),
+        );
+        assert_eq!(
+            result,
+            Some((
+                ColumnDataType::String,
+                ValueData::StringValue("123".to_string())
+            ))
+        );
+
+        // Float64 -> String
+        let result = coerce_to_existing_type(
+            ColumnDataType::String as i32,
+            ColumnDataType::Float64,
+            &ValueData::F64Value(1.5),
+        );
+        assert_eq!(
+            result,
+            Some((
+                ColumnDataType::String,
+                ValueData::StringValue("1.5".to_string())
+            ))
+        );
+
         // String -> Boolean
         let result = coerce_to_existing_type(
             ColumnDataType::Boolean as i32,
@@ -571,6 +800,20 @@ mod tests {
         assert_eq!(
             result,
             Some((ColumnDataType::Boolean, ValueData::BoolValue(true)))
+        );
+
+        // Boolean -> String
+        let result = coerce_to_existing_type(
+            ColumnDataType::String as i32,
+            ColumnDataType::Boolean,
+            &ValueData::BoolValue(true),
+        );
+        assert_eq!(
+            result,
+            Some((
+                ColumnDataType::String,
+                ValueData::StringValue("true".to_string())
+            ))
         );
 
         // Unparsable string -> Int64 returns None
