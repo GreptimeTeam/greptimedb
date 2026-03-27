@@ -302,7 +302,11 @@ impl Instance {
                 continue;
             };
 
-            for (col_idx, col_schema) in rows.schema.iter_mut().enumerate() {
+            // Collect all coercible schema mismatches first so we only walk and
+            // rewrite the row payloads once.
+            let mut pending_coercions = Vec::new();
+
+            for (col_idx, col_schema) in rows.schema.iter().enumerate() {
                 let Some(table_col) = table_schema.column_schema_by_name(&col_schema.column_name)
                 else {
                     continue;
@@ -327,11 +331,13 @@ impl Instance {
                     continue;
                 }
 
+                // Precompute the full coerced column, keeping row alignment with
+                // the existing request rows for the later batched writeback.
                 let coerced_values = coerce_column_values(
-                    rows.rows.iter().filter_map(|row| {
+                    rows.rows.iter().map(|row| {
                         row.values
                             .get(col_idx)
-                            .map(|value| value.value_data.clone())
+                            .and_then(|value| value.value_data.clone())
                     }),
                     target_type,
                     request_type,
@@ -346,13 +352,27 @@ impl Instance {
                     .build()
                 })?;
 
-                for (row, coerced_value) in rows.rows.iter_mut().zip(coerced_values) {
-                    if col_idx < row.values.len() {
-                        row.values[col_idx].value_data = coerced_value;
+                pending_coercions.push((col_idx, table_datatype, coerced_values));
+            }
+
+            if pending_coercions.is_empty() {
+                continue;
+            }
+
+            // Update schema metadata before mutating row values so both stay in sync.
+            for (col_idx, table_datatype, _) in &pending_coercions {
+                rows.schema[*col_idx].datatype = *table_datatype;
+            }
+
+            // Apply all pending column rewrites in one row pass. `take` lets us
+            // move the precomputed value out without cloning it again.
+            for (row_idx, row) in rows.rows.iter_mut().enumerate() {
+                for (col_idx, _, coerced_values) in &mut pending_coercions {
+                    if *col_idx < row.values.len() {
+                        row.values[*col_idx].value_data =
+                            std::mem::take(&mut coerced_values[row_idx]);
                     }
                 }
-
-                col_schema.datatype = table_datatype;
             }
         }
 
