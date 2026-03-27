@@ -66,6 +66,7 @@ use crate::optimizer::count_nest_aggr::CountNestAggrRule;
 use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
 use crate::optimizer::parallelize_scan::ParallelizeScan;
 use crate::optimizer::pass_distribution::PassDistribution;
+use crate::optimizer::reduce_aggregate_repartition::ReduceAggregateRepartition;
 use crate::optimizer::remove_duplicate::RemoveDuplicate;
 use crate::optimizer::scan_hint::ScanHintRule;
 use crate::optimizer::string_normalization::StringNormalizationRule;
@@ -192,6 +193,16 @@ impl QueryEngineState {
             7,
             Arc::new(datafusion::physical_optimizer::enforce_sorting::EnforceSorting {}),
         );
+        Self::insert_physical_optimizer_rule_after(
+            &mut physical_optimizer.rules,
+            datafusion::physical_optimizer::combine_partial_final_agg::CombinePartialFinalAggregate::new().name(),
+            Arc::new(ReduceAggregateRepartition),
+        );
+        Self::insert_physical_optimizer_rule_after(
+            &mut physical_optimizer.rules,
+            ReduceAggregateRepartition.name(),
+            Arc::new(datafusion::physical_optimizer::enforce_distribution::EnforceDistribution {}),
+        );
         // Add rule for windowed sort
         physical_optimizer
             .rules
@@ -251,6 +262,19 @@ impl QueryEngineState {
         name: &str,
     ) {
         rules.retain(|rule| rule.name() != name);
+    }
+
+    fn insert_physical_optimizer_rule_after(
+        rules: &mut Vec<Arc<dyn PhysicalOptimizerRule + Send + Sync>>,
+        name: &str,
+        rule: Arc<dyn PhysicalOptimizerRule + Send + Sync>,
+    ) {
+        let index = rules
+            .iter()
+            .position(|candidate| candidate.name() == name)
+            .map(|index| index + 1)
+            .unwrap_or(rules.len());
+        rules.insert(index, rule);
     }
 
     /// Optimize the logical plan by the extension analyzer rules.
