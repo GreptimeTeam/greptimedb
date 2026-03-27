@@ -322,7 +322,7 @@ impl PendingRowsBatcher {
             return Ok((Vec::new(), 0));
         }
 
-        let unique_tables = Self::collect_unique_table_schemas(&table_rows);
+        let unique_tables = Self::collect_unique_table_schemas(&table_rows)?;
         let mut plan = self
             .plan_table_resolution(&catalog, &schema, ctx, &unique_tables)
             .await?;
@@ -367,17 +367,28 @@ impl PendingRowsBatcher {
 
     /// Returns unique `(table_name, proto_schema)` pairs while keeping the
     /// first-seen schema for duplicate table names.
-    fn collect_unique_table_schemas(table_rows: &[(String, Rows)]) -> Vec<(&str, &[ColumnSchema])> {
+    fn collect_unique_table_schemas(
+        table_rows: &[(String, Rows)],
+    ) -> Result<Vec<(&str, &[ColumnSchema])>> {
         let mut unique_tables: Vec<(&str, &[ColumnSchema])> = Vec::with_capacity(table_rows.len());
         let mut seen = HashSet::new();
 
         for (table_name, rows) in table_rows {
             if seen.insert(table_name.as_str()) {
                 unique_tables.push((table_name.as_str(), &rows.schema));
+            } else {
+                // table_rows should group rows by table name.
+                return error::InvalidPromRemoteRequestSnafu {
+                    msg: format!(
+                        "Found duplicated table name in RowInsertRequest: {}",
+                        table_name
+                    ),
+                }
+                .fail();
             }
         }
 
-        unique_tables
+        Ok(unique_tables)
     }
 
     /// Resolves table metadata and classifies each table into existing,
@@ -1521,7 +1532,7 @@ mod tests {
             ("cpu".to_string(), mock_rows(1, "instance")),
         ];
 
-        let unique = PendingRowsBatcher::collect_unique_table_schemas(&table_rows);
+        let unique = PendingRowsBatcher::collect_unique_table_schemas(&table_rows).unwrap();
 
         assert_eq!(2, unique.len());
         assert_eq!("cpu", unique[0].0);
