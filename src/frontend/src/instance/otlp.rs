@@ -15,7 +15,6 @@
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, RowInsertRequests};
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
@@ -31,6 +30,7 @@ use servers::error::{self, AuthSnafu, CatalogSnafu, Result as ServerResult};
 use servers::http::prom_store::PHYSICAL_TABLE_PARAM;
 use servers::interceptor::{OpenTelemetryProtocolInterceptor, OpenTelemetryProtocolInterceptorRef};
 use servers::otlp;
+use servers::otlp::trace::coerce::{coerce_value_data, is_supported_trace_coercion};
 use servers::query_handler::{OpenTelemetryProtocolHandler, PipelineHandlerRef};
 use session::context::QueryContextRef;
 use snafu::ResultExt;
@@ -206,73 +206,6 @@ impl OpenTelemetryProtocolHandler for Instance {
     }
 }
 
-/// Try to coerce a single `ValueData` to a target `ColumnDataType`.
-/// Returns the coerced value on success, or `None` if coercion is not possible.
-fn coerce_value_data(
-    value: &Option<ValueData>,
-    target: ColumnDataType,
-    request_type: ColumnDataType,
-) -> Option<Option<ValueData>> {
-    let Some(v) = value else {
-        return Some(None);
-    };
-    match (request_type, target, v) {
-        // Int64 -> Float64
-        (ColumnDataType::Int64, ColumnDataType::Float64, ValueData::I64Value(n)) => {
-            Some(Some(ValueData::F64Value(*n as f64)))
-        }
-        // Int64 -> String
-        (ColumnDataType::Int64, ColumnDataType::String, ValueData::I64Value(n)) => {
-            Some(Some(ValueData::StringValue(n.to_string())))
-        }
-        // Float64 -> String
-        (ColumnDataType::Float64, ColumnDataType::String, ValueData::F64Value(n)) => {
-            Some(Some(ValueData::StringValue(n.to_string())))
-        }
-        // Boolean -> String
-        (ColumnDataType::Boolean, ColumnDataType::String, ValueData::BoolValue(b)) => {
-            Some(Some(ValueData::StringValue(b.to_string())))
-        }
-        // String -> Int64
-        (ColumnDataType::String, ColumnDataType::Int64, ValueData::StringValue(s)) => {
-            s.parse::<i64>().ok().map(|n| Some(ValueData::I64Value(n)))
-        }
-        // String -> Float64
-        (ColumnDataType::String, ColumnDataType::Float64, ValueData::StringValue(s)) => {
-            s.parse::<f64>().ok().map(|n| Some(ValueData::F64Value(n)))
-        }
-        // String -> Boolean
-        (ColumnDataType::String, ColumnDataType::Boolean, ValueData::StringValue(s)) => s
-            .parse::<bool>()
-            .ok()
-            .map(|b| Some(ValueData::BoolValue(b))),
-        _ => None,
-    }
-}
-
-fn coerce_column_values(
-    values: impl Iterator<Item = Option<ValueData>>,
-    target: ColumnDataType,
-    request_type: ColumnDataType,
-) -> Option<Vec<Option<ValueData>>> {
-    values
-        .map(|value| coerce_value_data(&value, target, request_type))
-        .collect()
-}
-
-fn is_supported_trace_coercion(request_type: ColumnDataType, target_type: ColumnDataType) -> bool {
-    matches!(
-        (request_type, target_type),
-        (ColumnDataType::Int64, ColumnDataType::Float64)
-            | (ColumnDataType::Int64, ColumnDataType::String)
-            | (ColumnDataType::Float64, ColumnDataType::String)
-            | (ColumnDataType::Boolean, ColumnDataType::String)
-            | (ColumnDataType::String, ColumnDataType::Int64)
-            | (ColumnDataType::String, ColumnDataType::Float64)
-            | (ColumnDataType::String, ColumnDataType::Boolean)
-    )
-}
-
 impl Instance {
     /// Coerce request column types and values to match the existing table schema
     /// for compatible type pairs. This handles the cross-batch case where a prior
@@ -331,28 +264,13 @@ impl Instance {
                     continue;
                 }
 
-                // Precompute the full coerced column, keeping row alignment with
-                // the existing request rows for the later batched writeback.
-                let coerced_values = coerce_column_values(
-                    rows.rows.iter().map(|row| {
-                        row.values
-                            .get(col_idx)
-                            .and_then(|value| value.value_data.clone())
-                    }),
-                    target_type,
+                pending_coercions.push((
+                    col_idx,
+                    table_datatype,
                     request_type,
-                )
-                .ok_or_else(|| {
-                    error::InvalidParameterSnafu {
-                        reason: format!(
-                            "failed to coerce trace column '{}' in table '{}' from {:?} to {:?}",
-                            col_schema.column_name, req.table_name, request_type, target_type
-                        ),
-                    }
-                    .build()
-                })?;
-
-                pending_coercions.push((col_idx, table_datatype, coerced_values));
+                    target_type,
+                    col_schema.column_name.clone(),
+                ));
             }
 
             if pending_coercions.is_empty() {
@@ -360,17 +278,28 @@ impl Instance {
             }
 
             // Update schema metadata before mutating row values so both stay in sync.
-            for (col_idx, table_datatype, _) in &pending_coercions {
+            for (col_idx, table_datatype, ..) in &pending_coercions {
                 rows.schema[*col_idx].datatype = *table_datatype;
             }
 
-            // Apply all pending column rewrites in one row pass. `take` lets us
-            // move the precomputed value out without cloning it again.
-            for (row_idx, row) in rows.rows.iter_mut().enumerate() {
-                for (col_idx, _, coerced_values) in &mut pending_coercions {
+            // Apply all pending column rewrites in one row pass.
+            for row in &mut rows.rows {
+                for (col_idx, _, request_type, target_type, column_name) in &pending_coercions {
                     if *col_idx < row.values.len() {
-                        row.values[*col_idx].value_data =
-                            std::mem::take(&mut coerced_values[row_idx]);
+                        row.values[*col_idx].value_data = coerce_value_data(
+                            &row.values[*col_idx].value_data,
+                            *target_type,
+                            *request_type,
+                        )
+                        .map_err(|_| {
+                            error::InvalidParameterSnafu {
+                                reason: format!(
+                                    "failed to coerce trace column '{}' in table '{}' from {:?} to {:?}",
+                                    column_name, req.table_name, request_type, target_type
+                                ),
+                            }
+                            .build()
+                        })?;
                     }
                 }
             }
@@ -382,170 +311,6 @@ impl Instance {
 
 #[cfg(test)]
 mod tests {
-    use api::v1::ColumnDataType;
-    use api::v1::value::ValueData;
-
-    use super::{coerce_column_values, coerce_value_data, is_supported_trace_coercion};
-
-    #[test]
-    fn test_coerce_int64_to_float64() {
-        let result = coerce_value_data(
-            &Some(ValueData::I64Value(42)),
-            ColumnDataType::Float64,
-            ColumnDataType::Int64,
-        );
-        assert_eq!(result, Some(Some(ValueData::F64Value(42.0))));
-    }
-
-    #[test]
-    fn test_coerce_string_to_int64() {
-        let result = coerce_value_data(
-            &Some(ValueData::StringValue("123".to_string())),
-            ColumnDataType::Int64,
-            ColumnDataType::String,
-        );
-        assert_eq!(result, Some(Some(ValueData::I64Value(123))));
-    }
-
-    #[test]
-    fn test_coerce_int64_to_string() {
-        let result = coerce_value_data(
-            &Some(ValueData::I64Value(123)),
-            ColumnDataType::String,
-            ColumnDataType::Int64,
-        );
-        assert_eq!(
-            result,
-            Some(Some(ValueData::StringValue("123".to_string())))
-        );
-    }
-
-    #[test]
-    fn test_coerce_string_to_float64() {
-        let result = coerce_value_data(
-            &Some(ValueData::StringValue("1.5".to_string())),
-            ColumnDataType::Float64,
-            ColumnDataType::String,
-        );
-        assert_eq!(result, Some(Some(ValueData::F64Value(1.5))));
-    }
-
-    #[test]
-    fn test_coerce_float64_to_string() {
-        let result = coerce_value_data(
-            &Some(ValueData::F64Value(1.5)),
-            ColumnDataType::String,
-            ColumnDataType::Float64,
-        );
-        assert_eq!(
-            result,
-            Some(Some(ValueData::StringValue("1.5".to_string())))
-        );
-    }
-
-    #[test]
-    fn test_coerce_string_to_boolean() {
-        let result = coerce_value_data(
-            &Some(ValueData::StringValue("true".to_string())),
-            ColumnDataType::Boolean,
-            ColumnDataType::String,
-        );
-        assert_eq!(result, Some(Some(ValueData::BoolValue(true))));
-
-        let result = coerce_value_data(
-            &Some(ValueData::StringValue("false".to_string())),
-            ColumnDataType::Boolean,
-            ColumnDataType::String,
-        );
-        assert_eq!(result, Some(Some(ValueData::BoolValue(false))));
-    }
-
-    #[test]
-    fn test_coerce_boolean_to_string() {
-        let result = coerce_value_data(
-            &Some(ValueData::BoolValue(true)),
-            ColumnDataType::String,
-            ColumnDataType::Boolean,
-        );
-        assert_eq!(
-            result,
-            Some(Some(ValueData::StringValue("true".to_string())))
-        );
-    }
-
-    #[test]
-    fn test_coerce_unparsable_string() {
-        let result = coerce_value_data(
-            &Some(ValueData::StringValue("not_a_number".to_string())),
-            ColumnDataType::Int64,
-            ColumnDataType::String,
-        );
-        assert_eq!(result, None);
-    }
-
-    #[test]
-    fn test_coerce_float64_to_int64_not_supported() {
-        let result = coerce_value_data(
-            &Some(ValueData::F64Value(1.5)),
-            ColumnDataType::Int64,
-            ColumnDataType::Float64,
-        );
-        assert_eq!(result, None);
-    }
-
-    #[test]
-    fn test_coerce_none_value() {
-        let result = coerce_value_data(&None, ColumnDataType::Float64, ColumnDataType::Int64);
-        assert_eq!(result, Some(None));
-    }
-
-    #[test]
-    fn test_coerce_column_values_aborts_on_parse_failure() {
-        let result = coerce_column_values(
-            vec![
-                Some(ValueData::StringValue("1.5".to_string())),
-                Some(ValueData::StringValue("not_a_number".to_string())),
-            ]
-            .into_iter(),
-            ColumnDataType::Float64,
-            ColumnDataType::String,
-        );
-        assert_eq!(result, None);
-    }
-
-    #[test]
-    fn test_is_supported_trace_coercion() {
-        assert!(is_supported_trace_coercion(
-            ColumnDataType::Int64,
-            ColumnDataType::Float64
-        ));
-        assert!(is_supported_trace_coercion(
-            ColumnDataType::Int64,
-            ColumnDataType::String
-        ));
-        assert!(is_supported_trace_coercion(
-            ColumnDataType::Float64,
-            ColumnDataType::String
-        ));
-        assert!(is_supported_trace_coercion(
-            ColumnDataType::Boolean,
-            ColumnDataType::String
-        ));
-        assert!(is_supported_trace_coercion(
-            ColumnDataType::String,
-            ColumnDataType::Int64
-        ));
-        assert!(is_supported_trace_coercion(
-            ColumnDataType::String,
-            ColumnDataType::Float64
-        ));
-        assert!(is_supported_trace_coercion(
-            ColumnDataType::String,
-            ColumnDataType::Boolean
-        ));
-        assert!(!is_supported_trace_coercion(
-            ColumnDataType::Binary,
-            ColumnDataType::Json
-        ));
-    }
+    // Cross-batch coercion behavior is covered by integration tests and the
+    // shared coercion helper unit tests under `servers::otlp::trace::coerce`.
 }

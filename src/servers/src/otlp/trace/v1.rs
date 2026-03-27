@@ -25,6 +25,7 @@ use session::context::QueryContextRef;
 
 use crate::error::{InvalidParameterSnafu, Result};
 use crate::otlp::trace::attributes::Attributes;
+use crate::otlp::trace::coerce::{coerce_non_null_value, is_supported_trace_coercion};
 use crate::otlp::trace::span::{TraceSpan, parse};
 use crate::otlp::trace::{
     DURATION_NANO_COLUMN, KEY_SERVICE_NAME, PARENT_SPAN_ID_COLUMN, SCOPE_NAME_COLUMN,
@@ -230,75 +231,6 @@ fn write_trace_operations_to_row(
     Ok(())
 }
 
-/// Try to coerce an incoming value to match the existing column type.
-/// Returns `Some((datatype, value_data))` if coercion succeeded, `None` if not applicable.
-fn coerce_to_existing_type(
-    existing_datatype: i32,
-    incoming_datatype: ColumnDataType,
-    value: &ValueData,
-) -> Option<(ColumnDataType, ValueData)> {
-    match (existing_datatype, incoming_datatype, value) {
-        // Int64 -> Float64 (lossless widening)
-        (dt, ColumnDataType::Int64, ValueData::I64Value(v))
-            if dt == ColumnDataType::Float64 as i32 =>
-        {
-            Some((ColumnDataType::Float64, ValueData::F64Value(*v as f64)))
-        }
-        // Int64 -> String
-        (dt, ColumnDataType::Int64, ValueData::I64Value(v))
-            if dt == ColumnDataType::String as i32 =>
-        {
-            Some((
-                ColumnDataType::String,
-                ValueData::StringValue(v.to_string()),
-            ))
-        }
-        // Float64 -> String
-        (dt, ColumnDataType::Float64, ValueData::F64Value(v))
-            if dt == ColumnDataType::String as i32 =>
-        {
-            Some((
-                ColumnDataType::String,
-                ValueData::StringValue(v.to_string()),
-            ))
-        }
-        // Boolean -> String
-        (dt, ColumnDataType::Boolean, ValueData::BoolValue(v))
-            if dt == ColumnDataType::String as i32 =>
-        {
-            Some((
-                ColumnDataType::String,
-                ValueData::StringValue(v.to_string()),
-            ))
-        }
-        // String -> Int64
-        (dt, ColumnDataType::String, ValueData::StringValue(s))
-            if dt == ColumnDataType::Int64 as i32 =>
-        {
-            s.parse::<i64>()
-                .ok()
-                .map(|v| (ColumnDataType::Int64, ValueData::I64Value(v)))
-        }
-        // String -> Float64
-        (dt, ColumnDataType::String, ValueData::StringValue(s))
-            if dt == ColumnDataType::Float64 as i32 =>
-        {
-            s.parse::<f64>()
-                .ok()
-                .map(|v| (ColumnDataType::Float64, ValueData::F64Value(v)))
-        }
-        // String -> Boolean
-        (dt, ColumnDataType::String, ValueData::StringValue(s))
-            if dt == ColumnDataType::Boolean as i32 =>
-        {
-            s.parse::<bool>()
-                .ok()
-                .map(|v| (ColumnDataType::Boolean, ValueData::BoolValue(v)))
-        }
-        _ => None,
-    }
-}
-
 fn prefer_incoming_non_string_type(
     existing_datatype: i32,
     incoming_datatype: ColumnDataType,
@@ -308,16 +240,18 @@ fn prefer_incoming_non_string_type(
 }
 
 fn coerce_string_value_to_type(target: ColumnDataType, value: &ValueData) -> Option<ValueData> {
-    let ValueData::StringValue(s) = value else {
-        return None;
-    };
+    coerce_non_null_value(target, ColumnDataType::String, value)
+        .filter(|_| is_supported_trace_coercion(ColumnDataType::String, target))
+}
 
-    match target {
-        ColumnDataType::Int64 => s.parse::<i64>().ok().map(ValueData::I64Value),
-        ColumnDataType::Float64 => s.parse::<f64>().ok().map(ValueData::F64Value),
-        ColumnDataType::Boolean => s.parse::<bool>().ok().map(ValueData::BoolValue),
-        _ => None,
-    }
+fn coerce_to_existing_type(
+    existing_datatype: i32,
+    incoming_datatype: ColumnDataType,
+    value: &ValueData,
+) -> Option<(ColumnDataType, ValueData)> {
+    let existing_datatype = ColumnDataType::try_from(existing_datatype).ok()?;
+    let value = coerce_non_null_value(existing_datatype, incoming_datatype, value)?;
+    Some((existing_datatype, value))
 }
 
 fn promote_string_column_to_type(
@@ -475,7 +409,6 @@ pub(crate) fn write_attributes(
 
 #[cfg(test)]
 mod tests {
-    use api::v1::ColumnDataType;
     use api::v1::value::ValueData;
     use opentelemetry_proto::tonic::common::v1::any_value::Value as OtlpValue;
     use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue};
@@ -727,109 +660,5 @@ mod tests {
         let result = write_attributes(&mut writer, "attr", attrs2, &mut row2);
         assert!(result.is_err());
     }
-
-    #[test]
-    fn test_coerce_to_existing_type_fn() {
-        // Int64 -> Float64
-        let result = coerce_to_existing_type(
-            ColumnDataType::Float64 as i32,
-            ColumnDataType::Int64,
-            &ValueData::I64Value(42),
-        );
-        assert_eq!(
-            result,
-            Some((ColumnDataType::Float64, ValueData::F64Value(42.0)))
-        );
-
-        // String -> Int64
-        let result = coerce_to_existing_type(
-            ColumnDataType::Int64 as i32,
-            ColumnDataType::String,
-            &ValueData::StringValue("123".to_string()),
-        );
-        assert_eq!(
-            result,
-            Some((ColumnDataType::Int64, ValueData::I64Value(123)))
-        );
-
-        // String -> Float64
-        let result = coerce_to_existing_type(
-            ColumnDataType::Float64 as i32,
-            ColumnDataType::String,
-            &ValueData::StringValue("1.5".to_string()),
-        );
-        assert_eq!(
-            result,
-            Some((ColumnDataType::Float64, ValueData::F64Value(1.5)))
-        );
-
-        // Int64 -> String
-        let result = coerce_to_existing_type(
-            ColumnDataType::String as i32,
-            ColumnDataType::Int64,
-            &ValueData::I64Value(123),
-        );
-        assert_eq!(
-            result,
-            Some((
-                ColumnDataType::String,
-                ValueData::StringValue("123".to_string())
-            ))
-        );
-
-        // Float64 -> String
-        let result = coerce_to_existing_type(
-            ColumnDataType::String as i32,
-            ColumnDataType::Float64,
-            &ValueData::F64Value(1.5),
-        );
-        assert_eq!(
-            result,
-            Some((
-                ColumnDataType::String,
-                ValueData::StringValue("1.5".to_string())
-            ))
-        );
-
-        // String -> Boolean
-        let result = coerce_to_existing_type(
-            ColumnDataType::Boolean as i32,
-            ColumnDataType::String,
-            &ValueData::StringValue("true".to_string()),
-        );
-        assert_eq!(
-            result,
-            Some((ColumnDataType::Boolean, ValueData::BoolValue(true)))
-        );
-
-        // Boolean -> String
-        let result = coerce_to_existing_type(
-            ColumnDataType::String as i32,
-            ColumnDataType::Boolean,
-            &ValueData::BoolValue(true),
-        );
-        assert_eq!(
-            result,
-            Some((
-                ColumnDataType::String,
-                ValueData::StringValue("true".to_string())
-            ))
-        );
-
-        // Unparsable string -> Int64 returns None
-        let result = coerce_to_existing_type(
-            ColumnDataType::Int64 as i32,
-            ColumnDataType::String,
-            &ValueData::StringValue("not_a_number".to_string()),
-        );
-        assert_eq!(result, None);
-
-        // Float64 -> Int64 not supported
-        let result = coerce_to_existing_type(
-            ColumnDataType::Int64 as i32,
-            ColumnDataType::Float64,
-            &ValueData::F64Value(1.5),
-        );
-        assert_eq!(result, None);
-    }
+    // Conversion matrix coverage lives in the shared coercion helper tests.
 }

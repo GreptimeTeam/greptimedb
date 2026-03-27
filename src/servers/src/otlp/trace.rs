@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod attributes;
+pub mod coerce;
 pub mod span;
 pub mod v0;
 pub mod v1;
