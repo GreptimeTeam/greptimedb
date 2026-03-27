@@ -972,6 +972,7 @@ async fn flush_region_writes_concurrently(
         }
     });
 
+    // todo(hl): should be bounded.
     futures::future::join_all(write_futures).await
 }
 
@@ -1240,6 +1241,7 @@ async fn flush_batch_physical(
             .with_label_values(&["flush_physical_concat_all"])
             .start_timer();
         let combined_schema = modified_batches[0].schema();
+        // todo(hl): maybe limit max rows to concat.
         match concat_batches(&combined_schema, &modified_batches) {
             Ok(batch) => batch,
             Err(err) => {
