@@ -45,7 +45,7 @@ fn unzip_logical_region_schema(
 ) -> Result<(String, String, HashSet<String>)> {
     let mut timestamp_column = None;
     let mut field_column = None;
-    let mut tag_columns = HashSet::with_capacity(target_schema.fields.len() - 2);
+    let mut tag_columns = HashSet::with_capacity(target_schema.fields.len().saturating_sub(2));
     for field in target_schema.fields() {
         if field.name() == greptime_timestamp() {
             timestamp_column = Some(field.name().clone());
