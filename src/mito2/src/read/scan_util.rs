@@ -1280,6 +1280,7 @@ pub(crate) fn should_split_flat_batches_for_merge(
             if file_meta.level == 0 {
                 // Always split level 0 files.
                 num_files_to_split += 1;
+                continue;
             } else if file_meta.num_rows < SPLIT_ROW_THRESHOLD || file_meta.num_series == 0 {
                 // If the file doesn't have enough rows, or the number of series is unavailable, skips it.
                 continue;
@@ -1314,11 +1315,88 @@ pub(crate) fn should_split_flat_batches_for_merge(
 }
 
 fn can_split_series(num_rows: u64, num_series: u64) -> bool {
-    assert!(num_series > 0);
-    assert!(num_rows > 0);
+    if num_rows == 0 || num_series == 0 {
+        return false;
+    }
 
     // It doesn't have too many series or it will have enough rows for each batch.
     num_series < NUM_SERIES_THRESHOLD || num_rows / num_series >= BATCH_SIZE_THRESHOLD
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use common_time::Timestamp;
+    use smallvec::smallvec;
+    use store_api::storage::FileId;
+
+    use super::*;
+    use crate::read::projection::ProjectionMapper;
+    use crate::read::range::{RangeMeta, RowGroupIndex, SourceIndex};
+    use crate::read::scan_region::{ScanInput, StreamContext};
+    use crate::sst::file::FileHandle;
+    use crate::test_util::memtable_util::metadata_with_primary_key;
+    use crate::test_util::scheduler_util::SchedulerEnv;
+    use crate::test_util::sst_util::sst_file_handle_with_file_id;
+
+    async fn new_stream_context_with_files(files: Vec<FileHandle>) -> StreamContext {
+        let env = SchedulerEnv::new().await;
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let mapper = ProjectionMapper::new(&metadata, [0, 2, 3].into_iter(), true).unwrap();
+        let input = ScanInput::new(env.access_layer.clone(), mapper).with_files(files);
+
+        StreamContext {
+            input,
+            ranges: vec![],
+            scan_fingerprint: None,
+            query_start: std::time::Instant::now(),
+        }
+    }
+
+    fn single_file_range_meta() -> RangeMeta {
+        RangeMeta {
+            time_range: (
+                Timestamp::new_millisecond(0),
+                Timestamp::new_millisecond(1000),
+            ),
+            indices: smallvec![SourceIndex {
+                index: 0,
+                num_row_groups: 1,
+            }],
+            row_group_indices: smallvec![RowGroupIndex {
+                index: 0,
+                row_group_index: 0,
+            }],
+            num_rows: 1024,
+        }
+    }
+
+    #[tokio::test]
+    async fn should_split_level_zero_file_even_when_series_stats_are_missing() {
+        let mut file = sst_file_handle_with_file_id(FileId::random(), 0, 1000)
+            .meta_ref()
+            .clone();
+        file.level = 0;
+        file.num_rows = DEFAULT_ROW_GROUP_SIZE as u64;
+        file.num_row_groups = 1;
+        file.num_series = 0;
+
+        let file = FileHandle::new(file, crate::test_util::new_noop_file_purger());
+        let stream_ctx = Arc::new(new_stream_context_with_files(vec![file]).await);
+
+        assert!(should_split_flat_batches_for_merge(
+            &stream_ctx,
+            &single_file_range_meta(),
+        ));
+    }
+
+    #[test]
+    fn can_split_series_returns_false_for_zero_inputs() {
+        assert!(!can_split_series(0, 1));
+        assert!(!can_split_series(1, 0));
+        assert!(!can_split_series(0, 0));
+    }
 }
 
 /// Creates a new [ReaderFilterMetrics] with optional apply metrics initialized
