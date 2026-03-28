@@ -69,7 +69,9 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
             (true, true) => "prom_rate",
             (true, false) => "prom_increase",
             (false, false) => "prom_delta",
-            (false, true) => "prom_delta",
+            (false, true) => {
+                unreachable!("gauge rate is not supported by ExtrapolatedRate")
+            }
         }
     }
 
