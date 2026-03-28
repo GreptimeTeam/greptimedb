@@ -39,8 +39,8 @@ use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
 use smallvec::SmallVec;
 use snafu::{OptionExt, ensure};
-use store_api::storage::RegionId;
 use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
+use store_api::storage::{RegionId, TableId};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, mpsc, oneshot};
 
 use crate::error;
@@ -97,7 +97,7 @@ struct BatchKey {
 #[derive(Debug)]
 struct TableBatch {
     table_name: String,
-    table_id: Option<u32>,
+    table_id: TableId,
     batches: Vec<RecordBatch>,
     row_count: usize,
 }
@@ -765,7 +765,7 @@ fn start_worker(
                             for (table_name, table_id, record_batch) in table_batches {
                                 let entry = batch.tables.entry(table_name.clone()).or_insert_with(|| TableBatch {
                                     table_name,
-                                    table_id: Some(table_id),
+                                    table_id,
                                     batches: Vec::new(),
                                     row_count: 0,
                                 });
@@ -1287,20 +1287,7 @@ async fn flush_batch_physical(
     let mut modified_row_count: usize = 0;
 
     'next_table: for table_batch in table_batches {
-        let table_id = match table_batch.table_id {
-            Some(id) => id,
-            None => {
-                record_failure!(
-                    table_batch.row_count,
-                    format!(
-                        "Missing table_id for logical table '{}' during physical flush",
-                        table_batch.table_name
-                    )
-                );
-                continue 'next_table;
-            }
-        };
-
+        let table_id = table_batch.table_id;
         let Some(first_batch) = table_batch.batches.first() else {
             continue 'next_table;
         };
