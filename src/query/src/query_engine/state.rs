@@ -49,9 +49,7 @@ use datafusion_optimizer::Analyzer;
 use datafusion_optimizer::analyzer::function_rewrite::ApplyFunctionRewrites;
 use datafusion_optimizer::optimizer::Optimizer;
 use partition::manager::PartitionRuleManagerRef;
-use promql::extension_plan::{
-    InstantManipulate, PromExtensionPlanner, RangeManipulate, SeriesDivide, SeriesNormalize,
-};
+use promql::extension_plan::PromExtensionPlanner;
 use table::TableRef;
 use table::table::adapter::DfTableProviderAdapter;
 
@@ -461,47 +459,9 @@ impl QueryPlanner for DfQueryPlanner {
         logical_plan: &DfLogicalPlan,
         session_state: &SessionState,
     ) -> DfResult<Arc<dyn ExecutionPlan>> {
-        let scoped_session_state;
-        let session_state = if should_disable_repartitioned_aggregations(logical_plan) {
-            scoped_session_state = {
-                let mut session_state = session_state.clone();
-                *session_state.config_mut() = session_state
-                    .config()
-                    .clone()
-                    .with_repartition_aggregations(false);
-                session_state
-            };
-            &scoped_session_state
-        } else {
-            session_state
-        };
-
         self.physical_planner
             .create_physical_plan(logical_plan, session_state)
             .await
-    }
-}
-
-fn should_disable_repartitioned_aggregations(plan: &DfLogicalPlan) -> bool {
-    match plan {
-        DfLogicalPlan::Aggregate(aggregate) => contains_promql_vector_node(&aggregate.input),
-        _ => plan
-            .inputs()
-            .into_iter()
-            .any(should_disable_repartitioned_aggregations),
-    }
-}
-
-fn contains_promql_vector_node(plan: &DfLogicalPlan) -> bool {
-    match plan {
-        DfLogicalPlan::Extension(extension) => {
-            let node = extension.node.as_any();
-            node.is::<SeriesDivide>()
-                || node.is::<SeriesNormalize>()
-                || node.is::<RangeManipulate>()
-                || node.is::<InstantManipulate>()
-        }
-        _ => plan.inputs().into_iter().any(contains_promql_vector_node),
     }
 }
 

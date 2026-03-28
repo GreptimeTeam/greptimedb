@@ -23,6 +23,9 @@ use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties, InputOrd
 use datafusion_common::Result as DfResult;
 use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
 use datafusion_physical_expr::{Distribution, Partitioning};
+use promql::extension_plan::{
+    InstantManipulateExec, RangeManipulateExec, SeriesDivideExec, SeriesNormalizeExec,
+};
 
 /// Replaces a redundant hash repartition before a coarser aggregate with a
 /// single fan-in.
@@ -80,12 +83,6 @@ impl ReduceAggregateRepartition {
                 return Ok(Transformed::no(plan));
             }
 
-            let Partitioning::Hash(finer_partition_exprs, _) =
-                repartition_exec.input().output_partitioning()
-            else {
-                return Ok(Transformed::no(plan));
-            };
-
             let Some(required_distribution) =
                 agg_exec.required_input_distribution().into_iter().next()
             else {
@@ -100,15 +97,7 @@ impl ReduceAggregateRepartition {
                 return Ok(Transformed::no(plan));
             }
 
-            let coarsening_satisfaction = repartition_exec.partitioning().satisfaction(
-                &Distribution::HashPartitioned(finer_partition_exprs.clone()),
-                repartition_exec
-                    .input()
-                    .properties()
-                    .equivalence_properties(),
-                true,
-            );
-            if !coarsening_satisfaction.is_subset() {
+            if !Self::can_reduce_repartition(repartition_exec) {
                 return Ok(Transformed::no(plan));
             }
 
@@ -128,6 +117,71 @@ impl ReduceAggregateRepartition {
             Ok(Transformed::yes(Arc::new(new_agg)))
         })
         .data()
+    }
+
+    fn can_reduce_repartition(repartition_exec: &RepartitionExec) -> bool {
+        let has_direct_promql_input =
+            Self::has_direct_promql_partial_input(repartition_exec.input());
+        if Self::contains_promql_exec_deep(repartition_exec.input()) {
+            return has_direct_promql_input;
+        }
+
+        let Partitioning::Hash(finer_partition_exprs, _) =
+            repartition_exec.input().output_partitioning()
+        else {
+            return false;
+        };
+
+        let coarsening_satisfaction = repartition_exec.partitioning().satisfaction(
+            &Distribution::HashPartitioned(finer_partition_exprs.clone()),
+            repartition_exec
+                .input()
+                .properties()
+                .equivalence_properties(),
+            true,
+        );
+        coarsening_satisfaction.is_subset()
+    }
+
+    fn has_direct_promql_partial_input(plan: &Arc<dyn ExecutionPlan>) -> bool {
+        let Some(partial_agg) = plan.as_any().downcast_ref::<AggregateExec>() else {
+            return false;
+        };
+
+        partial_agg.mode() == &AggregateMode::Partial
+            && Self::contains_promql_vector_exec(partial_agg.input())
+    }
+
+    fn contains_promql_vector_exec(plan: &Arc<dyn ExecutionPlan>) -> bool {
+        if Self::is_promql_vector_exec(plan) {
+            return true;
+        }
+
+        if plan.as_any().is::<AggregateExec>() {
+            return false;
+        }
+
+        plan.children()
+            .into_iter()
+            .any(Self::contains_promql_vector_exec)
+    }
+
+    fn contains_promql_exec_deep(plan: &Arc<dyn ExecutionPlan>) -> bool {
+        if Self::is_promql_vector_exec(plan) {
+            return true;
+        }
+
+        plan.children()
+            .into_iter()
+            .any(Self::contains_promql_exec_deep)
+    }
+
+    fn is_promql_vector_exec(plan: &Arc<dyn ExecutionPlan>) -> bool {
+        let plan = plan.as_any();
+        plan.is::<SeriesDivideExec>()
+            || plan.is::<SeriesNormalizeExec>()
+            || plan.is::<RangeManipulateExec>()
+            || plan.is::<InstantManipulateExec>()
     }
 }
 
