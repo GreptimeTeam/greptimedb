@@ -411,6 +411,80 @@ mod test {
         assert_eq!(output, expected);
     }
 
+    fn sample_range_inputs() -> (ColumnarValue, ColumnarValue, ColumnarValue) {
+        let ts_values = Arc::new(TimestampMillisecondArray::from_iter(
+            [1, 2, 3].into_iter().map(Some),
+        ));
+        let value_values = Arc::new(Float64Array::from_iter([1.0, 2.0, 3.0]));
+        let ranges = [(0, 2), (1, 2)];
+
+        let ts_range = RangeArray::from_ranges(ts_values, ranges).unwrap();
+        let value_range = RangeArray::from_ranges(value_values, ranges).unwrap();
+        let eval_ts = Arc::new(TimestampMillisecondArray::from_iter(
+            [2, 3].into_iter().map(Some),
+        )) as _;
+
+        (
+            ColumnarValue::Array(Arc::new(ts_range.into_dict())),
+            ColumnarValue::Array(Arc::new(value_range.into_dict())),
+            ColumnarValue::Array(eval_ts),
+        )
+    }
+
+    #[test]
+    fn rate_rejects_wrong_input_arity() {
+        let err = ExtrapolatedRate::<true, true>::new(5)
+            .calc(&[])
+            .unwrap_err();
+
+        assert!(err.to_string().contains("should have 4 inputs"));
+    }
+
+    #[test]
+    fn rate_rejects_non_int64_range_length() {
+        let (ts_range, value_range, eval_ts) = sample_range_inputs();
+
+        let err = ExtrapolatedRate::<true, true>::create_function(&[
+            ts_range,
+            value_range,
+            eval_ts,
+            ColumnarValue::Scalar(ScalarValue::Float64(Some(5.0))),
+        ])
+        .unwrap_err();
+
+        assert!(err.to_string().contains("range length type"));
+    }
+
+    #[test]
+    fn rate_rejects_empty_range_length() {
+        let (ts_range, value_range, eval_ts) = sample_range_inputs();
+
+        let err = ExtrapolatedRate::<true, true>::create_function(&[
+            ts_range,
+            value_range,
+            eval_ts,
+            ColumnarValue::Array(Arc::new(Int64Array::from(Vec::<i64>::new()))),
+        ])
+        .unwrap_err();
+
+        assert!(err.to_string().contains("range length must contain"));
+    }
+
+    #[test]
+    fn rate_rejects_null_range_length() {
+        let (ts_range, value_range, eval_ts) = sample_range_inputs();
+
+        let err = ExtrapolatedRate::<true, true>::create_function(&[
+            ts_range,
+            value_range,
+            eval_ts,
+            ColumnarValue::Array(Arc::new(Int64Array::from(vec![None]))),
+        ])
+        .unwrap_err();
+
+        assert!(err.to_string().contains("range length must contain"));
+    }
+
     #[test]
     fn increase_abnormal_input() {
         let ts_array = Arc::new(TimestampMillisecondArray::from_iter(
@@ -582,6 +656,75 @@ mod test {
     }
 
     #[test]
+    fn rate_rejects_non_timestamp_timestamp_range_values() {
+        let ts_values = Arc::new(Int64Array::from_iter([1, 2]));
+        let value_values = Arc::new(Float64Array::from_iter([1.0, 2.0]));
+        let ts_range = RangeArray::from_ranges(ts_values, [(0, 2)]).unwrap();
+        let value_range = RangeArray::from_ranges(value_values, [(0, 2)]).unwrap();
+        let eval_ts = Arc::new(TimestampMillisecondArray::from_iter([Some(2)]));
+
+        let err = ExtrapolatedRate::<true, true>::new(5)
+            .calc(&[
+                ColumnarValue::Array(Arc::new(ts_range.into_dict())),
+                ColumnarValue::Array(Arc::new(value_range.into_dict())),
+                ColumnarValue::Array(eval_ts),
+                ColumnarValue::Scalar(ScalarValue::Int64(Some(5))),
+            ])
+            .unwrap_err();
+
+        assert!(err.to_string().contains("values of type Timestamp"));
+    }
+
+    #[test]
+    fn rate_rejects_non_float_value_range_values() {
+        let ts_values = Arc::new(TimestampMillisecondArray::from_iter(
+            [1, 2].into_iter().map(Some),
+        ));
+        let value_values = Arc::new(Int64Array::from_iter([1, 2]));
+        let ts_range = RangeArray::from_ranges(ts_values, [(0, 2)]).unwrap();
+        let value_range = RangeArray::from_ranges(value_values, [(0, 2)]).unwrap();
+        let eval_ts = Arc::new(TimestampMillisecondArray::from_iter([Some(2)]));
+
+        let err = ExtrapolatedRate::<true, true>::new(5)
+            .calc(&[
+                ColumnarValue::Array(Arc::new(ts_range.into_dict())),
+                ColumnarValue::Array(Arc::new(value_range.into_dict())),
+                ColumnarValue::Array(eval_ts),
+                ColumnarValue::Scalar(ScalarValue::Int64(Some(5))),
+            ])
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("value range vector values of type Float64")
+        );
+    }
+
+    #[test]
+    fn rate_rejects_mismatched_range_counts() {
+        let ts_values = Arc::new(TimestampMillisecondArray::from_iter(
+            [1, 2, 3].into_iter().map(Some),
+        ));
+        let value_values = Arc::new(Float64Array::from_iter([1.0, 2.0, 3.0]));
+        let ts_range = RangeArray::from_ranges(ts_values, [(0, 2), (1, 2)]).unwrap();
+        let value_range = RangeArray::from_ranges(value_values, [(0, 2)]).unwrap();
+        let eval_ts = Arc::new(TimestampMillisecondArray::from_iter(
+            [2, 3].into_iter().map(Some),
+        ));
+
+        let err = ExtrapolatedRate::<true, true>::new(5)
+            .calc(&[
+                ColumnarValue::Array(Arc::new(ts_range.into_dict())),
+                ColumnarValue::Array(Arc::new(value_range.into_dict())),
+                ColumnarValue::Array(eval_ts),
+                ColumnarValue::Scalar(ScalarValue::Int64(Some(5))),
+            ])
+            .unwrap_err();
+
+        assert!(err.to_string().contains("same number of windows"));
+    }
+
+    #[test]
     fn rate_rejects_mismatched_range_layouts() {
         let ts_values = Arc::new(TimestampMillisecondArray::from_iter(
             [1, 2, 3, 4].into_iter().map(Some),
@@ -603,6 +746,38 @@ mod test {
             .unwrap_err();
 
         assert!(err.to_string().contains("same window layout"));
+    }
+
+    #[test]
+    fn rate_rejects_non_timestamp_eval_vector() {
+        let (ts_range, value_range, _) = sample_range_inputs();
+
+        let err = ExtrapolatedRate::<true, true>::new(5)
+            .calc(&[
+                ts_range,
+                value_range,
+                ColumnarValue::Array(Arc::new(Float64Array::from_iter([2.0, 3.0]))),
+                ColumnarValue::Scalar(ScalarValue::Int64(Some(5))),
+            ])
+            .unwrap_err();
+
+        assert!(err.to_string().contains("evaluation timestamp vector"));
+    }
+
+    #[test]
+    fn rate_rejects_mismatched_eval_timestamp_rows() {
+        let (ts_range, value_range, _) = sample_range_inputs();
+
+        let err = ExtrapolatedRate::<true, true>::new(5)
+            .calc(&[
+                ts_range,
+                value_range,
+                ColumnarValue::Array(Arc::new(TimestampMillisecondArray::from_iter([Some(2)]))),
+                ColumnarValue::Scalar(ScalarValue::Int64(Some(5))),
+            ])
+            .unwrap_err();
+
+        assert!(err.to_string().contains("same number of rows"));
     }
 
     #[test]
