@@ -184,7 +184,6 @@ GROUP BY b, a;
 |_|_|
 | physical_plan after CombinePartialFinalAggregate_| SAME TEXT AS ABOVE_|
 | physical_plan after ReduceAggregateRepartition_| SAME TEXT AS ABOVE_|
-| physical_plan after CombineSteppedAggregate_| SAME TEXT AS ABOVE_|
 | physical_plan after EnforceDistribution_| SAME TEXT AS ABOVE_|
 | physical_plan after EnforceSorting_| SAME TEXT AS ABOVE_|
 | physical_plan after OptimizeAggregateOrder_| SAME TEXT AS ABOVE_|

@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod combine_stepped_aggregate;
 pub mod constant_term;
 pub mod count_nest_aggr;
 pub mod count_wildcard;
