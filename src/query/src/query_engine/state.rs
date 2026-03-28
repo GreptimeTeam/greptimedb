@@ -61,6 +61,7 @@ use crate::dist_plan::{
 };
 use crate::metrics::{QUERY_MEMORY_POOL_REJECTED_TOTAL, QUERY_MEMORY_POOL_USAGE_BYTES};
 use crate::optimizer::ExtensionAnalyzerRule;
+use crate::optimizer::combine_stepped_aggregate::CombineSteppedAggregate;
 use crate::optimizer::constant_term::MatchesConstantTermOptimizer;
 use crate::optimizer::count_nest_aggr::CountNestAggrRule;
 use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
@@ -201,6 +202,11 @@ impl QueryEngineState {
         Self::insert_physical_optimizer_rule_after(
             &mut physical_optimizer.rules,
             ReduceAggregateRepartition.name(),
+            Arc::new(CombineSteppedAggregate),
+        );
+        Self::insert_physical_optimizer_rule_after(
+            &mut physical_optimizer.rules,
+            CombineSteppedAggregate.name(),
             Arc::new(datafusion::physical_optimizer::enforce_distribution::EnforceDistribution {}),
         );
         // Add rule for windowed sort
