@@ -1288,39 +1288,36 @@ async fn flush_batch_physical(
 
     'next_table: for table_batch in table_batches {
         let table_id = table_batch.table_id;
-        let Some(first_batch) = table_batch.batches.first() else {
-            continue 'next_table;
-        };
-
-        // Identify tag columns and non-tag columns from the logical batch schema.
-        // All chunks within a table_batch share the same schema, so we resolve
-        // column metadata once from the first batch.
-        // In prom batches, Float64 = value, Timestamp = timestamp, Utf8 = tags.
-        let batch_schema = first_batch.schema();
-        let (tag_columns, essential_col_indices) = match columns_taxonomy(
-            &batch_schema,
-            &table_batch.table_name,
-            &name_to_ids,
-            &partition_columns_set,
-        ) {
-            Ok(columns) => columns,
-            Err(err) => {
-                warn!(
-                    "Failed to resolve columns for logical table '{}': {:?}",
-                    table_batch.table_name, err
-                );
-                record_failure!(table_batch.row_count, err.to_string());
-                continue 'next_table;
-            }
-        };
-
-        if tag_columns.is_empty() && essential_col_indices.is_empty() {
-            continue 'next_table;
-        }
 
         // Transform each chunk to physical format directly, avoiding an
         // intermediate concat_batches per logical table.
         for batch in &table_batch.batches {
+            // Identify tag columns and non-tag columns from the logical batch schema.
+            // Chunks within a table_batch may have different schemas if new tag columns
+            // are added between submits.
+            // In prom batches, Float64 = value, Timestamp = timestamp, Utf8 = tags.
+            let batch_schema = batch.schema();
+            let (tag_columns, essential_col_indices) = match columns_taxonomy(
+                &batch_schema,
+                &table_batch.table_name,
+                &name_to_ids,
+                &partition_columns_set,
+            ) {
+                Ok(columns) => columns,
+                Err(err) => {
+                    warn!(
+                        "Failed to resolve columns for logical table '{}': {:?}",
+                        table_batch.table_name, err
+                    );
+                    record_failure!(table_batch.row_count, err.to_string());
+                    continue 'next_table;
+                }
+            };
+
+            if tag_columns.is_empty() && essential_col_indices.is_empty() {
+                continue;
+            }
+
             let modified = {
                 let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
                     .with_label_values(&["flush_physical_modify_batch"])
@@ -2045,5 +2042,84 @@ mod tests {
             result,
             Err(Error::InvalidPromRemoteRequest { .. })
         ));
+    }
+
+    #[test]
+    fn test_modify_batch_sparse_with_taxonomy_per_batch() {
+        use arrow::array::BinaryArray;
+        use metric_engine::batch_modifier::modify_batch_sparse;
+
+        let schema1 = Arc::new(ArrowSchema::new(vec![
+            Field::new(
+                "greptime_timestamp",
+                ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("greptime_value", ArrowDataType::Float64, true),
+            Field::new("tag1", ArrowDataType::Utf8, true),
+        ]));
+
+        let schema2 = Arc::new(ArrowSchema::new(vec![
+            Field::new(
+                "greptime_timestamp",
+                ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("greptime_value", ArrowDataType::Float64, true),
+            Field::new("tag1", ArrowDataType::Utf8, true),
+            Field::new("tag2", ArrowDataType::Utf8, true),
+        ]));
+        let batch2 = RecordBatch::try_new(
+            schema2.clone(),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![2000])),
+                Arc::new(arrow::array::Float64Array::from(vec![2.0])),
+                Arc::new(StringArray::from(vec!["v1"])),
+                Arc::new(StringArray::from(vec!["v2"])),
+            ],
+        )
+        .unwrap();
+
+        let name_to_ids = HashMap::from([("tag1".to_string(), 1), ("tag2".to_string(), 2)]);
+        let partition_columns = HashSet::new();
+
+        // A batch that only has tag1, same values as batch2 for ts and val.
+        let batch3 = RecordBatch::try_new(
+            schema1.clone(),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![2000])),
+                Arc::new(arrow::array::Float64Array::from(vec![2.0])),
+                Arc::new(StringArray::from(vec!["v1"])),
+            ],
+        )
+        .unwrap();
+
+        // Simulate the new loop logic in flush_batch_physical:
+        // Resolve taxonomy FOR EACH BATCH.
+        let (tag_columns2, indices2) =
+            columns_taxonomy(&batch2.schema(), "table", &name_to_ids, &partition_columns).unwrap();
+        let modified2 = modify_batch_sparse(batch2, 123, &tag_columns2, &indices2).unwrap();
+
+        let (tag_columns3, indices3) =
+            columns_taxonomy(&batch3.schema(), "table", &name_to_ids, &partition_columns).unwrap();
+        let modified3 = modify_batch_sparse(batch3, 123, &tag_columns3, &indices3).unwrap();
+
+        let pk2 = modified2
+            .column(0)
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap();
+        let pk3 = modified3
+            .column(0)
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap();
+
+        // Now they SHOULD be different because tag2 is included in pk2 but not in pk3.
+        assert_ne!(
+            pk2.value(0),
+            pk3.value(0),
+            "PK should be different because batch2 has tag2!"
+        );
     }
 }
