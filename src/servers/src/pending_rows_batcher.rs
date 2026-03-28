@@ -37,6 +37,7 @@ use dashmap::mapref::entry::Entry;
 use metric_engine::batch_modifier::{TagColumnInfo, modify_batch_sparse};
 use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
+use smallvec::SmallVec;
 use snafu::{OptionExt, ensure};
 use store_api::storage::RegionId;
 use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
@@ -935,14 +936,27 @@ fn should_dispatch_concurrently(region_write_count: usize) -> bool {
     region_write_count > 1
 }
 
-fn collect_tag_columns_and_non_tag_indices(
+/// Classifies columns in a logical-table batch for sparse primary-key conversion.
+///
+/// Returns:
+/// - `Vec<TagColumnInfo>`: all Utf8 tag columns sorted by tag name, used for
+///   TSID and sparse primary-key encoding.
+/// - `SmallVec<[usize; 3]>`: indices of columns copied into the physical batch
+///   after `__primary_key`, ordered as `[greptime_timestamp, greptime_value,
+///   partition_tag_columns...]`.
+fn columns_taxonomy(
     batch_schema: &Arc<ArrowSchema>,
     table_name: &str,
     name_to_ids: &HashMap<String, u32>,
     partition_columns: &HashSet<&str>,
-) -> Result<(Vec<TagColumnInfo>, Vec<usize>)> {
+) -> Result<(Vec<TagColumnInfo>, SmallVec<[usize; 3]>)> {
     let mut tag_columns = Vec::new();
-    let mut partition_tag_indices = Vec::new();
+    let mut essential_column_indices =
+        SmallVec::<[usize; 3]>::with_capacity(2 + partition_columns.len());
+    // Placeholder for greptime_timestamp and greptime_value
+    essential_column_indices.push(0);
+    essential_column_indices.push(0);
+
     let mut timestamp_index = None;
     let mut value_index = None;
 
@@ -965,7 +979,7 @@ fn collect_tag_columns_and_non_tag_indices(
                 });
 
                 if partition_columns.contains(field.name().as_str()) {
-                    partition_tag_indices.push(index);
+                    essential_column_indices.push(index);
                 }
             }
             ArrowDataType::Timestamp(TimeUnit::Millisecond, _) => {
@@ -1020,10 +1034,8 @@ fn collect_tag_columns_and_non_tag_indices(
 
     tag_columns.sort_by(|a, b| a.name.cmp(&b.name));
 
-    let mut essential_column_indices = Vec::with_capacity(2 + partition_tag_indices.len());
-    essential_column_indices.push(timestamp_index);
-    essential_column_indices.push(value_index);
-    essential_column_indices.extend(partition_tag_indices);
+    essential_column_indices[0] = timestamp_index;
+    essential_column_indices[1] = value_index;
 
     Ok((tag_columns, essential_column_indices))
 }
@@ -1298,7 +1310,7 @@ async fn flush_batch_physical(
         // column metadata once from the first batch.
         // In prom batches, Float64 = value, Timestamp = timestamp, Utf8 = tags.
         let batch_schema = first_batch.schema();
-        let (tag_columns, essential_col_indices) = match collect_tag_columns_and_non_tag_indices(
+        let (tag_columns, essential_col_indices) = match columns_taxonomy(
             &batch_schema,
             &table_batch.table_name,
             &name_to_ids,
@@ -1617,13 +1629,14 @@ mod tests {
     use common_query::request::QueryRequest;
     use common_recordbatch::SendableRecordBatchStream;
     use dashmap::DashMap;
+    use smallvec::SmallVec;
     use store_api::storage::RegionId;
     use tokio::sync::mpsc;
     use tokio::time::sleep;
 
     use super::{
         BatchKey, Error, FlushRegionWrite, FlushWriteResult, PendingRowsBatcher, PendingWorker,
-        WorkerCommand, collect_tag_columns_and_non_tag_indices, flush_region_writes_concurrently,
+        WorkerCommand, columns_taxonomy, flush_region_writes_concurrently,
         remove_worker_if_same_channel, should_close_worker_on_idle_timeout,
         should_dispatch_concurrently, strip_partition_columns_from_batch,
     };
@@ -1927,16 +1940,11 @@ mod tests {
             HashMap::from([("host".to_string(), 1_u32), ("region".to_string(), 2_u32)]);
         let partition_columns = HashSet::from(["host"]);
 
-        let (tag_columns, non_tag_indices) = collect_tag_columns_and_non_tag_indices(
-            &schema,
-            "cpu",
-            &name_to_ids,
-            &partition_columns,
-        )
-        .unwrap();
+        let (tag_columns, non_tag_indices) =
+            columns_taxonomy(&schema, "cpu", &name_to_ids, &partition_columns).unwrap();
 
         assert_eq!(2, tag_columns.len());
-        assert_eq!(vec![0, 1, 2], non_tag_indices);
+        assert_eq!(&[0, 1, 2], non_tag_indices.as_slice());
     }
 
     #[test]
@@ -1955,15 +1963,10 @@ mod tests {
             HashMap::from([("host".to_string(), 1_u32), ("region".to_string(), 2_u32)]);
         let partition_columns = HashSet::from(["host", "region"]);
 
-        let (_tag_columns, non_tag_indices) = collect_tag_columns_and_non_tag_indices(
-            &schema,
-            "cpu",
-            &name_to_ids,
-            &partition_columns,
-        )
-        .unwrap();
+        let (_tag_columns, non_tag_indices): (_, SmallVec<[usize; 3]>) =
+            columns_taxonomy(&schema, "cpu", &name_to_ids, &partition_columns).unwrap();
 
-        assert_eq!(vec![2, 1, 0, 3], non_tag_indices);
+        assert_eq!(&[2, 1, 0, 3], non_tag_indices.as_slice());
     }
 
     #[test]
@@ -1981,12 +1984,7 @@ mod tests {
         let name_to_ids = HashMap::from([("host".to_string(), 1_u32)]);
         let partition_columns = HashSet::from(["host"]);
 
-        let result = collect_tag_columns_and_non_tag_indices(
-            &schema,
-            "cpu",
-            &name_to_ids,
-            &partition_columns,
-        );
+        let result = columns_taxonomy(&schema, "cpu", &name_to_ids, &partition_columns);
 
         assert!(matches!(
             result,
@@ -2004,12 +2002,7 @@ mod tests {
         let name_to_ids = HashMap::from([("host".to_string(), 1_u32)]);
         let partition_columns = HashSet::from(["host"]);
 
-        let result = collect_tag_columns_and_non_tag_indices(
-            &schema,
-            "cpu",
-            &name_to_ids,
-            &partition_columns,
-        );
+        let result = columns_taxonomy(&schema, "cpu", &name_to_ids, &partition_columns);
 
         assert!(matches!(
             result,
@@ -2036,12 +2029,7 @@ mod tests {
         let name_to_ids = HashMap::from([("host".to_string(), 1_u32)]);
         let partition_columns = HashSet::from(["host"]);
 
-        let result = collect_tag_columns_and_non_tag_indices(
-            &schema,
-            "cpu",
-            &name_to_ids,
-            &partition_columns,
-        );
+        let result = columns_taxonomy(&schema, "cpu", &name_to_ids, &partition_columns);
 
         assert!(matches!(
             result,
@@ -2064,12 +2052,7 @@ mod tests {
         let name_to_ids = HashMap::from([("host".to_string(), 1_u32)]);
         let partition_columns = HashSet::from(["host"]);
 
-        let result = collect_tag_columns_and_non_tag_indices(
-            &schema,
-            "cpu",
-            &name_to_ids,
-            &partition_columns,
-        );
+        let result = columns_taxonomy(&schema, "cpu", &name_to_ids, &partition_columns);
 
         assert!(matches!(
             result,
