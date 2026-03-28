@@ -22,14 +22,14 @@ use api::v1::region::{
 };
 use api::v1::{ArrowIpc, ColumnSchema, RowInsertRequests, Rows};
 use arrow::compute::{concat_batches, filter_record_batch};
-use arrow::datatypes::{DataType as ArrowDataType, Schema as ArrowSchema};
+use arrow::datatypes::{DataType as ArrowDataType, Schema as ArrowSchema, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
 use bytes::Bytes;
 use catalog::CatalogManagerRef;
 use common_grpc::flight::{FlightEncoder, FlightMessage};
 use common_meta::node_manager::NodeManagerRef;
-use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
+use common_query::prelude::{GREPTIME_PHYSICAL_TABLE, greptime_timestamp, greptime_value};
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{debug, error, warn};
 use dashmap::DashMap;
@@ -37,8 +37,9 @@ use dashmap::mapref::entry::Entry;
 use metric_engine::batch_modifier::{TagColumnInfo, modify_batch_sparse};
 use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
-use snafu::OptionExt;
+use snafu::{OptionExt, ensure};
 use store_api::storage::RegionId;
+use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, mpsc, oneshot};
 
 use crate::error;
@@ -57,6 +58,7 @@ const PHYSICAL_TABLE_KEY: &str = "physical_table";
 /// Whether wait for ingestion result before reply to client.
 const PENDING_ROWS_BATCH_SYNC_ENV: &str = "PENDING_ROWS_BATCH_SYNC";
 const WORKER_IDLE_TIMEOUT_MULTIPLIER: u32 = 3;
+const PHYSICAL_REGION_ESSENTIAL_COLUMN_COUNT: usize = 3;
 
 #[async_trait]
 pub trait PendingRowsSchemaAlterer: Send + Sync {
@@ -940,24 +942,22 @@ fn collect_tag_columns_and_non_tag_indices(
     partition_columns: &HashSet<&str>,
 ) -> Result<(Vec<TagColumnInfo>, Vec<usize>)> {
     let mut tag_columns = Vec::new();
-    let mut non_tag_indices = Vec::new();
+    let mut partition_tag_indices = Vec::new();
+    let mut timestamp_index = None;
+    let mut value_index = None;
 
     for (index, field) in batch_schema.fields().iter().enumerate() {
         match field.data_type() {
             ArrowDataType::Utf8 => {
-                let column_id = match name_to_ids.get(field.name()) {
-                    Some(&id) => id,
-                    None => {
-                        return error::InternalSnafu {
-                            err_msg: format!(
-                                "Column '{}' from logical table '{}' not found in physical table column IDs",
-                                field.name(),
-                                table_name
-                            ),
-                        }
-                        .fail();
+                let column_id = name_to_ids.get(field.name()).copied().with_context(|| {
+                    error::InvalidPromRemoteRequestSnafu {
+                        msg: format!(
+                            "Column '{}' from logical table '{}' not found in physical table column IDs",
+                            field.name(),
+                            table_name
+                        ),
                     }
-                };
+                })?;
                 tag_columns.push(TagColumnInfo {
                     name: field.name().clone(),
                     index,
@@ -965,49 +965,106 @@ fn collect_tag_columns_and_non_tag_indices(
                 });
 
                 if partition_columns.contains(field.name().as_str()) {
-                    non_tag_indices.push(index);
+                    partition_tag_indices.push(index);
                 }
             }
-            _ => {
-                non_tag_indices.push(index);
+            ArrowDataType::Timestamp(TimeUnit::Millisecond, _) => {
+                ensure!(
+                    timestamp_index.replace(index).is_none(),
+                    error::InvalidPromRemoteRequestSnafu {
+                        msg: format!(
+                            "Duplicated timestamp column in logical table '{}' batch schema",
+                            table_name
+                        ),
+                    }
+                );
+            }
+            ArrowDataType::Float64 => {
+                ensure!(
+                    value_index.replace(index).is_none(),
+                    error::InvalidPromRemoteRequestSnafu {
+                        msg: format!(
+                            "Duplicated value column in logical table '{}' batch schema",
+                            table_name
+                        ),
+                    }
+                );
+            }
+            datatype => {
+                return error::InvalidPromRemoteRequestSnafu {
+                    msg: format!(
+                        "Unexpected data type '{datatype:?}' in logical table '{}' batch schema",
+                        table_name
+                    ),
+                }
+                .fail();
             }
         }
     }
+
+    let timestamp_index =
+        timestamp_index.with_context(|| error::InvalidPromRemoteRequestSnafu {
+            msg: format!(
+                "Missing essential column '{}' in logical table '{}' batch schema",
+                greptime_timestamp(),
+                table_name
+            ),
+        })?;
+    let value_index = value_index.with_context(|| error::InvalidPromRemoteRequestSnafu {
+        msg: format!(
+            "Missing essential column '{}' in logical table '{}' batch schema",
+            greptime_value(),
+            table_name
+        ),
+    })?;
 
     tag_columns.sort_by(|a, b| a.name.cmp(&b.name));
 
-    Ok((tag_columns, non_tag_indices))
+    let mut essential_column_indices = Vec::with_capacity(2 + partition_tag_indices.len());
+    essential_column_indices.push(timestamp_index);
+    essential_column_indices.push(value_index);
+    essential_column_indices.extend(partition_tag_indices);
+
+    Ok((tag_columns, essential_column_indices))
 }
 
-fn strip_partition_columns_from_batch(
-    batch: RecordBatch,
-    partition_columns: &[String],
-) -> Result<RecordBatch> {
-    if partition_columns.is_empty() {
-        return Ok(batch);
-    }
-
-    let partition_columns: HashSet<&str> = partition_columns.iter().map(String::as_str).collect();
-    let schema = batch.schema();
-    let mut fields = Vec::with_capacity(schema.fields().len());
-    let mut columns = Vec::with_capacity(schema.fields().len());
-
-    for (index, field) in schema.fields().iter().enumerate() {
-        if partition_columns.contains(field.name().as_str()) {
-            continue;
+fn strip_partition_columns_from_batch(batch: RecordBatch) -> Result<RecordBatch> {
+    ensure!(
+        batch.num_columns() >= PHYSICAL_REGION_ESSENTIAL_COLUMN_COUNT,
+        error::InternalSnafu {
+            err_msg: format!(
+                "Expected at least {} columns in physical batch, got {}",
+                PHYSICAL_REGION_ESSENTIAL_COLUMN_COUNT,
+                batch.num_columns()
+            ),
         }
-        fields.push(field.clone());
-        columns.push(batch.column(index).clone());
+    );
+
+    let expected_essential_names = [
+        PRIMARY_KEY_COLUMN_NAME,
+        greptime_timestamp(),
+        greptime_value(),
+    ];
+    let batch_schema = batch.schema();
+    for (index, expected_name) in expected_essential_names.iter().enumerate() {
+        let actual_name = batch_schema.field(index).name();
+        ensure!(
+            actual_name == *expected_name,
+            error::InternalSnafu {
+                err_msg: format!(
+                    "Unexpected physical batch column order at index {}: expected '{}', got '{}'",
+                    index, expected_name, actual_name
+                ),
+            }
+        );
     }
 
-    if fields.len() == schema.fields().len() {
-        return Ok(batch);
-    }
-
-    let schema = Arc::new(ArrowSchema::new(fields));
-    RecordBatch::try_new(schema, columns).map_err(|err| Error::Internal {
-        err_msg: format!("Failed to strip partition columns from RecordBatch: {err}"),
-    })
+    let essential_indices: Vec<usize> = (0..PHYSICAL_REGION_ESSENTIAL_COLUMN_COUNT).collect();
+    batch
+        .project(&essential_indices)
+        .map_err(|err| Error::Internal {
+            err_msg: format!("Failed to project essential columns from RecordBatch: {err}"),
+        })
 }
 
 async fn flush_region_writes_concurrently(
@@ -1241,7 +1298,7 @@ async fn flush_batch_physical(
         // column metadata once from the first batch.
         // In prom batches, Float64 = value, Timestamp = timestamp, Utf8 = tags.
         let batch_schema = first_batch.schema();
-        let (tag_columns, non_tag_indices) = match collect_tag_columns_and_non_tag_indices(
+        let (tag_columns, essential_col_indices) = match collect_tag_columns_and_non_tag_indices(
             &batch_schema,
             &table_batch.table_name,
             &name_to_ids,
@@ -1258,7 +1315,7 @@ async fn flush_batch_physical(
             }
         };
 
-        if tag_columns.is_empty() && non_tag_indices.is_empty() {
+        if tag_columns.is_empty() && essential_col_indices.is_empty() {
             continue 'next_table;
         }
 
@@ -1269,7 +1326,12 @@ async fn flush_batch_physical(
                 let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
                     .with_label_values(&["flush_physical_modify_batch"])
                     .start_timer();
-                match modify_batch_sparse(batch.clone(), table_id, &tag_columns, &non_tag_indices) {
+                match modify_batch_sparse(
+                    batch.clone(),
+                    table_id,
+                    &tag_columns,
+                    &essential_col_indices,
+                ) {
                     Ok(batch) => batch,
                     Err(err) => {
                         record_failure!(
@@ -1369,18 +1431,22 @@ async fn flush_batch_physical(
             }
         };
 
-        let region_batch = match strip_partition_columns_from_batch(region_batch, partition_columns)
-        {
-            Ok(batch) => batch,
-            Err(err) => {
-                record_failure!(
-                    total_row_count,
-                    format!(
-                        "Failed to strip partition columns for physical table '{}': {:?}",
-                        physical_table_name, err
-                    )
-                );
-                continue;
+        let region_batch = if partition_columns.is_empty() {
+            region_batch
+        } else {
+            // Strip partition columns before encoding and sending requests.
+            match strip_partition_columns_from_batch(region_batch) {
+                Ok(batch) => batch,
+                Err(err) => {
+                    record_failure!(
+                        total_row_count,
+                        format!(
+                            "Failed to strip partition columns for physical table '{}': {:?}",
+                            physical_table_name, err
+                        )
+                    );
+                    continue;
+                }
             }
         };
 
@@ -1540,7 +1606,7 @@ mod tests {
     use api::v1::meta::Peer;
     use api::v1::region::{InsertRequests, RegionRequest};
     use api::v1::{ColumnSchema, Row, RowInsertRequest, RowInsertRequests, Rows};
-    use arrow::array::{BinaryArray, Int64Array, StringArray};
+    use arrow::array::{BinaryArray, StringArray, TimestampMillisecondArray};
     use arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
     use arrow::record_batch::RecordBatch;
     use async_trait::async_trait;
@@ -1556,7 +1622,7 @@ mod tests {
     use tokio::time::sleep;
 
     use super::{
-        BatchKey, FlushRegionWrite, FlushWriteResult, PendingRowsBatcher, PendingWorker,
+        BatchKey, Error, FlushRegionWrite, FlushWriteResult, PendingRowsBatcher, PendingWorker,
         WorkerCommand, collect_tag_columns_and_non_tag_indices, flush_region_writes_concurrently,
         remove_worker_if_same_channel, should_close_worker_on_idle_timeout,
         should_dispatch_concurrently, strip_partition_columns_from_batch,
@@ -1790,28 +1856,69 @@ mod tests {
         let batch = RecordBatch::try_new(
             Arc::new(ArrowSchema::new(vec![
                 Field::new("__primary_key", ArrowDataType::Binary, false),
-                Field::new("greptime_timestamp", ArrowDataType::Int64, false),
+                Field::new(
+                    "greptime_timestamp",
+                    ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                    false,
+                ),
+                Field::new("greptime_value", ArrowDataType::Float64, true),
                 Field::new("host", ArrowDataType::Utf8, true),
             ])),
             vec![
                 Arc::new(BinaryArray::from(vec![b"k1".as_slice()])),
-                Arc::new(Int64Array::from(vec![1000_i64])),
+                Arc::new(TimestampMillisecondArray::from(vec![1000_i64])),
+                Arc::new(arrow::array::Float64Array::from(vec![42.0_f64])),
                 Arc::new(StringArray::from(vec!["node-1"])),
             ],
         )
         .unwrap();
 
-        let stripped = strip_partition_columns_from_batch(batch, &["host".to_string()]).unwrap();
+        let stripped = strip_partition_columns_from_batch(batch).unwrap();
 
-        assert_eq!(2, stripped.num_columns());
+        assert_eq!(3, stripped.num_columns());
         assert_eq!("__primary_key", stripped.schema().field(0).name());
         assert_eq!("greptime_timestamp", stripped.schema().field(1).name());
+        assert_eq!("greptime_value", stripped.schema().field(2).name());
+    }
+
+    #[test]
+    fn test_strip_partition_columns_from_batch_projects_essential_columns_without_lookup() {
+        let batch = RecordBatch::try_new(
+            Arc::new(ArrowSchema::new(vec![
+                Field::new("__primary_key", ArrowDataType::Binary, false),
+                Field::new(
+                    "greptime_timestamp",
+                    ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                    false,
+                ),
+                Field::new("greptime_value", ArrowDataType::Float64, true),
+                Field::new("host", ArrowDataType::Utf8, true),
+            ])),
+            vec![
+                Arc::new(BinaryArray::from(vec![b"k1".as_slice()])),
+                Arc::new(TimestampMillisecondArray::from(vec![1000_i64])),
+                Arc::new(arrow::array::Float64Array::from(vec![42.0_f64])),
+                Arc::new(StringArray::from(vec!["node-1"])),
+            ],
+        )
+        .unwrap();
+
+        let stripped = strip_partition_columns_from_batch(batch).unwrap();
+
+        assert_eq!(3, stripped.num_columns());
+        assert_eq!("__primary_key", stripped.schema().field(0).name());
+        assert_eq!("greptime_timestamp", stripped.schema().field(1).name());
+        assert_eq!("greptime_value", stripped.schema().field(2).name());
     }
 
     #[test]
     fn test_collect_tag_columns_and_non_tag_indices_keeps_partition_tag_column() {
         let schema = Arc::new(ArrowSchema::new(vec![
-            Field::new("greptime_timestamp", ArrowDataType::Int64, false),
+            Field::new(
+                "greptime_timestamp",
+                ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
             Field::new("greptime_value", ArrowDataType::Float64, true),
             Field::new("host", ArrowDataType::Utf8, true),
             Field::new("region", ArrowDataType::Utf8, true),
@@ -1830,5 +1937,143 @@ mod tests {
 
         assert_eq!(2, tag_columns.len());
         assert_eq!(vec![0, 1, 2], non_tag_indices);
+    }
+
+    #[test]
+    fn test_collect_tag_columns_and_non_tag_indices_prioritizes_essential_columns() {
+        let schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("host", ArrowDataType::Utf8, true),
+            Field::new("greptime_value", ArrowDataType::Float64, true),
+            Field::new(
+                "greptime_timestamp",
+                ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("region", ArrowDataType::Utf8, true),
+        ]));
+        let name_to_ids =
+            HashMap::from([("host".to_string(), 1_u32), ("region".to_string(), 2_u32)]);
+        let partition_columns = HashSet::from(["host", "region"]);
+
+        let (_tag_columns, non_tag_indices) = collect_tag_columns_and_non_tag_indices(
+            &schema,
+            "cpu",
+            &name_to_ids,
+            &partition_columns,
+        )
+        .unwrap();
+
+        assert_eq!(vec![2, 1, 0, 3], non_tag_indices);
+    }
+
+    #[test]
+    fn test_collect_tag_columns_and_non_tag_indices_rejects_unexpected_data_type() {
+        let schema = Arc::new(ArrowSchema::new(vec![
+            Field::new(
+                "greptime_timestamp",
+                ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("greptime_value", ArrowDataType::Float64, true),
+            Field::new("host", ArrowDataType::Utf8, true),
+            Field::new("invalid", ArrowDataType::Boolean, true),
+        ]));
+        let name_to_ids = HashMap::from([("host".to_string(), 1_u32)]);
+        let partition_columns = HashSet::from(["host"]);
+
+        let result = collect_tag_columns_and_non_tag_indices(
+            &schema,
+            "cpu",
+            &name_to_ids,
+            &partition_columns,
+        );
+
+        assert!(matches!(
+            result,
+            Err(Error::InvalidPromRemoteRequest { .. })
+        ));
+    }
+
+    #[test]
+    fn test_collect_tag_columns_and_non_tag_indices_rejects_int64_timestamp_column() {
+        let schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("greptime_timestamp", ArrowDataType::Int64, false),
+            Field::new("greptime_value", ArrowDataType::Float64, true),
+            Field::new("host", ArrowDataType::Utf8, true),
+        ]));
+        let name_to_ids = HashMap::from([("host".to_string(), 1_u32)]);
+        let partition_columns = HashSet::from(["host"]);
+
+        let result = collect_tag_columns_and_non_tag_indices(
+            &schema,
+            "cpu",
+            &name_to_ids,
+            &partition_columns,
+        );
+
+        assert!(matches!(
+            result,
+            Err(Error::InvalidPromRemoteRequest { .. })
+        ));
+    }
+
+    #[test]
+    fn test_collect_tag_columns_and_non_tag_indices_rejects_duplicated_timestamp_column() {
+        let schema = Arc::new(ArrowSchema::new(vec![
+            Field::new(
+                "ts1",
+                ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new(
+                "ts2",
+                ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("greptime_value", ArrowDataType::Float64, true),
+            Field::new("host", ArrowDataType::Utf8, true),
+        ]));
+        let name_to_ids = HashMap::from([("host".to_string(), 1_u32)]);
+        let partition_columns = HashSet::from(["host"]);
+
+        let result = collect_tag_columns_and_non_tag_indices(
+            &schema,
+            "cpu",
+            &name_to_ids,
+            &partition_columns,
+        );
+
+        assert!(matches!(
+            result,
+            Err(Error::InvalidPromRemoteRequest { .. })
+        ));
+    }
+
+    #[test]
+    fn test_collect_tag_columns_and_non_tag_indices_rejects_duplicated_value_column() {
+        let schema = Arc::new(ArrowSchema::new(vec![
+            Field::new(
+                "greptime_timestamp",
+                ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("value1", ArrowDataType::Float64, true),
+            Field::new("value2", ArrowDataType::Float64, true),
+            Field::new("host", ArrowDataType::Utf8, true),
+        ]));
+        let name_to_ids = HashMap::from([("host".to_string(), 1_u32)]);
+        let partition_columns = HashSet::from(["host"]);
+
+        let result = collect_tag_columns_and_non_tag_indices(
+            &schema,
+            "cpu",
+            &name_to_ids,
+            &partition_columns,
+        );
+
+        assert!(matches!(
+            result,
+            Err(Error::InvalidPromRemoteRequest { .. })
+        ));
     }
 }
