@@ -21,6 +21,7 @@ use arrow_schema::{Schema as ArrowSchema, SchemaRef as ArrowSchemaRef, SortOptio
 use async_stream::stream;
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_plugins::GREPTIME_EXEC_READ_COST;
+use common_query::prelude::greptime_timestamp;
 use common_query::request::QueryRequest;
 use common_recordbatch::adapter::RecordBatchMetrics;
 use common_telemetry::tracing_context::TracingContext;
@@ -37,12 +38,15 @@ use datafusion::physical_plan::{
 use datafusion_common::{Column as ColumnExpr, DataFusionError, Result};
 use datafusion_expr::{Expr, Extension, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion_physical_expr::expressions::Column;
-use datafusion_physical_expr::{Distribution, EquivalenceProperties, PhysicalSortExpr};
+use datafusion_physical_expr::{
+    Distribution, EquivalenceProperties, LexOrdering, PhysicalSortExpr,
+};
 use futures_util::StreamExt;
 use greptime_proto::v1::region::RegionRequestHeader;
 use meter_core::data::ReadItem;
 use meter_macros::read_meter;
 use session::context::QueryContextRef;
+use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 use store_api::storage::RegionId;
 use table::table_name::TableName;
 use tokio::time::Instant;
@@ -160,12 +164,168 @@ impl std::fmt::Debug for MergeScanExec {
 }
 
 impl MergeScanExec {
+    fn default_partition_exprs(
+        session_state: &SessionState,
+        plan: &LogicalPlan,
+        partition_cols: &AliasMapping,
+    ) -> Vec<Arc<dyn datafusion_physical_expr::PhysicalExpr>> {
+        partition_cols
+            .iter()
+            .filter_map(|col| Self::partition_expr_for_alias(session_state, plan, col.1.first()))
+            .collect()
+    }
+
+    fn partition_expr_for_alias(
+        session_state: &SessionState,
+        plan: &LogicalPlan,
+        column: Option<&ColumnExpr>,
+    ) -> Option<Arc<dyn datafusion_physical_expr::PhysicalExpr>> {
+        let column = column?;
+        session_state
+            .create_physical_expr(
+                Expr::Column(ColumnExpr::new_unqualified(column.name().to_string())),
+                plan.schema(),
+            )
+            .ok()
+    }
+
+    fn prefer_tsid_partition_exprs(
+        session_state: &SessionState,
+        plan: &LogicalPlan,
+        partition_cols: &AliasMapping,
+    ) -> Option<Vec<Arc<dyn datafusion_physical_expr::PhysicalExpr>>> {
+        if !Self::is_promql_tsid_ordered_plan(plan) {
+            return None;
+        }
+
+        let tsid_aliases = partition_cols.get(DATA_SCHEMA_TSID_COLUMN_NAME)?;
+        let tsid_expr = Self::partition_expr_for_alias(session_state, plan, tsid_aliases.first())?;
+        Some(vec![tsid_expr])
+    }
+
+    fn is_promql_tsid_ordered_plan(plan: &LogicalPlan) -> bool {
+        match plan {
+            LogicalPlan::Sort(sort) => {
+                if sort.expr.len() != 2 {
+                    return false;
+                }
+
+                let [tsid_sort, time_sort] = sort.expr.as_slice() else {
+                    return false;
+                };
+
+                Self::is_ascending_nulls_first_sort(tsid_sort, DATA_SCHEMA_TSID_COLUMN_NAME)
+                    && Self::is_ascending_nulls_first_sort(time_sort, greptime_timestamp())
+            }
+            LogicalPlan::Projection(projection) => {
+                Self::is_promql_tsid_ordered_plan(projection.input.as_ref())
+            }
+            LogicalPlan::Filter(filter) => Self::is_promql_tsid_ordered_plan(filter.input.as_ref()),
+            LogicalPlan::SubqueryAlias(alias) => {
+                Self::is_promql_tsid_ordered_plan(alias.input.as_ref())
+            }
+            LogicalPlan::Extension(extension)
+                if matches!(
+                    extension.node.name(),
+                    "PromInstantManipulate"
+                        | "PromSeriesDivide"
+                        | "PromNormalize"
+                        | "PromScalarCalculate"
+                        | "PromRangeManipulate"
+                ) =>
+            {
+                extension
+                    .node
+                    .inputs()
+                    .first()
+                    .is_some_and(|input| Self::is_promql_tsid_ordered_plan(input))
+            }
+            _ => false,
+        }
+    }
+
+    fn is_ascending_nulls_first_sort(
+        sort_expr: &datafusion_expr::expr::Sort,
+        column: &str,
+    ) -> bool {
+        sort_expr.asc
+            && sort_expr.nulls_first
+            && matches!(
+                sort_expr.expr.try_as_col(),
+                Some(col) if col.name == column
+            )
+    }
+
+    pub(crate) fn logical_sort_ordering(
+        session_state: &SessionState,
+        plan: &LogicalPlan,
+    ) -> Result<Option<LexOrdering>> {
+        if Self::is_promql_tsid_ordered_plan(plan) {
+            let tsid_expr = session_state.create_physical_expr(
+                Expr::Column(ColumnExpr::new_unqualified(
+                    DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
+                )),
+                plan.schema(),
+            )?;
+            let time_expr = session_state.create_physical_expr(
+                Expr::Column(ColumnExpr::new_unqualified(
+                    greptime_timestamp().to_string(),
+                )),
+                plan.schema(),
+            )?;
+            return Ok(LexOrdering::new(vec![
+                PhysicalSortExpr::new(
+                    tsid_expr,
+                    SortOptions {
+                        descending: false,
+                        nulls_first: true,
+                    },
+                ),
+                PhysicalSortExpr::new(
+                    time_expr,
+                    SortOptions {
+                        descending: false,
+                        nulls_first: true,
+                    },
+                ),
+            ]));
+        }
+
+        let LogicalPlan::Sort(sort) = plan else {
+            return Ok(None);
+        };
+
+        let lex_ordering = LexOrdering::new(
+            sort.expr
+                .iter()
+                .map(|sort_expr| {
+                    let physical_expr = session_state
+                        .create_physical_expr(sort_expr.expr.clone(), plan.schema())?;
+                    Ok(PhysicalSortExpr::new(
+                        physical_expr,
+                        SortOptions {
+                            descending: !sort_expr.asc,
+                            nulls_first: sort_expr.nulls_first,
+                        },
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?,
+        )
+        .ok_or_else(|| {
+            DataFusionError::Internal(format!(
+                "Sort plan must contain at least one expression: {plan}"
+            ))
+        })?;
+        Ok(Some(lex_ordering))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         session_state: &SessionState,
         table: TableName,
         regions: Vec<RegionId>,
         plan: LogicalPlan,
+        remote_orderings: Vec<LexOrdering>,
         arrow_schema: &ArrowSchema,
         region_query_handler: RegionQueryHandlerRef,
         query_ctx: QueryContextRef,
@@ -184,46 +344,23 @@ impl MergeScanExec {
         // break the ordering on merging (of MergeScan).
         //
         // Otherwise, we need to use the default ordering.
-        let eq_properties = if let LogicalPlan::Sort(sort) = &plan
-            && target_partition >= regions.len()
-        {
-            let lex_ordering = sort
-                .expr
-                .iter()
-                .map(|sort_expr| {
-                    let physical_expr = session_state
-                        .create_physical_expr(sort_expr.expr.clone(), plan.schema())?;
-                    Ok(PhysicalSortExpr::new(
-                        physical_expr,
-                        SortOptions {
-                            descending: !sort_expr.asc,
-                            nulls_first: sort_expr.nulls_first,
-                        },
-                    ))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            EquivalenceProperties::new_with_orderings(arrow_schema.clone(), vec![lex_ordering])
+        let eq_properties = if target_partition >= regions.len() {
+            if !remote_orderings.is_empty() {
+                EquivalenceProperties::new_with_orderings(arrow_schema.clone(), remote_orderings)
+            } else if let Some(ordering) = Self::logical_sort_ordering(session_state, &plan)? {
+                EquivalenceProperties::new_with_orderings(arrow_schema.clone(), vec![ordering])
+            } else {
+                EquivalenceProperties::new(arrow_schema.clone())
+            }
         } else {
             EquivalenceProperties::new(arrow_schema.clone())
         };
 
-        let partition_exprs = partition_cols
-            .iter()
-            .filter_map(|col| {
-                if let Some(first_alias) = col.1.first() {
-                    session_state
-                        .create_physical_expr(
-                            Expr::Column(ColumnExpr::new_unqualified(
-                                first_alias.name().to_string(),
-                            )),
-                            plan.schema(),
-                        )
-                        .ok()
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let partition_exprs =
+            Self::prefer_tsid_partition_exprs(session_state, &plan, &partition_cols)
+                .unwrap_or_else(|| {
+                    Self::default_partition_exprs(session_state, &plan, &partition_cols)
+                });
         let partitioning = Partitioning::Hash(partition_exprs, target_partition);
 
         let properties = Arc::new(PlanProperties::new(
@@ -421,28 +558,46 @@ impl MergeScanExec {
             return None;
         };
 
-        if let Partitioning::Hash(curr_dist, _) = &self.properties.partitioning
-            && curr_dist == &hash_exprs
-        {
-            // No need to change the distribution
-            return None;
-        }
-
         let all_partition_col_aliases: HashSet<_> = self
             .partition_cols
             .values()
             .flat_map(|aliases| aliases.iter().map(|c| c.name()))
             .collect();
-        let mut overlaps = vec![];
-        for expr in &hash_exprs {
-            if let Some(col_expr) = expr.as_any().downcast_ref::<Column>()
-                && all_partition_col_aliases.contains(col_expr.name())
-            {
-                overlaps.push(expr.clone());
-            }
+        let mut overlaps = hash_exprs
+            .iter()
+            .filter(|expr| {
+                expr.as_any()
+                    .downcast_ref::<Column>()
+                    .is_some_and(|col_expr| all_partition_col_aliases.contains(col_expr.name()))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        // Metric-engine scans can satisfy any hash distribution that includes `__tsid`.
+        // Equal requested keys must also share the same `__tsid`, and equal `__tsid` values are
+        // guaranteed to stay co-located across MergeScan partitions. Advertise the full requested
+        // distribution so EnforceDistribution can skip redundant reshuffles.
+        if self
+            .arrow_schema
+            .column_with_name(DATA_SCHEMA_TSID_COLUMN_NAME)
+            .is_some()
+            && hash_exprs.iter().any(|expr| {
+                expr.as_any()
+                    .downcast_ref::<Column>()
+                    .is_some_and(|col_expr| col_expr.name() == DATA_SCHEMA_TSID_COLUMN_NAME)
+            })
+        {
+            overlaps = hash_exprs.clone();
         }
 
         if overlaps.is_empty() {
+            return None;
+        }
+
+        if let Partitioning::Hash(curr_dist, _) = &self.properties.partitioning
+            && curr_dist == &overlaps
+        {
+            // No need to change the distribution.
             return None;
         }
 
@@ -491,6 +646,213 @@ impl MergeScanExec {
             .values()
             .cloned()
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use arrow_schema::{DataType, Field, Schema, TimeUnit};
+    use async_trait::async_trait;
+    use common_query::request::QueryRequest;
+    use common_recordbatch::SendableRecordBatchStream;
+    use datafusion::execution::SessionStateBuilder;
+    use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
+    use datafusion_common::ToDFSchema;
+    use datafusion_expr::{EmptyRelation, LogicalPlan, LogicalPlanBuilder, col};
+    use datafusion_physical_expr::{EquivalenceProperties, PhysicalExpr};
+    use session::ReadPreference;
+    use session::context::QueryContext;
+
+    use super::*;
+    use crate::error::Result as QueryResult;
+    use crate::region_query::RegionQueryHandler;
+
+    struct NoopRegionQueryHandler;
+
+    #[async_trait]
+    impl RegionQueryHandler for NoopRegionQueryHandler {
+        async fn do_get(
+            &self,
+            _read_preference: ReadPreference,
+            _request: QueryRequest,
+        ) -> QueryResult<SendableRecordBatchStream> {
+            unreachable!("merge scan distribution tests should not execute remote queries")
+        }
+    }
+
+    #[test]
+    fn try_with_new_distribution_satisfies_tsid_hash_requirements() {
+        let merge_scan = test_merge_scan_exec(
+            BTreeMap::from([
+                (
+                    "host".to_string(),
+                    BTreeSet::from([ColumnExpr::from_name("host")]),
+                ),
+                (
+                    DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
+                    BTreeSet::from([ColumnExpr::from_name(DATA_SCHEMA_TSID_COLUMN_NAME)]),
+                ),
+            ]),
+            vec![
+                partition_column("host", 0),
+                partition_column(DATA_SCHEMA_TSID_COLUMN_NAME, 1),
+            ],
+        );
+
+        let optimized = merge_scan
+            .try_with_new_distribution(Distribution::HashPartitioned(vec![
+                partition_column(DATA_SCHEMA_TSID_COLUMN_NAME, 1),
+                partition_column("greptime_timestamp", 2),
+            ]))
+            .unwrap();
+
+        let Partitioning::Hash(ref exprs, partition_count) = optimized.properties.partitioning
+        else {
+            panic!("expected hash partitioning");
+        };
+        assert_eq!(partition_count, 32);
+        assert_eq!(
+            column_names(&exprs),
+            vec![DATA_SCHEMA_TSID_COLUMN_NAME, "greptime_timestamp"]
+        );
+    }
+
+    #[test]
+    fn try_with_new_distribution_keeps_regular_partition_overlap() {
+        let merge_scan = test_merge_scan_exec(
+            BTreeMap::from([(
+                "host".to_string(),
+                BTreeSet::from([ColumnExpr::from_name("host")]),
+            )]),
+            vec![partition_column("greptime_timestamp", 2)],
+        );
+
+        let optimized = merge_scan
+            .try_with_new_distribution(Distribution::HashPartitioned(vec![
+                partition_column("host", 0),
+                partition_column("greptime_timestamp", 2),
+            ]))
+            .unwrap();
+
+        let Partitioning::Hash(ref exprs, partition_count) = optimized.properties.partitioning
+        else {
+            panic!("expected hash partitioning");
+        };
+        assert_eq!(partition_count, 32);
+        assert_eq!(column_names(&exprs), vec!["host"]);
+    }
+
+    #[test]
+    fn new_prefers_tsid_partitioning_for_promql_tsid_sort() {
+        let session_state = SessionStateBuilder::new().with_default_features().build();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("host", DataType::Utf8, true),
+            Field::new(DATA_SCHEMA_TSID_COLUMN_NAME, DataType::UInt64, false),
+            Field::new(
+                greptime_timestamp(),
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("greptime_value", DataType::Float64, true),
+        ]));
+        let partition_cols = BTreeMap::from([
+            (
+                "host".to_string(),
+                BTreeSet::from([ColumnExpr::from_name("host")]),
+            ),
+            (
+                DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
+                BTreeSet::from([ColumnExpr::from_name(DATA_SCHEMA_TSID_COLUMN_NAME)]),
+            ),
+        ]);
+        let plan = promql_tsid_sorted_plan(schema.clone());
+
+        let merge_scan = MergeScanExec::new(
+            &session_state,
+            TableName::new("greptime", "public", "test"),
+            vec![RegionId::new(1, 0), RegionId::new(1, 1)],
+            plan,
+            vec![],
+            schema.as_ref(),
+            Arc::new(NoopRegionQueryHandler),
+            QueryContext::arc(),
+            32,
+            partition_cols,
+        )
+        .unwrap();
+
+        let Partitioning::Hash(ref exprs, partition_count) = merge_scan.properties.partitioning
+        else {
+            panic!("expected hash partitioning");
+        };
+        assert_eq!(partition_count, 32);
+        assert_eq!(column_names(exprs), vec![DATA_SCHEMA_TSID_COLUMN_NAME]);
+    }
+
+    fn test_merge_scan_exec(
+        partition_cols: AliasMapping,
+        current_partition_exprs: Vec<Arc<dyn PhysicalExpr>>,
+    ) -> MergeScanExec {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("host", DataType::Utf8, true),
+            Field::new(DATA_SCHEMA_TSID_COLUMN_NAME, DataType::UInt64, false),
+            Field::new(
+                "greptime_timestamp",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("greptime_value", DataType::Float64, true),
+        ]));
+        let plan = LogicalPlanBuilder::empty(false).build().unwrap();
+
+        MergeScanExec {
+            table: TableName::new("greptime", "public", "test"),
+            regions: vec![RegionId::new(1, 0), RegionId::new(1, 1)],
+            plan,
+            arrow_schema: schema.clone(),
+            region_query_handler: Arc::new(NoopRegionQueryHandler),
+            metric: ExecutionPlanMetricsSet::new(),
+            properties: Arc::new(PlanProperties::new(
+                EquivalenceProperties::new(schema),
+                Partitioning::Hash(current_partition_exprs, 32),
+                EmissionType::Incremental,
+                Boundedness::Bounded,
+            )),
+            sub_stage_metrics: Arc::default(),
+            partition_metrics: Arc::default(),
+            query_ctx: QueryContext::arc(),
+            target_partition: 32,
+            partition_cols,
+        }
+    }
+
+    fn partition_column(name: &str, index: usize) -> Arc<dyn PhysicalExpr> {
+        Arc::new(Column::new(name, index))
+    }
+
+    fn column_names(exprs: &[Arc<dyn PhysicalExpr>]) -> Vec<&str> {
+        exprs
+            .iter()
+            .map(|expr| expr.as_any().downcast_ref::<Column>().unwrap().name())
+            .collect()
+    }
+
+    fn promql_tsid_sorted_plan(schema: Arc<Schema>) -> LogicalPlan {
+        let input = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: schema.to_dfschema_ref().unwrap(),
+        });
+
+        LogicalPlanBuilder::from(input)
+            .sort(vec![
+                col(DATA_SCHEMA_TSID_COLUMN_NAME).sort(true, true),
+                col(greptime_timestamp()).sort(true, true),
+            ])
+            .unwrap()
+            .build()
+            .unwrap()
     }
 }
 

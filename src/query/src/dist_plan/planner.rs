@@ -20,17 +20,22 @@ use ahash::HashMap;
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_query::prelude::greptime_timestamp;
+use datafusion::arrow::compute::SortOptions;
 use datafusion::common::Result;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::execution::context::SessionState;
-use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties};
 use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner};
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion, TreeNodeVisitor};
 use datafusion_common::{DataFusionError, TableReference};
 use datafusion_expr::{LogicalPlan, UserDefinedLogicalNode};
+use datafusion_physical_expr::expressions::Column as PhysicalColumn;
+use datafusion_physical_expr::{LexOrdering, PhysicalSortExpr};
 use partition::manager::{PartitionRuleManagerRef, create_partitions_from_region_routes};
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
+use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 use store_api::storage::RegionId;
 pub use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
@@ -162,6 +167,51 @@ impl ExtensionPlanner for DistExtensionPlanner {
             return fallback(optimized_plan).await;
         };
 
+        let remote_orderings = if let Ok(optimized_remote_plan) =
+            self.optimize_input_logical_plan(session_state, input_plan)
+        {
+            planner
+                .create_physical_plan(&optimized_remote_plan, session_state)
+                .await
+                .ok()
+                .map(|plan| {
+                    let mut remote_orderings = Vec::new();
+                    if let Some(preferred_ordering) =
+                        tsid_time_ordering(plan.as_ref()).filter(|ordering| {
+                            plan.equivalence_properties()
+                                .ordering_satisfy(ordering.clone())
+                                .unwrap_or(false)
+                        })
+                    {
+                        remote_orderings.push(preferred_ordering);
+                    }
+
+                    if let Some(preferred_ordering) =
+                        MergeScanExec::logical_sort_ordering(session_state, input_plan)
+                            .ok()
+                            .flatten()
+                            .filter(|ordering| {
+                                plan.equivalence_properties()
+                                    .ordering_satisfy(ordering.clone())
+                                    .unwrap_or(false)
+                            })
+                    {
+                        remote_orderings.push(preferred_ordering);
+                    }
+
+                    for ordering in plan.equivalence_properties().oeq_class().iter().cloned() {
+                        if !remote_orderings.contains(&ordering) {
+                            remote_orderings.push(ordering);
+                        }
+                    }
+
+                    remote_orderings
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
         // TODO(ruihang): generate different execution plans for different variant merge operation
         let schema = optimized_plan.schema().as_arrow();
         let query_ctx = session_state
@@ -173,6 +223,7 @@ impl ExtensionPlanner for DistExtensionPlanner {
             table_name,
             regions,
             input_plan.clone(),
+            remote_orderings,
             schema,
             self.region_query_handler.clone(),
             query_ctx,
@@ -181,6 +232,31 @@ impl ExtensionPlanner for DistExtensionPlanner {
         )?;
         Ok(Some(Arc::new(merge_scan_plan) as _))
     }
+}
+
+fn tsid_time_ordering(plan: &dyn ExecutionPlan) -> Option<LexOrdering> {
+    let schema = plan.schema();
+    let tsid_index = schema.index_of(DATA_SCHEMA_TSID_COLUMN_NAME).ok()?;
+    let time_index = schema.index_of(greptime_timestamp()).ok()?;
+    LexOrdering::new(vec![
+        PhysicalSortExpr::new(
+            Arc::new(PhysicalColumn::new(
+                DATA_SCHEMA_TSID_COLUMN_NAME,
+                tsid_index,
+            )),
+            SortOptions {
+                descending: false,
+                nulls_first: true,
+            },
+        ),
+        PhysicalSortExpr::new(
+            Arc::new(PhysicalColumn::new(greptime_timestamp(), time_index)),
+            SortOptions {
+                descending: false,
+                nulls_first: true,
+            },
+        ),
+    ])
 }
 
 impl DistExtensionPlanner {

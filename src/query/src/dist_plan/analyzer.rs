@@ -27,6 +27,7 @@ use datafusion_expr::utils::expr_to_columns;
 use datafusion_expr::{Expr, LogicalPlan, LogicalPlanBuilder, Subquery, col as col_fn};
 use datafusion_optimizer::analyzer::AnalyzerRule;
 use promql::extension_plan::SeriesDivide;
+use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
@@ -508,6 +509,20 @@ impl PlanRewriter {
                     .into_iter()
                     .map(|index| schema.column_name_by_index(index).to_string())
                     .collect::<Vec<String>>();
+
+                // Metric engine scans can project the internal `__tsid` column even though it is
+                // not part of the logical table schema. Equal `__tsid` values always belong to the
+                // same series, so carry it as an additional partition key when it is available.
+                if plan
+                    .schema()
+                    .index_of_column_by_name(None, DATA_SCHEMA_TSID_COLUMN_NAME)
+                    .is_some()
+                    && !partition_cols
+                        .iter()
+                        .any(|col| col == DATA_SCHEMA_TSID_COLUMN_NAME)
+                {
+                    partition_cols.push(DATA_SCHEMA_TSID_COLUMN_NAME.to_string());
+                }
 
                 let partition_rules = table.partition_rules();
                 let exist_phy_part_cols_not_in_logical_table = partition_rules
