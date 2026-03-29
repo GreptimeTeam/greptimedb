@@ -196,6 +196,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 |_|_|
 | physical_plan after FilterPushdown(Post)_| SAME TEXT AS ABOVE_|
 | physical_plan after WindowedSortRule_| SAME TEXT AS ABOVE_|
+| physical_plan after TsidJoinRepartition_| SAME TEXT AS ABOVE_|
 | physical_plan after MatchesConstantTerm_| SAME TEXT AS ABOVE_|
 | physical_plan after RemoveDuplicateRule_| SAME TEXT AS ABOVE_|
 | physical_plan after SanityCheckPlan_| SAME TEXT AS ABOVE_|
@@ -342,6 +343,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test AS series;
 |_|_|
 | physical_plan after FilterPushdown(Post)_| SAME TEXT AS ABOVE_|
 | physical_plan after WindowedSortRule_| SAME TEXT AS ABOVE_|
+| physical_plan after TsidJoinRepartition_| SAME TEXT AS ABOVE_|
 | physical_plan after MatchesConstantTerm_| SAME TEXT AS ABOVE_|
 | physical_plan after RemoveDuplicateRule_| SAME TEXT AS ABOVE_|
 | physical_plan after SanityCheckPlan_| SAME TEXT AS ABOVE_|

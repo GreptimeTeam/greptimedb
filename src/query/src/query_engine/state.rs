@@ -68,6 +68,7 @@ use crate::optimizer::remove_duplicate::RemoveDuplicate;
 use crate::optimizer::scan_hint::ScanHintRule;
 use crate::optimizer::string_normalization::StringNormalizationRule;
 use crate::optimizer::transcribe_atat::TranscribeAtatRule;
+use crate::optimizer::tsid_join_repartition::TsidJoinRepartition;
 use crate::optimizer::type_conversion::TypeConversionRule;
 use crate::optimizer::windowed_sort::WindowedSortPhysicalRule;
 use crate::options::QueryOptions as QueryOptionsNew;
@@ -194,6 +195,8 @@ impl QueryEngineState {
         physical_optimizer
             .rules
             .push(Arc::new(WindowedSortPhysicalRule));
+        // Relax redundant repartitions for tsid-based PromQL joins after distribution is enforced.
+        physical_optimizer.rules.push(Arc::new(TsidJoinRepartition));
         // explicitly not do filter pushdown for windowed sort&part sort
         // (notice that `PartSortExec` create another new dyn filter that need to be pushdown if want to use dyn filter optimization)
         // benchmark shows it can cause performance regression due to useless filtering and extra shuffle.

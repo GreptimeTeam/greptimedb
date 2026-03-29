@@ -23,6 +23,7 @@ pub mod string_normalization;
 #[cfg(test)]
 pub(crate) mod test_util;
 pub mod transcribe_atat;
+pub mod tsid_join_repartition;
 pub mod type_conversion;
 pub mod windowed_sort;
 
