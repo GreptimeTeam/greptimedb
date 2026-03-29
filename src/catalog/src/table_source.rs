@@ -15,7 +15,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use bytes::Bytes;
 use common_catalog::format_full_table_name;
 use common_query::logical_plan::{SubstraitPlanDecoderRef, rename_logical_plan_columns};
 use datafusion::common::{ResolvedTableReference, TableReference};
@@ -151,11 +150,7 @@ impl DfTableSourceProvider {
         let catalog_list = Arc::new(DummyCatalogList::new(self.catalog_manager.clone()));
         let logical_plan = self
             .plan_decoder
-            .decode(
-                Bytes::from(view_info.view_info.clone()),
-                catalog_list,
-                false,
-            )
+            .decode(view_info.view_info.clone().into(), catalog_list, false)
             .await
             .context(DecodePlanSnafu {
                 name: &table.table_info().name,
