@@ -138,7 +138,8 @@ use crate::gc::GcLimiterRef;
 use crate::manifest::action::RegionEdit;
 use crate::memtable::MemtableStats;
 use crate::metrics::{
-    HANDLE_REQUEST_ELAPSED, SCAN_MEMORY_USAGE_BYTES, SCAN_REQUESTS_REJECTED_TOTAL,
+    HANDLE_REQUEST_ELAPSED, SCAN_MEMORY_EXHAUSTED_TOTAL, SCAN_MEMORY_USAGE_BYTES,
+    SCAN_REQUESTS_REJECTED_TOTAL,
 };
 use crate::read::scan_region::{ScanRegion, Scanner};
 use crate::read::stream::ScanBatchStream;
@@ -230,6 +231,9 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
             QueryMemoryTracker::builder(scan_memory_limit, config.scan_memory_on_exhausted)
                 .on_update(|usage| {
                     SCAN_MEMORY_USAGE_BYTES.set(usage as i64);
+                })
+                .on_exhausted(|| {
+                    SCAN_MEMORY_EXHAUSTED_TOTAL.inc();
                 })
                 .on_reject(|| {
                     SCAN_REQUESTS_REJECTED_TOTAL.inc();
@@ -1379,6 +1383,9 @@ impl MitoEngine {
             QueryMemoryTracker::builder(scan_memory_limit, config.scan_memory_on_exhausted)
                 .on_update(|usage| {
                     SCAN_MEMORY_USAGE_BYTES.set(usage as i64);
+                })
+                .on_exhausted(|| {
+                    SCAN_MEMORY_EXHAUSTED_TOTAL.inc();
                 })
                 .on_reject(|| {
                     SCAN_REQUESTS_REJECTED_TOTAL.inc();
