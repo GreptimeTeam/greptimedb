@@ -53,7 +53,7 @@ pub trait PrimaryKeyCodecExt {
 
 pub trait PrimaryKeyFilter: Send + Sync {
     /// Returns true if the primary key matches the filter.
-    fn matches(&mut self, pk: &[u8]) -> bool;
+    fn matches(&mut self, pk: &[u8]) -> Result<bool>;
 }
 
 /// Composite values decoded from primary key bytes.
@@ -120,6 +120,7 @@ pub trait PrimaryKeyCodec: Send + Sync + Debug {
         &self,
         metadata: &RegionMetadataRef,
         filters: Arc<Vec<SimpleFilterEvaluator>>,
+        skip_partition_column: bool,
     ) -> Box<dyn PrimaryKeyFilter>;
 
     /// Returns the estimated size of the primary key.

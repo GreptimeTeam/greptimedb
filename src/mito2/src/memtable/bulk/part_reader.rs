@@ -367,6 +367,7 @@ fn apply_combined_filters(
         let predicate_mask = context.base.compute_filter_mask_flat(
             &record_batch,
             skip_fields,
+            false,
             &mut tag_decode_state,
         )?;
         // If predicate filters out the entire batch, return None early

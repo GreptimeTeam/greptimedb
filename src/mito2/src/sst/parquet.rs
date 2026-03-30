@@ -142,6 +142,7 @@ mod tests {
     use crate::sst::index::{IndexBuildType, Indexer, IndexerBuilder, IndexerBuilderImpl};
     use crate::sst::parquet::flat_format::FlatWriteFormat;
     use crate::sst::parquet::reader::{ParquetReader, ParquetReaderBuilder, ReaderMetrics};
+    use crate::sst::parquet::row_selection::RowGroupSelection;
     use crate::sst::parquet::writer::ParquetWriter;
     use crate::sst::{
         DEFAULT_WRITE_CONCURRENCY, FlatSchemaOptions, location, to_flat_sst_arrow_schema,
@@ -1113,6 +1114,39 @@ mod tests {
         assert!(reader.next_record_batch().await.unwrap().is_none());
     }
 
+    fn new_record_batch_from_rows(rows: &[(&str, &str, i64)]) -> RecordBatch {
+        let metadata = Arc::new(sst_region_metadata());
+        let flat_schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
+
+        let mut tag_0_builder = StringDictionaryBuilder::<UInt32Type>::new();
+        let mut tag_1_builder = StringDictionaryBuilder::<UInt32Type>::new();
+        let mut pk_builder = BinaryDictionaryBuilder::<UInt32Type>::new();
+        let mut field_values = Vec::with_capacity(rows.len());
+        let mut timestamps = Vec::with_capacity(rows.len());
+
+        for (tag_0, tag_1, ts) in rows {
+            tag_0_builder.append_value(*tag_0);
+            tag_1_builder.append_value(*tag_1);
+            pk_builder.append(new_primary_key(&[tag_0, tag_1])).unwrap();
+            field_values.push(*ts as u64);
+            timestamps.push(*ts);
+        }
+
+        RecordBatch::try_new(
+            flat_schema,
+            vec![
+                Arc::new(tag_0_builder.finish()) as ArrayRef,
+                Arc::new(tag_1_builder.finish()) as ArrayRef,
+                Arc::new(UInt64Array::from(field_values)) as ArrayRef,
+                Arc::new(TimestampMillisecondArray::from(timestamps)) as ArrayRef,
+                Arc::new(pk_builder.finish()) as ArrayRef,
+                Arc::new(UInt64Array::from_value(1000, rows.len())) as ArrayRef,
+                Arc::new(UInt8Array::from_value(OpType::Put as u8, rows.len())) as ArrayRef,
+            ],
+        )
+        .unwrap()
+    }
+
     /// Creates a flat format RecordBatch for testing with sparse primary key encoding.
     /// Similar to `new_record_batch_by_range` but without individual primary key columns.
     fn new_record_batch_by_range_sparse(
@@ -1640,6 +1674,133 @@ mod tests {
         assert_eq!(metrics.filter_metrics.rg_minmax_filtered, 0);
         assert_eq!(metrics.filter_metrics.rg_bloom_filtered, 0);
         assert_eq!(metrics.filter_metrics.rows_bloom_filtered, 100);
+    }
+
+    #[tokio::test]
+    async fn test_reader_prefilter_with_outer_selection_and_trailing_filtered_rows() {
+        let mut env = TestEnv::new().await;
+        let object_store = env.init_object_store_manager();
+        let file_path = RegionFilePathFactory::new(FILE_DIR.to_string(), PathType::Bare);
+        let metadata = Arc::new(sst_region_metadata());
+        let row_group_size = 10;
+
+        let flat_source = new_flat_source_from_record_batches(vec![
+            new_record_batch_by_range(&["a", "d"], 0, 3),
+            new_record_batch_by_range(&["b", "d"], 3, 10),
+        ]);
+        let write_opts = WriteOptions {
+            row_group_size,
+            ..Default::default()
+        };
+        let indexer_builder = create_test_indexer_builder(
+            &env,
+            object_store.clone(),
+            file_path.clone(),
+            metadata.clone(),
+            row_group_size,
+        );
+        let info = write_flat_sst(
+            object_store.clone(),
+            metadata.clone(),
+            indexer_builder,
+            file_path,
+            flat_source,
+            &write_opts,
+        )
+        .await;
+        let handle = create_file_handle_from_sst_info(&info, &metadata);
+
+        let builder =
+            ParquetReaderBuilder::new(FILE_DIR.to_string(), PathType::Bare, handle, object_store)
+                .flat_format(true)
+                .predicate(Some(Predicate::new(vec![col("tag_0").eq(lit("a"))])));
+
+        let mut metrics = ReaderMetrics::default();
+        let (context, _) = builder
+            .build_reader_input(&mut metrics)
+            .await
+            .unwrap()
+            .unwrap();
+        let selection = RowGroupSelection::from_row_ranges(
+            vec![(0, std::iter::once(0..6).collect())],
+            row_group_size,
+        );
+
+        let mut reader = ParquetReader::new(Arc::new(context), selection)
+            .await
+            .unwrap();
+        check_record_batch_reader_result(
+            &mut reader,
+            &[new_record_batch_by_range(&["a", "d"], 0, 3)],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_reader_prefilter_with_outer_selection_disjoint_matches_and_trailing_gap() {
+        let mut env = TestEnv::new().await;
+        let object_store = env.init_object_store_manager();
+        let file_path = RegionFilePathFactory::new(FILE_DIR.to_string(), PathType::Bare);
+        let metadata = Arc::new(sst_region_metadata());
+        let row_group_size = 8;
+
+        let flat_source = new_flat_source_from_record_batches(vec![
+            new_record_batch_by_range(&["a", "d"], 0, 2),
+            new_record_batch_by_range(&["b", "d"], 2, 4),
+            new_record_batch_by_range(&["a", "d"], 4, 6),
+            new_record_batch_by_range(&["c", "d"], 6, 8),
+        ]);
+        let write_opts = WriteOptions {
+            row_group_size,
+            ..Default::default()
+        };
+        let indexer_builder = create_test_indexer_builder(
+            &env,
+            object_store.clone(),
+            file_path.clone(),
+            metadata.clone(),
+            row_group_size,
+        );
+        let info = write_flat_sst(
+            object_store.clone(),
+            metadata.clone(),
+            indexer_builder,
+            file_path,
+            flat_source,
+            &write_opts,
+        )
+        .await;
+        let handle = create_file_handle_from_sst_info(&info, &metadata);
+
+        let builder =
+            ParquetReaderBuilder::new(FILE_DIR.to_string(), PathType::Bare, handle, object_store)
+                .flat_format(true)
+                .predicate(Some(Predicate::new(vec![col("tag_0").eq(lit("a"))])));
+
+        let mut metrics = ReaderMetrics::default();
+        let (context, _) = builder
+            .build_reader_input(&mut metrics)
+            .await
+            .unwrap()
+            .unwrap();
+        let selection = RowGroupSelection::from_row_ranges(
+            vec![(0, std::iter::once(0..8).collect())],
+            row_group_size,
+        );
+
+        let mut reader = ParquetReader::new(Arc::new(context), selection)
+            .await
+            .unwrap();
+        check_record_batch_reader_result(
+            &mut reader,
+            &[new_record_batch_from_rows(&[
+                ("a", "d", 0),
+                ("a", "d", 1),
+                ("a", "d", 4),
+                ("a", "d", 5),
+            ])],
+        )
+        .await;
     }
 
     #[tokio::test]

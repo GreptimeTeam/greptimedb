@@ -556,11 +556,13 @@ impl PrimaryKeyCodec for DensePrimaryKeyCodec {
         &self,
         metadata: &RegionMetadataRef,
         filters: Arc<Vec<SimpleFilterEvaluator>>,
+        skip_partition_column: bool,
     ) -> Box<dyn PrimaryKeyFilter> {
         Box::new(DensePrimaryKeyFilter::new(
             metadata.clone(),
             filters,
             self.clone(),
+            skip_partition_column,
         ))
     }
 
