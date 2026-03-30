@@ -142,14 +142,14 @@ fn extract_file_path_from_uri(uri: &str) -> Result<String> {
         .fail(),
         _ => url
             .to_file_path()
-            .map(|path| path.to_string_lossy().into_owned())
             .map_err(|_| {
                 InvalidUriSnafu {
                     uri,
-                    reason: "file:// URI must use a valid absolute filesystem path",
+                    reason: "file:// URI must use an absolute path like file:///tmp/backup",
                 }
                 .build()
-            }),
+            })
+            .map(|path| path.to_string_lossy().into_owned()),
     }
 }
 
@@ -573,6 +573,14 @@ mod tests {
         assert_eq!(
             extract_file_path_from_uri("file://localhost/tmp/backup").unwrap(),
             "/tmp/backup"
+        );
+        assert_eq!(
+            extract_file_path_from_uri("file:///tmp/my%20backup").unwrap(),
+            "/tmp/my backup"
+        );
+        assert_eq!(
+            extract_file_path_from_uri("file://localhost/tmp/my%20backup").unwrap(),
+            "/tmp/my backup"
         );
     }
 

@@ -56,7 +56,14 @@ pub(super) fn build_copy_target(
 
     match scheme {
         StorageScheme::File => {
-            let location = normalize_path(&format!("{}/{}", url.path(), suffix));
+            let root = url.to_file_path().map_err(|_| {
+                InvalidUriSnafu {
+                    uri: snapshot_uri,
+                    reason: "file:// URI must use an absolute path like file:///tmp/backup",
+                }
+                .build()
+            })?;
+            let location = normalize_path(&format!("{}/{}", root.to_string_lossy(), suffix));
             Ok(CopyTarget {
                 location,
                 connection: String::new(),
@@ -420,5 +427,14 @@ mod tests {
         assert!(connection.contains("SAS_TOKEN='sig=secret-token'"));
         assert!(masked.contains("SAS_TOKEN='[REDACTED]'"));
         assert!(!masked.contains("sig=secret-token"));
+    }
+
+    #[test]
+    fn test_build_copy_target_decodes_file_uri_path() {
+        let storage = ObjectStoreConfig::default();
+        let target = build_copy_target("file:///tmp/my%20backup", &storage, "public", 7)
+            .expect("file:// copy target should be built");
+
+        assert_eq!(target.location, "/tmp/my backup/data/public/7/");
     }
 }
