@@ -124,7 +124,9 @@ impl EncodedBulkPartIter {
                 &self.sequence,
                 batch,
                 self.current_skip_fields,
-                self.pk_filter.as_mut().map(|f| f as &mut dyn PrimaryKeyFilter),
+                self.pk_filter
+                    .as_mut()
+                    .map(|f| f as &mut dyn PrimaryKeyFilter),
             )? {
                 // Update metrics
                 self.metrics.num_batches += 1;
@@ -151,7 +153,9 @@ impl EncodedBulkPartIter {
                     &self.sequence,
                     batch,
                     self.current_skip_fields,
-                    self.pk_filter.as_mut().map(|f| f as &mut dyn PrimaryKeyFilter),
+                    self.pk_filter
+                        .as_mut()
+                        .map(|f| f as &mut dyn PrimaryKeyFilter),
                 )? {
                     // Update metrics
                     self.metrics.num_batches += 1;
@@ -292,8 +296,13 @@ impl BulkPartBatchIter {
             PreFilterMode::SkipFieldsOnDelete => true,
         };
 
-        let Some(filtered_batch) =
-            apply_combined_filters(&self.context, &self.sequence, projected_batch, skip_fields, None)?
+        let Some(filtered_batch) = apply_combined_filters(
+            &self.context,
+            &self.sequence,
+            projected_batch,
+            skip_fields,
+            None,
+        )?
         else {
             self.metrics.scan_cost += start.elapsed();
             return Ok(None);

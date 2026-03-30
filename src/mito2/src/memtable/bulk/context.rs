@@ -148,7 +148,7 @@ impl BulkIterContext {
         filters: &[SimpleFilterContext],
     ) -> Option<Arc<Vec<SimpleFilterEvaluator>>> {
         let flat_format = read_format.as_flat()?;
-        if !flat_format.raw_batch_has_primary_key_dictionary() {
+        if !flat_format.batch_has_raw_pk_columns() {
             return None;
         }
         let metadata = read_format.metadata();
@@ -173,10 +173,10 @@ impl BulkIterContext {
         let pk_filters = self.pk_filters.as_ref()?;
         let metadata = self.base.read_format.metadata();
         // Parquet PK prefilter always supports the partition column.
-        let inner =
-            self.base
-                .codec
-                .primary_key_filter(metadata, Arc::clone(pk_filters), false);
+        let inner = self
+            .base
+            .codec
+            .primary_key_filter(metadata, Arc::clone(pk_filters), false);
         Some(CachedPrimaryKeyFilter::new(inner))
     }
 
