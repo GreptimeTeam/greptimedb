@@ -17,6 +17,7 @@ use std::time::Instant;
 
 use datatypes::arrow::array::BooleanArray;
 use datatypes::arrow::record_batch::RecordBatch;
+use mito_codec::row_converter::PrimaryKeyFilter;
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReader;
 use snafu::ResultExt;
@@ -29,7 +30,8 @@ use crate::memtable::bulk::row_group_reader::MemtableRowGroupReaderBuilder;
 use crate::memtable::{MemScanMetrics, MemScanMetricsData};
 use crate::metrics::{READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
 use crate::sst::parquet::file_range::{PreFilterMode, TagDecodeState};
-use crate::sst::parquet::flat_format::sequence_column_index;
+use crate::sst::parquet::flat_format::{primary_key_column_index, sequence_column_index};
+use crate::sst::parquet::prefilter::{CachedPrimaryKeyFilter, prefilter_flat_batch_by_primary_key};
 
 /// Iterator for reading data inside a bulk part.
 pub struct EncodedBulkPartIter {
@@ -41,6 +43,8 @@ pub struct EncodedBulkPartIter {
     sequence: Option<SequenceRange>,
     /// Cached skip_fields for current row group.
     current_skip_fields: bool,
+    /// Primary key filter for prefiltering before convert_batch.
+    pk_filter: Option<CachedPrimaryKeyFilter>,
     /// Metrics for this iterator.
     metrics: MemScanMetricsData,
     /// Optional memory scan metrics to report to.
@@ -69,6 +73,9 @@ impl EncodedBulkPartIter {
         let builder =
             MemtableRowGroupReaderBuilder::try_new(&context, projection_mask, parquet_meta, data)?;
 
+        // Build PK filter if applicable (flat format with dictionary-encoded PKs).
+        let pk_filter = context.build_pk_filter();
+
         let (init_reader, current_skip_fields) = match row_groups_to_read.pop_front() {
             Some(first_row_group) => {
                 let skip_fields = builder.compute_skip_fields(&context, first_row_group);
@@ -85,6 +92,7 @@ impl EncodedBulkPartIter {
             builder,
             sequence,
             current_skip_fields,
+            pk_filter,
             metrics: MemScanMetricsData {
                 total_series: series_count,
                 ..Default::default()
@@ -116,6 +124,7 @@ impl EncodedBulkPartIter {
                 &self.sequence,
                 batch,
                 self.current_skip_fields,
+                self.pk_filter.as_mut().map(|f| f as &mut dyn PrimaryKeyFilter),
             )? {
                 // Update metrics
                 self.metrics.num_batches += 1;
@@ -142,6 +151,7 @@ impl EncodedBulkPartIter {
                     &self.sequence,
                     batch,
                     self.current_skip_fields,
+                    self.pk_filter.as_mut().map(|f| f as &mut dyn PrimaryKeyFilter),
                 )? {
                     // Update metrics
                     self.metrics.num_batches += 1;
@@ -283,7 +293,7 @@ impl BulkPartBatchIter {
         };
 
         let Some(filtered_batch) =
-            apply_combined_filters(&self.context, &self.sequence, projected_batch, skip_fields)?
+            apply_combined_filters(&self.context, &self.sequence, projected_batch, skip_fields, None)?
         else {
             self.metrics.scan_cost += start.elapsed();
             return Ok(None);
@@ -353,8 +363,21 @@ fn apply_combined_filters(
     sequence: &Option<SequenceRange>,
     record_batch: RecordBatch,
     skip_fields: bool,
+    pk_filter: Option<&mut dyn PrimaryKeyFilter>,
 ) -> error::Result<Option<RecordBatch>> {
-    // Converts the format to the flat format first.
+    // Apply PK prefilter on raw batch before convert_batch to reduce conversion overhead.
+    let has_pk_prefilter = pk_filter.is_some();
+    let record_batch = if let Some(pk_filter) = pk_filter {
+        let pk_col_idx = primary_key_column_index(record_batch.num_columns());
+        match prefilter_flat_batch_by_primary_key(record_batch, pk_col_idx, pk_filter)? {
+            Some(batch) => batch,
+            None => return Ok(None),
+        }
+    } else {
+        record_batch
+    };
+
+    // Converts the format to the flat format.
     let format = context.read_format().as_flat().unwrap();
     let record_batch = format.convert_batch(record_batch, None)?;
 
@@ -362,12 +385,12 @@ fn apply_combined_filters(
     let mut combined_filter = None;
     let mut tag_decode_state = TagDecodeState::new();
 
-    // First, apply predicate filters using the shared method.
+    // Apply predicate filters using the shared method.
     if !context.base.filters.is_empty() {
         let predicate_mask = context.base.compute_filter_mask_flat(
             &record_batch,
             skip_fields,
-            false,
+            has_pk_prefilter,
             &mut tag_decode_state,
         )?;
         // If predicate filters out the entire batch, return None early
