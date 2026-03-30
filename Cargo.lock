@@ -2135,7 +2135,6 @@ dependencies = [
  "common-time",
  "common-version",
  "common-wal",
- "const_format",
  "datanode",
  "datatypes",
  "etcd-client",
