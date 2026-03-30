@@ -308,9 +308,3 @@ impl Instance {
         Ok(())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    // Cross-batch coercion behavior is covered by integration tests and the
-    // shared coercion helper unit tests under `servers::otlp::trace::coerce`.
-}

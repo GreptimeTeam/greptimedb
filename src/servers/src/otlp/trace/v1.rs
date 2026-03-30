@@ -308,6 +308,10 @@ pub(crate) fn write_attributes(
         }
 
         let key = format!("{}.{}", prefix, key_suffix);
+        // for some types, see [`coerce.rs`] for the type list
+        // we'll try to coerce the incoming value to the existing type, if the coercion is supported.
+        // if the table doesn't have the column, and the batch has both string type and non-string type,
+        // we'll promote the string column to the non-string type.
         match attr.value.and_then(|v| v.value) {
             Some(OtlpValue::StringValue(v)) => {
                 let incoming_value = ValueData::StringValue(v);

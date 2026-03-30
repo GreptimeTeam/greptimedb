@@ -20,6 +20,16 @@ pub enum TraceCoerceError {
     Unsupported,
 }
 
+// For now we support the following coercions:
+// - Int64 to Float64
+// - Int64 to String
+// - Float64 to String
+// - Boolean to String
+// The following coercions are supported with parse, which could fail:
+// If fails, we will return TraceCoerceError::Unsupported.
+// - String to Int64
+// - String to Float64
+// - String to Boolean
 pub fn is_supported_trace_coercion(
     request_type: ColumnDataType,
     target_type: ColumnDataType,
