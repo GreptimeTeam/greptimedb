@@ -29,10 +29,13 @@ use crate::common::ObjectStoreConfig;
 use crate::data::export_v2::coordinator::export_data;
 use crate::data::export_v2::error::{
     ChunkTimeWindowRequiresBoundsSnafu, DatabaseSnafu, EmptyResultSnafu,
-    ManifestVersionMismatchSnafu, Result, SchemaOnlyModeMismatchSnafu, UnexpectedValueTypeSnafu,
+    ManifestVersionMismatchSnafu, Result, ResumeConfigMismatchSnafu, SchemaOnlyModeMismatchSnafu,
+    UnexpectedValueTypeSnafu,
 };
 use crate::data::export_v2::extractor::SchemaExtractor;
-use crate::data::export_v2::manifest::{DataFormat, MANIFEST_VERSION, Manifest, TimeRange};
+use crate::data::export_v2::manifest::{
+    ChunkMeta, DataFormat, MANIFEST_VERSION, Manifest, TimeRange,
+};
 use crate::data::path::ddl_path_for_schema;
 use crate::data::snapshot_storage::{OpenDalStorage, SnapshotStorage, validate_uri};
 use crate::data::sql::{escape_sql_identifier, escape_sql_literal};
@@ -230,13 +233,7 @@ impl ExportCreate {
                     .fail();
                 }
 
-                if manifest.schema_only != self.config.schema_only {
-                    return SchemaOnlyModeMismatchSnafu {
-                        existing_schema_only: manifest.schema_only,
-                        requested_schema_only: self.config.schema_only,
-                    }
-                    .fail();
-                }
+                validate_resume_config(&manifest, &self.config)?;
 
                 info!(
                     "Resuming existing snapshot: {} (completed: {}/{} chunks)",
@@ -497,8 +494,118 @@ fn build_schema_ddl(
     ddl
 }
 
+fn validate_resume_config(manifest: &Manifest, config: &ExportConfig) -> Result<()> {
+    if manifest.schema_only != config.schema_only {
+        return SchemaOnlyModeMismatchSnafu {
+            existing_schema_only: manifest.schema_only,
+            requested_schema_only: config.schema_only,
+        }
+        .fail();
+    }
+
+    if manifest.catalog != config.catalog {
+        return ResumeConfigMismatchSnafu {
+            field: "catalog",
+            existing: manifest.catalog.clone(),
+            requested: config.catalog.clone(),
+        }
+        .fail();
+    }
+
+    // If no schema filter is provided on resume, inherit the existing snapshot
+    // selection instead of reinterpreting the request as "all schemas".
+    if let Some(requested_schemas) = &config.schemas
+        && !schema_selection_matches(&manifest.schemas, requested_schemas)
+    {
+        return ResumeConfigMismatchSnafu {
+            field: "schemas",
+            existing: format_schema_selection(&manifest.schemas),
+            requested: format_schema_selection(requested_schemas),
+        }
+        .fail();
+    }
+
+    if manifest.time_range != config.time_range {
+        return ResumeConfigMismatchSnafu {
+            field: "time_range",
+            existing: format!("{:?}", manifest.time_range),
+            requested: format!("{:?}", config.time_range),
+        }
+        .fail();
+    }
+
+    if manifest.format != config.format {
+        return ResumeConfigMismatchSnafu {
+            field: "format",
+            existing: manifest.format.to_string(),
+            requested: config.format.to_string(),
+        }
+        .fail();
+    }
+
+    let expected_plan = Manifest::new_for_export(
+        manifest.catalog.clone(),
+        manifest.schemas.clone(),
+        config.schema_only,
+        config.time_range.clone(),
+        config.format,
+        config.chunk_time_window,
+    )?;
+    if !chunk_plan_matches(manifest, &expected_plan) {
+        return ResumeConfigMismatchSnafu {
+            field: "chunk plan",
+            existing: format_chunk_plan(&manifest.chunks),
+            requested: format_chunk_plan(&expected_plan.chunks),
+        }
+        .fail();
+    }
+
+    Ok(())
+}
+
+fn schema_selection_matches(existing: &[String], requested: &[String]) -> bool {
+    canonical_schema_selection(existing) == canonical_schema_selection(requested)
+}
+
+fn canonical_schema_selection(schemas: &[String]) -> Vec<String> {
+    let mut canonicalized = Vec::new();
+    let mut seen = HashSet::new();
+
+    for schema in schemas {
+        let normalized = schema.to_ascii_lowercase();
+        if seen.insert(normalized.clone()) {
+            canonicalized.push(normalized);
+        }
+    }
+
+    canonicalized.sort();
+    canonicalized
+}
+
+fn format_schema_selection(schemas: &[String]) -> String {
+    format!("[{}]", schemas.join(", "))
+}
+
+fn chunk_plan_matches(existing: &Manifest, expected: &Manifest) -> bool {
+    existing.chunks.len() == expected.chunks.len()
+        && existing
+            .chunks
+            .iter()
+            .zip(&expected.chunks)
+            .all(|(left, right)| left.id == right.id && left.time_range == right.time_range)
+}
+
+fn format_chunk_plan(chunks: &[ChunkMeta]) -> String {
+    let items = chunks
+        .iter()
+        .map(|chunk| format!("#{}:{:?}", chunk.id, chunk.time_range))
+        .collect::<Vec<_>>();
+    format!("[{}]", items.join(", "))
+}
+
 #[cfg(test)]
 mod tests {
+    use chrono::TimeZone;
     use clap::Parser;
 
     use super::*;
@@ -562,5 +669,165 @@ mod tests {
 
         assert!(error.contains("existing: false"));
         assert!(error.contains("requested: true"));
+    }
+
+    #[test]
+    fn test_validate_resume_config_rejects_catalog_mismatch() {
+        let manifest = Manifest::new_for_export(
+            "greptime".to_string(),
+            vec!["public".to_string()],
+            false,
+            TimeRange::unbounded(),
+            DataFormat::Parquet,
+            None,
+        )
+        .unwrap();
+        let config = ExportConfig {
+            catalog: "other".to_string(),
+            schemas: None,
+            schema_only: false,
+            format: DataFormat::Parquet,
+            force: false,
+            time_range: TimeRange::unbounded(),
+            chunk_time_window: None,
+            parallelism: 1,
+            snapshot_uri: "file:///tmp/snapshot".to_string(),
+            storage_config: ObjectStoreConfig::default(),
+        };
+
+        let error = validate_resume_config(&manifest, &config)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("catalog"));
+    }
+
+    #[test]
+    fn test_validate_resume_config_accepts_schema_selection_with_different_case_and_order() {
+        let manifest = Manifest::new_for_export(
+            "greptime".to_string(),
+            vec!["public".to_string(), "analytics".to_string()],
+            false,
+            TimeRange::unbounded(),
+            DataFormat::Parquet,
+            None,
+        )
+        .unwrap();
+        let config = ExportConfig {
+            catalog: "greptime".to_string(),
+            schemas: Some(vec![
+                "ANALYTICS".to_string(),
+                "PUBLIC".to_string(),
+                "public".to_string(),
+            ]),
+            schema_only: false,
+            format: DataFormat::Parquet,
+            force: false,
+            time_range: TimeRange::unbounded(),
+            chunk_time_window: None,
+            parallelism: 1,
+            snapshot_uri: "file:///tmp/snapshot".to_string(),
+            storage_config: ObjectStoreConfig::default(),
+        };
+
+        assert!(validate_resume_config(&manifest, &config).is_ok());
+    }
+
+    #[test]
+    fn test_validate_resume_config_rejects_chunk_plan_mismatch() {
+        let start = chrono::Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+        let end = chrono::Utc.with_ymd_and_hms(2025, 1, 1, 2, 0, 0).unwrap();
+        let time_range = TimeRange::new(Some(start), Some(end));
+        let manifest = Manifest::new_for_export(
+            "greptime".to_string(),
+            vec!["public".to_string()],
+            false,
+            time_range.clone(),
+            DataFormat::Parquet,
+            None,
+        )
+        .unwrap();
+        let config = ExportConfig {
+            catalog: "greptime".to_string(),
+            schemas: None,
+            schema_only: false,
+            format: DataFormat::Parquet,
+            force: false,
+            time_range,
+            chunk_time_window: Some(Duration::from_secs(3600)),
+            parallelism: 1,
+            snapshot_uri: "file:///tmp/snapshot".to_string(),
+            storage_config: ObjectStoreConfig::default(),
+        };
+
+        let error = validate_resume_config(&manifest, &config)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("chunk plan"));
+    }
+
+    #[test]
+    fn test_validate_resume_config_rejects_format_mismatch() {
+        let manifest = Manifest::new_for_export(
+            "greptime".to_string(),
+            vec!["public".to_string()],
+            false,
+            TimeRange::unbounded(),
+            DataFormat::Parquet,
+            None,
+        )
+        .unwrap();
+        let config = ExportConfig {
+            catalog: "greptime".to_string(),
+            schemas: None,
+            schema_only: false,
+            format: DataFormat::Csv,
+            force: false,
+            time_range: TimeRange::unbounded(),
+            chunk_time_window: None,
+            parallelism: 1,
+            snapshot_uri: "file:///tmp/snapshot".to_string(),
+            storage_config: ObjectStoreConfig::default(),
+        };
+
+        let error = validate_resume_config(&manifest, &config)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("format"));
+    }
+
+    #[test]
+    fn test_validate_resume_config_rejects_time_range_mismatch() {
+        let start = chrono::Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+        let end = chrono::Utc.with_ymd_and_hms(2025, 1, 1, 1, 0, 0).unwrap();
+        let manifest = Manifest::new_for_export(
+            "greptime".to_string(),
+            vec!["public".to_string()],
+            false,
+            TimeRange::new(Some(start), Some(end)),
+            DataFormat::Parquet,
+            None,
+        )
+        .unwrap();
+        let config = ExportConfig {
+            catalog: "greptime".to_string(),
+            schemas: None,
+            schema_only: false,
+            format: DataFormat::Parquet,
+            force: false,
+            time_range: TimeRange::new(Some(start), Some(start)),
+            chunk_time_window: None,
+            parallelism: 1,
+            snapshot_uri: "file:///tmp/snapshot".to_string(),
+            storage_config: ObjectStoreConfig::default(),
+        };
+
+        let error = validate_resume_config(&manifest, &config)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("time_range"));
     }
 }

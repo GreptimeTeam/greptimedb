@@ -83,6 +83,20 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Cannot resume snapshot with different {} (existing: {}, requested: {}). Use --force to recreate.",
+        field,
+        existing,
+        requested
+    ))]
+    ResumeConfigMismatch {
+        field: String,
+        existing: String,
+        requested: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to parse time: invalid format: {}", input))]
     TimeParseInvalidFormat {
         input: String,
@@ -172,6 +186,7 @@ impl ErrorExt for Error {
             Error::InvalidUri { .. }
             | Error::UnsupportedScheme { .. }
             | Error::SchemaOnlyModeMismatch { .. }
+            | Error::ResumeConfigMismatch { .. }
             | Error::ManifestVersionMismatch { .. } => StatusCode::InvalidArguments,
             Error::TimeParseInvalidFormat { .. }
             | Error::TimeParseEndBeforeStart { .. }
