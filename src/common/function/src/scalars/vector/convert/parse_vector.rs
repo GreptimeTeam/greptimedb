@@ -167,7 +167,7 @@ mod tests {
             "External error: Invalid vector string: [7.0,hello,9.0]",
         ];
 
-        for (input, expected) in inputs.into_iter().zip(expected.into_iter()) {
+        for (input, expected) in inputs.into_iter().zip(expected) {
             let args = ScalarFunctionArgs {
                 args: vec![ColumnarValue::Array(Arc::new(input))],
                 arg_fields: vec![],

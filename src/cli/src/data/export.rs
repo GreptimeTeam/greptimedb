@@ -458,8 +458,10 @@ impl Export {
 
     /// build operator with preference for file system
     async fn build_prefer_fs_operator(&self) -> Result<ObjectStore> {
-        if self.storage_type.is_remote_storage() && self.ddl_local_dir.is_some() {
-            let root = self.ddl_local_dir.as_ref().unwrap().clone();
+        if self.storage_type.is_remote_storage()
+            && let Some(ddl_local_dir) = &self.ddl_local_dir
+        {
+            let root = ddl_local_dir.clone();
             let op = new_fs_object_store(&root).map_err(|e| Error::Other {
                 source: e,
                 location: snafu::location!(),

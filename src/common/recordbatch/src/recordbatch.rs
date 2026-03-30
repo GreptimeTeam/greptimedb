@@ -437,7 +437,7 @@ fn maybe_align_json_array_with_schema(
     }
 
     let mut aligned = Vec::with_capacity(arrays.len());
-    for (field, array) in schema.fields().iter().zip(arrays.into_iter()) {
+    for (field, array) in schema.fields().iter().zip(arrays) {
         if !is_json_extension_type(field) {
             aligned.push(array);
             continue;

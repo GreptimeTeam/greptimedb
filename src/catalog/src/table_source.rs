@@ -195,7 +195,7 @@ impl DfTableSourceProvider {
                 plan_columns
                     .iter()
                     .map(|c| c.as_str())
-                    .zip(columns.into_iter())
+                    .zip(columns)
                     .collect(),
             )
             .context(ProjectViewColumnsSnafu)?

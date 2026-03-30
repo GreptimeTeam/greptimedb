@@ -512,7 +512,7 @@ struct FlightContext {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
 
     use api::v1::auth_header::AuthScheme;
     use api::v1::{AuthHeader, Basic};

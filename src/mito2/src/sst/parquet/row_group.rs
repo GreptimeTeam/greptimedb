@@ -220,7 +220,7 @@ pub(crate) fn compute_total_range_size(ranges: &[Range<u64>]) -> (u64, u64) {
 
     let gap = MERGE_GAP as u64;
     let mut sorted_ranges = ranges.to_vec();
-    sorted_ranges.sort_unstable_by(|a, b| a.start.cmp(&b.start));
+    sorted_ranges.sort_unstable_by_key(|a| a.start);
 
     let mut total_size_aligned = 0;
     let mut total_size_unaligned = 0;

@@ -1060,7 +1060,7 @@ impl StreamingEngine {
 
                 let fetch_order: Vec<FetchFromRow> = table_col_names
                     .iter()
-                    .zip(default_vals.into_iter())
+                    .zip(default_vals)
                     .map(|(col_name, col_default_val)| {
                         name_to_col
                             .get(col_name)

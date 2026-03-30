@@ -25,8 +25,7 @@ use arrow_flight::{
     HandshakeRequest, HandshakeResponse, PollInfo, PutResult, SchemaResult, Ticket,
 };
 use async_trait::async_trait;
-use bytes;
-use bytes::Bytes;
+use bytes::{self, Bytes};
 use common_grpc::flight::do_put::{DoPutMetadata, DoPutResponse};
 use common_grpc::flight::{FlightDecoder, FlightEncoder, FlightMessage};
 use common_memory_manager::MemoryGuard;

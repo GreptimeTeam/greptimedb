@@ -1198,7 +1198,7 @@ fn split_overlapping_ranges(ranges: &[PartitionRange]) -> BTreeMap<TimeRange, Ve
         for (range, parts) in forward_iter.chain(backward_iter) {
             untouched = untouched.iter().flat_map(|r| r.difference(range)).collect();
             let act = split_range_by(range, parts, &key, idx);
-            actions.extend(act.into_iter());
+            actions.extend(act);
         }
 
         for action in actions {

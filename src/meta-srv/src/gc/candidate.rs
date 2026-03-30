@@ -109,7 +109,7 @@ impl GcScheduler {
             }
 
             // Sort candidates by score in descending order and take top N
-            candidates.sort_by(|a, b| b.score.cmp(&a.score));
+            candidates.sort_by_key(|a| std::cmp::Reverse(a.score));
             let top_candidates: Vec<GcCandidate> = candidates
                 .into_iter()
                 .take(self.config.regions_per_table_threshold)

@@ -303,7 +303,7 @@ impl TryFrom<i32> for Role {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
 
     use common_workload::DatanodeWorkloadType;
 

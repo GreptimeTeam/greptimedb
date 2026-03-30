@@ -216,7 +216,7 @@ fn quantile_with_scratch(values: &[f64], quantile: f64, scratch: &mut Vec<f64>) 
     let length = scratch.len();
     let rank = quantile * (length - 1) as f64;
 
-    let lower_index = 0.max(rank.floor() as usize);
+    let lower_index = rank.floor() as usize;
     let upper_index = (length - 1).min(lower_index + 1);
     let weight = rank - rank.floor();
 

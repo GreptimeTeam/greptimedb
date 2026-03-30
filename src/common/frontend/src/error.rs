@@ -52,7 +52,7 @@ pub enum Error {
 
     #[snafu(display("Failed to invoke list process service"))]
     CreateChannel {
-        source: common_grpc::error::Error,
+        source: Box<common_grpc::error::Error>,
         #[snafu(implicit)]
         location: Location,
     },

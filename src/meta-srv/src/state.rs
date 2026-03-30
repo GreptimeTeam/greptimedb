@@ -117,7 +117,7 @@ pub fn become_follower() -> impl FnOnce(&State) -> State {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
 
     use crate::state::{FollowerState, LeaderState, State, become_follower, become_leader};
 

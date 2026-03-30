@@ -485,7 +485,7 @@ impl QueryMemoryTracker {
             "{} requested, {} used globally ({}%), {} used by this stream, hard limit: {}",
             ReadableSize(additional as u64),
             ReadableSize(current as u64),
-            if limit > 0 { current * 100 / limit } else { 0 },
+            (current * 100).checked_div(limit).unwrap_or(0),
             ReadableSize(stream_tracked as u64),
             ReadableSize(limit as u64)
         );
@@ -613,7 +613,7 @@ impl StreamMemoryTracker {
                     waited,
                     ReadableSize(additional as u64),
                     ReadableSize(current as u64),
-                    if limit > 0 { current * 100 / limit } else { 0 },
+                    (current * 100).checked_div(limit).unwrap_or(0),
                     ReadableSize(self.tracked_bytes as u64),
                     ReadableSize(limit as u64)
                 );
