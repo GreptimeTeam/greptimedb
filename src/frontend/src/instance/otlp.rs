@@ -210,6 +210,10 @@ impl OpenTelemetryProtocolHandler for Instance {
 }
 
 impl Instance {
+    /// Picks the final datatype for one trace column.
+    ///
+    /// Existing table schema is authoritative when present. Otherwise we resolve the
+    /// request-local observed types using the shared trace coercion rules.
     fn choose_trace_target_type(
         observed_types: &[ColumnDataType],
         existing_type: Option<ColumnDataType>,
@@ -269,6 +273,8 @@ impl Instance {
                 let mut observed_types = Vec::new();
                 push_observed_trace_type(&mut observed_types, current_type);
 
+                // Scan the full request first so the final type decision is not affected
+                // by row order inside the batch.
                 for row in &rows.rows {
                     let Some(value) = row
                         .values
@@ -304,6 +310,8 @@ impl Instance {
                     continue;
                 }
 
+                // Decide the final type once per column, then rewrite all affected cells
+                // together in one row pass below.
                 let Some(target_type) =
                     Self::choose_trace_target_type(&observed_types, existing_type).map_err(
                         |_| {
@@ -403,6 +411,8 @@ fn enrich_trace_reconcile_error(
     .build()
 }
 
+/// Only these trace scalar types participate in reconciliation. Other column kinds
+/// such as JSON and binary keep their original write path and schema checks.
 fn is_trace_reconcile_candidate_type(datatype: ColumnDataType) -> bool {
     matches!(
         datatype,
@@ -413,6 +423,7 @@ fn is_trace_reconcile_candidate_type(datatype: ColumnDataType) -> bool {
     )
 }
 
+/// Keeps the observed type list small without depending on enum ordering.
 fn push_observed_trace_type(observed_types: &mut Vec<ColumnDataType>, datatype: ColumnDataType) {
     if !observed_types.contains(&datatype) {
         observed_types.push(datatype);

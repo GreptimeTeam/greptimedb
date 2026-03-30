@@ -78,6 +78,12 @@ impl TableData {
         (self.schema, self.rows)
     }
 
+    /// Writes a field value without enforcing that later writes use the same datatype
+    /// as the first-seen schema entry.
+    ///
+    /// The OTLP trace v1 path uses this to preserve raw mixed values inside one request
+    /// so the frontend can reconcile them later against both the full batch and the
+    /// existing table schema.
     pub fn write_field_unchecked(
         &mut self,
         name: impl ToString,

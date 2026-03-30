@@ -103,6 +103,8 @@ pub fn trace_value_datatype(value: &ValueData) -> Option<ColumnDataType> {
     }
 }
 
+/// Resolves the final datatype for a new trace column when there is no existing
+/// table schema to override the request-local observations.
 pub fn resolve_new_trace_column_type(
     observed_types: impl IntoIterator<Item = ColumnDataType>,
 ) -> Result<Option<ColumnDataType>, TraceCoerceError> {

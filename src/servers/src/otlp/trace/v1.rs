@@ -247,6 +247,8 @@ pub(crate) fn write_attributes(
         let key = format!("{}.{}", prefix, key_suffix);
         match attr.value.and_then(|v| v.value) {
             Some(OtlpValue::StringValue(v)) => {
+                // Keep the raw request value here. Mixed trace types are reconciled later
+                // in the frontend once we can also see the existing table schema.
                 writer.write_field_unchecked(
                     &key,
                     ColumnDataType::String,
@@ -255,6 +257,7 @@ pub(crate) fn write_attributes(
                 );
             }
             Some(OtlpValue::BoolValue(v)) => {
+                // Do not coerce or promote types while building the request-local rows.
                 writer.write_field_unchecked(
                     &key,
                     ColumnDataType::Boolean,
@@ -263,6 +266,7 @@ pub(crate) fn write_attributes(
                 );
             }
             Some(OtlpValue::IntValue(v)) => {
+                // Preserving the original value avoids order-dependent behavior inside one batch.
                 writer.write_field_unchecked(
                     &key,
                     ColumnDataType::Int64,
