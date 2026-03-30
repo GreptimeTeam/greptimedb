@@ -39,7 +39,6 @@ use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
 use smallvec::SmallVec;
 use snafu::{OptionExt, ensure};
-use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 use store_api::storage::{RegionId, TableId};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, mpsc, oneshot};
 
@@ -1051,26 +1050,6 @@ fn strip_partition_columns_from_batch(batch: RecordBatch) -> Result<RecordBatch>
             ),
         }
     );
-
-    let expected_essential_names = [
-        PRIMARY_KEY_COLUMN_NAME,
-        greptime_timestamp(),
-        greptime_value(),
-    ];
-    let batch_schema = batch.schema();
-    for (index, expected_name) in expected_essential_names.iter().enumerate() {
-        let actual_name = batch_schema.field(index).name();
-        ensure!(
-            actual_name == *expected_name,
-            error::InternalSnafu {
-                err_msg: format!(
-                    "Unexpected physical batch column order at index {}: expected '{}', got '{}'",
-                    index, expected_name, actual_name
-                ),
-            }
-        );
-    }
-
     let essential_indices: Vec<usize> = (0..PHYSICAL_REGION_ESSENTIAL_COLUMN_COUNT).collect();
     batch
         .project(&essential_indices)
