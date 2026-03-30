@@ -5433,6 +5433,75 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
     )
     .await;
 
+    let existing_float_table_name = "trace_type_existing_float_prefers_schema";
+    let existing_float_seed_req = make_trace_v1_request(
+        "type-existing-float",
+        vec![make_trace_v1_span(
+            "00000000000000000000000000000041",
+            "0000000000000041",
+            "existing-float-seed",
+            1_736_480_942_445_160_000,
+            1_736_480_942_445_260_000,
+            vec![make_double_attr("attr_num", 1.25)],
+        )],
+    );
+    let res = send_trace_v1_req(
+        &client,
+        existing_float_table_name,
+        existing_float_seed_req,
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    let existing_float_req = make_trace_v1_request(
+        "type-existing-float",
+        vec![
+            make_trace_v1_span(
+                "00000000000000000000000000000042",
+                "0000000000000042",
+                "existing-float-int-first",
+                1_736_480_942_445_270_000,
+                1_736_480_942_445_370_000,
+                vec![make_int_attr("attr_num", 2)],
+            ),
+            make_trace_v1_span(
+                "00000000000000000000000000000043",
+                "0000000000000043",
+                "existing-float-float-later",
+                1_736_480_942_445_380_000,
+                1_736_480_942_445_480_000,
+                vec![make_double_attr("attr_num", 3.5)],
+            ),
+        ],
+    );
+    let res = send_trace_v1_req(
+        &client,
+        existing_float_table_name,
+        existing_float_req,
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    validate_data(
+        "otlp_traces_v1_existing_float_prefers_schema_rows",
+        &client,
+        &format!(
+            "select trace_id, \"span_attributes.attr_num\" from {} order by trace_id;",
+            existing_float_table_name
+        ),
+        r#"[["00000000000000000000000000000041",1.25],["00000000000000000000000000000042",2.0],["00000000000000000000000000000043",3.5]]"#,
+    )
+    .await;
+    validate_data(
+        "otlp_traces_v1_existing_float_prefers_schema_type",
+        &client,
+        "select column_name, lower(data_type), semantic_type from information_schema.columns where table_name = 'trace_type_existing_float_prefers_schema' and column_name = 'span_attributes.attr_num';",
+        r#"[["span_attributes.attr_num","double","FIELD"]]"#,
+    )
+    .await;
+
     validate_data(
         "otlp_traces_v1_type_coercion_rows",
         &client,

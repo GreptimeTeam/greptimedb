@@ -30,7 +30,10 @@ use servers::error::{self, AuthSnafu, CatalogSnafu, Result as ServerResult};
 use servers::http::prom_store::PHYSICAL_TABLE_PARAM;
 use servers::interceptor::{OpenTelemetryProtocolInterceptor, OpenTelemetryProtocolInterceptorRef};
 use servers::otlp;
-use servers::otlp::trace::coerce::{coerce_value_data, is_supported_trace_coercion};
+use servers::otlp::trace::coerce::{
+    coerce_value_data, is_supported_trace_coercion, resolve_new_trace_column_type,
+    trace_value_datatype,
+};
 use servers::query_handler::{OpenTelemetryProtocolHandler, PipelineHandlerRef};
 use session::context::QueryContextRef;
 use snafu::ResultExt;
@@ -139,7 +142,7 @@ impl OpenTelemetryProtocolHandler for Instance {
         OTLP_TRACES_ROWS.inc_by(rows as u64);
 
         if is_trace_v1_model {
-            self.coerce_trace_numeric_columns(&mut requests, &ctx)
+            self.reconcile_trace_column_types(&mut requests, &ctx)
                 .await?;
             self.handle_trace_inserts(requests, ctx)
                 .await
@@ -207,11 +210,36 @@ impl OpenTelemetryProtocolHandler for Instance {
 }
 
 impl Instance {
+    fn choose_trace_target_type(
+        observed_types: &[ColumnDataType],
+        existing_type: Option<ColumnDataType>,
+    ) -> ServerResult<Option<ColumnDataType>> {
+        let Some(existing_type) = existing_type else {
+            return resolve_new_trace_column_type(observed_types.iter().copied()).map_err(|_| {
+                error::InvalidParameterSnafu {
+                    reason: "unsupported trace type mix".to_string(),
+                }
+                .build()
+            });
+        };
+
+        if observed_types.iter().copied().all(|request_type| {
+            request_type == existing_type
+                || is_supported_trace_coercion(request_type, existing_type)
+        }) {
+            Ok(Some(existing_type))
+        } else {
+            error::InvalidParameterSnafu {
+                reason: "unsupported trace type mix".to_string(),
+            }
+            .fail()
+        }
+    }
+
     /// Coerce request column types and values to match the existing table schema
-    /// for compatible type pairs. This handles the cross-batch case where a prior
-    /// batch created the table with one type (e.g. Float64) but the current batch
-    /// has a different type (e.g. Int64) for the same column.
-    async fn coerce_trace_numeric_columns(
+    /// for compatible type pairs. Existing table schema wins when present;
+    /// otherwise the full request batch decides a stable target type.
+    async fn reconcile_trace_column_types(
         &self,
         requests: &mut RowInsertRequests,
         ctx: &QueryContextRef,
@@ -226,51 +254,80 @@ impl Instance {
                 .await
                 .context(CatalogSnafu)?;
 
-            let Some(table) = table else {
-                continue;
-            };
-            let table_schema = table.schema();
-
             let Some(rows) = req.rows.as_mut() else {
                 continue;
             };
 
-            // Collect all coercible schema mismatches first so we only walk and
-            // rewrite the row payloads once.
+            let table_schema = table.map(|table| table.schema());
             let mut pending_coercions = Vec::new();
 
             for (col_idx, col_schema) in rows.schema.iter().enumerate() {
-                let Some(table_col) = table_schema.column_schema_by_name(&col_schema.column_name)
+                let Some(current_type) = ColumnDataType::try_from(col_schema.datatype).ok() else {
+                    continue;
+                };
+
+                let mut observed_types = Vec::new();
+                push_observed_trace_type(&mut observed_types, current_type);
+
+                for row in &rows.rows {
+                    let Some(value) = row
+                        .values
+                        .get(col_idx)
+                        .and_then(|value| value.value_data.as_ref())
+                    else {
+                        continue;
+                    };
+
+                    let Some(value_type) = trace_value_datatype(value) else {
+                        continue;
+                    };
+                    push_observed_trace_type(&mut observed_types, value_type);
+                }
+
+                let existing_type = table_schema
+                    .as_ref()
+                    .and_then(|schema| schema.column_schema_by_name(&col_schema.column_name))
+                    .and_then(|table_col| {
+                        ColumnDataTypeWrapper::try_from(table_col.data_type.clone())
+                            .ok()
+                            .map(|wrapper| wrapper.datatype())
+                    });
+
+                if !observed_types
+                    .iter()
+                    .copied()
+                    .any(is_trace_reconcile_candidate_type)
+                    && existing_type
+                        .map(|datatype| !is_trace_reconcile_candidate_type(datatype))
+                        .unwrap_or(true)
+                {
+                    continue;
+                }
+
+                let Some(target_type) =
+                    Self::choose_trace_target_type(&observed_types, existing_type).map_err(
+                        |_| {
+                            enrich_trace_reconcile_error(
+                                &req.table_name,
+                                &col_schema.column_name,
+                                &observed_types,
+                                existing_type,
+                            )
+                        },
+                    )?
                 else {
                     continue;
                 };
 
-                let Ok(wrapper) = ColumnDataTypeWrapper::try_from(table_col.data_type.clone())
-                else {
-                    continue;
-                };
-                let table_datatype = wrapper.datatype() as i32;
-
-                if col_schema.datatype == table_datatype {
+                if observed_types
+                    .iter()
+                    .all(|observed| *observed == target_type)
+                    && col_schema.datatype == target_type as i32
+                {
                     continue;
                 }
 
-                let Some(request_type) = ColumnDataType::try_from(col_schema.datatype).ok() else {
-                    continue;
-                };
-                let target_type = wrapper.datatype();
-
-                if !is_supported_trace_coercion(request_type, target_type) {
-                    continue;
-                }
-
-                pending_coercions.push((
-                    col_idx,
-                    table_datatype,
-                    request_type,
-                    target_type,
-                    col_schema.column_name.clone(),
-                ));
+                pending_coercions.push((col_idx, target_type, col_schema.column_name.clone()));
             }
 
             if pending_coercions.is_empty() {
@@ -278,33 +335,86 @@ impl Instance {
             }
 
             // Update schema metadata before mutating row values so both stay in sync.
-            for (col_idx, table_datatype, ..) in &pending_coercions {
-                rows.schema[*col_idx].datatype = *table_datatype;
+            for (col_idx, target_type, ..) in &pending_coercions {
+                rows.schema[*col_idx].datatype = *target_type as i32;
             }
 
             // Apply all pending column rewrites in one row pass.
             for row in &mut rows.rows {
-                for (col_idx, _, request_type, target_type, column_name) in &pending_coercions {
-                    if *col_idx < row.values.len() {
-                        row.values[*col_idx].value_data = coerce_value_data(
-                            &row.values[*col_idx].value_data,
-                            *target_type,
-                            *request_type,
-                        )
-                        .map_err(|_| {
-                            error::InvalidParameterSnafu {
-                                reason: format!(
-                                    "failed to coerce trace column '{}' in table '{}' from {:?} to {:?}",
-                                    column_name, req.table_name, request_type, target_type
-                                ),
-                            }
-                            .build()
-                        })?;
+                for (col_idx, target_type, column_name) in &pending_coercions {
+                    let Some(value) = row.values.get_mut(*col_idx) else {
+                        continue;
+                    };
+                    let Some(request_type) =
+                        value.value_data.as_ref().and_then(trace_value_datatype)
+                    else {
+                        continue;
+                    };
+                    if request_type == *target_type {
+                        continue;
                     }
+
+                    value.value_data = coerce_value_data(
+                        &value.value_data,
+                        *target_type,
+                        request_type,
+                    )
+                    .map_err(|_| {
+                        error::InvalidParameterSnafu {
+                            reason: format!(
+                                "failed to coerce trace column '{}' in table '{}' from {:?} to {:?}",
+                                column_name, req.table_name, request_type, target_type
+                            ),
+                        }
+                        .build()
+                    })?;
                 }
             }
         }
 
         Ok(())
+    }
+}
+
+fn enrich_trace_reconcile_error(
+    table_name: &str,
+    column_name: &str,
+    observed_types: &[ColumnDataType],
+    existing_type: Option<ColumnDataType>,
+) -> servers::error::Error {
+    let observed_types = observed_types
+        .iter()
+        .map(|datatype| format!("{datatype:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    error::InvalidParameterSnafu {
+        reason: match existing_type {
+            Some(existing_type) => format!(
+                "failed to reconcile trace column '{}' in table '{}' with observed types [{}] against existing {:?}",
+                column_name, table_name, observed_types, existing_type
+            ),
+            None => format!(
+                "failed to reconcile trace column '{}' in table '{}' with observed types [{}]",
+                column_name, table_name, observed_types
+            ),
+        },
+    }
+    .build()
+}
+
+fn is_trace_reconcile_candidate_type(datatype: ColumnDataType) -> bool {
+    matches!(
+        datatype,
+        ColumnDataType::String
+            | ColumnDataType::Boolean
+            | ColumnDataType::Int64
+            | ColumnDataType::Float64
+    )
+}
+
+fn push_observed_trace_type(observed_types: &mut Vec<ColumnDataType>, datatype: ColumnDataType) {
+    if !observed_types.contains(&datatype) {
+        observed_types.push(datatype);
     }
 }

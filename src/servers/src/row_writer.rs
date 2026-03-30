@@ -78,22 +78,27 @@ impl TableData {
         (self.schema, self.rows)
     }
 
-    pub fn rows_mut(&mut self) -> &mut Vec<Row> {
-        &mut self.rows
-    }
-
-    pub fn column_index(&self, name: &str) -> Option<usize> {
-        self.column_indexes.get(name).copied()
-    }
-
-    pub fn column_schema_mut(&mut self, index: usize) -> Option<&mut ColumnSchema> {
-        self.schema.get_mut(index)
-    }
-
-    pub fn column_datatype(&self, name: &str) -> Option<i32> {
-        self.column_indexes
-            .get(name)
-            .map(|idx| self.schema[*idx].datatype)
+    pub fn write_field_unchecked(
+        &mut self,
+        name: impl ToString,
+        datatype: ColumnDataType,
+        value: Option<ValueData>,
+        one_row: &mut Vec<Value>,
+    ) {
+        let name = name.to_string();
+        if let Some(index) = self.column_indexes.get(&name).copied() {
+            one_row[index].value_data = value;
+        } else {
+            let index = self.schema.len();
+            self.schema.push(ColumnSchema {
+                column_name: name.clone(),
+                datatype: datatype as i32,
+                semantic_type: SemanticType::Field as i32,
+                ..Default::default()
+            });
+            self.column_indexes.insert(name, index);
+            one_row.push(Value { value_data: value });
+        }
     }
 }
 

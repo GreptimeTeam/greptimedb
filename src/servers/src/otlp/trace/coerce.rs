@@ -92,6 +92,54 @@ pub fn coerce_non_null_value(
     }
 }
 
+pub fn trace_value_datatype(value: &ValueData) -> Option<ColumnDataType> {
+    match value {
+        ValueData::StringValue(_) => Some(ColumnDataType::String),
+        ValueData::BoolValue(_) => Some(ColumnDataType::Boolean),
+        ValueData::I64Value(_) => Some(ColumnDataType::Int64),
+        ValueData::F64Value(_) => Some(ColumnDataType::Float64),
+        ValueData::BinaryValue(_) => Some(ColumnDataType::Binary),
+        _ => None,
+    }
+}
+
+pub fn resolve_new_trace_column_type(
+    observed_types: impl IntoIterator<Item = ColumnDataType>,
+) -> Result<Option<ColumnDataType>, TraceCoerceError> {
+    let mut observed_types = observed_types.into_iter().collect::<Vec<_>>();
+    observed_types.dedup();
+
+    match observed_types.as_slice() {
+        [] => Ok(None),
+        [datatype] => Ok(Some(*datatype)),
+        [_, _]
+            if observed_types.contains(&ColumnDataType::String)
+                && observed_types.contains(&ColumnDataType::Boolean) =>
+        {
+            Ok(Some(ColumnDataType::Boolean))
+        }
+        [_, _]
+            if observed_types.contains(&ColumnDataType::String)
+                && observed_types.contains(&ColumnDataType::Int64) =>
+        {
+            Ok(Some(ColumnDataType::Int64))
+        }
+        [_, _]
+            if observed_types.contains(&ColumnDataType::String)
+                && observed_types.contains(&ColumnDataType::Float64) =>
+        {
+            Ok(Some(ColumnDataType::Float64))
+        }
+        [_, _]
+            if observed_types.contains(&ColumnDataType::Int64)
+                && observed_types.contains(&ColumnDataType::Float64) =>
+        {
+            Ok(Some(ColumnDataType::Float64))
+        }
+        _ => Err(TraceCoerceError::Unsupported),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,5 +281,61 @@ mod tests {
             ColumnDataType::Binary,
             ColumnDataType::Json
         ));
+    }
+
+    #[test]
+    fn test_trace_value_datatype() {
+        assert_eq!(
+            trace_value_datatype(&ValueData::StringValue("x".to_string())),
+            Some(ColumnDataType::String)
+        );
+        assert_eq!(
+            trace_value_datatype(&ValueData::BoolValue(true)),
+            Some(ColumnDataType::Boolean)
+        );
+        assert_eq!(
+            trace_value_datatype(&ValueData::I64Value(1)),
+            Some(ColumnDataType::Int64)
+        );
+        assert_eq!(
+            trace_value_datatype(&ValueData::F64Value(1.0)),
+            Some(ColumnDataType::Float64)
+        );
+        assert_eq!(
+            trace_value_datatype(&ValueData::BinaryValue(vec![1_u8])),
+            Some(ColumnDataType::Binary)
+        );
+    }
+
+    #[test]
+    fn test_resolve_new_trace_column_type() {
+        assert_eq!(
+            resolve_new_trace_column_type([ColumnDataType::Int64]),
+            Ok(Some(ColumnDataType::Int64))
+        );
+        assert_eq!(
+            resolve_new_trace_column_type([ColumnDataType::String, ColumnDataType::Int64]),
+            Ok(Some(ColumnDataType::Int64))
+        );
+        assert_eq!(
+            resolve_new_trace_column_type([ColumnDataType::String, ColumnDataType::Float64]),
+            Ok(Some(ColumnDataType::Float64))
+        );
+        assert_eq!(
+            resolve_new_trace_column_type([ColumnDataType::String, ColumnDataType::Boolean]),
+            Ok(Some(ColumnDataType::Boolean))
+        );
+        assert_eq!(
+            resolve_new_trace_column_type([ColumnDataType::Int64, ColumnDataType::Float64]),
+            Ok(Some(ColumnDataType::Float64))
+        );
+        assert_eq!(
+            resolve_new_trace_column_type([
+                ColumnDataType::String,
+                ColumnDataType::Int64,
+                ColumnDataType::Float64,
+            ]),
+            Err(TraceCoerceError::Unsupported)
+        );
     }
 }
