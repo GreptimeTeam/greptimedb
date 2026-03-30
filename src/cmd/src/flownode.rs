@@ -35,7 +35,6 @@ use common_stat::ResourceStatImpl;
 use common_telemetry::info;
 use common_telemetry::logging::{DEFAULT_LOGGING_DIR, TracingOptions};
 use common_version::{short_version, verbose_version};
-use const_format::concatcp;
 use flow::{
     FlownodeBuilder, FlownodeInstance, FlownodeServiceBuilder, FrontendClient, FrontendInvoker,
     get_flow_auth_options,
@@ -53,7 +52,7 @@ use crate::error::{
 use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{App, create_resource_limit_metrics, log_versions, maybe_activate_heap_profile};
 
-pub const APP_NAME: &str = concatcp!(common_version::product_name(), "-flownode");
+pub const APP_NAME: &str = "greptime-flownode";
 
 type FlownodeOptions = GreptimeOptions<flow::FlownodeOptions>;
 

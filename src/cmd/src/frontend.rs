@@ -72,7 +72,7 @@ pub struct Instance {
     _guard: Vec<WorkerGuard>,
 }
 
-pub const APP_NAME: &str = const_format::concatcp!(common_version::product_name(), "-frontend");
+pub const APP_NAME: &str = "greptime-frontend";
 
 impl Instance {
     pub fn new(frontend: Frontend, _guard: Vec<WorkerGuard>) -> Self {
