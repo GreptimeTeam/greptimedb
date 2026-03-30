@@ -282,10 +282,10 @@ impl FlatReadFormat {
         }
     }
 
-    /// Returns `true` if raw batches from parquet use the flat layout with a
-    /// dictionary-encoded `__primary_key` column (i.e., [`ParquetAdapter::Flat`]).
+    /// Returns `true` if raw batches from parquet use the flat layout and
+    /// stores primary key columns as raw columns.
     /// Returns `false` for the legacy primary-key-to-flat conversion path.
-    pub(crate) fn raw_batch_has_primary_key_dictionary(&self) -> bool {
+    pub(crate) fn batch_has_raw_pk_columns(&self) -> bool {
         matches!(&self.parquet_adapter, ParquetAdapter::Flat(_))
     }
 
