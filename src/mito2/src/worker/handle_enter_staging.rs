@@ -19,6 +19,7 @@ use store_api::logstore::LogStore;
 use store_api::region_request::{EnterStagingRequest, StagingPartitionDirective};
 use store_api::storage::RegionId;
 
+use crate::compaction::CancelReason;
 use crate::error::{RegionNotFoundSnafu, Result, StagingPartitionExprMismatchSnafu};
 use crate::flush::FlushReason;
 use crate::manifest::action::{RegionMetaAction, RegionMetaActionList, RegionPartitionExprChange};
@@ -99,6 +100,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
 
         if self.compaction_scheduler.is_compacting(region_id) {
+            // Ask the in-flight local compaction to stop at a safe checkpoint before replaying this DDL.
+            let _ = self
+                .compaction_scheduler
+                .request_cancel(region_id, CancelReason::EnterStaging);
             // Safety: region is compacting, add ddl request to pending queue.
             self.compaction_scheduler
                 .add_ddl_request_to_pending(SenderDdlRequest {

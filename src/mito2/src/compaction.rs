@@ -24,12 +24,14 @@ mod twcs;
 mod window;
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use api::v1::region::compact_request;
 use api::v1::region::compact_request::Options;
 use common_base::Plugins;
+use common_base::cancellation::CancellationHandle;
 use common_memory_manager::OnExhaustedPolicy;
 use common_meta::key::SchemaMetadataManagerRef;
 use common_telemetry::{debug, error, info, warn};
@@ -112,6 +114,8 @@ pub(crate) struct CompactionScheduler {
     listener: WorkerListener,
     /// Plugins for the compaction scheduler.
     plugins: Plugins,
+    /// Monotonic id used to distinguish overlapping compaction task callbacks.
+    next_task_id: AtomicU64,
 }
 
 impl CompactionScheduler {
@@ -136,6 +140,7 @@ impl CompactionScheduler {
             memory_policy,
             listener,
             plugins,
+            next_task_id: AtomicU64::new(1),
         }
     }
 
@@ -186,26 +191,31 @@ impl CompactionScheduler {
         }
 
         // The region can compact directly.
-        let mut status: CompactionStatus =
-            CompactionStatus::new(region_id, version_control.clone(), access_layer.clone());
-        let request = status.new_compaction_request(
-            self.request_sender.clone(),
-            waiter,
-            self.engine_config.clone(),
-            self.cache_manager.clone(),
-            manifest_ctx,
-            self.listener.clone(),
-            schema_metadata_manager,
-            max_parallelism,
+        self.region_status.insert(
+            region_id,
+            CompactionStatus::new(region_id, version_control.clone(), access_layer.clone()),
         );
+
+        let request = self
+            .region_status
+            .get_mut(&region_id)
+            .unwrap()
+            .new_compaction_request(
+                self.request_sender.clone(),
+                waiter,
+                self.engine_config.clone(),
+                self.cache_manager.clone(),
+                manifest_ctx,
+                self.listener.clone(),
+                schema_metadata_manager,
+                max_parallelism,
+            );
 
         let result = self
             .schedule_compaction_request(request, compact_options)
             .await;
-        if matches!(result, Ok(true)) {
-            // Only if the compaction request is scheduled successfully,
-            // we insert the region into the status map.
-            self.region_status.insert(region_id, status);
+        if !matches!(result, Ok(true)) {
+            self.region_status.remove(&region_id);
         }
 
         self.listener.on_compaction_scheduled(region_id);
@@ -275,9 +285,18 @@ impl CompactionScheduler {
     pub(crate) async fn on_compaction_finished(
         &mut self,
         region_id: RegionId,
+        task_id: u64,
         manifest_ctx: &ManifestContextRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
     ) -> Vec<SenderDdlRequest> {
+        let Some(status) = self.region_status.get_mut(&region_id) else {
+            return Vec::new();
+        };
+        if !status.matches_task(task_id) {
+            return Vec::new();
+        }
+        status.clear_running_task(task_id);
+
         // If there a pending compaction request, handle it first
         // and defer returning the pending DDL requests to the caller.
         if self
@@ -291,25 +310,16 @@ impl CompactionScheduler {
             return Vec::new();
         }
 
-        let Some(status) = self.region_status.get_mut(&region_id) else {
-            // The region status might be removed by the previous steps.
-            // So we return empty DDL requests.
-            return Vec::new();
-        };
-
-        // Notify all waiters that compaction is finished.
-        for waiter in std::mem::take(&mut status.waiters) {
-            waiter.send(Ok(0));
-        }
-
-        // If there are pending DDL requests, run them.
-        let pending_ddl_requests = std::mem::take(&mut status.pending_ddl_requests);
+        let (pending_ddl_requests, should_schedule_next) =
+            self.finalize_compaction_task(region_id, task_id);
         if !pending_ddl_requests.is_empty() {
-            self.region_status.remove(&region_id);
-            // If there are pending DDL requests, we should return them to the caller.
-            // And skip try to schedule next compaction task.
             return pending_ddl_requests;
         }
+        if !should_schedule_next {
+            return Vec::new();
+        }
+
+        let status = self.region_status.get_mut(&region_id).unwrap();
 
         // We should always try to compact the region until picker returns None.
         let request = status.new_compaction_request(
@@ -345,6 +355,88 @@ impl CompactionScheduler {
             }
             Err(e) => {
                 error!(e; "Failed to schedule next compaction for region {}", region_id);
+                self.remove_region_on_failure(region_id, Arc::new(e));
+            }
+        }
+
+        Vec::new()
+    }
+
+    /// Notifies the scheduler that the compaction job is cancelled cooperatively.
+    pub(crate) async fn on_compaction_cancelled(
+        &mut self,
+        region_id: RegionId,
+        task_id: u64,
+        manifest_ctx: &ManifestContextRef,
+        schema_metadata_manager: SchemaMetadataManagerRef,
+    ) -> Vec<SenderDdlRequest> {
+        let Some(status) = self.region_status.get_mut(&region_id) else {
+            return Vec::new();
+        };
+        if !status.matches_task(task_id) {
+            return Vec::new();
+        }
+        status.clear_running_task(task_id);
+
+        // Let DDLs triggered by the cancellation take priority over any queued follow-up compaction.
+        let has_pending_ddls = !status.pending_ddl_requests.is_empty();
+        if has_pending_ddls {
+            let (pending_ddl_requests, should_schedule_next) =
+                self.finalize_compaction_task(region_id, task_id);
+            debug_assert!(!should_schedule_next);
+            return pending_ddl_requests;
+        }
+
+        if self
+            .handle_pending_compaction_request(
+                region_id,
+                manifest_ctx,
+                schema_metadata_manager.clone(),
+            )
+            .await
+        {
+            return Vec::new();
+        }
+
+        let (pending_ddl_requests, should_schedule_next) =
+            self.finalize_compaction_task(region_id, task_id);
+        if !pending_ddl_requests.is_empty() {
+            return pending_ddl_requests;
+        }
+        if !should_schedule_next {
+            return Vec::new();
+        }
+
+        let status = self.region_status.get_mut(&region_id).unwrap();
+        let request = status.new_compaction_request(
+            self.request_sender.clone(),
+            OptionOutputTx::none(),
+            self.engine_config.clone(),
+            self.cache_manager.clone(),
+            manifest_ctx,
+            self.listener.clone(),
+            schema_metadata_manager,
+            MAX_PARALLEL_COMPACTION,
+        );
+
+        match self
+            .schedule_compaction_request(
+                request,
+                compact_request::Options::Regular(Default::default()),
+            )
+            .await
+        {
+            Ok(true) => {
+                debug!(
+                    "Successfully scheduled next compaction for region id: {} after cancellation",
+                    region_id
+                );
+            }
+            Ok(false) => {
+                self.region_status.remove(&region_id);
+            }
+            Err(e) => {
+                error!(e; "Failed to schedule next compaction for region {} after cancellation", region_id);
                 self.remove_region_on_failure(region_id, Arc::new(e));
             }
         }
@@ -411,6 +503,18 @@ impl CompactionScheduler {
         self.region_status.contains_key(&region_id)
     }
 
+    pub(crate) fn request_cancel(
+        &mut self,
+        region_id: RegionId,
+        reason: CancelReason,
+    ) -> RequestCancelResult {
+        let Some(status) = self.region_status.get_mut(&region_id) else {
+            return RequestCancelResult::NotRunning;
+        };
+
+        status.request_cancel(reason)
+    }
+
     /// Schedules a compaction request.
     ///
     /// Returns true if the compaction request is scheduled successfully.
@@ -421,6 +525,7 @@ impl CompactionScheduler {
         options: compact_request::Options,
     ) -> Result<bool> {
         let region_id = request.region_id();
+        let task_id = self.next_task_id.fetch_add(1, Ordering::Relaxed);
         let (dynamic_compaction_opts, ttl) = find_dynamic_options(
             region_id.table_id(),
             &request.current_version.options,
@@ -500,6 +605,7 @@ impl CompactionScheduler {
         let waiters = if dynamic_compaction_opts.remote_compaction() {
             if let Some(remote_job_scheduler) = &self.plugins.get::<RemoteJobSchedulerRef>() {
                 let remote_compaction_job = CompactionJob {
+                    task_id,
                     compaction_region: compaction_region.clone(),
                     picker_output: picker_output.clone(),
                     start_time,
@@ -518,6 +624,10 @@ impl CompactionScheduler {
 
                 match result {
                     Ok(job_id) => {
+                        self.region_status
+                            .get_mut(&region_id)
+                            .unwrap()
+                            .start_remote_task(task_id);
                         info!(
                             "Scheduled remote compaction job {} for region {}",
                             job_id, region_id
@@ -555,7 +665,14 @@ impl CompactionScheduler {
 
         // Create a local compaction task.
         let estimated_bytes = estimate_compaction_bytes(&picker_output);
+        let running = self
+            .region_status
+            .get_mut(&region_id)
+            .unwrap()
+            .start_local_task(task_id);
         let local_compaction_task = Box::new(CompactionTaskImpl {
+            task_id,
+            running,
             request_sender,
             waiters,
             start_time,
@@ -597,6 +714,101 @@ impl CompactionScheduler {
         // Notifies all pending tasks.
         status.on_failure(err);
     }
+
+    fn finalize_compaction_task(
+        &mut self,
+        region_id: RegionId,
+        task_id: u64,
+    ) -> (Vec<SenderDdlRequest>, bool) {
+        let Some(status) = self.region_status.get_mut(&region_id) else {
+            return (Vec::new(), false);
+        };
+        if status.running.is_some() && !status.matches_task(task_id) {
+            return (Vec::new(), false);
+        }
+
+        finish_compaction_waiters(std::mem::take(&mut status.waiters));
+
+        let pending_ddl_requests = std::mem::take(&mut status.pending_ddl_requests);
+        if !pending_ddl_requests.is_empty() {
+            self.region_status.remove(&region_id);
+            return (pending_ddl_requests, false);
+        }
+
+        (Vec::new(), true)
+    }
+}
+
+fn finish_compaction_waiters(waiters: Vec<OutputTx>) {
+    for waiter in waiters {
+        waiter.send(Ok(0));
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CancelReason {
+    EnterStaging,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompactionRunState {
+    Running,
+    CancelRequested { reason: CancelReason },
+    Finishing,
+}
+
+pub(crate) type RunningCompactionRef = Arc<Mutex<RunningCompaction>>;
+
+#[derive(Debug)]
+pub(crate) struct RunningCompaction {
+    /// Unique id of the running compaction task for this region.
+    task_id: u64,
+    /// Cooperative cancellation handle for local compaction tasks.
+    cancel_handle: Option<Arc<CancellationHandle>>,
+    /// Cancellation/commit state of the running task.
+    state: CompactionRunState,
+}
+
+impl RunningCompaction {
+    fn local(task_id: u64) -> RunningCompactionRef {
+        Arc::new(Mutex::new(Self {
+            task_id,
+            cancel_handle: Some(Arc::new(CancellationHandle::default())),
+            state: CompactionRunState::Running,
+        }))
+    }
+
+    fn remote(task_id: u64) -> RunningCompactionRef {
+        Arc::new(Mutex::new(Self {
+            task_id,
+            cancel_handle: None,
+            state: CompactionRunState::Finishing,
+        }))
+    }
+
+    pub(crate) fn is_cancelled(running: &RunningCompactionRef, task_id: u64) -> bool {
+        let running = running.lock().unwrap();
+        running.task_id == task_id
+            && running
+                .cancel_handle
+                .as_ref()
+                .is_some_and(|handle| handle.is_cancelled())
+    }
+
+    pub(crate) fn mark_finishing(running: &RunningCompactionRef, task_id: u64) {
+        let mut running = running.lock().unwrap();
+        if running.task_id == task_id {
+            running.state = CompactionRunState::Finishing;
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RequestCancelResult {
+    CancelIssued,
+    AlreadyCancelling,
+    TooLateToCancel,
+    NotRunning,
 }
 
 impl Drop for CompactionScheduler {
@@ -706,6 +918,8 @@ struct CompactionStatus {
     pending_request: Option<PendingCompaction>,
     /// Pending DDL requests that should run when compaction is done.
     pending_ddl_requests: Vec<SenderDdlRequest>,
+    /// Running compaction state.
+    running: Option<RunningCompactionRef>,
 }
 
 impl CompactionStatus {
@@ -722,7 +936,57 @@ impl CompactionStatus {
             waiters: Vec::new(),
             pending_request: None,
             pending_ddl_requests: Vec::new(),
+            running: None,
         }
+    }
+
+    fn start_local_task(&mut self, task_id: u64) -> RunningCompactionRef {
+        let running = RunningCompaction::local(task_id);
+        self.running = Some(running.clone());
+        running
+    }
+
+    fn start_remote_task(&mut self, task_id: u64) {
+        self.running = Some(RunningCompaction::remote(task_id));
+    }
+
+    fn matches_task(&self, task_id: u64) -> bool {
+        self.running
+            .as_ref()
+            .map(|running| running.lock().unwrap().task_id == task_id)
+            .unwrap_or(false)
+    }
+
+    fn request_cancel(&mut self, reason: CancelReason) -> RequestCancelResult {
+        let Some(running) = &self.running else {
+            return RequestCancelResult::NotRunning;
+        };
+
+        let mut running = running.lock().unwrap();
+        match running.state {
+            CompactionRunState::Running => {
+                // Remote tasks don't expose a local cancellation handle, so treat them as non-cancellable.
+                let Some(handle) = &running.cancel_handle else {
+                    return RequestCancelResult::TooLateToCancel;
+                };
+                handle.cancel();
+                running.state = CompactionRunState::CancelRequested { reason };
+                RequestCancelResult::CancelIssued
+            }
+            CompactionRunState::CancelRequested { .. } => RequestCancelResult::AlreadyCancelling,
+            CompactionRunState::Finishing => RequestCancelResult::TooLateToCancel,
+        }
+    }
+
+    fn clear_running_task(&mut self, task_id: u64) -> bool {
+        let Some(running) = &self.running else {
+            return false;
+        };
+        if running.lock().unwrap().task_id != task_id {
+            return false;
+        }
+        self.running = None;
+        true
     }
 
     /// Merge the waiter to the pending compaction.
@@ -1327,8 +1591,19 @@ mod tests {
         );
 
         // On compaction finished and schedule next compaction.
+        let task_id = scheduler
+            .region_status
+            .get(&region_id)
+            .and_then(|status| status.running.as_ref())
+            .map(|running| running.lock().unwrap().task_id)
+            .unwrap();
         scheduler
-            .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager.clone())
+            .on_compaction_finished(
+                region_id,
+                task_id,
+                &manifest_ctx,
+                schema_metadata_manager.clone(),
+            )
             .await;
         assert_eq!(1, scheduler.region_status.len());
         assert_eq!(2, job_scheduler.num_jobs());
@@ -1465,8 +1740,19 @@ mod tests {
         assert!(status.pending_request.is_some());
 
         // On compaction finished and schedule next compaction.
+        let task_id = scheduler
+            .region_status
+            .get(&region_id)
+            .and_then(|status| status.running.as_ref())
+            .map(|running| running.lock().unwrap().task_id)
+            .unwrap();
         scheduler
-            .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager.clone())
+            .on_compaction_finished(
+                region_id,
+                task_id,
+                &manifest_ctx,
+                schema_metadata_manager.clone(),
+            )
             .await;
         assert_eq!(1, scheduler.region_status.len());
         assert_eq!(2, job_scheduler.num_jobs());
@@ -1546,6 +1832,12 @@ mod tests {
             region_id,
             CompactionStatus::new(region_id, version_control, env.access_layer.clone()),
         );
+        let task_id = 1;
+        scheduler
+            .region_status
+            .get_mut(&region_id)
+            .unwrap()
+            .start_local_task(task_id);
 
         let (output_tx, _output_rx) = oneshot::channel();
         scheduler.add_ddl_request_to_pending(SenderDdlRequest {
@@ -1560,6 +1852,155 @@ mod tests {
         });
 
         assert!(scheduler.has_pending_ddls(region_id));
+    }
+
+    #[tokio::test]
+    async fn test_request_cancel_state_transitions() {
+        let env = SchedulerEnv::new().await;
+        let builder = VersionControlBuilder::new();
+        let region_id = builder.region_id();
+        let version_control = Arc::new(builder.build());
+        let mut status =
+            CompactionStatus::new(region_id, version_control, env.access_layer.clone());
+        let task_id = 42;
+        let running = status.start_local_task(task_id);
+
+        assert_eq!(
+            status.request_cancel(CancelReason::EnterStaging),
+            RequestCancelResult::CancelIssued
+        );
+        assert!(RunningCompaction::is_cancelled(&running, task_id));
+        assert_eq!(
+            status.request_cancel(CancelReason::EnterStaging),
+            RequestCancelResult::AlreadyCancelling
+        );
+
+        RunningCompaction::mark_finishing(&running, task_id);
+        assert_eq!(
+            status.request_cancel(CancelReason::EnterStaging),
+            RequestCancelResult::TooLateToCancel
+        );
+
+        assert!(status.clear_running_task(task_id));
+        assert_eq!(
+            status.request_cancel(CancelReason::EnterStaging),
+            RequestCancelResult::NotRunning
+        );
+    }
+
+    #[tokio::test]
+    async fn test_request_cancel_remote_compaction_is_too_late() {
+        let env = SchedulerEnv::new().await;
+        let builder = VersionControlBuilder::new();
+        let region_id = builder.region_id();
+        let version_control = Arc::new(builder.build());
+        let mut status =
+            CompactionStatus::new(region_id, version_control, env.access_layer.clone());
+        let task_id = 42;
+
+        status.start_remote_task(task_id);
+
+        assert_eq!(
+            status.request_cancel(CancelReason::EnterStaging),
+            RequestCancelResult::TooLateToCancel
+        );
+        assert!(status.matches_task(task_id));
+    }
+
+    #[tokio::test]
+    async fn test_on_compaction_cancelled_returns_pending_ddl_requests() {
+        let job_scheduler = Arc::new(VecScheduler::default());
+        let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
+        let (tx, _rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_compaction_scheduler(tx);
+        let builder = VersionControlBuilder::new();
+        let version_control = Arc::new(builder.build());
+        let region_id = builder.region_id();
+        let manifest_ctx = env
+            .mock_manifest_context(version_control.current().version.metadata.clone())
+            .await;
+        let (schema_metadata_manager, _kv_backend) = mock_schema_metadata_manager();
+
+        scheduler.region_status.insert(
+            region_id,
+            CompactionStatus::new(region_id, version_control, env.access_layer.clone()),
+        );
+        let task_id = 7;
+        scheduler
+            .region_status
+            .get_mut(&region_id)
+            .unwrap()
+            .start_local_task(task_id);
+
+        let (output_tx, _output_rx) = oneshot::channel();
+        scheduler.add_ddl_request_to_pending(SenderDdlRequest {
+            region_id,
+            sender: OptionOutputTx::from(output_tx),
+            request: crate::request::DdlRequest::EnterStaging(
+                store_api::region_request::EnterStagingRequest {
+                    partition_directive:
+                        store_api::region_request::StagingPartitionDirective::RejectAllWrites,
+                },
+            ),
+        });
+
+        let pending_ddls = scheduler
+            .on_compaction_cancelled(region_id, task_id, &manifest_ctx, schema_metadata_manager)
+            .await;
+
+        assert_eq!(pending_ddls.len(), 1);
+        assert!(!scheduler.has_pending_ddls(region_id));
+        assert!(!scheduler.region_status.contains_key(&region_id));
+        assert_eq!(job_scheduler.num_jobs(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_on_compaction_cancelled_prioritizes_pending_ddls_over_pending_compaction() {
+        let job_scheduler = Arc::new(VecScheduler::default());
+        let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
+        let (tx, _rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_compaction_scheduler(tx);
+        let builder = VersionControlBuilder::new();
+        let version_control = Arc::new(builder.build());
+        let region_id = builder.region_id();
+        let manifest_ctx = env
+            .mock_manifest_context(version_control.current().version.metadata.clone())
+            .await;
+        let (schema_metadata_manager, _kv_backend) = mock_schema_metadata_manager();
+
+        scheduler.region_status.insert(
+            region_id,
+            CompactionStatus::new(region_id, version_control, env.access_layer.clone()),
+        );
+        let task_id = 9;
+        let status = scheduler.region_status.get_mut(&region_id).unwrap();
+        status.start_local_task(task_id);
+        let (manual_tx, _manual_rx) = oneshot::channel();
+        status.set_pending_request(PendingCompaction {
+            options: compact_request::Options::StrictWindow(StrictWindow { window_seconds: 60 }),
+            waiter: OptionOutputTx::from(manual_tx),
+            max_parallelism: 1,
+        });
+
+        let (output_tx, _output_rx) = oneshot::channel();
+        scheduler.add_ddl_request_to_pending(SenderDdlRequest {
+            region_id,
+            sender: OptionOutputTx::from(output_tx),
+            request: crate::request::DdlRequest::EnterStaging(
+                store_api::region_request::EnterStagingRequest {
+                    partition_directive:
+                        store_api::region_request::StagingPartitionDirective::RejectAllWrites,
+                },
+            ),
+        });
+
+        let pending_ddls = scheduler
+            .on_compaction_cancelled(region_id, task_id, &manifest_ctx, schema_metadata_manager)
+            .await;
+
+        assert_eq!(pending_ddls.len(), 1);
+        assert!(!scheduler.region_status.contains_key(&region_id));
+        assert_eq!(job_scheduler.num_jobs(), 0);
     }
 
     #[tokio::test]
@@ -1717,6 +2158,12 @@ mod tests {
             region_id,
             CompactionStatus::new(region_id, version_control, env.access_layer.clone()),
         );
+        let task_id = 1;
+        scheduler
+            .region_status
+            .get_mut(&region_id)
+            .unwrap()
+            .start_local_task(task_id);
 
         let (output_tx, _output_rx) = oneshot::channel();
         scheduler.add_ddl_request_to_pending(SenderDdlRequest {
@@ -1731,7 +2178,7 @@ mod tests {
         });
 
         let pending_ddls = scheduler
-            .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager)
+            .on_compaction_finished(region_id, task_id, &manifest_ctx, schema_metadata_manager)
             .await;
 
         assert_eq!(pending_ddls.len(), 1);
@@ -1756,6 +2203,8 @@ mod tests {
         let (manual_tx, manual_rx) = oneshot::channel();
         let mut status =
             CompactionStatus::new(region_id, version_control.clone(), env.access_layer.clone());
+        let task_id = 1;
+        status.start_local_task(task_id);
         status.set_pending_request(PendingCompaction {
             options: compact_request::Options::Regular(Default::default()),
             waiter: OptionOutputTx::from(manual_tx),
@@ -1776,7 +2225,7 @@ mod tests {
         });
 
         let pending_ddls = scheduler
-            .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager)
+            .on_compaction_finished(region_id, task_id, &manifest_ctx, schema_metadata_manager)
             .await;
 
         assert_eq!(pending_ddls.len(), 1);
@@ -1798,7 +2247,7 @@ mod tests {
         let (schema_metadata_manager, _kv_backend) = mock_schema_metadata_manager();
 
         let pending_ddls = scheduler
-            .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager)
+            .on_compaction_finished(region_id, 1, &manifest_ctx, schema_metadata_manager)
             .await;
 
         assert!(pending_ddls.is_empty());
@@ -1831,6 +2280,8 @@ mod tests {
         let (manual_tx, manual_rx) = oneshot::channel();
         let mut status =
             CompactionStatus::new(region_id, version_control.clone(), env.access_layer.clone());
+        let task_id = 1;
+        status.start_local_task(task_id);
         status.set_pending_request(PendingCompaction {
             options: compact_request::Options::Regular(Default::default()),
             waiter: OptionOutputTx::from(manual_tx),
@@ -1851,7 +2302,7 @@ mod tests {
         });
 
         let pending_ddls = scheduler
-            .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager)
+            .on_compaction_finished(region_id, task_id, &manifest_ctx, schema_metadata_manager)
             .await;
 
         assert!(pending_ddls.is_empty());
@@ -1877,9 +2328,15 @@ mod tests {
             region_id,
             CompactionStatus::new(region_id, version_control, env.access_layer.clone()),
         );
+        let task_id = 1;
+        scheduler
+            .region_status
+            .get_mut(&region_id)
+            .unwrap()
+            .start_local_task(task_id);
 
         let pending_ddls = scheduler
-            .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager)
+            .on_compaction_finished(region_id, task_id, &manifest_ctx, schema_metadata_manager)
             .await;
 
         assert!(pending_ddls.is_empty());
@@ -1914,9 +2371,15 @@ mod tests {
             region_id,
             CompactionStatus::new(region_id, version_control, env.access_layer.clone()),
         );
+        let task_id = 1;
+        scheduler
+            .region_status
+            .get_mut(&region_id)
+            .unwrap()
+            .start_local_task(task_id);
 
         let pending_ddls = scheduler
-            .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager)
+            .on_compaction_finished(region_id, task_id, &manifest_ctx, schema_metadata_manager)
             .await;
 
         assert!(pending_ddls.is_empty());
