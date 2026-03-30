@@ -414,6 +414,14 @@ impl CacheStrategy {
         }
     }
 
+    /// Returns true if the range result cache is enabled.
+    pub(crate) fn has_range_result_cache(&self) -> bool {
+        match self {
+            CacheStrategy::EnableAll(cache_manager) => cache_manager.has_range_result_cache(),
+            CacheStrategy::Compaction(_) | CacheStrategy::Disabled => false,
+        }
+    }
+
     pub(crate) fn range_result_memory_limiter(&self) -> Option<&Arc<RangeResultMemoryLimiter>> {
         match self {
             CacheStrategy::EnableAll(cache_manager) => {
@@ -785,6 +793,11 @@ impl CacheManager {
                 .add(range_result_cache_weight(&key, &result).into());
             cache.insert(key, result);
         }
+    }
+
+    /// Returns true if the range result cache is enabled.
+    pub(crate) fn has_range_result_cache(&self) -> bool {
+        self.range_result_cache.is_some()
     }
 
     pub(crate) fn range_result_memory_limiter(&self) -> &Arc<RangeResultMemoryLimiter> {

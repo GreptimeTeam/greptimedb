@@ -272,6 +272,10 @@ pub(crate) fn build_range_cache_key(
     stream_ctx: &StreamContext,
     part_range: &PartitionRange,
 ) -> Option<RangeScanCacheKey> {
+    if !stream_ctx.input.cache_strategy.has_range_result_cache() {
+        return None;
+    }
+
     let fingerprint = stream_ctx.scan_fingerprint.as_ref()?;
 
     // Dyn filters can change at runtime, so we can't cache when they're present.
