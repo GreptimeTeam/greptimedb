@@ -310,12 +310,12 @@ pub(crate) fn write_attributes(
         let key = format!("{}.{}", prefix, key_suffix);
         match attr.value.and_then(|v| v.value) {
             Some(OtlpValue::StringValue(v)) => {
+                let incoming_value = ValueData::StringValue(v);
                 let (datatype, value_data) = if let Some(existing) = writer.column_datatype(&key) {
-                    let incoming_value = ValueData::StringValue(v.clone());
                     coerce_to_existing_type(existing, ColumnDataType::String, &incoming_value)
-                        .unwrap_or((ColumnDataType::String, ValueData::StringValue(v)))
+                        .unwrap_or((ColumnDataType::String, incoming_value))
                 } else {
-                    (ColumnDataType::String, ValueData::StringValue(v))
+                    (ColumnDataType::String, incoming_value)
                 };
                 row_writer::write_fields(
                     writer,
