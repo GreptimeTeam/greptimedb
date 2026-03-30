@@ -230,7 +230,7 @@ fn write_trace_operations_to_row(
     Ok(())
 }
 
-fn write_attributes(
+pub(crate) fn write_attributes(
     writer: &mut TableData,
     prefix: &str,
     attributes: Attributes,
@@ -247,44 +247,40 @@ fn write_attributes(
         let key = format!("{}.{}", prefix, key_suffix);
         match attr.value.and_then(|v| v.value) {
             Some(OtlpValue::StringValue(v)) => {
-                row_writer::write_fields(
-                    writer,
-                    std::iter::once(make_string_column_data(&key, Some(v))),
+                // Keep the raw request value here. Mixed trace types are reconciled later
+                // in the frontend once we can also see the existing table schema.
+                writer.write_field_unchecked(
+                    &key,
+                    ColumnDataType::String,
+                    Some(ValueData::StringValue(v)),
                     row,
-                )?;
+                );
             }
             Some(OtlpValue::BoolValue(v)) => {
-                row_writer::write_fields(
-                    writer,
-                    std::iter::once(make_column_data(
-                        &key,
-                        ColumnDataType::Boolean,
-                        Some(ValueData::BoolValue(v)),
-                    )),
+                // Do not coerce or promote types while building the request-local rows.
+                writer.write_field_unchecked(
+                    &key,
+                    ColumnDataType::Boolean,
+                    Some(ValueData::BoolValue(v)),
                     row,
-                )?;
+                );
             }
             Some(OtlpValue::IntValue(v)) => {
-                row_writer::write_fields(
-                    writer,
-                    std::iter::once(make_column_data(
-                        &key,
-                        ColumnDataType::Int64,
-                        Some(ValueData::I64Value(v)),
-                    )),
+                // Preserving the original value avoids order-dependent behavior inside one batch.
+                writer.write_field_unchecked(
+                    &key,
+                    ColumnDataType::Int64,
+                    Some(ValueData::I64Value(v)),
                     row,
-                )?;
+                );
             }
             Some(OtlpValue::DoubleValue(v)) => {
-                row_writer::write_fields(
-                    writer,
-                    std::iter::once(make_column_data(
-                        &key,
-                        ColumnDataType::Float64,
-                        Some(ValueData::F64Value(v)),
-                    )),
+                writer.write_field_unchecked(
+                    &key,
+                    ColumnDataType::Float64,
+                    Some(ValueData::F64Value(v)),
                     row,
-                )?;
+                );
             }
             Some(OtlpValue::ArrayValue(v)) => row_writer::write_json(
                 writer,
@@ -314,4 +310,215 @@ fn write_attributes(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use api::v1::value::ValueData;
+    use opentelemetry_proto::tonic::common::v1::any_value::Value as OtlpValue;
+    use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue};
+
+    use super::*;
+    use crate::otlp::trace::attributes::Attributes;
+    use crate::row_writer::TableData;
+
+    fn make_kv(key: &str, value: OtlpValue) -> KeyValue {
+        KeyValue {
+            key: key.to_string(),
+            value: Some(AnyValue { value: Some(value) }),
+        }
+    }
+
+    #[test]
+    fn test_keep_mixed_numeric_values_until_frontend_reconciliation() {
+        let mut writer = TableData::new(4, 2);
+
+        let attrs1 = Attributes::from(vec![make_kv("val", OtlpValue::DoubleValue(1.5))]);
+        let mut row1 = writer.alloc_one_row();
+        write_attributes(&mut writer, "attr", attrs1, &mut row1).unwrap();
+        writer.add_row(row1);
+
+        let attrs2 = Attributes::from(vec![make_kv("val", OtlpValue::IntValue(42))]);
+        let mut row2 = writer.alloc_one_row();
+        write_attributes(&mut writer, "attr", attrs2, &mut row2).unwrap();
+        writer.add_row(row2);
+
+        let (schema, rows) = writer.into_schema_and_rows();
+
+        let col_idx = schema
+            .iter()
+            .position(|c| c.column_name == "attr.val")
+            .unwrap();
+        assert_eq!(schema[col_idx].datatype, ColumnDataType::Float64 as i32);
+
+        assert_eq!(
+            rows[0].values[col_idx].value_data,
+            Some(ValueData::F64Value(1.5))
+        );
+        assert_eq!(
+            rows[1].values[col_idx].value_data,
+            Some(ValueData::I64Value(42))
+        );
+    }
+
+    #[test]
+    fn test_keep_mixed_string_and_int_values_until_frontend_reconciliation() {
+        let mut writer = TableData::new(4, 2);
+
+        let attrs1 = Attributes::from(vec![make_kv("val", OtlpValue::IntValue(10))]);
+        let mut row1 = writer.alloc_one_row();
+        write_attributes(&mut writer, "attr", attrs1, &mut row1).unwrap();
+        writer.add_row(row1);
+
+        let attrs2 = Attributes::from(vec![make_kv(
+            "val",
+            OtlpValue::StringValue("20".to_string()),
+        )]);
+        let mut row2 = writer.alloc_one_row();
+        write_attributes(&mut writer, "attr", attrs2, &mut row2).unwrap();
+        writer.add_row(row2);
+
+        let (schema, rows) = writer.into_schema_and_rows();
+        let col_idx = schema
+            .iter()
+            .position(|c| c.column_name == "attr.val")
+            .unwrap();
+        assert_eq!(schema[col_idx].datatype, ColumnDataType::Int64 as i32);
+        assert_eq!(
+            rows[1].values[col_idx].value_data,
+            Some(ValueData::StringValue("20".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_keep_first_seen_schema_until_frontend_reconciliation() {
+        let mut writer = TableData::new(4, 2);
+
+        let attrs1 = Attributes::from(vec![make_kv(
+            "val",
+            OtlpValue::StringValue("10".to_string()),
+        )]);
+        let mut row1 = writer.alloc_one_row();
+        write_attributes(&mut writer, "attr", attrs1, &mut row1).unwrap();
+        writer.add_row(row1);
+
+        let attrs2 = Attributes::from(vec![make_kv("val", OtlpValue::IntValue(20))]);
+        let mut row2 = writer.alloc_one_row();
+        write_attributes(&mut writer, "attr", attrs2, &mut row2).unwrap();
+        writer.add_row(row2);
+
+        let (schema, rows) = writer.into_schema_and_rows();
+        let col_idx = schema
+            .iter()
+            .position(|c| c.column_name == "attr.val")
+            .unwrap();
+        assert_eq!(schema[col_idx].datatype, ColumnDataType::String as i32);
+        assert_eq!(
+            rows[0].values[col_idx].value_data,
+            Some(ValueData::StringValue("10".to_string()))
+        );
+        assert_eq!(
+            rows[1].values[col_idx].value_data,
+            Some(ValueData::I64Value(20))
+        );
+    }
+
+    #[test]
+    fn test_keep_mixed_string_and_float_values_until_frontend_reconciliation() {
+        let mut writer = TableData::new(4, 2);
+
+        let attrs1 = Attributes::from(vec![make_kv("val", OtlpValue::DoubleValue(1.5))]);
+        let mut row1 = writer.alloc_one_row();
+        write_attributes(&mut writer, "attr", attrs1, &mut row1).unwrap();
+        writer.add_row(row1);
+
+        let attrs2 = Attributes::from(vec![make_kv(
+            "val",
+            OtlpValue::StringValue("1.5".to_string()),
+        )]);
+        let mut row2 = writer.alloc_one_row();
+        write_attributes(&mut writer, "attr", attrs2, &mut row2).unwrap();
+        writer.add_row(row2);
+
+        let (schema, rows) = writer.into_schema_and_rows();
+        let col_idx = schema
+            .iter()
+            .position(|c| c.column_name == "attr.val")
+            .unwrap();
+        assert_eq!(schema[col_idx].datatype, ColumnDataType::Float64 as i32);
+        assert_eq!(
+            rows[1].values[col_idx].value_data,
+            Some(ValueData::StringValue("1.5".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_keep_mixed_string_and_bool_values_until_frontend_reconciliation() {
+        let mut writer = TableData::new(4, 2);
+
+        let attrs1 = Attributes::from(vec![make_kv(
+            "val",
+            OtlpValue::StringValue("true".to_string()),
+        )]);
+        let mut row1 = writer.alloc_one_row();
+        write_attributes(&mut writer, "attr", attrs1, &mut row1).unwrap();
+        writer.add_row(row1);
+
+        let attrs2 = Attributes::from(vec![make_kv("val", OtlpValue::BoolValue(false))]);
+        let mut row2 = writer.alloc_one_row();
+        write_attributes(&mut writer, "attr", attrs2, &mut row2).unwrap();
+        writer.add_row(row2);
+
+        let (schema, rows) = writer.into_schema_and_rows();
+        let col_idx = schema
+            .iter()
+            .position(|c| c.column_name == "attr.val")
+            .unwrap();
+        assert_eq!(schema[col_idx].datatype, ColumnDataType::String as i32);
+        assert_eq!(
+            rows[0].values[col_idx].value_data,
+            Some(ValueData::StringValue("true".to_string()))
+        );
+        assert_eq!(
+            rows[1].values[col_idx].value_data,
+            Some(ValueData::BoolValue(false))
+        );
+    }
+
+    #[test]
+    fn test_keep_mixed_binary_and_string_values_until_frontend_reconciliation() {
+        let mut writer = TableData::new(4, 2);
+
+        let attrs1 = Attributes::from(vec![make_kv(
+            "val",
+            OtlpValue::BytesValue(vec![1_u8, 2, 3]),
+        )]);
+        let mut row1 = writer.alloc_one_row();
+        write_attributes(&mut writer, "attr", attrs1, &mut row1).unwrap();
+        writer.add_row(row1);
+
+        let attrs2 = Attributes::from(vec![make_kv(
+            "val",
+            OtlpValue::StringValue("false".to_string()),
+        )]);
+        let mut row2 = writer.alloc_one_row();
+        write_attributes(&mut writer, "attr", attrs2, &mut row2).unwrap();
+        writer.add_row(row2);
+
+        let (schema, rows) = writer.into_schema_and_rows();
+        let col_idx = schema
+            .iter()
+            .position(|c| c.column_name == "attr.val")
+            .unwrap();
+        assert_eq!(schema[col_idx].datatype, ColumnDataType::Binary as i32);
+        assert_eq!(
+            rows[0].values[col_idx].value_data,
+            Some(ValueData::BinaryValue(vec![1_u8, 2, 3]))
+        );
+        assert_eq!(
+            rows[1].values[col_idx].value_data,
+            Some(ValueData::StringValue("false".to_string()))
+        );
+    }
+    // Conversion matrix coverage lives in the shared coercion helper tests.
 }
