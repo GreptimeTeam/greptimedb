@@ -26,5 +26,6 @@ pub mod partition;
 pub mod simplify;
 pub mod splitter;
 pub mod subtask;
+pub mod utils;
 
 pub use crate::partition::{PartitionRule, PartitionRuleRef};

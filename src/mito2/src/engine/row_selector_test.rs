@@ -13,12 +13,15 @@
 // limitations under the License.
 
 use api::v1::Rows;
+use common_base::readable_size::ReadableSize;
 use common_recordbatch::RecordBatches;
+use datafusion_expr::{col, lit};
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::RegionRequest;
 use store_api::storage::{RegionId, ScanRequest, TimeSeriesRowSelector};
 
 use crate::config::MitoConfig;
+use crate::engine::MitoEngine;
 use crate::test_util::batch_util::sort_batches_and_print;
 use crate::test_util::{
     CreateRequestBuilder, TestEnv, build_rows_for_key, flush_region, put_rows, rows_schema,
@@ -107,6 +110,27 @@ async fn test_last_row(append_mode: bool, flat_format: bool) {
     assert_eq!(expected, sort_batches_and_print(&batches, &["tag_0", "ts"]));
 }
 
+async fn scan_last_row(
+    engine: &MitoEngine,
+    region_id: RegionId,
+    filters: Vec<datafusion_expr::Expr>,
+) -> String {
+    let scanner = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                filters,
+                series_row_selector: Some(TimeSeriesRowSelector::LastRow),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let stream = scanner.scan().await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    sort_batches_and_print(&batches, &["tag_0", "ts"])
+}
+
 #[tokio::test]
 async fn test_last_row_append_mode_disabled() {
     test_last_row(false, false).await;
@@ -125,4 +149,70 @@ async fn test_last_row_flat_format_append_mode_disabled() {
 #[tokio::test]
 async fn test_last_row_flat_format_append_mode_enabled() {
     test_last_row(true, true).await;
+}
+
+#[tokio::test]
+async fn test_last_row_flat_format_prefilter_does_not_poison_selector_cache() {
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            selector_result_cache_size: ReadableSize::mb(1),
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let request = CreateRequestBuilder::new()
+        .insert_option("sst_format", "flat")
+        .build();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let rows = Rows {
+        schema: column_schemas,
+        rows: [
+            build_rows_for_key("a", 0, 3, 0),
+            build_rows_for_key("b", 0, 3, 10),
+        ]
+        .concat(),
+    };
+    put_rows(&engine, region_id, rows).await;
+    flush_region(&engine, region_id, Some(16)).await;
+
+    let filtered = scan_last_row(&engine, region_id, vec![col("tag_0").eq(lit("a"))]).await;
+    assert_eq!(
+        "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| a     | 2.0     | 1970-01-01T00:00:02 |
++-------+---------+---------------------+",
+        filtered
+    );
+
+    let unfiltered = scan_last_row(&engine, region_id, vec![]).await;
+    assert_eq!(
+        "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| a     | 2.0     | 1970-01-01T00:00:02 |
+| b     | 12.0    | 1970-01-01T00:00:02 |
++-------+---------+---------------------+",
+        unfiltered
+    );
 }

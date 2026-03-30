@@ -77,6 +77,35 @@ impl TableData {
     pub fn into_schema_and_rows(self) -> (Vec<ColumnSchema>, Vec<Row>) {
         (self.schema, self.rows)
     }
+
+    /// Writes a field value without enforcing that later writes use the same datatype
+    /// as the first-seen schema entry.
+    ///
+    /// The OTLP trace v1 path uses this to preserve raw mixed values inside one request
+    /// so the frontend can reconcile them later against both the full batch and the
+    /// existing table schema.
+    pub fn write_field_unchecked(
+        &mut self,
+        name: impl ToString,
+        datatype: ColumnDataType,
+        value: Option<ValueData>,
+        one_row: &mut Vec<Value>,
+    ) {
+        let name = name.to_string();
+        if let Some(index) = self.column_indexes.get(&name).copied() {
+            one_row[index].value_data = value;
+        } else {
+            let index = self.schema.len();
+            self.schema.push(ColumnSchema {
+                column_name: name.clone(),
+                datatype: datatype as i32,
+                semantic_type: SemanticType::Field as i32,
+                ..Default::default()
+            });
+            self.column_indexes.insert(name, index);
+            one_row.push(Value { value_data: value });
+        }
+    }
 }
 
 pub struct MultiTableData {

@@ -30,10 +30,6 @@ base64.workspace = true
 cache.workspace = true
 catalog.workspace = true
 chrono.workspace = true
-datafusion-physical-plan.workspace = true
-datafusion.workspace = true
-datafusion-common.workspace = true
-either = "1.15"
 clap.workspace = true
 cli.workspace = true
 client.workspace = true
@@ -51,14 +47,19 @@ common-procedure.workspace = true
 common-query.workspace = true
 common-recordbatch.workspace = true
 common-runtime.workspace = true
+common-stat.workspace = true
 common-telemetry = { workspace = true, features = [
     "deadlock_detection",
 ] }
 common-time.workspace = true
 common-version.workspace = true
 common-wal.workspace = true
+datafusion.workspace = true
+datafusion-common.workspace = true
+datafusion-physical-plan.workspace = true
 datanode.workspace = true
 datatypes.workspace = true
+either = "1.15"
 etcd-client.workspace = true
 flow.workspace = true
 frontend = { workspace = true, default-features = false }
@@ -81,21 +82,20 @@ query.workspace = true
 rand.workspace = true
 regex.workspace = true
 reqwest.workspace = true
-standalone.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 servers.workspace = true
 session.workspace = true
 similar-asserts.workspace = true
 snafu.workspace = true
-common-stat.workspace = true
+sqlparser.workspace = true
+standalone.workspace = true
 store-api.workspace = true
 table.workspace = true
 tokio.workspace = true
 toml.workspace = true
 tonic.workspace = true
 tracing-appender.workspace = true
-sqlparser.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 pprof = { version = "0.14", features = [
@@ -110,14 +110,8 @@ api.workspace = true
 client = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
 common-version.workspace = true
+file-engine.workspace = true
+mito2.workspace = true
 serde.workspace = true
 temp-env = "0.3"
 tempfile.workspace = true
-file-engine.workspace = true
-mito2.workspace = true
-
-[target.'cfg(not(windows))'.dev-dependencies]
-rexpect = "0.5"
-
-[package.metadata.cargo-udeps.ignore]
-development = ["rexpect"]

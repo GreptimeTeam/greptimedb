@@ -37,6 +37,8 @@ fn test_query_context() -> QueryContext {
         timezone: "UTC".to_string(),
         extensions: HashMap::new(),
         channel: 0,
+        snapshot_seqs: HashMap::new(),
+        sst_min_sequences: HashMap::new(),
     }
 }
 
@@ -251,6 +253,10 @@ fn test_create_flow_data_new_format_serialization() {
         catalog: "new_catalog".to_string(),
         schema: "new_schema".to_string(),
         timezone: "America/New_York".to_string(),
+        extensions: HashMap::new(),
+        channel: 0,
+        snapshot_seqs: HashMap::new(),
+        sst_min_sequences: HashMap::new(),
     };
 
     let data = CreateFlowData {
@@ -272,6 +278,9 @@ fn test_create_flow_data_new_format_serialization() {
     assert_eq!(deserialized.flow_context.catalog, "new_catalog");
     assert_eq!(deserialized.flow_context.schema, "new_schema");
     assert_eq!(deserialized.flow_context.timezone, "America/New_York");
+    assert_eq!(deserialized.flow_context.channel, 0);
+    assert_eq!(deserialized.flow_context.snapshot_seqs, HashMap::new());
+    assert_eq!(deserialized.flow_context.sst_min_sequences, HashMap::new());
 }
 
 #[test]
@@ -286,6 +295,8 @@ fn test_flow_query_context_conversion_from_query_context() {
         ]
         .into(),
         channel: 99,
+        snapshot_seqs: HashMap::from([(1, 10)]),
+        sst_min_sequences: HashMap::from([(1, 8)]),
     };
 
     let flow_context: FlowQueryContext = query_context.into();
@@ -293,6 +304,9 @@ fn test_flow_query_context_conversion_from_query_context() {
     assert_eq!(flow_context.catalog, "prod_catalog");
     assert_eq!(flow_context.schema, "public");
     assert_eq!(flow_context.timezone, "America/Los_Angeles");
+    assert_eq!(flow_context.channel, 99);
+    assert_eq!(flow_context.snapshot_seqs, HashMap::from([(1, 10)]));
+    assert_eq!(flow_context.sst_min_sequences, HashMap::from([(1, 8)]));
 }
 
 #[test]
@@ -301,6 +315,10 @@ fn test_flow_info_conversion_with_flow_context() {
         catalog: "info_catalog".to_string(),
         schema: "info_schema".to_string(),
         timezone: "Europe/Berlin".to_string(),
+        extensions: HashMap::new(),
+        channel: 0,
+        snapshot_seqs: HashMap::new(),
+        sst_min_sequences: HashMap::new(),
     };
 
     let data = CreateFlowData {
@@ -349,6 +367,10 @@ fn test_mixed_serialization_format_support() {
         catalog: "test".to_string(),
         schema: "test".to_string(),
         timezone: "UTC".to_string(),
+        extensions: HashMap::new(),
+        channel: 0,
+        snapshot_seqs: HashMap::new(),
+        sst_min_sequences: HashMap::new(),
     };
     assert_eq!(ctx_from_new, expected_new);
 }

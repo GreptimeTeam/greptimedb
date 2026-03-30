@@ -20,9 +20,10 @@ use std::time::{Duration, Instant};
 
 use mito_codec::key_values::KeyValue;
 use mito_codec::row_converter::PrimaryKeyFilter;
+use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 
-use crate::error::Result;
+use crate::error::{DecodeSnafu, Result};
 use crate::memtable::partition_tree::data::{
     DATA_INIT_CAP, DataBatch, DataBuffer, DataBufferReader, DataBufferReaderBuilder, DataParts,
 };
@@ -281,7 +282,7 @@ impl ShardBuilderReader {
             self.keys_before_pruning += 1;
             let key = self.dict_reader.key_by_pk_index(pk_index);
             let now = Instant::now();
-            if key_filter.matches(key) {
+            if key_filter.matches(key).context(DecodeSnafu)? {
                 self.prune_pk_cost += now.elapsed();
                 self.last_yield_pk_index = Some(pk_index);
                 self.keys_after_pruning += 1;

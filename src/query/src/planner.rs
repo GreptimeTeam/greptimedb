@@ -278,17 +278,22 @@ impl DfLogicalPlanner {
         let table_provider = DfTableSourceProvider::new(
             self.engine_state.catalog_manager().clone(),
             self.engine_state.disallow_cross_catalog_query(),
-            query_ctx,
+            query_ctx.clone(),
             plan_decoder,
             self.session_state
                 .config_options()
                 .sql_parser
                 .enable_ident_normalization,
         );
-        PromPlanner::stmt_to_plan(table_provider, stmt, &self.engine_state)
+        let plan = PromPlanner::stmt_to_plan(table_provider, stmt, &self.engine_state)
             .await
             .map_err(BoxedError::new)
-            .context(QueryPlanSnafu)
+            .context(QueryPlanSnafu)?;
+
+        let context = QueryEngineContext::new(self.session_state.clone(), query_ctx);
+        Ok(self
+            .engine_state
+            .optimize_by_extension_rules(plan, &context)?)
     }
 
     #[tracing::instrument(skip_all)]
@@ -571,15 +576,22 @@ mod tests {
     use std::sync::Arc;
 
     use arrow_schema::DataType;
+    use catalog::RegisterTableRequest;
+    use catalog::memory::MemoryCatalogManager;
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
     use session::context::QueryContext;
+    use store_api::metric_engine_consts::{
+        DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME, LOGICAL_TABLE_METADATA_KEY,
+        METRIC_ENGINE_NAME,
+    };
     use table::metadata::{TableInfoBuilder, TableMetaBuilder};
     use table::test_util::EmptyTable;
 
     use super::*;
-    use crate::QueryEngineRef;
-    use crate::parser::QueryLanguageParser;
+    use crate::parser::{PromQuery, QueryLanguageParser};
+    use crate::{QueryEngineFactory, QueryEngineRef};
 
     async fn create_test_engine() -> QueryEngineRef {
         let columns = vec![
@@ -600,6 +612,109 @@ mod tests {
         crate::tests::new_query_engine_with_table(table)
     }
 
+    fn create_promql_test_engine() -> QueryEngineRef {
+        let catalog_manager = MemoryCatalogManager::with_default_setup();
+        let physical_table_name = "phy";
+        let physical_table_id = 999u32;
+
+        let physical_schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                DATA_SCHEMA_TABLE_ID_COLUMN_NAME.to_string(),
+                ConcreteDataType::uint32_datatype(),
+                false,
+            ),
+            ColumnSchema::new(
+                DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
+                ConcreteDataType::uint64_datatype(),
+                false,
+            ),
+            ColumnSchema::new("tag_0", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("tag_1", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new("field_0", ConcreteDataType::float64_datatype(), true),
+        ]));
+        let physical_meta = TableMetaBuilder::empty()
+            .schema(physical_schema)
+            .primary_key_indices(vec![0, 1, 2, 3])
+            .value_indices(vec![4, 5])
+            .engine(METRIC_ENGINE_NAME.to_string())
+            .next_column_id(1024)
+            .build()
+            .unwrap();
+        let physical_info = TableInfoBuilder::default()
+            .table_id(physical_table_id)
+            .name(physical_table_name)
+            .meta(physical_meta)
+            .build()
+            .unwrap();
+        catalog_manager
+            .register_table_sync(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: physical_table_name.to_string(),
+                table_id: physical_table_id,
+                table: EmptyTable::from_table_info(&physical_info),
+            })
+            .unwrap();
+
+        let mut options = table::requests::TableOptions::default();
+        options.extra_options.insert(
+            LOGICAL_TABLE_METADATA_KEY.to_string(),
+            physical_table_name.to_string(),
+        );
+        let logical_schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("tag_0", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("tag_1", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new("field_0", ConcreteDataType::float64_datatype(), true),
+        ]));
+        let logical_meta = TableMetaBuilder::empty()
+            .schema(logical_schema)
+            .primary_key_indices(vec![0, 1])
+            .value_indices(vec![3])
+            .engine(METRIC_ENGINE_NAME.to_string())
+            .options(options)
+            .next_column_id(1024)
+            .build()
+            .unwrap();
+        let logical_info = TableInfoBuilder::default()
+            .table_id(1024)
+            .name("some_metric")
+            .meta(logical_meta)
+            .build()
+            .unwrap();
+        catalog_manager
+            .register_table_sync(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: "some_metric".to_string(),
+                table_id: 1024,
+                table: EmptyTable::from_table_info(&logical_info),
+            })
+            .unwrap();
+
+        QueryEngineFactory::new(
+            catalog_manager,
+            None,
+            None,
+            None,
+            None,
+            false,
+            crate::options::QueryOptions::default(),
+        )
+        .query_engine()
+    }
+
     async fn parse_sql_to_plan(sql: &str) -> LogicalPlan {
         let stmt = QueryLanguageParser::parse_sql(sql, &QueryContext::arc()).unwrap();
         let engine = create_test_engine().await;
@@ -608,6 +723,25 @@ mod tests {
             .plan(&stmt, QueryContext::arc())
             .await
             .unwrap()
+    }
+
+    async fn parse_promql_to_plan(query: &str) -> LogicalPlan {
+        let engine = create_promql_test_engine();
+        let query_ctx = QueryContext::arc();
+        let stmt = QueryLanguageParser::parse_promql(
+            &PromQuery {
+                query: query.to_string(),
+                start: "0".to_string(),
+                end: "10".to_string(),
+                step: "5s".to_string(),
+                lookback: "300s".to_string(),
+                alias: None,
+            },
+            &query_ctx,
+        )
+        .unwrap();
+
+        engine.planner().plan(&stmt, query_ctx).await.unwrap()
     }
 
     #[tokio::test]
@@ -647,6 +781,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_plan_pql_applies_extension_rules() {
+        for inner_agg in ["count", "sum", "avg", "min", "max", "stddev", "stdvar"] {
+            let plan = parse_promql_to_plan(&format!(
+                "sum(irate(some_metric[1h])) / scalar(count({inner_agg}(some_metric) by (tag_0)))"
+            ))
+            .await;
+            let plan_str = plan.display_indent_schema().to_string();
+            assert!(plan_str.contains("Distinct:"), "{inner_agg}: {plan_str}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_plan_pql_filters_null_only_groups_for_non_count_inner_aggs() {
+        let count_plan = parse_promql_to_plan("scalar(count(count(some_metric) by (tag_0)))").await;
+        let count_plan_str = count_plan.display_indent_schema().to_string();
+        assert!(
+            !count_plan_str.contains("field_0 IS NOT NULL"),
+            "{count_plan_str}"
+        );
+
+        for inner_agg in ["sum", "avg", "min", "max", "stddev", "stdvar"] {
+            let plan = parse_promql_to_plan(&format!(
+                "scalar(count({inner_agg}(some_metric) by (tag_0)))"
+            ))
+            .await;
+            let plan_str = plan.display_indent_schema().to_string();
+            assert!(
+                plan_str.contains("field_0 IS NOT NULL"),
+                "{inner_agg}: {plan_str}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_plan_pql_skips_extension_rules_for_non_direct_or_unsupported_inner_agg() {
+        for query in [
+            "sum(irate(some_metric[1h])) / scalar(count(sum(irate(some_metric[1h])) by (tag_0)))",
+            "sum(irate(some_metric[1h])) / scalar(count(group(some_metric) by (tag_0)))",
+        ] {
+            let plan = parse_promql_to_plan(query).await;
+            let plan_str = plan.display_indent_schema().to_string();
+            assert!(!plan_str.contains("Distinct:"), "{query}: {plan_str}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_plan_sql_does_not_apply_nested_count_rule() {
+        let plan = parse_sql_to_plan(
+            "SELECT id, count(inner_count) \
+             FROM ( \
+                 SELECT id, count(name) AS inner_count \
+                 FROM test \
+                 GROUP BY id \
+                 ORDER BY id \
+                 LIMIT 1000000 \
+             ) t \
+             GROUP BY id \
+             ORDER BY id",
+        )
+        .await;
+
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(!plan_str.contains("Distinct:"), "{plan_str}");
+    }
+
+    #[tokio::test]
     async fn test_get_inferred_parameter_types_subquery() {
         let plan = parse_sql_to_plan(
             r#"SELECT * FROM test WHERE id = (SELECT id FROM test CROSS JOIN (SELECT parse_ident($1::TEXT) AS parts) p LIMIT 1)"#,
@@ -656,5 +856,17 @@ mod tests {
         assert_eq!(types.len(), 1);
         let type_1 = types.get("$1").unwrap();
         assert_eq!(type_1, &Some(DataType::Utf8));
+    }
+
+    #[tokio::test]
+    async fn test_get_inferred_parameter_types_insert() {
+        let plan = parse_sql_to_plan("INSERT INTO test (id, name) VALUES ($1, $2), ($3, $4)").await;
+        let types = DfLogicalPlanner::get_inferred_parameter_types(&plan).unwrap();
+
+        assert_eq!(types.len(), 4);
+        assert_eq!(types.get("$1"), Some(&Some(DataType::Int32)));
+        assert_eq!(types.get("$2"), Some(&Some(DataType::Utf8)));
+        assert_eq!(types.get("$3"), Some(&Some(DataType::Int32)));
+        assert_eq!(types.get("$4"), Some(&Some(DataType::Utf8)));
     }
 }
