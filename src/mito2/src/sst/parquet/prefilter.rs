@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use api::v1::SemanticType;
 use common_recordbatch::filter::SimpleFilterEvaluator;
-use datatypes::arrow::array::{BinaryArray, BooleanArray};
+use datatypes::arrow::array::{BinaryArray, BooleanArray, BooleanBufferBuilder};
 use datatypes::arrow::record_batch::RecordBatch;
 use futures::StreamExt;
 use mito_codec::row_converter::{PrimaryKeyCodec, PrimaryKeyFilter};
@@ -122,14 +122,19 @@ pub(crate) fn prefilter_flat_batch_by_primary_key(
         return Ok(Some(input.slice(span.start, span.end - span.start)));
     }
 
-    let mut mask = vec![false; input.num_rows()];
+    let mut builder = BooleanBufferBuilder::new(input.num_rows());
+    builder.append_n(input.num_rows(), false);
     for span in matched_row_ranges {
-        mask[span].fill(true);
+        for i in span {
+            builder.set_bit(i, true);
+        }
     }
 
-    let filtered =
-        datatypes::arrow::compute::filter_record_batch(&input, &BooleanArray::from(mask))
-            .context(ComputeArrowSnafu)?;
+    let filtered = datatypes::arrow::compute::filter_record_batch(
+        &input,
+        &BooleanArray::new(builder.finish(), None),
+    )
+    .context(ComputeArrowSnafu)?;
     if filtered.num_rows() == 0 {
         Ok(None)
     } else {
