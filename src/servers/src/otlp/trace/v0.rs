@@ -73,12 +73,9 @@ pub fn build_aux_table_requests(
     write_trace_services_to_row(&mut trace_services_writer, aux_data.services)?;
     write_trace_operations_to_row(&mut trace_operations_writer, aux_data.operations)?;
 
+    multi_table_writer.add_table_data(trace_services_table_name(table_name), trace_services_writer);
     multi_table_writer.add_table_data(
-        trace_services_table_name(&table_name),
-        trace_services_writer,
-    );
-    multi_table_writer.add_table_data(
-        trace_operations_table_name(&table_name),
+        trace_operations_table_name(table_name),
         trace_operations_writer,
     );
     Ok(multi_table_writer.into_row_insert_requests())
