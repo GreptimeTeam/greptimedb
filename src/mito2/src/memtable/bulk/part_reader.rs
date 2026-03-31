@@ -219,6 +219,8 @@ pub struct BulkPartBatchIter {
     context: BulkIterContextRef,
     /// Sequence number filter.
     sequence: Option<SequenceRange>,
+    /// Primary key filter for prefiltering before convert_batch.
+    pk_filter: Option<CachedPrimaryKeyFilter>,
     /// Metrics for this iterator.
     metrics: MemScanMetricsData,
     /// Optional memory scan metrics to report to.
@@ -236,10 +238,13 @@ impl BulkPartBatchIter {
     ) -> Self {
         assert!(context.read_format().as_flat().is_some());
 
+        let pk_filter = context.build_pk_filter();
+
         Self {
             batches: VecDeque::from(batches),
             context,
             sequence,
+            pk_filter,
             metrics: MemScanMetricsData {
                 total_series: series_count,
                 ..Default::default()
@@ -301,7 +306,7 @@ impl BulkPartBatchIter {
             &self.sequence,
             projected_batch,
             skip_fields,
-            None,
+            self.pk_filter.as_mut().map(|f| f as &mut dyn PrimaryKeyFilter),
         )?
         else {
             self.metrics.scan_cost += start.elapsed();
@@ -465,6 +470,7 @@ mod tests {
 
     use super::*;
     use crate::memtable::bulk::context::BulkIterContext;
+    use crate::test_util::sst_util::new_primary_key;
 
     #[test]
     fn test_bulk_part_batch_iter() {
@@ -493,9 +499,16 @@ mod tests {
             vec![1000, 2000, 3000],
         ));
 
-        // Create primary key dictionary array
+        // Create primary key dictionary array with properly encoded PKs
         use datatypes::arrow::array::{BinaryArray, DictionaryArray, UInt32Array};
-        let values = Arc::new(BinaryArray::from_iter_values([b"key1", b"key2", b"key3"]));
+        let pk1 = new_primary_key(&["key1"]);
+        let pk2 = new_primary_key(&["key2"]);
+        let pk3 = new_primary_key(&["key3"]);
+        let values = Arc::new(BinaryArray::from_iter_values([
+            pk1.as_slice(),
+            pk2.as_slice(),
+            pk3.as_slice(),
+        ]));
         let keys = UInt32Array::from(vec![0, 1, 2]);
         let primary_key = Arc::new(DictionaryArray::new(keys, values));
 
@@ -628,12 +641,17 @@ mod tests {
         ]));
 
         // Create first batch with 2 rows
+        let pk1 = new_primary_key(&["key1"]);
+        let pk2 = new_primary_key(&["key2"]);
         let key1_1 = Arc::new(StringArray::from_iter_values(["key1", "key2"]));
         let field1_1 = Arc::new(Int64Array::from(vec![11, 12]));
         let timestamp_1 = Arc::new(datatypes::arrow::array::TimestampMillisecondArray::from(
             vec![1000, 2000],
         ));
-        let values_1 = Arc::new(BinaryArray::from_iter_values([b"key1", b"key2"]));
+        let values_1 = Arc::new(BinaryArray::from_iter_values([
+            pk1.as_slice(),
+            pk2.as_slice(),
+        ]));
         let keys_1 = UInt32Array::from(vec![0, 1]);
         let primary_key_1 = Arc::new(DictionaryArray::new(keys_1, values_1));
         let sequence_1 = Arc::new(UInt64Array::from(vec![1, 2]));
@@ -653,12 +671,19 @@ mod tests {
         .unwrap();
 
         // Create second batch with 3 rows
+        let pk3 = new_primary_key(&["key3"]);
+        let pk4 = new_primary_key(&["key4"]);
+        let pk5 = new_primary_key(&["key5"]);
         let key1_2 = Arc::new(StringArray::from_iter_values(["key3", "key4", "key5"]));
         let field1_2 = Arc::new(Int64Array::from(vec![13, 14, 15]));
         let timestamp_2 = Arc::new(datatypes::arrow::array::TimestampMillisecondArray::from(
             vec![3000, 4000, 5000],
         ));
-        let values_2 = Arc::new(BinaryArray::from_iter_values([b"key3", b"key4", b"key5"]));
+        let values_2 = Arc::new(BinaryArray::from_iter_values([
+            pk3.as_slice(),
+            pk4.as_slice(),
+            pk5.as_slice(),
+        ]));
         let keys_2 = UInt32Array::from(vec![0, 1, 2]);
         let primary_key_2 = Arc::new(DictionaryArray::new(keys_2, values_2));
         let sequence_2 = Arc::new(UInt64Array::from(vec![3, 4, 5]));
