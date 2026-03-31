@@ -53,6 +53,18 @@ pub struct TraceSpan {
 
 pub type TraceSpans = Vec<TraceSpan>;
 
+#[derive(Debug, Clone)]
+pub struct TraceSpanGroup {
+    pub service_name: Option<String>,
+    pub resource_attributes: Attributes,
+    pub scope_name: String,
+    pub scope_version: String,
+    pub scope_attributes: Attributes,
+    pub spans: TraceSpans,
+}
+
+pub type TraceSpanGroups = Vec<TraceSpanGroup>;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SpanLink {
     pub trace_id: String,
@@ -241,14 +253,19 @@ pub fn status_to_string(status: &Option<Status>) -> (String, String) {
 /// See
 /// <https://github.com/open-telemetry/opentelemetry-proto/blob/main/opentelemetry/proto/trace/v1/trace.proto>
 /// for data structure of OTLP traces.
-pub fn parse(request: ExportTraceServiceRequest) -> TraceSpans {
+pub fn parse(request: ExportTraceServiceRequest) -> TraceSpanGroups {
+    let group_size = request
+        .resource_spans
+        .iter()
+        .flat_map(|res| res.scope_spans.iter())
+        .count();
     let span_size = request
         .resource_spans
         .iter()
         .flat_map(|res| res.scope_spans.iter())
         .flat_map(|scope| scope.spans.iter())
         .count();
-    let mut spans = Vec::with_capacity(span_size);
+    let mut groups = Vec::with_capacity(group_size);
     for resource_spans in request.resource_spans {
         let resource_attrs = resource_spans
             .resource
@@ -268,6 +285,7 @@ pub fn parse(request: ExportTraceServiceRequest) -> TraceSpans {
 
         for scope_spans in resource_spans.scope_spans {
             let scope = scope_spans.scope.unwrap_or_default();
+            let mut spans = Vec::with_capacity(scope_spans.spans.len().min(span_size));
             for span in scope_spans.spans {
                 spans.push(parse_span(
                     service_name.clone(),
@@ -276,16 +294,47 @@ pub fn parse(request: ExportTraceServiceRequest) -> TraceSpans {
                     span,
                 ));
             }
+            groups.push(TraceSpanGroup {
+                service_name: service_name.clone(),
+                resource_attributes: Attributes::from(&resource_attrs[..]),
+                scope_name: scope.name,
+                scope_version: scope.version,
+                scope_attributes: Attributes::from(scope.attributes),
+                spans,
+            });
         }
     }
-    spans
+    groups
 }
 
 #[cfg(test)]
 mod tests {
-    use opentelemetry_proto::tonic::trace::v1::Status;
+    use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+    use opentelemetry_proto::tonic::common::v1::{
+        AnyValue, InstrumentationScope, KeyValue, any_value,
+    };
+    use opentelemetry_proto::tonic::resource::v1::Resource;
+    use opentelemetry_proto::tonic::trace::v1::{ResourceSpans, ScopeSpans, Span, Status};
 
-    use crate::otlp::trace::span::{bytes_to_hex_string, status_to_string};
+    use crate::otlp::trace::KEY_SERVICE_NAME;
+    use crate::otlp::trace::span::{bytes_to_hex_string, parse, status_to_string};
+
+    fn make_kv(key: &str, value: &str) -> KeyValue {
+        KeyValue {
+            key: key.to_string(),
+            value: Some(AnyValue {
+                value: Some(any_value::Value::StringValue(value.to_string())),
+            }),
+        }
+    }
+
+    fn make_span(trace_id: u8, span_id: u8) -> Span {
+        Span {
+            trace_id: vec![trace_id; 16],
+            span_id: vec![span_id; 8],
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn test_bytes_to_hex_string() {
@@ -314,5 +363,63 @@ mod tests {
             ("STATUS_CODE_OK".into(), message),
             status_to_string(&Some(status)),
         );
+    }
+
+    #[test]
+    fn test_parse_preserves_resource_scope_groups() {
+        let request = ExportTraceServiceRequest {
+            resource_spans: vec![
+                ResourceSpans {
+                    resource: Some(Resource {
+                        attributes: vec![make_kv(KEY_SERVICE_NAME, "svc-a")],
+                        ..Default::default()
+                    }),
+                    scope_spans: vec![
+                        ScopeSpans {
+                            scope: Some(InstrumentationScope {
+                                name: "scope-1".to_string(),
+                                ..Default::default()
+                            }),
+                            spans: vec![make_span(0x11, 0x21), make_span(0x12, 0x22)],
+                            ..Default::default()
+                        },
+                        ScopeSpans {
+                            scope: Some(InstrumentationScope {
+                                name: "scope-2".to_string(),
+                                ..Default::default()
+                            }),
+                            spans: vec![make_span(0x13, 0x23)],
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                },
+                ResourceSpans {
+                    resource: Some(Resource {
+                        attributes: vec![make_kv(KEY_SERVICE_NAME, "svc-b")],
+                        ..Default::default()
+                    }),
+                    scope_spans: vec![ScopeSpans {
+                        scope: Some(InstrumentationScope {
+                            name: "scope-3".to_string(),
+                            ..Default::default()
+                        }),
+                        spans: vec![make_span(0x14, 0x24)],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            ],
+        };
+
+        let groups = parse(request);
+        assert_eq!(groups.len(), 3);
+        assert_eq!(groups[0].service_name.as_deref(), Some("svc-a"));
+        assert_eq!(groups[0].scope_name, "scope-1");
+        assert_eq!(groups[0].spans.len(), 2);
+        assert_eq!(groups[1].scope_name, "scope-2");
+        assert_eq!(groups[1].spans.len(), 1);
+        assert_eq!(groups[2].service_name.as_deref(), Some("svc-b"));
+        assert_eq!(groups[2].scope_name, "scope-3");
     }
 }

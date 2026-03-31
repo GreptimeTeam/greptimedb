@@ -36,7 +36,7 @@ use servers::otlp::trace::coerce::{
     coerce_value_data, is_supported_trace_coercion, resolve_new_trace_column_type,
     trace_value_datatype,
 };
-use servers::otlp::trace::span::TraceSpan;
+use servers::otlp::trace::span::{TraceSpan, TraceSpanGroup};
 use servers::query_handler::{
     OpenTelemetryProtocolHandler, PipelineHandlerRef, TraceIngestOutcome,
 };
@@ -230,7 +230,7 @@ impl Instance {
         pipeline: &PipelineWay,
         pipeline_params: &GreptimePipelineParams,
         table_name: String,
-        spans: Vec<TraceSpan>,
+        groups: Vec<TraceSpanGroup>,
         ctx: QueryContextRef,
     ) -> ServerResult<TraceIngestOutcome> {
         let is_trace_v1_model = matches!(pipeline, PipelineWay::OtlpTraceDirectV1);
@@ -247,23 +247,25 @@ impl Instance {
             failure_messages: Vec::new(),
         };
 
-        let mut chunk = Vec::with_capacity(TRACE_INGEST_CHUNK_SIZE);
-        for span in spans {
-            chunk.push(span);
-            if chunk.len() == TRACE_INGEST_CHUNK_SIZE {
-                self.ingest_trace_chunk(
-                    &ingest_ctx,
-                    std::mem::replace(&mut chunk, Vec::with_capacity(TRACE_INGEST_CHUNK_SIZE)),
-                    ctx.clone(),
-                    &mut ingest_state,
-                )
-                .await?;
+        for group in groups {
+            let mut chunk = Vec::with_capacity(TRACE_INGEST_CHUNK_SIZE);
+            for span in group.spans {
+                chunk.push(span);
+                if chunk.len() == TRACE_INGEST_CHUNK_SIZE {
+                    self.ingest_trace_chunk(
+                        &ingest_ctx,
+                        std::mem::replace(&mut chunk, Vec::with_capacity(TRACE_INGEST_CHUNK_SIZE)),
+                        ctx.clone(),
+                        &mut ingest_state,
+                    )
+                    .await?;
+                }
             }
-        }
 
-        if !chunk.is_empty() {
-            self.ingest_trace_chunk(&ingest_ctx, chunk, ctx.clone(), &mut ingest_state)
-                .await?;
+            if !chunk.is_empty() {
+                self.ingest_trace_chunk(&ingest_ctx, chunk, ctx.clone(), &mut ingest_state)
+                    .await?;
+            }
         }
 
         OTLP_TRACES_ROWS.inc_by(ingest_state.outcome.accepted_spans as u64);

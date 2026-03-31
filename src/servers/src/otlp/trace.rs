@@ -29,7 +29,7 @@ use pipeline::{GreptimePipelineParams, PipelineWay};
 use session::context::QueryContextRef;
 
 use crate::error::{NotSupportedSnafu, Result};
-use crate::otlp::trace::span::{TraceSpan, TraceSpans};
+use crate::otlp::trace::span::{TraceSpan, TraceSpanGroups};
 use crate::query_handler::PipelineHandlerRef;
 
 // column names
@@ -91,7 +91,7 @@ impl TraceAuxData {
     }
 }
 
-pub fn parse(request: ExportTraceServiceRequest) -> TraceSpans {
+pub fn parse(request: ExportTraceServiceRequest) -> TraceSpanGroups {
     span::parse(request)
 }
 
