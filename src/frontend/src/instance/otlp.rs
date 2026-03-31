@@ -26,7 +26,7 @@ use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
 use pipeline::{GreptimePipelineParams, PipelineWay};
-use servers::error::{self, AuthSnafu, CatalogSnafu, Result as ServerResult};
+use servers::error::{self, AuthSnafu, Result as ServerResult};
 use servers::http::prom_store::PHYSICAL_TABLE_PARAM;
 use servers::interceptor::{OpenTelemetryProtocolInterceptor, OpenTelemetryProtocolInterceptorRef};
 use servers::otlp;
@@ -255,8 +255,7 @@ impl Instance {
             let table = self
                 .catalog_manager
                 .table(catalog, &schema, &req.table_name, None)
-                .await
-                .context(CatalogSnafu)?;
+                .await?;
 
             let Some(rows) = req.rows.as_mut() else {
                 continue;

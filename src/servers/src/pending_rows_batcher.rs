@@ -419,9 +419,7 @@ impl PendingRowsBatcher {
             .await
         };
 
-        for ((table_name, rows_schema), table_result) in
-            unique_tables.iter().zip(resolved_tables.into_iter())
-        {
+        for ((table_name, rows_schema), table_result) in unique_tables.iter().zip(resolved_tables) {
             let table = table_result?;
 
             if let Some(table) = table {
@@ -502,10 +500,8 @@ impl PendingRowsBatcher {
             .await
         };
 
-        for ((table_name, _), table_result) in plan
-            .tables_to_create
-            .iter()
-            .zip(created_table_results.into_iter())
+        for ((table_name, _), table_result) in
+            plan.tables_to_create.iter().zip(created_table_results)
         {
             let table = table_result?.with_context(|| error::UnexpectedResultSnafu {
                 reason: format!(
@@ -601,10 +597,8 @@ impl PendingRowsBatcher {
             .await
         };
 
-        for ((table_name, _), table_result) in plan
-            .tables_to_alter
-            .iter()
-            .zip(altered_table_results.into_iter())
+        for ((table_name, _), table_result) in
+            plan.tables_to_alter.iter().zip(altered_table_results)
         {
             let table = table_result?.with_context(|| error::UnexpectedResultSnafu {
                 reason: format!(
