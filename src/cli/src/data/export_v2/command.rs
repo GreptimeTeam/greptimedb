@@ -29,8 +29,8 @@ use crate::common::ObjectStoreConfig;
 use crate::data::export_v2::coordinator::export_data;
 use crate::data::export_v2::error::{
     ChunkTimeWindowRequiresBoundsSnafu, DatabaseSnafu, EmptyResultSnafu,
-    ManifestVersionMismatchSnafu, Result, ResumeConfigMismatchSnafu, SchemaOnlyModeMismatchSnafu,
-    UnexpectedValueTypeSnafu,
+    ManifestVersionMismatchSnafu, Result, ResumeConfigMismatchSnafu, SchemaOnlyArgsNotAllowedSnafu,
+    SchemaOnlyModeMismatchSnafu, UnexpectedValueTypeSnafu,
 };
 use crate::data::export_v2::extractor::SchemaExtractor;
 use crate::data::export_v2::manifest::{
@@ -142,6 +142,31 @@ impl ExportCreateCommand {
             return ChunkTimeWindowRequiresBoundsSnafu
                 .fail()
                 .map_err(BoxedError::new);
+        }
+        if self.schema_only {
+            let mut invalid_args = Vec::new();
+            if self.start_time.is_some() {
+                invalid_args.push("--start-time");
+            }
+            if self.end_time.is_some() {
+                invalid_args.push("--end-time");
+            }
+            if self.chunk_time_window.is_some() {
+                invalid_args.push("--chunk-time-window");
+            }
+            if self.format != DataFormat::Parquet {
+                invalid_args.push("--format");
+            }
+            if self.parallelism != 1 {
+                invalid_args.push("--parallelism");
+            }
+            if !invalid_args.is_empty() {
+                return SchemaOnlyArgsNotAllowedSnafu {
+                    args: invalid_args.join(", "),
+                }
+                .fail()
+                .map_err(BoxedError::new);
+            }
         }
 
         // Parse schemas (empty vec means all schemas)
@@ -656,6 +681,37 @@ mod tests {
         let error = result.err().unwrap().to_string();
 
         assert!(error.contains("chunk_time_window requires both --start-time and --end-time"));
+    }
+
+    #[tokio::test]
+    async fn test_build_rejects_data_export_args_in_schema_only_mode() {
+        let cmd = ExportCreateCommand::parse_from([
+            "export-v2-create",
+            "--addr",
+            "127.0.0.1:4000",
+            "--to",
+            "file:///tmp/export-v2-test",
+            "--schema-only",
+            "--start-time",
+            "2024-01-01T00:00:00Z",
+            "--end-time",
+            "2024-01-02T00:00:00Z",
+            "--chunk-time-window",
+            "1h",
+            "--format",
+            "csv",
+            "--parallelism",
+            "2",
+        ]);
+
+        let error = cmd.build().await.err().unwrap().to_string();
+
+        assert!(error.contains("--schema-only cannot be used with data export arguments"));
+        assert!(error.contains("--start-time"));
+        assert!(error.contains("--end-time"));
+        assert!(error.contains("--chunk-time-window"));
+        assert!(error.contains("--format"));
+        assert!(error.contains("--parallelism"));
     }
 
     #[test]

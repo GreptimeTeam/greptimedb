@@ -118,6 +118,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("--schema-only cannot be used with data export arguments: {}", args))]
+    SchemaOnlyArgsNotAllowed {
+        args: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Empty result from query"))]
     EmptyResult {
         #[snafu(implicit)]
@@ -187,7 +194,8 @@ impl ErrorExt for Error {
             | Error::UnsupportedScheme { .. }
             | Error::SchemaOnlyModeMismatch { .. }
             | Error::ResumeConfigMismatch { .. }
-            | Error::ManifestVersionMismatch { .. } => StatusCode::InvalidArguments,
+            | Error::ManifestVersionMismatch { .. }
+            | Error::SchemaOnlyArgsNotAllowed { .. } => StatusCode::InvalidArguments,
             Error::TimeParseInvalidFormat { .. }
             | Error::TimeParseEndBeforeStart { .. }
             | Error::ChunkTimeWindowRequiresBounds { .. } => StatusCode::InvalidArguments,
