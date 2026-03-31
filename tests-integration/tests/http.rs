@@ -40,7 +40,9 @@ use loki_proto::logproto::{EntryAdapter, LabelPairAdapter, PushRequest, StreamAd
 use loki_proto::prost_types::Timestamp;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
-use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+use opentelemetry_proto::tonic::collector::trace::v1::{
+    ExportTraceServiceRequest, ExportTraceServiceResponse,
+};
 use pipeline::GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME;
 use prost::Message;
 use serde_json::{Value, json};
@@ -5572,23 +5574,31 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
         ],
     );
     let res = send_trace_v1_req(&client, abort_table_name, abort_req, false).await;
-    assert_eq!(StatusCode::BAD_REQUEST, res.status());
-    let body: Value = res.json().await;
+    assert_eq!(StatusCode::OK, res.status());
+    let body = ExportTraceServiceResponse::decode(res.bytes().await).unwrap();
+    let partial_success = body.partial_success.as_ref().unwrap();
+    assert_eq!(partial_success.rejected_spans, 1);
     assert!(
-        body["error"].as_str().unwrap().contains(
-            "failed to coerce trace column 'span_attributes.attr_int' in table 'trace_type_abort'"
+        partial_success
+            .error_message
+            .contains("Accepted 1 spans, rejected 1 spans"),
+        "unexpected partial success body: {body:?}"
+    );
+    assert!(
+        partial_success.error_message.contains(
+            "Rejected span 00000000000000000000000000000013:0000000000000013 (InvalidArguments)"
         ),
-        "unexpected error body: {body}"
+        "unexpected partial success body: {body:?}"
     );
 
     validate_data(
         "otlp_traces_v1_type_abort_rows",
         &client,
         &format!(
-            "select trace_id, \"span_attributes.attr_int\" from {} order by trace_id;",
+            "select trace_id, \"span_attributes.attr_int\" from {} order by trace_id",
             abort_table_name
         ),
-        r#"[["00000000000000000000000000000011",10]]"#,
+        r#"[["00000000000000000000000000000011",10],["00000000000000000000000000000012",20]]"#,
     )
     .await;
 

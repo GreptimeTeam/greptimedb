@@ -19,7 +19,8 @@ use api::v1::{ColumnDataType, RowInsertRequests};
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use client::Output;
-use common_error::ext::BoxedError;
+use common_error::ext::{BoxedError, ErrorExt};
+use common_error::status_code::StatusCode;
 use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
 use common_telemetry::tracing;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
@@ -30,17 +31,44 @@ use servers::error::{self, AuthSnafu, CatalogSnafu, Result as ServerResult};
 use servers::http::prom_store::PHYSICAL_TABLE_PARAM;
 use servers::interceptor::{OpenTelemetryProtocolInterceptor, OpenTelemetryProtocolInterceptorRef};
 use servers::otlp;
+use servers::otlp::trace::TraceAuxData;
 use servers::otlp::trace::coerce::{
     coerce_value_data, is_supported_trace_coercion, resolve_new_trace_column_type,
     trace_value_datatype,
 };
-use servers::query_handler::{OpenTelemetryProtocolHandler, PipelineHandlerRef};
+use servers::otlp::trace::span::TraceSpan;
+use servers::query_handler::{
+    OpenTelemetryProtocolHandler, PipelineHandlerRef, TraceIngestOutcome,
+};
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 use table::requests::{OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM};
 
 use crate::instance::Instance;
 use crate::metrics::{OTLP_LOGS_ROWS, OTLP_METRICS_ROWS, OTLP_TRACES_ROWS};
+
+const TRACE_INGEST_CHUNK_SIZE: usize = 64;
+const TRACE_FAILURE_MESSAGE_LIMIT: usize = 4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChunkFailureReaction {
+    RetryPerSpan,
+    DiscardChunk,
+}
+
+struct TraceChunkIngestContext<'a> {
+    pipeline_handler: PipelineHandlerRef,
+    pipeline: &'a PipelineWay,
+    pipeline_params: &'a GreptimePipelineParams,
+    table_name: &'a str,
+    is_trace_v1_model: bool,
+}
+
+struct TraceIngestState {
+    aux_data: TraceAuxData,
+    outcome: TraceIngestOutcome,
+    failure_messages: Vec<String>,
+}
 
 #[async_trait]
 impl OpenTelemetryProtocolHandler for Instance {
@@ -116,7 +144,7 @@ impl OpenTelemetryProtocolHandler for Instance {
         pipeline_params: GreptimePipelineParams,
         table_name: String,
         ctx: QueryContextRef,
-    ) -> ServerResult<Output> {
+    ) -> ServerResult<TraceIngestOutcome> {
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()
@@ -128,32 +156,16 @@ impl OpenTelemetryProtocolHandler for Instance {
             .get::<OpenTelemetryProtocolInterceptorRef<servers::error::Error>>();
         interceptor_ref.pre_execute(ctx.clone())?;
 
-        let is_trace_v1_model = matches!(pipeline, PipelineWay::OtlpTraceDirectV1);
-
-        let (mut requests, rows) = otlp::trace::to_grpc_insert_requests(
-            request,
-            pipeline,
-            pipeline_params,
-            table_name,
-            &ctx,
+        let spans = otlp::trace::parse(request);
+        self.ingest_trace_spans(
             pipeline_handler,
-        )?;
-
-        OTLP_TRACES_ROWS.inc_by(rows as u64);
-
-        if is_trace_v1_model {
-            self.reconcile_trace_column_types(&mut requests, &ctx)
-                .await?;
-            self.handle_trace_inserts(requests, ctx)
-                .await
-                .map_err(BoxedError::new)
-                .context(error::ExecuteGrpcQuerySnafu)
-        } else {
-            self.handle_log_inserts(requests, ctx)
-                .await
-                .map_err(BoxedError::new)
-                .context(error::ExecuteGrpcQuerySnafu)
-        }
+            &pipeline,
+            &pipeline_params,
+            table_name,
+            spans,
+            ctx,
+        )
+        .await
     }
 
     #[tracing::instrument(skip_all)]
@@ -210,6 +222,262 @@ impl OpenTelemetryProtocolHandler for Instance {
 }
 
 impl Instance {
+    /// Ingest OTLP trace spans with chunk-level writes and span-level fallback on
+    /// deterministic chunk failures.
+    async fn ingest_trace_spans(
+        &self,
+        pipeline_handler: PipelineHandlerRef,
+        pipeline: &PipelineWay,
+        pipeline_params: &GreptimePipelineParams,
+        table_name: String,
+        spans: Vec<TraceSpan>,
+        ctx: QueryContextRef,
+    ) -> ServerResult<TraceIngestOutcome> {
+        let is_trace_v1_model = matches!(pipeline, PipelineWay::OtlpTraceDirectV1);
+        let ingest_ctx = TraceChunkIngestContext {
+            pipeline_handler,
+            pipeline,
+            pipeline_params,
+            table_name: &table_name,
+            is_trace_v1_model,
+        };
+        let mut ingest_state = TraceIngestState {
+            aux_data: TraceAuxData::default(),
+            outcome: TraceIngestOutcome::default(),
+            failure_messages: Vec::new(),
+        };
+
+        let mut chunk = Vec::with_capacity(TRACE_INGEST_CHUNK_SIZE);
+        for span in spans {
+            chunk.push(span);
+            if chunk.len() == TRACE_INGEST_CHUNK_SIZE {
+                self.ingest_trace_chunk(
+                    &ingest_ctx,
+                    std::mem::replace(&mut chunk, Vec::with_capacity(TRACE_INGEST_CHUNK_SIZE)),
+                    ctx.clone(),
+                    &mut ingest_state,
+                )
+                .await?;
+            }
+        }
+
+        if !chunk.is_empty() {
+            self.ingest_trace_chunk(&ingest_ctx, chunk, ctx.clone(), &mut ingest_state)
+                .await?;
+        }
+
+        OTLP_TRACES_ROWS.inc_by(ingest_state.outcome.accepted_spans as u64);
+
+        if !ingest_state.aux_data.is_empty() {
+            // Auxiliary trace tables are derived from spans whose main-table
+            // writes are already confirmed, so they never create new accepted
+            // spans and they do not affect rejected span counts.
+            let (aux_requests, _) = otlp::trace::to_grpc_insert_requests_for_aux_tables(
+                std::mem::take(&mut ingest_state.aux_data),
+                ingest_ctx.pipeline,
+                ingest_ctx.table_name,
+            )?;
+
+            if !aux_requests.inserts.is_empty()
+                && let Err(err) = self
+                    .insert_trace_requests(aux_requests, ingest_ctx.is_trace_v1_model, ctx)
+                    .await
+            {
+                self.push_trace_failure_message(
+                    &mut ingest_state.failure_messages,
+                    format!(
+                        "Auxiliary trace tables were not fully updated ({})",
+                        err.status_code().as_ref()
+                    ),
+                );
+            }
+        }
+
+        ingest_state.outcome.error_message = Self::finish_trace_failure_message(
+            ingest_state.outcome.accepted_spans,
+            ingest_state.outcome.rejected_spans,
+            ingest_state.failure_messages,
+        );
+
+        Ok(ingest_state.outcome)
+    }
+
+    /// Ingest one owned trace chunk so successful spans can be moved into the
+    /// accepted set without extra cloning.
+    async fn ingest_trace_chunk(
+        &self,
+        ingest_ctx: &TraceChunkIngestContext<'_>,
+        chunk: Vec<TraceSpan>,
+        ctx: QueryContextRef,
+        ingest_state: &mut TraceIngestState,
+    ) -> ServerResult<()> {
+        // Try the fast path first so healthy batches keep their original
+        // throughput and write amplification stays low.
+        let (requests, chunk_rows) = otlp::trace::to_grpc_insert_requests_from_spans(
+            &chunk,
+            ingest_ctx.pipeline,
+            ingest_ctx.pipeline_params,
+            ingest_ctx.table_name,
+            &ctx,
+            ingest_ctx.pipeline_handler.clone(),
+        )?;
+
+        match self
+            .insert_trace_requests(requests, ingest_ctx.is_trace_v1_model, ctx.clone())
+            .await
+        {
+            Ok(output) => {
+                ingest_state.outcome.write_cost += output.meta.cost;
+                ingest_state.outcome.accepted_spans += chunk_rows;
+                for span in &chunk {
+                    ingest_state.aux_data.observe_span(span);
+                }
+            }
+            Err(err) => match Self::classify_trace_chunk_failure(err.status_code()) {
+                ChunkFailureReaction::RetryPerSpan => {
+                    self.push_trace_failure_message(
+                        &mut ingest_state.failure_messages,
+                        format!("Chunk fallback triggered by {}", err.status_code().as_ref()),
+                    );
+                    // Only deterministic failures are retried span by span.
+                    // Ambiguous failures are handled below without retrying
+                    // because the chunk may already have been ingested.
+                    self.ingest_trace_chunk_span_by_span(
+                        ingest_ctx,
+                        chunk,
+                        ctx.clone(),
+                        ingest_state,
+                    )
+                    .await?;
+                }
+                ChunkFailureReaction::DiscardChunk => {
+                    ingest_state.outcome.rejected_spans += chunk.len();
+                    self.push_trace_failure_message(
+                        &mut ingest_state.failure_messages,
+                        format!(
+                            "Discarded {} spans after ambiguous chunk failure ({})",
+                            chunk.len(),
+                            err.status_code().as_ref()
+                        ),
+                    );
+                    // TODO(shuiyisong): Add an idempotent retry-safe recovery path for
+                    // ambiguous chunk failures such as timeout-like errors.
+                }
+            },
+        }
+
+        Ok(())
+    }
+
+    /// Retry spans one by one only after a deterministic chunk failure.
+    async fn ingest_trace_chunk_span_by_span(
+        &self,
+        ingest_ctx: &TraceChunkIngestContext<'_>,
+        chunk: Vec<TraceSpan>,
+        ctx: QueryContextRef,
+        ingest_state: &mut TraceIngestState,
+    ) -> ServerResult<()> {
+        for span in chunk {
+            let (requests, rows) = otlp::trace::to_grpc_insert_requests_from_spans(
+                std::slice::from_ref(&span),
+                ingest_ctx.pipeline,
+                ingest_ctx.pipeline_params,
+                ingest_ctx.table_name,
+                &ctx,
+                ingest_ctx.pipeline_handler.clone(),
+            )?;
+
+            match self
+                .insert_trace_requests(requests, ingest_ctx.is_trace_v1_model, ctx.clone())
+                .await
+            {
+                Ok(output) => {
+                    ingest_state.outcome.write_cost += output.meta.cost;
+                    ingest_state.outcome.accepted_spans += rows;
+                    ingest_state.aux_data.observe_span(&span);
+                }
+                Err(err) => {
+                    ingest_state.outcome.rejected_spans += 1;
+                    self.push_trace_failure_message(
+                        &mut ingest_state.failure_messages,
+                        format!(
+                            "Rejected span {}:{} ({})",
+                            span.trace_id,
+                            span.span_id,
+                            err.status_code().as_ref()
+                        ),
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Reconcile and insert one trace request batch.
+    async fn insert_trace_requests(
+        &self,
+        mut requests: RowInsertRequests,
+        is_trace_v1_model: bool,
+        ctx: QueryContextRef,
+    ) -> ServerResult<Output> {
+        if is_trace_v1_model {
+            self.reconcile_trace_column_types(&mut requests, &ctx)
+                .await?;
+            self.handle_trace_inserts(requests, ctx)
+                .await
+                .map_err(BoxedError::new)
+                .context(error::ExecuteGrpcQuerySnafu)
+        } else {
+            self.handle_log_inserts(requests, ctx)
+                .await
+                .map_err(BoxedError::new)
+                .context(error::ExecuteGrpcQuerySnafu)
+        }
+    }
+
+    // TODO(shuiyisong): review this
+    fn classify_trace_chunk_failure(status: StatusCode) -> ChunkFailureReaction {
+        match status {
+            StatusCode::InvalidArguments
+            | StatusCode::InvalidSyntax
+            | StatusCode::Unsupported
+            | StatusCode::TableNotFound
+            | StatusCode::TableColumnNotFound
+            | StatusCode::TableColumnExists
+            | StatusCode::DatabaseNotFound => ChunkFailureReaction::RetryPerSpan,
+            _ => ChunkFailureReaction::DiscardChunk,
+        }
+    }
+
+    fn push_trace_failure_message(&self, messages: &mut Vec<String>, message: String) {
+        if messages.len() < TRACE_FAILURE_MESSAGE_LIMIT {
+            messages.push(message);
+        }
+    }
+
+    fn finish_trace_failure_message(
+        accepted_spans: usize,
+        rejected_spans: usize,
+        messages: Vec<String>,
+    ) -> Option<String> {
+        if rejected_spans == 0 && messages.is_empty() {
+            return None;
+        }
+
+        let mut summary = format!(
+            "Accepted {} spans, rejected {} spans",
+            accepted_spans, rejected_spans
+        );
+
+        if !messages.is_empty() {
+            summary.push_str(": ");
+            summary.push_str(&messages.join("; "));
+        }
+
+        Some(summary)
+    }
+
     /// Picks the final datatype for one trace column.
     ///
     /// Existing table schema is authoritative when present. Otherwise we resolve the
@@ -427,5 +695,46 @@ fn is_trace_reconcile_candidate_type(datatype: ColumnDataType) -> bool {
 fn push_observed_trace_type(observed_types: &mut Vec<ColumnDataType>, datatype: ColumnDataType) {
     if !observed_types.contains(&datatype) {
         observed_types.push(datatype);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use common_error::status_code::StatusCode;
+
+    use super::{ChunkFailureReaction, Instance};
+
+    #[test]
+    fn test_classify_trace_chunk_failure() {
+        assert_eq!(
+            Instance::classify_trace_chunk_failure(StatusCode::InvalidArguments),
+            ChunkFailureReaction::RetryPerSpan
+        );
+        assert_eq!(
+            Instance::classify_trace_chunk_failure(StatusCode::TableColumnNotFound),
+            ChunkFailureReaction::RetryPerSpan
+        );
+        assert_eq!(
+            Instance::classify_trace_chunk_failure(StatusCode::DeadlineExceeded),
+            ChunkFailureReaction::DiscardChunk
+        );
+        assert_eq!(
+            Instance::classify_trace_chunk_failure(StatusCode::StorageUnavailable),
+            ChunkFailureReaction::DiscardChunk
+        );
+    }
+
+    #[test]
+    fn test_finish_trace_failure_message() {
+        let message = Instance::finish_trace_failure_message(
+            3,
+            2,
+            vec!["Rejected span trace:span (InvalidArguments)".to_string()],
+        )
+        .unwrap();
+        assert!(message.contains("Accepted 3 spans, rejected 2 spans"));
+        assert!(message.contains("Rejected span trace:span"));
+
+        assert_eq!(Instance::finish_trace_failure_message(2, 0, vec![]), None);
     }
 }
