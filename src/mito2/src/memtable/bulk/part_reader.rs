@@ -127,6 +127,7 @@ impl EncodedBulkPartIter {
                 self.pk_filter
                     .as_mut()
                     .map(|f| f as &mut dyn PrimaryKeyFilter),
+                &mut self.metrics,
             )? {
                 // Update metrics
                 self.metrics.num_batches += 1;
@@ -156,6 +157,7 @@ impl EncodedBulkPartIter {
                     self.pk_filter
                         .as_mut()
                         .map(|f| f as &mut dyn PrimaryKeyFilter),
+                    &mut self.metrics,
                 )? {
                     // Update metrics
                     self.metrics.num_batches += 1;
@@ -189,12 +191,14 @@ impl Iterator for EncodedBulkPartIter {
 impl Drop for EncodedBulkPartIter {
     fn drop(&mut self) {
         common_telemetry::debug!(
-            "EncodedBulkPartIter region: {}, metrics: total_series={}, num_rows={}, num_batches={}, scan_cost={:?}",
+            "EncodedBulkPartIter region: {}, metrics: total_series={}, num_rows={}, num_batches={}, scan_cost={:?}, prefilter_cost={:?}, prefilter_rows_filtered={}",
             self.context.region_id(),
             self.metrics.total_series,
             self.metrics.num_rows,
             self.metrics.num_batches,
-            self.metrics.scan_cost
+            self.metrics.scan_cost,
+            self.metrics.prefilter_cost,
+            self.metrics.prefilter_rows_filtered
         );
 
         // Report MemScanMetrics if not already reported
@@ -309,6 +313,7 @@ impl BulkPartBatchIter {
             self.pk_filter
                 .as_mut()
                 .map(|f| f as &mut dyn PrimaryKeyFilter),
+            &mut self.metrics,
         )?
         else {
             self.metrics.scan_cost += start.elapsed();
@@ -349,12 +354,14 @@ impl Iterator for BulkPartBatchIter {
 impl Drop for BulkPartBatchIter {
     fn drop(&mut self) {
         common_telemetry::debug!(
-            "BulkPartBatchIter region: {}, metrics: total_series={}, num_rows={}, num_batches={}, scan_cost={:?}",
+            "BulkPartBatchIter region: {}, metrics: total_series={}, num_rows={}, num_batches={}, scan_cost={:?}, prefilter_cost={:?}, prefilter_rows_filtered={}",
             self.context.region_id(),
             self.metrics.total_series,
             self.metrics.num_rows,
             self.metrics.num_batches,
-            self.metrics.scan_cost
+            self.metrics.scan_cost,
+            self.metrics.prefilter_cost,
+            self.metrics.prefilter_rows_filtered
         );
 
         // Report MemScanMetrics if not already reported
@@ -380,14 +387,25 @@ fn apply_combined_filters(
     record_batch: RecordBatch,
     skip_fields: bool,
     pk_filter: Option<&mut dyn PrimaryKeyFilter>,
+    metrics: &mut MemScanMetricsData,
 ) -> error::Result<Option<RecordBatch>> {
     // Apply PK prefilter on raw batch before convert_batch to reduce conversion overhead.
     let has_pk_prefilter = pk_filter.is_some();
     let record_batch = if let Some(pk_filter) = pk_filter {
+        let rows_before = record_batch.num_rows();
+        let prefilter_start = Instant::now();
         let pk_col_idx = primary_key_column_index(record_batch.num_columns());
         match prefilter_flat_batch_by_primary_key(record_batch, pk_col_idx, pk_filter)? {
-            Some(batch) => batch,
-            None => return Ok(None),
+            Some(batch) => {
+                metrics.prefilter_cost += prefilter_start.elapsed();
+                metrics.prefilter_rows_filtered += rows_before - batch.num_rows();
+                batch
+            }
+            None => {
+                metrics.prefilter_cost += prefilter_start.elapsed();
+                metrics.prefilter_rows_filtered += rows_before;
+                return Ok(None);
+            }
         }
     } else {
         record_batch
