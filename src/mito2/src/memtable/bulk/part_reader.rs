@@ -306,7 +306,9 @@ impl BulkPartBatchIter {
             &self.sequence,
             projected_batch,
             skip_fields,
-            self.pk_filter.as_mut().map(|f| f as &mut dyn PrimaryKeyFilter),
+            self.pk_filter
+                .as_mut()
+                .map(|f| f as &mut dyn PrimaryKeyFilter),
         )?
         else {
             self.metrics.scan_cost += start.elapsed();

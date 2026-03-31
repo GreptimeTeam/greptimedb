@@ -148,7 +148,7 @@ impl BulkIterContext {
         filters: &[SimpleFilterContext],
     ) -> Option<Arc<Vec<SimpleFilterEvaluator>>> {
         let flat_format = read_format.as_flat()?;
-        if !flat_format.batch_has_raw_pk_columns() {
+        if flat_format.batch_has_raw_pk_columns() {
             return None;
         }
         let metadata = read_format.metadata();
