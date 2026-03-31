@@ -1259,6 +1259,9 @@ async fn flush_batch_physical(
     let mut modified_batches: Vec<RecordBatch> = Vec::with_capacity(table_batches.len());
     let mut modified_row_count: usize = 0;
 
+    let mut modify_elapsed = Duration::ZERO;
+    let mut columns_taxonomy_elapsed = Duration::ZERO;
+
     'next_table: for table_batch in table_batches {
         let table_id = table_batch.table_id;
 
@@ -1270,6 +1273,7 @@ async fn flush_batch_physical(
             // are added between submits.
             // In prom batches, Float64 = value, Timestamp = timestamp, Utf8 = tags.
             let batch_schema = batch.schema();
+            let start = Instant::now();
             let (tag_columns, essential_col_indices) = match columns_taxonomy(
                 &batch_schema,
                 &table_batch.table_name,
@@ -1287,21 +1291,22 @@ async fn flush_batch_physical(
                 }
             };
 
+            columns_taxonomy_elapsed += start.elapsed();
             if tag_columns.is_empty() && essential_col_indices.is_empty() {
                 continue;
             }
 
             let modified = {
-                let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
-                    .with_label_values(&["flush_physical_modify_batch"])
-                    .start_timer();
+                let start = Instant::now();
                 match modify_batch_sparse(
                     batch.clone(),
                     table_id,
                     &tag_columns,
                     &essential_col_indices,
                 ) {
-                    Ok(batch) => batch,
+                    Ok(batch) => {
+                        modify_elapsed += start.elapsed();
+                        batch },
                     Err(err) => {
                         record_failure!(
                             table_batch.row_count,
@@ -1319,6 +1324,13 @@ async fn flush_batch_physical(
             modified_batches.push(modified);
         }
     }
+
+    PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
+        .with_label_values(&["flush_physical_modify_batch"])
+        .observe(modify_elapsed.as_secs_f64());
+    PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
+        .with_label_values(&["flush_physical_columns_taxonomy"])
+        .observe(columns_taxonomy_elapsed.as_secs_f64());
 
     if modified_batches.is_empty() {
         if first_error.is_none() {
