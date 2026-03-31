@@ -727,7 +727,18 @@ impl PromPlanner {
                         self.ctx.table_name = Some("rhs".to_string());
                     }
                 }
-                let mut field_columns = left_field_columns.iter().zip(right_field_columns.iter());
+                let field_columns = left_field_columns
+                    .iter()
+                    .zip(right_field_columns.iter())
+                    .collect::<Vec<_>>();
+                // PromQL binary arithmetic only combines the shared prefix of value columns.
+                // Keep the output field count aligned with that zipped prefix so planning
+                // remains stable even when the two sides have uneven multi-field schemas.
+                self.ctx.field_columns = field_columns
+                    .iter()
+                    .map(|(left_col_name, _)| (*left_col_name).clone())
+                    .collect();
+                let mut field_columns = field_columns.into_iter();
 
                 let join_plan = self.join_on_non_field_columns(
                     left_input,
@@ -849,9 +860,17 @@ impl PromPlanner {
             }
         }
 
-        let mut field_columns = repeated_field_columns
+        let field_columns = repeated_field_columns
             .iter()
-            .zip(other_field_columns.iter());
+            .zip(other_field_columns.iter())
+            .collect::<Vec<_>>();
+        // The collapsed fast path must preserve the same zipped-field semantics as the
+        // original two-step plan: only the shared prefix of value columns participates.
+        self.ctx.field_columns = field_columns
+            .iter()
+            .map(|(repeated_col_name, _)| (*repeated_col_name).clone())
+            .collect();
+        let mut field_columns = field_columns.into_iter();
 
         let join_plan = self.join_on_non_field_columns(
             repeated_input,
@@ -4453,10 +4472,26 @@ mod test {
         num_tag: usize,
         num_field: usize,
     ) -> DfTableSourceProvider {
+        let table_specs = table_name_tuples
+            .iter()
+            .map(|(schema_name, table_name)| ((schema_name.clone(), table_name.clone()), num_field))
+            .collect::<Vec<_>>();
+        build_test_table_provider_with_tsid_fields(&table_specs, num_tag).await
+    }
+
+    async fn build_test_table_provider_with_tsid_fields(
+        table_specs: &[((String, String), usize)],
+        num_tag: usize,
+    ) -> DfTableSourceProvider {
         let catalog_list = MemoryCatalogManager::with_default_setup();
 
         let physical_table_name = "phy";
         let physical_table_id = 999u32;
+        let physical_num_field = table_specs
+            .iter()
+            .map(|(_, num_field)| *num_field)
+            .max()
+            .unwrap_or(0);
 
         // Register a metric engine physical table with internal columns.
         {
@@ -4487,7 +4522,7 @@ mod test {
                 )
                 .with_time_index(true),
             );
-            for i in 0..num_field {
+            for i in 0..physical_num_field {
                 columns.push(ColumnSchema::new(
                     format!("field_{i}"),
                     ConcreteDataType::float64_datatype(),
@@ -4500,7 +4535,7 @@ mod test {
             let table_meta = TableMetaBuilder::empty()
                 .schema(schema)
                 .primary_key_indices(primary_key_indices)
-                .value_indices((2 + num_tag..2 + num_tag + 1 + num_field).collect())
+                .value_indices((2 + num_tag..2 + num_tag + 1 + physical_num_field).collect())
                 .engine(METRIC_ENGINE_NAME.to_string())
                 .next_column_id(1024)
                 .build()
@@ -4527,7 +4562,7 @@ mod test {
         }
 
         // Register metric engine logical tables without `__tsid`, referencing the physical table.
-        for (idx, (schema_name, table_name)) in table_name_tuples.iter().enumerate() {
+        for (idx, ((schema_name, table_name), num_field)) in table_specs.iter().enumerate() {
             let mut columns = vec![];
             for i in 0..num_tag {
                 columns.push(ColumnSchema::new(
@@ -4544,7 +4579,7 @@ mod test {
                 )
                 .with_time_index(true),
             );
-            for i in 0..num_field {
+            for i in 0..*num_field {
                 columns.push(ColumnSchema::new(
                     format!("field_{i}"),
                     ConcreteDataType::float64_datatype(),
@@ -4562,7 +4597,7 @@ mod test {
             let table_meta = TableMetaBuilder::empty()
                 .schema(schema)
                 .primary_key_indices((0..num_tag).collect())
-                .value_indices((num_tag + 1..num_tag + 1 + num_field).collect())
+                .value_indices((num_tag + 1..num_tag + 1 + *num_field).collect())
                 .engine(METRIC_ENGINE_NAME.to_string())
                 .options(options)
                 .next_column_id(1024)
@@ -5108,6 +5143,114 @@ mod test {
         let plan_str = plan.display_indent_schema().to_string();
         assert_eq!(plan_str.matches("__tsid =").count(), 1, "{plan_str}");
         assert!(!plan_str.contains("tag_0 ="), "{plan_str}");
+    }
+
+    #[tokio::test]
+    async fn repeated_tsid_binary_operand_uses_shorter_field_side() {
+        let prom_expr =
+            parser::parse("((two_field_metric - one_field_metric) / one_field_metric) * 100")
+                .unwrap();
+        let eval_stmt = EvalStmt {
+            expr: prom_expr,
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+
+        let table_provider = build_test_table_provider_with_tsid_fields(
+            &[
+                (
+                    (
+                        DEFAULT_SCHEMA_NAME.to_string(),
+                        "two_field_metric".to_string(),
+                    ),
+                    2,
+                ),
+                (
+                    (
+                        DEFAULT_SCHEMA_NAME.to_string(),
+                        "one_field_metric".to_string(),
+                    ),
+                    1,
+                ),
+            ],
+            1,
+        )
+        .await;
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+
+        let field_names = plan
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().clone())
+            .collect::<Vec<_>>();
+        let value_columns = field_names
+            .iter()
+            .filter(|name| {
+                *name != "tag_0" && *name != "timestamp" && *name != DATA_SCHEMA_TSID_COLUMN_NAME
+            })
+            .count();
+        assert_eq!(value_columns, 1, "{field_names:?}");
+    }
+
+    #[tokio::test]
+    async fn tsid_binary_join_uses_shorter_field_side() {
+        let prom_expr = parser::parse("one_field_metric / two_field_metric").unwrap();
+        let eval_stmt = EvalStmt {
+            expr: prom_expr,
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+
+        let table_provider = build_test_table_provider_with_tsid_fields(
+            &[
+                (
+                    (
+                        DEFAULT_SCHEMA_NAME.to_string(),
+                        "one_field_metric".to_string(),
+                    ),
+                    1,
+                ),
+                (
+                    (
+                        DEFAULT_SCHEMA_NAME.to_string(),
+                        "two_field_metric".to_string(),
+                    ),
+                    2,
+                ),
+            ],
+            1,
+        )
+        .await;
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+
+        let field_names = plan
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().clone())
+            .collect::<Vec<_>>();
+        let value_columns = field_names
+            .iter()
+            .filter(|name| {
+                *name != "tag_0" && *name != "timestamp" && *name != DATA_SCHEMA_TSID_COLUMN_NAME
+            })
+            .count();
+        assert_eq!(value_columns, 1, "{field_names:?}");
     }
 
     #[tokio::test]
