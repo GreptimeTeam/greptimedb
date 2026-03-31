@@ -1386,6 +1386,25 @@ async fn flush_batch_physical(
         }
     };
 
+    let stripped_batch = if partition_columns.is_empty() {
+        combined_batch
+    } else {
+        // Strip partition columns before encoding and sending requests.
+        match strip_partition_columns_from_batch(combined_batch) {
+            Ok(batch) => batch,
+            Err(err) => {
+                record_failure!(
+                    total_row_count,
+                    format!(
+                        "Failed to strip partition columns for physical table '{}': {:?}",
+                        physical_table_name, err
+                    )
+                );
+                return;
+            }
+        }
+    };
+
     let mut region_writes = Vec::new();
     for (region_number, mask) in region_masks {
         if mask.select_none() {
@@ -1393,37 +1412,18 @@ async fn flush_batch_physical(
         }
 
         let region_batch = if mask.select_all() {
-            combined_batch.clone()
+            stripped_batch.clone()
         } else {
             let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
                 .with_label_values(&["flush_physical_filter_record_batch"])
                 .start_timer();
-            match filter_record_batch(&combined_batch, mask.array()) {
+            match filter_record_batch(&stripped_batch, mask.array()) {
                 Ok(batch) => batch,
                 Err(err) => {
                     record_failure!(
                         total_row_count,
                         format!(
                             "Failed to filter combined batch for physical table '{}': {:?}",
-                            physical_table_name, err
-                        )
-                    );
-                    continue;
-                }
-            }
-        };
-
-        let region_batch = if partition_columns.is_empty() {
-            region_batch
-        } else {
-            // Strip partition columns before encoding and sending requests.
-            match strip_partition_columns_from_batch(region_batch) {
-                Ok(batch) => batch,
-                Err(err) => {
-                    record_failure!(
-                        total_row_count,
-                        format!(
-                            "Failed to strip partition columns for physical table '{}': {:?}",
                             physical_table_name, err
                         )
                     );
