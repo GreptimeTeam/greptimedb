@@ -217,9 +217,9 @@ impl PrefilterContextBuilder {
             return None;
         }
 
-        // Only flat format with dictionary-encoded PKs supports PK prefiltering.
+        // Only perform PK prefiltering for primary-key-to-flat conversion path.
         let flat_format = read_format.as_flat()?;
-        if !flat_format.raw_batch_has_primary_key_dictionary() {
+        if flat_format.batch_has_raw_pk_columns() {
             return None;
         }
 
