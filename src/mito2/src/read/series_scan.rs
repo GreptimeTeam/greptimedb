@@ -223,7 +223,8 @@ impl SeriesScan {
         let (senders, receivers) = new_channel_list(self.properties.num_partitions());
         let mut distributor = SeriesDistributor {
             stream_ctx: self.stream_ctx.clone(),
-            semaphore: Some(Arc::new(Semaphore::new(self.properties.num_partitions()))),
+            range_semaphore: Some(Arc::new(Semaphore::new(self.properties.num_partitions()))),
+            final_merge_semaphore: Some(Arc::new(Semaphore::new(self.properties.num_partitions()))),
             partitions: self.properties.partitions.clone(),
             pruner: self.pruner.clone(),
             senders,
@@ -415,8 +416,13 @@ impl SeriesScan {
 struct SeriesDistributor {
     /// Context for the scan stream.
     stream_ctx: Arc<StreamContext>,
-    /// Optional semaphore for limiting the number of concurrent scans.
-    semaphore: Option<Arc<Semaphore>>,
+    /// Semaphore for file scanning and range-level merging.
+    range_semaphore: Option<Arc<Semaphore>>,
+    /// Semaphore for the final merge across all range streams.
+    /// Must be separate from `range_semaphore` to avoid deadlock: final merge tasks
+    /// hold a permit while waiting for data from range-level merge tasks, which also
+    /// need permits to produce data.
+    final_merge_semaphore: Option<Arc<Semaphore>>,
     /// Partition ranges to scan.
     partitions: Vec<Vec<PartitionRange>>,
     /// Shared pruner for file range building.
@@ -489,8 +495,8 @@ impl SeriesDistributor {
                 let part_range = *part_range;
                 let part_metrics = part_metrics.clone();
                 let partition_pruner = partition_pruner.clone();
-                let file_scan_semaphore = self.semaphore.clone();
-                let merge_semaphore = self.semaphore.clone();
+                let file_scan_semaphore = self.range_semaphore.clone();
+                let merge_semaphore = self.range_semaphore.clone();
                 tasks.push(common_runtime::spawn_global(async move {
                     SeqScan::build_flat_partition_range_read(
                         &stream_ctx,
@@ -517,10 +523,12 @@ impl SeriesDistributor {
         );
 
         // Each partition range stream is already deduped, so skip dedup here.
+        // Use a separate semaphore for the final merge to avoid deadlock with
+        // range-level merge tasks that share the range_semaphore.
         let mut reader = SeqScan::build_flat_reader_from_sources(
             &self.stream_ctx,
             range_streams,
-            self.semaphore.clone(),
+            self.final_merge_semaphore.clone(),
             Some(&part_metrics),
             true,
         )
@@ -617,17 +625,19 @@ impl SeriesDistributor {
                     &part_metrics,
                     partition_pruner.clone(),
                     &mut sources,
-                    self.semaphore.clone(),
+                    self.range_semaphore.clone(),
                 )
                 .await?;
             }
         }
 
         // Builds a reader that merge sources from all parts.
+        // Use a separate semaphore for the final merge to avoid deadlock with
+        // range-level tasks that share the range_semaphore.
         let mut reader = SeqScan::build_reader_from_sources(
             &self.stream_ctx,
             sources,
-            self.semaphore.clone(),
+            self.final_merge_semaphore.clone(),
             Some(&part_metrics),
         )
         .await?;
