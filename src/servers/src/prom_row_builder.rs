@@ -27,7 +27,6 @@ use arrow::array::{
     TimestampMillisecondBuilder, TimestampNanosecondBuilder, TimestampSecondBuilder,
     new_null_array,
 };
-use arrow::compute::cast;
 use arrow::datatypes::{DataType as ArrowDataType, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use arrow_schema::TimeUnit;
@@ -158,13 +157,7 @@ pub(crate) fn rows_to_aligned_record_batch(
                 src_arrow_type.clone(),
                 row_count,
             )?;
-            if array.data_type() != target_field.data_type() {
-                columns.push(
-                    cast(array.as_ref(), target_field.data_type()).context(error::ArrowSnafu)?,
-                );
-            } else {
-                columns.push(array);
-            }
+            columns.push(array);
         } else {
             columns.push(new_null_array(target_field.data_type(), row_count));
         }

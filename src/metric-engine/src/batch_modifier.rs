@@ -38,7 +38,6 @@ pub struct TagColumnInfo {
 }
 
 /// Computes `__tsid` values for each row.
-#[allow(dead_code)]
 pub fn compute_tsid_array(
     batch: &RecordBatch,
     sorted_tag_columns: &[TagColumnInfo],

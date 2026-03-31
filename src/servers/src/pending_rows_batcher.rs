@@ -1306,7 +1306,8 @@ async fn flush_batch_physical(
                 ) {
                     Ok(batch) => {
                         modify_elapsed += start.elapsed();
-                        batch },
+                        batch
+                    }
                     Err(err) => {
                         record_failure!(
                             table_batch.row_count,
