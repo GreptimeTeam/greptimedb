@@ -24,12 +24,11 @@ use api::v1::RowInsertRequests;
 pub use common_catalog::consts::{
     PARENT_SPAN_ID_COLUMN, SPAN_ID_COLUMN, SPAN_NAME_COLUMN, TRACE_ID_COLUMN,
 };
-use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use pipeline::{GreptimePipelineParams, PipelineWay};
 use session::context::QueryContextRef;
 
 use crate::error::{NotSupportedSnafu, Result};
-use crate::otlp::trace::span::{TraceSpan, TraceSpanGroups};
+use crate::otlp::trace::span::TraceSpan;
 use crate::query_handler::PipelineHandlerRef;
 
 // column names
@@ -89,10 +88,6 @@ impl TraceAuxData {
     pub fn is_empty(&self) -> bool {
         self.services.is_empty() && self.operations.is_empty()
     }
-}
-
-pub fn parse(request: ExportTraceServiceRequest) -> TraceSpanGroups {
-    span::parse(request)
 }
 
 /// Convert a subset of trace spans to GreptimeDB row insert requests.

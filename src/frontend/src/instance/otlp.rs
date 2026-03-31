@@ -156,7 +156,7 @@ impl OpenTelemetryProtocolHandler for Instance {
             .get::<OpenTelemetryProtocolInterceptorRef<servers::error::Error>>();
         interceptor_ref.pre_execute(ctx.clone())?;
 
-        let spans = otlp::trace::parse(request);
+        let spans = otlp::trace::span::parse(request);
         self.ingest_trace_spans(
             pipeline_handler,
             &pipeline,
