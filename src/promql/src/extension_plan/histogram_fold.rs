@@ -20,8 +20,8 @@ use std::task::Poll;
 use std::time::Instant;
 
 use common_telemetry::warn;
-use datafusion::arrow::array::{Array, AsArray, StringArray};
-use datafusion::arrow::compute::{SortOptions, concat_batches};
+use datafusion::arrow::array::{Array, AsArray, Float64Array, StringArray, UInt32Array};
+use datafusion::arrow::compute::{self as arrow_compute, SortOptions, concat_batches};
 use datafusion::arrow::datatypes::{DataType, Float64Type, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::stats::Precision;
@@ -573,6 +573,8 @@ impl ExecutionPlan for HistogramFoldExec {
             output_buffered_rows: 0,
             cached_le_parsed: None,
             counters_buf: Vec::new(),
+            optimistic_output_batches: Vec::new(),
+            optimistic_output_rows: 0,
         }))
     }
 
@@ -641,6 +643,10 @@ pub struct HistogramFoldStream {
     cached_le_parsed: Option<Vec<f64>>,
     /// Reusable buffer for counter values to avoid per-group allocation.
     counters_buf: Vec<f64>,
+
+    /// Output batches from the optimistic path (batch-take approach, bypasses MutableVector).
+    optimistic_output_batches: Vec<RecordBatch>,
+    optimistic_output_rows: usize,
 
     // runtime things
     input: SendableRecordBatchStream,
@@ -786,29 +792,30 @@ impl HistogramFoldStream {
         Ok(None)
     }
 
-    /// Fold record batches from input buffer and put to output buffer
+    /// Fold record batches from input buffer and put to output buffer.
+    ///
+    /// Uses a batch-take approach: collects one take index per group (pointing
+    /// to the first row), then applies `compute::take` for all normal columns
+    /// at once. This avoids `Helper::try_into_vectors` and per-row
+    /// `MutableVector::push_value_ref` overhead entirely.
     fn fold_buf(&mut self, bucket_num: usize) -> DataFusionResult<()> {
         let batch = concat_batches(&self.input_schema, self.input_buffer.drain(..).as_ref())?;
         let mut remaining_rows = self.input_buffered_rows;
         let mut cursor = 0;
 
-        // TODO(LFC): Try to get rid of the Arrow array to vector conversion here.
-        let vectors = Helper::try_into_vectors(batch.columns())
-            .map_err(|e| DataFusionError::Execution(e.to_string()))?;
-        let le_array = batch.column(self.le_column_index);
-        let le_array = le_array.as_string::<i32>();
-        let field_array = batch.column(self.field_column_index);
-        let field_array = field_array.as_primitive::<Float64Type>();
-        let mut tag_values_buf = Vec::with_capacity(self.normal_indices.len());
+        let le_array = batch.column(self.le_column_index).as_string::<i32>();
+        let field_array = batch
+            .column(self.field_column_index)
+            .as_primitive::<Float64Type>();
+        let field_values = field_array.values();
+        let field_no_nulls = field_array.null_count() == 0;
 
         // Parse le (bucket bound) values once and cache for reuse across all groups.
-        // The invariant is that all groups have the same le values.
         if self.cached_le_parsed.is_none() && remaining_rows >= bucket_num {
             let mut parsed = Vec::with_capacity(bucket_num);
             for bias in 0..bucket_num {
-                let position = bias;
-                let le = if le_array.is_valid(position) {
-                    le_array.value(position).parse::<f64>().unwrap_or(f64::NAN)
+                let le = if le_array.is_valid(bias) {
+                    le_array.value(bias).parse::<f64>().unwrap_or(f64::NAN)
                 } else {
                     f64::NAN
                 };
@@ -818,41 +825,90 @@ impl HistogramFoldStream {
             self.counters_buf.resize(bucket_num, 0.0);
         }
 
+        // Collect take indices (one per group) and computed field results
+        let est_groups = remaining_rows / bucket_num;
+        let mut take_indices: Vec<u32> = Vec::with_capacity(est_groups);
+        let mut field_results: Vec<f64> = Vec::with_capacity(est_groups);
+
         while remaining_rows >= bucket_num && self.mode == FoldMode::Optimistic {
-            self.collect_tag_values(&vectors, cursor, &mut tag_values_buf);
-            if !self.validate_optimistic_group(
-                &vectors,
-                le_array,
-                cursor,
-                bucket_num,
-                &tag_values_buf,
-            ) {
-                let remaining_input_batch = batch.slice(cursor, remaining_rows);
-                self.switch_to_safe_mode(remaining_input_batch)?;
-                return Ok(());
+            // Validate group using direct Arrow arrays — only check last row
+            let inf_index = cursor + bucket_num - 1;
+            if !Self::is_positive_infinity(le_array, inf_index) {
+                break;
+            }
+            if bucket_num > 1 {
+                let mut valid = true;
+                for &idx in &self.normal_indices {
+                    if !Self::col_values_equal_at(batch.column(idx).as_ref(), cursor, inf_index) {
+                        valid = false;
+                        break;
+                    }
+                }
+                if !valid {
+                    break;
+                }
             }
 
-            // "sample" normal columns
-            for (idx, value) in self.normal_indices.iter().zip(tag_values_buf.iter()) {
-                self.output_buffer[*idx].push_value_ref(value);
-            }
-            // "fold" field column — reuse counters buffer, use cached le values
+            take_indices.push(cursor as u32);
+
+            // Read field values into counters buffer
             let counters = &mut self.counters_buf;
-            for (bias, counter) in counters.iter_mut().enumerate().take(bucket_num) {
-                let position = cursor + bias;
-                *counter = if field_array.is_valid(position) {
-                    field_array.value(position)
-                } else {
-                    f64::NAN
-                };
+            if field_no_nulls {
+                counters[..bucket_num].copy_from_slice(&field_values[cursor..cursor + bucket_num]);
+            } else {
+                for (bias, counter) in counters.iter_mut().enumerate().take(bucket_num) {
+                    let position = cursor + bias;
+                    *counter = if field_array.is_valid(position) {
+                        field_values[position]
+                    } else {
+                        f64::NAN
+                    };
+                }
             }
-            // ignore invalid data
+
             let bucket = self.cached_le_parsed.as_ref().unwrap();
-            let result = Self::evaluate_row(self.quantile, bucket, counters).unwrap_or(f64::NAN);
-            self.output_buffer[self.field_column_index].push_value_ref(&ValueRef::from(result));
+            let result = Self::evaluate_row_fast(self.quantile, bucket, counters);
+            field_results.push(result);
+
             cursor += bucket_num;
             remaining_rows -= bucket_num;
-            self.output_buffered_rows += 1;
+        }
+
+        // Build output batch from take indices (bypasses VectorRef and MutableVector)
+        if !take_indices.is_empty() {
+            let num_groups = take_indices.len();
+            let indices = UInt32Array::from(take_indices);
+            let field_col: Arc<dyn Array> = Arc::new(Float64Array::from(field_results));
+            let mut columns: Vec<Arc<dyn Array>> =
+                Vec::with_capacity(self.output_schema.fields().len());
+
+            let input_field_count = batch.num_columns();
+            for input_idx in 0..input_field_count {
+                if input_idx == self.le_column_index {
+                    continue; // le is removed from output schema
+                }
+                if input_idx == self.field_column_index {
+                    columns.push(field_col.clone());
+                } else {
+                    columns.push(arrow_compute::take(
+                        batch.column(input_idx),
+                        &indices,
+                        None,
+                    )?);
+                }
+            }
+
+            let output_batch = RecordBatch::try_new(self.output_schema.clone(), columns)
+                .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+            self.optimistic_output_rows += num_groups;
+            self.optimistic_output_batches.push(output_batch);
+        }
+
+        // If validation failed mid-batch, switch to safe mode for the remainder
+        if remaining_rows >= bucket_num && self.mode == FoldMode::Optimistic {
+            let remaining_input_batch = batch.slice(cursor, remaining_rows);
+            self.switch_to_safe_mode(remaining_input_batch)?;
+            return Ok(());
         }
 
         let remaining_input_batch = batch.slice(cursor, remaining_rows);
@@ -870,7 +926,7 @@ impl HistogramFoldStream {
     }
 
     fn maybe_take_output(&mut self) -> DataFusionResult<Option<DataFusionResult<RecordBatch>>> {
-        if self.output_buffered_rows >= self.batch_size {
+        if self.output_buffered_rows + self.optimistic_output_rows >= self.batch_size {
             return Ok(self.take_output_buf()?.map(Ok));
         }
         Ok(None)
@@ -900,30 +956,6 @@ impl HistogramFoldStream {
         for idx in self.normal_indices.iter() {
             tag_values.push(vectors[*idx].get_ref(row));
         }
-    }
-
-    fn validate_optimistic_group(
-        &self,
-        vectors: &[VectorRef],
-        le_array: &StringArray,
-        cursor: usize,
-        bucket_num: usize,
-        tag_values: &[ValueRef<'_>],
-    ) -> bool {
-        let inf_index = cursor + bucket_num - 1;
-        if !Self::is_positive_infinity(le_array, inf_index) {
-            return false;
-        }
-
-        for offset in 1..bucket_num {
-            let row = cursor + offset;
-            for (idx, expected) in self.normal_indices.iter().zip(tag_values.iter()) {
-                if vectors[*idx].get_ref(row) != *expected {
-                    return false;
-                }
-            }
-        }
-        true
     }
 
     /// Checks whether a row belongs to the current group (same series).
@@ -1033,9 +1065,11 @@ impl HistogramFoldStream {
                 .all(|(group, now)| group.as_value_ref() == *now)
     }
 
-    /// Compute result from output buffer
+    /// Compute result from output buffer, combining optimistic (batch-take)
+    /// and safe mode (MutableVector) outputs.
     fn take_output_buf(&mut self) -> DataFusionResult<Option<RecordBatch>> {
-        if self.output_buffered_rows == 0 {
+        let total_rows = self.output_buffered_rows + self.optimistic_output_rows;
+        if total_rows == 0 {
             if self.input_buffered_rows != 0 {
                 warn!(
                     "input buffer is not empty, {} rows remaining",
@@ -1045,19 +1079,37 @@ impl HistogramFoldStream {
             return Ok(None);
         }
 
-        let mut output_buf = Self::empty_output_buffer(&self.output_schema, self.le_column_index)?;
-        std::mem::swap(&mut self.output_buffer, &mut output_buf);
-        let mut columns = Vec::with_capacity(output_buf.len());
-        for builder in output_buf.iter_mut() {
-            columns.push(builder.to_vector().to_arrow_array());
-        }
-        // remove the placeholder column for `le`
-        columns.remove(self.le_column_index);
+        let mut all_batches: Vec<RecordBatch> = Vec::new();
 
-        self.output_buffered_rows = 0;
-        RecordBatch::try_new(self.output_schema.clone(), columns)
-            .map(Some)
-            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))
+        // Optimistic output (batch-take path)
+        if !self.optimistic_output_batches.is_empty() {
+            all_batches.append(&mut self.optimistic_output_batches);
+            self.optimistic_output_rows = 0;
+        }
+
+        // Safe mode output (MutableVector path)
+        if self.output_buffered_rows > 0 {
+            let mut output_buf =
+                Self::empty_output_buffer(&self.output_schema, self.le_column_index)?;
+            std::mem::swap(&mut self.output_buffer, &mut output_buf);
+            let mut columns = Vec::with_capacity(output_buf.len());
+            for builder in output_buf.iter_mut() {
+                columns.push(builder.to_vector().to_arrow_array());
+            }
+            columns.remove(self.le_column_index);
+            self.output_buffered_rows = 0;
+            let batch = RecordBatch::try_new(self.output_schema.clone(), columns)
+                .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+            all_batches.push(batch);
+        }
+
+        if all_batches.len() == 1 {
+            Ok(Some(all_batches.into_iter().next().unwrap()))
+        } else {
+            concat_batches(&self.output_schema, &all_batches)
+                .map(Some)
+                .map_err(Into::into)
+        }
     }
 
     fn flush_remaining(&mut self) -> DataFusionResult<()> {
@@ -1079,12 +1131,100 @@ impl HistogramFoldStream {
         Ok(())
     }
 
+    #[inline]
     fn is_positive_infinity(le_array: &StringArray, index: usize) -> bool {
-        le_array.is_valid(index)
-            && matches!(
-                le_array.value(index).parse::<f64>(),
-                Ok(value) if value.is_infinite() && value.is_sign_positive()
-            )
+        le_array.is_valid(index) && {
+            let v = le_array.value(index);
+            v.eq_ignore_ascii_case("+inf") || v.eq_ignore_ascii_case("inf")
+        }
+    }
+
+    /// Compare two rows of an Arrow array for equality. Handles common types
+    /// with direct downcast for zero-allocation comparison, with ScalarValue fallback.
+    #[inline]
+    fn col_values_equal_at(array: &dyn Array, a: usize, b: usize) -> bool {
+        use datafusion::arrow::array::AsArray;
+        use datafusion::arrow::datatypes::{Int64Type, TimestampMillisecondType, UInt64Type};
+
+        match array.data_type() {
+            DataType::Utf8 => {
+                let arr = array.as_string::<i32>();
+                arr.value(a) == arr.value(b)
+            }
+            DataType::LargeUtf8 => {
+                let arr = array.as_string::<i64>();
+                arr.value(a) == arr.value(b)
+            }
+            DataType::UInt64 => {
+                let arr = array.as_primitive::<UInt64Type>();
+                arr.value(a) == arr.value(b)
+            }
+            DataType::Int64 => {
+                let arr = array.as_primitive::<Int64Type>();
+                arr.value(a) == arr.value(b)
+            }
+            DataType::Float64 => {
+                let arr = array.as_primitive::<Float64Type>();
+                arr.value(a) == arr.value(b)
+            }
+            DataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Millisecond, _) => {
+                let arr = array.as_primitive::<TimestampMillisecondType>();
+                arr.value(a) == arr.value(b)
+            }
+            _ => {
+                use datafusion::common::ScalarValue;
+                ScalarValue::try_from_array(array, a).ok()
+                    == ScalarValue::try_from_array(array, b).ok()
+            }
+        }
+    }
+
+    /// Fast quantile evaluation for the optimistic path where bucket bounds
+    /// are pre-validated (sorted, last is +Inf, correct length). Modifies
+    /// counters in-place for monotonicity fix to avoid Cow allocation.
+    #[inline]
+    fn evaluate_row_fast(quantile: f64, bucket: &[f64], counter: &mut [f64]) -> f64 {
+        if quantile < 0.0 {
+            return f64::NEG_INFINITY;
+        }
+        if quantile > 1.0 {
+            return f64::INFINITY;
+        }
+        if quantile.is_nan() {
+            return f64::NAN;
+        }
+
+        // Fix counter monotonicity in-place (avoids Cow allocation)
+        let mut prev = 0.0f64;
+        for v in counter.iter_mut() {
+            if !v.is_finite() || *v < prev {
+                *v = prev;
+            }
+            prev = *v;
+        }
+
+        let total = *counter.last().unwrap();
+        let expected_pos = total * quantile;
+        let fit_bucket_pos = counter.partition_point(|&c| c < expected_pos);
+        if fit_bucket_pos >= bucket.len() - 1 {
+            bucket[bucket.len() - 2]
+        } else {
+            let upper_bound = bucket[fit_bucket_pos];
+            let upper_count = counter[fit_bucket_pos];
+            let mut lower_bound = bucket[0].min(0.0);
+            let mut lower_count = 0.0;
+            if fit_bucket_pos > 0 {
+                lower_bound = bucket[fit_bucket_pos - 1];
+                lower_count = counter[fit_bucket_pos - 1];
+            }
+            if (upper_count - lower_count).abs() < 1e-10 {
+                f64::NAN
+            } else {
+                lower_bound
+                    + (upper_bound - lower_bound) / (upper_count - lower_count)
+                        * (expected_pos - lower_count)
+            }
+        }
     }
 
     /// Evaluate the field column and return the result
