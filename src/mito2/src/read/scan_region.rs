@@ -14,7 +14,7 @@
 
 //! Scans a region according to the scan request.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -27,11 +27,19 @@ use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_telemetry::tracing::Instrument;
 use common_telemetry::{debug, error, tracing, warn};
 use common_time::range::TimestampRange;
+use datafusion::parquet::arrow::parquet_to_arrow_schema;
 use datafusion::physical_plan::expressions::DynamicFilterPhysicalExpr;
 use datafusion_common::Column;
 use datafusion_expr::Expr;
 use datafusion_expr::utils::expr_to_columns;
+use datatypes::arrow::datatypes::DataType as ArrowDataType;
+use datatypes::data_type::{ConcreteDataType, DataType};
+use datatypes::extension::json::is_json_extension_type;
+use datatypes::schema::Schema;
+use datatypes::schema::ext::ArrowSchemaExt;
+use datatypes::types::json_type;
 use futures::StreamExt;
+use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData};
 use partition::expr::PartitionExpr;
 use smallvec::SmallVec;
 use snafu::{OptionExt as _, ResultExt};
@@ -45,9 +53,9 @@ use tokio::sync::{Semaphore, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::access_layer::AccessLayerRef;
-use crate::cache::CacheStrategy;
+use crate::cache::{CacheStrategy, CachedSstMeta};
 use crate::config::{DEFAULT_MAX_CONCURRENT_SCAN_FILES, DEFAULT_SCAN_CHANNEL_SIZE};
-use crate::error::{InvalidPartitionExprSnafu, InvalidRequestSnafu, Result};
+use crate::error::{InvalidMetaSnafu, InvalidPartitionExprSnafu, InvalidRequestSnafu, Result};
 #[cfg(feature = "enterprise")]
 use crate::extension::{BoxedExtensionRange, BoxedExtensionRangeProvider};
 use crate::memtable::{MemtableRange, RangesOptions};
@@ -75,7 +83,8 @@ use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBui
 #[cfg(feature = "vector_index")]
 use crate::sst::index::vector_index::applier::{VectorIndexApplier, VectorIndexApplierRef};
 use crate::sst::parquet::file_range::PreFilterMode;
-use crate::sst::parquet::reader::ReaderMetrics;
+use crate::sst::parquet::metadata::MetadataLoader;
+use crate::sst::parquet::reader::{MetadataCacheMetrics, ReaderMetrics};
 
 /// Parallel scan channel size for flat format.
 const FLAT_SCAN_CHANNEL_SIZE: usize = 2;
@@ -552,6 +561,7 @@ impl ScanRegion {
             .with_merge_mode(self.version.options.merge_mode())
             .with_series_row_selector(self.request.series_row_selector)
             .with_distribution(self.request.distribution)
+            .with_json2_column_types(self.request.json2_column_types.clone())
             .with_flat_format(flat_format);
         #[cfg(feature = "vector_index")]
         let input = input
@@ -568,6 +578,8 @@ impl ScanRegion {
         } else {
             input
         };
+
+        let input = concretize_json2_types(input).await?;
         Ok(input)
     }
 
@@ -794,6 +806,144 @@ impl ScanRegion {
     }
 }
 
+async fn concretize_json2_types(input: ScanInput) -> Result<ScanInput> {
+    let Some(output_schema) = input.mapper.as_flat().map(|x| x.output_schema()) else {
+        return Ok(input);
+    };
+    let output_arrow_schema = output_schema.arrow_schema();
+    if !output_arrow_schema.has_json_extension_field() {
+        return Ok(input);
+    }
+
+    let memtable_schemas = input
+        .memtables
+        .iter()
+        .filter_map(|mem| mem.record_batch_schema())
+        .collect::<Vec<_>>();
+    let parquet_schemas = collect_parquet_record_batch_schemas(
+        &input.files,
+        &input.access_layer,
+        &input.cache_strategy,
+    )
+    .await?;
+    if memtable_schemas.is_empty()
+        && parquet_schemas.is_empty()
+        // TODO(LFC): If we can concrete json2 type solely by query-driven hint, we can skip data-driven concretize.
+        && input.json2_column_types.is_empty()
+    {
+        return Ok(input);
+    }
+
+    let mut column_schemas = output_schema.column_schemas().to_vec();
+    let mut changed = false;
+    for (idx, column_schema) in column_schemas.iter_mut().enumerate() {
+        let output_field = &output_arrow_schema.fields()[idx];
+        if !is_json_extension_type(output_field) {
+            continue;
+        }
+
+        let mut merged = input
+            .json2_column_types
+            .get(&column_schema.name)
+            .map(ConcreteDataType::as_arrow_type);
+        for schema in &memtable_schemas {
+            if let Some((_, field)) = schema.column_with_name(&column_schema.name) {
+                merge_json_type_candidate(&mut merged, field.data_type());
+            }
+        }
+        for schema in parquet_schemas.iter() {
+            if let Some((_, field)) = schema.as_ref().column_with_name(&column_schema.name) {
+                merge_json_type_candidate(&mut merged, field.data_type());
+            }
+        }
+
+        if let Some(merged) = merged
+            && merged != *output_field.data_type()
+        {
+            column_schema.data_type = ConcreteDataType::from_arrow_type(&merged);
+            common_telemetry::info!("merged type: {}", column_schema.data_type);
+            changed = true;
+        }
+    }
+
+    if changed {
+        let mut mapper = Arc::unwrap_or_clone(input.mapper);
+        mapper.with_flat_output_schema(Arc::new(Schema::new(column_schemas)));
+        Ok(ScanInput {
+            mapper: Arc::new(mapper),
+            ..input
+        })
+    } else {
+        Ok(input)
+    }
+}
+
+fn merge_json_type_candidate(merged: &mut Option<ArrowDataType>, candidate: &ArrowDataType) {
+    match merged {
+        Some(current) => {
+            *current = json_type::merge_as_json_type(current, candidate).into_owned();
+        }
+        None => {
+            *merged = Some(candidate.clone());
+        }
+    }
+}
+
+async fn collect_parquet_record_batch_schemas(
+    files: &[FileHandle],
+    access_layer: &AccessLayerRef,
+    cache_strategy: &CacheStrategy,
+) -> Result<Vec<datatypes::arrow::datatypes::SchemaRef>> {
+    let mut schemas = Vec::with_capacity(files.len());
+    for file in files {
+        let parquet_metadata =
+            read_or_load_parquet_metadata(file, access_layer, cache_strategy).await?;
+        let file_metadata = parquet_metadata.file_metadata();
+        let arrow_schema = parquet_to_arrow_schema(
+            file_metadata.schema_descr(),
+            file_metadata.key_value_metadata(),
+        )
+        .map_err(|e| {
+            InvalidMetaSnafu {
+                reason: format!(
+                    "Failed to convert parquet metadata to arrow schema, file: {}, error: {e}",
+                    file.file_id()
+                ),
+            }
+            .build()
+        })?;
+        if arrow_schema.has_json_extension_field() {
+            schemas.push(Arc::new(arrow_schema));
+        }
+    }
+    Ok(schemas)
+}
+
+async fn read_or_load_parquet_metadata(
+    file: &FileHandle,
+    access_layer: &AccessLayerRef,
+    cache_strategy: &CacheStrategy,
+) -> Result<Arc<ParquetMetaData>> {
+    let mut metrics = MetadataCacheMetrics::default();
+    if let Some(metadata) = cache_strategy
+        .get_sst_meta_data(file.file_id(), &mut metrics, PageIndexPolicy::default())
+        .await
+    {
+        return Ok(metadata.parquet_metadata());
+    }
+
+    let file_path = file.file_path(access_layer.table_dir(), access_layer.path_type());
+    let file_size = file.meta_ref().file_size;
+    let metadata = MetadataLoader::new(access_layer.object_store().clone(), &file_path, file_size)
+        .load(&mut metrics)
+        .await
+        .and_then(|x| CachedSstMeta::try_new(&file_path, x))
+        .map(Arc::new)?;
+    cache_strategy.put_sst_meta_data(file.file_id(), metadata.clone());
+
+    Ok(metadata.parquet_metadata())
+}
+
 /// Returns true if the time range of a SST `file` matches the `predicate`.
 fn file_in_range(file: &FileHandle, predicate: &TimestampRange) -> bool {
     if predicate == &TimestampRange::min_to_max() {
@@ -855,6 +1005,8 @@ pub struct ScanInput {
     pub(crate) series_row_selector: Option<TimeSeriesRowSelector>,
     /// Hint for the required distribution of the scanner.
     pub(crate) distribution: Option<TimeSeriesDistribution>,
+    /// Query-driven target types for JSON2 columns.
+    json2_column_types: HashMap<String, ConcreteDataType>,
     /// Whether to use flat format.
     pub(crate) flat_format: bool,
     /// Whether this scan is for compaction.
@@ -893,6 +1045,7 @@ impl ScanInput {
             merge_mode: MergeMode::default(),
             series_row_selector: None,
             distribution: None,
+            json2_column_types: HashMap::new(),
             flat_format: false,
             compaction: false,
             #[cfg(feature = "enterprise")]
@@ -926,6 +1079,15 @@ impl ScanInput {
     #[must_use]
     pub(crate) fn with_files(mut self, files: Vec<FileHandle>) -> Self {
         self.files = files;
+        self
+    }
+
+    #[must_use]
+    fn with_json2_column_types(
+        mut self,
+        json2_column_types: HashMap<String, ConcreteDataType>,
+    ) -> Self {
+        self.json2_column_types = json2_column_types;
         self
     }
 

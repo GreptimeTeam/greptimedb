@@ -15,6 +15,7 @@
 //! Planner, QueryEngine implementations based on DataFusion.
 
 mod error;
+mod json2_expr_planner;
 mod planner;
 
 use std::any::Any;

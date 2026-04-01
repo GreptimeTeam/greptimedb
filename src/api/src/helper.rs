@@ -129,7 +129,7 @@ impl From<ColumnDataTypeWrapper> for ConcreteDataType {
                         };
                         ConcreteDataType::json_native_datatype(inner_type.into())
                     }
-                    None => ConcreteDataType::Json(JsonType::null()),
+                    None => ConcreteDataType::Json(JsonType::new(JsonFormat::Json2)),
                     _ => {
                         // invalid state, type extension is missing or invalid
                         ConcreteDataType::null_datatype()
@@ -461,6 +461,7 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
                                 })
                             }
                         }
+                        JsonFormat::Json2 => Some(ColumnDataTypeExtension { type_ext: None }),
                     }
                 } else {
                     None

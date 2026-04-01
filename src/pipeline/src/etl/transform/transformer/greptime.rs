@@ -418,7 +418,7 @@ fn resolve_schema(
         match (column_type, value_type) {
             (column_type, value_type) if column_type == value_type => Ok(()),
             (ConcreteDataType::Json(column_type), ConcreteDataType::Json(value_type))
-                if column_type.is_include(value_type) =>
+                if column_type.is_json2() =>
             {
                 Ok(())
             }
@@ -689,17 +689,16 @@ fn resolve_value(
         }
 
         VrlValue::Array(_) | VrlValue::Object(_) => {
-            let is_json_native_type = schema_info
+            let is_json2_type = schema_info
                 .find_column_schema_in_table(&column_name)
                 .is_some_and(|x| {
-                    if let ConcreteDataType::Json(column_type) = &x.column_schema.data_type {
-                        column_type.is_native_type()
-                    } else {
-                        false
-                    }
+                    matches!(
+                        &x.column_schema.data_type,
+                        ConcreteDataType::Json(column_type) if column_type.is_json2()
+                    )
                 });
 
-            let value = if is_json_native_type {
+            let value = if is_json2_type {
                 let json_extension_type: Option<JsonExtensionType> =
                     if let Some(x) = schema_info.find_column_schema_in_table(&column_name) {
                         x.column_schema.extension_type()?
