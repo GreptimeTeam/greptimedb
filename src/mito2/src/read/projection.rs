@@ -52,51 +52,27 @@ impl ProjectionMapper {
     pub fn new(
         metadata: &RegionMetadataRef,
         projection: impl Iterator<Item = usize> + Clone,
-        flat_format: bool,
     ) -> Result<Self> {
-        if flat_format {
-            Ok(ProjectionMapper::Flat(FlatProjectionMapper::new(
-                metadata, projection,
-            )?))
-        } else {
-            Ok(ProjectionMapper::PrimaryKey(
-                PrimaryKeyProjectionMapper::new(metadata, projection)?,
-            ))
-        }
+        Ok(ProjectionMapper::Flat(FlatProjectionMapper::new(
+            metadata, projection,
+        )?))
     }
 
     /// Returns a new mapper with output projection and explicit read columns.
     pub fn new_with_read_columns(
         metadata: &RegionMetadataRef,
         projection: impl Iterator<Item = usize>,
-        flat_format: bool,
         read_column_ids: Vec<ColumnId>,
     ) -> Result<Self> {
         let projection: Vec<_> = projection.collect();
-        if flat_format {
-            Ok(ProjectionMapper::Flat(
-                FlatProjectionMapper::new_with_read_columns(metadata, projection, read_column_ids)?,
-            ))
-        } else {
-            Ok(ProjectionMapper::PrimaryKey(
-                PrimaryKeyProjectionMapper::new_with_read_columns(
-                    metadata,
-                    projection,
-                    read_column_ids,
-                )?,
-            ))
-        }
+        Ok(ProjectionMapper::Flat(
+            FlatProjectionMapper::new_with_read_columns(metadata, projection, read_column_ids)?,
+        ))
     }
 
     /// Returns a new mapper without projection.
-    pub fn all(metadata: &RegionMetadataRef, flat_format: bool) -> Result<Self> {
-        if flat_format {
-            Ok(ProjectionMapper::Flat(FlatProjectionMapper::all(metadata)?))
-        } else {
-            Ok(ProjectionMapper::PrimaryKey(
-                PrimaryKeyProjectionMapper::all(metadata)?,
-            ))
-        }
+    pub fn all(metadata: &RegionMetadataRef) -> Result<Self> {
+        Ok(ProjectionMapper::Flat(FlatProjectionMapper::all(metadata)?))
     }
 
     /// Returns the metadata that created the mapper.
@@ -483,218 +459,11 @@ mod tests {
     };
 
     use super::*;
-    use crate::cache::CacheManager;
-    use crate::read::BatchBuilder;
-
-    fn new_batch(
-        ts_start: i64,
-        tags: &[i64],
-        fields: &[(ColumnId, i64)],
-        num_rows: usize,
-    ) -> Batch {
-        let converter = DensePrimaryKeyCodec::with_fields(
-            (0..tags.len())
-                .map(|idx| {
-                    (
-                        idx as u32,
-                        SortField::new(ConcreteDataType::int64_datatype()),
-                    )
-                })
-                .collect(),
-        );
-        let primary_key = converter
-            .encode(tags.iter().map(|v| ValueRef::Int64(*v)))
-            .unwrap();
-
-        let mut builder = BatchBuilder::new(primary_key);
-        builder
-            .timestamps_array(Arc::new(TimestampMillisecondArray::from_iter_values(
-                (0..num_rows).map(|i| ts_start + i as i64 * 1000),
-            )))
-            .unwrap()
-            .sequences_array(Arc::new(UInt64Array::from_iter_values(0..num_rows as u64)))
-            .unwrap()
-            .op_types_array(Arc::new(UInt8Array::from_iter_values(
-                (0..num_rows).map(|_| OpType::Put as u8),
-            )))
-            .unwrap();
-        for (column_id, field) in fields {
-            builder
-                .push_field_array(
-                    *column_id,
-                    Arc::new(Int64Array::from_iter_values(std::iter::repeat_n(
-                        *field, num_rows,
-                    ))),
-                )
-                .unwrap();
-        }
-        builder.build().unwrap()
-    }
 
     fn print_record_batch(record_batch: RecordBatch) -> String {
         pretty::pretty_format_batches(&[record_batch.into_df_record_batch()])
             .unwrap()
             .to_string()
-    }
-
-    #[test]
-    fn test_projection_mapper_all() {
-        let metadata = Arc::new(
-            TestRegionMetadataBuilder::default()
-                .num_tags(2)
-                .num_fields(2)
-                .build(),
-        );
-        // Create the enum wrapper with default format (primary key)
-        let mapper = ProjectionMapper::all(&metadata, false).unwrap();
-        assert_eq!([0, 1, 2, 3, 4], mapper.column_ids());
-        assert_eq!(
-            [
-                (3, ConcreteDataType::int64_datatype()),
-                (4, ConcreteDataType::int64_datatype())
-            ],
-            mapper.as_primary_key().unwrap().batch_fields()
-        );
-
-        // With vector cache.
-        let cache = CacheManager::builder().vector_cache_size(1024).build();
-        let cache = CacheStrategy::EnableAll(Arc::new(cache));
-        let batch = new_batch(0, &[1, 2], &[(3, 3), (4, 4)], 3);
-        let record_batch = mapper
-            .as_primary_key()
-            .unwrap()
-            .convert(&batch, &cache)
-            .unwrap();
-        let expect = "\
-+---------------------+----+----+----+----+
-| ts                  | k0 | k1 | v0 | v1 |
-+---------------------+----+----+----+----+
-| 1970-01-01T00:00:00 | 1  | 2  | 3  | 4  |
-| 1970-01-01T00:00:01 | 1  | 2  | 3  | 4  |
-| 1970-01-01T00:00:02 | 1  | 2  | 3  | 4  |
-+---------------------+----+----+----+----+";
-        assert_eq!(expect, print_record_batch(record_batch));
-
-        assert!(
-            cache
-                .get_repeated_vector(&ConcreteDataType::int64_datatype(), &Value::Int64(1))
-                .is_some()
-        );
-        assert!(
-            cache
-                .get_repeated_vector(&ConcreteDataType::int64_datatype(), &Value::Int64(2))
-                .is_some()
-        );
-        assert!(
-            cache
-                .get_repeated_vector(&ConcreteDataType::int64_datatype(), &Value::Int64(3))
-                .is_none()
-        );
-        let record_batch = mapper
-            .as_primary_key()
-            .unwrap()
-            .convert(&batch, &cache)
-            .unwrap();
-        assert_eq!(expect, print_record_batch(record_batch));
-    }
-
-    #[test]
-    fn test_projection_mapper_with_projection() {
-        let metadata = Arc::new(
-            TestRegionMetadataBuilder::default()
-                .num_tags(2)
-                .num_fields(2)
-                .build(),
-        );
-        // Columns v1, k0
-        let mapper = ProjectionMapper::new(&metadata, [4, 1].into_iter(), false).unwrap();
-        assert_eq!([4, 1], mapper.column_ids());
-        assert_eq!(
-            [(4, ConcreteDataType::int64_datatype())],
-            mapper.as_primary_key().unwrap().batch_fields()
-        );
-
-        let batch = new_batch(0, &[1, 2], &[(4, 4)], 3);
-        let cache = CacheManager::builder().vector_cache_size(1024).build();
-        let cache = CacheStrategy::EnableAll(Arc::new(cache));
-        let record_batch = mapper
-            .as_primary_key()
-            .unwrap()
-            .convert(&batch, &cache)
-            .unwrap();
-        let expect = "\
-+----+----+
-| v1 | k0 |
-+----+----+
-| 4  | 1  |
-| 4  | 1  |
-| 4  | 1  |
-+----+----+";
-        assert_eq!(expect, print_record_batch(record_batch));
-    }
-
-    #[test]
-    fn test_projection_mapper_read_superset() {
-        let metadata = Arc::new(
-            TestRegionMetadataBuilder::default()
-                .num_tags(2)
-                .num_fields(2)
-                .build(),
-        );
-        // Output columns v1, k0. Read also includes v0.
-        let mapper = ProjectionMapper::new_with_read_columns(
-            &metadata,
-            [4, 1].into_iter(),
-            false,
-            vec![4, 1, 3],
-        )
-        .unwrap();
-        assert_eq!([4, 1, 3], mapper.column_ids());
-
-        let batch = new_batch(0, &[1, 2], &[(3, 3), (4, 4)], 3);
-        let cache = CacheManager::builder().vector_cache_size(1024).build();
-        let cache = CacheStrategy::EnableAll(Arc::new(cache));
-        let record_batch = mapper
-            .as_primary_key()
-            .unwrap()
-            .convert(&batch, &cache)
-            .unwrap();
-        let expect = "\
-+----+----+
-| v1 | k0 |
-+----+----+
-| 4  | 1  |
-| 4  | 1  |
-| 4  | 1  |
-+----+----+";
-        assert_eq!(expect, print_record_batch(record_batch));
-    }
-
-    #[test]
-    fn test_projection_mapper_empty_projection() {
-        let metadata = Arc::new(
-            TestRegionMetadataBuilder::default()
-                .num_tags(2)
-                .num_fields(2)
-                .build(),
-        );
-        // Empty projection
-        let mapper = ProjectionMapper::new(&metadata, [].into_iter(), false).unwrap();
-        assert_eq!([0], mapper.column_ids()); // Should still read the time index column
-        assert!(mapper.output_schema().is_empty());
-        let pk_mapper = mapper.as_primary_key().unwrap();
-        assert!(pk_mapper.batch_fields().is_empty());
-        assert!(!pk_mapper.has_tags);
-        assert!(pk_mapper.batch_indices.is_empty());
-        assert!(pk_mapper.is_empty_projection);
-
-        let batch = new_batch(0, &[1, 2], &[], 3);
-        let cache = CacheManager::builder().vector_cache_size(1024).build();
-        let cache = CacheStrategy::EnableAll(Arc::new(cache));
-        let record_batch = pk_mapper.convert(&batch, &cache).unwrap();
-        assert_eq!(3, record_batch.num_rows());
-        assert_eq!(0, record_batch.num_columns());
-        assert!(record_batch.schema.is_empty());
     }
 
     fn new_flat_batch(
@@ -812,7 +581,7 @@ mod tests {
                 .build(),
         );
         let cache = CacheStrategy::Disabled;
-        let mapper = ProjectionMapper::all(&metadata, true).unwrap();
+        let mapper = ProjectionMapper::all(&metadata).unwrap();
         assert_eq!([0, 1, 2, 3, 4], mapper.column_ids());
         assert_eq!(
             [
@@ -848,7 +617,7 @@ mod tests {
         );
         let cache = CacheStrategy::Disabled;
         // Columns v1, k0
-        let mapper = ProjectionMapper::new(&metadata, [4, 1].into_iter(), true).unwrap();
+        let mapper = ProjectionMapper::new(&metadata, [4, 1].into_iter()).unwrap();
         assert_eq!([4, 1], mapper.column_ids());
         assert_eq!(
             [
@@ -882,13 +651,9 @@ mod tests {
         );
         let cache = CacheStrategy::Disabled;
         // Output columns v1, k0. Read also includes v0.
-        let mapper = ProjectionMapper::new_with_read_columns(
-            &metadata,
-            [4, 1].into_iter(),
-            true,
-            vec![4, 1, 3],
-        )
-        .unwrap();
+        let mapper =
+            ProjectionMapper::new_with_read_columns(&metadata, [4, 1].into_iter(), vec![4, 1, 3])
+                .unwrap();
         assert_eq!([4, 1, 3], mapper.column_ids());
 
         let batch = new_flat_batch(None, &[(1, 1)], &[(3, 3), (4, 4)], 3);
@@ -914,7 +679,7 @@ mod tests {
         );
         let cache = CacheStrategy::Disabled;
         // Empty projection
-        let mapper = ProjectionMapper::new(&metadata, [].into_iter(), true).unwrap();
+        let mapper = ProjectionMapper::new(&metadata, [].into_iter()).unwrap();
         assert_eq!([0], mapper.column_ids()); // Should still read the time index column
         assert!(mapper.output_schema().is_empty());
         let flat_mapper = mapper.as_flat().unwrap();
