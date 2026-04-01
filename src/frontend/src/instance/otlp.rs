@@ -870,8 +870,16 @@ mod tests {
     }
 
     #[test]
+    fn test_finish_trace_failure_message_without_detail_messages() {
+        assert_eq!(
+            Instance::finish_trace_failure_message(0, 2, vec![]),
+            Some("Accepted 0 spans, rejected 2 spans".to_string())
+        );
+    }
+
+    #[test]
     fn test_push_trace_failure_message_increments_labeled_counter() {
-        let label = "retry_per_span";
+        let label = "retry_per_span_counter_test";
         let initial = OTLP_TRACES_FAILURE_COUNT.with_label_values(&[label]).get();
         let mut messages = Vec::new();
 
@@ -885,6 +893,39 @@ mod tests {
         assert_eq!(
             OTLP_TRACES_FAILURE_COUNT.with_label_values(&[label]).get(),
             initial + 1
+        );
+    }
+
+    #[test]
+    fn test_push_trace_failure_message_caps_recorded_messages() {
+        let label = "retry_per_span_limit_test";
+        let mut messages = Vec::new();
+
+        for idx in 0..=4 {
+            Instance::push_trace_failure_message(
+                &mut messages,
+                label,
+                format!("failure-{idx}"),
+            );
+        }
+
+        assert_eq!(messages.len(), 4);
+        assert_eq!(
+            messages,
+            vec![
+                "failure-0".to_string(),
+                "failure-1".to_string(),
+                "failure-2".to_string(),
+                "failure-3".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_classify_trace_chunk_failure_defaults_to_discard() {
+        assert_eq!(
+            Instance::classify_trace_chunk_failure(StatusCode::Unknown),
+            ChunkFailureReaction::DiscardChunk
         );
     }
 }
