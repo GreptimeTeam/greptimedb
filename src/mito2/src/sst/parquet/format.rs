@@ -46,7 +46,6 @@ use mito_codec::row_converter::{
 };
 use parquet::file::metadata::{ParquetMetaData, RowGroupMetaData};
 use parquet::file::statistics::Statistics;
-use parquet::schema::types::SchemaDescriptor;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
 use store_api::storage::{ColumnId, SequenceNumber};
@@ -132,65 +131,6 @@ pub enum ReadFormat {
     PrimaryKey(PrimaryKeyReadFormat),
     /// The parquet is in the new flat format.
     Flat(FlatReadFormat),
-}
-
-/// A nested field access path inside one parquet root column.
-pub type ParquetPath = Vec<String>;
-
-/// Projection mapped onto a parquet schema.
-///
-/// Each projected parquet column may optionally carry nested-path pruning
-/// information. If `nested_paths` is empty, the whole root column is read.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParquetProjection {
-    pub cols: Vec<ParquetColumnProjection>,
-}
-
-/// Projection for a single root column in the parquet schema.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParquetColumnProjection {
-    /// Root field index in the parquet schema.
-    pub root_index: usize,
-    /// Nested paths to read under this root column.
-    ///
-    /// Each path includes the root column itself. For example, for a root
-    /// column `j`, path `["j", "a", "b"]` refers to `j.a.b`.
-    ///
-    /// If empty, the whole root column is read.
-    pub nested_paths: Vec<ParquetPath>,
-}
-
-/// Builds parquet leaf-column indices from a parquet projection.
-pub fn build_parquet_leaves_indices(
-    parquet_schema_desc: &SchemaDescriptor,
-    projection: &ParquetProjection,
-) -> Vec<usize> {
-    let mut map = HashMap::new();
-    for col in &projection.cols {
-        map.insert(col.root_index, &col.nested_paths);
-    }
-
-    let mut leaf_indices = Vec::new();
-    for (leaf_idx, leaf_col) in parquet_schema_desc.columns().iter().enumerate() {
-        let root_idx = parquet_schema_desc.get_column_root_idx(leaf_idx);
-        let Some(nested_paths) = map.get(&root_idx) else {
-            continue;
-        };
-        if nested_paths.is_empty() {
-            leaf_indices.push(leaf_idx);
-            continue;
-        }
-
-        let leaf_path = leaf_col.path().parts();
-        if nested_paths
-            .iter()
-            .any(|nested_path| leaf_path.starts_with(nested_path))
-        {
-            leaf_indices.push(leaf_idx);
-        }
-    }
-
-    leaf_indices
 }
 
 impl ReadFormat {
@@ -1060,8 +1000,6 @@ mod tests {
     use mito_codec::row_converter::{
         DensePrimaryKeyCodec, PrimaryKeyCodec, PrimaryKeyCodecExt, SparsePrimaryKeyCodec,
     };
-    use parquet::basic::Repetition;
-    use parquet::schema::types::Type;
     use store_api::codec::PrimaryKeyEncoding;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
@@ -1452,115 +1390,6 @@ mod tests {
         let read_format =
             ReadFormat::new_flat(metadata, [2, 1, 5].iter().copied(), None, "test", false).unwrap();
         assert_eq!(&[0, 3, 4, 5, 6, 7], read_format.projection_indices());
-    }
-
-    #[test]
-    fn test_build_parquet_leaves_indices_reads_whole_root() {
-        let leaf_a = Arc::new(
-            Type::primitive_type_builder("a", parquet::basic::Type::INT64)
-                .with_repetition(Repetition::REQUIRED)
-                .build()
-                .unwrap(),
-        );
-        let leaf_b = Arc::new(
-            Type::primitive_type_builder("b", parquet::basic::Type::INT64)
-                .with_repetition(Repetition::REQUIRED)
-                .build()
-                .unwrap(),
-        );
-        let root_j = Arc::new(
-            Type::group_type_builder("j")
-                .with_repetition(Repetition::REQUIRED)
-                .with_fields(vec![leaf_a, leaf_b])
-                .build()
-                .unwrap(),
-        );
-        let schema = Arc::new(
-            Type::group_type_builder("schema")
-                .with_fields(vec![root_j])
-                .build()
-                .unwrap(),
-        );
-        let parquet_schema_desc = SchemaDescriptor::new(schema);
-
-        let projection = ParquetProjection {
-            cols: vec![ParquetColumnProjection {
-                root_index: 0,
-                nested_paths: vec![],
-            }],
-        };
-
-        assert_eq!(
-            vec![0, 1],
-            build_parquet_leaves_indices(&parquet_schema_desc, &projection)
-        );
-    }
-
-    #[test]
-    fn test_build_parquet_leaves_indices_filters_nested_paths() {
-        let leaf_a = Arc::new(
-            Type::primitive_type_builder("a", parquet::basic::Type::INT64)
-                .with_repetition(Repetition::REQUIRED)
-                .build()
-                .unwrap(),
-        );
-        let leaf_c = Arc::new(
-            Type::primitive_type_builder("c", parquet::basic::Type::INT64)
-                .with_repetition(Repetition::REQUIRED)
-                .build()
-                .unwrap(),
-        );
-        let leaf_d = Arc::new(
-            Type::primitive_type_builder("d", parquet::basic::Type::INT64)
-                .with_repetition(Repetition::REQUIRED)
-                .build()
-                .unwrap(),
-        );
-        let group_b = Arc::new(
-            Type::group_type_builder("b")
-                .with_repetition(Repetition::REQUIRED)
-                .with_fields(vec![leaf_c, leaf_d])
-                .build()
-                .unwrap(),
-        );
-        let root_j = Arc::new(
-            Type::group_type_builder("j")
-                .with_repetition(Repetition::REQUIRED)
-                .with_fields(vec![leaf_a, group_b])
-                .build()
-                .unwrap(),
-        );
-        let root_k = Arc::new(
-            Type::primitive_type_builder("k", parquet::basic::Type::INT64)
-                .with_repetition(Repetition::REQUIRED)
-                .build()
-                .unwrap(),
-        );
-        let schema = Arc::new(
-            Type::group_type_builder("schema")
-                .with_fields(vec![root_j, root_k])
-                .build()
-                .unwrap(),
-        );
-        let parquet_schema_desc = SchemaDescriptor::new(schema);
-
-        let projection = ParquetProjection {
-            cols: vec![
-                ParquetColumnProjection {
-                    root_index: 0,
-                    nested_paths: vec![vec!["j".to_string(), "b".to_string()]],
-                },
-                ParquetColumnProjection {
-                    root_index: 1,
-                    nested_paths: vec![],
-                },
-            ],
-        };
-
-        assert_eq!(
-            vec![1, 2, 3],
-            build_parquet_leaves_indices(&parquet_schema_desc, &projection)
-        );
     }
 
     #[test]

@@ -74,9 +74,9 @@ use crate::sst::parquet::file_range::{
     FileRangeContext, FileRangeContextRef, PartitionFilterContext, PreFilterMode, RangeBase,
     row_group_contains_delete,
 };
-use crate::sst::parquet::format::{
-    ParquetColumnProjection, ParquetProjection, ReadFormat, build_parquet_leaves_indices,
-    need_override_sequence,
+use crate::sst::parquet::format::{ReadFormat, need_override_sequence};
+use crate::sst::parquet::read_columns::{
+    ParquetReadColumns, build_parquet_leaves_indices,
 };
 use crate::sst::parquet::metadata::MetadataLoader;
 use crate::sst::parquet::prefilter::{
@@ -423,16 +423,8 @@ impl ParquetReaderBuilder {
 
         // Computes the projection mask.
         let parquet_schema_desc = parquet_meta.file_metadata().schema_descr();
-        let parquet_projection = ParquetProjection {
-            cols: read_format
-                .projection_indices()
-                .iter()
-                .map(|index| ParquetColumnProjection {
-                    root_index: *index,
-                    nested_paths: vec![],
-                })
-                .collect(),
-        };
+        let parquet_projection =
+            ParquetReadColumns::from_root_indices(read_format.projection_indices().iter().copied());
         let leaf_indices = build_parquet_leaves_indices(parquet_schema_desc, &parquet_projection);
         let projection_mask =
             ProjectionMask::leaves(parquet_schema_desc, leaf_indices.iter().copied());

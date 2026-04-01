@@ -31,6 +31,7 @@ pub mod format;
 pub(crate) mod helper;
 pub(crate) mod metadata;
 pub mod prefilter;
+pub mod read_columns;
 pub mod reader;
 pub mod row_group;
 pub mod row_selection;
