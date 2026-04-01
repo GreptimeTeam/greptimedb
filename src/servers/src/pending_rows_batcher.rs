@@ -1155,6 +1155,16 @@ async fn flush_batch(
 ///
 /// This is the only flush path. Any failure in resolving or transforming the
 /// physical flush inputs is recorded as flush failure and reported to waiters.
+macro_rules! record_failure {
+    ($first_error:expr, $row_count:expr, $msg:expr) => {{
+        let msg = $msg;
+        if $first_error.is_none() {
+            *$first_error = Some(msg.clone());
+        }
+        mark_flush_failure($row_count, &msg);
+    }};
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn flush_batch_physical(
     table_batches: &[TableBatch],
@@ -1166,16 +1176,6 @@ async fn flush_batch_physical(
     catalog_manager: &CatalogManagerRef,
     first_error: &mut Option<String>,
 ) {
-    macro_rules! record_failure {
-        ($row_count:expr, $msg:expr) => {{
-            let msg = $msg;
-            if first_error.is_none() {
-                *first_error = Some(msg.clone());
-            }
-            mark_flush_failure($row_count, &msg);
-        }};
-    }
-
     // 1. Resolve the physical table and get column ID mapping
     let physical_table = {
         let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
@@ -1193,6 +1193,7 @@ async fn flush_batch_physical(
             Ok(Some(table)) => table,
             Ok(None) => {
                 record_failure!(
+                    first_error,
                     total_row_count,
                     format!(
                         "Physical table '{}' not found during pending flush",
@@ -1203,6 +1204,7 @@ async fn flush_batch_physical(
             }
             Err(err) => {
                 record_failure!(
+                    first_error,
                     total_row_count,
                     format!(
                         "Failed to resolve physical table '{}' for pending flush: {:?}",
@@ -1219,6 +1221,7 @@ async fn flush_batch_physical(
         Some(ids) => ids,
         None => {
             record_failure!(
+                first_error,
                 total_row_count,
                 format!(
                     "Physical table '{}' has no column IDs for pending flush",
@@ -1241,6 +1244,7 @@ async fn flush_batch_physical(
             Ok(rule) => rule,
             Err(err) => {
                 record_failure!(
+                    first_error,
                     total_row_count,
                     format!(
                         "Failed to fetch partition rule for physical table '{}': {:?}",
@@ -1256,6 +1260,71 @@ async fn flush_batch_physical(
         partition_columns.iter().map(String::as_str).collect();
 
     // 3. Transform each logical table batch into physical format
+    let (modified_batches, modified_row_count) = transform_logical_batches_to_physical(
+        table_batches,
+        &name_to_ids,
+        &partition_columns_set,
+        first_error,
+    );
+
+    if modified_batches.is_empty() {
+        if first_error.is_none() {
+            record_failure!(
+                first_error,
+                total_row_count,
+                format!(
+                    "No batches can be transformed for physical table '{}' during pending flush",
+                    physical_table_name
+                )
+            );
+        }
+        return;
+    }
+
+    // 4. Concatenate all modified batches (all share the same physical schema)
+    let combined_batch =
+        match concat_modified_batches(&modified_batches, modified_row_count, first_error) {
+            Some(batch) => batch,
+            None => return,
+        };
+
+    // 5. Split by physical partition rule and send to regions
+    let physical_table_id = physical_table_info.table_id();
+    let region_writes = split_and_encode_region_writes(
+        combined_batch,
+        physical_table_id,
+        physical_table_name,
+        partition_rule.0.as_ref(),
+        partition_columns,
+        partition_manager,
+        total_row_count,
+        first_error,
+    )
+    .await;
+
+    for result in flush_region_writes_concurrently(node_manager.clone(), region_writes).await {
+        match result {
+            FlushWriteResult::Success { row_count } => {
+                FLUSH_TOTAL.inc();
+                FLUSH_ROWS.observe(row_count as f64);
+            }
+            FlushWriteResult::Failed { row_count, message } => {
+                record_failure!(first_error, row_count, message);
+            }
+        }
+    }
+}
+
+/// Transforms logical table batches into physical format (sparse primary key encoding).
+///
+/// It identifies tag columns and essential columns (timestamp, value) for each logical batch
+/// and applies sparse primary key modification.
+fn transform_logical_batches_to_physical(
+    table_batches: &[TableBatch],
+    name_to_ids: &HashMap<String, u32>,
+    partition_columns_set: &HashSet<&str>,
+    first_error: &mut Option<String>,
+) -> (Vec<RecordBatch>, usize) {
     let mut modified_batches: Vec<RecordBatch> = Vec::with_capacity(table_batches.len());
     let mut modified_row_count: usize = 0;
 
@@ -1265,20 +1334,14 @@ async fn flush_batch_physical(
     'next_table: for table_batch in table_batches {
         let table_id = table_batch.table_id;
 
-        // Transform each chunk to physical format directly, avoiding an
-        // intermediate concat_batches per logical table.
         for batch in &table_batch.batches {
-            // Identify tag columns and non-tag columns from the logical batch schema.
-            // Chunks within a table_batch may have different schemas if new tag columns
-            // are added between submits.
-            // In prom batches, Float64 = value, Timestamp = timestamp, Utf8 = tags.
             let batch_schema = batch.schema();
             let start = Instant::now();
             let (tag_columns, essential_col_indices) = match columns_taxonomy(
                 &batch_schema,
                 &table_batch.table_name,
-                &name_to_ids,
-                &partition_columns_set,
+                name_to_ids,
+                partition_columns_set,
             ) {
                 Ok(columns) => columns,
                 Err(err) => {
@@ -1286,7 +1349,7 @@ async fn flush_batch_physical(
                         "Failed to resolve columns for logical table '{}': {:?}",
                         table_batch.table_name, err
                     );
-                    record_failure!(table_batch.row_count, err.to_string());
+                    record_failure!(first_error, table_batch.row_count, err.to_string());
                     continue 'next_table;
                 }
             };
@@ -1310,6 +1373,7 @@ async fn flush_batch_physical(
                     }
                     Err(err) => {
                         record_failure!(
+                            first_error,
                             table_batch.row_count,
                             format!(
                                 "Failed to modify batch for logical table '{}': {:?}",
@@ -1333,55 +1397,64 @@ async fn flush_batch_physical(
         .with_label_values(&["flush_physical_columns_taxonomy"])
         .observe(columns_taxonomy_elapsed.as_secs_f64());
 
-    if modified_batches.is_empty() {
-        if first_error.is_none() {
+    (modified_batches, modified_row_count)
+}
+
+/// Concatenates all modified batches into a single large batch.
+///
+/// All modified batches share the same physical schema.
+fn concat_modified_batches(
+    modified_batches: &[RecordBatch],
+    modified_row_count: usize,
+    first_error: &mut Option<String>,
+) -> Option<RecordBatch> {
+    let combined_schema = modified_batches[0].schema();
+    let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
+        .with_label_values(&["flush_physical_concat_all"])
+        .start_timer();
+    match concat_batches(&combined_schema, modified_batches) {
+        Ok(batch) => Some(batch),
+        Err(err) => {
             record_failure!(
-                total_row_count,
-                format!(
-                    "No batches can be transformed for physical table '{}' during pending flush",
-                    physical_table_name
-                )
+                first_error,
+                modified_row_count,
+                format!("Failed to concat modified batches: {:?}", err)
             );
+            None
         }
-        return;
     }
+}
 
-    // 4. Concatenate all modified batches (all share the same physical schema)
-    let combined_batch = {
-        let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
-            .with_label_values(&["flush_physical_concat_all"])
-            .start_timer();
-        let combined_schema = modified_batches[0].schema();
-        // todo(hl): maybe limit max rows to concat.
-        match concat_batches(&combined_schema, &modified_batches) {
-            Ok(batch) => batch,
-            Err(err) => {
-                record_failure!(
-                    modified_row_count,
-                    format!("Failed to concat modified batches: {:?}", err)
-                );
-                return;
-            }
-        }
-    };
-
-    // 5. Split by physical partition rule and send to regions
-    let physical_table_id = physical_table_info.table_id();
+/// Splits a combined batch into multiple region-specific writes based on partition rules.
+///
+/// It also strips partition columns from the batches before encoding them into Arrow IPC format.
+#[allow(clippy::too_many_arguments)]
+async fn split_and_encode_region_writes(
+    combined_batch: RecordBatch,
+    physical_table_id: TableId,
+    physical_table_name: &str,
+    partition_rule: &dyn partition::partition::PartitionRule,
+    partition_columns: &[String],
+    partition_manager: &PartitionRuleManagerRef,
+    total_row_count: usize,
+    first_error: &mut Option<String>,
+) -> Vec<FlushRegionWrite> {
     let region_masks = {
         let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
             .with_label_values(&["flush_physical_split_record_batch"])
             .start_timer();
-        match partition_rule.0.split_record_batch(&combined_batch) {
+        match partition_rule.split_record_batch(&combined_batch) {
             Ok(masks) => masks,
             Err(err) => {
                 record_failure!(
+                    first_error,
                     total_row_count,
                     format!(
                         "Failed to split combined batch for physical table '{}': {:?}",
                         physical_table_name, err
                     )
                 );
-                return;
+                return Vec::new();
             }
         }
     };
@@ -1389,18 +1462,18 @@ async fn flush_batch_physical(
     let stripped_batch = if partition_columns.is_empty() {
         combined_batch
     } else {
-        // Strip partition columns before encoding and sending requests.
         match strip_partition_columns_from_batch(combined_batch) {
             Ok(batch) => batch,
             Err(err) => {
                 record_failure!(
+                    first_error,
                     total_row_count,
                     format!(
                         "Failed to strip partition columns for physical table '{}': {:?}",
                         physical_table_name, err
                     )
                 );
-                return;
+                return Vec::new();
             }
         }
     };
@@ -1421,6 +1494,7 @@ async fn flush_batch_physical(
                 Ok(batch) => batch,
                 Err(err) => {
                     record_failure!(
+                        first_error,
                         total_row_count,
                         format!(
                             "Failed to filter combined batch for physical table '{}': {:?}",
@@ -1446,6 +1520,7 @@ async fn flush_batch_physical(
                 Ok(peer) => peer,
                 Err(err) => {
                     record_failure!(
+                        first_error,
                         row_count,
                         format!(
                             "Failed to resolve region leader for physical region {}: {:?}",
@@ -1465,6 +1540,7 @@ async fn flush_batch_physical(
                 Ok(encoded) => encoded,
                 Err(err) => {
                     record_failure!(
+                        first_error,
                         row_count,
                         format!(
                             "Failed to encode Arrow IPC for physical region {}: {:?}",
@@ -1500,17 +1576,7 @@ async fn flush_batch_physical(
         });
     }
 
-    for result in flush_region_writes_concurrently(node_manager.clone(), region_writes).await {
-        match result {
-            FlushWriteResult::Success { row_count } => {
-                FLUSH_TOTAL.inc();
-                FLUSH_ROWS.observe(row_count as f64);
-            }
-            FlushWriteResult::Failed { row_count, message } => {
-                record_failure!(row_count, message);
-            }
-        }
-    }
+    region_writes
 }
 
 fn notify_waiters(waiters: Vec<FlushWaiter>, first_error: &Option<String>) {
