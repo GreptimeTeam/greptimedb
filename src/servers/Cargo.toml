@@ -178,3 +178,7 @@ harness = false
 [[bench]]
 name = "loki_labels"
 harness = false
+
+[[bench]]
+name = "flush_batch_physical"
+harness = false

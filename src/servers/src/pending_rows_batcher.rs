@@ -89,13 +89,13 @@ pub trait PendingRowsSchemaAlterer: Send + Sync {
 pub type PendingRowsSchemaAltererRef = Arc<dyn PendingRowsSchemaAlterer>;
 
 #[derive(Clone)]
-struct PhysicalTableMetadata {
-    table_info: TableInfoRef,
-    name_to_ids: Option<HashMap<String, u32>>,
+pub struct PhysicalTableMetadata {
+    pub table_info: TableInfoRef,
+    pub name_to_ids: Option<HashMap<String, u32>>,
 }
 
 #[async_trait]
-trait PhysicalFlushCatalogProvider: Send + Sync {
+pub trait PhysicalFlushCatalogProvider: Send + Sync {
     async fn physical_table(
         &self,
         catalog: &str,
@@ -106,7 +106,7 @@ trait PhysicalFlushCatalogProvider: Send + Sync {
 }
 
 #[async_trait]
-trait PhysicalFlushPartitionProvider: Send + Sync {
+pub trait PhysicalFlushPartitionProvider: Send + Sync {
     async fn find_table_partition_rule(
         &self,
         table_info: &TableInfo,
@@ -116,7 +116,7 @@ trait PhysicalFlushPartitionProvider: Send + Sync {
 }
 
 #[async_trait]
-trait PhysicalFlushNodeRequester: Send + Sync {
+pub trait PhysicalFlushNodeRequester: Send + Sync {
     async fn handle(
         &self,
         peer: &Peer,
@@ -205,11 +205,11 @@ struct BatchKey {
 }
 
 #[derive(Debug)]
-struct TableBatch {
-    table_name: String,
-    table_id: TableId,
-    batches: Vec<RecordBatch>,
-    row_count: usize,
+pub struct TableBatch {
+    pub table_name: String,
+    pub table_id: TableId,
+    pub batches: Vec<RecordBatch>,
+    pub row_count: usize,
 }
 
 /// Intermediate planning state for resolving and preparing logical tables
@@ -1245,7 +1245,7 @@ async fn flush_batch(
     notify_waiters(waiters, result);
 }
 
-async fn flush_batch_physical(
+pub async fn flush_batch_physical(
     table_batches: &[TableBatch],
     physical_table_name: &str,
     ctx: &QueryContextRef,
