@@ -363,8 +363,10 @@ impl Instance {
                         format!("Chunk fallback triggered by {}", err.status_code().as_ref()),
                     );
                     // Only deterministic failures are retried span by span.
-                    // Ambiguous failures are handled below without retrying
-                    // because the chunk may already have been ingested.
+                    // This includes schemaless table or column creation paths for
+                    // trace ingestion. Ambiguous failures are handled below
+                    // without retrying because the chunk may already have been
+                    // ingested.
                     self.ingest_trace_chunk_span_by_span(
                         ingest_ctx,
                         chunk,
@@ -489,15 +491,14 @@ impl Instance {
         }
     }
 
-    // TODO(shuiyisong): review this
     fn classify_trace_chunk_failure(status: StatusCode) -> ChunkFailureReaction {
         match status {
-            StatusCode::InvalidArguments | StatusCode::InvalidSyntax | StatusCode::Unsupported => {
-                ChunkFailureReaction::RetryPerSpan
-            }
-            StatusCode::TableNotFound
-            | StatusCode::TableColumnNotFound
-            | StatusCode::DatabaseNotFound => ChunkFailureReaction::DiscardChunk,
+            StatusCode::InvalidArguments
+            | StatusCode::InvalidSyntax
+            | StatusCode::Unsupported
+            | StatusCode::TableNotFound
+            | StatusCode::TableColumnNotFound => ChunkFailureReaction::RetryPerSpan,
+            StatusCode::DatabaseNotFound => ChunkFailureReaction::DiscardChunk,
             StatusCode::Cancelled | StatusCode::DeadlineExceeded => ChunkFailureReaction::Propagate,
             _ if status.is_retryable() => ChunkFailureReaction::Propagate,
             _ => ChunkFailureReaction::DiscardChunk,
@@ -789,11 +790,11 @@ mod tests {
         );
         assert_eq!(
             Instance::classify_trace_chunk_failure(StatusCode::TableColumnNotFound),
-            ChunkFailureReaction::DiscardChunk
+            ChunkFailureReaction::RetryPerSpan
         );
         assert_eq!(
             Instance::classify_trace_chunk_failure(StatusCode::TableNotFound),
-            ChunkFailureReaction::DiscardChunk
+            ChunkFailureReaction::RetryPerSpan
         );
         assert_eq!(
             Instance::classify_trace_chunk_failure(StatusCode::DatabaseNotFound),
