@@ -545,12 +545,11 @@ async fn ensure_chunk_schema_files_exist(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+
     use async_trait::async_trait;
 
     use super::*;
-    use crate::data::export_v2::manifest::{
-        ChunkMeta, ChunkStatus, Manifest, TimeRange,
-    };
+    use crate::data::export_v2::manifest::{ChunkMeta, ChunkStatus, Manifest, TimeRange};
     use crate::data::export_v2::schema::SchemaSnapshot;
     use crate::data::snapshot_storage::SnapshotStorage;
 
@@ -793,7 +792,11 @@ CREATE VIEW v AS SELECT 1;
 
         let lines = format_data_import_plan(
             &[completed, skipped],
-            &["public".to_string(), "测试".to_string(), "metrics".to_string()],
+            &[
+                "public".to_string(),
+                "测试".to_string(),
+                "metrics".to_string(),
+            ],
         );
 
         assert_eq!(lines[0], "-- Data import plan:");
