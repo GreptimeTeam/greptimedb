@@ -685,6 +685,20 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(transparent)]
+    Partition {
+        source: partition::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(transparent)]
+    MetricEngine {
+        source: metric_engine::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -818,6 +832,8 @@ impl ErrorExt for Error {
             MemoryLimitExceeded { .. } => StatusCode::RateLimited,
 
             GreptimeProto { source, .. } => source.status_code(),
+            Partition { source, .. } => source.status_code(),
+            MetricEngine { source, .. } => source.status_code(),
         }
     }
 

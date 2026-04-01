@@ -39,7 +39,7 @@ use partition::manager::PartitionRuleManagerRef;
 use partition::partition::PartitionRuleRef;
 use session::context::QueryContextRef;
 use smallvec::SmallVec;
-use snafu::{OptionExt, ensure};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::{RegionId, TableId};
 use table::metadata::{TableInfo, TableInfoRef};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, mpsc, oneshot};
@@ -112,7 +112,7 @@ trait PhysicalFlushPartitionProvider: Send + Sync {
         table_info: &TableInfo,
     ) -> partition::error::Result<PartitionRuleRef>;
 
-    async fn find_region_leader(&self, region_id: RegionId) -> partition::error::Result<Peer>;
+    async fn find_region_leader(&self, region_id: RegionId) -> Result<Peer>;
 }
 
 #[async_trait]
@@ -121,7 +121,7 @@ trait PhysicalFlushNodeRequester: Send + Sync {
         &self,
         peer: &Peer,
         request: RegionRequest,
-    ) -> common_meta::error::Result<api::region::RegionResponse>;
+    ) -> Result<api::region::RegionResponse>;
 }
 
 #[derive(Clone)]
@@ -171,8 +171,9 @@ impl PhysicalFlushPartitionProvider for PartitionManagerPhysicalFlushAdapter {
             .map(|(rule, _)| rule)
     }
 
-    async fn find_region_leader(&self, region_id: RegionId) -> partition::error::Result<Peer> {
-        self.partition_manager.find_region_leader(region_id).await
+    async fn find_region_leader(&self, region_id: RegionId) -> Result<Peer> {
+        let peer = self.partition_manager.find_region_leader(region_id).await?;
+        Ok(peer)
     }
 }
 
@@ -187,9 +188,12 @@ impl PhysicalFlushNodeRequester for NodeManagerPhysicalFlushAdapter {
         &self,
         peer: &Peer,
         request: RegionRequest,
-    ) -> common_meta::error::Result<api::region::RegionResponse> {
+    ) -> error::Result<api::region::RegionResponse> {
         let datanode = self.node_manager.datanode(peer).await;
-        datanode.handle(request).await
+        datanode
+            .handle(request)
+            .await
+            .context(error::CommonMetaSnafu)
     }
 }
 
@@ -1021,7 +1025,6 @@ async fn spawn_flush(
 }
 
 struct FlushRegionWrite {
-    region_id: RegionId,
     row_count: usize,
     datanode: Peer,
     request: RegionRequest,
@@ -1036,11 +1039,6 @@ struct PlannedRegionBatch {
 struct ResolvedRegionBatch {
     planned: PlannedRegionBatch,
     datanode: Peer,
-}
-
-enum FlushWriteResult {
-    Success { row_count: usize },
-    Failed { row_count: usize, message: String },
 }
 
 fn should_dispatch_concurrently(region_write_count: usize) -> bool {
@@ -1173,27 +1171,17 @@ fn strip_partition_columns_from_batch(batch: RecordBatch) -> Result<RecordBatch>
 async fn flush_region_writes_concurrently(
     node_manager: &(impl PhysicalFlushNodeRequester + ?Sized),
     writes: Vec<FlushRegionWrite>,
-) -> Vec<FlushWriteResult> {
+) -> Result<()> {
     if !should_dispatch_concurrently(writes.len()) {
-        let mut results = Vec::with_capacity(writes.len());
         for write in writes {
             let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
                 .with_label_values(&["flush_write_region"])
                 .start_timer();
-            match node_manager.handle(&write.datanode, write.request).await {
-                Ok(_) => results.push(FlushWriteResult::Success {
-                    row_count: write.row_count,
-                }),
-                Err(err) => results.push(FlushWriteResult::Failed {
-                    row_count: write.row_count,
-                    message: format!(
-                        "Bulk insert flush failed for region {}: {:?}",
-                        write.region_id, err
-                    ),
-                }),
-            }
+            node_manager.handle(&write.datanode, write.request).await?;
+            FLUSH_TOTAL.inc();
+            FLUSH_ROWS.observe(write.row_count as f64);
         }
-        return results;
+        return Ok(());
     }
 
     let write_futures = writes.into_iter().map(|write| async move {
@@ -1201,22 +1189,15 @@ async fn flush_region_writes_concurrently(
             .with_label_values(&["flush_write_region"])
             .start_timer();
 
-        match node_manager.handle(&write.datanode, write.request).await {
-            Ok(_) => FlushWriteResult::Success {
-                row_count: write.row_count,
-            },
-            Err(err) => FlushWriteResult::Failed {
-                row_count: write.row_count,
-                message: format!(
-                    "Bulk insert flush failed for region {}: {:?}",
-                    write.region_id, err
-                ),
-            },
-        }
+        node_manager.handle(&write.datanode, write.request).await?;
+        FLUSH_TOTAL.inc();
+        FLUSH_ROWS.observe(write.row_count as f64);
+        Ok::<_, Error>(())
     });
 
     // todo(hl): should be bounded.
-    futures::future::join_all(write_futures).await
+    futures::future::try_join_all(write_futures).await?;
+    Ok(())
 }
 
 async fn flush_batch(
@@ -1232,7 +1213,6 @@ async fn flush_batch(
         waiters,
     } = flush;
     let start = Instant::now();
-    let mut first_error: Option<String> = None;
 
     // Physical-table-level flush: transform all logical table batches
     // into physical format and write them together.
@@ -1243,196 +1223,110 @@ async fn flush_batch(
     let partition_provider = PartitionManagerPhysicalFlushAdapter { partition_manager };
     let node_requester = NodeManagerPhysicalFlushAdapter { node_manager };
     let catalog_provider = CatalogManagerPhysicalFlushAdapter { catalog_manager };
-    flush_batch_physical(
+    let result = flush_batch_physical(
         &table_batches,
-        total_row_count,
         &physical_table_name,
         &ctx,
         &partition_provider,
         &node_requester,
         &catalog_provider,
-        &mut first_error,
     )
     .await;
 
     let elapsed = start.elapsed().as_secs_f64();
     FLUSH_ELAPSED.observe(elapsed);
+
+    if result.is_err() {
+        FLUSH_FAILURES.inc();
+        FLUSH_DROPPED_ROWS.inc_by(total_row_count as u64);
+    }
+
     debug!(
         "Pending rows batch flushed, total rows: {}, elapsed time: {}s",
         total_row_count, elapsed
     );
 
-    notify_waiters(waiters, &first_error);
+    notify_waiters(waiters, result);
 }
 
-/// Attempts to flush all table batches by transforming them into the physical
-/// table format (sparse primary key encoding) and writing directly to the
-/// physical data regions.
-///
-/// This is the only flush path. Any failure in resolving or transforming the
-/// physical flush inputs is recorded as flush failure and reported to waiters.
-macro_rules! record_failure {
-    ($first_error:expr, $row_count:expr, $msg:expr) => {{
-        let msg = $msg;
-        if $first_error.is_none() {
-            *$first_error = Some(msg.clone());
-        }
-        mark_flush_failure($row_count, &msg);
-    }};
-}
-
-#[allow(clippy::too_many_arguments)]
 async fn flush_batch_physical(
     table_batches: &[TableBatch],
-    total_row_count: usize,
     physical_table_name: &str,
     ctx: &QueryContextRef,
     partition_manager: &(impl PhysicalFlushPartitionProvider + ?Sized),
     node_manager: &(impl PhysicalFlushNodeRequester + ?Sized),
     catalog_manager: &(impl PhysicalFlushCatalogProvider + ?Sized),
-    first_error: &mut Option<String>,
-) {
+) -> Result<()> {
     // 1. Resolve the physical table and get column ID mapping
     let physical_table = {
         let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
             .with_label_values(&["flush_physical_resolve_table"])
             .start_timer();
-        match catalog_manager
+        catalog_manager
             .physical_table(
                 ctx.current_catalog(),
                 &ctx.current_schema(),
                 physical_table_name,
                 ctx.as_ref(),
             )
-            .await
-        {
-            Ok(Some(table)) => table,
-            Ok(None) => {
-                record_failure!(
-                    first_error,
-                    total_row_count,
-                    format!(
-                        "Physical table '{}' not found during pending flush",
-                        physical_table_name
-                    )
-                );
-                return;
-            }
-            Err(err) => {
-                record_failure!(
-                    first_error,
-                    total_row_count,
-                    format!(
-                        "Failed to resolve physical table '{}' for pending flush: {:?}",
-                        physical_table_name, err
-                    )
-                );
-                return;
-            }
-        }
+            .await?
+            .context(error::InternalSnafu {
+                err_msg: format!(
+                    "Physical table '{}' not found during pending flush",
+                    physical_table_name
+                ),
+            })?
     };
 
     let physical_table_info = physical_table.table_info;
-    let name_to_ids = match physical_table.name_to_ids {
-        Some(ids) => ids,
-        None => {
-            record_failure!(
-                first_error,
-                total_row_count,
-                format!(
-                    "Physical table '{}' has no column IDs for pending flush",
-                    physical_table_name
-                )
-            );
-            return;
-        }
-    };
+    let name_to_ids = physical_table.name_to_ids.context(error::InternalSnafu {
+        err_msg: format!(
+            "Physical table '{}' has no column IDs for pending flush",
+            physical_table_name
+        ),
+    })?;
 
     // 2. Get the physical table's partition rule (one lookup instead of N)
     let partition_rule = {
         let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
             .with_label_values(&["flush_physical_fetch_partition_rule"])
             .start_timer();
-        match partition_manager
+        partition_manager
             .find_table_partition_rule(physical_table_info.as_ref())
             .await
-        {
-            Ok(rule) => rule,
-            Err(err) => {
-                record_failure!(
-                    first_error,
-                    total_row_count,
-                    format!(
+            .map_err(|err| {
+                error::InternalSnafu {
+                    err_msg: format!(
                         "Failed to fetch partition rule for physical table '{}': {:?}",
                         physical_table_name, err
-                    )
-                );
-                return;
-            }
-        }
+                    ),
+                }
+                .build()
+            })?
     };
     let partition_columns = partition_rule.partition_columns();
     let partition_columns_set: HashSet<&str> =
         partition_columns.iter().map(String::as_str).collect();
 
     // 3. Transform each logical table batch into physical format
-    let (modified_batches, modified_row_count) = transform_logical_batches_to_physical(
-        table_batches,
-        &name_to_ids,
-        &partition_columns_set,
-        first_error,
-    );
-
-    if modified_batches.is_empty() {
-        if first_error.is_none() {
-            record_failure!(
-                first_error,
-                total_row_count,
-                format!(
-                    "No batches can be transformed for physical table '{}' during pending flush",
-                    physical_table_name
-                )
-            );
-        }
-        return;
-    }
+    let modified_batches =
+        transform_logical_batches_to_physical(table_batches, &name_to_ids, &partition_columns_set)?;
 
     // 4. Concatenate all modified batches (all share the same physical schema)
-    let combined_batch =
-        match concat_modified_batches(&modified_batches, modified_row_count, first_error) {
-            Some(batch) => batch,
-            None => return,
-        };
+    let combined_batch = concat_modified_batches(&modified_batches)?;
 
     // 5. Split by physical partition rule and send to regions
     let physical_table_id = physical_table_info.table_id();
-    let Some(planned_batches) = plan_region_batches(
+    let planned_batches = plan_region_batches(
         combined_batch,
         physical_table_id,
-        physical_table_name,
         partition_rule.as_ref(),
         partition_columns,
-        total_row_count,
-        first_error,
-    ) else {
-        return;
-    };
+    )?;
 
-    let resolved_batches =
-        resolve_region_targets(planned_batches, partition_manager, first_error).await;
-    let region_writes = encode_region_write_requests(resolved_batches, first_error);
-
-    for result in flush_region_writes_concurrently(node_manager, region_writes).await {
-        match result {
-            FlushWriteResult::Success { row_count } => {
-                FLUSH_TOTAL.inc();
-                FLUSH_ROWS.observe(row_count as f64);
-            }
-            FlushWriteResult::Failed { row_count, message } => {
-                record_failure!(first_error, row_count, message);
-            }
-        }
-    }
+    let resolved_batches = resolve_region_targets(planned_batches, partition_manager).await?;
+    let region_writes = encode_region_write_requests(resolved_batches)?;
+    flush_region_writes_concurrently(node_manager, region_writes).await
 }
 
 /// Transforms logical table batches into physical format (sparse primary key encoding).
@@ -1443,36 +1337,24 @@ fn transform_logical_batches_to_physical(
     table_batches: &[TableBatch],
     name_to_ids: &HashMap<String, u32>,
     partition_columns_set: &HashSet<&str>,
-    first_error: &mut Option<String>,
-) -> (Vec<RecordBatch>, usize) {
+) -> Result<Vec<RecordBatch>> {
     let mut modified_batches: Vec<RecordBatch> = Vec::with_capacity(table_batches.len());
-    let mut modified_row_count: usize = 0;
 
     let mut modify_elapsed = Duration::ZERO;
     let mut columns_taxonomy_elapsed = Duration::ZERO;
 
-    'next_table: for table_batch in table_batches {
+    for table_batch in table_batches {
         let table_id = table_batch.table_id;
 
         for batch in &table_batch.batches {
             let batch_schema = batch.schema();
             let start = Instant::now();
-            let (tag_columns, essential_col_indices) = match columns_taxonomy(
+            let (tag_columns, essential_col_indices) = columns_taxonomy(
                 &batch_schema,
                 &table_batch.table_name,
                 name_to_ids,
                 partition_columns_set,
-            ) {
-                Ok(columns) => columns,
-                Err(err) => {
-                    warn!(
-                        "Failed to resolve columns for logical table '{}': {:?}",
-                        table_batch.table_name, err
-                    );
-                    record_failure!(first_error, table_batch.row_count, err.to_string());
-                    continue 'next_table;
-                }
-            };
+            )?;
 
             columns_taxonomy_elapsed += start.elapsed();
             if tag_columns.is_empty() && essential_col_indices.is_empty() {
@@ -1481,31 +1363,16 @@ fn transform_logical_batches_to_physical(
 
             let modified = {
                 let start = Instant::now();
-                match modify_batch_sparse(
+                let batch = modify_batch_sparse(
                     batch.clone(),
                     table_id,
                     &tag_columns,
                     &essential_col_indices,
-                ) {
-                    Ok(batch) => {
-                        modify_elapsed += start.elapsed();
-                        batch
-                    }
-                    Err(err) => {
-                        record_failure!(
-                            first_error,
-                            table_batch.row_count,
-                            format!(
-                                "Failed to modify batch for logical table '{}': {:?}",
-                                table_batch.table_name, err
-                            )
-                        );
-                        continue 'next_table;
-                    }
-                }
+                )?;
+                modify_elapsed += start.elapsed();
+                batch
             };
 
-            modified_row_count += modified.num_rows();
             modified_batches.push(modified);
         }
     }
@@ -1517,98 +1384,55 @@ fn transform_logical_batches_to_physical(
         .with_label_values(&["flush_physical_columns_taxonomy"])
         .observe(columns_taxonomy_elapsed.as_secs_f64());
 
-    (modified_batches, modified_row_count)
+    ensure!(
+        !modified_batches.is_empty(),
+        error::InternalSnafu {
+            err_msg: "No batches can be transformed during pending flush",
+        }
+    );
+    Ok(modified_batches)
 }
 
 /// Concatenates all modified batches into a single large batch.
 ///
 /// All modified batches share the same physical schema.
-fn concat_modified_batches(
-    modified_batches: &[RecordBatch],
-    modified_row_count: usize,
-    first_error: &mut Option<String>,
-) -> Option<RecordBatch> {
+fn concat_modified_batches(modified_batches: &[RecordBatch]) -> Result<RecordBatch> {
     let combined_schema = modified_batches[0].schema();
     let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
         .with_label_values(&["flush_physical_concat_all"])
         .start_timer();
-    match concat_batches(&combined_schema, modified_batches) {
-        Ok(batch) => Some(batch),
-        Err(err) => {
-            record_failure!(
-                first_error,
-                modified_row_count,
-                format!("Failed to concat modified batches: {:?}", err)
-            );
-            None
-        }
-    }
+    concat_batches(&combined_schema, modified_batches).context(error::ArrowSnafu)
 }
 
 fn split_combined_batch_by_region(
     combined_batch: &RecordBatch,
-    physical_table_name: &str,
     partition_rule: &dyn partition::partition::PartitionRule,
-    total_row_count: usize,
-    first_error: &mut Option<String>,
-) -> Option<HashMap<u32, partition::partition::RegionMask>> {
+) -> Result<HashMap<u32, partition::partition::RegionMask>> {
     let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
         .with_label_values(&["flush_physical_split_record_batch"])
         .start_timer();
-    match partition_rule.split_record_batch(combined_batch) {
-        Ok(masks) => Some(masks),
-        Err(err) => {
-            record_failure!(
-                first_error,
-                total_row_count,
-                format!(
-                    "Failed to split combined batch for physical table '{}': {:?}",
-                    physical_table_name, err
-                )
-            );
-            None
-        }
-    }
+    let map = partition_rule.split_record_batch(combined_batch)?;
+    Ok(map)
 }
 
 fn prepare_physical_region_routing_batch(
     combined_batch: RecordBatch,
-    physical_table_name: &str,
     partition_columns: &[String],
-    total_row_count: usize,
-    first_error: &mut Option<String>,
-) -> Option<RecordBatch> {
+) -> Result<RecordBatch> {
     if partition_columns.is_empty() {
-        return Some(combined_batch);
+        return Ok(combined_batch);
     }
-
-    match strip_partition_columns_from_batch(combined_batch) {
-        Ok(batch) => Some(batch),
-        Err(err) => {
-            record_failure!(
-                first_error,
-                total_row_count,
-                format!(
-                    "Failed to strip partition columns for physical table '{}': {:?}",
-                    physical_table_name, err
-                )
-            );
-            None
-        }
-    }
+    strip_partition_columns_from_batch(combined_batch)
 }
 
 fn plan_region_batch(
     stripped_batch: &RecordBatch,
-    physical_table_name: &str,
     physical_table_id: TableId,
     region_number: u32,
     mask: &partition::partition::RegionMask,
-    total_row_count: usize,
-    first_error: &mut Option<String>,
-) -> Option<PlannedRegionBatch> {
+) -> Result<Option<PlannedRegionBatch>> {
     if mask.select_none() {
-        return None;
+        return Ok(None);
     }
 
     let region_batch = if mask.select_all() {
@@ -1617,117 +1441,67 @@ fn plan_region_batch(
         let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
             .with_label_values(&["flush_physical_filter_record_batch"])
             .start_timer();
-        match filter_record_batch(stripped_batch, mask.array()) {
-            Ok(batch) => batch,
-            Err(err) => {
-                record_failure!(
-                    first_error,
-                    total_row_count,
-                    format!(
-                        "Failed to filter combined batch for physical table '{}': {:?}",
-                        physical_table_name, err
-                    )
-                );
-                return None;
-            }
-        }
+        filter_record_batch(stripped_batch, mask.array()).context(error::ArrowSnafu)?
     };
 
     let row_count = region_batch.num_rows();
     if row_count == 0 {
-        return None;
+        return Ok(None);
     }
 
-    Some(PlannedRegionBatch {
+    Ok(Some(PlannedRegionBatch {
         region_id: RegionId::new(physical_table_id, region_number),
         row_count,
         batch: region_batch,
-    })
+    }))
 }
 
 #[allow(clippy::too_many_arguments)]
 fn plan_region_batches(
     combined_batch: RecordBatch,
     physical_table_id: TableId,
-    physical_table_name: &str,
     partition_rule: &dyn partition::partition::PartitionRule,
     partition_columns: &[String],
-    total_row_count: usize,
-    first_error: &mut Option<String>,
-) -> Option<Vec<PlannedRegionBatch>> {
-    let region_masks = split_combined_batch_by_region(
-        &combined_batch,
-        physical_table_name,
-        partition_rule,
-        total_row_count,
-        first_error,
-    )?;
-    let stripped_batch = prepare_physical_region_routing_batch(
-        combined_batch,
-        physical_table_name,
-        partition_columns,
-        total_row_count,
-        first_error,
-    )?;
+) -> Result<Vec<PlannedRegionBatch>> {
+    let region_masks = split_combined_batch_by_region(&combined_batch, partition_rule)?;
+    let stripped_batch = prepare_physical_region_routing_batch(combined_batch, partition_columns)?;
 
     let mut planned_batches = Vec::new();
     for (region_number, mask) in region_masks {
-        if let Some(planned_batch) = plan_region_batch(
-            &stripped_batch,
-            physical_table_name,
-            physical_table_id,
-            region_number,
-            &mask,
-            total_row_count,
-            first_error,
-        ) {
+        if let Some(planned_batch) =
+            plan_region_batch(&stripped_batch, physical_table_id, region_number, &mask)?
+        {
             planned_batches.push(planned_batch);
         }
     }
 
-    Some(planned_batches)
+    Ok(planned_batches)
 }
 
 async fn resolve_region_targets(
     planned_batches: Vec<PlannedRegionBatch>,
     partition_manager: &(impl PhysicalFlushPartitionProvider + ?Sized),
-    first_error: &mut Option<String>,
-) -> Vec<ResolvedRegionBatch> {
+) -> Result<Vec<ResolvedRegionBatch>> {
     let mut resolved_batches = Vec::with_capacity(planned_batches.len());
     for planned in planned_batches {
         let datanode = {
             let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
                 .with_label_values(&["flush_physical_resolve_region_leader"])
                 .start_timer();
-            match partition_manager
+            partition_manager
                 .find_region_leader(planned.region_id)
-                .await
-            {
-                Ok(peer) => peer,
-                Err(err) => {
-                    record_failure!(
-                        first_error,
-                        planned.row_count,
-                        format!(
-                            "Failed to resolve region leader for physical region {}: {:?}",
-                            planned.region_id, err
-                        )
-                    );
-                    continue;
-                }
-            }
+                .await?
         };
 
         resolved_batches.push(ResolvedRegionBatch { planned, datanode });
     }
 
-    resolved_batches
+    Ok(resolved_batches)
 }
 
 fn encode_region_write_requests(
     resolved_batches: Vec<ResolvedRegionBatch>,
-    first_error: &mut Option<String>,
-) -> Vec<FlushRegionWrite> {
+) -> Result<Vec<FlushRegionWrite>> {
     let mut region_writes = Vec::with_capacity(resolved_batches.len());
     for resolved in resolved_batches {
         let region_id = resolved.planned.region_id;
@@ -1736,20 +1510,7 @@ fn encode_region_write_requests(
             let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
                 .with_label_values(&["flush_physical_encode_ipc"])
                 .start_timer();
-            match record_batch_to_ipc(resolved.planned.batch) {
-                Ok(encoded) => encoded,
-                Err(err) => {
-                    record_failure!(
-                        first_error,
-                        row_count,
-                        format!(
-                            "Failed to encode Arrow IPC for physical region {}: {:?}",
-                            region_id, err
-                        )
-                    );
-                    continue;
-                }
-            }
+            record_batch_to_ipc(resolved.planned.batch)?
         };
 
         let request = RegionRequest {
@@ -1769,23 +1530,22 @@ fn encode_region_write_requests(
         };
 
         region_writes.push(FlushRegionWrite {
-            region_id,
             row_count,
             datanode: resolved.datanode,
             request,
         });
     }
 
-    region_writes
+    Ok(region_writes)
 }
 
-fn notify_waiters(waiters: Vec<FlushWaiter>, first_error: &Option<String>) {
+fn notify_waiters(waiters: Vec<FlushWaiter>, result: Result<()>) {
     for waiter in waiters {
-        let result = match first_error {
-            Some(err_msg) => Err(Error::Internal {
-                err_msg: err_msg.clone(),
+        let result = match &result {
+            Err(e) => Err(Error::Internal {
+                err_msg: e.to_string(),
             }),
-            None => Ok(()),
+            Ok(()) => Ok(()),
         };
         let _ = waiter.response_tx.send(result);
         // waiter._permit is dropped here, releasing the inflight semaphore slot
@@ -1798,7 +1558,7 @@ fn mark_flush_failure(row_count: usize, message: &str) {
     FLUSH_DROPPED_ROWS.inc_by(row_count as u64);
 }
 
-fn flush_with_error(batch: &mut PendingBatch, message: &str) {
+fn flush_with_error(batch: &mut PendingBatch, error: &Error) {
     if batch.total_row_count == 0 {
         return;
     }
@@ -1813,8 +1573,8 @@ fn flush_with_error(batch: &mut PendingBatch, message: &str) {
     PENDING_ROWS.sub(row_count as i64);
     PENDING_BATCHES.dec();
 
-    let err_msg = Some(message.to_string());
-    notify_waiters(waiters, &err_msg);
+    notify_waiters(waiters, Err(error));
+    let err_msg = Some(error.to_string());
     mark_flush_failure(row_count, message);
 }
 
@@ -1870,6 +1630,7 @@ mod tests {
     use partition::error::Result as PartitionResult;
     use partition::partition::{PartitionRule, PartitionRuleRef, RegionMask};
     use smallvec::SmallVec;
+    use snafu::ResultExt;
     use store_api::storage::RegionId;
     use table::metadata::TableId;
     use table::test_util::table_info::test_table_info;
@@ -1877,7 +1638,7 @@ mod tests {
     use tokio::time::sleep;
 
     use super::{
-        BatchKey, Error, FlushRegionWrite, FlushWriteResult, PendingRowsBatcher, PendingWorker,
+        BatchKey, Error, FlushRegionWrite, PendingRowsBatcher, PendingWorker,
         PhysicalFlushCatalogProvider, PhysicalFlushNodeRequester, PhysicalFlushPartitionProvider,
         PhysicalTableMetadata, PlannedRegionBatch, ResolvedRegionBatch, TableBatch, WorkerCommand,
         columns_taxonomy, encode_region_write_requests, flush_batch_physical,
@@ -1885,6 +1646,7 @@ mod tests {
         should_close_worker_on_idle_timeout, should_dispatch_concurrently,
         strip_partition_columns_from_batch, transform_logical_batches_to_physical,
     };
+    use crate::error;
 
     fn mock_rows(row_count: usize, schema_name: &str) -> Rows {
         Rows {
@@ -2054,7 +1816,7 @@ mod tests {
             Ok(Arc::new(SingleRegionPartitionRule))
         }
 
-        async fn find_region_leader(&self, _region_id: RegionId) -> PartitionResult<Peer> {
+        async fn find_region_leader(&self, _region_id: RegionId) -> error::Result<Peer> {
             self.region_leader_calls.fetch_add(1, Ordering::SeqCst);
             Ok(Peer {
                 id: 1,
@@ -2074,7 +1836,7 @@ mod tests {
             &self,
             _peer: &Peer,
             _request: RegionRequest,
-        ) -> MetaResult<RegionResponse> {
+        ) -> error::Result<RegionResponse> {
             self.writes.fetch_add(1, Ordering::SeqCst);
             Ok(RegionResponse::new(0))
         }
@@ -2189,9 +1951,16 @@ mod tests {
 
     #[async_trait]
     impl PhysicalFlushNodeRequester for ConcurrentMockNodeManager {
-        async fn handle(&self, peer: &Peer, request: RegionRequest) -> MetaResult<RegionResponse> {
+        async fn handle(
+            &self,
+            peer: &Peer,
+            request: RegionRequest,
+        ) -> error::Result<RegionResponse> {
             let datanode = self.datanode(peer).await;
-            datanode.handle(request).await
+            datanode
+                .handle(request)
+                .await
+                .context(error::CommonMetaSnafu)
         }
     }
 
@@ -2265,7 +2034,6 @@ mod tests {
 
         let writes = vec![
             FlushRegionWrite {
-                region_id: RegionId::new(1024, 1),
                 row_count: 10,
                 datanode: Peer {
                     id: 1,
@@ -2274,7 +2042,6 @@ mod tests {
                 request: RegionRequest::default(),
             },
             FlushRegionWrite {
-                region_id: RegionId::new(1024, 2),
                 row_count: 12,
                 datanode: Peer {
                     id: 2,
@@ -2284,13 +2051,9 @@ mod tests {
             },
         ];
 
-        let results = flush_region_writes_concurrently(node_manager.as_ref(), writes).await;
-        assert_eq!(2, results.len());
-        assert!(
-            results
-                .iter()
-                .all(|result| matches!(result, FlushWriteResult::Success { .. }))
-        );
+        flush_region_writes_concurrently(node_manager.as_ref(), writes)
+            .await
+            .unwrap();
         assert!(max_inflight.load(Ordering::SeqCst) >= 2);
     }
 
@@ -2589,18 +2352,11 @@ mod tests {
 
         let name_to_ids = HashMap::from([("tag1".to_string(), 1)]);
         let partition_columns = HashSet::new();
-        let mut first_error = None;
-
-        let (modified, total_rows) = transform_logical_batches_to_physical(
-            &table_batches,
-            &name_to_ids,
-            &partition_columns,
-            &mut first_error,
-        );
+        let modified =
+            transform_logical_batches_to_physical(&table_batches, &name_to_ids, &partition_columns)
+                .unwrap();
 
         assert_eq!(1, modified.len());
-        assert_eq!(1, total_rows);
-        assert!(first_error.is_none());
         assert_eq!(3, modified[0].num_columns());
         assert_eq!("__primary_key", modified[0].schema().field(0).name());
         assert_eq!("greptime_timestamp", modified[0].schema().field(1).name());
@@ -2621,21 +2377,12 @@ mod tests {
         // tag1 is missing from name_to_ids, causing columns_taxonomy to fail.
         let name_to_ids = HashMap::new();
         let partition_columns = HashSet::new();
-        let mut first_error = None;
+        let err =
+            transform_logical_batches_to_physical(&table_batches, &name_to_ids, &partition_columns)
+                .unwrap_err();
 
-        let (modified, total_rows) = transform_logical_batches_to_physical(
-            &table_batches,
-            &name_to_ids,
-            &partition_columns,
-            &mut first_error,
-        );
-
-        assert_eq!(0, modified.len());
-        assert_eq!(0, total_rows);
-        assert!(first_error.is_some());
         assert!(
-            first_error
-                .unwrap()
+            err.to_string()
                 .contains("not found in physical table column IDs")
         );
     }
@@ -2662,18 +2409,11 @@ mod tests {
 
         let name_to_ids = HashMap::from([("tag1".to_string(), 1), ("tag2".to_string(), 2)]);
         let partition_columns = HashSet::new();
-        let mut first_error = None;
-
-        let (modified, total_rows) = transform_logical_batches_to_physical(
-            &table_batches,
-            &name_to_ids,
-            &partition_columns,
-            &mut first_error,
-        );
+        let modified =
+            transform_logical_batches_to_physical(&table_batches, &name_to_ids, &partition_columns)
+                .unwrap();
 
         assert_eq!(2, modified.len());
-        assert_eq!(2, total_rows);
-        assert!(first_error.is_none());
     }
 
     #[test]
@@ -2699,20 +2439,11 @@ mod tests {
         // tag1 is missing from name_to_ids, causing batch1 to fail.
         let name_to_ids = HashMap::from([("tag2".to_string(), 2)]);
         let partition_columns = HashSet::new();
-        let mut first_error = None;
+        let err =
+            transform_logical_batches_to_physical(&table_batches, &name_to_ids, &partition_columns)
+                .unwrap_err();
 
-        let (modified, total_rows) = transform_logical_batches_to_physical(
-            &table_batches,
-            &name_to_ids,
-            &partition_columns,
-            &mut first_error,
-        );
-
-        // Only batch2 should succeed.
-        assert_eq!(1, modified.len());
-        assert_eq!(1, total_rows);
-        assert!(first_error.is_some());
-        assert!(first_error.unwrap().contains("tag1"));
+        assert!(err.to_string().contains("tag1"));
     }
 
     #[tokio::test]
@@ -2726,12 +2457,10 @@ mod tests {
         let partition_calls = Arc::new(AtomicUsize::new(0));
         let leader_calls = Arc::new(AtomicUsize::new(0));
         let node = MockFlushNodeRequester::default();
-        let mut first_error = None;
         let ctx = session::context::QueryContext::arc();
 
         flush_batch_physical(
             &table_batches,
-            1,
             "phy",
             &ctx,
             &MockFlushPartitionProvider {
@@ -2742,11 +2471,10 @@ mod tests {
             &MockFlushCatalogProvider {
                 table: Some(mock_physical_table_metadata(1024)),
             },
-            &mut first_error,
         )
-        .await;
+        .await
+        .unwrap();
 
-        assert!(first_error.is_none());
         assert_eq!(1, partition_calls.load(Ordering::SeqCst));
         assert_eq!(1, leader_calls.load(Ordering::SeqCst));
         assert_eq!(1, node.writes.load(Ordering::SeqCst));
@@ -2763,12 +2491,10 @@ mod tests {
         let partition_calls = Arc::new(AtomicUsize::new(0));
         let leader_calls = Arc::new(AtomicUsize::new(0));
         let node = MockFlushNodeRequester::default();
-        let mut first_error = None;
         let ctx = session::context::QueryContext::arc();
 
-        flush_batch_physical(
+        let err = flush_batch_physical(
             &table_batches,
-            1,
             "missing_phy",
             &ctx,
             &MockFlushPartitionProvider {
@@ -2777,16 +2503,58 @@ mod tests {
             },
             &node,
             &MockFlushCatalogProvider { table: None },
-            &mut first_error,
         )
-        .await;
+        .await
+        .unwrap_err();
 
         assert!(
-            first_error
-                .as_deref()
-                .is_some_and(|err| err.contains("Physical table 'missing_phy' not found"))
+            err.to_string()
+                .contains("Physical table 'missing_phy' not found")
         );
         assert_eq!(0, partition_calls.load(Ordering::SeqCst));
+        assert_eq!(0, leader_calls.load(Ordering::SeqCst));
+        assert_eq!(0, node.writes.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn test_flush_batch_physical_aborts_immediately_on_transform_error() {
+        let table_batches = vec![
+            TableBatch {
+                table_name: "broken".to_string(),
+                table_id: 11,
+                batches: vec![mock_tag_batch("unknown_tag", "host-1", 1000, 1.0)],
+                row_count: 1,
+            },
+            TableBatch {
+                table_name: "healthy".to_string(),
+                table_id: 12,
+                batches: vec![mock_tag_batch("tag1", "host-2", 2000, 2.0)],
+                row_count: 1,
+            },
+        ];
+        let partition_calls = Arc::new(AtomicUsize::new(0));
+        let leader_calls = Arc::new(AtomicUsize::new(0));
+        let node = MockFlushNodeRequester::default();
+        let ctx = session::context::QueryContext::arc();
+
+        let err = flush_batch_physical(
+            &table_batches,
+            "phy",
+            &ctx,
+            &MockFlushPartitionProvider {
+                partition_rule_calls: partition_calls.clone(),
+                region_leader_calls: leader_calls.clone(),
+            },
+            &node,
+            &MockFlushCatalogProvider {
+                table: Some(mock_physical_table_metadata(1024)),
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("unknown_tag"));
+        assert_eq!(1, partition_calls.load(Ordering::SeqCst));
         assert_eq!(0, leader_calls.load(Ordering::SeqCst));
         assert_eq!(0, node.writes.load(Ordering::SeqCst));
     }
@@ -2812,23 +2580,17 @@ mod tests {
             ],
         )
         .unwrap();
-        let mut first_error = None;
-
         let mut planned_batches = plan_region_batches(
             combined_batch,
             1024,
-            "phy",
             &TwoRegionPartitionRule {
                 partition_columns: vec!["host".to_string()],
             },
             &["host".to_string()],
-            2,
-            &mut first_error,
         )
         .unwrap();
         planned_batches.sort_by_key(|planned| planned.region_id.region_number());
 
-        assert!(first_error.is_none());
         assert_eq!(2, planned_batches.len());
         assert_eq!(RegionId::new(1024, 1), planned_batches[0].region_id);
         assert_eq!(1, planned_batches[0].row_count);
@@ -2868,13 +2630,9 @@ mod tests {
                 addr: "node-1".to_string(),
             },
         };
-        let mut first_error = None;
+        let writes = encode_region_write_requests(vec![resolved_batch]).unwrap();
 
-        let writes = encode_region_write_requests(vec![resolved_batch], &mut first_error);
-
-        assert!(first_error.is_none());
         assert_eq!(1, writes.len());
-        assert_eq!(RegionId::new(1024, 1), writes[0].region_id);
         assert_eq!(1, writes[0].row_count);
         assert_eq!(1, writes[0].datanode.id);
         let Some(region_request::Body::BulkInsert(request)) = &writes[0].request.body else {
