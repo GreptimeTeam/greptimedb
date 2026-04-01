@@ -19,19 +19,15 @@ use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_time::Timestamp;
 use datatypes::arrow::array::BooleanArray;
 use datatypes::arrow::buffer::BooleanBuffer;
-use datatypes::arrow::compute::concat_batches;
 use datatypes::arrow::record_batch::RecordBatch;
-use mito_codec::row_converter::PrimaryKeyFilter;
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 
-use crate::error::{ComputeArrowSnafu, RecordBatchSnafu, Result, UnexpectedSnafu};
+use crate::error::{RecordBatchSnafu, Result};
 use crate::memtable::BoxedBatchIterator;
 use crate::read::last_row::{FlatRowGroupLastRowCachedReader, RowGroupLastRowCachedReader};
 use crate::read::{Batch, BatchReader};
 use crate::sst::file::FileTimeRange;
 use crate::sst::parquet::file_range::FileRangeContextRef;
-use crate::sst::parquet::flat_format::primary_key_column_index;
-use crate::sst::parquet::format::PrimaryKeyArray;
 use crate::sst::parquet::reader::{FlatRowGroupReader, ReaderMetrics, RowGroupReader};
 
 pub enum Source {
@@ -251,80 +247,12 @@ pub enum FlatSource {
 }
 
 impl FlatSource {
-    fn next_raw_batch(&mut self) -> Result<Option<RecordBatch>> {
+    async fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
         match self {
-            FlatSource::RowGroup(r) => r.next_raw_batch(),
-            FlatSource::LastRow(r) => r.next_batch(),
+            FlatSource::RowGroup(r) => r.next_batch().await,
+            FlatSource::LastRow(r) => r.next_batch().await,
         }
     }
-
-    fn convert_batch(&self, batch: RecordBatch) -> Result<RecordBatch> {
-        match self {
-            FlatSource::RowGroup(r) => r.convert_batch(batch),
-            FlatSource::LastRow(_) => Ok(batch),
-        }
-    }
-}
-
-struct CachedPrimaryKeyFilter {
-    inner: Box<dyn PrimaryKeyFilter>,
-    last_primary_key: Vec<u8>,
-    last_match: Option<bool>,
-}
-
-impl CachedPrimaryKeyFilter {
-    fn new(inner: Box<dyn PrimaryKeyFilter>) -> Self {
-        Self {
-            inner,
-            last_primary_key: Vec::new(),
-            last_match: None,
-        }
-    }
-}
-
-impl PrimaryKeyFilter for CachedPrimaryKeyFilter {
-    fn matches(&mut self, pk: &[u8]) -> bool {
-        if let Some(last_match) = self.last_match
-            && self.last_primary_key == pk
-        {
-            return last_match;
-        }
-
-        let matched = self.inner.matches(pk);
-        self.last_primary_key.clear();
-        self.last_primary_key.extend_from_slice(pk);
-        self.last_match = Some(matched);
-        matched
-    }
-}
-
-fn batch_single_primary_key(batch: &RecordBatch) -> Result<Option<&[u8]>> {
-    let primary_key_index = primary_key_column_index(batch.num_columns());
-    let pk_dict_array = batch
-        .column(primary_key_index)
-        .as_any()
-        .downcast_ref::<PrimaryKeyArray>()
-        .context(UnexpectedSnafu {
-            reason: "Primary key column is not a dictionary array".to_string(),
-        })?;
-    let pk_values = pk_dict_array
-        .values()
-        .as_any()
-        .downcast_ref::<datatypes::arrow::array::BinaryArray>()
-        .context(UnexpectedSnafu {
-            reason: "Primary key values are not binary array".to_string(),
-        })?;
-    let keys = pk_dict_array.keys();
-    if keys.is_empty() {
-        return Ok(None);
-    }
-
-    let first_key = keys.value(0);
-    if first_key != keys.value(keys.len() - 1) {
-        return Ok(None);
-    }
-
-    Ok(Some(pk_values.value(first_key as usize)))
 }
 
 /// A flat format reader that returns RecordBatch instead of Batch.
@@ -332,8 +260,6 @@ pub struct FlatPruneReader {
     /// Context for file ranges.
     context: FileRangeContextRef,
     source: FlatSource,
-    primary_key_filter: Option<CachedPrimaryKeyFilter>,
-    buffered_prefiltered_batch: Option<RecordBatch>,
     metrics: ReaderMetrics,
     /// Whether to skip field filters for this row group.
     skip_fields: bool,
@@ -346,10 +272,6 @@ impl FlatPruneReader {
         skip_fields: bool,
     ) -> Self {
         Self {
-            primary_key_filter: ctx
-                .new_primary_key_filter()
-                .map(CachedPrimaryKeyFilter::new),
-            buffered_prefiltered_batch: None,
             context: ctx,
             source: FlatSource::RowGroup(reader),
             metrics: Default::default(),
@@ -363,8 +285,6 @@ impl FlatPruneReader {
         skip_fields: bool,
     ) -> Self {
         Self {
-            primary_key_filter: None,
-            buffered_prefiltered_batch: None,
             context: ctx,
             source: FlatSource::LastRow(reader),
             metrics: Default::default(),
@@ -377,18 +297,20 @@ impl FlatPruneReader {
         self.metrics.clone()
     }
 
-    pub(crate) fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
+    pub(crate) async fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
         loop {
-            let Some(mut raw_batch) = self.next_prefiltered_batch()? else {
+            let start = std::time::Instant::now();
+            let batch = self.source.next_batch().await?;
+            self.metrics.scan_cost += start.elapsed();
+
+            let Some(record_batch) = batch else {
                 return Ok(None);
             };
 
-            let scan_start = std::time::Instant::now();
-            self.coalesce_prefiltered_batches(&mut raw_batch)?;
-            let record_batch = self.source.convert_batch(raw_batch)?;
-            self.metrics.scan_cost += scan_start.elapsed();
-
+            // Update metrics for the received batch
+            self.metrics.num_rows += record_batch.num_rows();
             self.metrics.num_batches += 1;
+
             match self.prune_flat(record_batch)? {
                 Some(filtered_batch) => {
                     return Ok(Some(filtered_batch));
@@ -398,68 +320,6 @@ impl FlatPruneReader {
                 }
             }
         }
-    }
-
-    fn next_prefiltered_batch(&mut self) -> Result<Option<RecordBatch>> {
-        if let Some(batch) = self.buffered_prefiltered_batch.take() {
-            return Ok(Some(batch));
-        }
-
-        loop {
-            let start = std::time::Instant::now();
-            let Some(raw_batch) = self.source.next_raw_batch()? else {
-                return Ok(None);
-            };
-
-            self.metrics.num_rows += raw_batch.num_rows();
-
-            let num_rows_before_prefilter = raw_batch.num_rows();
-            let Some(prefiltered_batch) = self.prefilter_primary_keys(raw_batch)? else {
-                self.metrics.scan_cost += start.elapsed();
-                self.metrics.filter_metrics.rows_precise_filtered += num_rows_before_prefilter;
-                continue;
-            };
-            let prefiltered_rows = num_rows_before_prefilter - prefiltered_batch.num_rows();
-            self.metrics.filter_metrics.rows_precise_filtered += prefiltered_rows;
-            self.metrics.scan_cost += start.elapsed();
-            return Ok(Some(prefiltered_batch));
-        }
-    }
-
-    fn coalesce_prefiltered_batches(&mut self, batch: &mut RecordBatch) -> Result<()> {
-        let Some(primary_key) = batch_single_primary_key(batch)? else {
-            return Ok(());
-        };
-        let primary_key = primary_key.to_vec();
-        let schema = batch.schema();
-        let mut batches: Vec<RecordBatch> = Vec::new();
-
-        while let Some(next_batch) = self.next_prefiltered_batch()? {
-            if batch_single_primary_key(&next_batch)? == Some(primary_key.as_slice()) {
-                if batches.is_empty() {
-                    batches.push(batch.clone());
-                }
-                batches.push(next_batch);
-            } else {
-                self.buffered_prefiltered_batch = Some(next_batch);
-                break;
-            }
-        }
-
-        if !batches.is_empty() {
-            *batch = concat_batches(&schema, &batches).context(ComputeArrowSnafu)?;
-        }
-
-        Ok(())
-    }
-
-    fn prefilter_primary_keys(&mut self, record_batch: RecordBatch) -> Result<Option<RecordBatch>> {
-        let Some(primary_key_filter) = self.primary_key_filter.as_mut() else {
-            return Ok(Some(record_batch));
-        };
-
-        self.context
-            .prefilter_flat_batch_by_primary_key(record_batch, primary_key_filter)
     }
 
     /// Prunes batches by the pushed down predicate and returns RecordBatch.
