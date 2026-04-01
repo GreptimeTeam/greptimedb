@@ -52,6 +52,14 @@ lazy_static! {
     )
     .unwrap();
 
+    /// The number of OpenTelemetry trace ingest failures on the frontend node.
+    pub static ref OTLP_TRACES_FAILURE_COUNT: IntCounterVec = register_int_counter_vec!(
+        "greptime_frontend_otlp_traces_failure_count",
+        "frontend otlp trace ingest failure count",
+        &["label"]
+    )
+    .unwrap();
+
     /// The number of OpenTelemetry logs send by frontend node.
     pub static ref OTLP_LOGS_ROWS: IntCounter = register_int_counter!(
         "greptime_frontend_otlp_logs_rows",

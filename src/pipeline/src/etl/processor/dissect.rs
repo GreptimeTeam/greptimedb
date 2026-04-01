@@ -527,7 +527,7 @@ impl DissectProcessor {
             };
 
             for (name, mut values) in appends {
-                values.sort_by(|a, b| a.1.cmp(&b.1));
+                values.sort_by_key(|a| a.1);
                 let value = values.into_iter().map(|(a, _)| a).join(sep);
                 map.push((name, VrlValue::Bytes(Bytes::from(value))));
             }

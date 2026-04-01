@@ -34,18 +34,20 @@ use crate::batch_modifier::{TagColumnInfo, modify_batch_sparse};
 use crate::engine::MetricEngineInner;
 use crate::error;
 use crate::error::Result;
+use crate::metrics::MITO_OPERATION_ELAPSED;
 
 impl MetricEngineInner {
-    /// Bulk-inserts logical rows into a metric region.
+    /// Bulk-inserts rows into a metric region.
     ///
-    /// This method accepts a `RegionBulkInsertsRequest` whose payload is a logical
-    /// `RecordBatch` (timestamp, value and tag columns) for the given logical `region_id`.
+    /// **Logical region path:** The request payload is a logical `RecordBatch`
+    /// (timestamp, value and tag columns). It is transformed to physical format
+    /// via `modify_batch_sparse`, encoded to Arrow IPC, and forwarded as a
+    /// `BulkInserts` request to the data region. If mito reports
+    /// `StatusCode::Unsupported`, the request is transparently retried as a `Put`.
     ///
-    /// The transformed batch is encoded to Arrow IPC and forwarded as a `BulkInserts`
-    /// request to the data region, along with the original `partition_expr_version`.
-    /// If the data region reports `StatusCode::Unsupported` for bulk inserts, the request
-    /// is transparently retried as a `Put` by converting the original logical batch into
-    /// `api::v1::Rows`, so callers observe the same semantics as `put_region`.
+    /// **Physical region path:** The request payload is already in physical format
+    /// (produced by the batcher's `flush_batch_physical`). It is forwarded directly
+    /// to the data region with no transformation.
     ///
     /// Returns the number of affected rows, or `0` if the input batch is empty.
     pub async fn bulk_insert_region(
@@ -53,13 +55,42 @@ impl MetricEngineInner {
         region_id: RegionId,
         request: RegionBulkInsertsRequest,
     ) -> Result<AffectedRows> {
-        ensure!(
-            !self.is_physical_region(region_id),
-            error::UnsupportedRegionRequestSnafu {
-                request: RegionRequest::BulkInserts(request),
-            }
-        );
+        if request.payload.num_rows() == 0 {
+            return Ok(0);
+        }
+        if self.is_physical_region(region_id) {
+            let _timer = MITO_OPERATION_ELAPSED
+                .with_label_values(&["bulk_insert_physical"])
+                .start_timer();
+            return self.bulk_insert_physical_region(region_id, request).await;
+        }
 
+        let _timer = MITO_OPERATION_ELAPSED
+            .with_label_values(&["bulk_insert_logical"])
+            .start_timer();
+        self.bulk_insert_logical_region(region_id, request).await
+    }
+
+    /// Passthrough for bulk inserts targeting a physical data region.
+    ///
+    /// The batch is already in physical format (with `__primary_key`, timestamp,
+    /// value columns), so no logical-to-physical transformation is needed.
+    async fn bulk_insert_physical_region(
+        &self,
+        region_id: RegionId,
+        request: RegionBulkInsertsRequest,
+    ) -> Result<AffectedRows> {
+        self.data_region
+            .write_data(region_id, RegionRequest::BulkInserts(request))
+            .await
+    }
+
+    /// Bulk-inserts logical rows, transforming them to physical format first.
+    async fn bulk_insert_logical_region(
+        &self,
+        region_id: RegionId,
+        request: RegionBulkInsertsRequest,
+    ) -> Result<AffectedRows> {
         let (physical_region_id, data_region_id, primary_key_encoding) =
             self.find_data_region_meta(region_id)?;
 
@@ -380,7 +411,7 @@ fn record_batch_to_ipc(record_batch: &RecordBatch) -> Result<(Bytes, Bytes, Byte
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
     use std::sync::Arc;
 
     use api::v1::ArrowIpc;
@@ -390,6 +421,7 @@ mod tests {
     use datatypes::arrow::array::{Float64Array, StringArray, TimestampMillisecondArray};
     use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema, TimeUnit};
     use datatypes::arrow::record_batch::RecordBatch;
+    use mito2::config::MitoConfig;
     use store_api::metric_engine_consts::MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING;
     use store_api::path_utils::table_dir;
     use store_api::region_engine::RegionEngine;
@@ -397,6 +429,7 @@ mod tests {
     use store_api::storage::{RegionId, ScanRequest};
 
     use super::record_batch_to_ipc;
+    use crate::batch_modifier::{TagColumnInfo, modify_batch_sparse};
     use crate::error::Error;
     use crate::test_util::{self, TestEnv};
 
@@ -492,23 +525,81 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_bulk_insert_physical_region_rejected() {
-        let env = TestEnv::new().await;
+    async fn test_bulk_insert_physical_region_passthrough() {
+        // Use flat format so that BulkMemtable is used (supports write_bulk).
+        let mito_config = MitoConfig {
+            default_experimental_flat_format: true,
+            ..Default::default()
+        };
+        let env = TestEnv::with_mito_config("", mito_config, Default::default()).await;
         env.init_metric_region().await;
-
         let physical_region_id = env.default_physical_region_id();
-        let batch = build_logical_batch(0, 2);
-        let request = build_bulk_request(physical_region_id, batch);
+        let logical_region_id = env.default_logical_region_id();
 
-        let err = env
+        // First, do a normal logical bulk insert so we can compare results.
+        let logical_batch = build_logical_batch(0, 3);
+        let logical_request = build_bulk_request(logical_region_id, logical_batch.clone());
+        let response = env
+            .metric()
+            .handle_request(logical_region_id, logical_request)
+            .await
+            .unwrap();
+        assert_eq!(response.affected_rows, 3);
+
+        // Now build a physical-format batch using modify_batch_sparse (simulating
+        // what the batcher's flush_batch_physical does) and send it directly to
+        // the physical region.
+        let tag_columns = vec![TagColumnInfo {
+            name: "job".to_string(),
+            index: 2,
+            column_id: 2, // column_id for "job" in the physical table
+        }];
+        let non_tag_indices = vec![0, 1]; // timestamp, value
+        let second_batch = build_logical_batch(3, 3);
+        let physical_batch = modify_batch_sparse(
+            second_batch,
+            logical_region_id.table_id(),
+            &tag_columns,
+            &non_tag_indices,
+        )
+        .unwrap();
+        let request = build_bulk_request(physical_region_id, physical_batch);
+        let response = env
             .metric()
             .handle_request(physical_region_id, request)
             .await
-            .unwrap_err();
-        let Some(err) = err.as_any().downcast_ref::<Error>() else {
-            panic!("unexpected error type");
+            .unwrap();
+        assert_eq!(response.affected_rows, 3);
+
+        // Verify all 6 rows are readable from the logical region.
+        let stream = env
+            .metric()
+            .scan_to_stream(logical_region_id, ScanRequest::default())
+            .await
+            .unwrap();
+        let batches = RecordBatches::try_collect(stream).await.unwrap();
+        assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 6);
+    }
+
+    #[tokio::test]
+    async fn test_bulk_insert_physical_region_empty_batch() {
+        // Use flat format so that BulkMemtable is used (supports write_bulk).
+        let mito_config = MitoConfig {
+            default_experimental_flat_format: true,
+            ..Default::default()
         };
-        assert_matches!(err, Error::UnsupportedRegionRequest { .. });
+        let env = TestEnv::with_mito_config("", mito_config, Default::default()).await;
+        env.init_metric_region().await;
+        let physical_region_id = env.default_physical_region_id();
+
+        let batch = build_logical_batch(0, 0);
+        let request = build_bulk_request(physical_region_id, batch);
+        let response = env
+            .metric()
+            .handle_request(physical_region_id, request)
+            .await
+            .unwrap();
+        assert_eq!(response.affected_rows, 0);
     }
 
     #[tokio::test]

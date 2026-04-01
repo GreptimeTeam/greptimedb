@@ -48,12 +48,16 @@ pub struct ParquetFetchMetricsData {
     pub store_fetch_elapsed: std::time::Duration,
     /// Total elapsed time for fetching row groups.
     pub total_fetch_elapsed: std::time::Duration,
+    /// Elapsed time for prefilter execution.
+    pub prefilter_cost: std::time::Duration,
+    /// Number of rows filtered out by prefiltering.
+    pub prefilter_filtered_rows: usize,
 }
 
 impl ParquetFetchMetricsData {
     /// Returns true if the metrics are empty (contain no meaningful data).
     fn is_empty(&self) -> bool {
-        self.total_fetch_elapsed.is_zero()
+        self.total_fetch_elapsed.is_zero() && self.prefilter_cost.is_zero()
     }
 }
 
@@ -84,6 +88,8 @@ impl std::fmt::Debug for ParquetFetchMetrics {
             write_cache_fetch_elapsed,
             store_fetch_elapsed,
             total_fetch_elapsed,
+            prefilter_cost,
+            prefilter_filtered_rows,
         } = *data;
 
         write!(f, "{{")?;
@@ -142,6 +148,16 @@ impl std::fmt::Debug for ParquetFetchMetrics {
         if !store_fetch_elapsed.is_zero() {
             write!(f, ", \"store_fetch_elapsed\":\"{:?}\"", store_fetch_elapsed)?;
         }
+        if !prefilter_cost.is_zero() {
+            write!(f, ", \"prefilter_cost\":\"{:?}\"", prefilter_cost)?;
+        }
+        if prefilter_filtered_rows > 0 {
+            write!(
+                f,
+                ", \"prefilter_filtered_rows\":{}",
+                prefilter_filtered_rows
+            )?;
+        }
 
         write!(f, "}}")
     }
@@ -169,6 +185,8 @@ impl ParquetFetchMetrics {
             write_cache_fetch_elapsed,
             store_fetch_elapsed,
             total_fetch_elapsed,
+            prefilter_cost,
+            prefilter_filtered_rows,
         } = *other.data.lock().unwrap();
 
         let mut data = self.data.lock().unwrap();
@@ -185,6 +203,8 @@ impl ParquetFetchMetrics {
         data.write_cache_fetch_elapsed += write_cache_fetch_elapsed;
         data.store_fetch_elapsed += store_fetch_elapsed;
         data.total_fetch_elapsed += total_fetch_elapsed;
+        data.prefilter_cost += prefilter_cost;
+        data.prefilter_filtered_rows += prefilter_filtered_rows;
     }
 }
 
@@ -200,7 +220,7 @@ pub(crate) fn compute_total_range_size(ranges: &[Range<u64>]) -> (u64, u64) {
 
     let gap = MERGE_GAP as u64;
     let mut sorted_ranges = ranges.to_vec();
-    sorted_ranges.sort_unstable_by(|a, b| a.start.cmp(&b.start));
+    sorted_ranges.sort_unstable_by_key(|a| a.start);
 
     let mut total_size_aligned = 0;
     let mut total_size_unaligned = 0;

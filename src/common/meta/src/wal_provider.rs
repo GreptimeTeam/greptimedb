@@ -172,7 +172,7 @@ pub fn extract_topic_from_wal_options(
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
 
     use common_wal::config::kafka::MetasrvKafkaConfig;
     use common_wal::config::kafka::common::KafkaTopicConfig;

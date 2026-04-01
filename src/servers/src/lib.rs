@@ -12,11 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(assert_matches)]
 #![feature(try_blocks)]
 #![feature(exclusive_wrapper)]
-#![feature(if_let_guard)]
-#![feature(box_patterns)]
 
 use datafusion_expr::LogicalPlan;
 use datatypes::schema::Schema;
@@ -41,9 +38,11 @@ pub mod mysql;
 pub mod opentsdb;
 pub mod otel_arrow;
 pub mod otlp;
+pub mod pending_rows_batcher;
 mod pipeline;
 pub mod postgres;
 pub mod prom_remote_write;
+pub(crate) mod prom_row_builder;
 pub mod prom_store;
 pub mod prometheus;
 pub mod prometheus_handler;

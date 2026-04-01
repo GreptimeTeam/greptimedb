@@ -33,7 +33,7 @@ use datafusion::sql::TableReference;
 use datafusion_expr::{DmlStatement, LogicalPlan, lit};
 use datatypes::arrow::array::{Array, AsArray};
 use servers::error::{
-    CatalogSnafu, CollectRecordbatchSnafu, DataFusionSnafu, ExecuteQuerySnafu, NotSupportedSnafu,
+    CollectRecordbatchSnafu, DataFusionSnafu, ExecuteQuerySnafu, NotSupportedSnafu,
     TableNotFoundSnafu,
 };
 use servers::query_handler::DashboardDefinition;
@@ -139,8 +139,7 @@ impl Instance {
                 DASHBOARD_TABLE_NAME,
                 Some(&ctx),
             )
-            .await
-            .context(CatalogSnafu)?
+            .await?
         {
             return Ok(table);
         }
@@ -178,8 +177,7 @@ impl Instance {
                 DASHBOARD_TABLE_NAME,
                 Some(&ctx),
             )
-            .await
-            .context(CatalogSnafu)?
+            .await?
             .context(TableNotFoundSnafu {
                 catalog: catalog.to_string(),
                 schema: DEFAULT_PRIVATE_SCHEMA_NAME.to_string(),
@@ -255,8 +253,7 @@ impl Instance {
                 DASHBOARD_TABLE_NAME,
                 Some(&query_ctx),
             )
-            .await
-            .context(CatalogSnafu)?
+            .await?
         {
             table
         } else {

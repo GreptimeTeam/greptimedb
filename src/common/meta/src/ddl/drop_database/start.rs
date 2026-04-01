@@ -72,7 +72,7 @@ impl State for DropDatabaseStart {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
     use std::sync::Arc;
 
     use crate::ddl::drop_database::cursor::DropDatabaseCursor;

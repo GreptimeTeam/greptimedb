@@ -17,7 +17,7 @@
 
 use std::sync::Arc;
 
-use datafusion::arrow::array::{Float64Array, TimestampMillisecondArray};
+use datafusion::arrow::array::{Float64Array, Float64Builder, TimestampMillisecondArray};
 use datafusion::arrow::datatypes::TimeUnit;
 use datafusion::common::DataFusionError;
 use datafusion::logical_expr::{ScalarUDF, Volatility};
@@ -28,7 +28,7 @@ use datatypes::arrow::array::Array;
 use datatypes::arrow::datatypes::DataType;
 
 use crate::error;
-use crate::functions::{extract_array, linear_regression};
+use crate::functions::{extract_range_array, linear_regression_slices};
 use crate::range_array::RangeArray;
 
 pub struct PredictLinear;
@@ -62,12 +62,10 @@ impl PredictLinear {
             DataFusionError::Plan("prom_predict_linear function should have 3 inputs".to_string()),
         )?;
 
-        let ts_array = extract_array(&input[0])?;
-        let value_array = extract_array(&input[1])?;
         let t_col = &input[2];
 
-        let ts_range: RangeArray = RangeArray::try_new(ts_array.to_data().into())?;
-        let value_range: RangeArray = RangeArray::try_new(value_array.to_data().into())?;
+        let ts_range = extract_range_array(&input[0])?;
+        let value_range = extract_range_array(&input[1])?;
         error::ensure(
             ts_range.len() == value_range.len(),
             DataFusionError::Execution(format!(
@@ -130,73 +128,84 @@ impl PredictLinear {
                 Box::new(t_array.iter())
             }
         };
-        let mut result_array = Vec::with_capacity(ts_range.len());
+        let all_timestamps = ts_range
+            .values()
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap()
+            .values();
+        let all_values = value_range
+            .values()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        let mut result_builder = Float64Builder::with_capacity(ts_range.len());
         for (index, t) in t_iter.enumerate() {
-            let (timestamps, values) = get_ts_values(&ts_range, &value_range, index, Self::name())?;
-            let ret = predict_linear_impl(&timestamps, &values, t.unwrap());
-            result_array.push(ret);
+            match predict_linear_impl(
+                &ts_range,
+                &value_range,
+                all_timestamps,
+                all_values,
+                index,
+                t.unwrap(),
+                Self::name(),
+            )? {
+                Some(value) => result_builder.append_value(value),
+                None => result_builder.append_null(),
+            }
         }
 
-        let result = ColumnarValue::Array(Arc::new(Float64Array::from_iter(result_array)));
+        let result = ColumnarValue::Array(Arc::new(result_builder.finish()));
         Ok(result)
     }
 }
 
-fn get_ts_values(
+fn predict_linear_impl(
     ts_range: &RangeArray,
     value_range: &RangeArray,
+    all_timestamps: &[i64],
+    all_values: &Float64Array,
     index: usize,
+    t: i64,
     func_name: &str,
-) -> Result<(TimestampMillisecondArray, Float64Array), DataFusionError> {
-    let timestamps = ts_range
-        .get(index)
-        .unwrap()
-        .as_any()
-        .downcast_ref::<TimestampMillisecondArray>()
-        .unwrap()
-        .clone();
-    let values = value_range
-        .get(index)
-        .unwrap()
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .unwrap()
-        .clone();
+) -> Result<Option<f64>, DataFusionError> {
+    let (ts_offset, ts_len) = ts_range.get_offset_length(index).unwrap();
+    let (value_offset, value_len) = value_range.get_offset_length(index).unwrap();
     error::ensure(
-        timestamps.len() == values.len(),
+        ts_len == value_len,
         DataFusionError::Execution(format!(
             "{}: time and value arrays in a group should have the same length, found {} and {}",
-            func_name,
-            timestamps.len(),
-            values.len()
+            func_name, ts_len, value_len
         )),
     )?;
-    Ok((timestamps, values))
-}
-
-fn predict_linear_impl(
-    timestamps: &TimestampMillisecondArray,
-    values: &Float64Array,
-    t: i64,
-) -> Option<f64> {
-    if timestamps.len() < 2 {
-        return None;
+    if ts_len < 2 {
+        return Ok(None);
     }
 
     // last timestamp is evaluation timestamp
-    let evaluate_ts = timestamps.value(timestamps.len() - 1);
-    let (slope, intercept) = linear_regression(timestamps, values, evaluate_ts);
+    let evaluate_ts = all_timestamps[ts_offset + ts_len - 1];
+    let (slope, intercept) = linear_regression_slices(
+        all_timestamps,
+        ts_offset,
+        all_values,
+        value_offset,
+        value_len,
+        evaluate_ts,
+    );
 
     if slope.is_none() || intercept.is_none() {
-        return None;
+        return Ok(None);
     }
 
-    Some(slope.unwrap() * t as f64 + intercept.unwrap())
+    Ok(Some(slope.unwrap() * t as f64 + intercept.unwrap()))
 }
 
 #[cfg(test)]
 mod test {
     use std::vec;
+
+    use datafusion::arrow::array::{DictionaryArray, Int64Array};
+    use datatypes::arrow::datatypes::Int64Type;
 
     use super::*;
     use crate::functions::test_util::simple_range_udf_runner;
@@ -303,5 +312,45 @@ mod test {
             // value at t = 7800
             vec![Some(82765.9090909091)],
         );
+    }
+
+    #[test]
+    fn calculate_predict_linear_with_misaligned_offsets() {
+        let ts_values = Arc::new(TimestampMillisecondArray::from_iter(
+            [0i64, 1000, 2000, 3000].into_iter().map(Some),
+        ));
+        let value_values = Arc::new(Float64Array::from_iter([10.0, 20.0, 30.0]));
+        let ts_array = RangeArray::from_ranges(ts_values, [(1, 3)]).unwrap();
+        let value_array = RangeArray::from_ranges(value_values, [(0, 3)]).unwrap();
+
+        simple_range_udf_runner(
+            PredictLinear::scalar_udf(),
+            ts_array,
+            value_array,
+            vec![ScalarValue::Int64(Some(0))],
+            vec![Some(30.0)],
+        );
+    }
+
+    #[test]
+    fn predict_linear_rejects_external_dictionary_with_null_keys() {
+        let ts_values = Arc::new(TimestampMillisecondArray::from_iter(
+            [0i64, 1000].into_iter().map(Some),
+        ));
+        let ts_keys = Int64Array::from_iter([Some(0), None]);
+        let ts_dict = DictionaryArray::<Int64Type>::try_new(ts_keys, ts_values).unwrap();
+
+        let value_values = Arc::new(Float64Array::from_iter([1.0, 2.0]));
+        let value_keys = Int64Array::from_iter([Some(0), Some(1)]);
+        let value_dict = DictionaryArray::<Int64Type>::try_new(value_keys, value_values).unwrap();
+
+        let err = PredictLinear::predict_linear(&[
+            ColumnarValue::Array(Arc::new(ts_dict)),
+            ColumnarValue::Array(Arc::new(value_dict)),
+            ColumnarValue::Scalar(ScalarValue::Int64(Some(0))),
+        ])
+        .unwrap_err();
+
+        assert!(err.to_string().contains("Empty range is not expected"));
     }
 }

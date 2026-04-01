@@ -56,6 +56,9 @@ pub enum Error {
     #[snafu(display("Internal error: {}", err_msg))]
     Internal { err_msg: String },
 
+    #[snafu(display("Pending rows batcher channel closed"))]
+    BatcherChannelClosed,
+
     #[snafu(display("Unsupported data type: {}, reason: {}", data_type, reason))]
     UnsupportedDataType {
         data_type: ConcreteDataType,
@@ -389,7 +392,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Error accessing catalog"))]
+    #[snafu(transparent)]
     Catalog {
         source: catalog::error::Error,
         #[snafu(implicit)]
@@ -675,6 +678,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(transparent)]
+    DataTypes {
+        source: datatypes::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -684,6 +694,7 @@ impl ErrorExt for Error {
         use Error::*;
         match self {
             Internal { .. }
+            | BatcherChannelClosed
             | InternalIo { .. }
             | TokioIo { .. }
             | StartHttp { .. }
@@ -752,6 +763,7 @@ impl ErrorExt for Error {
 
             Catalog { source, .. } => source.status_code(),
             RowWriter { source, .. } => source.status_code(),
+            DataTypes { source, .. } => source.status_code(),
 
             TlsRequired { .. } => StatusCode::Unknown,
             Auth { source, .. } => source.status_code(),

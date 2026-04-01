@@ -89,7 +89,7 @@ pub fn patch_batch_timezone(
     let patched_columns: Vec<ArrayRef> = expected_schema
         .fields()
         .iter()
-        .zip(columns.into_iter())
+        .zip(columns)
         .map(|(expected_field, column)| {
             let expected_type = expected_field.data_type();
             let actual_type = column.data_type();

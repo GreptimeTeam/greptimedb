@@ -18,9 +18,12 @@
 //! to various storage backends (S3, OSS, GCS, Azure Blob, local filesystem).
 
 use async_trait::async_trait;
+use futures::TryStreamExt;
 use object_store::services::{Azblob, Fs, Gcs, Oss, S3};
 use object_store::util::{with_instrument_layers, with_retry_layers};
-use object_store::{AzblobConnection, GcsConnection, ObjectStore, OssConnection, S3Connection};
+use object_store::{
+    AzblobConnection, ErrorKind, GcsConnection, ObjectStore, OssConnection, S3Connection,
+};
 use snafu::ResultExt;
 use url::Url;
 
@@ -139,14 +142,14 @@ fn extract_file_path_from_uri(uri: &str) -> Result<String> {
         .fail(),
         _ => url
             .to_file_path()
-            .map(|path| path.to_string_lossy().into_owned())
             .map_err(|_| {
                 InvalidUriSnafu {
                     uri,
-                    reason: "file:// URI must use a valid absolute filesystem path",
+                    reason: "file:// URI must use an absolute path like file:///tmp/backup",
                 }
                 .build()
-            }),
+            })
+            .map(|path| path.to_string_lossy().into_owned()),
     }
 }
 
@@ -183,6 +186,12 @@ pub trait SnapshotStorage: Send + Sync {
 
     /// Reads a text file from a relative path under the snapshot root.
     async fn read_text(&self, path: &str) -> Result<String>;
+
+    /// Creates a directory-like prefix under the snapshot root when needed by the backend.
+    async fn create_dir_all(&self, path: &str) -> Result<()>;
+
+    /// Lists files recursively under a relative prefix.
+    async fn list_files_recursive(&self, prefix: &str) -> Result<Vec<String>>;
 
     /// Deletes the entire snapshot (for --force).
     async fn delete_snapshot(&self) -> Result<()>;
@@ -443,6 +452,38 @@ impl SnapshotStorage for OpenDalStorage {
         String::from_utf8(data).context(TextDecodeSnafu)
     }
 
+    async fn create_dir_all(&self, path: &str) -> Result<()> {
+        self.object_store
+            .create_dir(path)
+            .await
+            .context(StorageOperationSnafu {
+                operation: format!("create dir {}", path),
+            })
+    }
+
+    async fn list_files_recursive(&self, prefix: &str) -> Result<Vec<String>> {
+        let mut lister = match self.object_store.lister_with(prefix).recursive(true).await {
+            Ok(lister) => lister,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(error).context(StorageOperationSnafu {
+                    operation: format!("list {}", prefix),
+                });
+            }
+        };
+
+        let mut files = Vec::new();
+        while let Some(entry) = lister.try_next().await.context(StorageOperationSnafu {
+            operation: format!("list {}", prefix),
+        })? {
+            if entry.metadata().is_dir() {
+                continue;
+            }
+            files.push(entry.path().to_string());
+        }
+        Ok(files)
+    }
+
     async fn delete_snapshot(&self) -> Result<()> {
         self.object_store
             .remove_all("/")
@@ -532,6 +573,14 @@ mod tests {
         assert_eq!(
             extract_file_path_from_uri("file://localhost/tmp/backup").unwrap(),
             "/tmp/backup"
+        );
+        assert_eq!(
+            extract_file_path_from_uri("file:///tmp/my%20backup").unwrap(),
+            "/tmp/my backup"
+        );
+        assert_eq!(
+            extract_file_path_from_uri("file://localhost/tmp/my%20backup").unwrap(),
+            "/tmp/my backup"
         );
     }
 

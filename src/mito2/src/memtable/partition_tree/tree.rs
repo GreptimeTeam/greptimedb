@@ -490,6 +490,7 @@ impl TreeIter {
                 num_rows: self.metrics.rows_fetched,
                 num_batches: self.metrics.batches_fetched,
                 scan_cost: self.metrics.iter_elapsed,
+                ..Default::default()
             };
             mem_scan_metrics.merge_inner(&inner);
         }

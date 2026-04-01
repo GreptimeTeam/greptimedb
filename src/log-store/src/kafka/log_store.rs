@@ -550,7 +550,7 @@ fn check_termination(offset: i64, end_offset: i64) -> bool {
 #[cfg(test)]
 mod tests {
 
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::time::Duration;

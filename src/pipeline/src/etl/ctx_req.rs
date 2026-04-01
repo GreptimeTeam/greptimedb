@@ -223,7 +223,7 @@ impl ContextReq {
     }
 
     pub fn all_req(self) -> impl Iterator<Item = RowInsertRequest> {
-        self.req.into_iter().flat_map(|(_, req)| req)
+        self.req.into_values().flatten()
     }
 
     pub fn ref_all_req(&self) -> impl Iterator<Item = &RowInsertRequest> {

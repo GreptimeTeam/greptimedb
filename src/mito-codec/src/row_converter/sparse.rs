@@ -357,11 +357,13 @@ impl PrimaryKeyCodec for SparsePrimaryKeyCodec {
         &self,
         metadata: &RegionMetadataRef,
         filters: Arc<Vec<SimpleFilterEvaluator>>,
+        skip_partition_column: bool,
     ) -> Box<dyn PrimaryKeyFilter> {
         Box::new(SparsePrimaryKeyFilter::new(
             metadata.clone(),
             filters,
             self.clone(),
+            skip_partition_column,
         ))
     }
 

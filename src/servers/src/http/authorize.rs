@@ -330,7 +330,7 @@ fn extract_influxdb_user_from_query(query: &str) -> (Option<&str>, Option<&str>)
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
 
     use common_base::secrets::ExposeSecret;
 

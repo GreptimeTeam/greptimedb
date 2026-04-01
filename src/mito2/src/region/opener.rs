@@ -881,7 +881,7 @@ impl RegionLoadCacheTask {
         }
 
         // Sorts files by max timestamp in descending order to loads latest files first
-        files_to_download.sort_by(|a, b| b.2.cmp(&a.2));
+        files_to_download.sort_by_key(|b| std::cmp::Reverse(b.2));
 
         let total_files = files_to_download.len() as i64;
 
@@ -1011,7 +1011,7 @@ async fn preload_parquet_meta_cache_for_files(
     let allow_direct_load = matches!(object_store.info().scheme(), object_store::Scheme::Fs);
 
     // Sort by time range so we can prefer preloading newer files first.
-    files.sort_by(|a, b| b.meta_ref().time_range.1.cmp(&a.meta_ref().time_range.1));
+    files.sort_by_key(|b| std::cmp::Reverse(b.meta_ref().time_range.1));
 
     let mut loaded = 0usize;
     for file_handle in files {

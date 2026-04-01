@@ -91,6 +91,7 @@ impl FrontendSelector for MetaClientSelector {
                 let channel = self
                     .channel_manager
                     .get(node.peer.addr)
+                    .map_err(Box::new)
                     .context(error::CreateChannelSnafu)?;
                 let client = frontend_client::FrontendClient::new(channel);
                 Ok(Box::new(client) as FrontendClientPtr)

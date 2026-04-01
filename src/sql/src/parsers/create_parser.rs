@@ -1242,7 +1242,7 @@ fn ensure_partition_columns_defined<'a>(
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
     use std::collections::HashMap;
 
     use common_catalog::consts::FILE_ENGINE;
