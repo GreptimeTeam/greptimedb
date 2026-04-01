@@ -421,8 +421,9 @@ impl ParquetReaderBuilder {
 
         // Computes the projection mask.
         let parquet_schema_desc = parquet_meta.file_metadata().schema_descr();
-        let parquet_projection =
-            ParquetReadColumns::from_root_indices(read_format.projection_indices().iter().copied());
+        let parquet_projection = ParquetReadColumns::from_deduped_root_indices(
+            read_format.projection_indices().iter().copied(),
+        );
         let leaf_indices = build_parquet_leaves_indices(parquet_schema_desc, &parquet_projection);
         let projection_mask =
             ProjectionMask::leaves(parquet_schema_desc, leaf_indices.iter().copied());

@@ -26,7 +26,11 @@ pub struct ParquetReadColumns {
 }
 
 impl ParquetReadColumns {
-    pub fn from_root_indices(root_indices: impl IntoIterator<Item = usize>) -> Self {
+    /// Builds root-column projections from root indices that are already
+    /// deduplicated.
+    ///
+    /// Note: this constructor does not check for duplicates.
+    pub fn from_deduped_root_indices(root_indices: impl IntoIterator<Item = usize>) -> Self {
         let cols = root_indices
             .into_iter()
             .map(ParquetReadColumn::new)
