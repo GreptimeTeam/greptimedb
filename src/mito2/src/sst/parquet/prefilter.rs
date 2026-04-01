@@ -351,7 +351,6 @@ mod tests {
 
     use super::*;
     use crate::read::projection::ReadColumns;
-    use crate::sst::internal_fields;
     use crate::sst::parquet::format::ReadFormat;
     use crate::test_util::sst_util::{new_primary_key, sst_region_metadata_with_encoding};
 
