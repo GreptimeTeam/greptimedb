@@ -105,8 +105,11 @@ impl RowGroupLastRowCachedReader {
 
         if let Some(value) = cache_strategy.get_selector_result(&key) {
             let is_primary_key = matches!(&value.result, SelectorResult::PrimaryKey(_));
-            let schema_matches =
-                value.projection == row_group_reader.read_format().projection_indices();
+            let schema_matches = value.projection
+                == row_group_reader
+                    .read_format()
+                    .projection_indices_iter()
+                    .collect::<Vec<_>>();
             if is_primary_key && schema_matches {
                 // Format and schema match, use cache batches.
                 Self::new_hit(value)
@@ -233,7 +236,10 @@ impl RowGroupLastRowReader {
         }
         let value = Arc::new(SelectorResultValue::new(
             std::mem::take(&mut self.yielded_batches),
-            self.reader.read_format().projection_indices().to_vec(),
+            self.reader
+                .read_format()
+                .projection_indices_iter()
+                .collect(),
         ));
         self.cache_strategy.put_selector_result(self.key, value);
     }

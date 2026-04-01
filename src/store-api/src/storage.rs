@@ -17,6 +17,7 @@
 pub mod consts;
 mod descriptors;
 mod file;
+mod projection;
 mod requests;
 mod types;
 
@@ -27,6 +28,7 @@ pub use datatypes::schema::{
 
 pub use self::descriptors::*;
 pub use self::file::{FileId, FileRef, FileRefsManifest, GcReport, IndexVersion, ParseIdError};
+pub use self::projection::{NestedPath, ProjectionInput};
 pub use self::requests::{
     ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector, VectorDistanceMetric,
     VectorIndexEngine, VectorIndexEngineType, VectorSearchMatches, VectorSearchRequest,

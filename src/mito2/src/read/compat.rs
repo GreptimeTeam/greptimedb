@@ -605,7 +605,8 @@ fn may_compat_fields(
     actual: &RegionMetadata,
 ) -> Result<Option<CompatFields>> {
     let expect_fields = mapper.batch_fields();
-    let actual_fields = Batch::projected_fields(actual, mapper.column_ids());
+    let read_column_ids: Vec<_> = mapper.column_ids_iter().collect();
+    let actual_fields = Batch::projected_fields(actual, &read_column_ids);
     if expect_fields == actual_fields {
         return Ok(None);
     }
@@ -986,10 +987,11 @@ mod tests {
     };
     use store_api::codec::PrimaryKeyEncoding;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
-    use store_api::storage::RegionId;
+    use store_api::storage::{ProjectionInput, RegionId};
 
     use super::*;
     use crate::read::flat_projection::FlatProjectionMapper;
+    use crate::read::projection::ReadColumns;
     use crate::sst::parquet::flat_format::FlatReadFormat;
     use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
     use crate::test_util::{VecBatchReader, check_reader_result};
@@ -1446,9 +1448,10 @@ mod tests {
             &[1],
         ));
         // Output: tag_1, field_3, field_2. Read also includes field_4.
+        let projection_input = ProjectionInput::new().with_projection(vec![1, 3, 2]);
         let mapper = ProjectionMapper::new_with_read_columns(
             &expect_meta,
-            [1, 3, 2].into_iter(),
+            projection_input,
             false,
             vec![1, 3, 2, 4],
         )
@@ -1560,7 +1563,7 @@ mod tests {
         let mapper = FlatProjectionMapper::all(&expected_metadata).unwrap();
         let read_format = FlatReadFormat::new(
             actual_metadata.clone(),
-            [0, 1, 2, 3].into_iter(),
+            ReadColumns::with_column_ids([0, 1, 2, 3]),
             None,
             "test",
             false,
@@ -1647,15 +1650,16 @@ mod tests {
         ));
 
         // Output projection: tag_1, field_2. Read also includes field_3.
+        let projection_input = ProjectionInput::new().with_projection(vec![1, 2]);
         let mapper = FlatProjectionMapper::new_with_read_columns(
             &expected_metadata,
-            vec![1, 2],
+            projection_input,
             vec![1, 2, 3],
         )
         .unwrap();
         let read_format = FlatReadFormat::new(
             actual_metadata.clone(),
-            [1, 2, 3].into_iter(),
+            ReadColumns::with_column_ids([1, 2, 3]),
             None,
             "test",
             false,
@@ -1746,7 +1750,7 @@ mod tests {
         let mapper = FlatProjectionMapper::all(&expected_metadata).unwrap();
         let read_format = FlatReadFormat::new(
             actual_metadata.clone(),
-            [0, 1, 2, 3].into_iter(),
+            ReadColumns::with_column_ids([0, 1, 2, 3]),
             None,
             "test",
             false,
@@ -1840,7 +1844,7 @@ mod tests {
         let mapper = FlatProjectionMapper::all(&expected_metadata).unwrap();
         let read_format = FlatReadFormat::new(
             actual_metadata.clone(),
-            [0, 2, 3].into_iter(),
+            ReadColumns::with_column_ids([0, 2, 3]),
             None,
             "test",
             true,

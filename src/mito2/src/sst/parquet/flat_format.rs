@@ -51,9 +51,10 @@ use crate::error::{
     ComputeArrowSnafu, DecodeSnafu, InvalidParquetSnafu, InvalidRecordBatchSnafu,
     NewRecordBatchSnafu, Result,
 };
+use crate::read::projection::ReadColumns;
 use crate::sst::parquet::format::{
-    FIXED_POS_COLUMN_NUM, FormatProjection, INTERNAL_COLUMN_NUM, PrimaryKeyArray,
-    PrimaryKeyReadFormat, ReadFormat, StatValues,
+    FIXED_POS_COLUMN_NUM, FormatProjection, INTERNAL_COLUMN_NUM, ParquetProjection,
+    PrimaryKeyArray, PrimaryKeyReadFormat, ReadFormat, StatValues,
 };
 use crate::sst::{
     FlatSchemaOptions, flat_sst_arrow_schema_column_num, tag_maybe_to_dictionary_field,
@@ -161,7 +162,7 @@ impl FlatReadFormat {
     /// If `skip_auto_convert` is true, skips auto conversion of format when the encoding is sparse encoding.
     pub fn new(
         metadata: RegionMetadataRef,
-        column_ids: impl Iterator<Item = ColumnId>,
+        read_columns: ReadColumns,
         num_columns: Option<usize>,
         file_path: &str,
         skip_auto_convert: bool,
@@ -177,16 +178,18 @@ impl FlatReadFormat {
                 // Only skip auto convert when the primary key encoding is sparse.
                 ParquetAdapter::PrimaryKeyToFlat(ParquetPrimaryKeyToFlat::new(
                     metadata,
-                    column_ids,
+                    read_columns,
                     skip_auto_convert,
                 ))
             } else {
                 ParquetAdapter::PrimaryKeyToFlat(ParquetPrimaryKeyToFlat::new(
-                    metadata, column_ids, false,
+                    metadata,
+                    read_columns,
+                    false,
                 ))
             }
         } else {
-            ParquetAdapter::Flat(ParquetFlat::new(metadata, column_ids))
+            ParquetAdapter::Flat(ParquetFlat::new(metadata, read_columns))
         };
 
         Ok(FlatReadFormat {
@@ -263,11 +266,10 @@ impl FlatReadFormat {
         }
     }
 
-    /// Gets sorted projection indices to read from the SST file.
-    pub(crate) fn projection_indices(&self) -> &[usize] {
+    pub(crate) fn parquet_projection(&self) -> &ParquetProjection {
         match &self.parquet_adapter {
-            ParquetAdapter::Flat(p) => &p.format_projection.projection_indices,
-            ParquetAdapter::PrimaryKeyToFlat(p) => p.format.projection_indices(),
+            ParquetAdapter::Flat(p) => &p.format_projection.parquet_projection,
+            ParquetAdapter::PrimaryKeyToFlat(p) => p.format.parquet_projection(),
         }
     }
 
@@ -403,7 +405,7 @@ impl ParquetPrimaryKeyToFlat {
     /// Creates a helper with existing `metadata` and `column_ids` to read.
     fn new(
         metadata: RegionMetadataRef,
-        column_ids: impl Iterator<Item = ColumnId>,
+        read_columns: ReadColumns,
         skip_auto_convert: bool,
     ) -> ParquetPrimaryKeyToFlat {
         assert!(if skip_auto_convert {
@@ -412,20 +414,18 @@ impl ParquetPrimaryKeyToFlat {
             true
         });
 
-        let column_ids: Vec<_> = column_ids.collect();
-
         // Creates a map to lookup index based on the new format.
         let id_to_index = sst_column_id_indices(&metadata);
         let sst_column_num =
             flat_sst_arrow_schema_column_num(&metadata, &FlatSchemaOptions::default());
 
         let codec = build_primary_key_codec(&metadata);
-        let format = PrimaryKeyReadFormat::new(metadata.clone(), column_ids.iter().copied());
+        let format = PrimaryKeyReadFormat::new(metadata.clone(), read_columns.clone());
         let (convert_format, format_projection) = if skip_auto_convert {
             (
                 None,
                 FormatProjection {
-                    projection_indices: format.projection_indices().to_vec(),
+                    parquet_projection: format.parquet_projection().clone(),
                     column_id_to_projected_index: format.field_id_to_projected_index().clone(),
                 },
             )
@@ -434,7 +434,7 @@ impl ParquetPrimaryKeyToFlat {
             let format_projection = FormatProjection::compute_format_projection(
                 &id_to_index,
                 sst_column_num,
-                column_ids.iter().copied(),
+                read_columns,
             );
             (
                 FlatConvertFormat::new(Arc::clone(&metadata), &format_projection, codec),
@@ -471,15 +471,15 @@ struct ParquetFlat {
 }
 
 impl ParquetFlat {
-    /// Creates a helper with existing `metadata` and `column_ids` to read.
-    fn new(metadata: RegionMetadataRef, column_ids: impl Iterator<Item = ColumnId>) -> ParquetFlat {
+    /// Creates a helper with existing `metadata` and read `projection`.
+    fn new(metadata: RegionMetadataRef, read_columns: ReadColumns) -> ParquetFlat {
         // Creates a map to lookup index.
         let id_to_index = sst_column_id_indices(&metadata);
         let arrow_schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
         let sst_column_num =
             flat_sst_arrow_schema_column_num(&metadata, &FlatSchemaOptions::default());
         let format_projection =
-            FormatProjection::compute_format_projection(&id_to_index, sst_column_num, column_ids);
+            FormatProjection::compute_format_projection(&id_to_index, sst_column_num, read_columns);
 
         Self {
             metadata,
@@ -777,14 +777,15 @@ impl FlatConvertFormat {
 impl FlatReadFormat {
     /// Creates a helper with existing `metadata` and all columns.
     pub fn new_with_all_columns(metadata: RegionMetadataRef) -> FlatReadFormat {
-        Self::new(
-            Arc::clone(&metadata),
-            metadata.column_metadatas.iter().map(|c| c.column_id),
-            None,
-            "test",
-            false,
-        )
-        .unwrap()
+        use crate::read::projection::{ReadColumn, ReadColumns};
+
+        let cols = metadata
+            .column_metadatas
+            .iter()
+            .map(|c| ReadColumn::new(c.column_id, vec![]))
+            .collect();
+        let projection = ReadColumns { cols };
+        Self::new(Arc::clone(&metadata), projection, None, "test", false).unwrap()
     }
 }
 

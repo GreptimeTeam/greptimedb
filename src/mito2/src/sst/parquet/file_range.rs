@@ -286,11 +286,16 @@ impl FileRange {
             } else {
                 self.context.reader_builder.cache_strategy().clone()
             };
+            let projection_indices: Vec<_> = self
+                .context
+                .read_format()
+                .projection_indices_iter()
+                .collect();
             let reader = FlatRowGroupLastRowCachedReader::new(
                 self.file_handle().file_id().file_id(),
                 self.row_group_idx,
                 cache_strategy,
-                self.context.read_format().projection_indices(),
+                &projection_indices,
                 flat_row_group_reader,
             );
             FlatPruneReader::new_with_last_row_reader(self.context.clone(), reader, skip_fields)

@@ -46,13 +46,15 @@ use mito_codec::row_converter::{
 };
 use parquet::file::metadata::{ParquetMetaData, RowGroupMetaData};
 use parquet::file::statistics::Statistics;
+use parquet::schema::types::SchemaDescriptor;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
-use store_api::storage::{ColumnId, SequenceNumber};
+use store_api::storage::{ColumnId, NestedPath, SequenceNumber};
 
 use crate::error::{
     ConvertVectorSnafu, DecodeSnafu, InvalidRecordBatchSnafu, NewRecordBatchSnafu, Result,
 };
+use crate::read::projection::ReadColumns;
 use crate::read::{Batch, BatchBuilder, BatchColumn};
 use crate::sst::file::{FileMeta, FileTimeRange};
 use crate::sst::parquet::flat_format::FlatReadFormat;
@@ -133,26 +135,80 @@ pub enum ReadFormat {
     Flat(FlatReadFormat),
 }
 
+/// Projection mapped onto a parquet schema.
+///
+/// Each projected parquet column may optionally carry nested-path pruning
+/// information. If `nested_paths` is empty, the whole root column is read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParquetProjection {
+    pub cols: Vec<ParquetColumnProjection>,
+}
+
+/// Projection for a single root column in the parquet schema.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParquetColumnProjection {
+    /// Root field index in the parquet schema.
+    pub root_index: usize,
+    /// Nested paths to read under this root column.
+    ///
+    /// Each path includes the root column itself. For example, for
+    /// a root column `j`, path `["j", "a", "b"]` refers to `j.a.b`.
+    ///
+    /// If empty, the whole root column is read.
+    pub nested_paths: Vec<NestedPath>,
+}
+
+/// Builds parquet leaf-column indices from a parquet projection.
+///
+/// `nested_paths` are interpreted as full paths including the root column.
+/// For example, for root column `j`, path `["j", "a", "b"]` matches leaves
+/// under `j.a.b`.
+pub fn build_parquet_leaves_indices(
+    parquet_schema_desc: &SchemaDescriptor,
+    projection: &ParquetProjection,
+) -> Vec<usize> {
+    let mut map = HashMap::new();
+    for col in &projection.cols {
+        map.insert(col.root_index, &col.nested_paths);
+    }
+    let mut leaf_indices = Vec::new();
+    for (leaf_idx, leaf_col) in parquet_schema_desc.columns().iter().enumerate() {
+        let leaf_paths = leaf_col.path().parts();
+        let root_idx = parquet_schema_desc.get_column_root_idx(leaf_idx);
+        let Some(nested_paths) = map.get(&root_idx) else {
+            continue;
+        };
+        if nested_paths.is_empty() {
+            leaf_indices.push(leaf_idx);
+            continue;
+        }
+        if nested_paths
+            .iter()
+            .any(|nested_path| leaf_paths.starts_with(nested_path))
+        {
+            leaf_indices.push(leaf_idx);
+        }
+    }
+    leaf_indices
+}
+
 impl ReadFormat {
     /// Creates a helper to read the primary key format.
-    pub fn new_primary_key(
-        metadata: RegionMetadataRef,
-        column_ids: impl Iterator<Item = ColumnId>,
-    ) -> Self {
-        ReadFormat::PrimaryKey(PrimaryKeyReadFormat::new(metadata, column_ids))
+    pub fn new_primary_key(metadata: RegionMetadataRef, read_columns: ReadColumns) -> Self {
+        ReadFormat::PrimaryKey(PrimaryKeyReadFormat::new(metadata, read_columns))
     }
 
     /// Creates a helper to read the flat format.
     pub fn new_flat(
         metadata: RegionMetadataRef,
-        column_ids: impl Iterator<Item = ColumnId>,
+        read_columns: ReadColumns,
         num_columns: Option<usize>,
         file_path: &str,
         skip_auto_convert: bool,
     ) -> Result<Self> {
         Ok(ReadFormat::Flat(FlatReadFormat::new(
             metadata,
-            column_ids,
+            read_columns,
             num_columns,
             file_path,
             skip_auto_convert,
@@ -162,17 +218,17 @@ impl ReadFormat {
     /// Creates a new read format.
     pub fn new(
         region_metadata: RegionMetadataRef,
-        projection: Option<&[ColumnId]>,
+        read_columns: Option<&ReadColumns>,
         flat_format: bool,
         num_columns: Option<usize>,
         file_path: &str,
         skip_auto_convert: bool,
     ) -> Result<ReadFormat> {
         if flat_format {
-            if let Some(column_ids) = projection {
+            if let Some(read_columns) = read_columns {
                 ReadFormat::new_flat(
                     region_metadata,
-                    column_ids.iter().copied(),
+                    read_columns.clone(),
                     num_columns,
                     file_path,
                     skip_auto_convert,
@@ -181,28 +237,32 @@ impl ReadFormat {
                 // No projection, lists all column ids to read.
                 ReadFormat::new_flat(
                     region_metadata.clone(),
-                    region_metadata
-                        .column_metadatas
-                        .iter()
-                        .map(|col| col.column_id),
+                    ReadColumns::with_column_ids(
+                        region_metadata
+                            .column_metadatas
+                            .iter()
+                            .map(|col| col.column_id),
+                    ),
                     num_columns,
                     file_path,
                     skip_auto_convert,
                 )
             }
-        } else if let Some(column_ids) = projection {
+        } else if let Some(read_columns) = read_columns {
             Ok(ReadFormat::new_primary_key(
                 region_metadata,
-                column_ids.iter().copied(),
+                read_columns.clone(),
             ))
         } else {
             // No projection, lists all column ids to read.
             Ok(ReadFormat::new_primary_key(
                 region_metadata.clone(),
-                region_metadata
-                    .column_metadatas
-                    .iter()
-                    .map(|col| col.column_id),
+                ReadColumns::with_column_ids(
+                    region_metadata
+                        .column_metadatas
+                        .iter()
+                        .map(|col| col.column_id),
+                ),
             ))
         }
     }
@@ -240,11 +300,18 @@ impl ReadFormat {
         }
     }
 
-    /// Gets sorted projection indices to read.
-    pub(crate) fn projection_indices(&self) -> &[usize] {
+    /// Gets sorted root projection indices to read.
+    pub(crate) fn projection_indices_iter(&self) -> impl Iterator<Item = usize> + '_ {
+        self.parquet_projection()
+            .cols
+            .iter()
+            .map(|column| column.root_index)
+    }
+
+    pub(crate) fn parquet_projection(&self) -> &ParquetProjection {
         match self {
-            ReadFormat::PrimaryKey(format) => format.projection_indices(),
-            ReadFormat::Flat(format) => format.projection_indices(),
+            ReadFormat::PrimaryKey(format) => format.parquet_projection(),
+            ReadFormat::Flat(format) => format.parquet_projection(),
         }
     }
 
@@ -397,8 +464,8 @@ pub struct PrimaryKeyReadFormat {
     /// Field column id to its index in `schema` (SST schema).
     /// In SST schema, fields are stored in the front of the schema.
     field_id_to_index: HashMap<ColumnId, usize>,
-    /// Indices of columns to read from the SST. It contains all internal columns.
-    projection_indices: Vec<usize>,
+    /// Projection mapped onto the parquet schema, including all internal columns.
+    parquet_projection: ParquetProjection,
     /// Field column id to their index in the projected schema (
     /// the schema of [Batch]).
     field_id_to_projected_index: HashMap<ColumnId, usize>,
@@ -409,11 +476,8 @@ pub struct PrimaryKeyReadFormat {
 }
 
 impl PrimaryKeyReadFormat {
-    /// Creates a helper with existing `metadata` and `column_ids` to read.
-    pub fn new(
-        metadata: RegionMetadataRef,
-        column_ids: impl Iterator<Item = ColumnId>,
-    ) -> PrimaryKeyReadFormat {
+    /// Creates a helper with existing `metadata` and logical read columns.
+    pub fn new(metadata: RegionMetadataRef, read_columns: ReadColumns) -> PrimaryKeyReadFormat {
         let field_id_to_index: HashMap<_, _> = metadata
             .field_columns()
             .enumerate()
@@ -424,14 +488,14 @@ impl PrimaryKeyReadFormat {
         let format_projection = FormatProjection::compute_format_projection(
             &field_id_to_index,
             arrow_schema.fields.len(),
-            column_ids,
+            read_columns,
         );
 
         PrimaryKeyReadFormat {
             metadata,
             arrow_schema,
             field_id_to_index,
-            projection_indices: format_projection.projection_indices,
+            parquet_projection: format_projection.parquet_projection,
             field_id_to_projected_index: format_projection.column_id_to_projected_index,
             override_sequence: None,
             primary_key_codec: None,
@@ -465,9 +529,8 @@ impl PrimaryKeyReadFormat {
         &self.metadata
     }
 
-    /// Gets sorted projection indices to read.
-    pub(crate) fn projection_indices(&self) -> &[usize] {
-        &self.projection_indices
+    pub(crate) fn parquet_projection(&self) -> &ParquetProjection {
+        &self.parquet_projection
     }
 
     /// Gets the field id to projected index.
@@ -790,7 +853,7 @@ impl PrimaryKeyReadFormat {
 /// Helper to compute the projection for the SST.
 pub(crate) struct FormatProjection {
     /// Indices of columns to read from the SST. It contains all internal columns.
-    pub(crate) projection_indices: Vec<usize>,
+    pub(crate) parquet_projection: ParquetProjection,
     /// Column id to their index in the projected schema (
     /// the schema after projection).
     ///
@@ -805,47 +868,79 @@ impl FormatProjection {
     pub(crate) fn compute_format_projection(
         id_to_index: &HashMap<ColumnId, usize>,
         sst_column_num: usize,
-        column_ids: impl Iterator<Item = ColumnId>,
+        read_columns: ReadColumns,
     ) -> Self {
-        // Maps column id of a projected column to its index in SST.
-        // It also ignores columns not in the SST.
-        // [(column id, index in SST)]
-        let mut projected_schema: Vec<_> = column_ids
-            .filter_map(|column_id| {
-                id_to_index
-                    .get(&column_id)
-                    .copied()
-                    .map(|index| (column_id, index))
+        // Maps read columns to their root index in the SST and ignores columns not in the SST.
+        let mut projected_schema: Vec<_> = read_columns
+            .cols
+            .into_iter()
+            .filter_map(|column| {
+                let column_id = column.column_id();
+                id_to_index.get(&column_id).copied().map(|root_index| {
+                    (
+                        column_id,
+                        ParquetColumnProjection {
+                            root_index,
+                            nested_paths: column.nested_paths().to_vec(),
+                        },
+                    )
+                })
             })
             .collect();
-        // Sorts columns by their indices in the SST. SST uses a bitmap for projection.
-        // This ensures the schema of `projected_schema` is the same as the batch returned from the SST.
-        projected_schema.sort_unstable_by_key(|x| x.1);
-        // Dedups the entries to avoid the case that `column_ids` has duplicated columns.
-        projected_schema.dedup_by_key(|x| x.1);
+        // Keep projected columns in parquet root order.
+        projected_schema.sort_unstable_by_key(|(_, projection)| projection.root_index);
 
-        // Collects all projected indices.
-        // It contains the positions of all columns we need to read.
-        let mut projection_indices: Vec<_> = projected_schema
-            .iter()
-            .map(|(_column_id, index)| *index)
-            // We need to add all fixed position columns.
-            .chain(sst_column_num - FIXED_POS_COLUMN_NUM..sst_column_num)
-            .collect();
-        projection_indices.sort_unstable();
-        // Removes duplications.
-        projection_indices.dedup();
-
-        // Creates a map from column id to the index of that column in the projected record batch.
         let column_id_to_projected_index = projected_schema
-            .into_iter()
-            .map(|(column_id, _)| column_id)
+            .iter()
             .enumerate()
-            .map(|(index, column_id)| (column_id, index))
+            .map(|(index, (column_id, _))| (*column_id, index))
             .collect();
+
+        let mut parquet_projection =
+            Vec::with_capacity(projected_schema.len() + FIXED_POS_COLUMN_NUM);
+        for (_, column) in projected_schema {
+            if let Some(existing) =
+                parquet_projection
+                    .iter_mut()
+                    .find(|existing: &&mut ParquetColumnProjection| {
+                        existing.root_index == column.root_index
+                    })
+            {
+                if existing.nested_paths.is_empty() || column.nested_paths.is_empty() {
+                    existing.nested_paths.clear();
+                } else {
+                    existing.nested_paths.extend(column.nested_paths);
+                }
+            } else {
+                parquet_projection.push(column);
+            }
+        }
+
+        // Fixed-position columns are always required.
+        for root_index in sst_column_num - FIXED_POS_COLUMN_NUM..sst_column_num {
+            if parquet_projection
+                .iter()
+                .all(|column| column.root_index != root_index)
+            {
+                parquet_projection.push(ParquetColumnProjection {
+                    root_index,
+                    nested_paths: vec![],
+                });
+            }
+        }
+        parquet_projection.sort_unstable_by_key(|column| column.root_index);
+
+        for column in &mut parquet_projection {
+            if !column.nested_paths.is_empty() {
+                column.nested_paths.sort_unstable();
+                column.nested_paths.dedup();
+            }
+        }
 
         Self {
-            projection_indices,
+            parquet_projection: ParquetProjection {
+                cols: parquet_projection,
+            },
             column_id_to_projected_index,
         }
     }
@@ -878,10 +973,15 @@ impl StatValues {
 impl PrimaryKeyReadFormat {
     /// Creates a helper with existing `metadata` and all columns.
     pub fn new_with_all_columns(metadata: RegionMetadataRef) -> PrimaryKeyReadFormat {
-        Self::new(
-            Arc::clone(&metadata),
-            metadata.column_metadatas.iter().map(|c| c.column_id),
-        )
+        use crate::read::projection::{ReadColumn, ReadColumns};
+
+        let cols = metadata
+            .column_metadatas
+            .iter()
+            .map(|c| ReadColumn::new(c.column_id, vec![]))
+            .collect();
+        let projection = ReadColumns { cols };
+        Self::new(Arc::clone(&metadata), projection)
     }
 }
 
@@ -1000,12 +1100,15 @@ mod tests {
     use mito_codec::row_converter::{
         DensePrimaryKeyCodec, PrimaryKeyCodec, PrimaryKeyCodecExt, SparsePrimaryKeyCodec,
     };
+    use parquet::basic::Repetition;
+    use parquet::schema::types::Type;
     use store_api::codec::PrimaryKeyEncoding;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
     use store_api::storage::consts::ReservedColumnId;
 
     use super::*;
+    use crate::read::projection::{ReadColumn, ReadColumns};
     use crate::sst::parquet::flat_format::{FlatWriteFormat, sequence_column_index};
     use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
 
@@ -1131,20 +1234,36 @@ mod tests {
     }
 
     #[test]
-    fn test_projection_indices() {
+    fn test_projection_indices_iter() {
         let metadata = build_test_region_metadata();
         // Only read tag1
-        let read_format = ReadFormat::new_primary_key(metadata.clone(), [3].iter().copied());
-        assert_eq!(&[2, 3, 4, 5], read_format.projection_indices());
+        let read_format =
+            ReadFormat::new_primary_key(metadata.clone(), ReadColumns::with_column_ids([3]));
+        assert_eq!(
+            vec![2, 3, 4, 5],
+            read_format.projection_indices_iter().collect::<Vec<_>>()
+        );
         // Only read field1
-        let read_format = ReadFormat::new_primary_key(metadata.clone(), [4].iter().copied());
-        assert_eq!(&[0, 2, 3, 4, 5], read_format.projection_indices());
+        let read_format =
+            ReadFormat::new_primary_key(metadata.clone(), ReadColumns::with_column_ids([4]));
+        assert_eq!(
+            vec![0, 2, 3, 4, 5],
+            read_format.projection_indices_iter().collect::<Vec<_>>()
+        );
         // Only read ts
-        let read_format = ReadFormat::new_primary_key(metadata.clone(), [5].iter().copied());
-        assert_eq!(&[2, 3, 4, 5], read_format.projection_indices());
+        let read_format =
+            ReadFormat::new_primary_key(metadata.clone(), ReadColumns::with_column_ids([5]));
+        assert_eq!(
+            vec![2, 3, 4, 5],
+            read_format.projection_indices_iter().collect::<Vec<_>>()
+        );
         // Read field0, tag0, ts
-        let read_format = ReadFormat::new_primary_key(metadata, [2, 1, 5].iter().copied());
-        assert_eq!(&[1, 2, 3, 4, 5], read_format.projection_indices());
+        let read_format =
+            ReadFormat::new_primary_key(metadata, ReadColumns::with_column_ids([2, 1, 5]));
+        assert_eq!(
+            vec![1, 2, 3, 4, 5],
+            read_format.projection_indices_iter().collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -1190,7 +1309,8 @@ mod tests {
             .iter()
             .map(|col| col.column_id)
             .collect();
-        let read_format = PrimaryKeyReadFormat::new(metadata, column_ids.iter().copied());
+        let read_format =
+            PrimaryKeyReadFormat::new(metadata, ReadColumns::with_column_ids(column_ids));
         assert_eq!(arrow_schema, *read_format.arrow_schema());
 
         let record_batch = RecordBatch::new_empty(arrow_schema);
@@ -1209,7 +1329,8 @@ mod tests {
             .iter()
             .map(|col| col.column_id)
             .collect();
-        let read_format = PrimaryKeyReadFormat::new(metadata, column_ids.iter().copied());
+        let read_format =
+            PrimaryKeyReadFormat::new(metadata, ReadColumns::with_column_ids(column_ids));
 
         let columns: Vec<ArrayRef> = vec![
             Arc::new(Int64Array::from(vec![1, 1, 10, 10])), // field1
@@ -1240,8 +1361,15 @@ mod tests {
             .iter()
             .map(|col| col.column_id)
             .collect();
-        let read_format =
-            ReadFormat::new(metadata, Some(&column_ids), false, None, "test", false).unwrap();
+        let read_format = ReadFormat::new(
+            metadata,
+            Some(&ReadColumns::with_column_ids(column_ids)),
+            false,
+            None,
+            "test",
+            false,
+        )
+        .unwrap();
 
         let columns: Vec<ArrayRef> = vec![
             Arc::new(Int64Array::from(vec![1, 1, 10, 10])), // field1
@@ -1363,33 +1491,261 @@ mod tests {
     }
 
     #[test]
-    fn test_flat_projection_indices() {
+    fn test_flat_projection_indices_iter() {
         let metadata = build_test_region_metadata();
         // Based on flat format: tag0(0), tag1(1), field1(2), field0(3), ts(4), __primary_key(5), __sequence(6), __op_type(7)
         // The projection includes all "fixed position" columns: ts(4), __primary_key(5), __sequence(6), __op_type(7)
 
         // Only read tag1 (column_id=3, index=1) + fixed columns
-        let read_format =
-            ReadFormat::new_flat(metadata.clone(), [3].iter().copied(), None, "test", false)
-                .unwrap();
-        assert_eq!(&[1, 4, 5, 6, 7], read_format.projection_indices());
+        let read_format = ReadFormat::new_flat(
+            metadata.clone(),
+            ReadColumns::with_column_ids([3]),
+            None,
+            "test",
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            vec![1, 4, 5, 6, 7],
+            read_format.projection_indices_iter().collect::<Vec<_>>()
+        );
 
         // Only read field1 (column_id=4, index=2) + fixed columns
-        let read_format =
-            ReadFormat::new_flat(metadata.clone(), [4].iter().copied(), None, "test", false)
-                .unwrap();
-        assert_eq!(&[2, 4, 5, 6, 7], read_format.projection_indices());
+        let read_format = ReadFormat::new_flat(
+            metadata.clone(),
+            ReadColumns::with_column_ids([4]),
+            None,
+            "test",
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            vec![2, 4, 5, 6, 7],
+            read_format.projection_indices_iter().collect::<Vec<_>>()
+        );
 
         // Only read ts (column_id=5, index=4) + fixed columns (ts is already included in fixed)
-        let read_format =
-            ReadFormat::new_flat(metadata.clone(), [5].iter().copied(), None, "test", false)
-                .unwrap();
-        assert_eq!(&[4, 5, 6, 7], read_format.projection_indices());
+        let read_format = ReadFormat::new_flat(
+            metadata.clone(),
+            ReadColumns::with_column_ids([5]),
+            None,
+            "test",
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            vec![4, 5, 6, 7],
+            read_format.projection_indices_iter().collect::<Vec<_>>()
+        );
 
         // Read field0(column_id=2, index=3), tag0(column_id=1, index=0), ts(column_id=5, index=4) + fixed columns
-        let read_format =
-            ReadFormat::new_flat(metadata, [2, 1, 5].iter().copied(), None, "test", false).unwrap();
-        assert_eq!(&[0, 3, 4, 5, 6, 7], read_format.projection_indices());
+        let read_format = ReadFormat::new_flat(
+            metadata,
+            ReadColumns::with_column_ids([2, 1, 5]),
+            None,
+            "test",
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            vec![0, 3, 4, 5, 6, 7],
+            read_format.projection_indices_iter().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_build_parquet_leaves_indices_reads_whole_root() {
+        // Parquet schema:
+        // schema
+        // ├── j
+        // │   ├── a      -> leaf 0
+        // │   └── b.c    -> leaf 1
+        // └── k          -> leaf 2
+        let leaf_a = Arc::new(
+            Type::primitive_type_builder("a", parquet::basic::Type::INT64)
+                .with_repetition(Repetition::REQUIRED)
+                .build()
+                .unwrap(),
+        );
+        let leaf_c = Arc::new(
+            Type::primitive_type_builder("c", parquet::basic::Type::INT64)
+                .with_repetition(Repetition::REQUIRED)
+                .build()
+                .unwrap(),
+        );
+        let group_b = Arc::new(
+            Type::group_type_builder("b")
+                .with_repetition(Repetition::REQUIRED)
+                .with_fields(vec![leaf_c])
+                .build()
+                .unwrap(),
+        );
+        let root_j = Arc::new(
+            Type::group_type_builder("j")
+                .with_repetition(Repetition::REQUIRED)
+                .with_fields(vec![leaf_a, group_b])
+                .build()
+                .unwrap(),
+        );
+        let root_k = Arc::new(
+            Type::primitive_type_builder("k", parquet::basic::Type::INT64)
+                .with_repetition(Repetition::REQUIRED)
+                .build()
+                .unwrap(),
+        );
+        let schema = Arc::new(
+            Type::group_type_builder("schema")
+                .with_fields(vec![root_j, root_k])
+                .build()
+                .unwrap(),
+        );
+        let parquet_schema_desc = SchemaDescriptor::new(schema);
+
+        let projection = ParquetProjection {
+            cols: vec![ParquetColumnProjection {
+                root_index: 0,
+                nested_paths: vec![],
+            }],
+        };
+
+        // Empty nested paths means reading the whole root column `j`,
+        // which expands to all leaves under `j`.
+        assert_eq!(
+            vec![0, 1],
+            build_parquet_leaves_indices(&parquet_schema_desc, &projection)
+        );
+    }
+
+    #[test]
+    fn test_build_parquet_leaves_indices_filters_nested_paths() {
+        // Parquet schema:
+        // schema
+        // ├── j
+        // │   ├── a      -> leaf 0
+        // │   └── b
+        // │       ├── c  -> leaf 1
+        // │       └── d  -> leaf 2
+        // └── k          -> leaf 3
+        let leaf_a = Arc::new(
+            Type::primitive_type_builder("a", parquet::basic::Type::INT64)
+                .with_repetition(Repetition::REQUIRED)
+                .build()
+                .unwrap(),
+        );
+        let leaf_c = Arc::new(
+            Type::primitive_type_builder("c", parquet::basic::Type::INT64)
+                .with_repetition(Repetition::REQUIRED)
+                .build()
+                .unwrap(),
+        );
+        let leaf_d = Arc::new(
+            Type::primitive_type_builder("d", parquet::basic::Type::INT64)
+                .with_repetition(Repetition::REQUIRED)
+                .build()
+                .unwrap(),
+        );
+        let group_b = Arc::new(
+            Type::group_type_builder("b")
+                .with_repetition(Repetition::REQUIRED)
+                .with_fields(vec![leaf_c, leaf_d])
+                .build()
+                .unwrap(),
+        );
+        let root_j = Arc::new(
+            Type::group_type_builder("j")
+                .with_repetition(Repetition::REQUIRED)
+                .with_fields(vec![leaf_a, group_b])
+                .build()
+                .unwrap(),
+        );
+        let root_k = Arc::new(
+            Type::primitive_type_builder("k", parquet::basic::Type::INT64)
+                .with_repetition(Repetition::REQUIRED)
+                .build()
+                .unwrap(),
+        );
+        let schema = Arc::new(
+            Type::group_type_builder("schema")
+                .with_fields(vec![root_j, root_k])
+                .build()
+                .unwrap(),
+        );
+        let parquet_schema_desc = SchemaDescriptor::new(schema);
+
+        let projection = ParquetProjection {
+            cols: vec![
+                ParquetColumnProjection {
+                    root_index: 0,
+                    nested_paths: vec![vec!["j".to_string(), "b".to_string()]],
+                },
+                ParquetColumnProjection {
+                    root_index: 1,
+                    nested_paths: vec![],
+                },
+            ],
+        };
+
+        // `["j", "b"]` includes root `j`, so it matches leaves under `j.b`.
+        // Root `k` is read entirely because its nested paths are empty.
+        assert_eq!(
+            vec![1, 2, 3],
+            build_parquet_leaves_indices(&parquet_schema_desc, &projection)
+        );
+    }
+
+    #[test]
+    fn test_compute_format_projection() {
+        let projection = ReadColumns {
+            cols: vec![
+                ReadColumn::new(2, vec![vec!["j".to_string(), "b".to_string()]]),
+                ReadColumn::new(1, vec![]),
+            ],
+        };
+        // Mock root indices in the parquet schema:
+        //   - column_id 2 -> root 1
+        //   - column_id 1 -> root 3
+        // The remaining roots 4..=7 are the four fixed-position columns that are always read:
+        // time index, primary key, sequence, and op type.
+        let id_to_index = HashMap::from([(1, 3usize), (2, 1usize)]);
+
+        let format_projection =
+            FormatProjection::compute_format_projection(&id_to_index, 8, projection);
+
+        assert_eq!(
+            ParquetProjection {
+                cols: vec![
+                    ParquetColumnProjection {
+                        root_index: 1,
+                        nested_paths: vec![vec!["j".to_string(), "b".to_string()]],
+                    },
+                    ParquetColumnProjection {
+                        root_index: 3,
+                        nested_paths: vec![],
+                    },
+                    ParquetColumnProjection {
+                        root_index: 4,
+                        nested_paths: vec![],
+                    },
+                    ParquetColumnProjection {
+                        root_index: 5,
+                        nested_paths: vec![],
+                    },
+                    ParquetColumnProjection {
+                        root_index: 6,
+                        nested_paths: vec![],
+                    },
+                    ParquetColumnProjection {
+                        root_index: 7,
+                        nested_paths: vec![],
+                    },
+                ],
+            },
+            format_projection.parquet_projection
+        );
+        assert_eq!(
+            HashMap::from([(2, 0usize), (1, 1usize)]),
+            format_projection.column_id_to_projected_index
+        );
     }
 
     #[test]
@@ -1397,7 +1753,7 @@ mod tests {
         let metadata = build_test_region_metadata();
         let mut format = FlatReadFormat::new(
             metadata,
-            std::iter::once(1), // Just read tag0
+            ReadColumns::with_column_ids([1]), // Just read tag0
             Some(8),
             "test",
             false,
@@ -1614,7 +1970,7 @@ mod tests {
             .collect();
         let format = FlatReadFormat::new(
             metadata.clone(),
-            column_ids.into_iter(),
+            ReadColumns::with_column_ids(column_ids),
             Some(6),
             "test",
             false,
@@ -1696,7 +2052,7 @@ mod tests {
             .collect();
         let format = FlatReadFormat::new(
             metadata.clone(),
-            column_ids.clone().into_iter(),
+            ReadColumns::with_column_ids(column_ids.clone()),
             None,
             "test",
             false,
@@ -1783,9 +2139,14 @@ mod tests {
         // Compare the actual result with the expected record batch
         assert_eq!(expected_record_batch, result);
 
-        let format =
-            FlatReadFormat::new(metadata.clone(), column_ids.into_iter(), None, "test", true)
-                .unwrap();
+        let format = FlatReadFormat::new(
+            metadata.clone(),
+            ReadColumns::with_column_ids(column_ids),
+            None,
+            "test",
+            true,
+        )
+        .unwrap();
         // Test conversion with sparse encoding and skip convert.
         let result = format.convert_batch(record_batch.clone(), None).unwrap();
         assert_eq!(record_batch, result);

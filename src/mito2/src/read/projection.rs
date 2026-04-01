@@ -29,12 +29,145 @@ use datatypes::vectors::VectorRef;
 use mito_codec::row_converter::{CompositeValues, PrimaryKeyCodec, build_primary_key_codec};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::ColumnId;
+use store_api::storage::{ColumnId, NestedPath, ProjectionInput};
 
 use crate::cache::CacheStrategy;
 use crate::error::{InvalidRequestSnafu, Result};
 use crate::read::Batch;
 use crate::read::flat_projection::FlatProjectionMapper;
+
+/// Logical columns to read from a region.
+///
+/// Read columns describe which logical columns and nested fields should be read
+/// from storage. Each read column is identified by its [`ColumnId`],
+/// which represents the root column in the storage schema.
+///
+/// Nested fields under the column are specified by [`NestedPath`] entries.
+/// Each path includes the root column name as its first element.
+///
+/// For example, assume column id `9` corresponds to a root column named `j`
+/// with nested fields:
+///
+/// ```text
+/// j
+/// ├── a
+/// └── b
+///     └── c
+/// ```
+///
+/// The following SQL:
+///
+/// SELECT j.a, j.b.c FROM t
+///
+/// may produce read columns like:
+///
+/// ```text
+/// ReadColumn {
+///     column_id: 9,
+///     nested_paths: [
+///         ["j", "a"],
+///         ["j", "b", "c"],
+///     ]
+/// }
+/// ```
+///
+/// If `nested_paths` is empty, the whole column will be read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadColumns {
+    pub cols: Vec<ReadColumn>,
+}
+
+impl ReadColumns {
+    pub fn with_column_ids<I>(column_ids: I) -> Self
+    where
+        I: IntoIterator<Item = u32>,
+    {
+        let cols = column_ids
+            .into_iter()
+            .map(|col_id| ReadColumn::new(col_id, vec![]))
+            .collect();
+        ReadColumns { cols }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.cols.is_empty()
+    }
+
+    pub(crate) fn column_ids_iter(&self) -> impl Iterator<Item = ColumnId> + '_ {
+        self.cols.iter().map(|column| column.column_id())
+    }
+}
+
+/// Logical read requirement for a single column.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadColumn {
+    column_id: ColumnId,
+    /// Nested filed paths under this column.
+    /// Empty means reading the whole column.
+    nested_paths: Vec<NestedPath>,
+}
+
+impl ReadColumn {
+    pub(crate) fn new(column_id: ColumnId, nested_paths: Vec<NestedPath>) -> Self {
+        Self {
+            column_id,
+            nested_paths,
+        }
+    }
+
+    pub(crate) fn column_id(&self) -> ColumnId {
+        self.column_id
+    }
+
+    pub(crate) fn nested_paths(&self) -> &[NestedPath] {
+        &self.nested_paths
+    }
+}
+
+/// Builds the final read columns.
+///
+/// `read_column_ids` determines which root columns to read and in what order.
+/// Nested paths are attached to matching columns by column name.
+pub(crate) fn build_read_columns(
+    metadata: &RegionMetadataRef,
+    nested_paths: &[NestedPath],
+    read_col_ids: &[ColumnId],
+) -> Result<ReadColumns> {
+    let mut paths_by_col: HashMap<String, Vec<NestedPath>> = HashMap::new();
+    for path in nested_paths {
+        let Some((root_name, _)) = path.split_first() else {
+            continue;
+        };
+        paths_by_col
+            .entry(root_name.clone())
+            .or_default()
+            .push(path.clone());
+    }
+
+    let mut cols = Vec::with_capacity(read_col_ids.len());
+    for col_id in read_col_ids {
+        let column_id = *col_id;
+
+        let col = metadata
+            .column_by_id(column_id)
+            .with_context(|| InvalidRequestSnafu {
+                region_id: metadata.region_id,
+                reason: format!("read column id {} does not exist in metadata", column_id),
+            })?;
+
+        let nested_paths = paths_by_col
+            .get(&col.column_schema.name)
+            .cloned()
+            .unwrap_or_default();
+
+        cols.push(ReadColumn {
+            column_id,
+            nested_paths,
+        });
+    }
+
+    Ok(ReadColumns { cols })
+}
 
 /// Only cache vector when its length `<=` this value.
 pub(crate) const MAX_VECTOR_LENGTH_TO_CACHE: usize = 16384;
@@ -68,20 +201,23 @@ impl ProjectionMapper {
     /// Returns a new mapper with output projection and explicit read columns.
     pub fn new_with_read_columns(
         metadata: &RegionMetadataRef,
-        projection: impl Iterator<Item = usize>,
+        projection_input: ProjectionInput,
         flat_format: bool,
         read_column_ids: Vec<ColumnId>,
     ) -> Result<Self> {
-        let projection: Vec<_> = projection.collect();
         if flat_format {
             Ok(ProjectionMapper::Flat(
-                FlatProjectionMapper::new_with_read_columns(metadata, projection, read_column_ids)?,
+                FlatProjectionMapper::new_with_read_columns(
+                    metadata,
+                    projection_input,
+                    read_column_ids,
+                )?,
             ))
         } else {
             Ok(ProjectionMapper::PrimaryKey(
                 PrimaryKeyProjectionMapper::new_with_read_columns(
                     metadata,
-                    projection,
+                    projection_input,
                     read_column_ids,
                 )?,
             ))
@@ -115,12 +251,10 @@ impl ProjectionMapper {
         }
     }
 
-    /// Returns ids of projected columns that we need to read
-    /// from memtables and SSTs.
-    pub(crate) fn column_ids(&self) -> &[ColumnId] {
+    pub(crate) fn read_columns(&self) -> &ReadColumns {
         match self {
-            ProjectionMapper::PrimaryKey(m) => m.column_ids(),
-            ProjectionMapper::Flat(m) => m.column_ids(),
+            ProjectionMapper::PrimaryKey(m) => m.read_columns(),
+            ProjectionMapper::Flat(m) => m.read_columns(),
         }
     }
 
@@ -170,8 +304,8 @@ pub struct PrimaryKeyProjectionMapper {
     codec: Arc<dyn PrimaryKeyCodec>,
     /// Schema for converted [RecordBatch].
     output_schema: SchemaRef,
-    /// Ids of columns to read from memtables and SSTs.
-    read_column_ids: Vec<ColumnId>,
+    /// The columns used to read from memtables and SSTs.
+    read_columns: ReadColumns,
     /// Ids and DataTypes of field columns in the read [Batch].
     batch_fields: Vec<(ColumnId, ConcreteDataType)>,
     /// `true` If the original projection is empty.
@@ -189,15 +323,17 @@ impl PrimaryKeyProjectionMapper {
     ) -> Result<PrimaryKeyProjectionMapper> {
         let projection: Vec<_> = projection.collect();
         let read_column_ids = read_column_ids_from_projection(metadata, &projection)?;
-        Self::new_with_read_columns(metadata, projection, read_column_ids)
+        let projection_input = ProjectionInput::new().with_projection(projection);
+        Self::new_with_read_columns(metadata, projection_input, read_column_ids)
     }
 
     /// Returns a new mapper with output projection and explicit read columns.
     pub fn new_with_read_columns(
         metadata: &RegionMetadataRef,
-        projection: Vec<usize>,
+        projection_input: ProjectionInput,
         read_column_ids: Vec<ColumnId>,
     ) -> Result<PrimaryKeyProjectionMapper> {
+        let projection = projection_input.projection;
         // If the original projection is empty.
         let is_empty_projection = projection.is_empty();
 
@@ -218,6 +354,8 @@ impl PrimaryKeyProjectionMapper {
         }
 
         let codec = build_primary_key_codec(metadata);
+        let read_columns =
+            build_read_columns(metadata, &projection_input.nested_paths, &read_column_ids)?;
         // If projection is empty, we don't output any column.
         let output_schema = if is_empty_projection {
             Arc::new(Schema::new(vec![]))
@@ -276,7 +414,7 @@ impl PrimaryKeyProjectionMapper {
             has_tags,
             codec,
             output_schema,
-            read_column_ids,
+            read_columns,
             batch_fields,
             is_empty_projection,
         })
@@ -299,8 +437,12 @@ impl PrimaryKeyProjectionMapper {
 
     /// Returns ids of projected columns that we need to read
     /// from memtables and SSTs.
-    pub(crate) fn column_ids(&self) -> &[ColumnId] {
-        &self.read_column_ids
+    pub(crate) fn column_ids_iter(&self) -> impl Iterator<Item = ColumnId> + '_ {
+        self.read_columns.column_ids_iter()
+    }
+
+    pub(crate) fn read_columns(&self) -> &ReadColumns {
+        &self.read_columns
     }
 
     /// Returns ids of fields in [Batch]es the mapper expects to convert.
@@ -310,7 +452,7 @@ impl PrimaryKeyProjectionMapper {
 
     /// Returns the schema of converted [RecordBatch].
     /// This is the schema that the stream will output. This schema may contain
-    /// less columns than [PrimaryKeyProjectionMapper::column_ids()].
+    /// less columns than the mapper read projection.
     pub(crate) fn output_schema(&self) -> SchemaRef {
         self.output_schema.clone()
     }
@@ -483,6 +625,41 @@ mod tests {
     use crate::cache::CacheManager;
     use crate::read::BatchBuilder;
 
+    #[test]
+    fn test_build_projection_attaches_nested_paths() {
+        let metadata = Arc::new(
+            TestRegionMetadataBuilder::default()
+                .num_tags(2)
+                .num_fields(2)
+                .build(),
+        );
+        let projection_input = ProjectionInput::new().with_nested_paths(vec![
+            vec!["v1".to_string(), "a".to_string()],
+            vec!["v1".to_string(), "b".to_string(), "c".to_string()],
+            vec!["k0".to_string(), "x".to_string()],
+            vec!["unknown".to_string(), "y".to_string()],
+        ]);
+
+        let read_columns =
+            build_read_columns(&metadata, &projection_input.nested_paths, &[4, 1]).unwrap();
+
+        assert_eq!(
+            ReadColumns {
+                cols: vec![
+                    ReadColumn::new(
+                        4,
+                        vec![
+                            vec!["v1".to_string(), "a".to_string()],
+                            vec!["v1".to_string(), "b".to_string(), "c".to_string()],
+                        ],
+                    ),
+                    ReadColumn::new(1, vec![vec!["k0".to_string(), "x".to_string()]]),
+                ],
+            },
+            read_columns
+        );
+    }
+
     fn new_batch(
         ts_start: i64,
         tags: &[i64],
@@ -544,7 +721,10 @@ mod tests {
         );
         // Create the enum wrapper with default format (primary key)
         let mapper = ProjectionMapper::all(&metadata, false).unwrap();
-        assert_eq!([0, 1, 2, 3, 4], mapper.column_ids());
+        assert_eq!(
+            vec![0, 1, 2, 3, 4],
+            mapper.read_columns().column_ids_iter().collect::<Vec<_>>()
+        );
         assert_eq!(
             [
                 (3, ConcreteDataType::int64_datatype()),
@@ -605,7 +785,10 @@ mod tests {
         );
         // Columns v1, k0
         let mapper = ProjectionMapper::new(&metadata, [4, 1].into_iter(), false).unwrap();
-        assert_eq!([4, 1], mapper.column_ids());
+        assert_eq!(
+            vec![4, 1],
+            mapper.read_columns().column_ids_iter().collect::<Vec<_>>()
+        );
         assert_eq!(
             [(4, ConcreteDataType::int64_datatype())],
             mapper.as_primary_key().unwrap().batch_fields()
@@ -639,14 +822,18 @@ mod tests {
                 .build(),
         );
         // Output columns v1, k0. Read also includes v0.
+        let projection_input = ProjectionInput::new().with_projection(vec![4, 1]);
         let mapper = ProjectionMapper::new_with_read_columns(
             &metadata,
-            [4, 1].into_iter(),
+            projection_input,
             false,
             vec![4, 1, 3],
         )
         .unwrap();
-        assert_eq!([4, 1, 3], mapper.column_ids());
+        assert_eq!(
+            vec![4, 1, 3],
+            mapper.read_columns().column_ids_iter().collect::<Vec<_>>()
+        );
 
         let batch = new_batch(0, &[1, 2], &[(3, 3), (4, 4)], 3);
         let cache = CacheManager::builder().vector_cache_size(1024).build();
@@ -677,7 +864,10 @@ mod tests {
         );
         // Empty projection
         let mapper = ProjectionMapper::new(&metadata, [].into_iter(), false).unwrap();
-        assert_eq!([0], mapper.column_ids()); // Should still read the time index column
+        assert_eq!(
+            vec![0],
+            mapper.read_columns().column_ids_iter().collect::<Vec<_>>()
+        ); // Should still read the time index column
         assert!(mapper.output_schema().is_empty());
         let pk_mapper = mapper.as_primary_key().unwrap();
         assert!(pk_mapper.batch_fields().is_empty());
@@ -810,7 +1000,10 @@ mod tests {
         );
         let cache = CacheStrategy::Disabled;
         let mapper = ProjectionMapper::all(&metadata, true).unwrap();
-        assert_eq!([0, 1, 2, 3, 4], mapper.column_ids());
+        assert_eq!(
+            vec![0, 1, 2, 3, 4],
+            mapper.read_columns().column_ids_iter().collect::<Vec<_>>()
+        );
         assert_eq!(
             [
                 (1, ConcreteDataType::int64_datatype()),
@@ -846,7 +1039,10 @@ mod tests {
         let cache = CacheStrategy::Disabled;
         // Columns v1, k0
         let mapper = ProjectionMapper::new(&metadata, [4, 1].into_iter(), true).unwrap();
-        assert_eq!([4, 1], mapper.column_ids());
+        assert_eq!(
+            vec![4, 1],
+            mapper.read_columns().column_ids_iter().collect::<Vec<_>>()
+        );
         assert_eq!(
             [
                 (1, ConcreteDataType::int64_datatype()),
@@ -879,14 +1075,18 @@ mod tests {
         );
         let cache = CacheStrategy::Disabled;
         // Output columns v1, k0. Read also includes v0.
+        let projection_input = ProjectionInput::new().with_projection(vec![4, 1]);
         let mapper = ProjectionMapper::new_with_read_columns(
             &metadata,
-            [4, 1].into_iter(),
+            projection_input,
             true,
             vec![4, 1, 3],
         )
         .unwrap();
-        assert_eq!([4, 1, 3], mapper.column_ids());
+        assert_eq!(
+            vec![4, 1, 3],
+            mapper.read_columns().column_ids_iter().collect::<Vec<_>>()
+        );
 
         let batch = new_flat_batch(None, &[(1, 1)], &[(3, 3), (4, 4)], 3);
         let record_batch = mapper.as_flat().unwrap().convert(&batch, &cache).unwrap();
@@ -912,7 +1112,10 @@ mod tests {
         let cache = CacheStrategy::Disabled;
         // Empty projection
         let mapper = ProjectionMapper::new(&metadata, [].into_iter(), true).unwrap();
-        assert_eq!([0], mapper.column_ids()); // Should still read the time index column
+        assert_eq!(
+            vec![0],
+            mapper.read_columns().column_ids_iter().collect::<Vec<_>>()
+        ); // Should still read the time index column
         assert!(mapper.output_schema().is_empty());
         let flat_mapper = mapper.as_flat().unwrap();
         assert_eq!(
