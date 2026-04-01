@@ -16,11 +16,10 @@
 //! is usually a row group in a parquet file.
 
 use std::collections::HashMap;
-use std::ops::{BitAnd, Range};
+use std::ops::BitAnd;
 use std::sync::Arc;
 
 use api::v1::{OpType, SemanticType};
-use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_telemetry::error;
 use datafusion::physical_plan::PhysicalExpr;
 use datafusion::physical_plan::expressions::DynamicFilterPhysicalExpr;
@@ -29,18 +28,17 @@ use datatypes::arrow::buffer::BooleanBuffer;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::Schema;
-use mito_codec::primary_key_filter::is_partition_column;
-use mito_codec::row_converter::{CompositeValues, PrimaryKeyCodec, PrimaryKeyFilter};
+use mito_codec::row_converter::{CompositeValues, PrimaryKeyCodec};
 use parquet::arrow::arrow_reader::RowSelection;
 use parquet::file::metadata::ParquetMetaData;
 use snafu::{OptionExt, ResultExt};
 use store_api::codec::PrimaryKeyEncoding;
-use store_api::metadata::{RegionMetadata, RegionMetadataRef};
+use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, TimeSeriesRowSelector};
 use table::predicate::Predicate;
 
 use crate::error::{
-    ArrowReaderSnafu, ComputeArrowSnafu, DataTypeMismatchSnafu, DecodeSnafu, DecodeStatsSnafu,
+    ComputeArrowSnafu, DataTypeMismatchSnafu, DecodeSnafu, DecodeStatsSnafu,
     EvalPartitionFilterSnafu, NewRecordBatchSnafu, RecordBatchSnafu, Result, StatsNotPresentSnafu,
     UnexpectedSnafu,
 };
@@ -51,14 +49,13 @@ use crate::read::last_row::{FlatRowGroupLastRowCachedReader, RowGroupLastRowCach
 use crate::read::prune::{FlatPruneReader, PruneReader};
 use crate::sst::file::FileHandle;
 use crate::sst::parquet::flat_format::{
-    DecodedPrimaryKeys, decode_primary_keys, primary_key_column_index, time_index_column_index,
+    DecodedPrimaryKeys, decode_primary_keys, time_index_column_index,
 };
-use crate::sst::parquet::format::{PrimaryKeyArray, ReadFormat};
+use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::reader::{
     FlatRowGroupReader, MaybeFilter, RowGroupReader, RowGroupReaderBuilder, SimpleFilterContext,
 };
-use crate::sst::parquet::row_group::{InMemoryRowGroup, ParquetFetchMetrics};
-use crate::sst::parquet::row_selection::row_selection_from_row_ranges;
+use crate::sst::parquet::row_group::ParquetFetchMetrics;
 use crate::sst::parquet::stats::RowGroupPruningStats;
 
 /// Checks if a row group contains delete operations by examining the min value of op_type column.
@@ -147,7 +144,7 @@ impl FileRange {
             std::slice::from_ref(curr_row_group),
             read_format,
             self.context.base.expected_metadata.clone(),
-            self.context.should_skip_fields(self.row_group_idx),
+            self.compute_skip_fields(),
         );
 
         // not costly to create a predicate here since dynamic filters are wrapped in Arc
@@ -157,6 +154,22 @@ impl FileRange {
             .first()
             .cloned()
             .unwrap_or(true) // unexpected, not skip just in case
+    }
+
+    fn compute_skip_fields(&self) -> bool {
+        match self.context.base.pre_filter_mode {
+            PreFilterMode::All => false,
+            PreFilterMode::SkipFields => true,
+            PreFilterMode::SkipFieldsOnDelete => {
+                // Check if this specific row group contains delete op
+                row_group_contains_delete(
+                    self.context.reader_builder.parquet_metadata(),
+                    self.row_group_idx,
+                    self.context.reader_builder.file_path(),
+                )
+                .unwrap_or(true)
+            }
+        }
     }
 
     /// Returns a reader to read the [FileRange].
@@ -230,6 +243,15 @@ impl FileRange {
         if !self.in_dynamic_filter_range() {
             return Ok(None);
         }
+        let parquet_reader = self
+            .context
+            .reader_builder
+            .build(
+                self.row_group_idx,
+                self.row_selection.clone(),
+                fetch_metrics,
+            )
+            .await?;
 
         let use_last_row_reader = if selector
             .map(|s| s == TimeSeriesRowSelector::LastRow)
@@ -253,21 +275,8 @@ impl FileRange {
         let skip_fields = self.context.should_skip_fields(self.row_group_idx);
 
         let flat_prune_reader = if use_last_row_reader {
-            let row_selection = self.row_selection.clone();
-            if row_selection
-                .as_ref()
-                .is_some_and(|selection| selection.row_count() == 0)
-            {
-                return Ok(None);
-            }
-
-            let flat_row_group_reader = FlatRowGroupReader::new(
-                self.context.clone(),
-                self.context
-                    .reader_builder
-                    .build(self.row_group_idx, row_selection, fetch_metrics)
-                    .await?,
-            );
+            let flat_row_group_reader =
+                FlatRowGroupReader::new(self.context.clone(), parquet_reader);
             let reader = FlatRowGroupLastRowCachedReader::new(
                 self.file_handle().file_id().file_id(),
                 self.row_group_idx,
@@ -277,136 +286,16 @@ impl FileRange {
             );
             FlatPruneReader::new_with_last_row_reader(self.context.clone(), reader, skip_fields)
         } else {
-            match self.prefiltered_flat_reader_input(fetch_metrics).await? {
-                PrefilteredFlatReaderInput::Selection(row_selection) => {
-                    if row_selection
-                        .as_ref()
-                        .is_some_and(|selection| selection.row_count() == 0)
-                    {
-                        return Ok(None);
-                    }
-
-                    let flat_row_group_reader = FlatRowGroupReader::new(
-                        self.context.clone(),
-                        self.context
-                            .reader_builder
-                            .build(self.row_group_idx, row_selection, fetch_metrics)
-                            .await?,
-                    );
-                    FlatPruneReader::new_with_row_group_reader(
-                        self.context.clone(),
-                        flat_row_group_reader,
-                        skip_fields,
-                    )
-                }
-                PrefilteredFlatReaderInput::Prefetched(mut row_group) => {
-                    let flat_row_group_reader = FlatRowGroupReader::new(
-                        self.context.clone(),
-                        self.context
-                            .reader_builder
-                            .build_on_row_group(
-                                &mut row_group,
-                                self.row_selection.clone(),
-                                fetch_metrics,
-                            )
-                            .await?,
-                    );
-                    FlatPruneReader::new_with_row_group_reader(
-                        self.context.clone(),
-                        flat_row_group_reader,
-                        skip_fields,
-                    )
-                }
-            }
+            let flat_row_group_reader =
+                FlatRowGroupReader::new(self.context.clone(), parquet_reader);
+            FlatPruneReader::new_with_row_group_reader(
+                self.context.clone(),
+                flat_row_group_reader,
+                skip_fields,
+            )
         };
 
         Ok(Some(flat_prune_reader))
-    }
-
-    async fn prefiltered_flat_reader_input<'a>(
-        &'a self,
-        fetch_metrics: Option<&ParquetFetchMetrics>,
-    ) -> Result<PrefilteredFlatReaderInput<'a>> {
-        if !self.select_all() {
-            return Ok(PrefilteredFlatReaderInput::Selection(
-                self.row_selection.clone(),
-            ));
-        }
-
-        let Some(mut primary_key_filter) = self.context.new_primary_key_filter() else {
-            return Ok(PrefilteredFlatReaderInput::Selection(
-                self.row_selection.clone(),
-            ));
-        };
-
-        let read_format = ReadFormat::new_flat(
-            self.context.read_format().metadata().clone(),
-            std::iter::empty::<ColumnId>(),
-            Some(
-                self.context
-                    .reader_builder
-                    .parquet_metadata()
-                    .file_metadata()
-                    .schema_descr()
-                    .num_columns(),
-            ),
-            self.context.file_path(),
-            false,
-        )?;
-        let mut row_group = self
-            .context
-            .reader_builder
-            .new_in_memory_row_group(self.row_group_idx);
-        let reader = self
-            .context
-            .reader_builder
-            .build_on_row_group_with_read_format(
-                &mut row_group,
-                self.row_selection.clone(),
-                fetch_metrics,
-                &read_format,
-            )
-            .await?;
-
-        let rows_in_group = self
-            .context
-            .reader_builder
-            .parquet_metadata()
-            .row_group(self.row_group_idx)
-            .num_rows() as usize;
-        let mut matched_row_ranges: Vec<Range<usize>> = Vec::new();
-        let mut row_offset = 0;
-        for batch_result in reader {
-            let batch = batch_result.context(ArrowReaderSnafu {
-                path: self.context.file_path(),
-            })?;
-            let batch_num_rows = batch.num_rows();
-            matched_row_ranges.extend(
-                self.context
-                    .base
-                    .matching_row_ranges_by_primary_key(&batch, primary_key_filter.as_mut())?
-                    .into_iter()
-                    .map(|range| (range.start + row_offset)..(range.end + row_offset)),
-            );
-            row_offset += batch_num_rows;
-        }
-
-        if matched_row_ranges.is_empty() {
-            return Ok(PrefilteredFlatReaderInput::Selection(Some(
-                RowSelection::from(vec![]),
-            )));
-        }
-
-        if matched_row_ranges.len() == 1
-            && matched_row_ranges[0].start == 0
-            && matched_row_ranges[0].end == rows_in_group
-        {
-            return Ok(PrefilteredFlatReaderInput::Prefetched(row_group));
-        }
-
-        Ok(PrefilteredFlatReaderInput::Selection(Some(
-            row_selection_from_row_ranges(matched_row_ranges.into_iter(), rows_in_group),
-        )))
     }
 
     /// Returns the helper to compat batches.
@@ -423,11 +312,6 @@ impl FileRange {
     pub(crate) fn file_handle(&self) -> &FileHandle {
         self.context.reader_builder.file_handle()
     }
-}
-
-enum PrefilteredFlatReaderInput<'a> {
-    Selection(Option<RowSelection>),
-    Prefetched(InMemoryRowGroup<'a>),
 }
 
 /// Context shared by ranges of the same parquet SST.
@@ -457,11 +341,6 @@ impl FileRangeContext {
     /// Returns filters pushed down.
     pub(crate) fn filters(&self) -> &[SimpleFilterContext] {
         &self.base.filters
-    }
-
-    /// Builds an encoded primary-key filter for flat scan pre-filtering.
-    pub(crate) fn new_primary_key_filter(&self) -> Option<Box<dyn PrimaryKeyFilter>> {
-        self.base.new_primary_key_filter()
     }
 
     /// Returns true if a partition filter is configured.
@@ -509,16 +388,6 @@ impl FileRangeContext {
         skip_fields: bool,
     ) -> Result<Option<RecordBatch>> {
         self.base.precise_filter_flat(input, skip_fields)
-    }
-
-    /// Applies an encoded primary-key prefilter to the input `RecordBatch`.
-    pub(crate) fn prefilter_flat_batch_by_primary_key(
-        &self,
-        input: RecordBatch,
-        primary_key_filter: &mut dyn PrimaryKeyFilter,
-    ) -> Result<Option<RecordBatch>> {
-        self.base
-            .prefilter_flat_batch_by_primary_key(input, primary_key_filter)
     }
 
     /// Determines whether to skip field filters based on PreFilterMode and row group delete status.
@@ -570,11 +439,6 @@ pub(crate) struct PartitionFilterContext {
 pub(crate) struct RangeBase {
     /// Filters pushed down.
     pub(crate) filters: Vec<SimpleFilterContext>,
-    /// Simple filters that can be compiled into encoded primary-key checks.
-    ///
-    /// This set is pre-validated against the SST/expected metadata and only contains
-    /// tag filters on primary-key columns, excluding partition columns.
-    pub(crate) primary_key_filters: Option<Arc<Vec<SimpleFilterEvaluator>>>,
     /// Dynamic filter physical exprs.
     pub(crate) dyn_filters: Vec<Arc<DynamicFilterPhysicalExpr>>,
     /// Helper to read the SST.
@@ -609,178 +473,6 @@ impl TagDecodeState {
 }
 
 impl RangeBase {
-    pub(crate) fn retain_usable_primary_key_filters(
-        sst_metadata: &RegionMetadataRef,
-        expected_metadata: Option<&RegionMetadata>,
-        filters: &mut Vec<SimpleFilterEvaluator>,
-    ) {
-        filters.retain(|filter| {
-            Self::is_usable_primary_key_filter(sst_metadata, expected_metadata, filter)
-        });
-    }
-
-    fn is_usable_primary_key_filter(
-        sst_metadata: &RegionMetadataRef,
-        expected_metadata: Option<&RegionMetadata>,
-        filter: &SimpleFilterEvaluator,
-    ) -> bool {
-        if is_partition_column(filter.column_name()) {
-            return false;
-        }
-
-        let sst_column = match expected_metadata {
-            Some(expected_metadata) => {
-                let Some(expected_column) = expected_metadata.column_by_name(filter.column_name())
-                else {
-                    return false;
-                };
-                let Some(sst_column) = sst_metadata.column_by_id(expected_column.column_id) else {
-                    return false;
-                };
-
-                if sst_column.column_schema.name != expected_column.column_schema.name
-                    || sst_column.semantic_type != expected_column.semantic_type
-                    || sst_column.column_schema.data_type != expected_column.column_schema.data_type
-                {
-                    return false;
-                }
-
-                sst_column
-            }
-            None => {
-                let Some(sst_column) = sst_metadata.column_by_name(filter.column_name()) else {
-                    return false;
-                };
-                sst_column
-            }
-        };
-
-        sst_column.semantic_type == SemanticType::Tag
-            && sst_metadata
-                .primary_key_index(sst_column.column_id)
-                .is_some()
-    }
-
-    /// Builds an encoded primary-key filter for flat scan pre-filtering.
-    pub(crate) fn new_primary_key_filter(&self) -> Option<Box<dyn PrimaryKeyFilter>> {
-        if self.read_format.metadata().primary_key.is_empty()
-            || !self
-                .read_format
-                .as_flat()
-                .is_some_and(|format| format.raw_batch_has_primary_key_dictionary())
-        {
-            return None;
-        }
-        let filters = self.primary_key_filters.as_ref()?;
-        if filters.is_empty() {
-            return None;
-        }
-        let filters = Arc::clone(filters);
-
-        Some(
-            self.codec
-                .primary_key_filter(self.read_format.metadata(), filters),
-        )
-    }
-
-    /// Applies an encoded primary-key prefilter before flat-row materialization.
-    ///
-    /// This only prunes rows that are guaranteed to fail simple primary-key predicates.
-    /// The normal precise filter still runs after flat conversion.
-    pub(crate) fn prefilter_flat_batch_by_primary_key(
-        &self,
-        input: RecordBatch,
-        primary_key_filter: &mut dyn PrimaryKeyFilter,
-    ) -> Result<Option<RecordBatch>> {
-        if input.num_rows() == 0 {
-            return Ok(Some(input));
-        }
-
-        let matched_row_ranges =
-            self.matching_row_ranges_by_primary_key(&input, primary_key_filter)?;
-        if matched_row_ranges.is_empty() {
-            return Ok(None);
-        }
-
-        if matched_row_ranges.len() == 1
-            && matched_row_ranges[0].start == 0
-            && matched_row_ranges[0].end == input.num_rows()
-        {
-            return Ok(Some(input));
-        }
-
-        if matched_row_ranges.len() == 1 {
-            let span = &matched_row_ranges[0];
-            return Ok(Some(input.slice(span.start, span.end - span.start)));
-        }
-
-        let mut mask = vec![false; input.num_rows()];
-        for span in matched_row_ranges {
-            mask[span].fill(true);
-        }
-
-        let filtered =
-            datatypes::arrow::compute::filter_record_batch(&input, &BooleanArray::from(mask))
-                .context(ComputeArrowSnafu)?;
-        if filtered.num_rows() == 0 {
-            Ok(None)
-        } else {
-            Ok(Some(filtered))
-        }
-    }
-
-    fn matching_row_ranges_by_primary_key(
-        &self,
-        input: &RecordBatch,
-        primary_key_filter: &mut dyn PrimaryKeyFilter,
-    ) -> Result<Vec<Range<usize>>> {
-        let primary_key_index = primary_key_column_index(input.num_columns());
-        let pk_dict_array = input
-            .column(primary_key_index)
-            .as_any()
-            .downcast_ref::<PrimaryKeyArray>()
-            .context(UnexpectedSnafu {
-                reason: "Primary key column is not a dictionary array".to_string(),
-            })?;
-        let pk_values = pk_dict_array
-            .values()
-            .as_any()
-            .downcast_ref::<datatypes::arrow::array::BinaryArray>()
-            .context(UnexpectedSnafu {
-                reason: "Primary key values are not binary array".to_string(),
-            })?;
-        let keys = pk_dict_array.keys();
-        let key_values = keys.values();
-
-        if key_values.is_empty() {
-            return Ok(std::iter::once(0..input.num_rows()).collect());
-        }
-
-        let mut matched_row_ranges: Vec<Range<usize>> = Vec::new();
-        let mut start = 0;
-        while start < key_values.len() {
-            let key = key_values[start];
-            let mut end = start + 1;
-            while end < key_values.len() && key_values[end] == key {
-                end += 1;
-            }
-
-            if primary_key_filter.matches(pk_values.value(key as usize)) {
-                if let Some(last) = matched_row_ranges.last_mut()
-                    && last.end == start
-                {
-                    last.end = end;
-                } else {
-                    matched_row_ranges.push(start..end);
-                }
-            }
-
-            start = end;
-        }
-
-        Ok(matched_row_ranges)
-    }
-
     /// TRY THE BEST to perform pushed down predicate precisely on the input batch.
     /// Return the filtered batch. If the entire batch is filtered out, return None.
     ///

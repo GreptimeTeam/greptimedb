@@ -41,17 +41,9 @@ pub mod writer;
 pub const PARQUET_METADATA_KEY: &str = "greptime:metadata";
 
 /// Default batch size to read parquet files.
-///
-/// This is a runtime-only scan granularity, so we align it with DataFusion's
-/// default execution batch size to reduce rebatching and concatenation in the
-/// query pipeline.
-pub(crate) const DEFAULT_READ_BATCH_SIZE: usize = 8 * 1024;
+pub(crate) const DEFAULT_READ_BATCH_SIZE: usize = 1024;
 /// Default row group size for parquet files.
-///
-/// Keep the existing persisted/on-disk default stable. It intentionally stays
-/// decoupled from [`DEFAULT_READ_BATCH_SIZE`] so we can tune runtime scan
-/// batching without changing the row group layout of newly written SSTs.
-pub const DEFAULT_ROW_GROUP_SIZE: usize = 100 * 1024;
+pub const DEFAULT_ROW_GROUP_SIZE: usize = 100 * DEFAULT_READ_BATCH_SIZE;
 
 /// Parquet write options.
 #[derive(Debug, Clone)]
