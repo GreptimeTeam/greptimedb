@@ -1182,12 +1182,7 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::OK);
     let prom_resp = res.json::<PrometheusJsonResponse>().await;
     assert_eq!(prom_resp.status, "success");
-    assert!(
-        prom_resp
-            .error
-            .is_none()
-            && prom_resp.error_type.is_none()
-    );
+    assert!(prom_resp.error.is_none() && prom_resp.error_type.is_none());
     assert_eq!(
         prom_resp.data,
         serde_json::from_value::<PrometheusResponse>(json!([])).unwrap()
