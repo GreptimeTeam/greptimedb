@@ -270,13 +270,8 @@ impl Instance {
                 .map(|chunk| chunk.collect::<Vec<_>>())
                 .collect::<Vec<_>>();
             for chunk in chunks {
-                self.ingest_trace_chunk(
-                    &ingest_ctx,
-                    chunk,
-                    ctx.clone(),
-                    &mut ingest_state,
-                )
-                .await?;
+                self.ingest_trace_chunk(&ingest_ctx, chunk, ctx.clone(), &mut ingest_state)
+                    .await?;
             }
         }
 
