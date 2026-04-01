@@ -33,7 +33,10 @@ use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{debug, error, tracing, warn};
 use common_time::timezone::parse_timezone;
 use futures_util::StreamExt;
-use session::context::{Channel, QueryContextBuilder, QueryContextRef};
+use session::context::{
+    Channel, QueryContextBuilder, QueryContextRef, REMOTE_QUERY_ID_EXTENSION_KEY,
+    generate_remote_query_id,
+};
 use session::hints::READ_PREFERENCE_HINT;
 use snafu::{OptionExt, ResultExt};
 use tokio::sync::mpsc;
@@ -214,7 +217,11 @@ pub(crate) fn create_query_context(
         .current_catalog(catalog)
         .current_schema(schema)
         .timezone(timezone)
-        .channel(channel);
+        .channel(channel)
+        .set_extension(
+            REMOTE_QUERY_ID_EXTENSION_KEY.to_string(),
+            generate_remote_query_id(),
+        );
 
     if let Some(x) = extensions
         .iter()
@@ -308,9 +315,16 @@ mod tests {
             query_context.read_preference(),
             ReadPreference::Leader
         ));
+        let mut extensions = query_context.extensions().into_iter().collect::<Vec<_>>();
+        extensions.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(
-            query_context.extensions().into_iter().collect::<Vec<_>>(),
-            vec![("auto_create_table".to_string(), "true".to_string())]
+            extensions[0],
+            ("auto_create_table".to_string(), "true".to_string())
+        );
+        assert_eq!(extensions[1].0, REMOTE_QUERY_ID_EXTENSION_KEY.to_string());
+        assert_eq!(
+            query_context.remote_query_id(),
+            Some(extensions[1].1.as_str())
         );
     }
 }
