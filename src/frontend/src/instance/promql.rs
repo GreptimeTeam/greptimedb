@@ -132,14 +132,7 @@ impl Instance {
 
         // Check label column existence before building the query plan so a missing label can be
         // reported as `TableColumnNotFound` and handled like Prometheus expects.
-        if !table
-            .table_info()
-            .meta
-            .schema
-            .column_schemas()
-            .iter()
-            .any(|column| column.name == label_name)
-        {
+        if table.schema().column_schema_by_name(&label_name).is_none() {
             return table::error::ColumnNotExistsSnafu {
                 column_name: label_name,
                 table_name: full_table_name,
