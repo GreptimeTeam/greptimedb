@@ -37,9 +37,18 @@ SELECT * FROM test_alt_format;
 -- SQLNESS SORT_RESULT 3 1
 SELECT i, h FROM test_alt_format;
 
--- not allow to change from flat to primary_key
--- SQLNESS REPLACE \d+\(\d+,\s+\d+\) REDACTED
+-- allow to change from flat to primary_key
 ALTER TABLE test_alt_format SET 'sst_format' = 'primary_key';
+
+INSERT INTO test_alt_format (h, j, i) VALUES (14, 4, 34);
+
+-- SQLNESS SORT_RESULT 3 1
+SELECT * FROM test_alt_format;
+
+ADMIN flush_table('test_alt_format');
+
+-- SQLNESS SORT_RESULT 3 1
+SELECT * FROM test_alt_format;
 
 DROP TABLE test_alt_format;
 
@@ -72,9 +81,13 @@ INSERT INTO t1 (ts, val, host) VALUES
 
 SELECT host, ts, val FROM t1 where host = 'example.com' ORDER BY ts ASC;
 
--- not allow to change from flat to primary_key
--- SQLNESS REPLACE \d+\(\d+,\s+\d+\) REDACTED
+-- allow to change from flat to primary_key
 ALTER TABLE alt_format_phy SET 'sst_format' = 'primary_key';
+
+INSERT INTO t1 (ts, val, host) VALUES
+  ('2022-01-01 00:00:02', 5.0, 'example.com');
+
+SELECT host, ts, val FROM t1 where host = 'example.com' ORDER BY ts ASC;
 
 DROP TABLE t1;
 

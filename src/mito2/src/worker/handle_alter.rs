@@ -216,15 +216,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     // If the format is unchanged, we also consider the option is altered.
                     if new_format != current_options.sst_format.unwrap_or_default() {
                         all_options_altered = false;
-
-                        // Validates the format type.
-                        ensure!(
-                            new_format == FormatType::Flat,
-                            store_api::metadata::InvalidRegionRequestSnafu {
-                                region_id: region.region_id,
-                                err: "Only allow changing format type to flat",
-                            }
-                        );
                     }
                 }
                 SetRegionOption::AppendMode(new_append_mode) => {
@@ -274,8 +265,6 @@ fn new_region_options_on_empty_memtable(
             SetRegionOption::Format(format_str) => {
                 // Safety: handle_alter_region_options_fast() has validated this.
                 let new_format = format_str.parse::<FormatType>().unwrap();
-                assert_eq!(FormatType::Flat, new_format);
-
                 current_options.sst_format = Some(new_format);
             }
             SetRegionOption::AppendMode(new_append_mode) => {
