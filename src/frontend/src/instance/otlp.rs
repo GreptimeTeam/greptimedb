@@ -56,6 +56,7 @@ const TRACE_FAILURE_MESSAGE_LIMIT: usize = 4;
 enum ChunkFailureReaction {
     RetryPerSpan,
     DiscardChunk,
+    Propagate,
 }
 
 impl ChunkFailureReaction {
@@ -63,6 +64,7 @@ impl ChunkFailureReaction {
         match self {
             Self::RetryPerSpan => "retry_per_span",
             Self::DiscardChunk => "discard_chunk",
+            Self::Propagate => "propagate_failure",
         }
     }
 }
@@ -291,19 +293,25 @@ impl Instance {
                 ingest_ctx.table_name,
             )?;
 
-            if !aux_requests.inserts.is_empty()
-                && let Err(err) = self
+            if !aux_requests.inserts.is_empty() {
+                match self
                     .insert_trace_requests(aux_requests, ingest_ctx.is_trace_v1_model, ctx)
                     .await
-            {
-                Self::push_trace_failure_message(
-                    &mut ingest_state.failure_messages,
-                    "aux_table_update_failed",
-                    format!(
-                        "Auxiliary trace tables were not fully updated ({})",
-                        err.status_code().as_ref()
-                    ),
-                );
+                {
+                    Ok(output) => {
+                        Self::add_trace_write_cost(&mut ingest_state.outcome, output.meta.cost);
+                    }
+                    Err(err) => {
+                        Self::push_trace_failure_message(
+                            &mut ingest_state.failure_messages,
+                            "aux_table_update_failed",
+                            format!(
+                                "Auxiliary trace tables were not fully updated ({})",
+                                err.status_code().as_ref()
+                            ),
+                        );
+                    }
+                }
             }
         }
 
@@ -341,7 +349,7 @@ impl Instance {
             .await
         {
             Ok(output) => {
-                ingest_state.outcome.write_cost += output.meta.cost;
+                Self::add_trace_write_cost(&mut ingest_state.outcome, output.meta.cost);
                 ingest_state.outcome.accepted_spans += chunk_rows;
                 for span in &chunk {
                     ingest_state.aux_data.observe_span(span);
@@ -379,6 +387,20 @@ impl Instance {
                     // TODO(shuiyisong): Add an idempotent retry-safe recovery path for
                     // ambiguous chunk failures such as timeout-like errors.
                 }
+                // Retryable or ambiguous failures must fail the request instead of
+                // becoming partial success. This path is not retry-safe because the
+                // chunk may already have been committed before the error surfaced.
+                ChunkFailureReaction::Propagate => {
+                    Self::push_trace_failure_message(
+                        &mut ingest_state.failure_messages,
+                        ChunkFailureReaction::Propagate.as_metric_label(),
+                        format!(
+                            "Propagating retryable chunk failure ({})",
+                            err.status_code().as_ref()
+                        ),
+                    );
+                    return Err(err);
+                }
             },
         }
 
@@ -408,11 +430,25 @@ impl Instance {
                 .await
             {
                 Ok(output) => {
-                    ingest_state.outcome.write_cost += output.meta.cost;
+                    Self::add_trace_write_cost(&mut ingest_state.outcome, output.meta.cost);
                     ingest_state.outcome.accepted_spans += rows;
                     ingest_state.aux_data.observe_span(&span);
                 }
                 Err(err) => {
+                    if Self::should_propagate_trace_span_failure(err.status_code()) {
+                        Self::push_trace_failure_message(
+                            &mut ingest_state.failure_messages,
+                            ChunkFailureReaction::Propagate.as_metric_label(),
+                            format!(
+                                "Propagating retryable span failure for {}:{} ({})",
+                                span.trace_id,
+                                span.span_id,
+                                err.status_code().as_ref()
+                            ),
+                        );
+                        return Err(err);
+                    }
+
                     ingest_state.outcome.rejected_spans += 1;
                     Self::push_trace_failure_message(
                         &mut ingest_state.failure_messages,
@@ -456,15 +492,27 @@ impl Instance {
     // TODO(shuiyisong): review this
     fn classify_trace_chunk_failure(status: StatusCode) -> ChunkFailureReaction {
         match status {
-            StatusCode::InvalidArguments
-            | StatusCode::InvalidSyntax
-            | StatusCode::Unsupported
-            | StatusCode::TableNotFound
+            StatusCode::InvalidArguments | StatusCode::InvalidSyntax | StatusCode::Unsupported => {
+                ChunkFailureReaction::RetryPerSpan
+            }
+            StatusCode::TableNotFound
             | StatusCode::TableColumnNotFound
-            | StatusCode::TableColumnExists
-            | StatusCode::DatabaseNotFound => ChunkFailureReaction::RetryPerSpan,
+            | StatusCode::DatabaseNotFound => ChunkFailureReaction::DiscardChunk,
+            StatusCode::Cancelled | StatusCode::DeadlineExceeded => ChunkFailureReaction::Propagate,
+            _ if status.is_retryable() => ChunkFailureReaction::Propagate,
             _ => ChunkFailureReaction::DiscardChunk,
         }
+    }
+
+    fn should_propagate_trace_span_failure(status: StatusCode) -> bool {
+        matches!(
+            Self::classify_trace_chunk_failure(status),
+            ChunkFailureReaction::Propagate
+        )
+    }
+
+    fn add_trace_write_cost(outcome: &mut TraceIngestOutcome, cost: usize) {
+        outcome.write_cost += cost;
     }
 
     fn push_trace_failure_message(messages: &mut Vec<String>, label: &str, message: String) {
@@ -720,6 +768,7 @@ fn push_observed_trace_type(observed_types: &mut Vec<ColumnDataType>, datatype: 
 #[cfg(test)]
 mod tests {
     use common_error::status_code::StatusCode;
+    use servers::query_handler::TraceIngestOutcome;
 
     use super::{ChunkFailureReaction, Instance};
     use crate::metrics::OTLP_TRACES_FAILURE_COUNT;
@@ -731,17 +780,78 @@ mod tests {
             ChunkFailureReaction::RetryPerSpan
         );
         assert_eq!(
-            Instance::classify_trace_chunk_failure(StatusCode::TableColumnNotFound),
+            Instance::classify_trace_chunk_failure(StatusCode::InvalidSyntax),
             ChunkFailureReaction::RetryPerSpan
         );
         assert_eq!(
-            Instance::classify_trace_chunk_failure(StatusCode::DeadlineExceeded),
+            Instance::classify_trace_chunk_failure(StatusCode::Unsupported),
+            ChunkFailureReaction::RetryPerSpan
+        );
+        assert_eq!(
+            Instance::classify_trace_chunk_failure(StatusCode::TableColumnNotFound),
             ChunkFailureReaction::DiscardChunk
         );
         assert_eq!(
-            Instance::classify_trace_chunk_failure(StatusCode::StorageUnavailable),
+            Instance::classify_trace_chunk_failure(StatusCode::TableNotFound),
             ChunkFailureReaction::DiscardChunk
         );
+        assert_eq!(
+            Instance::classify_trace_chunk_failure(StatusCode::DatabaseNotFound),
+            ChunkFailureReaction::DiscardChunk
+        );
+        assert_eq!(
+            Instance::classify_trace_chunk_failure(StatusCode::DeadlineExceeded),
+            ChunkFailureReaction::Propagate
+        );
+        assert_eq!(
+            Instance::classify_trace_chunk_failure(StatusCode::Cancelled),
+            ChunkFailureReaction::Propagate
+        );
+        assert_eq!(
+            Instance::classify_trace_chunk_failure(StatusCode::StorageUnavailable),
+            ChunkFailureReaction::Propagate
+        );
+        assert_eq!(
+            Instance::classify_trace_chunk_failure(StatusCode::Internal),
+            ChunkFailureReaction::Propagate
+        );
+        assert_eq!(
+            Instance::classify_trace_chunk_failure(StatusCode::RegionNotReady),
+            ChunkFailureReaction::Propagate
+        );
+        assert_eq!(
+            Instance::classify_trace_chunk_failure(StatusCode::TableUnavailable),
+            ChunkFailureReaction::Propagate
+        );
+        assert_eq!(
+            Instance::classify_trace_chunk_failure(StatusCode::RegionBusy),
+            ChunkFailureReaction::Propagate
+        );
+        assert_eq!(
+            Instance::classify_trace_chunk_failure(StatusCode::RuntimeResourcesExhausted),
+            ChunkFailureReaction::Propagate
+        );
+    }
+
+    #[test]
+    fn test_classify_trace_span_failure() {
+        assert!(Instance::should_propagate_trace_span_failure(
+            StatusCode::DeadlineExceeded
+        ));
+        assert!(Instance::should_propagate_trace_span_failure(
+            StatusCode::StorageUnavailable
+        ));
+        assert!(!Instance::should_propagate_trace_span_failure(
+            StatusCode::InvalidArguments
+        ));
+    }
+
+    #[test]
+    fn test_add_trace_write_cost() {
+        let mut outcome = TraceIngestOutcome::default();
+        Instance::add_trace_write_cost(&mut outcome, 3);
+        Instance::add_trace_write_cost(&mut outcome, 5);
+        assert_eq!(outcome.write_cost, 8);
     }
 
     #[test]

@@ -259,12 +259,6 @@ pub fn parse(request: ExportTraceServiceRequest) -> TraceSpanGroups {
         .iter()
         .flat_map(|res| res.scope_spans.iter())
         .count();
-    let span_size = request
-        .resource_spans
-        .iter()
-        .flat_map(|res| res.scope_spans.iter())
-        .flat_map(|scope| scope.spans.iter())
-        .count();
     let mut groups = Vec::with_capacity(group_size);
     for resource_spans in request.resource_spans {
         let resource_attrs = resource_spans
@@ -285,7 +279,7 @@ pub fn parse(request: ExportTraceServiceRequest) -> TraceSpanGroups {
 
         for scope_spans in resource_spans.scope_spans {
             let scope = scope_spans.scope.unwrap_or_default();
-            let mut spans = Vec::with_capacity(scope_spans.spans.len().min(span_size));
+            let mut spans = Vec::with_capacity(scope_spans.spans.len());
             for span in scope_spans.spans {
                 spans.push(parse_span(
                     service_name.clone(),
