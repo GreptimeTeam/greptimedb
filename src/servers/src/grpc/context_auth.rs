@@ -20,7 +20,10 @@ use auth::{Identity, Password, UserInfoRef, UserProviderRef};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
-use session::context::{Channel, QueryContextBuilder, QueryContextRef};
+use session::context::{
+    Channel, QueryContextBuilder, QueryContextRef, REMOTE_QUERY_ID_EXTENSION_KEY,
+    generate_remote_query_id,
+};
 use snafu::{OptionExt, ResultExt};
 use tonic::Status;
 use tonic::metadata::MetadataMap;
@@ -50,6 +53,10 @@ pub fn create_query_context_from_grpc_metadata(
             .current_catalog(catalog)
             .current_schema(schema)
             .channel(Channel::Grpc)
+            .set_extension(
+                REMOTE_QUERY_ID_EXTENSION_KEY.to_string(),
+                generate_remote_query_id(),
+            )
             .build(),
     ))
 }

@@ -139,6 +139,7 @@ datafusion-orc = "0.7"
 datafusion-pg-catalog = "0.15.1"
 datafusion-physical-expr = "=52.1"
 datafusion-physical-plan = "=52.1"
+datafusion-proto = "=52.1"
 datafusion-sql = "=52.1"
 datafusion-substrait = "=52.1"
 deadpool = "0.12"
@@ -251,7 +252,7 @@ tracing-appender = "0.2"
 tracing-opentelemetry = "0.31.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
 typetag = "0.2"
-uuid = { version = "1.17", features = ["serde", "v4", "fast-rng"] }
+uuid = { version = "1.17", features = ["serde", "v4", "v7", "fast-rng"] }
 vrl = "0.25"
 zstd = "0.13"
 # DO_NOT_REMOVE_THIS: END_OF_EXTERNAL_DEPENDENCIES
@@ -341,6 +342,7 @@ datafusion-optimizer = { git = "https://github.com/GreptimeTeam/datafusion.git",
 datafusion-physical-expr = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "02b82535e0160c4545667f36a03e1ff9d1d2e51f" }
 datafusion-physical-expr-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "02b82535e0160c4545667f36a03e1ff9d1d2e51f" }
 datafusion-physical-plan = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "02b82535e0160c4545667f36a03e1ff9d1d2e51f" }
+datafusion-proto = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "02b82535e0160c4545667f36a03e1ff9d1d2e51f" }
 datafusion-datasource = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "02b82535e0160c4545667f36a03e1ff9d1d2e51f" }
 datafusion-sql = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "02b82535e0160c4545667f36a03e1ff9d1d2e51f" }
 datafusion-substrait = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "02b82535e0160c4545667f36a03e1ff9d1d2e51f" }

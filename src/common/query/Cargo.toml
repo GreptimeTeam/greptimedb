@@ -22,8 +22,10 @@ common-time.workspace = true
 datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
+datafusion-proto.workspace = true
 datatypes.workspace = true
 once_cell.workspace = true
+prost.workspace = true
 serde.workspace = true
 snafu.workspace = true
 sqlparser.workspace = true
@@ -33,4 +35,5 @@ store-api.workspace = true
 [dev-dependencies]
 common-base.workspace = true
 futures-util.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
