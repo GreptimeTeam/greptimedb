@@ -677,7 +677,9 @@ impl ScanbenchCommand {
 
             // Scan all partitions
             let num_partitions = scanner.properties().partitions.len();
-            let ctx = QueryScanContext::default();
+            let ctx = QueryScanContext {
+                explain_verbose: self.verbose,
+            };
             let metrics_set = ExecutionPlanMetricsSet::new();
 
             let mut scan_futures = FuturesUnordered::new();

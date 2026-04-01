@@ -17,6 +17,7 @@ use std::time::Instant;
 
 use datatypes::arrow::array::BooleanArray;
 use datatypes::arrow::record_batch::RecordBatch;
+use mito_codec::row_converter::PrimaryKeyFilter;
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReader;
 use snafu::ResultExt;
@@ -29,7 +30,8 @@ use crate::memtable::bulk::row_group_reader::MemtableRowGroupReaderBuilder;
 use crate::memtable::{MemScanMetrics, MemScanMetricsData};
 use crate::metrics::{READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
 use crate::sst::parquet::file_range::{PreFilterMode, TagDecodeState};
-use crate::sst::parquet::flat_format::sequence_column_index;
+use crate::sst::parquet::flat_format::{primary_key_column_index, sequence_column_index};
+use crate::sst::parquet::prefilter::{CachedPrimaryKeyFilter, prefilter_flat_batch_by_primary_key};
 
 /// Iterator for reading data inside a bulk part.
 pub struct EncodedBulkPartIter {
@@ -41,6 +43,8 @@ pub struct EncodedBulkPartIter {
     sequence: Option<SequenceRange>,
     /// Cached skip_fields for current row group.
     current_skip_fields: bool,
+    /// Primary key filter for prefiltering before convert_batch.
+    pk_filter: Option<CachedPrimaryKeyFilter>,
     /// Metrics for this iterator.
     metrics: MemScanMetricsData,
     /// Optional memory scan metrics to report to.
@@ -69,6 +73,9 @@ impl EncodedBulkPartIter {
         let builder =
             MemtableRowGroupReaderBuilder::try_new(&context, projection_mask, parquet_meta, data)?;
 
+        // Build PK filter if applicable (flat format with dictionary-encoded PKs).
+        let pk_filter = context.build_pk_filter();
+
         let (init_reader, current_skip_fields) = match row_groups_to_read.pop_front() {
             Some(first_row_group) => {
                 let skip_fields = builder.compute_skip_fields(&context, first_row_group);
@@ -85,6 +92,7 @@ impl EncodedBulkPartIter {
             builder,
             sequence,
             current_skip_fields,
+            pk_filter,
             metrics: MemScanMetricsData {
                 total_series: series_count,
                 ..Default::default()
@@ -116,6 +124,10 @@ impl EncodedBulkPartIter {
                 &self.sequence,
                 batch,
                 self.current_skip_fields,
+                self.pk_filter
+                    .as_mut()
+                    .map(|f| f as &mut dyn PrimaryKeyFilter),
+                &mut self.metrics,
             )? {
                 // Update metrics
                 self.metrics.num_batches += 1;
@@ -142,6 +154,10 @@ impl EncodedBulkPartIter {
                     &self.sequence,
                     batch,
                     self.current_skip_fields,
+                    self.pk_filter
+                        .as_mut()
+                        .map(|f| f as &mut dyn PrimaryKeyFilter),
+                    &mut self.metrics,
                 )? {
                     // Update metrics
                     self.metrics.num_batches += 1;
@@ -175,12 +191,14 @@ impl Iterator for EncodedBulkPartIter {
 impl Drop for EncodedBulkPartIter {
     fn drop(&mut self) {
         common_telemetry::debug!(
-            "EncodedBulkPartIter region: {}, metrics: total_series={}, num_rows={}, num_batches={}, scan_cost={:?}",
+            "EncodedBulkPartIter region: {}, metrics: total_series={}, num_rows={}, num_batches={}, scan_cost={:?}, prefilter_cost={:?}, prefilter_rows_filtered={}",
             self.context.region_id(),
             self.metrics.total_series,
             self.metrics.num_rows,
             self.metrics.num_batches,
-            self.metrics.scan_cost
+            self.metrics.scan_cost,
+            self.metrics.prefilter_cost,
+            self.metrics.prefilter_rows_filtered
         );
 
         // Report MemScanMetrics if not already reported
@@ -205,6 +223,8 @@ pub struct BulkPartBatchIter {
     context: BulkIterContextRef,
     /// Sequence number filter.
     sequence: Option<SequenceRange>,
+    /// Primary key filter for prefiltering before convert_batch.
+    pk_filter: Option<CachedPrimaryKeyFilter>,
     /// Metrics for this iterator.
     metrics: MemScanMetricsData,
     /// Optional memory scan metrics to report to.
@@ -222,10 +242,13 @@ impl BulkPartBatchIter {
     ) -> Self {
         assert!(context.read_format().as_flat().is_some());
 
+        let pk_filter = context.build_pk_filter();
+
         Self {
             batches: VecDeque::from(batches),
             context,
             sequence,
+            pk_filter,
             metrics: MemScanMetricsData {
                 total_series: series_count,
                 ..Default::default()
@@ -282,8 +305,16 @@ impl BulkPartBatchIter {
             PreFilterMode::SkipFieldsOnDelete => true,
         };
 
-        let Some(filtered_batch) =
-            apply_combined_filters(&self.context, &self.sequence, projected_batch, skip_fields)?
+        let Some(filtered_batch) = apply_combined_filters(
+            &self.context,
+            &self.sequence,
+            projected_batch,
+            skip_fields,
+            self.pk_filter
+                .as_mut()
+                .map(|f| f as &mut dyn PrimaryKeyFilter),
+            &mut self.metrics,
+        )?
         else {
             self.metrics.scan_cost += start.elapsed();
             return Ok(None);
@@ -323,12 +354,14 @@ impl Iterator for BulkPartBatchIter {
 impl Drop for BulkPartBatchIter {
     fn drop(&mut self) {
         common_telemetry::debug!(
-            "BulkPartBatchIter region: {}, metrics: total_series={}, num_rows={}, num_batches={}, scan_cost={:?}",
+            "BulkPartBatchIter region: {}, metrics: total_series={}, num_rows={}, num_batches={}, scan_cost={:?}, prefilter_cost={:?}, prefilter_rows_filtered={}",
             self.context.region_id(),
             self.metrics.total_series,
             self.metrics.num_rows,
             self.metrics.num_batches,
-            self.metrics.scan_cost
+            self.metrics.scan_cost,
+            self.metrics.prefilter_cost,
+            self.metrics.prefilter_rows_filtered
         );
 
         // Report MemScanMetrics if not already reported
@@ -353,8 +386,32 @@ fn apply_combined_filters(
     sequence: &Option<SequenceRange>,
     record_batch: RecordBatch,
     skip_fields: bool,
+    pk_filter: Option<&mut dyn PrimaryKeyFilter>,
+    metrics: &mut MemScanMetricsData,
 ) -> error::Result<Option<RecordBatch>> {
-    // Converts the format to the flat format first.
+    // Apply PK prefilter on raw batch before convert_batch to reduce conversion overhead.
+    let has_pk_prefilter = pk_filter.is_some();
+    let record_batch = if let Some(pk_filter) = pk_filter {
+        let rows_before = record_batch.num_rows();
+        let prefilter_start = Instant::now();
+        let pk_col_idx = primary_key_column_index(record_batch.num_columns());
+        match prefilter_flat_batch_by_primary_key(record_batch, pk_col_idx, pk_filter)? {
+            Some(batch) => {
+                metrics.prefilter_cost += prefilter_start.elapsed();
+                metrics.prefilter_rows_filtered += rows_before - batch.num_rows();
+                batch
+            }
+            None => {
+                metrics.prefilter_cost += prefilter_start.elapsed();
+                metrics.prefilter_rows_filtered += rows_before;
+                return Ok(None);
+            }
+        }
+    } else {
+        record_batch
+    };
+
+    // Converts the format to the flat format.
     let format = context.read_format().as_flat().unwrap();
     let record_batch = format.convert_batch(record_batch, None)?;
 
@@ -362,12 +419,12 @@ fn apply_combined_filters(
     let mut combined_filter = None;
     let mut tag_decode_state = TagDecodeState::new();
 
-    // First, apply predicate filters using the shared method.
+    // Apply predicate filters using the shared method.
     if !context.base.filters.is_empty() {
         let predicate_mask = context.base.compute_filter_mask_flat(
             &record_batch,
             skip_fields,
-            false,
+            has_pk_prefilter,
             &mut tag_decode_state,
         )?;
         // If predicate filters out the entire batch, return None early
@@ -433,6 +490,7 @@ mod tests {
 
     use super::*;
     use crate::memtable::bulk::context::BulkIterContext;
+    use crate::test_util::sst_util::new_primary_key;
 
     #[test]
     fn test_bulk_part_batch_iter() {
@@ -461,9 +519,16 @@ mod tests {
             vec![1000, 2000, 3000],
         ));
 
-        // Create primary key dictionary array
+        // Create primary key dictionary array with properly encoded PKs
         use datatypes::arrow::array::{BinaryArray, DictionaryArray, UInt32Array};
-        let values = Arc::new(BinaryArray::from_iter_values([b"key1", b"key2", b"key3"]));
+        let pk1 = new_primary_key(&["key1"]);
+        let pk2 = new_primary_key(&["key2"]);
+        let pk3 = new_primary_key(&["key3"]);
+        let values = Arc::new(BinaryArray::from_iter_values([
+            pk1.as_slice(),
+            pk2.as_slice(),
+            pk3.as_slice(),
+        ]));
         let keys = UInt32Array::from(vec![0, 1, 2]);
         let primary_key = Arc::new(DictionaryArray::new(keys, values));
 
@@ -596,12 +661,17 @@ mod tests {
         ]));
 
         // Create first batch with 2 rows
+        let pk1 = new_primary_key(&["key1"]);
+        let pk2 = new_primary_key(&["key2"]);
         let key1_1 = Arc::new(StringArray::from_iter_values(["key1", "key2"]));
         let field1_1 = Arc::new(Int64Array::from(vec![11, 12]));
         let timestamp_1 = Arc::new(datatypes::arrow::array::TimestampMillisecondArray::from(
             vec![1000, 2000],
         ));
-        let values_1 = Arc::new(BinaryArray::from_iter_values([b"key1", b"key2"]));
+        let values_1 = Arc::new(BinaryArray::from_iter_values([
+            pk1.as_slice(),
+            pk2.as_slice(),
+        ]));
         let keys_1 = UInt32Array::from(vec![0, 1]);
         let primary_key_1 = Arc::new(DictionaryArray::new(keys_1, values_1));
         let sequence_1 = Arc::new(UInt64Array::from(vec![1, 2]));
@@ -621,12 +691,19 @@ mod tests {
         .unwrap();
 
         // Create second batch with 3 rows
+        let pk3 = new_primary_key(&["key3"]);
+        let pk4 = new_primary_key(&["key4"]);
+        let pk5 = new_primary_key(&["key5"]);
         let key1_2 = Arc::new(StringArray::from_iter_values(["key3", "key4", "key5"]));
         let field1_2 = Arc::new(Int64Array::from(vec![13, 14, 15]));
         let timestamp_2 = Arc::new(datatypes::arrow::array::TimestampMillisecondArray::from(
             vec![3000, 4000, 5000],
         ));
-        let values_2 = Arc::new(BinaryArray::from_iter_values([b"key3", b"key4", b"key5"]));
+        let values_2 = Arc::new(BinaryArray::from_iter_values([
+            pk3.as_slice(),
+            pk4.as_slice(),
+            pk5.as_slice(),
+        ]));
         let keys_2 = UInt32Array::from(vec![0, 1, 2]);
         let primary_key_2 = Arc::new(DictionaryArray::new(keys_2, values_2));
         let sequence_2 = Arc::new(UInt64Array::from(vec![3, 4, 5]));

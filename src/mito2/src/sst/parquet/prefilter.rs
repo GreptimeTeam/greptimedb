@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use api::v1::SemanticType;
 use common_recordbatch::filter::SimpleFilterEvaluator;
-use datatypes::arrow::array::BinaryArray;
+use datatypes::arrow::array::{BinaryArray, BooleanArray, BooleanBufferBuilder};
 use datatypes::arrow::record_batch::RecordBatch;
 use futures::StreamExt;
 use mito_codec::row_converter::{PrimaryKeyCodec, PrimaryKeyFilter};
@@ -33,7 +33,7 @@ use parquet::schema::types::SchemaDescriptor;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 
-use crate::error::{DecodeSnafu, ReadParquetSnafu, Result, UnexpectedSnafu};
+use crate::error::{ComputeArrowSnafu, DecodeSnafu, ReadParquetSnafu, Result, UnexpectedSnafu};
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::{PrimaryKeyArray, ReadFormat};
 use crate::sst::parquet::reader::{RowGroupBuildContext, RowGroupReaderBuilder};
@@ -91,6 +91,55 @@ pub(crate) fn matching_row_ranges_by_primary_key(
     }
 
     Ok(matched_row_ranges)
+}
+
+/// Filters a flat-format record batch by primary key, returning only rows whose
+/// primary key matches the filter. Returns `None` if all rows are filtered out.
+pub(crate) fn prefilter_flat_batch_by_primary_key(
+    input: RecordBatch,
+    pk_column_index: usize,
+    pk_filter: &mut dyn PrimaryKeyFilter,
+) -> Result<Option<RecordBatch>> {
+    if input.num_rows() == 0 {
+        return Ok(Some(input));
+    }
+
+    let matched_row_ranges =
+        matching_row_ranges_by_primary_key(&input, pk_column_index, pk_filter)?;
+    if matched_row_ranges.is_empty() {
+        return Ok(None);
+    }
+
+    if matched_row_ranges.len() == 1
+        && matched_row_ranges[0].start == 0
+        && matched_row_ranges[0].end == input.num_rows()
+    {
+        return Ok(Some(input));
+    }
+
+    if matched_row_ranges.len() == 1 {
+        let span = &matched_row_ranges[0];
+        return Ok(Some(input.slice(span.start, span.end - span.start)));
+    }
+
+    let mut builder = BooleanBufferBuilder::new(input.num_rows());
+    builder.append_n(input.num_rows(), false);
+    for span in matched_row_ranges {
+        for i in span {
+            builder.set_bit(i, true);
+        }
+    }
+
+    let filtered = datatypes::arrow::compute::filter_record_batch(
+        &input,
+        &BooleanArray::new(builder.finish(), None),
+    )
+    .context(ComputeArrowSnafu)?;
+    if filtered.num_rows() == 0 {
+        Ok(None)
+    } else {
+        Ok(Some(filtered))
+    }
 }
 
 /// Returns whether a filter can be applied by parquet primary-key prefiltering.
@@ -346,12 +395,19 @@ mod tests {
 
     use common_recordbatch::filter::SimpleFilterEvaluator;
     use datafusion_expr::{col, lit};
-    use mito_codec::row_converter::PrimaryKeyFilter;
+    use datatypes::arrow::array::{
+        ArrayRef, DictionaryArray, TimestampMillisecondArray, UInt8Array, UInt32Array, UInt64Array,
+    };
+    use datatypes::arrow::datatypes::{Schema, UInt32Type};
+    use mito_codec::row_converter::{PrimaryKeyFilter, build_primary_key_codec};
     use store_api::codec::PrimaryKeyEncoding;
 
     use super::*;
+    use crate::sst::internal_fields;
     use crate::sst::parquet::format::ReadFormat;
-    use crate::test_util::sst_util::{new_primary_key, sst_region_metadata_with_encoding};
+    use crate::test_util::sst_util::{
+        new_primary_key, sst_region_metadata, sst_region_metadata_with_encoding,
+    };
 
     #[test]
     fn test_is_usable_primary_key_filter_skips_legacy_primary_key_batches() {
@@ -415,5 +471,126 @@ mod tests {
         );
 
         assert_eq!(hits.load(Ordering::Relaxed), 2);
+    }
+
+    fn new_test_filters(exprs: &[datafusion_expr::Expr]) -> Vec<SimpleFilterEvaluator> {
+        exprs
+            .iter()
+            .filter_map(SimpleFilterEvaluator::try_new)
+            .collect()
+    }
+
+    fn new_raw_batch(primary_keys: &[&[u8]], field_values: &[u64]) -> RecordBatch {
+        assert_eq!(primary_keys.len(), field_values.len());
+
+        let metadata = Arc::new(sst_region_metadata());
+        let arrow_schema = metadata.schema.arrow_schema();
+        let field_column = arrow_schema
+            .field(arrow_schema.index_of("field_0").unwrap())
+            .clone();
+        let time_index_column = arrow_schema
+            .field(arrow_schema.index_of("ts").unwrap())
+            .clone();
+        let mut fields = vec![field_column, time_index_column];
+        fields.extend(
+            internal_fields()
+                .into_iter()
+                .map(|field| field.as_ref().clone()),
+        );
+        let schema = Arc::new(Schema::new(fields));
+
+        let mut dict_values = Vec::new();
+        let mut keys = Vec::with_capacity(primary_keys.len());
+        for pk in primary_keys {
+            let key = dict_values
+                .iter()
+                .position(|existing: &&[u8]| existing == pk)
+                .unwrap_or_else(|| {
+                    dict_values.push(*pk);
+                    dict_values.len() - 1
+                });
+            keys.push(key as u32);
+        }
+        let pk_array: ArrayRef = Arc::new(DictionaryArray::<UInt32Type>::new(
+            UInt32Array::from(keys),
+            Arc::new(BinaryArray::from_iter_values(dict_values.iter().copied())),
+        ));
+
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(UInt64Array::from(field_values.to_vec())),
+                Arc::new(TimestampMillisecondArray::from_iter_values(
+                    0..primary_keys.len() as i64,
+                )),
+                pk_array,
+                Arc::new(UInt64Array::from(vec![1; primary_keys.len()])),
+                Arc::new(UInt8Array::from(vec![1; primary_keys.len()])),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn field_values(batch: &RecordBatch) -> Vec<u64> {
+        batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap()
+            .values()
+            .to_vec()
+    }
+
+    #[test]
+    fn test_prefilter_primary_key_drops_single_dictionary_batch() {
+        let metadata = Arc::new(sst_region_metadata());
+        let filters = Arc::new(new_test_filters(&[col("tag_0").eq(lit("b"))]));
+        let mut primary_key_filter = build_primary_key_codec(metadata.as_ref())
+            .primary_key_filter(&metadata, filters, false);
+        let pk_a = new_primary_key(&["a", "x"]);
+        let batch = new_raw_batch(&[pk_a.as_slice(), pk_a.as_slice()], &[10, 11]);
+        let pk_col_idx = primary_key_column_index(batch.num_columns());
+
+        let filtered =
+            prefilter_flat_batch_by_primary_key(batch, pk_col_idx, primary_key_filter.as_mut())
+                .unwrap();
+
+        assert!(filtered.is_none());
+    }
+
+    #[test]
+    fn test_prefilter_primary_key_builds_mask_for_fragmented_matches() {
+        let metadata = Arc::new(sst_region_metadata());
+        let filters = Arc::new(new_test_filters(&[col("tag_0")
+            .eq(lit("a"))
+            .or(col("tag_0").eq(lit("c")))]));
+        let mut primary_key_filter = build_primary_key_codec(metadata.as_ref())
+            .primary_key_filter(&metadata, filters, false);
+        let pk_a = new_primary_key(&["a", "x"]);
+        let pk_b = new_primary_key(&["b", "x"]);
+        let pk_c = new_primary_key(&["c", "x"]);
+        let pk_d = new_primary_key(&["d", "x"]);
+        let batch = new_raw_batch(
+            &[
+                pk_a.as_slice(),
+                pk_a.as_slice(),
+                pk_b.as_slice(),
+                pk_b.as_slice(),
+                pk_c.as_slice(),
+                pk_c.as_slice(),
+                pk_d.as_slice(),
+                pk_d.as_slice(),
+            ],
+            &[10, 11, 12, 13, 14, 15, 16, 17],
+        );
+        let pk_col_idx = primary_key_column_index(batch.num_columns());
+
+        let filtered =
+            prefilter_flat_batch_by_primary_key(batch, pk_col_idx, primary_key_filter.as_mut())
+                .unwrap()
+                .unwrap();
+
+        assert_eq!(filtered.num_rows(), 4);
+        assert_eq!(field_values(&filtered), vec![10, 11, 14, 15]);
     }
 }
