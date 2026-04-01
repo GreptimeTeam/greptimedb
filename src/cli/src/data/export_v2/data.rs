@@ -38,7 +38,19 @@ pub(super) struct CopyTarget {
     secrets: Vec<Option<String>>,
 }
 
+pub(crate) struct CopySource {
+    pub(crate) location: String,
+    pub(crate) connection: String,
+    secrets: Vec<Option<String>>,
+}
+
 impl CopyTarget {
+    fn mask_sql(&self, sql: &str) -> String {
+        mask_secrets(sql, &self.secrets)
+    }
+}
+
+impl CopySource {
     fn mask_sql(&self, sql: &str) -> String {
         mask_secrets(sql, &self.secrets)
     }
@@ -50,6 +62,40 @@ pub(super) fn build_copy_target(
     schema: &str,
     chunk_id: u32,
 ) -> Result<CopyTarget> {
+    let location = build_copy_location(snapshot_uri, storage, schema, chunk_id)?;
+    Ok(CopyTarget {
+        location: location.location,
+        connection: location.connection,
+        secrets: location.secrets,
+    })
+}
+
+pub(crate) fn build_copy_source(
+    snapshot_uri: &str,
+    storage: &ObjectStoreConfig,
+    schema: &str,
+    chunk_id: u32,
+) -> Result<CopySource> {
+    let location = build_copy_location(snapshot_uri, storage, schema, chunk_id)?;
+    Ok(CopySource {
+        location: location.location,
+        connection: location.connection,
+        secrets: location.secrets,
+    })
+}
+
+struct CopyLocation {
+    location: String,
+    connection: String,
+    secrets: Vec<Option<String>>,
+}
+
+fn build_copy_location(
+    snapshot_uri: &str,
+    storage: &ObjectStoreConfig,
+    schema: &str,
+    chunk_id: u32,
+) -> Result<CopyLocation> {
     let url = Url::parse(snapshot_uri).context(UrlParseSnafu)?;
     let scheme = StorageScheme::from_uri(snapshot_uri)?;
     let suffix = data_dir_for_schema_chunk(schema, chunk_id);
@@ -64,7 +110,7 @@ pub(super) fn build_copy_target(
                 .build()
             })?;
             let location = normalize_path(&format!("{}/{}", root.to_string_lossy(), suffix));
-            Ok(CopyTarget {
+            Ok(CopyLocation {
                 location,
                 connection: String::new(),
                 secrets: Vec::new(),
@@ -74,7 +120,7 @@ pub(super) fn build_copy_target(
             let (bucket, root) = extract_bucket_root(&url, snapshot_uri)?;
             let location = format!("s3://{}/{}", bucket, join_root(&root, &suffix));
             let (connection, secrets) = build_s3_connection(storage);
-            Ok(CopyTarget {
+            Ok(CopyLocation {
                 location,
                 connection,
                 secrets,
@@ -84,7 +130,7 @@ pub(super) fn build_copy_target(
             let (bucket, root) = extract_bucket_root(&url, snapshot_uri)?;
             let location = format!("oss://{}/{}", bucket, join_root(&root, &suffix));
             let (connection, secrets) = build_oss_connection(storage);
-            Ok(CopyTarget {
+            Ok(CopyLocation {
                 location,
                 connection,
                 secrets,
@@ -94,7 +140,7 @@ pub(super) fn build_copy_target(
             let (bucket, root) = extract_bucket_root(&url, snapshot_uri)?;
             let location = format!("gcs://{}/{}", bucket, join_root(&root, &suffix));
             let (connection, secrets) = build_gcs_connection(storage, snapshot_uri)?;
-            Ok(CopyTarget {
+            Ok(CopyLocation {
                 location,
                 connection,
                 secrets,
@@ -104,7 +150,7 @@ pub(super) fn build_copy_target(
             let (bucket, root) = extract_bucket_root(&url, snapshot_uri)?;
             let location = format!("azblob://{}/{}", bucket, join_root(&root, &suffix));
             let (connection, secrets) = build_azblob_connection(storage);
-            Ok(CopyTarget {
+            Ok(CopyLocation {
                 location,
                 connection,
                 secrets,
@@ -130,6 +176,30 @@ pub(super) async fn execute_copy_database(
         target.connection
     );
     let safe_sql = target.mask_sql(&sql);
+    info!("Executing sql: {}", safe_sql);
+    database_client
+        .sql_in_public(&sql)
+        .await
+        .context(DatabaseSnafu)?;
+    Ok(())
+}
+
+pub(crate) async fn execute_copy_database_from(
+    database_client: &DatabaseClient,
+    catalog: &str,
+    schema: &str,
+    source: &CopySource,
+    format: DataFormat,
+) -> Result<()> {
+    let sql = format!(
+        r#"COPY DATABASE "{}"."{}" FROM '{}' WITH (FORMAT='{}'){};"#,
+        escape_sql_identifier(catalog),
+        escape_sql_identifier(schema),
+        escape_sql_literal(&source.location),
+        format,
+        source.connection
+    );
+    let safe_sql = source.mask_sql(&sql);
     info!("Executing sql: {}", safe_sql);
     database_client
         .sql_in_public(&sql)

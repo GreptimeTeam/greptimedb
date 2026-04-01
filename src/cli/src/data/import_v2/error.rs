@@ -19,6 +19,8 @@ use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
 
+use crate::data::export_v2::manifest::ChunkStatus;
+
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
@@ -45,12 +47,34 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Incomplete snapshot: chunk {} has status {:?}", chunk_id, status))]
+    IncompleteSnapshot {
+        chunk_id: u32,
+        status: ChunkStatus,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display(
-        "Importing data from full snapshots is not implemented yet (snapshot has {} chunk(s))",
-        chunk_count
+        "Snapshot is inconsistent: chunk {} for schema '{}' is marked completed but no files were found under '{}'",
+        chunk_id,
+        schema,
+        path
     ))]
-    FullSnapshotImportNotSupported {
-        chunk_count: usize,
+    MissingChunkData {
+        chunk_id: u32,
+        schema: String,
+        path: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Chunk {} import failed for schema '{}'", chunk_id, schema))]
+    ChunkImportFailed {
+        chunk_id: u32,
+        schema: String,
+        #[snafu(source)]
+        error: crate::data::export_v2::error::Error,
         #[snafu(implicit)]
         location: Location,
     },
@@ -80,9 +104,12 @@ impl ErrorExt for Error {
             Error::SnapshotNotFound { .. }
             | Error::SchemaNotInSnapshot { .. }
             | Error::ManifestVersionMismatch { .. }
-            | Error::FullSnapshotImportNotSupported { .. } => StatusCode::InvalidArguments,
+            | Error::IncompleteSnapshot { .. }
+            | Error::MissingChunkData { .. } => StatusCode::InvalidArguments,
             Error::Database { error, .. } => error.status_code(),
-            Error::SnapshotStorage { error, .. } => error.status_code(),
+            Error::SnapshotStorage { error, .. } | Error::ChunkImportFailed { error, .. } => {
+                error.status_code()
+            }
         }
     }
 
