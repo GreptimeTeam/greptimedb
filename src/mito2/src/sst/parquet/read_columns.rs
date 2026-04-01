@@ -145,50 +145,7 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn test_build_parquet_leaves_indices_reads_whole_root() {
-        let leaf_a = Arc::new(
-            Type::primitive_type_builder("a", parquet::basic::Type::INT64)
-                .with_repetition(Repetition::REQUIRED)
-                .build()
-                .unwrap(),
-        );
-        let leaf_b = Arc::new(
-            Type::primitive_type_builder("b", parquet::basic::Type::INT64)
-                .with_repetition(Repetition::REQUIRED)
-                .build()
-                .unwrap(),
-        );
-        let root_j = Arc::new(
-            Type::group_type_builder("j")
-                .with_repetition(Repetition::REQUIRED)
-                .with_fields(vec![leaf_a, leaf_b])
-                .build()
-                .unwrap(),
-        );
-        let schema = Arc::new(
-            Type::group_type_builder("schema")
-                .with_fields(vec![root_j])
-                .build()
-                .unwrap(),
-        );
-        let parquet_schema_desc = SchemaDescriptor::new(schema);
-
-        let projection = ParquetReadColumns {
-            cols: vec![ParquetReadColumn {
-                root_index: 0,
-                nested_paths: vec![],
-            }],
-        };
-
-        assert_eq!(
-            vec![0, 1],
-            build_parquet_leaves_indices(&parquet_schema_desc, &projection)
-        );
-    }
-
-    #[test]
-    fn test_build_parquet_leaves_indices_filters_nested_paths() {
+    fn build_test_nested_parquet_schema() -> SchemaDescriptor {
         let leaf_a = Arc::new(
             Type::primitive_type_builder("a", parquet::basic::Type::INT64)
                 .with_repetition(Repetition::REQUIRED)
@@ -233,7 +190,30 @@ mod tests {
                 .build()
                 .unwrap(),
         );
-        let parquet_schema_desc = SchemaDescriptor::new(schema);
+
+        SchemaDescriptor::new(schema)
+    }
+
+    #[test]
+    fn test_build_parquet_leaves_indices_reads_whole_root() {
+        let parquet_schema_desc = build_test_nested_parquet_schema();
+
+        let projection = ParquetReadColumns {
+            cols: vec![ParquetReadColumn {
+                root_index: 0,
+                nested_paths: vec![],
+            }],
+        };
+
+        assert_eq!(
+            vec![0, 1, 2],
+            build_parquet_leaves_indices(&parquet_schema_desc, &projection)
+        );
+    }
+
+    #[test]
+    fn test_build_parquet_leaves_indices_filters_nested_paths() {
+        let parquet_schema_desc = build_test_nested_parquet_schema();
 
         let projection = ParquetReadColumns {
             cols: vec![
