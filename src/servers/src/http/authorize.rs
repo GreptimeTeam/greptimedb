@@ -28,7 +28,9 @@ use common_telemetry::warn;
 use common_time::Timezone;
 use common_time::timezone::parse_timezone;
 use headers::Header;
-use session::context::QueryContextBuilder;
+use session::context::{
+    QueryContextBuilder, REMOTE_QUERY_ID_EXTENSION_KEY, generate_remote_query_id,
+};
 use snafu::{OptionExt, ResultExt, ensure};
 
 use crate::error::{
@@ -64,7 +66,11 @@ pub async fn inner_auth<B>(
     let query_ctx_builder = QueryContextBuilder::default()
         .current_catalog(catalog.clone())
         .current_schema(schema.clone())
-        .timezone(timezone);
+        .timezone(timezone)
+        .set_extension(
+            REMOTE_QUERY_ID_EXTENSION_KEY.to_string(),
+            generate_remote_query_id(),
+        );
 
     let query_ctx = query_ctx_builder.build();
     let need_auth = need_auth(&req);
@@ -386,6 +392,19 @@ mod tests {
         let unsupported = "digest";
         let auth_scheme: Result<AuthScheme> = unsupported.try_into();
         assert!(auth_scheme.is_err());
+    }
+
+    #[test]
+    fn test_inner_auth_assigns_remote_query_id() {
+        let req =
+            mock_http_request(None, Some("http://127.0.0.1/v1/sql?db=greptime-public")).unwrap();
+        let req = futures::executor::block_on(inner_auth::<()>(None, req)).unwrap();
+        let query_ctx = req
+            .extensions()
+            .get::<session::context::QueryContext>()
+            .unwrap();
+
+        assert!(query_ctx.remote_query_id().is_some());
     }
 
     #[test]

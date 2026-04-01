@@ -2632,10 +2632,13 @@ dependencies = [
  "datafusion",
  "datafusion-common",
  "datafusion-expr",
+ "datafusion-proto",
  "datatypes",
  "futures-util",
  "once_cell",
+ "prost 0.14.1",
  "serde",
+ "serde_json",
  "snafu 0.8.6",
  "sqlparser",
  "sqlparser_derive 0.1.1",
@@ -4127,6 +4130,43 @@ dependencies = [
  "parking_lot 0.12.4",
  "pin-project-lite",
  "tokio",
+]
+
+[[package]]
+name = "datafusion-proto"
+version = "52.1.0"
+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=02b82535e0160c4545667f36a03e1ff9d1d2e51f#02b82535e0160c4545667f36a03e1ff9d1d2e51f"
+dependencies = [
+ "arrow 57.3.0",
+ "chrono",
+ "datafusion-catalog",
+ "datafusion-catalog-listing",
+ "datafusion-common",
+ "datafusion-datasource",
+ "datafusion-datasource-arrow",
+ "datafusion-datasource-csv",
+ "datafusion-datasource-json",
+ "datafusion-datasource-parquet",
+ "datafusion-execution",
+ "datafusion-expr",
+ "datafusion-functions-table",
+ "datafusion-physical-expr",
+ "datafusion-physical-expr-common",
+ "datafusion-physical-plan",
+ "datafusion-proto-common",
+ "object_store",
+ "prost 0.14.1",
+ "rand 0.9.1",
+]
+
+[[package]]
+name = "datafusion-proto-common"
+version = "52.1.0"
+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=02b82535e0160c4545667f36a03e1ff9d1d2e51f#02b82535e0160c4545667f36a03e1ff9d1d2e51f"
+dependencies = [
+ "arrow 57.3.0",
+ "datafusion-common",
+ "prost 0.14.1",
 ]
 
 [[package]]
@@ -12137,6 +12177,7 @@ dependencies = [
  "derive_more",
  "snafu 0.8.6",
  "sql",
+ "uuid",
 ]
 
 [[package]]
