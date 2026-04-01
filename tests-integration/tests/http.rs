@@ -40,7 +40,9 @@ use loki_proto::logproto::{EntryAdapter, LabelPairAdapter, PushRequest, StreamAd
 use loki_proto::prost_types::Timestamp;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
-use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+use opentelemetry_proto::tonic::collector::trace::v1::{
+    ExportTraceServiceRequest, ExportTraceServiceResponse,
+};
 use pipeline::GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME;
 use prost::Message;
 use serde_json::{Value, json};
@@ -5572,25 +5574,82 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
         ],
     );
     let res = send_trace_v1_req(&client, abort_table_name, abort_req, false).await;
-    assert_eq!(StatusCode::BAD_REQUEST, res.status());
-    let body: Value = res.json().await;
+    assert_eq!(StatusCode::OK, res.status());
+    let body = ExportTraceServiceResponse::decode(res.bytes().await).unwrap();
+    let partial_success = body.partial_success.as_ref().unwrap();
+    assert_eq!(partial_success.rejected_spans, 1);
     assert!(
-        body["error"].as_str().unwrap().contains(
-            "failed to coerce trace column 'span_attributes.attr_int' in table 'trace_type_abort'"
+        partial_success
+            .error_message
+            .contains("Accepted 1 spans, rejected 1 spans"),
+        "unexpected partial success body: {body:?}"
+    );
+    assert!(
+        partial_success.error_message.contains(
+            "Rejected span 00000000000000000000000000000013:0000000000000013 (InvalidArguments)"
         ),
-        "unexpected error body: {body}"
+        "unexpected partial success body: {body:?}"
     );
 
     validate_data(
         "otlp_traces_v1_type_abort_rows",
         &client,
         &format!(
-            "select trace_id, \"span_attributes.attr_int\" from {} order by trace_id;",
+            "select trace_id, \"span_attributes.attr_int\" from {} order by trace_id",
             abort_table_name
         ),
-        r#"[["00000000000000000000000000000011",10]]"#,
+        r#"[["00000000000000000000000000000011",10],["00000000000000000000000000000012",20]]"#,
     )
     .await;
+
+    let chunk_failure_req = make_trace_v1_request(
+        "type-discard",
+        vec![
+            make_trace_v1_span(
+                "00000000000000000000000000000021",
+                "0000000000000021",
+                "discard-one",
+                1_736_480_942_445_400_000,
+                1_736_480_942_445_500_000,
+                vec![make_string_attr("attr_text", "alpha")],
+            ),
+            make_trace_v1_span(
+                "00000000000000000000000000000022",
+                "0000000000000022",
+                "discard-two",
+                1_736_480_942_445_600_000,
+                1_736_480_942_445_700_000,
+                vec![make_string_attr("attr_text", "beta")],
+            ),
+        ],
+    );
+    let res = send_trace_v1_req_with_db(
+        &client,
+        "nonexistent",
+        "trace_chunk_discard",
+        chunk_failure_req,
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+    let body = ExportTraceServiceResponse::decode(res.bytes().await).unwrap();
+    let partial_success = body.partial_success.as_ref().unwrap();
+    assert_eq!(partial_success.rejected_spans, 2);
+    assert!(
+        partial_success
+            .error_message
+            .contains("Accepted 0 spans, rejected 2 spans"),
+        "unexpected partial success body: {body:?}"
+    );
+    assert!(
+        partial_success
+            .error_message
+            .contains("Chunk fallback triggered by")
+            || partial_success
+                .error_message
+                .contains("Discarded 2 spans after ambiguous chunk failure"),
+        "unexpected partial success body: {body:?}"
+    );
 
     guard.remove_all().await;
 }
@@ -7830,6 +7889,16 @@ async fn send_trace_v1_req(
     req: ExportTraceServiceRequest,
     with_gzip: bool,
 ) -> TestResponse {
+    send_trace_v1_req_with_db(client, "public", table_name, req, with_gzip).await
+}
+
+async fn send_trace_v1_req_with_db(
+    client: &TestClient,
+    db_name: &str,
+    table_name: &str,
+    req: ExportTraceServiceRequest,
+    with_gzip: bool,
+) -> TestResponse {
     send_req(
         client,
         vec![
@@ -7844,6 +7913,10 @@ async fn send_trace_v1_req(
             (
                 HeaderName::from_static("x-greptime-trace-table-name"),
                 HeaderValue::from_str(table_name).unwrap(),
+            ),
+            (
+                GREPTIME_DB_HEADER_NAME.clone(),
+                HeaderValue::from_str(db_name).unwrap(),
             ),
         ],
         "/v1/otlp/v1/traces",
