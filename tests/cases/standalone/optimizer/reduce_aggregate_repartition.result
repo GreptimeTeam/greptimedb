@@ -44,6 +44,7 @@ ORDER BY a, b;
 
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
 EXPLAIN VERBOSE
 SELECT a, b, sum(m)
 FROM (
@@ -150,23 +151,23 @@ GROUP BY b, a;
 | initial_physical_plan_| ProjectionExec: expr=[a@1 as a, b@0 as b, sum(s.m)@2 as sum(s.m)]_|
 |_|_AggregateExec: mode=FinalPartitioned, gby=[b@0 as b, a@1 as a], aggr=[sum(s.m)]_|
 |_|_AggregateExec: mode=Partial, gby=[b@0 as b, a@1 as a], aggr=[sum(s.m)]_|
-|_|_MergeScanExec: peers=[4398046511104(1024, 0), 4398046511105(1024, 1), ]_|
+|_|_MergeScanExec: REDACTED
 |_|_|
 | initial_physical_plan_with_stats_| ProjectionExec: expr=[a@1 as a, b@0 as b, sum(s.m)@2 as sum(s.m)], statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
 |_|_AggregateExec: mode=FinalPartitioned, gby=[b@0 as b, a@1 as a], aggr=[sum(s.m)], statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
 |_|_AggregateExec: mode=Partial, gby=[b@0 as b, a@1 as a], aggr=[sum(s.m)], statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
-|_|_MergeScanExec: peers=[4398046511104(1024, 0), 4398046511105(1024, 1), ], statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
+|_|_MergeScanExec: REDACTED
 |_|_|
 | initial_physical_plan_with_schema_| ProjectionExec: expr=[a@1 as a, b@0 as b, sum(s.m)@2 as sum(s.m)], schema=[a:Utf8;N, b:Utf8;N, sum(s.m):Int64;N]_|
 |_|_AggregateExec: mode=FinalPartitioned, gby=[b@0 as b, a@1 as a], aggr=[sum(s.m)], schema=[b:Utf8;N, a:Utf8;N, sum(s.m):Int64;N]_|
 |_|_AggregateExec: mode=Partial, gby=[b@0 as b, a@1 as a], aggr=[sum(s.m)], schema=[b:Utf8;N, a:Utf8;N, sum(s.m)[sum]:Int64;N]_|
-|_|_MergeScanExec: peers=[4398046511104(1024, 0), 4398046511105(1024, 1), ], schema=[b:Utf8;N, a:Utf8;N, __sum_state(s.m):Struct("sum[sum]": Int64);N]_|
+|_|_MergeScanExec: REDACTED
 |_|_|
 | physical_plan after OutputRequirements_| OutputRequirementExec: order_by=[], dist_by=Unspecified_|
 |_|_ProjectionExec: expr=[a@1 as a, b@0 as b, sum(s.m)@2 as sum(s.m)]_|
 |_|_AggregateExec: mode=FinalPartitioned, gby=[b@0 as b, a@1 as a], aggr=[sum(s.m)]_|
 |_|_AggregateExec: mode=Partial, gby=[b@0 as b, a@1 as a], aggr=[sum(s.m)]_|
-|_|_MergeScanExec: peers=[4398046511104(1024, 0), 4398046511105(1024, 1), ]_|
+|_|_MergeScanExec: REDACTED
 |_|_|
 | physical_plan after aggregate_statistics_| SAME TEXT AS ABOVE_|
 | physical_plan after join_selection_| SAME TEXT AS ABOVE_|
@@ -180,7 +181,7 @@ GROUP BY b, a;
 |_|_AggregateExec: mode=FinalPartitioned, gby=[b@0 as b, a@1 as a], aggr=[sum(s.m)]_|
 |_|_RepartitionExec: partitioning=Hash([b@0, a@1], 32), input_partitions=32_|
 |_|_AggregateExec: mode=Partial, gby=[b@0 as b, a@1 as a], aggr=[sum(s.m)]_|
-|_|_MergeScanExec: peers=[4398046511104(1024, 0), 4398046511105(1024, 1), ]_|
+|_|_MergeScanExec: REDACTED
 |_|_|
 | physical_plan after CombinePartialFinalAggregate_| SAME TEXT AS ABOVE_|
 | physical_plan after ReduceAggregateRepartition_| SAME TEXT AS ABOVE_|
@@ -192,7 +193,7 @@ GROUP BY b, a;
 |_|_AggregateExec: mode=FinalPartitioned, gby=[b@0 as b, a@1 as a], aggr=[sum(s.m)]_|
 |_|_RepartitionExec: partitioning=Hash([b@0, a@1], 32), input_partitions=32_|
 |_|_AggregateExec: mode=Partial, gby=[b@0 as b, a@1 as a], aggr=[sum(s.m)]_|
-|_|_MergeScanExec: peers=[4398046511104(1024, 0), 4398046511105(1024, 1), ]_|
+|_|_MergeScanExec: REDACTED
 |_|_|
 | physical_plan after LimitAggregation_| SAME TEXT AS ABOVE_|
 | physical_plan after LimitPushPastWindows_| SAME TEXT AS ABOVE_|
@@ -209,19 +210,19 @@ GROUP BY b, a;
 |_|_AggregateExec: mode=FinalPartitioned, gby=[b@0 as b, a@1 as a], aggr=[sum(s.m)]_|
 |_|_RepartitionExec: partitioning=Hash([b@0, a@1], 32), input_partitions=32_|
 |_|_AggregateExec: mode=Partial, gby=[b@0 as b, a@1 as a], aggr=[sum(s.m)]_|
-|_|_MergeScanExec: peers=[4398046511104(1024, 0), 4398046511105(1024, 1), ]_|
+|_|_MergeScanExec: REDACTED
 |_|_|
 | physical_plan_with_stats_| ProjectionExec: expr=[a@1 as a, b@0 as b, sum(s.m)@2 as sum(s.m)], statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
 |_|_AggregateExec: mode=FinalPartitioned, gby=[b@0 as b, a@1 as a], aggr=[sum(s.m)], statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
 |_|_RepartitionExec: partitioning=Hash([b@0, a@1], 32), input_partitions=32, statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
 |_|_AggregateExec: mode=Partial, gby=[b@0 as b, a@1 as a], aggr=[sum(s.m)], statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
-|_|_MergeScanExec: peers=[4398046511104(1024, 0), 4398046511105(1024, 1), ], statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
+|_|_MergeScanExec: REDACTED
 |_|_|
 | physical_plan_with_schema_| ProjectionExec: expr=[a@1 as a, b@0 as b, sum(s.m)@2 as sum(s.m)], schema=[a:Utf8;N, b:Utf8;N, sum(s.m):Int64;N]_|
 |_|_AggregateExec: mode=FinalPartitioned, gby=[b@0 as b, a@1 as a], aggr=[sum(s.m)], schema=[b:Utf8;N, a:Utf8;N, sum(s.m):Int64;N]_|
 |_|_RepartitionExec: partitioning=Hash([b@0, a@1], 32), input_partitions=32, schema=[b:Utf8;N, a:Utf8;N, sum(s.m)[sum]:Int64;N]_|
 |_|_AggregateExec: mode=Partial, gby=[b@0 as b, a@1 as a], aggr=[sum(s.m)], schema=[b:Utf8;N, a:Utf8;N, sum(s.m)[sum]:Int64;N]_|
-|_|_MergeScanExec: peers=[4398046511104(1024, 0), 4398046511105(1024, 1), ], schema=[b:Utf8;N, a:Utf8;N, __sum_state(s.m):Struct("sum[sum]": Int64);N]_|
+|_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
 

@@ -31,6 +31,7 @@ ORDER BY a, b;
 
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
 EXPLAIN VERBOSE
 SELECT a, b, sum(m)
 FROM (
