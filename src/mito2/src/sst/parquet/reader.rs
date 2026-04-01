@@ -75,13 +75,11 @@ use crate::sst::parquet::file_range::{
     row_group_contains_delete,
 };
 use crate::sst::parquet::format::{ReadFormat, need_override_sequence};
-use crate::sst::parquet::read_columns::{
-    ParquetReadColumns, build_parquet_leaves_indices,
-};
 use crate::sst::parquet::metadata::MetadataLoader;
 use crate::sst::parquet::prefilter::{
     PrefilterContextBuilder, execute_prefilter, is_usable_primary_key_filter,
 };
+use crate::sst::parquet::read_columns::{ParquetReadColumns, build_parquet_leaves_indices};
 use crate::sst::parquet::row_group::ParquetFetchMetrics;
 use crate::sst::parquet::row_selection::RowGroupSelection;
 use crate::sst::parquet::stats::RowGroupPruningStats;
