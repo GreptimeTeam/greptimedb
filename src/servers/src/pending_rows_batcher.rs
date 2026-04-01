@@ -1672,9 +1672,10 @@ mod tests {
 
     use super::{
         BatchKey, Error, FlushRegionWrite, FlushWriteResult, PendingRowsBatcher, PendingWorker,
-        WorkerCommand, columns_taxonomy, flush_region_writes_concurrently,
+        TableBatch, WorkerCommand, columns_taxonomy, flush_region_writes_concurrently,
         remove_worker_if_same_channel, should_close_worker_on_idle_timeout,
         should_dispatch_concurrently, strip_partition_columns_from_batch,
+        transform_logical_batches_to_physical,
     };
 
     fn mock_rows(row_count: usize, schema_name: &str) -> Rows {
@@ -1685,6 +1686,28 @@ mod tests {
             }],
             rows: (0..row_count).map(|_| Row { values: vec![] }).collect(),
         }
+    }
+
+    fn mock_tag_batch(tag_name: &str, tag_value: &str, ts: i64, val: f64) -> RecordBatch {
+        let schema = Arc::new(ArrowSchema::new(vec![
+            Field::new(
+                "greptime_timestamp",
+                ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("greptime_value", ArrowDataType::Float64, true),
+            Field::new(tag_name, ArrowDataType::Utf8, true),
+        ]));
+
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![ts])),
+                Arc::new(arrow::array::Float64Array::from(vec![val])),
+                Arc::new(StringArray::from(vec![tag_value])),
+            ],
+        )
+        .unwrap()
     }
 
     #[test]
@@ -2173,5 +2196,144 @@ mod tests {
             pk3.value(0),
             "PK should be different because batch2 has tag2!"
         );
+    }
+
+    #[test]
+    fn test_transform_logical_batches_to_physical_success() {
+        let batch = mock_tag_batch("tag1", "v1", 1000, 1.0);
+
+        let table_batches = vec![TableBatch {
+            table_name: "t1".to_string(),
+            table_id: 1,
+            batches: vec![batch],
+            row_count: 1,
+        }];
+
+        let name_to_ids = HashMap::from([("tag1".to_string(), 1)]);
+        let partition_columns = HashSet::new();
+        let mut first_error = None;
+
+        let (modified, total_rows) = transform_logical_batches_to_physical(
+            &table_batches,
+            &name_to_ids,
+            &partition_columns,
+            &mut first_error,
+        );
+
+        assert_eq!(1, modified.len());
+        assert_eq!(1, total_rows);
+        assert!(first_error.is_none());
+        assert_eq!(3, modified[0].num_columns());
+        assert_eq!("__primary_key", modified[0].schema().field(0).name());
+        assert_eq!("greptime_timestamp", modified[0].schema().field(1).name());
+        assert_eq!("greptime_value", modified[0].schema().field(2).name());
+    }
+
+    #[test]
+    fn test_transform_logical_batches_to_physical_taxonomy_failure() {
+        let batch = mock_tag_batch("tag1", "v1", 1000, 1.0);
+
+        let table_batches = vec![TableBatch {
+            table_name: "t1".to_string(),
+            table_id: 1,
+            batches: vec![batch],
+            row_count: 1,
+        }];
+
+        // tag1 is missing from name_to_ids, causing columns_taxonomy to fail.
+        let name_to_ids = HashMap::new();
+        let partition_columns = HashSet::new();
+        let mut first_error = None;
+
+        let (modified, total_rows) = transform_logical_batches_to_physical(
+            &table_batches,
+            &name_to_ids,
+            &partition_columns,
+            &mut first_error,
+        );
+
+        assert_eq!(0, modified.len());
+        assert_eq!(0, total_rows);
+        assert!(first_error.is_some());
+        assert!(
+            first_error
+                .unwrap()
+                .contains("not found in physical table column IDs")
+        );
+    }
+
+    #[test]
+    fn test_transform_logical_batches_to_physical_multiple_batches() {
+        let batch1 = mock_tag_batch("tag1", "v1", 1000, 1.0);
+        let batch2 = mock_tag_batch("tag2", "v2", 2000, 2.0);
+
+        let table_batches = vec![
+            TableBatch {
+                table_name: "t1".to_string(),
+                table_id: 1,
+                batches: vec![batch1],
+                row_count: 1,
+            },
+            TableBatch {
+                table_name: "t2".to_string(),
+                table_id: 2,
+                batches: vec![batch2],
+                row_count: 1,
+            },
+        ];
+
+        let name_to_ids = HashMap::from([("tag1".to_string(), 1), ("tag2".to_string(), 2)]);
+        let partition_columns = HashSet::new();
+        let mut first_error = None;
+
+        let (modified, total_rows) = transform_logical_batches_to_physical(
+            &table_batches,
+            &name_to_ids,
+            &partition_columns,
+            &mut first_error,
+        );
+
+        assert_eq!(2, modified.len());
+        assert_eq!(2, total_rows);
+        assert!(first_error.is_none());
+    }
+
+    #[test]
+    fn test_transform_logical_batches_to_physical_mixed_success_failure() {
+        let batch1 = mock_tag_batch("tag1", "v1", 1000, 1.0);
+        let batch2 = mock_tag_batch("tag2", "v2", 2000, 2.0);
+
+        let table_batches = vec![
+            TableBatch {
+                table_name: "t1".to_string(),
+                table_id: 1,
+                batches: vec![batch1],
+                row_count: 1,
+            },
+            TableBatch {
+                table_name: "t2".to_string(),
+                table_id: 2,
+                batches: vec![batch2],
+                row_count: 1,
+            },
+        ];
+
+        // tag1 is missing from name_to_ids, causing batch1 to fail.
+        let name_to_ids = HashMap::from([("tag2".to_string(), 2)]);
+        let partition_columns = HashSet::new();
+        let mut first_error = None;
+
+        let (modified, total_rows) = transform_logical_batches_to_physical(
+            &table_batches,
+            &name_to_ids,
+            &partition_columns,
+            &mut first_error,
+        );
+
+        // Only batch2 should succeed.
+        assert_eq!(1, modified.len());
+        assert_eq!(1, total_rows);
+        assert!(first_error.is_some());
+        assert!(first_error.unwrap().contains("tag1"));
     }
 }
