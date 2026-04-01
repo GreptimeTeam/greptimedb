@@ -232,7 +232,7 @@ struct PendingBatch {
 }
 
 struct FlushWaiter {
-    response_tx: oneshot::Sender<Result<()>>,
+    response_tx: oneshot::Sender<std::result::Result<(), Arc<Error>>>,
     _permit: OwnedSemaphorePermit,
 }
 
@@ -253,7 +253,7 @@ enum WorkerCommand {
         table_batches: Vec<(String, u32, RecordBatch)>,
         total_rows: usize,
         ctx: QueryContextRef,
-        response_tx: oneshot::Sender<Result<()>>,
+        response_tx: oneshot::Sender<std::result::Result<(), Arc<Error>>>,
         _permit: OwnedSemaphorePermit,
     },
 }
@@ -412,7 +412,9 @@ impl PendingRowsBatcher {
                     .await
                     .map_err(|_| error::BatcherChannelClosedSnafu.build())?
             };
-            result.map(|()| total_rows as u64)
+            result
+                .context(error::SubmitBatchSnafu)
+                .map(|()| total_rows as u64)
         } else {
             Ok(total_rows as u64)
         }
@@ -1534,14 +1536,12 @@ fn encode_region_write_requests(
 }
 
 fn notify_waiters(waiters: Vec<FlushWaiter>, result: Result<()>) {
+    let shared_result = result.map_err(Arc::new);
     for waiter in waiters {
-        let result = match &result {
-            Err(e) => Err(Error::Internal {
-                err_msg: e.to_string(),
-            }),
+        let _ = waiter.response_tx.send(match &shared_result {
             Ok(()) => Ok(()),
-        };
-        let _ = waiter.response_tx.send(result);
+            Err(error) => Err(Arc::clone(error)),
+        });
         // waiter._permit is dropped here, releasing the inflight semaphore slot
     }
 }
