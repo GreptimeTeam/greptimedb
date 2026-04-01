@@ -26,7 +26,7 @@ use snafu::ResultExt;
 use crate::Tool;
 use crate::common::ObjectStoreConfig;
 use crate::data::export_v2::data::{build_copy_source, execute_copy_database_from};
-use crate::data::export_v2::manifest::{ChunkMeta, ChunkStatus, MANIFEST_VERSION};
+use crate::data::export_v2::manifest::{ChunkMeta, ChunkStatus, DataFormat, MANIFEST_VERSION};
 use crate::data::import_v2::error::{
     ChunkImportFailedSnafu, IncompleteSnapshotSnafu, ManifestVersionMismatchSnafu,
     MissingChunkDataSnafu, Result, SchemaNotInSnapshotSnafu, SnapshotStorageSnafu,
@@ -184,6 +184,15 @@ impl Import {
 
         info!("Generated {} DDL statements", ddl_statements.len());
 
+        let data_prefixes = if !manifest.schema_only && !manifest.chunks.is_empty() {
+            Some(
+                validate_data_snapshot(self.storage.as_ref(), &manifest.chunks, &schemas_to_import)
+                    .await?,
+            )
+        } else {
+            None
+        };
+
         // 4. Dry-run mode: print DDL and exit
         if self.dry_run {
             info!("Dry-run mode - DDL statements to execute:");
@@ -207,8 +216,13 @@ impl Import {
         executor.execute_strict(&ddl_statements).await?;
 
         if !manifest.schema_only && !manifest.chunks.is_empty() {
-            self.import_data(&manifest.chunks, &schemas_to_import, manifest.format)
-                .await?;
+            self.import_data(
+                &manifest.chunks,
+                &schemas_to_import,
+                manifest.format,
+                data_prefixes.expect("validated full snapshot must provide data prefixes"),
+            )
+            .await?;
         }
 
         info!(
@@ -242,10 +256,9 @@ impl Import {
         &self,
         chunks: &[ChunkMeta],
         schemas: &[String],
-        format: crate::data::export_v2::manifest::DataFormat,
+        format: DataFormat,
+        actual_prefixes: HashSet<String>,
     ) -> Result<()> {
-        validate_chunk_statuses(chunks)?;
-
         let total_chunks = chunks
             .iter()
             .filter(|chunk| chunk.status == ChunkStatus::Completed)
@@ -277,7 +290,7 @@ impl Import {
             );
 
             for schema in schemas {
-                if !ensure_chunk_schema_files_exist(self.storage.as_ref(), chunk, schema).await? {
+                if !validate_chunk_schema_files(chunk, schema, &actual_prefixes)? {
                     info!("  {}: no data, skipped", schema);
                     continue;
                 }
@@ -515,22 +528,65 @@ fn format_data_import_plan(chunks: &[ChunkMeta], schemas: &[String]) -> Vec<Stri
     lines
 }
 
-async fn ensure_chunk_schema_files_exist(
+async fn validate_data_snapshot(
     storage: &dyn SnapshotStorage,
+    chunks: &[ChunkMeta],
+    schemas: &[String],
+) -> Result<HashSet<String>> {
+    validate_chunk_statuses(chunks)?;
+    let actual_prefixes = collect_chunk_data_prefixes(storage).await?;
+
+    for chunk in chunks {
+        if chunk.status == ChunkStatus::Skipped {
+            continue;
+        }
+        for schema in schemas {
+            validate_chunk_schema_files(chunk, schema, &actual_prefixes)?;
+        }
+    }
+
+    Ok(actual_prefixes)
+}
+
+async fn collect_chunk_data_prefixes(storage: &dyn SnapshotStorage) -> Result<HashSet<String>> {
+    let files = storage
+        .list_files_recursive("data/")
+        .await
+        .context(SnapshotStorageSnafu)?;
+    let mut prefixes = HashSet::new();
+
+    for path in files {
+        let normalized = path.trim_start_matches('/');
+        let mut parts = normalized.splitn(4, '/');
+        let Some(root) = parts.next() else {
+            continue;
+        };
+        let Some(schema) = parts.next() else {
+            continue;
+        };
+        let Some(chunk_id) = parts.next() else {
+            continue;
+        };
+        if root != "data" {
+            continue;
+        }
+        prefixes.insert(format!("data/{schema}/{chunk_id}/"));
+    }
+
+    Ok(prefixes)
+}
+
+fn validate_chunk_schema_files(
     chunk: &ChunkMeta,
     schema: &str,
+    actual_prefixes: &HashSet<String>,
 ) -> Result<bool> {
     if !chunk_has_schema_files(chunk, schema) {
         return Ok(false);
     }
 
     let prefix = data_dir_for_schema_chunk(schema, chunk.id);
-    let files = storage
-        .list_files_recursive(&prefix)
-        .await
-        .context(SnapshotStorageSnafu)?;
-
-    if files.is_empty() {
+    if !actual_prefixes.contains(&prefix) {
         return MissingChunkDataSnafu {
             chunk_id: chunk.id,
             schema: schema.to_string(),
@@ -544,7 +600,7 @@ async fn ensure_chunk_schema_files_exist(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     use async_trait::async_trait;
 
@@ -604,9 +660,10 @@ mod tests {
         ) -> crate::data::export_v2::error::Result<Vec<String>> {
             Ok(self
                 .files_by_prefix
-                .get(prefix)
-                .cloned()
-                .unwrap_or_default())
+                .iter()
+                .filter(|(candidate, _)| candidate.starts_with(prefix))
+                .flat_map(|(_, files)| files.clone())
+                .collect())
         }
 
         async fn delete_snapshot(&self) -> crate::data::export_v2::error::Result<()> {
@@ -808,56 +865,87 @@ CREATE VIEW v AS SELECT 1;
     }
 
     #[tokio::test]
-    async fn test_ensure_chunk_schema_files_exist_accepts_present_prefix() {
-        let mut chunk = ChunkMeta::new(7, TimeRange::unbounded());
-        chunk.files = vec!["data/public/7/a.parquet".to_string()];
-
+    async fn test_collect_chunk_data_prefixes_indexes_present_prefixes() {
         let storage = StubStorage {
             manifest: Manifest::new_schema_only("greptime".to_string(), vec!["public".to_string()]),
-            files_by_prefix: HashMap::from([(
-                "data/public/7/".to_string(),
-                vec!["data/public/7/a.parquet".to_string()],
-            )]),
+            files_by_prefix: HashMap::from([
+                (
+                    "data/public/7/".to_string(),
+                    vec!["data/public/7/a.parquet".to_string()],
+                ),
+                (
+                    "data/%E6%B5%8B%E8%AF%95/9/".to_string(),
+                    vec!["data/%E6%B5%8B%E8%AF%95/9/b.parquet".to_string()],
+                ),
+            ]),
         };
 
-        assert!(
-            ensure_chunk_schema_files_exist(&storage, &chunk, "public")
-                .await
-                .unwrap()
-        );
+        let prefixes = collect_chunk_data_prefixes(&storage).await.unwrap();
+
+        assert!(prefixes.contains("data/public/7/"));
+        assert!(prefixes.contains("data/%E6%B5%8B%E8%AF%95/9/"));
     }
 
-    #[tokio::test]
-    async fn test_ensure_chunk_schema_files_exist_rejects_missing_prefix() {
+    #[test]
+    fn test_validate_chunk_schema_files_accepts_present_prefix() {
+        let mut chunk = ChunkMeta::new(7, TimeRange::unbounded());
+        chunk.files = vec!["data/public/7/a.parquet".to_string()];
+        let actual_prefixes = HashSet::from(["data/public/7/".to_string()]);
+
+        assert!(validate_chunk_schema_files(&chunk, "public", &actual_prefixes).unwrap());
+    }
+
+    #[test]
+    fn test_validate_chunk_schema_files_rejects_missing_prefix() {
         let mut chunk = ChunkMeta::new(7, TimeRange::unbounded());
         chunk.files = vec!["data/public/7/a.parquet".to_string()];
 
-        let storage = StubStorage {
-            manifest: Manifest::new_schema_only("greptime".to_string(), vec!["public".to_string()]),
-            files_by_prefix: HashMap::new(),
-        };
-
-        let error = ensure_chunk_schema_files_exist(&storage, &chunk, "public")
-            .await
+        let error = validate_chunk_schema_files(&chunk, "public", &HashSet::new())
             .expect_err("missing chunk prefix should fail")
             .to_string();
         assert!(error.contains("marked completed but no files were found"));
     }
 
-    #[tokio::test]
-    async fn test_ensure_chunk_schema_files_exist_skips_absent_schema() {
+    #[test]
+    fn test_validate_chunk_schema_files_skips_absent_schema() {
         let mut chunk = ChunkMeta::new(7, TimeRange::unbounded());
         chunk.files = vec!["data/public/7/a.parquet".to_string()];
+
+        assert!(!validate_chunk_schema_files(&chunk, "metrics", &HashSet::new()).unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_validate_data_snapshot_rejects_failed_chunk_before_dry_run() {
+        let mut failed = ChunkMeta::new(3, TimeRange::unbounded());
+        failed.status = ChunkStatus::Failed;
 
         let storage = StubStorage {
             manifest: Manifest::new_schema_only("greptime".to_string(), vec!["public".to_string()]),
             files_by_prefix: HashMap::new(),
         };
 
-        assert!(
-            !ensure_chunk_schema_files_exist(&storage, &chunk, "metrics")
-                .await
-                .unwrap()
-        );
+        let error = validate_data_snapshot(&storage, &[failed], &["public".to_string()])
+            .await
+            .expect_err("failed chunk should reject dry-run validation")
+            .to_string();
+        assert!(error.contains("Incomplete snapshot"));
+    }
+
+    #[tokio::test]
+    async fn test_validate_data_snapshot_rejects_missing_chunk_prefix_before_dry_run() {
+        let mut completed = ChunkMeta::new(7, TimeRange::unbounded());
+        completed.status = ChunkStatus::Completed;
+        completed.files = vec!["data/public/7/a.parquet".to_string()];
+
+        let storage = StubStorage {
+            manifest: Manifest::new_schema_only("greptime".to_string(), vec!["public".to_string()]),
+            files_by_prefix: HashMap::new(),
+        };
+
+        let error = validate_data_snapshot(&storage, &[completed], &["public".to_string()])
+            .await
+            .expect_err("missing chunk prefix should reject dry-run validation")
+            .to_string();
+        assert!(error.contains("marked completed but no files were found"));
     }
 }
