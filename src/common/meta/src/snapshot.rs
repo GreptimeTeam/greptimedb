@@ -355,7 +355,7 @@ impl MetadataSnapshotManager {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
     use std::sync::Arc;
 
     use common_test_util::temp_dir::{TempDir, create_temp_dir};

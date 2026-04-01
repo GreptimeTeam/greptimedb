@@ -84,7 +84,7 @@ impl State for UpdateTableInfos {
             .persistent_ctx
             .update_table_infos
             .iter()
-            .zip(table_info_values.into_iter())
+            .zip(table_info_values)
         {
             let new_table_info = Self::build_new_table_info(
                 *table_id,

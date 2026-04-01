@@ -12,9 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::assert_matches::assert_matches;
-use std::fs;
 use std::sync::Arc;
+use std::{assert_matches, fs};
 
 use api::v1::Rows;
 use common_error::ext::ErrorExt;

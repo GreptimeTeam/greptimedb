@@ -575,7 +575,7 @@ struct MetricEngineInner {
 
 #[cfg(test)]
 mod test {
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
     use std::collections::HashMap;
 
     use common_telemetry::info;

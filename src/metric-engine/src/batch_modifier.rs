@@ -28,7 +28,7 @@ use crate::error::{EncodePrimaryKeySnafu, Result, UnexpectedRequestSnafu};
 
 /// Info about a tag column for TSID computation and sparse primary key encoding.
 #[allow(dead_code)]
-pub(crate) struct TagColumnInfo {
+pub struct TagColumnInfo {
     /// Column name (used for label-name hash).
     pub name: String,
     /// Column index in the RecordBatch.
@@ -37,9 +37,16 @@ pub(crate) struct TagColumnInfo {
     pub column_id: ColumnId,
 }
 
-/// Computes `__tsid` values for each row.
-#[allow(dead_code)]
-pub(crate) fn compute_tsid_array(
+/// Computes the TSID for each row in a [RecordBatch].
+///
+/// The TSID is a stable hash of the set of labels (tags) present in each row.
+/// It accounts for both the names and values of all non-null tag columns.
+///
+/// # Logic
+/// - If a row has no nulls across all `sorted_tag_columns`, it uses a precomputed hash of all label names.
+/// - If a row has nulls, it dynamically computes a hash of the names of labels that are present (non-null).
+/// - In both cases, it then hashes the values of those present labels in the order specified by `sorted_tag_columns`.
+pub fn compute_tsid_array(
     batch: &RecordBatch,
     sorted_tag_columns: &[TagColumnInfo],
     tag_arrays: &[&StringArray],
@@ -110,12 +117,30 @@ fn build_tag_arrays<'a>(
         .collect()
 }
 
-/// Modifies a RecordBatch for sparse primary key encoding.
-pub(crate) fn modify_batch_sparse(
+/// Modifies a [RecordBatch] to include a sparse primary key column.
+///
+/// This function transforms the input `batch` into a new `RecordBatch` where the first column
+/// is the generated primary key (named [PRIMARY_KEY_COLUMN_NAME]), followed by columns
+/// indicated by `extra_column_indices`.
+///
+/// The primary key uses a "sparse" encoding, which compactly represents the row's identity
+/// by only including non-null tag values. The encoding, handled by [SparsePrimaryKeyCodec],
+/// consists of:
+/// 1. The `table_id`.
+/// 2. A `tsid` (Time Series ID), which is a hash of the present tags.
+/// 3. The actual non-null tag values paired with their `column_id`.
+///
+/// # Parameters
+/// - `batch`: The source [RecordBatch].
+/// - `table_id`: The ID of the table.
+/// - `sorted_tag_columns`: Metadata for tag columns, used for both TSID computation and PK encoding.
+/// - `extra_column_indices`: Indices of columns from the original batch to keep in the output
+///   (typically the timestamp and value fields).
+pub fn modify_batch_sparse(
     batch: RecordBatch,
     table_id: u32,
     sorted_tag_columns: &[TagColumnInfo],
-    non_tag_column_indices: &[usize],
+    extra_column_indices: &[usize],
 ) -> Result<RecordBatch> {
     let num_rows = batch.num_rows();
     let codec = SparsePrimaryKeyCodec::schemaless();
@@ -151,7 +176,7 @@ pub(crate) fn modify_batch_sparse(
     ))];
     let mut columns: Vec<Arc<dyn Array>> = vec![Arc::new(pk_array)];
 
-    for &idx in non_tag_column_indices {
+    for &idx in extra_column_indices {
         fields.push(batch.schema().fields()[idx].clone());
         columns.push(batch.column(idx).clone());
     }

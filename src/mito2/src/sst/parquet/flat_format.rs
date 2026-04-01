@@ -282,6 +282,13 @@ impl FlatReadFormat {
         }
     }
 
+    /// Returns `true` if raw batches from parquet use the flat layout and
+    /// stores primary key columns as raw columns.
+    /// Returns `false` for the legacy primary-key-to-flat conversion path.
+    pub(crate) fn batch_has_raw_pk_columns(&self) -> bool {
+        matches!(&self.parquet_adapter, ParquetAdapter::Flat(_))
+    }
+
     /// Creates a sequence array to override.
     pub(crate) fn new_override_sequence_array(&self, length: usize) -> Option<ArrayRef> {
         self.override_sequence

@@ -30,7 +30,7 @@
 //!   --to file:///tmp/snapshot \
 //!   --schema-only
 //!
-//! # Export with time range (M2)
+//! # Export with time range
 //! greptime cli data export-v2 create \
 //!   --addr 127.0.0.1:4000 \
 //!   --to s3://bucket/snapshots/prod-20250101 \
@@ -38,7 +38,10 @@
 //!   --end-time 2025-01-31T23:59:59Z
 //! ```
 
+mod chunker;
 mod command;
+mod coordinator;
+mod data;
 pub mod error;
 pub mod extractor;
 pub mod manifest;

@@ -24,7 +24,6 @@ use common_meta::distributed_time_constants::init_distributed_time_constants;
 use common_telemetry::info;
 use common_telemetry::logging::{DEFAULT_LOGGING_DIR, TracingOptions};
 use common_version::{short_version, verbose_version};
-use const_format::concatcp;
 use meta_srv::bootstrap::{MetasrvInstance, metasrv_builder};
 use meta_srv::metasrv::BackendImpl;
 use snafu::ResultExt;
@@ -36,7 +35,7 @@ use crate::{App, create_resource_limit_metrics, log_versions, maybe_activate_hea
 
 type MetasrvOptions = GreptimeOptions<meta_srv::metasrv::MetasrvOptions>;
 
-pub const APP_NAME: &str = concatcp!(common_version::product_name(), "-metasrv");
+pub const APP_NAME: &str = "greptime-metasrv";
 
 pub struct Instance {
     instance: MetasrvInstance,

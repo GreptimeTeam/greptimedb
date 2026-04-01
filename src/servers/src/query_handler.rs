@@ -63,6 +63,14 @@ pub type PipelineHandlerRef = Arc<dyn PipelineHandler + Send + Sync>;
 pub type LogQueryHandlerRef = Arc<dyn LogQueryHandler + Send + Sync>;
 pub type JaegerQueryHandlerRef = Arc<dyn JaegerQueryHandler + Send + Sync>;
 
+#[derive(Debug, Default, Clone)]
+pub struct TraceIngestOutcome {
+    pub write_cost: usize,
+    pub accepted_spans: usize,
+    pub rejected_spans: usize,
+    pub error_message: Option<String>,
+}
+
 #[async_trait]
 pub trait InfluxdbLineProtocolHandler {
     /// A successful request will not return a response.
@@ -123,7 +131,7 @@ pub trait OpenTelemetryProtocolHandler: PipelineHandler {
         pipeline_params: GreptimePipelineParams,
         table_name: String,
         ctx: QueryContextRef,
-    ) -> Result<Output>;
+    ) -> Result<TraceIngestOutcome>;
 
     async fn logs(
         &self,

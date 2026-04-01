@@ -708,7 +708,7 @@ impl TableMetadataManager {
 
         // Creates view info
         let view_info_value = ViewInfoValue::new(
-            raw_logical_plan,
+            raw_logical_plan.into(),
             table_names,
             columns,
             plan_columns,
@@ -1184,7 +1184,7 @@ impl TableMetadataManager {
         definition: String,
     ) -> Result<()> {
         let new_view_info_value = current_view_info_value.update(
-            new_view_info,
+            new_view_info.into(),
             table_names,
             columns,
             plan_columns,
@@ -2752,7 +2752,7 @@ mod tests {
         let new_definition = "CREATE VIEW test AS SELECT * FROM b_table join c_table";
 
         let current_view_info_value = DeserializedValueWithBytes::from_inner(ViewInfoValue::new(
-            logical_plan.clone(),
+            logical_plan.clone().into(),
             table_names,
             columns,
             plan_columns,
@@ -2803,7 +2803,7 @@ mod tests {
         let wrong_definition = "wrong_definition";
         let wrong_view_info_value =
             DeserializedValueWithBytes::from_inner(current_view_info_value.update(
-                wrong_view_info,
+                wrong_view_info.into(),
                 new_table_names.clone(),
                 new_columns.clone(),
                 new_plan_columns.clone(),

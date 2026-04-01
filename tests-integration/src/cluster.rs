@@ -127,8 +127,8 @@ impl GreptimeDbCluster {
                 .await
                 .into_iter()
                 .flat_map(|e| {
-                    if e.index_file_path.is_some() {
-                        vec![e.file_path, e.index_file_path.unwrap()]
+                    if let Some(index_file_path) = e.index_file_path {
+                        vec![e.file_path, index_file_path]
                     } else {
                         vec![e.file_path]
                     }

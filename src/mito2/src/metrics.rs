@@ -244,10 +244,15 @@ lazy_static! {
         "greptime_mito_scan_memory_usage_bytes",
         "current scan memory usage in bytes"
     ).unwrap();
-    /// Counter of rejected scan requests due to memory limit.
+    /// Counter of scan allocation attempts that could not acquire memory immediately.
+    pub static ref SCAN_MEMORY_EXHAUSTED_TOTAL: IntCounter = register_int_counter!(
+        "greptime_mito_scan_memory_exhausted_total",
+        "total number of times scan memory was unavailable for immediate acquisition"
+    ).unwrap();
+    /// Counter of scan requests that ultimately failed due to memory pressure.
     pub static ref SCAN_REQUESTS_REJECTED_TOTAL: IntCounter = register_int_counter!(
         "greptime_mito_scan_requests_rejected_total",
-        "total number of scan requests rejected due to memory limit"
+        "total number of scan requests that ultimately failed due to memory limit"
     ).unwrap();
     /// Gauge for active file range builders in the pruner.
     pub static ref PRUNER_ACTIVE_BUILDERS: IntGauge = register_int_gauge!(

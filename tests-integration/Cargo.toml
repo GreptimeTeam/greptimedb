@@ -3,6 +3,11 @@ name = "tests-integration"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+autotests = false
+
+[[test]]
+name = "main"
+path = "tests/main.rs"
 
 [features]
 dashboard = ["servers/dashboard"]
