@@ -25,24 +25,7 @@ pub struct ParquetReadColumns {
     cols: Vec<ParquetReadColumn>,
 }
 
-impl Default for ParquetReadColumns {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl ParquetReadColumns {
-    pub fn new() -> ParquetReadColumns {
-        ParquetReadColumns { cols: vec![] }
-    }
-
-    /// # Safety
-    ///
-    /// The caller must ensure `read_col.root_index()` is unique within `self`.
-    pub unsafe fn push_cols(&mut self, read_col: ParquetReadColumn) {
-        self.cols.push(read_col);
-    }
-
     pub fn from_root_indices(root_indices: impl IntoIterator<Item = usize>) -> Self {
         let cols = root_indices
             .into_iter()
