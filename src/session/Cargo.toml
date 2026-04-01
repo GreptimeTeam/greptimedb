@@ -27,3 +27,4 @@ derive_builder.workspace = true
 derive_more.workspace = true
 snafu.workspace = true
 sql.workspace = true
+uuid.workspace = true
