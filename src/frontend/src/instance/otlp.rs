@@ -902,11 +902,7 @@ mod tests {
         let mut messages = Vec::new();
 
         for idx in 0..=4 {
-            Instance::push_trace_failure_message(
-                &mut messages,
-                label,
-                format!("failure-{idx}"),
-            );
+            Instance::push_trace_failure_message(&mut messages, label, format!("failure-{idx}"));
         }
 
         assert_eq!(messages.len(), 4);
