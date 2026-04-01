@@ -40,6 +40,10 @@ const APPROXIMATE_COLUMN_COUNT: usize = 30;
 // Use a timestamp(2100-01-01 00:00:00) as large as possible.
 const MAX_TIMESTAMP: i64 = 4102444800000000000;
 
+/// Converts trace spans into row insert requests for the main v1 trace table.
+///
+/// Auxiliary service and operation table writes are built separately so the
+/// caller can update them only after the main span write succeeds.
 pub fn v1_to_grpc_main_insert_requests(
     spans: &[TraceSpan],
     _pipeline: &PipelineWay,
@@ -55,6 +59,7 @@ pub fn v1_to_grpc_main_insert_requests(
     Ok(multi_table_writer.into_row_insert_requests())
 }
 
+/// Builds the row-oriented payload for the main v1 trace table.
 pub fn build_trace_table_data(spans: &[TraceSpan]) -> Result<TableData> {
     let mut trace_writer = TableData::new(APPROXIMATE_COLUMN_COUNT, spans.len());
     for span in spans.iter().cloned() {
@@ -64,6 +69,7 @@ pub fn build_trace_table_data(spans: &[TraceSpan]) -> Result<TableData> {
     Ok(trace_writer)
 }
 
+/// Builds row insert requests for the v1 trace auxiliary tables.
 pub fn build_aux_table_requests(
     aux_data: TraceAuxData,
     table_name: &str,

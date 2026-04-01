@@ -67,6 +67,12 @@ pub const SPAN_STATUS_PREFIX: &str = "STATUS_CODE_";
 pub const SPAN_STATUS_UNSET: &str = "STATUS_CODE_UNSET";
 pub const SPAN_STATUS_ERROR: &str = "STATUS_CODE_ERROR";
 
+/// Deduplicated auxiliary trace entities derived from successfully ingested
+/// spans.
+///
+/// The main trace table is written first. Once a span is confirmed accepted, we
+/// record the service and operation tuples here so the auxiliary tables can be
+/// updated separately without affecting span acceptance accounting.
 #[derive(Debug, Default)]
 pub struct TraceAuxData {
     pub services: HashSet<String>,
@@ -74,6 +80,8 @@ pub struct TraceAuxData {
 }
 
 impl TraceAuxData {
+    /// Records the auxiliary service and operation rows implied by one accepted
+    /// span.
     pub fn observe_span(&mut self, span: &TraceSpan) {
         if let Some(service_name) = &span.service_name {
             self.services.insert(service_name.clone());
@@ -85,6 +93,7 @@ impl TraceAuxData {
         }
     }
 
+    /// Returns true when no auxiliary table updates are needed.
     pub fn is_empty(&self) -> bool {
         self.services.is_empty() && self.operations.is_empty()
     }

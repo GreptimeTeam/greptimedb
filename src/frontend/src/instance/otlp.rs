@@ -23,6 +23,7 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
 use common_telemetry::tracing;
+use itertools::Itertools;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
@@ -261,23 +262,21 @@ impl Instance {
         };
 
         for group in groups {
-            let mut chunk = Vec::with_capacity(TRACE_INGEST_CHUNK_SIZE);
-            for span in group.spans {
-                chunk.push(span);
-                if chunk.len() == TRACE_INGEST_CHUNK_SIZE {
-                    self.ingest_trace_chunk(
-                        &ingest_ctx,
-                        std::mem::replace(&mut chunk, Vec::with_capacity(TRACE_INGEST_CHUNK_SIZE)),
-                        ctx.clone(),
-                        &mut ingest_state,
-                    )
-                    .await?;
-                }
-            }
-
-            if !chunk.is_empty() {
-                self.ingest_trace_chunk(&ingest_ctx, chunk, ctx.clone(), &mut ingest_state)
-                    .await?;
+            let chunks = group
+                .spans
+                .into_iter()
+                .chunks(TRACE_INGEST_CHUNK_SIZE)
+                .into_iter()
+                .map(|chunk| chunk.collect::<Vec<_>>())
+                .collect::<Vec<_>>();
+            for chunk in chunks {
+                self.ingest_trace_chunk(
+                    &ingest_ctx,
+                    chunk,
+                    ctx.clone(),
+                    &mut ingest_state,
+                )
+                .await?;
             }
         }
 
@@ -521,6 +520,12 @@ impl Instance {
 
         if messages.len() < TRACE_FAILURE_MESSAGE_LIMIT {
             messages.push(message);
+        } else if messages.len() == TRACE_FAILURE_MESSAGE_LIMIT {
+            tracing::debug!(
+                label,
+                limit = TRACE_FAILURE_MESSAGE_LIMIT,
+                "Trace ingest failure message limit reached; suppressing additional failure details"
+            );
         }
     }
 
