@@ -24,6 +24,7 @@ use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 
 use crate::error::Result;
+use crate::read::projection::ReadColumns;
 use crate::sst::parquet::file_range::{PreFilterMode, RangeBase};
 use crate::sst::parquet::flat_format::FlatReadFormat;
 use crate::sst::parquet::format::ReadFormat;
@@ -73,9 +74,11 @@ impl BulkIterContext {
             })
             .collect();
 
+        let projection =
+            projection.map(|column_ids| ReadColumns::with_column_ids(column_ids.iter().copied()));
         let read_format = ReadFormat::new(
             region_metadata.clone(),
-            projection,
+            projection.as_ref(),
             true,
             None,
             "memtable",

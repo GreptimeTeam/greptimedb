@@ -21,7 +21,7 @@ use datafusion_expr::expr::Expr;
 pub use datatypes::schema::{VectorDistanceMetric, VectorIndexEngineType};
 use strum::Display;
 
-use crate::storage::{ColumnId, SequenceNumber};
+use crate::storage::{ColumnId, ProjectionInput, SequenceNumber};
 
 /// A hint for KNN vector search.
 #[derive(Debug, Clone, PartialEq)]
@@ -95,9 +95,8 @@ pub enum TimeSeriesDistribution {
 
 #[derive(Default, Clone, Debug, PartialEq)]
 pub struct ScanRequest {
-    /// Indices of columns to read, `None` to read all columns. This indices is
-    /// based on table schema.
-    pub projection: Option<Vec<usize>>,
+    /// Optional projection information for the scan. `None` reads all root columns.
+    pub projection_input: Option<ProjectionInput>,
     /// Filters pushed down
     pub filters: Vec<Expr>,
     /// Expected output ordering. This is only a hint and isn't guaranteed.
@@ -154,8 +153,8 @@ impl Display for ScanRequest {
         let mut delimiter = Delimiter::None;
 
         write!(f, "ScanRequest {{ ")?;
-        if let Some(projection) = &self.projection {
-            write!(f, "{}projection: {:?}", delimiter.as_str(), projection)?;
+        if let Some(projection_input) = &self.projection_input {
+            write!(f, "{}projection: {}", delimiter.as_str(), projection_input)?;
         }
         if !self.filters.is_empty() {
             write!(
@@ -245,8 +244,9 @@ mod tests {
         };
         assert_eq!(request.to_string(), "ScanRequest {  }");
 
+        let projection_input = Some(ProjectionInput::new().with_projection(vec![1, 2]));
         let request = ScanRequest {
-            projection: Some(vec![1, 2]),
+            projection_input,
             filters: vec![
                 binary_expr(col("i"), Operator::Gt, lit(1)),
                 binary_expr(col("s"), Operator::Eq, lit("x")),
@@ -256,7 +256,7 @@ mod tests {
         };
         assert_eq!(
             request.to_string(),
-            r#"ScanRequest { projection: [1, 2], filters: [i > Int32(1), s = Utf8("x")], limit: 10 }"#
+            r#"ScanRequest { projection: ProjectionInput { projection: [1, 2], nested_paths: [] }, filters: [i > Int32(1), s = Utf8("x")], limit: 10 }"#
         );
 
         let request = ScanRequest {
@@ -272,14 +272,15 @@ mod tests {
             r#"ScanRequest { filters: [i > Int32(1), s = Utf8("x")], limit: 10 }"#
         );
 
+        let projection_input = Some(ProjectionInput::new().with_projection(vec![1, 2]));
         let request = ScanRequest {
-            projection: Some(vec![1, 2]),
+            projection_input,
             limit: Some(10),
             ..Default::default()
         };
         assert_eq!(
             request.to_string(),
-            "ScanRequest { projection: [1, 2], limit: 10 }"
+            "ScanRequest { projection: ProjectionInput { projection: [1, 2], nested_paths: [] }, limit: 10 }"
         );
 
         let request = ScanRequest {
@@ -298,6 +299,27 @@ mod tests {
         assert_eq!(
             request.to_string(),
             "ScanRequest { snapshot_on_scan: true }"
+        );
+    }
+
+    #[test]
+    fn test_display_scan_request_with_nested_paths() {
+        let projection_input = Some(
+            ProjectionInput::new()
+                .with_projection(vec![1, 2])
+                .with_nested_paths(vec![
+                    vec!["j".to_string(), "a".to_string()],
+                    vec!["j".to_string(), "b".to_string(), "c".to_string()],
+                ]),
+        );
+        let request = ScanRequest {
+            projection_input,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            request.to_string(),
+            r#"ScanRequest { projection: ProjectionInput { projection: [1, 2], nested_paths: [["j", "a"], ["j", "b", "c"]] } }"#
         );
     }
 }

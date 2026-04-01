@@ -54,6 +54,7 @@ use crate::metrics::{
     READ_ROWS_TOTAL, READ_STAGE_ELAPSED,
 };
 use crate::read::flat_projection::CompactionProjectionMapper;
+use crate::read::projection::ReadColumns;
 use crate::read::prune::FlatPruneReader;
 use crate::read::{Batch, BatchReader};
 use crate::sst::file::FileHandle;
@@ -74,7 +75,9 @@ use crate::sst::parquet::file_range::{
     FileRangeContext, FileRangeContextRef, PartitionFilterContext, PreFilterMode, RangeBase,
     row_group_contains_delete,
 };
-use crate::sst::parquet::format::{ReadFormat, need_override_sequence};
+use crate::sst::parquet::format::{
+    ReadFormat, build_parquet_leaves_indices, need_override_sequence,
+};
 use crate::sst::parquet::metadata::MetadataLoader;
 use crate::sst::parquet::prefilter::{
     PrefilterContextBuilder, execute_prefilter, is_usable_primary_key_filter,
@@ -120,11 +123,11 @@ pub struct ParquetReaderBuilder {
     object_store: ObjectStore,
     /// Predicate to push down.
     predicate: Option<Predicate>,
-    /// Metadata of columns to read.
+    /// Projection used to read from the parquet file.
     ///
     /// `None` reads all columns. Due to schema change, the projection
     /// can contain columns not in the parquet file.
-    projection: Option<Vec<ColumnId>>,
+    read_columns: Option<ReadColumns>,
     /// Strategy to cache SST data.
     cache_strategy: CacheStrategy,
     /// Index appliers.
@@ -166,7 +169,7 @@ impl ParquetReaderBuilder {
             file_handle,
             object_store,
             predicate: None,
-            projection: None,
+            read_columns: None,
             cache_strategy: CacheStrategy::Disabled,
             inverted_index_appliers: [None, None],
             bloom_filter_index_appliers: [None, None],
@@ -195,8 +198,8 @@ impl ParquetReaderBuilder {
     ///
     /// The reader only applies the projection to fields.
     #[must_use]
-    pub fn projection(mut self, projection: Option<Vec<ColumnId>>) -> ParquetReaderBuilder {
-        self.projection = projection;
+    pub fn projection(mut self, read_columns: Option<ReadColumns>) -> ParquetReaderBuilder {
+        self.read_columns = read_columns;
         self
     }
 
@@ -384,10 +387,10 @@ impl ParquetReaderBuilder {
             None
         };
 
-        let mut read_format = if let Some(column_ids) = &self.projection {
+        let mut read_format = if let Some(read_columns) = &self.read_columns {
             ReadFormat::new(
                 region_meta.clone(),
-                Some(column_ids),
+                Some(read_columns),
                 flat_format,
                 Some(parquet_meta.file_metadata().schema_descr().num_columns()),
                 &file_path,
@@ -396,14 +399,15 @@ impl ParquetReaderBuilder {
         } else {
             // Lists all column ids to read, we always use the expected metadata if possible.
             let expected_meta = self.expected_metadata.as_ref().unwrap_or(&region_meta);
-            let column_ids: Vec<_> = expected_meta
-                .column_metadatas
-                .iter()
-                .map(|col| col.column_id)
-                .collect();
+            let read_columns = ReadColumns::with_column_ids(
+                expected_meta
+                    .column_metadatas
+                    .iter()
+                    .map(|col| col.column_id),
+            );
             ReadFormat::new(
                 region_meta.clone(),
-                Some(&column_ids),
+                Some(&read_columns),
                 flat_format,
                 Some(parquet_meta.file_metadata().schema_descr().num_columns()),
                 &file_path,
@@ -420,10 +424,10 @@ impl ParquetReaderBuilder {
 
         // Computes the projection mask.
         let parquet_schema_desc = parquet_meta.file_metadata().schema_descr();
-        let indices = read_format.projection_indices();
-        // Now we assumes we don't have nested schemas.
-        // TODO(yingwen): Revisit this if we introduce nested types such as JSON type.
-        let projection_mask = ProjectionMask::roots(parquet_schema_desc, indices.iter().copied());
+        let parquet_projection = read_format.parquet_projection();
+        let leaf_indices = build_parquet_leaves_indices(parquet_schema_desc, parquet_projection);
+        let projection_mask =
+            ProjectionMask::leaves(parquet_schema_desc, leaf_indices.iter().copied());
         let selection = self
             .row_groups_to_read(&read_format, &parquet_meta, &mut metrics.filter_metrics)
             .await;

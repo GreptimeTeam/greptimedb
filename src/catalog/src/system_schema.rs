@@ -139,12 +139,16 @@ impl DataSource for SystemTableDataSource {
         &self,
         request: ScanRequest,
     ) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
-        let projected_schema = match &request.projection {
+        let projection = request
+            .projection_input
+            .as_ref()
+            .map(|projection_input| projection_input.projection.clone());
+
+        let projected_schema = match projection.as_ref() {
             Some(projection) => self.try_project(projection)?,
             None => self.table.schema(),
         };
 
-        let projection = request.projection.clone();
         let stream = self
             .table
             .to_stream(request)

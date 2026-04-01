@@ -28,11 +28,13 @@ use datatypes::value::Value;
 use datatypes::vectors::Helper;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
-use store_api::storage::ColumnId;
+use store_api::storage::{ColumnId, ProjectionInput};
 
 use crate::cache::CacheStrategy;
 use crate::error::{InvalidRequestSnafu, RecordBatchSnafu, Result};
-use crate::read::projection::{read_column_ids_from_projection, repeated_vector_with_cache};
+use crate::read::projection::{
+    ReadColumns, build_read_columns, read_column_ids_from_projection, repeated_vector_with_cache,
+};
 use crate::sst::parquet::flat_format::sst_column_id_indices;
 use crate::sst::parquet::format::FormatProjection;
 use crate::sst::{
@@ -48,11 +50,10 @@ pub struct FlatProjectionMapper {
     metadata: RegionMetadataRef,
     /// Schema for converted [RecordBatch] to return.
     output_schema: SchemaRef,
-    /// Ids of columns to read from memtables and SSTs.
-    /// The mapper won't deduplicate the column ids.
+    /// Logical columns used to read from memtables and SSTs.
     ///
     /// Note that this doesn't contain the `__table_id` and `__tsid`.
-    read_column_ids: Vec<ColumnId>,
+    read_columns: ReadColumns,
     /// Ids and DataTypes of columns of the expected batch.
     /// We can use this to check if the batch is compatible with the expected schema.
     ///
@@ -77,15 +78,17 @@ impl FlatProjectionMapper {
     ) -> Result<Self> {
         let projection: Vec<_> = projection.collect();
         let read_column_ids = read_column_ids_from_projection(metadata, &projection)?;
-        Self::new_with_read_columns(metadata, projection, read_column_ids)
+        let projection_input = ProjectionInput::new().with_projection(projection);
+        Self::new_with_read_columns(metadata, projection_input, read_column_ids)
     }
 
     /// Returns a new mapper with output projection and explicit read columns.
     pub fn new_with_read_columns(
         metadata: &RegionMetadataRef,
-        projection: Vec<usize>,
+        projection_input: ProjectionInput,
         read_column_ids: Vec<ColumnId>,
     ) -> Result<Self> {
+        let projection = projection_input.projection;
         // If the original projection is empty.
         let is_empty_projection = projection.is_empty();
 
@@ -112,11 +115,13 @@ impl FlatProjectionMapper {
         // Creates a map to lookup index.
         let id_to_index = sst_column_id_indices(metadata);
         // TODO(yingwen): Support different flat schema options.
+        let read_columns =
+            build_read_columns(metadata, &projection_input.nested_paths, &read_column_ids)?;
         let format_projection = FormatProjection::compute_format_projection(
             &id_to_index,
             // All columns with internal columns.
             metadata.column_metadatas.len() + 3,
-            read_column_ids.iter().copied(),
+            read_columns.clone(),
         );
 
         let batch_schema = flat_projected_columns(metadata, &format_projection);
@@ -163,7 +168,7 @@ impl FlatProjectionMapper {
         Ok(FlatProjectionMapper {
             metadata: metadata.clone(),
             output_schema,
-            read_column_ids,
+            read_columns,
             batch_schema,
             is_empty_projection,
             batch_indices,
@@ -181,10 +186,8 @@ impl FlatProjectionMapper {
         &self.metadata
     }
 
-    /// Returns ids of projected columns that we need to read
-    /// from memtables and SSTs.
-    pub(crate) fn column_ids(&self) -> &[ColumnId] {
-        &self.read_column_ids
+    pub(crate) fn read_columns(&self) -> &ReadColumns {
+        &self.read_columns
     }
 
     /// Returns the field column start index in output batch.
@@ -235,7 +238,7 @@ impl FlatProjectionMapper {
 
     /// Returns the schema of converted [RecordBatch].
     /// This is the schema that the stream will output. This schema may contain
-    /// less columns than [FlatProjectionMapper::column_ids()].
+    /// less columns than the mapper read projection.
     pub(crate) fn output_schema(&self) -> SchemaRef {
         self.output_schema.clone()
     }
@@ -439,10 +442,11 @@ impl CompactionProjectionMapper {
             })
             .chain([metadata.time_index_column_pos()])
             .collect::<Vec<_>>();
+        let projection_input = ProjectionInput::new().with_projection(projection);
 
         let mapper = FlatProjectionMapper::new_with_read_columns(
             metadata,
-            projection,
+            projection_input,
             metadata
                 .column_metadatas
                 .iter()
