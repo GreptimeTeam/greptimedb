@@ -18,7 +18,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use common_recordbatch::filter::SimpleFilterEvaluator;
-use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyFilter, build_primary_key_codec};
+use mito_codec::row_converter::build_primary_key_codec;
 use parquet::file::metadata::ParquetMetaData;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
@@ -26,7 +26,6 @@ use table::predicate::Predicate;
 
 use crate::error::Result;
 use crate::sst::parquet::file_range::{PreFilterMode, RangeBase};
-use crate::sst::parquet::flat_format::FlatReadFormat;
 use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::prefilter::CachedPrimaryKeyFilter;
 use crate::sst::parquet::reader::SimpleFilterContext;
