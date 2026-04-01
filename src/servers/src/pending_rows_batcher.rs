@@ -31,7 +31,7 @@ use common_grpc::flight::{FlightEncoder, FlightMessage};
 use common_meta::node_manager::NodeManagerRef;
 use common_query::prelude::{GREPTIME_PHYSICAL_TABLE, greptime_timestamp, greptime_value};
 use common_telemetry::tracing_context::TracingContext;
-use common_telemetry::{debug, error, warn};
+use common_telemetry::{debug, warn};
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 use metric_engine::batch_modifier::{TagColumnInfo, modify_batch_sparse};
@@ -225,9 +225,9 @@ struct TableResolutionPlan {
 
 struct PendingBatch {
     tables: HashMap<String, TableBatch>,
-    created_at: Option<Instant>,
+    created_at: Instant,
     total_row_count: usize,
-    ctx: Option<QueryContextRef>,
+    ctx: QueryContextRef,
     waiters: Vec<FlushWaiter>,
 }
 
@@ -817,12 +817,12 @@ impl Drop for PendingRowsBatcher {
 }
 
 impl PendingBatch {
-    fn new() -> Self {
+    fn new(ctx: QueryContextRef) -> Self {
         Self {
             tables: HashMap::new(),
-            created_at: None,
+            created_at: Instant::now(),
             total_row_count: 0,
-            ctx: None,
+            ctx,
             waiters: Vec::new(),
         }
     }
@@ -844,7 +844,7 @@ fn start_worker(
     flush_semaphore: Arc<Semaphore>,
 ) {
     tokio::spawn(async move {
-        let mut batch = PendingBatch::new();
+        let mut batch = None;
         let mut interval = tokio::time::interval(flush_interval);
         let mut shutdown_rx = shutdown.subscribe();
         let idle_deadline = tokio::time::Instant::now() + worker_idle_timeout;
@@ -858,16 +858,15 @@ fn start_worker(
                         Some(WorkerCommand::Submit { table_batches, total_rows, ctx, response_tx, _permit }) => {
                             idle_timer.as_mut().reset(tokio::time::Instant::now() + worker_idle_timeout);
 
-                            if batch.total_row_count == 0 {
-                                batch.created_at = Some(Instant::now());
-                                batch.ctx = Some(ctx);
+                            let pending_batch =batch.get_or_insert_with(||{
                                 PENDING_BATCHES.inc();
-                            }
+                                PendingBatch::new(ctx)
+                            });
 
-                            batch.waiters.push(FlushWaiter { response_tx, _permit });
+                            pending_batch.waiters.push(FlushWaiter { response_tx, _permit });
 
                             for (table_name, table_id, record_batch) in table_batches {
-                                let entry = batch.tables.entry(table_name.clone()).or_insert_with(|| TableBatch {
+                                let entry = pending_batch.tables.entry(table_name.clone()).or_insert_with(|| TableBatch {
                                     table_name,
                                     table_id,
                                     batches: Vec::new(),
@@ -877,10 +876,10 @@ fn start_worker(
                                 entry.batches.push(record_batch);
                             }
 
-                            batch.total_row_count += total_rows;
+                            pending_batch.total_row_count += total_rows;
                             PENDING_ROWS.add(total_rows as i64);
 
-                            if batch.total_row_count >= max_batch_rows
+                            if pending_batch.total_row_count >= max_batch_rows
                                 && let Some(flush) = drain_batch(&mut batch) {
                                     spawn_flush(
                                         flush,
@@ -905,7 +904,10 @@ fn start_worker(
                     }
                 }
                 _ = &mut idle_timer => {
-                    if !should_close_worker_on_idle_timeout(batch.total_row_count, rx.len()) {
+                    if !should_close_worker_on_idle_timeout(
+                        batch.as_ref().map_or(0, |batch| batch.total_row_count),
+                        rx.len(),
+                    ) {
                         idle_timer
                             .as_mut()
                             .reset(tokio::time::Instant::now() + worker_idle_timeout);
@@ -921,9 +923,9 @@ fn start_worker(
                     break;
                 }
                 _ = interval.tick() => {
-                    if let Some(created_at) = batch.created_at
-                        && batch.total_row_count > 0
-                        && created_at.elapsed() >= flush_interval
+                    if batch
+                        .as_ref()
+                        .is_some_and(|batch| batch.created_at.elapsed() >= flush_interval)
                         && let Some(flush) = drain_batch(&mut batch) {
                             spawn_flush(
                                 flush,
@@ -973,24 +975,16 @@ fn should_close_worker_on_idle_timeout(total_row_count: usize, queued_requests: 
     total_row_count == 0 && queued_requests == 0
 }
 
-fn drain_batch(batch: &mut PendingBatch) -> Option<FlushBatch> {
-    if batch.total_row_count == 0 {
+fn drain_batch(batch: &mut Option<PendingBatch>) -> Option<FlushBatch> {
+    let batch = batch.take()?;
+    let total_row_count = batch.total_row_count;
+
+    if total_row_count == 0 {
         return None;
     }
 
-    let ctx = match batch.ctx.take() {
-        Some(ctx) => ctx,
-        None => {
-            flush_with_error(batch, "Pending batch missing context");
-            return None;
-        }
-    };
-
-    let total_row_count = batch.total_row_count;
-    let table_batches = std::mem::take(&mut batch.tables).into_values().collect();
-    let waiters = std::mem::take(&mut batch.waiters);
-    batch.total_row_count = 0;
-    batch.created_at = None;
+    let table_batches = batch.tables.into_values().collect();
+    let waiters = batch.waiters;
 
     PENDING_ROWS.sub(total_row_count as i64);
     PENDING_BATCHES.dec();
@@ -998,7 +992,7 @@ fn drain_batch(batch: &mut PendingBatch) -> Option<FlushBatch> {
     Some(FlushBatch {
         table_batches,
         total_row_count,
-        ctx,
+        ctx: batch.ctx,
         waiters,
     })
 }
@@ -1552,32 +1546,6 @@ fn notify_waiters(waiters: Vec<FlushWaiter>, result: Result<()>) {
     }
 }
 
-fn mark_flush_failure(row_count: usize, message: &str) {
-    error!("Pending rows batch flush failed, message: {}", message);
-    FLUSH_FAILURES.inc();
-    FLUSH_DROPPED_ROWS.inc_by(row_count as u64);
-}
-
-fn flush_with_error(batch: &mut PendingBatch, error: &Error) {
-    if batch.total_row_count == 0 {
-        return;
-    }
-
-    let row_count = batch.total_row_count;
-    let waiters = std::mem::take(&mut batch.waiters);
-    batch.tables.clear();
-    batch.total_row_count = 0;
-    batch.created_at = None;
-    batch.ctx = None;
-
-    PENDING_ROWS.sub(row_count as i64);
-    PENDING_BATCHES.dec();
-
-    notify_waiters(waiters, Err(error));
-    let err_msg = Some(error.to_string());
-    mark_flush_failure(row_count, message);
-}
-
 fn record_batch_to_ipc(record_batch: RecordBatch) -> Result<(Bytes, Bytes, Bytes)> {
     let mut encoder = FlightEncoder::default();
     let schema = encoder.encode_schema(record_batch.schema().as_ref());
@@ -1607,7 +1575,7 @@ mod tests {
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use api::region::RegionResponse;
     use api::v1::flow::{DirtyWindowRequests, FlowRequest, FlowResponse};
@@ -1634,17 +1602,18 @@ mod tests {
     use store_api::storage::RegionId;
     use table::metadata::TableId;
     use table::test_util::table_info::test_table_info;
-    use tokio::sync::mpsc;
+    use tokio::sync::{Semaphore, mpsc, oneshot};
     use tokio::time::sleep;
 
     use super::{
-        BatchKey, Error, FlushRegionWrite, PendingRowsBatcher, PendingWorker,
-        PhysicalFlushCatalogProvider, PhysicalFlushNodeRequester, PhysicalFlushPartitionProvider,
-        PhysicalTableMetadata, PlannedRegionBatch, ResolvedRegionBatch, TableBatch, WorkerCommand,
-        columns_taxonomy, encode_region_write_requests, flush_batch_physical,
-        flush_region_writes_concurrently, plan_region_batches, remove_worker_if_same_channel,
-        should_close_worker_on_idle_timeout, should_dispatch_concurrently,
-        strip_partition_columns_from_batch, transform_logical_batches_to_physical,
+        BatchKey, Error, FlushRegionWrite, FlushWaiter, PendingBatch, PendingRowsBatcher,
+        PendingWorker, PhysicalFlushCatalogProvider, PhysicalFlushNodeRequester,
+        PhysicalFlushPartitionProvider, PhysicalTableMetadata, PlannedRegionBatch,
+        ResolvedRegionBatch, TableBatch, WorkerCommand, columns_taxonomy, drain_batch,
+        encode_region_write_requests, flush_batch_physical, flush_region_writes_concurrently,
+        plan_region_batches, remove_worker_if_same_channel, should_close_worker_on_idle_timeout,
+        should_dispatch_concurrently, strip_partition_columns_from_batch,
+        transform_logical_batches_to_physical,
     };
     use crate::error;
 
@@ -1867,6 +1836,38 @@ mod tests {
         assert_eq!(1, table_rows.len());
         assert_eq!("cpu", table_rows[0].0);
         assert_eq!(2, table_rows[0].1.rows.len());
+    }
+
+    #[test]
+    fn test_drain_batch_takes_initialized_pending_batch_from_option() {
+        let ctx = session::context::QueryContext::arc();
+        let (response_tx, _response_rx) = oneshot::channel();
+        let permit = Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap();
+        let mut batch = Some(PendingBatch {
+            tables: HashMap::from([(
+                "cpu".to_string(),
+                TableBatch {
+                    table_name: "cpu".to_string(),
+                    table_id: 42,
+                    batches: vec![mock_tag_batch("tag1", "host-1", 1000, 1.0)],
+                    row_count: 1,
+                },
+            )]),
+            created_at: Instant::now(),
+            total_row_count: 1,
+            ctx: ctx.clone(),
+            waiters: vec![FlushWaiter {
+                response_tx,
+                _permit: permit,
+            }],
+        });
+
+        let flush = drain_batch(&mut batch).unwrap();
+
+        assert!(batch.is_none());
+        assert_eq!(1, flush.total_row_count);
+        assert_eq!(1, flush.table_batches.len());
+        assert_eq!(ctx.current_catalog(), flush.ctx.current_catalog());
     }
 
     #[derive(Clone)]
