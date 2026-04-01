@@ -74,7 +74,10 @@ use crate::sst::parquet::file_range::{
     FileRangeContext, FileRangeContextRef, PartitionFilterContext, PreFilterMode, RangeBase,
     row_group_contains_delete,
 };
-use crate::sst::parquet::format::{ReadFormat, need_override_sequence};
+use crate::sst::parquet::format::{
+    ParquetColumnProjection, ParquetProjection, ReadFormat, build_parquet_leaves_indices,
+    need_override_sequence,
+};
 use crate::sst::parquet::metadata::MetadataLoader;
 use crate::sst::parquet::prefilter::{
     PrefilterContextBuilder, execute_prefilter, is_usable_primary_key_filter,
@@ -420,10 +423,19 @@ impl ParquetReaderBuilder {
 
         // Computes the projection mask.
         let parquet_schema_desc = parquet_meta.file_metadata().schema_descr();
-        let indices = read_format.projection_indices();
-        // Now we assumes we don't have nested schemas.
-        // TODO(yingwen): Revisit this if we introduce nested types such as JSON type.
-        let projection_mask = ProjectionMask::roots(parquet_schema_desc, indices.iter().copied());
+        let parquet_projection = ParquetProjection {
+            cols: read_format
+                .projection_indices()
+                .iter()
+                .map(|index| ParquetColumnProjection {
+                    root_index: *index,
+                    nested_paths: vec![],
+                })
+                .collect(),
+        };
+        let leaf_indices = build_parquet_leaves_indices(parquet_schema_desc, &parquet_projection);
+        let projection_mask =
+            ProjectionMask::leaves(parquet_schema_desc, leaf_indices.iter().copied());
         let selection = self
             .row_groups_to_read(&read_format, &parquet_meta, &mut metrics.filter_metrics)
             .await;
