@@ -322,7 +322,7 @@ impl HistogramFold {
     /// Transform the schema
     ///
     /// - `le` will be removed
-    fn convert_schema(
+    pub fn convert_schema(
         input_schema: &DFSchemaRef,
         le_column: &str,
     ) -> DataFusionResult<DFSchemaRef> {
@@ -417,6 +417,34 @@ pub struct HistogramFoldExec {
     quantile: f64,
     metric: ExecutionPlanMetricsSet,
     properties: Arc<PlanProperties>,
+}
+
+impl HistogramFoldExec {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        le_column_index: usize,
+        field_column_index: usize,
+        ts_column_index: usize,
+        quantile: f64,
+        input: Arc<dyn ExecutionPlan>,
+        output_schema: SchemaRef,
+        tag_columns: Vec<Arc<dyn PhysicalExpr>>,
+        partition_exprs: Vec<Arc<dyn PhysicalExpr>>,
+        properties: Arc<PlanProperties>,
+    ) -> Self {
+        Self {
+            le_column_index,
+            field_column_index,
+            ts_column_index,
+            quantile,
+            input,
+            output_schema,
+            tag_columns,
+            partition_exprs,
+            metric: ExecutionPlanMetricsSet::new(),
+            properties,
+        }
+    }
 }
 
 impl ExecutionPlan for HistogramFoldExec {
@@ -543,6 +571,8 @@ impl ExecutionPlan for HistogramFoldExec {
                 self.le_column_index,
             )?,
             output_buffered_rows: 0,
+            cached_le_parsed: None,
+            counters_buf: Vec::new(),
         }))
     }
 
@@ -605,6 +635,12 @@ pub struct HistogramFoldStream {
     input_buffered_rows: usize,
     output_buffer: Vec<Box<dyn MutableVector>>,
     output_buffered_rows: usize,
+
+    /// Cached parsed le (bucket bound) values — parsed once from the first
+    /// complete bucket's `le` strings, reused for all subsequent groups.
+    cached_le_parsed: Option<Vec<f64>>,
+    /// Reusable buffer for counter values to avoid per-group allocation.
+    counters_buf: Vec<f64>,
 
     // runtime things
     input: SendableRecordBatchStream,
@@ -765,6 +801,23 @@ impl HistogramFoldStream {
         let field_array = field_array.as_primitive::<Float64Type>();
         let mut tag_values_buf = Vec::with_capacity(self.normal_indices.len());
 
+        // Parse le (bucket bound) values once and cache for reuse across all groups.
+        // The invariant is that all groups have the same le values.
+        if self.cached_le_parsed.is_none() && remaining_rows >= bucket_num {
+            let mut parsed = Vec::with_capacity(bucket_num);
+            for bias in 0..bucket_num {
+                let position = bias;
+                let le = if le_array.is_valid(position) {
+                    le_array.value(position).parse::<f64>().unwrap_or(f64::NAN)
+                } else {
+                    f64::NAN
+                };
+                parsed.push(le);
+            }
+            self.cached_le_parsed = Some(parsed);
+            self.counters_buf.resize(bucket_num, 0.0);
+        }
+
         while remaining_rows >= bucket_num && self.mode == FoldMode::Optimistic {
             self.collect_tag_values(&vectors, cursor, &mut tag_values_buf);
             if !self.validate_optimistic_group(
@@ -783,27 +836,19 @@ impl HistogramFoldStream {
             for (idx, value) in self.normal_indices.iter().zip(tag_values_buf.iter()) {
                 self.output_buffer[*idx].push_value_ref(value);
             }
-            // "fold" `le` and field columns
-            let mut bucket = Vec::with_capacity(bucket_num);
-            let mut counters = Vec::with_capacity(bucket_num);
-            for bias in 0..bucket_num {
+            // "fold" field column — reuse counters buffer, use cached le values
+            let counters = &mut self.counters_buf;
+            for (bias, counter) in counters.iter_mut().enumerate().take(bucket_num) {
                 let position = cursor + bias;
-                let le = if le_array.is_valid(position) {
-                    le_array.value(position).parse::<f64>().unwrap_or(f64::NAN)
-                } else {
-                    f64::NAN
-                };
-                bucket.push(le);
-
-                let counter = if field_array.is_valid(position) {
+                *counter = if field_array.is_valid(position) {
                     field_array.value(position)
                 } else {
                     f64::NAN
                 };
-                counters.push(counter);
             }
             // ignore invalid data
-            let result = Self::evaluate_row(self.quantile, &bucket, &counters).unwrap_or(f64::NAN);
+            let bucket = self.cached_le_parsed.as_ref().unwrap();
+            let result = Self::evaluate_row(self.quantile, bucket, counters).unwrap_or(f64::NAN);
             self.output_buffer[self.field_column_index].push_value_ref(&ValueRef::from(result));
             cursor += bucket_num;
             remaining_rows -= bucket_num;
@@ -1093,10 +1138,8 @@ impl HistogramFoldStream {
 
         let total = *counter.last().unwrap();
         let expected_pos = total * quantile;
-        let mut fit_bucket_pos = 0;
-        while fit_bucket_pos < bucket.len() && counter[fit_bucket_pos] < expected_pos {
-            fit_bucket_pos += 1;
-        }
+        // Binary search for the bucket whose counter >= expected_pos
+        let fit_bucket_pos = counter.partition_point(|&c| c < expected_pos);
         if fit_bucket_pos >= bucket.len() - 1 {
             Ok(bucket[bucket.len() - 2])
         } else {
