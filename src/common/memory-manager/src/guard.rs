@@ -172,7 +172,7 @@ impl<M: MemoryMetrics> MemoryGuard<M> {
                         true
                     }
                     Err(TryAcquireError::NoPermits) | Err(TryAcquireError::Closed) => {
-                        quota.metrics.inc_rejected("try_acquire_additional");
+                        quota.metrics.inc_exhausted("try_acquire_additional");
                         false
                     }
                 }

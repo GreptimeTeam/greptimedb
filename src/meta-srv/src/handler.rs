@@ -870,7 +870,7 @@ impl HeartbeatHandlerGroupBuilderCustomizer for DefaultHeartbeatHandlerGroupBuil
 #[cfg(test)]
 mod tests {
 
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -972,7 +972,7 @@ mod tests {
             "RemapFlowPeerHandler",
         ];
         assert_eq!(names.len(), handlers.len());
-        for (handler, name) in handlers.iter().zip(names.into_iter()) {
+        for (handler, name) in handlers.iter().zip(names) {
             assert_eq!(handler.name, name);
         }
     }
@@ -1009,7 +1009,7 @@ mod tests {
             "RemapFlowPeerHandler",
         ];
         assert_eq!(names.len(), handlers.len());
-        for (handler, name) in handlers.iter().zip(names.into_iter()) {
+        for (handler, name) in handlers.iter().zip(names) {
             assert_eq!(handler.name, name);
         }
     }
@@ -1043,7 +1043,7 @@ mod tests {
             "RemapFlowPeerHandler",
         ];
         assert_eq!(names.len(), handlers.len());
-        for (handler, name) in handlers.iter().zip(names.into_iter()) {
+        for (handler, name) in handlers.iter().zip(names) {
             assert_eq!(handler.name, name);
         }
     }
@@ -1077,7 +1077,7 @@ mod tests {
             "RemapFlowPeerHandler",
         ];
         assert_eq!(names.len(), handlers.len());
-        for (handler, name) in handlers.iter().zip(names.into_iter()) {
+        for (handler, name) in handlers.iter().zip(names) {
             assert_eq!(handler.name, name);
         }
     }
@@ -1111,7 +1111,7 @@ mod tests {
             "RemapFlowPeerHandler",
         ];
         assert_eq!(names.len(), handlers.len());
-        for (handler, name) in handlers.iter().zip(names.into_iter()) {
+        for (handler, name) in handlers.iter().zip(names) {
             assert_eq!(handler.name, name);
         }
     }
@@ -1145,7 +1145,7 @@ mod tests {
         ];
 
         assert_eq!(names.len(), handlers.len());
-        for (handler, name) in handlers.iter().zip(names.into_iter()) {
+        for (handler, name) in handlers.iter().zip(names) {
             assert_eq!(handler.name, name);
         }
     }
@@ -1179,7 +1179,7 @@ mod tests {
         ];
 
         assert_eq!(names.len(), handlers.len());
-        for (handler, name) in handlers.iter().zip(names.into_iter()) {
+        for (handler, name) in handlers.iter().zip(names) {
             assert_eq!(handler.name, name);
         }
     }
@@ -1212,7 +1212,7 @@ mod tests {
             "RemapFlowPeerHandler",
         ];
         assert_eq!(names.len(), handlers.len());
-        for (handler, name) in handlers.iter().zip(names.into_iter()) {
+        for (handler, name) in handlers.iter().zip(names) {
             assert_eq!(handler.name, name);
         }
     }

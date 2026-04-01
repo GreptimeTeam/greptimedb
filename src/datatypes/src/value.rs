@@ -922,7 +922,7 @@ impl TryFrom<Value> for serde_json::Value {
                 let map = struct_type
                     .fields()
                     .iter()
-                    .zip(items.into_iter())
+                    .zip(items)
                     .map(|(field, value)| {
                         Ok((
                             field.name().to_string(),
@@ -2723,26 +2723,26 @@ pub(crate) mod tests {
                 .unwrap()
         );
         assert_eq!(
-            ScalarValue::UInt8(Some(u8::MIN + 1)),
-            Value::UInt8(u8::MIN + 1)
+            ScalarValue::UInt8(Some(1)),
+            Value::UInt8(1)
                 .try_to_scalar_value(&ConcreteDataType::uint8_datatype())
                 .unwrap()
         );
         assert_eq!(
-            ScalarValue::UInt16(Some(u16::MIN + 2)),
-            Value::UInt16(u16::MIN + 2)
+            ScalarValue::UInt16(Some(2)),
+            Value::UInt16(2)
                 .try_to_scalar_value(&ConcreteDataType::uint16_datatype())
                 .unwrap()
         );
         assert_eq!(
-            ScalarValue::UInt32(Some(u32::MIN + 3)),
-            Value::UInt32(u32::MIN + 3)
+            ScalarValue::UInt32(Some(3)),
+            Value::UInt32(3)
                 .try_to_scalar_value(&ConcreteDataType::uint32_datatype())
                 .unwrap()
         );
         assert_eq!(
-            ScalarValue::UInt64(Some(u64::MIN + 4)),
-            Value::UInt64(u64::MIN + 4)
+            ScalarValue::UInt64(Some(4)),
+            Value::UInt64(4)
                 .try_to_scalar_value(&ConcreteDataType::uint64_datatype())
                 .unwrap()
         );

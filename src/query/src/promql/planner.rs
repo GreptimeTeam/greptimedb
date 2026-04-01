@@ -531,8 +531,7 @@ impl PromPlanner {
                     .use_tsid
                     .then_some(DfExpr::Column(Column::from_name(
                         DATA_SCHEMA_TSID_COLUMN_NAME,
-                    )))
-                    .into_iter(),
+                    ))),
             )
             .chain(Some(self.create_time_index_column_expr()?));
 
@@ -1459,8 +1458,7 @@ impl PromPlanner {
                         .use_tsid
                         .then_some(DfExpr::Column(Column::new_unqualified(
                             DATA_SCHEMA_TSID_COLUMN_NAME,
-                        )))
-                        .into_iter(),
+                        ))),
                 )
                 .chain(Some(self.create_time_index_column_expr()?))
                 .collect::<Vec<_>>();
@@ -1974,15 +1972,10 @@ impl PromPlanner {
                         .iter()
                         .map(|tag| DfExpr::Column(Column::from_name(tag))),
                 )
-                .chain(
-                    self.ctx
-                        .use_tsid
-                        .then_some(DfExpr::Column(Column::new(
-                            Some(table_ref.clone()),
-                            DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
-                        )))
-                        .into_iter(),
-                )
+                .chain(self.ctx.use_tsid.then_some(DfExpr::Column(Column::new(
+                    Some(table_ref.clone()),
+                    DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
+                ))))
                 .chain(Some(DfExpr::Alias(Alias {
                     expr: Box::new(DfExpr::Cast(Cast {
                         expr: Box::new(self.create_time_index_column_expr()?),
@@ -2020,8 +2013,7 @@ impl PromPlanner {
                         .use_tsid
                         .then_some(DfExpr::Column(Column::from_name(
                             DATA_SCHEMA_TSID_COLUMN_NAME,
-                        )))
-                        .into_iter(),
+                        ))),
                 )
                 .chain(Some(self.create_time_index_column_expr()?))
                 .collect::<Vec<_>>();

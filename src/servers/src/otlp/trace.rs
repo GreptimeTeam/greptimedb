@@ -13,19 +13,22 @@
 // limitations under the License.
 
 pub mod attributes;
+pub mod coerce;
 pub mod span;
 pub mod v0;
 pub mod v1;
+
+use std::collections::HashSet;
 
 use api::v1::RowInsertRequests;
 pub use common_catalog::consts::{
     PARENT_SPAN_ID_COLUMN, SPAN_ID_COLUMN, SPAN_NAME_COLUMN, TRACE_ID_COLUMN,
 };
-use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use pipeline::{GreptimePipelineParams, PipelineWay};
 use session::context::QueryContextRef;
 
 use crate::error::{NotSupportedSnafu, Result};
+use crate::otlp::trace::span::TraceSpan;
 use crate::query_handler::PipelineHandlerRef;
 
 // column names
@@ -64,33 +67,84 @@ pub const SPAN_STATUS_PREFIX: &str = "STATUS_CODE_";
 pub const SPAN_STATUS_UNSET: &str = "STATUS_CODE_UNSET";
 pub const SPAN_STATUS_ERROR: &str = "STATUS_CODE_ERROR";
 
-/// Convert SpanTraces to GreptimeDB row insert requests.
-/// Returns `InsertRequests` and total number of rows to ingest
-pub fn to_grpc_insert_requests(
-    request: ExportTraceServiceRequest,
-    pipeline: PipelineWay,
-    pipeline_params: GreptimePipelineParams,
-    table_name: String,
+/// Deduplicated auxiliary trace entities derived from successfully ingested
+/// spans.
+///
+/// The main trace table is written first. Once a span is confirmed accepted, we
+/// record the service and operation tuples here so the auxiliary tables can be
+/// updated separately without affecting span acceptance accounting.
+#[derive(Debug, Default)]
+pub struct TraceAuxData {
+    pub services: HashSet<String>,
+    pub operations: HashSet<(String, String, String)>,
+}
+
+impl TraceAuxData {
+    /// Records the auxiliary service and operation rows implied by one accepted
+    /// span.
+    pub fn observe_span(&mut self, span: &TraceSpan) {
+        if let Some(service_name) = &span.service_name {
+            self.services.insert(service_name.clone());
+            self.operations.insert((
+                service_name.clone(),
+                span.span_name.clone(),
+                span.span_kind.clone(),
+            ));
+        }
+    }
+
+    /// Returns true when no auxiliary table updates are needed.
+    pub fn is_empty(&self) -> bool {
+        self.services.is_empty() && self.operations.is_empty()
+    }
+}
+
+/// Convert a subset of trace spans to GreptimeDB row insert requests.
+pub fn to_grpc_insert_requests_from_spans(
+    spans: &[TraceSpan],
+    pipeline: &PipelineWay,
+    pipeline_params: &GreptimePipelineParams,
+    table_name: &str,
     query_ctx: &QueryContextRef,
     pipeline_handler: PipelineHandlerRef,
 ) -> Result<(RowInsertRequests, usize)> {
     match pipeline {
-        PipelineWay::OtlpTraceDirectV0 => v0::v0_to_grpc_insert_requests(
-            request,
+        PipelineWay::OtlpTraceDirectV0 => v0::v0_to_grpc_main_insert_requests(
+            spans,
             pipeline,
             pipeline_params,
             table_name,
             query_ctx,
             pipeline_handler,
         ),
-        PipelineWay::OtlpTraceDirectV1 => v1::v1_to_grpc_insert_requests(
-            request,
+        PipelineWay::OtlpTraceDirectV1 => v1::v1_to_grpc_main_insert_requests(
+            spans,
             pipeline,
             pipeline_params,
             table_name,
             query_ctx,
             pipeline_handler,
         ),
+        _ => NotSupportedSnafu {
+            feat: "Unsupported pipeline for trace",
+        }
+        .fail(),
+    }
+}
+
+/// Build insert requests for the auxiliary trace tables derived from accepted
+/// spans.
+///
+/// "Aux" here refers to the trace service and trace operation tables, not the
+/// main trace span table itself.
+pub fn to_grpc_insert_requests_for_aux_tables(
+    aux_data: TraceAuxData,
+    pipeline: &PipelineWay,
+    table_name: &str,
+) -> Result<(RowInsertRequests, usize)> {
+    match pipeline {
+        PipelineWay::OtlpTraceDirectV0 => v0::build_aux_table_requests(aux_data, table_name),
+        PipelineWay::OtlpTraceDirectV1 => v1::build_aux_table_requests(aux_data, table_name),
         _ => NotSupportedSnafu {
             feat: "Unsupported pipeline for trace",
         }

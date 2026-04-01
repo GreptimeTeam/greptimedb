@@ -61,11 +61,7 @@ impl RegionWalRange {
 
     fn next_batch_size(&self) -> Option<u64> {
         if self.current_entry_id < self.end_entry_id {
-            Some(
-                self.end_entry_id
-                    .checked_sub(self.current_entry_id)
-                    .unwrap_or_default(),
-            )
+            Some(self.end_entry_id.saturating_sub(self.current_entry_id))
         } else {
             None
         }

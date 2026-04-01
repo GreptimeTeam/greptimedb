@@ -372,6 +372,7 @@ impl IterBuilder for BatchRangeBuilder {
                 num_rows: batch.num_rows(),
                 num_batches: 1,
                 scan_cost: self.scan_cost,
+                ..Default::default()
             };
             metrics.merge_inner(&inner);
         }

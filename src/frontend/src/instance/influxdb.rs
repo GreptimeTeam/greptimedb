@@ -21,9 +21,7 @@ use client::Output;
 use common_error::ext::BoxedError;
 use common_time::Timestamp;
 use common_time::timestamp::TimeUnit;
-use servers::error::{
-    AuthSnafu, CatalogSnafu, Error, TimestampOverflowSnafu, UnexpectedResultSnafu,
-};
+use servers::error::{AuthSnafu, Error, TimestampOverflowSnafu, UnexpectedResultSnafu};
 use servers::influxdb::InfluxdbRequest;
 use servers::interceptor::{LineProtocolInterceptor, LineProtocolInterceptorRef};
 use servers::query_handler::InfluxdbLineProtocolHandler;
@@ -92,8 +90,7 @@ impl InfluxdbLineTimestampAligner<'_> {
                     &insert.table_name,
                     Some(query_context),
                 )
-                .await
-                .context(CatalogSnafu)?
+                .await?
                 .map(|x| x.schema())
                 .and_then(|schema| {
                     schema.timestamp_column().map(|col| {

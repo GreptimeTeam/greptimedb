@@ -328,7 +328,7 @@ mod tests {
             ),
         ];
         let mut builder = JsonVectorBuilder::new(JsonNativeType::Null, 1);
-        for (json, result) in jsons.into_iter().zip(results.into_iter()) {
+        for (json, result) in jsons.into_iter().zip(results) {
             push(json, &mut builder, result);
         }
         let vector = builder.to_vector();
@@ -448,7 +448,7 @@ mod tests {
         for (builder, (expect_type, expect_vector)) in builder
             .builders
             .iter()
-            .zip(expect_types.into_iter().zip(expect_vectors.into_iter()))
+            .zip(expect_types.into_iter().zip(expect_vectors))
         {
             assert_eq!(builder.json_type.name(), expect_type);
             let vector = builder.inner.to_vector_cloned();

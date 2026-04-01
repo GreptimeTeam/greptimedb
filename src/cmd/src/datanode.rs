@@ -43,7 +43,7 @@ use crate::error::{
 };
 use crate::options::{GlobalOptions, GreptimeOptions};
 
-pub const APP_NAME: &str = const_format::concatcp!(common_version::product_name(), "-datanode");
+pub const APP_NAME: &str = "greptime-datanode";
 
 type DatanodeOptions = GreptimeOptions<datanode::config::DatanodeOptions>;
 
@@ -356,7 +356,7 @@ impl StartCommand {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
     use std::io::Write;
     use std::time::Duration;
 

@@ -26,12 +26,16 @@ use snafu::{OptionExt, ResultExt};
 
 use crate::Tool;
 use crate::common::ObjectStoreConfig;
+use crate::data::export_v2::coordinator::export_data;
 use crate::data::export_v2::error::{
-    CannotResumeSchemaOnlySnafu, DataExportNotImplementedSnafu, DatabaseSnafu, EmptyResultSnafu,
-    ManifestVersionMismatchSnafu, Result, UnexpectedValueTypeSnafu,
+    ChunkTimeWindowRequiresBoundsSnafu, DatabaseSnafu, EmptyResultSnafu,
+    ManifestVersionMismatchSnafu, Result, ResumeConfigMismatchSnafu, SchemaOnlyArgsNotAllowedSnafu,
+    SchemaOnlyModeMismatchSnafu, UnexpectedValueTypeSnafu,
 };
 use crate::data::export_v2::extractor::SchemaExtractor;
-use crate::data::export_v2::manifest::{DataFormat, MANIFEST_VERSION, Manifest};
+use crate::data::export_v2::manifest::{
+    ChunkMeta, DataFormat, MANIFEST_VERSION, Manifest, TimeRange,
+};
 use crate::data::path::ddl_path_for_schema;
 use crate::data::snapshot_storage::{OpenDalStorage, SnapshotStorage, validate_uri};
 use crate::data::sql::{escape_sql_identifier, escape_sql_literal};
@@ -84,6 +88,11 @@ pub struct ExportCreateCommand {
     #[clap(long)]
     end_time: Option<String>,
 
+    /// Chunk time window (e.g., 1h, 6h, 1d, 7d).
+    /// Requires both --start-time and --end-time when specified.
+    #[clap(long, value_parser = humantime::parse_duration)]
+    chunk_time_window: Option<Duration>,
+
     /// Data format: parquet, csv, json.
     #[clap(long, value_enum, default_value = "parquet")]
     format: DataFormat,
@@ -92,7 +101,7 @@ pub struct ExportCreateCommand {
     #[clap(long)]
     force: bool,
 
-    /// Concurrency level (for future use).
+    /// Parallelism for COPY DATABASE execution (server-side, per schema per chunk).
     #[clap(long, default_value = "1")]
     parallelism: usize,
 
@@ -127,10 +136,37 @@ impl ExportCreateCommand {
         // Validate URI format
         validate_uri(&self.to).map_err(BoxedError::new)?;
 
-        if !self.schema_only {
-            return DataExportNotImplementedSnafu
+        let time_range = TimeRange::parse(self.start_time.as_deref(), self.end_time.as_deref())
+            .map_err(BoxedError::new)?;
+        if self.chunk_time_window.is_some() && !time_range.is_bounded() {
+            return ChunkTimeWindowRequiresBoundsSnafu
                 .fail()
                 .map_err(BoxedError::new);
+        }
+        if self.schema_only {
+            let mut invalid_args = Vec::new();
+            if self.start_time.is_some() {
+                invalid_args.push("--start-time");
+            }
+            if self.end_time.is_some() {
+                invalid_args.push("--end-time");
+            }
+            if self.chunk_time_window.is_some() {
+                invalid_args.push("--chunk-time-window");
+            }
+            if self.format != DataFormat::Parquet {
+                invalid_args.push("--format");
+            }
+            if self.parallelism != 1 {
+                invalid_args.push("--parallelism");
+            }
+            if !invalid_args.is_empty() {
+                return SchemaOnlyArgsNotAllowedSnafu {
+                    args: invalid_args.join(", "),
+                }
+                .fail()
+                .map_err(BoxedError::new);
+            }
         }
 
         // Parse schemas (empty vec means all schemas)
@@ -155,12 +191,18 @@ impl ExportCreateCommand {
         );
 
         Ok(Box::new(ExportCreate {
-            catalog: self.catalog.clone(),
-            schemas,
-            schema_only: self.schema_only,
-            _format: self.format,
-            force: self.force,
-            _parallelism: self.parallelism,
+            config: ExportConfig {
+                catalog: self.catalog.clone(),
+                schemas,
+                schema_only: self.schema_only,
+                format: self.format,
+                force: self.force,
+                time_range,
+                chunk_time_window: self.chunk_time_window,
+                parallelism: self.parallelism,
+                snapshot_uri: self.to.clone(),
+                storage_config: self.storage.clone(),
+            },
             storage: Box::new(storage),
             database_client,
         }))
@@ -169,14 +211,22 @@ impl ExportCreateCommand {
 
 /// Export tool implementation.
 pub struct ExportCreate {
+    config: ExportConfig,
+    storage: Box<dyn SnapshotStorage>,
+    database_client: DatabaseClient,
+}
+
+struct ExportConfig {
     catalog: String,
     schemas: Option<Vec<String>>,
     schema_only: bool,
-    _format: DataFormat,
+    format: DataFormat,
     force: bool,
-    _parallelism: usize,
-    storage: Box<dyn SnapshotStorage>,
-    database_client: DatabaseClient,
+    time_range: TimeRange,
+    chunk_time_window: Option<Duration>,
+    parallelism: usize,
+    snapshot_uri: String,
+    storage_config: ObjectStoreConfig,
 }
 
 #[async_trait]
@@ -192,12 +242,12 @@ impl ExportCreate {
         let exists = self.storage.exists().await?;
 
         if exists {
-            if self.force {
+            if self.config.force {
                 info!("Deleting existing snapshot (--force)");
                 self.storage.delete_snapshot().await?;
             } else {
                 // Resume mode - read existing manifest
-                let manifest = self.storage.read_manifest().await?;
+                let mut manifest = self.storage.read_manifest().await?;
 
                 // Check version compatibility
                 if manifest.version != MANIFEST_VERSION {
@@ -208,10 +258,7 @@ impl ExportCreate {
                     .fail();
                 }
 
-                // Cannot resume schema-only with data export
-                if manifest.schema_only && !self.schema_only {
-                    return CannotResumeSchemaOnlySnafu.fail();
-                }
+                validate_resume_config(&manifest, &self.config)?;
 
                 info!(
                     "Resuming existing snapshot: {} (completed: {}/{} chunks)",
@@ -220,22 +267,31 @@ impl ExportCreate {
                     manifest.chunks.len()
                 );
 
-                // For M1, we only handle schema-only exports
-                // M2 will add chunk resume logic
                 if manifest.is_complete() {
                     info!("Snapshot is already complete");
                     return Ok(());
                 }
 
-                // TODO: Resume data export in M2
-                info!("Data export resume not yet implemented (M2)");
+                if manifest.schema_only {
+                    return Ok(());
+                }
+
+                export_data(
+                    self.storage.as_ref(),
+                    &self.database_client,
+                    &self.config.snapshot_uri,
+                    &self.config.storage_config,
+                    &mut manifest,
+                    self.config.parallelism,
+                )
+                .await?;
                 return Ok(());
             }
         }
 
         // 2. Get schema list
-        let extractor = SchemaExtractor::new(&self.database_client, &self.catalog);
-        let schema_snapshot = extractor.extract(self.schemas.as_deref()).await?;
+        let extractor = SchemaExtractor::new(&self.database_client, &self.config.catalog);
+        let schema_snapshot = extractor.extract(self.config.schemas.as_deref()).await?;
 
         let schema_names: Vec<String> = schema_snapshot
             .schemas
@@ -245,7 +301,14 @@ impl ExportCreate {
         info!("Exporting schemas: {:?}", schema_names);
 
         // 3. Create manifest
-        let manifest = Manifest::new_schema_only(self.catalog.clone(), schema_names.clone());
+        let mut manifest = Manifest::new_for_export(
+            self.config.catalog.clone(),
+            schema_names.clone(),
+            self.config.schema_only,
+            self.config.time_range.clone(),
+            self.config.format,
+            self.config.chunk_time_window,
+        )?;
 
         // 4. Write schema files
         self.storage.write_schema(&schema_snapshot).await?;
@@ -259,13 +322,27 @@ impl ExportCreate {
             info!("Exported DDL for schema {} to {}", schema, ddl_path);
         }
 
-        // 6. Write manifest last.
+        // 6. Write manifest after schema artifacts and before any data export.
         //
         // The manifest is the snapshot commit point: only write it after the schema
         // index and all DDL files are durable, so a crash cannot leave a "valid"
-        // snapshot that is missing required schema artifacts.
+        // snapshot that is missing required schema artifacts. For full exports we
+        // still need the manifest before data copy starts, because chunk resume is
+        // tracked by updating this manifest in place.
         self.storage.write_manifest(&manifest).await?;
         info!("Snapshot created: {}", manifest.snapshot_id);
+
+        if !self.config.schema_only {
+            export_data(
+                self.storage.as_ref(),
+                &self.database_client,
+                &self.config.snapshot_uri,
+                &self.config.storage_config,
+                &mut manifest,
+                self.config.parallelism,
+            )
+            .await?;
+        }
 
         Ok(())
     }
@@ -321,7 +398,7 @@ impl ExportCreate {
             "SELECT table_name, table_type FROM information_schema.tables \
              WHERE table_catalog = '{}' AND table_schema = '{}' \
              AND (table_type = 'BASE TABLE' OR table_type = 'VIEW')",
-            escape_sql_literal(&self.catalog),
+            escape_sql_literal(&self.config.catalog),
             escape_sql_literal(schema)
         );
         let records: Option<Vec<Vec<Value>>> = self
@@ -359,7 +436,7 @@ impl ExportCreate {
         let sql = format!(
             "SELECT DISTINCT table_name FROM information_schema.columns \
              WHERE table_catalog = '{}' AND table_schema = '{}' AND column_name = '__tsid'",
-            escape_sql_literal(&self.catalog),
+            escape_sql_literal(&self.config.catalog),
             escape_sql_literal(schema)
         );
         let records: Option<Vec<Vec<Value>>> = self
@@ -392,14 +469,14 @@ impl ExportCreate {
             Some(table) => format!(
                 r#"SHOW CREATE {} "{}"."{}"."{}""#,
                 show_type,
-                escape_sql_identifier(&self.catalog),
+                escape_sql_identifier(&self.config.catalog),
                 escape_sql_identifier(schema),
                 escape_sql_identifier(table)
             ),
             None => format!(
                 r#"SHOW CREATE {} "{}"."{}""#,
                 show_type,
-                escape_sql_identifier(&self.catalog),
+                escape_sql_identifier(&self.config.catalog),
                 escape_sql_identifier(schema)
             ),
         };
@@ -442,8 +519,118 @@ fn build_schema_ddl(
     ddl
 }
 
+fn validate_resume_config(manifest: &Manifest, config: &ExportConfig) -> Result<()> {
+    if manifest.schema_only != config.schema_only {
+        return SchemaOnlyModeMismatchSnafu {
+            existing_schema_only: manifest.schema_only,
+            requested_schema_only: config.schema_only,
+        }
+        .fail();
+    }
+
+    if manifest.catalog != config.catalog {
+        return ResumeConfigMismatchSnafu {
+            field: "catalog",
+            existing: manifest.catalog.clone(),
+            requested: config.catalog.clone(),
+        }
+        .fail();
+    }
+
+    // If no schema filter is provided on resume, inherit the existing snapshot
+    // selection instead of reinterpreting the request as "all schemas".
+    if let Some(requested_schemas) = &config.schemas
+        && !schema_selection_matches(&manifest.schemas, requested_schemas)
+    {
+        return ResumeConfigMismatchSnafu {
+            field: "schemas",
+            existing: format_schema_selection(&manifest.schemas),
+            requested: format_schema_selection(requested_schemas),
+        }
+        .fail();
+    }
+
+    if manifest.time_range != config.time_range {
+        return ResumeConfigMismatchSnafu {
+            field: "time_range",
+            existing: format!("{:?}", manifest.time_range),
+            requested: format!("{:?}", config.time_range),
+        }
+        .fail();
+    }
+
+    if manifest.format != config.format {
+        return ResumeConfigMismatchSnafu {
+            field: "format",
+            existing: manifest.format.to_string(),
+            requested: config.format.to_string(),
+        }
+        .fail();
+    }
+
+    let expected_plan = Manifest::new_for_export(
+        manifest.catalog.clone(),
+        manifest.schemas.clone(),
+        config.schema_only,
+        config.time_range.clone(),
+        config.format,
+        config.chunk_time_window,
+    )?;
+    if !chunk_plan_matches(manifest, &expected_plan) {
+        return ResumeConfigMismatchSnafu {
+            field: "chunk plan",
+            existing: format_chunk_plan(&manifest.chunks),
+            requested: format_chunk_plan(&expected_plan.chunks),
+        }
+        .fail();
+    }
+
+    Ok(())
+}
+
+fn schema_selection_matches(existing: &[String], requested: &[String]) -> bool {
+    canonical_schema_selection(existing) == canonical_schema_selection(requested)
+}
+
+fn canonical_schema_selection(schemas: &[String]) -> Vec<String> {
+    let mut canonicalized = Vec::new();
+    let mut seen = HashSet::new();
+
+    for schema in schemas {
+        let normalized = schema.to_ascii_lowercase();
+        if seen.insert(normalized.clone()) {
+            canonicalized.push(normalized);
+        }
+    }
+
+    canonicalized.sort();
+    canonicalized
+}
+
+fn format_schema_selection(schemas: &[String]) -> String {
+    format!("[{}]", schemas.join(", "))
+}
+
+fn chunk_plan_matches(existing: &Manifest, expected: &Manifest) -> bool {
+    existing.chunks.len() == expected.chunks.len()
+        && existing
+            .chunks
+            .iter()
+            .zip(&expected.chunks)
+            .all(|(left, right)| left.id == right.id && left.time_range == right.time_range)
+}
+
+fn format_chunk_plan(chunks: &[ChunkMeta]) -> String {
+    let items = chunks
+        .iter()
+        .map(|chunk| format!("#{}:{:?}", chunk.id, chunk.time_range))
+        .collect::<Vec<_>>();
+    format!("[{}]", items.join(", "))
+}
+
 #[cfg(test)]
 mod tests {
+    use chrono::TimeZone;
     use clap::Parser;
 
     use super::*;
@@ -478,19 +665,225 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_build_rejects_non_schema_only_export() {
+    async fn test_build_rejects_chunk_window_without_bounds() {
         let cmd = ExportCreateCommand::parse_from([
             "export-v2-create",
             "--addr",
             "127.0.0.1:4000",
             "--to",
             "file:///tmp/export-v2-test",
+            "--chunk-time-window",
+            "1h",
         ]);
 
         let result = cmd.build().await;
         assert!(result.is_err());
         let error = result.err().unwrap().to_string();
 
-        assert!(error.contains("Data export is not implemented yet"));
+        assert!(error.contains("chunk_time_window requires both --start-time and --end-time"));
+    }
+
+    #[tokio::test]
+    async fn test_build_rejects_data_export_args_in_schema_only_mode() {
+        let cmd = ExportCreateCommand::parse_from([
+            "export-v2-create",
+            "--addr",
+            "127.0.0.1:4000",
+            "--to",
+            "file:///tmp/export-v2-test",
+            "--schema-only",
+            "--start-time",
+            "2024-01-01T00:00:00Z",
+            "--end-time",
+            "2024-01-02T00:00:00Z",
+            "--chunk-time-window",
+            "1h",
+            "--format",
+            "csv",
+            "--parallelism",
+            "2",
+        ]);
+
+        let error = cmd.build().await.err().unwrap().to_string();
+
+        assert!(error.contains("--schema-only cannot be used with data export arguments"));
+        assert!(error.contains("--start-time"));
+        assert!(error.contains("--end-time"));
+        assert!(error.contains("--chunk-time-window"));
+        assert!(error.contains("--format"));
+        assert!(error.contains("--parallelism"));
+    }
+
+    #[test]
+    fn test_schema_only_mode_mismatch_error_message() {
+        let error = crate::data::export_v2::error::SchemaOnlyModeMismatchSnafu {
+            existing_schema_only: false,
+            requested_schema_only: true,
+        }
+        .build()
+        .to_string();
+
+        assert!(error.contains("existing: false"));
+        assert!(error.contains("requested: true"));
+    }
+
+    #[test]
+    fn test_validate_resume_config_rejects_catalog_mismatch() {
+        let manifest = Manifest::new_for_export(
+            "greptime".to_string(),
+            vec!["public".to_string()],
+            false,
+            TimeRange::unbounded(),
+            DataFormat::Parquet,
+            None,
+        )
+        .unwrap();
+        let config = ExportConfig {
+            catalog: "other".to_string(),
+            schemas: None,
+            schema_only: false,
+            format: DataFormat::Parquet,
+            force: false,
+            time_range: TimeRange::unbounded(),
+            chunk_time_window: None,
+            parallelism: 1,
+            snapshot_uri: "file:///tmp/snapshot".to_string(),
+            storage_config: ObjectStoreConfig::default(),
+        };
+
+        let error = validate_resume_config(&manifest, &config)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("catalog"));
+    }
+
+    #[test]
+    fn test_validate_resume_config_accepts_schema_selection_with_different_case_and_order() {
+        let manifest = Manifest::new_for_export(
+            "greptime".to_string(),
+            vec!["public".to_string(), "analytics".to_string()],
+            false,
+            TimeRange::unbounded(),
+            DataFormat::Parquet,
+            None,
+        )
+        .unwrap();
+        let config = ExportConfig {
+            catalog: "greptime".to_string(),
+            schemas: Some(vec![
+                "ANALYTICS".to_string(),
+                "PUBLIC".to_string(),
+                "public".to_string(),
+            ]),
+            schema_only: false,
+            format: DataFormat::Parquet,
+            force: false,
+            time_range: TimeRange::unbounded(),
+            chunk_time_window: None,
+            parallelism: 1,
+            snapshot_uri: "file:///tmp/snapshot".to_string(),
+            storage_config: ObjectStoreConfig::default(),
+        };
+
+        assert!(validate_resume_config(&manifest, &config).is_ok());
+    }
+
+    #[test]
+    fn test_validate_resume_config_rejects_chunk_plan_mismatch() {
+        let start = chrono::Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+        let end = chrono::Utc.with_ymd_and_hms(2025, 1, 1, 2, 0, 0).unwrap();
+        let time_range = TimeRange::new(Some(start), Some(end));
+        let manifest = Manifest::new_for_export(
+            "greptime".to_string(),
+            vec!["public".to_string()],
+            false,
+            time_range.clone(),
+            DataFormat::Parquet,
+            None,
+        )
+        .unwrap();
+        let config = ExportConfig {
+            catalog: "greptime".to_string(),
+            schemas: None,
+            schema_only: false,
+            format: DataFormat::Parquet,
+            force: false,
+            time_range,
+            chunk_time_window: Some(Duration::from_secs(3600)),
+            parallelism: 1,
+            snapshot_uri: "file:///tmp/snapshot".to_string(),
+            storage_config: ObjectStoreConfig::default(),
+        };
+
+        let error = validate_resume_config(&manifest, &config)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("chunk plan"));
+    }
+
+    #[test]
+    fn test_validate_resume_config_rejects_format_mismatch() {
+        let manifest = Manifest::new_for_export(
+            "greptime".to_string(),
+            vec!["public".to_string()],
+            false,
+            TimeRange::unbounded(),
+            DataFormat::Parquet,
+            None,
+        )
+        .unwrap();
+        let config = ExportConfig {
+            catalog: "greptime".to_string(),
+            schemas: None,
+            schema_only: false,
+            format: DataFormat::Csv,
+            force: false,
+            time_range: TimeRange::unbounded(),
+            chunk_time_window: None,
+            parallelism: 1,
+            snapshot_uri: "file:///tmp/snapshot".to_string(),
+            storage_config: ObjectStoreConfig::default(),
+        };
+
+        let error = validate_resume_config(&manifest, &config)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("format"));
+    }
+
+    #[test]
+    fn test_validate_resume_config_rejects_time_range_mismatch() {
+        let start = chrono::Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+        let end = chrono::Utc.with_ymd_and_hms(2025, 1, 1, 1, 0, 0).unwrap();
+        let manifest = Manifest::new_for_export(
+            "greptime".to_string(),
+            vec!["public".to_string()],
+            false,
+            TimeRange::new(Some(start), Some(end)),
+            DataFormat::Parquet,
+            None,
+        )
+        .unwrap();
+        let config = ExportConfig {
+            catalog: "greptime".to_string(),
+            schemas: None,
+            schema_only: false,
+            format: DataFormat::Parquet,
+            force: false,
+            time_range: TimeRange::new(Some(start), Some(start)),
+            chunk_time_window: None,
+            parallelism: 1,
+            snapshot_uri: "file:///tmp/snapshot".to_string(),
+            storage_config: ObjectStoreConfig::default(),
+        };
+
+        let error = validate_resume_config(&manifest, &config)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("time_range"));
     }
 }

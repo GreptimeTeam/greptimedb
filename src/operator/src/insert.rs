@@ -103,7 +103,7 @@ pub enum AutoCreateTableType {
 }
 
 impl AutoCreateTableType {
-    fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             AutoCreateTableType::Logical(_) => "logical",
             AutoCreateTableType::Physical => "physical",
@@ -343,8 +343,7 @@ impl Inserter {
             .convert(request)
             .await?;
 
-        let table_infos =
-            HashMap::from_iter([(table_info.table_id(), table_info.clone())].into_iter());
+        let table_infos = HashMap::from_iter([(table_info.table_id(), table_info.clone())]);
 
         self.do_request(inserts, &table_infos, &ctx).await
     }
@@ -360,8 +359,7 @@ impl Inserter {
                 .convert(insert, ctx, statement_executor)
                 .await?;
 
-        let table_infos =
-            HashMap::from_iter([(table_info.table_id(), table_info.clone())].into_iter());
+        let table_infos = HashMap::from_iter([(table_info.table_id(), table_info.clone())]);
 
         self.do_request(inserts, &table_infos, ctx).await
     }

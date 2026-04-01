@@ -215,10 +215,10 @@ pub async fn show_databases(
 fn replace_column_in_expr(expr: &mut sqlparser::ast::Expr, from_column: &str, to_column: &str) {
     let _ = visit_expressions_mut(expr, |e| {
         match e {
-            sqlparser::ast::Expr::Identifier(ident) => {
-                if ident.value.eq_ignore_ascii_case(from_column) {
-                    ident.value = to_column.to_string();
-                }
+            sqlparser::ast::Expr::Identifier(ident)
+                if ident.value.eq_ignore_ascii_case(from_column) =>
+            {
+                ident.value = to_column.to_string();
             }
             sqlparser::ast::Expr::CompoundIdentifier(idents) => {
                 if let Some(last) = idents.last_mut()
@@ -748,23 +748,17 @@ pub fn show_variable(stmt: ShowVariables, query_ctx: QueryContextRef) -> Result<
                 .pg_intervalstyle_format();
             style.to_string()
         }
-        "MAX_EXECUTION_TIME" => {
-            if query_ctx.channel() == Channel::Mysql {
+        "MAX_EXECUTION_TIME"
+            if query_ctx.channel() == Channel::Mysql => {
                 query_ctx.query_timeout_as_millis().to_string()
-            } else {
-                return UnsupportedVariableSnafu { name: variable }.fail();
             }
-        }
-        "STATEMENT_TIMEOUT" => {
+        "STATEMENT_TIMEOUT"
             // Add time units to postgres query timeout display.
-            if query_ctx.channel() == Channel::Postgres {
+            if query_ctx.channel() == Channel::Postgres => {
                 let mut timeout = query_ctx.query_timeout_as_millis().to_string();
                 timeout.push_str("ms");
                 timeout
-            } else {
-                return UnsupportedVariableSnafu { name: variable }.fail();
             }
-        }
         _ => return UnsupportedVariableSnafu { name: variable }.fail(),
     };
     let schema = Arc::new(Schema::new(vec![ColumnSchema::new(

@@ -646,7 +646,7 @@ impl SeriesDivideStream {
             let tags = TagIdentifier::try_new(batch, &self.tag_indices)?;
 
             // check if the first row is the same with last batch's last row
-            if resumed_batch_index > self.inspect_start.checked_sub(1).unwrap_or_default() {
+            if resumed_batch_index > self.inspect_start.saturating_sub(1) {
                 let last_batch = &self.buffer[resumed_batch_index - 1];
                 let last_row = last_batch.num_rows() - 1;
                 let last_tags = TagIdentifier::try_new(last_batch, &self.tag_indices)?;

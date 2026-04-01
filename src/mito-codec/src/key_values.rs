@@ -431,11 +431,9 @@ mod tests {
         values: &[Option<i64>],
     ) {
         assert_eq!(num_rows, kvs.num_rows());
-        let mut expect_seq = START_SEQ;
         let expect_ts = ValueRef::Int64(ts);
-        for kv in kvs.iter() {
+        for (expect_seq, kv) in (START_SEQ..).zip(kvs.iter()) {
             assert_eq!(expect_seq, kv.sequence());
-            expect_seq += 1;
             assert_eq!(OpType::Put, kv.op_type);
             assert_eq!(keys.len(), kv.num_primary_keys());
             assert_eq!(values.len(), kv.num_fields());

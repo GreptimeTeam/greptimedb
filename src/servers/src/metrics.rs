@@ -177,6 +177,13 @@ lazy_static! {
         vec![0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0]
     )
     .unwrap();
+    pub static ref PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED: HistogramVec = register_histogram_vec!(
+        "greptime_prom_store_pending_rows_batch_flush_stage_elapsed",
+        "Elapsed time of pending rows batch flush stages in seconds",
+        &["stage"],
+        vec![0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0]
+    )
+    .unwrap();
     /// Http prometheus read duration per database.
     pub static ref METRIC_HTTP_PROM_STORE_READ_ELAPSED: HistogramVec = register_histogram_vec!(
         "greptime_servers_http_prometheus_read_elapsed",
@@ -361,7 +368,7 @@ lazy_static! {
         "maximum bytes allowed for all concurrent request bodies and messages"
     ).unwrap();
 
-    /// Total number of rejected requests due to memory exhaustion.
+    /// Total number of requests rejected due to memory exhaustion.
     pub static ref REQUEST_MEMORY_REJECTED: IntCounterVec = register_int_counter_vec!(
         "greptime_servers_request_memory_rejected_total",
         "number of requests rejected due to memory limit",

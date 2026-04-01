@@ -214,7 +214,7 @@ pub trait Mailbox: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
 
     use common_time::util::current_time_millis;
     use tokio::sync::watch;

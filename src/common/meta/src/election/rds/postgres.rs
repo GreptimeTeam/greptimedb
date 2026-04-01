@@ -829,8 +829,7 @@ impl PgElection {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
-    use std::env;
+    use std::{assert_matches, env};
 
     use deadpool_postgres::{Config, Runtime};
     use tokio_postgres::NoTls;

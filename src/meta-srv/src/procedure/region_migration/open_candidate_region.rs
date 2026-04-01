@@ -208,7 +208,7 @@ impl OpenCandidateRegion {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
     use std::collections::HashMap;
 
     use common_catalog::consts::MITO2_ENGINE;

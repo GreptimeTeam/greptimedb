@@ -96,7 +96,7 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
             .as_any()
             .downcast_ref::<Int64Array>()
             .unwrap()
-            .value(0) as i64;
+            .value(0);
 
         Ok(Self::new(range_length))
     }

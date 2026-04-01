@@ -1083,8 +1083,8 @@ impl IndexBuildScheduler {
     /// Find the next task which has the highest priority to run.
     fn find_next_task(&self) -> Option<IndexBuildTask> {
         self.region_status
-            .iter()
-            .filter_map(|(_, status)| status.pending_tasks.peek())
+            .values()
+            .filter_map(|status| status.pending_tasks.peek())
             .max()
             .cloned()
     }
