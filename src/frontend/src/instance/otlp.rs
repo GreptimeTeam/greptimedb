@@ -45,7 +45,9 @@ use snafu::ResultExt;
 use table::requests::{OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM};
 
 use crate::instance::Instance;
-use crate::metrics::{OTLP_LOGS_ROWS, OTLP_METRICS_ROWS, OTLP_TRACES_ROWS};
+use crate::metrics::{
+    OTLP_LOGS_ROWS, OTLP_METRICS_ROWS, OTLP_TRACES_FAILURE_COUNT, OTLP_TRACES_ROWS,
+};
 
 const TRACE_INGEST_CHUNK_SIZE: usize = 64;
 const TRACE_FAILURE_MESSAGE_LIMIT: usize = 4;
@@ -54,6 +56,15 @@ const TRACE_FAILURE_MESSAGE_LIMIT: usize = 4;
 enum ChunkFailureReaction {
     RetryPerSpan,
     DiscardChunk,
+}
+
+impl ChunkFailureReaction {
+    fn as_metric_label(self) -> &'static str {
+        match self {
+            Self::RetryPerSpan => "retry_per_span",
+            Self::DiscardChunk => "discard_chunk",
+        }
+    }
 }
 
 struct TraceChunkIngestContext<'a> {
@@ -285,8 +296,9 @@ impl Instance {
                     .insert_trace_requests(aux_requests, ingest_ctx.is_trace_v1_model, ctx)
                     .await
             {
-                self.push_trace_failure_message(
+                Self::push_trace_failure_message(
                     &mut ingest_state.failure_messages,
+                    "aux_table_update_failed",
                     format!(
                         "Auxiliary trace tables were not fully updated ({})",
                         err.status_code().as_ref()
@@ -337,8 +349,9 @@ impl Instance {
             }
             Err(err) => match Self::classify_trace_chunk_failure(err.status_code()) {
                 ChunkFailureReaction::RetryPerSpan => {
-                    self.push_trace_failure_message(
+                    Self::push_trace_failure_message(
                         &mut ingest_state.failure_messages,
+                        ChunkFailureReaction::RetryPerSpan.as_metric_label(),
                         format!("Chunk fallback triggered by {}", err.status_code().as_ref()),
                     );
                     // Only deterministic failures are retried span by span.
@@ -354,8 +367,9 @@ impl Instance {
                 }
                 ChunkFailureReaction::DiscardChunk => {
                     ingest_state.outcome.rejected_spans += chunk.len();
-                    self.push_trace_failure_message(
+                    Self::push_trace_failure_message(
                         &mut ingest_state.failure_messages,
+                        ChunkFailureReaction::DiscardChunk.as_metric_label(),
                         format!(
                             "Discarded {} spans after ambiguous chunk failure ({})",
                             chunk.len(),
@@ -400,8 +414,9 @@ impl Instance {
                 }
                 Err(err) => {
                     ingest_state.outcome.rejected_spans += 1;
-                    self.push_trace_failure_message(
+                    Self::push_trace_failure_message(
                         &mut ingest_state.failure_messages,
+                        "span_rejected",
                         format!(
                             "Rejected span {}:{} ({})",
                             span.trace_id,
@@ -452,7 +467,9 @@ impl Instance {
         }
     }
 
-    fn push_trace_failure_message(&self, messages: &mut Vec<String>, message: String) {
+    fn push_trace_failure_message(messages: &mut Vec<String>, label: &str, message: String) {
+        OTLP_TRACES_FAILURE_COUNT.with_label_values(&[label]).inc();
+
         if messages.len() < TRACE_FAILURE_MESSAGE_LIMIT {
             messages.push(message);
         }
@@ -705,6 +722,7 @@ mod tests {
     use common_error::status_code::StatusCode;
 
     use super::{ChunkFailureReaction, Instance};
+    use crate::metrics::OTLP_TRACES_FAILURE_COUNT;
 
     #[test]
     fn test_classify_trace_chunk_failure() {
@@ -738,5 +756,24 @@ mod tests {
         assert!(message.contains("Rejected span trace:span"));
 
         assert_eq!(Instance::finish_trace_failure_message(2, 0, vec![]), None);
+    }
+
+    #[test]
+    fn test_push_trace_failure_message_increments_labeled_counter() {
+        let label = "retry_per_span";
+        let initial = OTLP_TRACES_FAILURE_COUNT.with_label_values(&[label]).get();
+        let mut messages = Vec::new();
+
+        Instance::push_trace_failure_message(
+            &mut messages,
+            label,
+            "Chunk fallback triggered by InvalidArguments".to_string(),
+        );
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            OTLP_TRACES_FAILURE_COUNT.with_label_values(&[label]).get(),
+            initial + 1
+        );
     }
 }
