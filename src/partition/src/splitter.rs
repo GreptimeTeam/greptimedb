@@ -66,7 +66,7 @@ impl<'a> SplitReadRowHelper<'a> {
             .collect::<HashMap<_, _>>();
         let partition_cols = partition_rule.partition_columns();
         let partition_cols_indexes = partition_cols
-            .into_iter()
+            .iter()
             .map(|col_name| col_name_to_idx.get(&col_name).cloned())
             .collect::<Vec<_>>();
 
@@ -176,15 +176,25 @@ mod tests {
     }
 
     #[derive(Debug, Serialize, Deserialize)]
-    struct MockPartitionRule;
+    struct MockPartitionRule {
+        partition_columns: Vec<String>,
+    }
+
+    impl Default for MockPartitionRule {
+        fn default() -> Self {
+            Self {
+                partition_columns: vec!["id".to_string()],
+            }
+        }
+    }
 
     impl PartitionRule for MockPartitionRule {
         fn as_any(&self) -> &dyn Any {
             self
         }
 
-        fn partition_columns(&self) -> Vec<String> {
-            vec!["id".to_string()]
+        fn partition_columns(&self) -> &[String] {
+            &self.partition_columns
         }
 
         fn find_region(&self, values: &[Value]) -> Result<RegionNumber> {
@@ -206,15 +216,25 @@ mod tests {
     }
 
     #[derive(Debug, Serialize, Deserialize)]
-    struct MockMissedColPartitionRule;
+    struct MockMissedColPartitionRule {
+        partition_columns: Vec<String>,
+    }
+
+    impl Default for MockMissedColPartitionRule {
+        fn default() -> Self {
+            Self {
+                partition_columns: vec!["missed_col".to_string()],
+            }
+        }
+    }
 
     impl PartitionRule for MockMissedColPartitionRule {
         fn as_any(&self) -> &dyn Any {
             self
         }
 
-        fn partition_columns(&self) -> Vec<String> {
-            vec!["missed_col".to_string()]
+        fn partition_columns(&self) -> &[String] {
+            &self.partition_columns
         }
 
         fn find_region(&self, values: &[Value]) -> Result<RegionNumber> {
@@ -243,8 +263,8 @@ mod tests {
             self
         }
 
-        fn partition_columns(&self) -> Vec<String> {
-            vec![]
+        fn partition_columns(&self) -> &[String] {
+            &[]
         }
 
         fn find_region(&self, _values: &[Value]) -> Result<RegionNumber> {
@@ -261,7 +281,7 @@ mod tests {
     #[test]
     fn test_writer_splitter() {
         let rows = mock_rows();
-        let rule = Arc::new(MockPartitionRule) as PartitionRuleRef;
+        let rule = Arc::new(MockPartitionRule::default()) as PartitionRuleRef;
         let splitter = RowSplitter::new(rule);
 
         let mut splits = splitter.split(rows).unwrap();
@@ -276,7 +296,7 @@ mod tests {
     #[test]
     fn test_missed_col_writer_splitter() {
         let rows = mock_rows();
-        let rule = Arc::new(MockMissedColPartitionRule) as PartitionRuleRef;
+        let rule = Arc::new(MockMissedColPartitionRule::default()) as PartitionRuleRef;
 
         let splitter = RowSplitter::new(rule);
         let mut splits = splitter.split(rows).unwrap();

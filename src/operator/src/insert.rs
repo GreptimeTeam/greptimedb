@@ -103,7 +103,7 @@ pub enum AutoCreateTableType {
 }
 
 impl AutoCreateTableType {
-    fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             AutoCreateTableType::Logical(_) => "logical",
             AutoCreateTableType::Physical => "physical",

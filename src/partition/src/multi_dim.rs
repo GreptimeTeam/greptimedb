@@ -338,8 +338,8 @@ impl PartitionRule for MultiDimPartitionRule {
         self
     }
 
-    fn partition_columns(&self) -> Vec<String> {
-        self.partition_columns.clone()
+    fn partition_columns(&self) -> &[String] {
+        &self.partition_columns
     }
 
     fn find_region(&self, values: &[Value]) -> Result<RegionNumber> {
