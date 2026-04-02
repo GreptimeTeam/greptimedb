@@ -626,8 +626,10 @@ pub(crate) fn sanitize_region_options(manifest: &RegionManifest, options: &mut R
             manifest.sst_format,
             manifest.metadata.region_id,
         );
-        options.sst_format = Some(manifest.sst_format);
     }
+    // Always set sst_format from manifest to ensure it's explicitly stored,
+    // even when the default matches the manifest value.
+    options.sst_format = Some(manifest.sst_format);
     if let Some(manifest_append_mode) = manifest.append_mode
         && options.append_mode != manifest_append_mode
     {

@@ -1397,7 +1397,7 @@ async fn test_alter_region_sst_format_flat_to_pk_without_flush() {
             .sst_format;
         assert_eq!(current_format, expected);
     };
-    check_format(&engine, None);
+    check_format(&engine, Some(FormatType::Flat));
 
     // Inserts some data with flat format
     let rows = Rows {
