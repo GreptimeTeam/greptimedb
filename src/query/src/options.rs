@@ -162,6 +162,13 @@ impl FlowQueryExtensions {
         Ok(self.incremental_after_seqs.is_some())
     }
 
+    pub fn has_flow_context(&self) -> bool {
+        self.incremental_after_seqs.is_some()
+            || self.incremental_mode.is_some()
+            || self.return_region_seq
+            || self.sink_table_id.is_some()
+    }
+
     pub fn should_collect_region_watermark(&self) -> bool {
         self.return_region_seq || self.incremental_after_seqs.is_some()
     }

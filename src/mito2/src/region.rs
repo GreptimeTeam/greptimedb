@@ -318,6 +318,10 @@ impl MitoRegion {
         self.version_control.committed_sequence()
     }
 
+    pub fn flushed_sequence(&self) -> SequenceNumber {
+        self.version_control.current().version.flushed_sequence
+    }
+
     /// Returns whether the region is readonly.
     pub fn is_follower(&self) -> bool {
         self.manifest_ctx.state.load() == RegionRoleState::Follower
