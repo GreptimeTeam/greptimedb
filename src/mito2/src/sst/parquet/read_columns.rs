@@ -132,6 +132,108 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn test_reads_whole_root() {
+        let parquet_schema_desc = build_test_nested_parquet_schema();
+
+        let projection = ParquetReadColumns {
+            cols: vec![ParquetReadColumn {
+                root_index: 0,
+                nested_paths: vec![],
+            }],
+        };
+
+        assert_eq!(
+            vec![0, 1, 2],
+            build_parquet_leaves_indices(&parquet_schema_desc, &projection)
+        );
+    }
+
+    #[test]
+    fn test_filters_nested_paths() {
+        let parquet_schema_desc = build_test_nested_parquet_schema();
+
+        let projection = ParquetReadColumns {
+            cols: vec![
+                ParquetReadColumn {
+                    root_index: 0,
+                    nested_paths: vec![vec!["j".to_string(), "b".to_string()]],
+                },
+                ParquetReadColumn {
+                    root_index: 1,
+                    nested_paths: vec![],
+                },
+            ],
+        };
+
+        assert_eq!(
+            vec![1, 2, 3],
+            build_parquet_leaves_indices(&parquet_schema_desc, &projection)
+        );
+    }
+
+    #[test]
+    fn test_reads_middle_level_path() {
+        let parquet_schema_desc = build_test_nested_parquet_schema();
+
+        let projection = ParquetReadColumns {
+            cols: vec![ParquetReadColumn {
+                root_index: 0,
+                nested_paths: vec![vec!["j".to_string(), "b".to_string()]],
+            }],
+        };
+
+        assert_eq!(
+            vec![1, 2],
+            build_parquet_leaves_indices(&parquet_schema_desc, &projection)
+        );
+    }
+
+    #[test]
+    fn test_reads_leaf_level_path() {
+        let parquet_schema_desc = build_test_nested_parquet_schema();
+
+        let projection = ParquetReadColumns {
+            cols: vec![ParquetReadColumn {
+                root_index: 0,
+                nested_paths: vec![vec!["j".to_string(), "b".to_string(), "c".to_string()]],
+            }],
+        };
+
+        assert_eq!(
+            vec![1],
+            build_parquet_leaves_indices(&parquet_schema_desc, &projection)
+        );
+    }
+
+    #[test]
+    fn test_merges_mixed_paths() {
+        let parquet_schema_desc = build_test_nested_parquet_schema();
+
+        let projection = ParquetReadColumns {
+            cols: vec![ParquetReadColumn {
+                root_index: 0,
+                nested_paths: vec![
+                    vec!["j".to_string(), "a".to_string()],
+                    vec!["j".to_string(), "b".to_string(), "d".to_string()],
+                ],
+            }],
+        };
+
+        assert_eq!(
+            vec![0, 2],
+            build_parquet_leaves_indices(&parquet_schema_desc, &projection)
+        );
+    }
+
+    // Test schema:
+    // schema
+    // |- j
+    // |  |- a: INT64
+    // |  `- b
+    // |     |- c: INT64
+    // |     `- d: INT64
+    // `- k: INT64
     fn build_test_nested_parquet_schema() -> SchemaDescriptor {
         let leaf_a = Arc::new(
             Type::primitive_type_builder("a", parquet::basic::Type::INT64)
@@ -179,45 +281,5 @@ mod tests {
         );
 
         SchemaDescriptor::new(schema)
-    }
-
-    #[test]
-    fn test_build_parquet_leaves_indices_reads_whole_root() {
-        let parquet_schema_desc = build_test_nested_parquet_schema();
-
-        let projection = ParquetReadColumns {
-            cols: vec![ParquetReadColumn {
-                root_index: 0,
-                nested_paths: vec![],
-            }],
-        };
-
-        assert_eq!(
-            vec![0, 1, 2],
-            build_parquet_leaves_indices(&parquet_schema_desc, &projection)
-        );
-    }
-
-    #[test]
-    fn test_build_parquet_leaves_indices_filters_nested_paths() {
-        let parquet_schema_desc = build_test_nested_parquet_schema();
-
-        let projection = ParquetReadColumns {
-            cols: vec![
-                ParquetReadColumn {
-                    root_index: 0,
-                    nested_paths: vec![vec!["j".to_string(), "b".to_string()]],
-                },
-                ParquetReadColumn {
-                    root_index: 1,
-                    nested_paths: vec![],
-                },
-            ],
-        };
-
-        assert_eq!(
-            vec![1, 2, 3],
-            build_parquet_leaves_indices(&parquet_schema_desc, &projection)
-        );
     }
 }
