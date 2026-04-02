@@ -31,7 +31,7 @@ use snafu::{OptionExt, ResultExt};
 use crate::error::{
     CatalogSnafu, CollectRecordbatchSnafu, ExecLogicalPlanSnafu,
     PrometheusLabelValuesQueryPlanSnafu, PrometheusMetricNamesQueryPlanSnafu, ReadTableSnafu,
-    Result, TableNotFoundSnafu,
+    Result, TableNotFoundSnafu, TableSnafu,
 };
 use crate::instance::Instance;
 
@@ -120,20 +120,32 @@ impl Instance {
             })
             .unwrap_or_else(|| ctx.current_schema());
 
+        let full_table_name = format_full_table_name(ctx.current_catalog(), &table_schema, &metric);
         let table = self
             .catalog_manager
             .table(ctx.current_catalog(), &table_schema, &metric, Some(ctx))
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {
-                table_name: format_full_table_name(ctx.current_catalog(), &table_schema, &metric),
+                table_name: full_table_name.clone(),
             })?;
+
+        // Check label column existence before building the query plan so a missing label can be
+        // reported as `TableColumnNotFound` and handled like Prometheus expects.
+        if table.schema().column_schema_by_name(&label_name).is_none() {
+            return table::error::ColumnNotExistsSnafu {
+                column_name: label_name,
+                table_name: full_table_name,
+            }
+            .fail()
+            .context(TableSnafu);
+        }
 
         let dataframe = self
             .query_engine
             .read_table(table.clone())
             .with_context(|_| ReadTableSnafu {
-                table_name: format_full_table_name(ctx.current_catalog(), &table_schema, &metric),
+                table_name: full_table_name,
             })?;
 
         let scan_plan = dataframe.into_unoptimized_plan();

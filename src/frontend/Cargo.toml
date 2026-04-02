@@ -52,6 +52,7 @@ futures.workspace = true
 hostname.workspace = true
 humantime.workspace = true
 humantime-serde.workspace = true
+itertools.workspace = true
 lazy_static.workspace = true
 log-query.workspace = true
 meta-client.workspace = true

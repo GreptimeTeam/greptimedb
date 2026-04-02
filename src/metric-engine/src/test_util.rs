@@ -76,6 +76,22 @@ impl TestEnv {
         }
     }
 
+    /// Returns a new env with specific `prefix`, `mito_config`, and `config` for test.
+    pub async fn with_mito_config(
+        prefix: &str,
+        mito_config: MitoConfig,
+        config: EngineConfig,
+    ) -> Self {
+        let mut mito_env = MitoTestEnv::with_prefix(prefix).await;
+        let mito = mito_env.create_engine(mito_config).await;
+        let metric = MetricEngine::try_new(mito.clone(), config).unwrap();
+        Self {
+            mito_env,
+            mito,
+            metric,
+        }
+    }
+
     /// Returns a new env with specific `prefix` and `mito_env` for test.
     pub async fn with_mito_env(mut mito_env: MitoTestEnv) -> Self {
         let mito = mito_env.create_engine(MitoConfig::default()).await;

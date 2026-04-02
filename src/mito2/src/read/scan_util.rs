@@ -138,6 +138,10 @@ pub(crate) struct ScanMetricsSet {
     mem_batches: usize,
     /// Number of series read from memtables.
     mem_series: usize,
+    /// Duration of prefilter in memtable scan.
+    mem_prefilter_cost: Duration,
+    /// Number of rows filtered by prefilter in memtable scan.
+    mem_prefilter_rows_filtered: usize,
 
     // SST related metrics:
     /// Duration to build file ranges.
@@ -341,6 +345,8 @@ impl fmt::Debug for ScanMetricsSet {
             mem_rows,
             mem_batches,
             mem_series,
+            mem_prefilter_cost,
+            mem_prefilter_rows_filtered,
             inverted_index_apply_metrics,
             bloom_filter_apply_metrics,
             fulltext_index_apply_metrics,
@@ -508,6 +514,15 @@ impl fmt::Debug for ScanMetricsSet {
         }
         if !mem_scan_cost.is_zero() {
             write!(f, ", \"mem_scan_cost\":\"{mem_scan_cost:?}\"")?;
+        }
+        if !mem_prefilter_cost.is_zero() {
+            write!(f, ", \"mem_prefilter_cost\":\"{mem_prefilter_cost:?}\"")?;
+        }
+        if *mem_prefilter_rows_filtered > 0 {
+            write!(
+                f,
+                ", \"mem_prefilter_rows_filtered\":{mem_prefilter_rows_filtered}"
+            )?;
         }
 
         // Write optional verbose metrics if they are not empty
@@ -1061,6 +1076,8 @@ impl PartitionMetrics {
         metrics.mem_rows += data.num_rows;
         metrics.mem_batches += data.num_batches;
         metrics.mem_series += data.total_series;
+        metrics.mem_prefilter_cost += data.prefilter_cost;
+        metrics.mem_prefilter_rows_filtered += data.prefilter_rows_filtered;
     }
 
     /// Merges [ScannerMetrics], `build_reader_cost`, `scan_cost` and `yield_cost`.

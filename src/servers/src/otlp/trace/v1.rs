@@ -18,19 +18,18 @@ use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, RowInsertRequests, Value};
 use common_catalog::consts::{trace_operations_table_name, trace_services_table_name};
 use common_grpc::precision::Precision;
-use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use opentelemetry_proto::tonic::common::v1::any_value::Value as OtlpValue;
 use pipeline::{GreptimePipelineParams, PipelineWay};
 use session::context::QueryContextRef;
 
 use crate::error::Result;
 use crate::otlp::trace::attributes::Attributes;
-use crate::otlp::trace::span::{TraceSpan, parse};
+use crate::otlp::trace::span::TraceSpan;
 use crate::otlp::trace::{
     DURATION_NANO_COLUMN, KEY_SERVICE_NAME, PARENT_SPAN_ID_COLUMN, SCOPE_NAME_COLUMN,
     SCOPE_VERSION_COLUMN, SERVICE_NAME_COLUMN, SPAN_EVENTS_COLUMN, SPAN_ID_COLUMN,
     SPAN_KIND_COLUMN, SPAN_NAME_COLUMN, SPAN_STATUS_CODE, SPAN_STATUS_MESSAGE_COLUMN,
-    TIMESTAMP_COLUMN, TRACE_ID_COLUMN, TRACE_STATE_COLUMN,
+    TIMESTAMP_COLUMN, TRACE_ID_COLUMN, TRACE_STATE_COLUMN, TraceAuxData,
 };
 use crate::otlp::utils::{any_value_to_jsonb, make_column_data, make_string_column_data};
 use crate::query_handler::PipelineHandlerRef;
@@ -41,64 +40,52 @@ const APPROXIMATE_COLUMN_COUNT: usize = 30;
 // Use a timestamp(2100-01-01 00:00:00) as large as possible.
 const MAX_TIMESTAMP: i64 = 4102444800000000000;
 
-/// Convert SpanTraces to GreptimeDB row insert requests.
-/// Returns `InsertRequests` and total number of rows to ingest
+/// Converts trace spans into row insert requests for the main v1 trace table.
 ///
-/// Compared with v0, this v1 implementation:
-/// 1. flattens all attribute data into columns.
-/// 2. treat `span_id` and `parent_trace_id` as fields.
-/// 3. removed `service_name` column because it's already in
-///    `resource_attributes.service_name`
-///
-/// For other compound data structures like span_links and span_events here we
-/// are still using `json` data structure.
-pub fn v1_to_grpc_insert_requests(
-    request: ExportTraceServiceRequest,
-    _pipeline: PipelineWay,
-    _pipeline_params: GreptimePipelineParams,
-    table_name: String,
+/// Auxiliary service and operation table writes are built separately so the
+/// caller can update them only after the main span write succeeds.
+pub fn v1_to_grpc_main_insert_requests(
+    spans: &[TraceSpan],
+    _pipeline: &PipelineWay,
+    _pipeline_params: &GreptimePipelineParams,
+    table_name: &str,
     _query_ctx: &QueryContextRef,
     _pipeline_handler: PipelineHandlerRef,
 ) -> Result<(RowInsertRequests, usize)> {
-    let spans = parse(request);
     let mut multi_table_writer = MultiTableData::default();
+    let trace_writer = build_trace_table_data(spans)?;
+    multi_table_writer.add_table_data(table_name, trace_writer);
+
+    Ok(multi_table_writer.into_row_insert_requests())
+}
+
+/// Builds the row-oriented payload for the main v1 trace table.
+pub fn build_trace_table_data(spans: &[TraceSpan]) -> Result<TableData> {
     let mut trace_writer = TableData::new(APPROXIMATE_COLUMN_COUNT, spans.len());
+    for span in spans.iter().cloned() {
+        write_span_to_row(&mut trace_writer, span)?;
+    }
+
+    Ok(trace_writer)
+}
+
+/// Builds row insert requests for the v1 trace auxiliary tables.
+pub fn build_aux_table_requests(
+    aux_data: TraceAuxData,
+    table_name: &str,
+) -> Result<(RowInsertRequests, usize)> {
+    let mut multi_table_writer = MultiTableData::default();
     let mut trace_services_writer = TableData::new(APPROXIMATE_COLUMN_COUNT, 1);
     let mut trace_operations_writer = TableData::new(APPROXIMATE_COLUMN_COUNT, 1);
 
-    let mut services = HashSet::new();
-    let mut operations = HashSet::new();
-    for span in spans {
-        if let Some(service_name) = &span.service_name {
-            // Only insert the service name if it's not already in the set.
-            if !services.contains(service_name) {
-                services.insert(service_name.clone());
-            }
+    write_trace_services_to_row(&mut trace_services_writer, aux_data.services)?;
+    write_trace_operations_to_row(&mut trace_operations_writer, aux_data.operations)?;
 
-            // Only insert the operation if it's not already in the set.
-            let operation = (
-                service_name.clone(),
-                span.span_name.clone(),
-                span.span_kind.clone(),
-            );
-            if !operations.contains(&operation) {
-                operations.insert(operation);
-            }
-        }
-        write_span_to_row(&mut trace_writer, span)?;
-    }
-    write_trace_services_to_row(&mut trace_services_writer, services)?;
-    write_trace_operations_to_row(&mut trace_operations_writer, operations)?;
-
+    multi_table_writer.add_table_data(trace_services_table_name(table_name), trace_services_writer);
     multi_table_writer.add_table_data(
-        trace_services_table_name(&table_name),
-        trace_services_writer,
-    );
-    multi_table_writer.add_table_data(
-        trace_operations_table_name(&table_name),
+        trace_operations_table_name(table_name),
         trace_operations_writer,
     );
-    multi_table_writer.add_table_data(table_name, trace_writer);
 
     Ok(multi_table_writer.into_row_insert_requests())
 }
@@ -319,13 +306,38 @@ mod tests {
     use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue};
 
     use super::*;
+    use crate::otlp::trace::TraceAuxData;
     use crate::otlp::trace::attributes::Attributes;
+    use crate::otlp::trace::span::{SpanEvents, SpanLinks};
     use crate::row_writer::TableData;
 
     fn make_kv(key: &str, value: OtlpValue) -> KeyValue {
         KeyValue {
             key: key.to_string(),
             value: Some(AnyValue { value: Some(value) }),
+        }
+    }
+
+    fn make_span(service_name: &str, trace_id: &str, span_id: &str) -> TraceSpan {
+        TraceSpan {
+            service_name: Some(service_name.to_string()),
+            trace_id: trace_id.to_string(),
+            span_id: span_id.to_string(),
+            parent_span_id: None,
+            resource_attributes: Attributes::from(vec![]),
+            scope_name: "scope".to_string(),
+            scope_version: "v1".to_string(),
+            scope_attributes: Attributes::from(vec![]),
+            trace_state: String::new(),
+            span_name: "op".to_string(),
+            span_kind: "SPAN_KIND_SERVER".to_string(),
+            span_status_code: "STATUS_CODE_UNSET".to_string(),
+            span_status_message: String::new(),
+            span_attributes: Attributes::from(vec![]),
+            span_events: SpanEvents::from(vec![]),
+            span_links: SpanLinks::from(vec![]),
+            start_in_nanosecond: 1,
+            end_in_nanosecond: 2,
         }
     }
 
@@ -519,6 +531,23 @@ mod tests {
             rows[1].values[col_idx].value_data,
             Some(ValueData::StringValue("false".to_string()))
         );
+    }
+
+    #[test]
+    fn test_build_aux_table_requests_deduplicates_services_and_operations() {
+        let spans = vec![
+            make_span("svc-a", "trace-a", "span-a"),
+            make_span("svc-a", "trace-b", "span-b"),
+        ];
+        let mut aux_data = TraceAuxData::default();
+        for span in &spans {
+            aux_data.observe_span(span);
+        }
+
+        let (requests, total_rows) =
+            build_aux_table_requests(aux_data, "opentelemetry_traces").unwrap();
+        assert_eq!(requests.inserts.len(), 2);
+        assert_eq!(total_rows, 2);
     }
     // Conversion matrix coverage lives in the shared coercion helper tests.
 }

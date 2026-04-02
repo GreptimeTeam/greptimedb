@@ -567,6 +567,7 @@ impl Iter {
                 num_rows: self.metrics.num_rows,
                 num_batches: self.metrics.num_batches,
                 scan_cost: self.metrics.scan_cost,
+                ..Default::default()
             };
             mem_scan_metrics.merge_inner(&inner);
         }

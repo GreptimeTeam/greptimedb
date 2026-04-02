@@ -25,6 +25,10 @@ pub(crate) fn ddl_path_for_schema(schema: &str) -> String {
     )
 }
 
+pub(crate) fn data_dir_for_schema_chunk(schema: &str, chunk_id: u32) -> String {
+    format!("data/{}/{}/", encode_path_segment(schema), chunk_id)
+}
+
 pub(crate) fn encode_path_segment(value: &str) -> String {
     let mut encoded = String::with_capacity(value.len());
     for byte in value.bytes() {
@@ -71,6 +75,15 @@ mod tests {
         assert_eq!(
             ddl_path_for_schema("../evil"),
             "schema/ddl/%2E%2E%2Fevil.sql"
+        );
+    }
+
+    #[test]
+    fn test_data_dir_for_schema_chunk_encodes_schema_segment() {
+        assert_eq!(data_dir_for_schema_chunk("public", 1), "data/public/1/");
+        assert_eq!(
+            data_dir_for_schema_chunk("../evil", 7),
+            "data/%2E%2E%2Fevil/7/"
         );
     }
 }

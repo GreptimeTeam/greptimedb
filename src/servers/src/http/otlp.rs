@@ -29,7 +29,7 @@ use opentelemetry_proto::tonic::collector::logs::v1::{
 };
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceResponse;
 use opentelemetry_proto::tonic::collector::trace::v1::{
-    ExportTraceServiceRequest, ExportTraceServiceResponse,
+    ExportTracePartialSuccess, ExportTraceServiceRequest, ExportTraceServiceResponse,
 };
 use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
 use pipeline::PipelineWay;
@@ -175,11 +175,16 @@ pub async fn traces(
             query_ctx,
         )
         .await
-        .map(|o| OtlpResponse {
+        .map(|outcome| OtlpResponse {
             resp_body: ExportTraceServiceResponse {
-                partial_success: None,
+                partial_success: outcome.error_message.map(|error_message| {
+                    ExportTracePartialSuccess {
+                        rejected_spans: outcome.rejected_spans as i64,
+                        error_message,
+                    }
+                }),
             },
-            write_cost: o.meta.cost,
+            write_cost: outcome.write_cost,
         })
 }
 

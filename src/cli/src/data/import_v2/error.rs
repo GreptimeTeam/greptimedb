@@ -45,6 +45,16 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Importing data from full snapshots is not implemented yet (snapshot has {} chunk(s))",
+        chunk_count
+    ))]
+    FullSnapshotImportNotSupported {
+        chunk_count: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Snapshot storage error"))]
     SnapshotStorage {
         #[snafu(source)]
@@ -67,10 +77,10 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::SnapshotNotFound { .. } | Error::SchemaNotInSnapshot { .. } => {
-                StatusCode::InvalidArguments
-            }
-            Error::ManifestVersionMismatch { .. } => StatusCode::InvalidArguments,
+            Error::SnapshotNotFound { .. }
+            | Error::SchemaNotInSnapshot { .. }
+            | Error::ManifestVersionMismatch { .. }
+            | Error::FullSnapshotImportNotSupported { .. } => StatusCode::InvalidArguments,
             Error::Database { error, .. } => error.status_code(),
             Error::SnapshotStorage { error, .. } => error.status_code(),
         }
