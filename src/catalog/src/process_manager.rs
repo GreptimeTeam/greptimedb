@@ -395,7 +395,7 @@ impl SlowQueryTimer {
 
 impl Drop for SlowQueryTimer {
     fn drop(&mut self) {
-        // Calculate the elaspsed duration since the timer is created.
+        // Calculate the elapsed duration since the timer is created.
         let elapsed = self.start.elapsed();
         if elapsed > self.threshold {
             // Only capture a portion of slow queries based on sample_ratio.
