@@ -1232,6 +1232,7 @@ impl MemtableCompactor {
                 max_timestamp,
                 max_sequence,
                 estimated_series_count,
+                metadata,
             );
 
             common_telemetry::trace!(
