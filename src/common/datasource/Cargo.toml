@@ -28,7 +28,6 @@ common-runtime.workspace = true
 common-telemetry.workspace = true
 datafusion.workspace = true
 datafusion-datasource.workspace = true
-datafusion-orc.workspace = true
 datatypes.workspace = true
 futures.workspace = true
 lazy_static.workspace = true
@@ -47,3 +46,4 @@ url.workspace = true
 
 [dev-dependencies]
 common-test-util.workspace = true
+datafusion-orc.workspace = true
