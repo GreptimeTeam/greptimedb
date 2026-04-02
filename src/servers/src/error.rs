@@ -52,6 +52,8 @@ pub enum Error {
     Arrow {
         #[snafu(source)]
         error: arrow_schema::ArrowError,
+        #[snafu(implicit)]
+        location: Location,
     },
 
     #[snafu(display("Internal error: {}", err_msg))]
@@ -701,7 +703,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to submit batch"))]
+    #[snafu(display("Failed to submit batch: {}", source))]
     SubmitBatch { source: Arc<Error> },
 }
 

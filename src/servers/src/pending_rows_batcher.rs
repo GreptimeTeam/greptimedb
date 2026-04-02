@@ -1157,11 +1157,7 @@ fn strip_partition_columns_from_batch(batch: RecordBatch) -> Result<RecordBatch>
         }
     );
     let essential_indices: Vec<usize> = (0..PHYSICAL_REGION_ESSENTIAL_COLUMN_COUNT).collect();
-    batch
-        .project(&essential_indices)
-        .map_err(|err| Error::Internal {
-            err_msg: format!("Failed to project essential columns from RecordBatch: {err}"),
-        })
+    batch.project(&essential_indices).context(error::ArrowSnafu)
 }
 
 async fn flush_region_writes_concurrently(
@@ -1245,6 +1241,16 @@ async fn flush_batch(
     notify_waiters(waiters, result);
 }
 
+/// Flushes a batch of logical table rows by transforming them into the physical table format
+/// and writing them to the appropriate datanode regions.
+///
+/// This function performs the end-to-end physical flush pipeline:
+/// 1. Resolves the physical table metadata and column ID mapping.
+/// 2. Fetches the physical table's partition rule.
+/// 3. Transforms each logical table batch into the physical (sparse primary key) format.
+/// 4. Concatenates all transformed batches into a single combined batch.
+/// 5. Splits the combined batch by partition rule and sends region write requests
+///    concurrently to the target datanodes.
 pub async fn flush_batch_physical(
     table_batches: &[TableBatch],
     physical_table_name: &str,
@@ -1289,16 +1295,7 @@ pub async fn flush_batch_physical(
             .start_timer();
         partition_manager
             .find_table_partition_rule(physical_table_info.as_ref())
-            .await
-            .map_err(|err| {
-                error::InternalSnafu {
-                    err_msg: format!(
-                        "Failed to fetch partition rule for physical table '{}': {:?}",
-                        physical_table_name, err
-                    ),
-                }
-                .build()
-            })?
+            .await?
     };
     let partition_columns = partition_rule.partition_columns();
     let partition_columns_set: HashSet<&str> =
@@ -1334,7 +1331,8 @@ fn transform_logical_batches_to_physical(
     name_to_ids: &HashMap<String, u32>,
     partition_columns_set: &HashSet<&str>,
 ) -> Result<Vec<RecordBatch>> {
-    let mut modified_batches: Vec<RecordBatch> = Vec::with_capacity(table_batches.len());
+    let mut modified_batches: Vec<RecordBatch> =
+        Vec::with_capacity(table_batches.iter().map(|b| b.batches.len()).sum());
 
     let mut modify_elapsed = Duration::ZERO;
     let mut columns_taxonomy_elapsed = Duration::ZERO;
