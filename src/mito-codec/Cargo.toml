@@ -26,8 +26,8 @@ snafu.workspace = true
 store-api.workspace = true
 
 [dev-dependencies]
-criterion = "0.7"
 common-query.workspace = true
+criterion = "0.7"
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
 
