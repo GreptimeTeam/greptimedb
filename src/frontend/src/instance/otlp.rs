@@ -595,7 +595,7 @@ impl Instance {
                 });
         };
 
-        if observed_types.iter().copied().all(|request_type| {
+        if observed_types.iter().all(|&request_type| {
             request_type == existing_type
                 || is_supported_trace_coercion(request_type, existing_type)
         }) {
