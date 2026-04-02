@@ -1532,6 +1532,17 @@ impl MultiBulkPart {
                 &pruning_stats,
                 region_meta.schema.arrow_schema(),
             );
+            let total = self.batches.len();
+            let pruned = mask.iter().filter(|&&s| !s).count();
+            common_telemetry::info!(
+                "MultiBulkPart batch pruning: region={}, total_batches={}, pruned_batches={}, total_rows={}, min_values={:?}, max_values={:?}",
+                region_meta.region_id,
+                total,
+                pruned,
+                self.total_rows,
+                stats.min_values,
+                stats.max_values,
+            );
             self.batches
                 .iter()
                 .zip(mask.iter())
