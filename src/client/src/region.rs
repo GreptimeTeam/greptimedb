@@ -16,7 +16,10 @@ use std::sync::Arc;
 
 use api::region::RegionResponse;
 use api::v1::ResponseHeader;
-use api::v1::region::RegionRequest;
+use api::v1::region::{
+    RegionRequest, RegionRequestHeader, RemoteDynFilterRequest, RemoteDynFilterUnregister,
+    RemoteDynFilterUpdate, region_request, remote_dyn_filter_request,
+};
 use arc_swap::ArcSwapOption;
 use arrow_flight::Ticket;
 use async_stream::stream;
@@ -284,6 +287,48 @@ impl RegionRequester {
     pub async fn handle(&self, request: RegionRequest) -> Result<RegionResponse> {
         self.handle_inner(request).await
     }
+
+    pub async fn handle_remote_dyn_filter_update(
+        &self,
+        query_id: impl Into<String>,
+        update: RemoteDynFilterUpdate,
+    ) -> Result<RegionResponse> {
+        self.handle_inner(build_remote_dyn_filter_request(
+            query_id.into(),
+            remote_dyn_filter_request::Action::Update(update),
+        ))
+        .await
+    }
+
+    pub async fn handle_remote_dyn_filter_unregister(
+        &self,
+        query_id: impl Into<String>,
+        unregister: RemoteDynFilterUnregister,
+    ) -> Result<RegionResponse> {
+        self.handle_inner(build_remote_dyn_filter_request(
+            query_id.into(),
+            remote_dyn_filter_request::Action::Unregister(unregister),
+        ))
+        .await
+    }
+}
+
+fn build_remote_dyn_filter_request(
+    query_id: String,
+    action: remote_dyn_filter_request::Action,
+) -> RegionRequest {
+    RegionRequest {
+        header: Some(RegionRequestHeader {
+            tracing_context: TracingContext::from_current_span().to_w3c(),
+            ..Default::default()
+        }),
+        body: Some(region_request::Body::RemoteDynFilter(
+            RemoteDynFilterRequest {
+                query_id,
+                action: Some(action),
+            },
+        )),
+    }
 }
 
 pub fn check_response_header(header: &Option<ResponseHeader>) -> Result<()> {
@@ -312,6 +357,7 @@ pub fn check_response_header(header: &Option<ResponseHeader>) -> Result<()> {
 #[cfg(test)]
 mod test {
     use api::v1::Status as PbStatus;
+    use api::v1::region::{RemoteDynFilterUpdate, region_request, remote_dyn_filter_request};
 
     use super::*;
     use crate::Error::{IllegalDatabaseResponse, Server};
@@ -360,5 +406,31 @@ mod test {
         };
         assert_eq!(code, StatusCode::Internal);
         assert_eq!(msg, "blabla");
+    }
+
+    #[test]
+    fn test_build_remote_dyn_filter_request_sets_header_and_body() {
+        let request = build_remote_dyn_filter_request(
+            "query-1".to_string(),
+            remote_dyn_filter_request::Action::Update(RemoteDynFilterUpdate {
+                filter_id: "filter-1".to_string(),
+                payload: vec![1, 2, 3],
+                generation: 7,
+                is_complete: false,
+            }),
+        );
+
+        request.header.expect("remote dyn filter header must exist");
+
+        let body = request.body.expect("remote dyn filter body must exist");
+        let region_request::Body::RemoteDynFilter(remote_request) = body else {
+            panic!("expected remote dyn filter request body");
+        };
+
+        assert_eq!(remote_request.query_id, "query-1");
+        assert!(matches!(
+            remote_request.action,
+            Some(remote_dyn_filter_request::Action::Update(_))
+        ));
     }
 }
