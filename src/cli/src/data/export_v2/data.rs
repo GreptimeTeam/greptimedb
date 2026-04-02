@@ -432,9 +432,21 @@ mod tests {
     #[test]
     fn test_build_copy_target_decodes_file_uri_path() {
         let storage = ObjectStoreConfig::default();
-        let target = build_copy_target("file:///tmp/my%20backup", &storage, "public", 7)
+        let snapshot_root = std::env::temp_dir().join("my backup");
+        let snapshot_uri = Url::from_file_path(&snapshot_root)
+            .expect("absolute platform path should convert to file:// URI")
+            .to_string();
+        let expected = normalize_path(&format!(
+            "{}/{}",
+            snapshot_root.to_string_lossy(),
+            data_dir_for_schema_chunk("public", 7)
+        ));
+        let target = build_copy_target(&snapshot_uri, &storage, "public", 7)
             .expect("file:// copy target should be built");
 
-        assert_eq!(target.location, "/tmp/my backup/data/public/7/");
+        assert!(snapshot_uri.contains("%20"));
+        assert!(!target.location.contains("%20"));
+        assert!(target.location.contains("my backup"));
+        assert_eq!(target.location, expected);
     }
 }
