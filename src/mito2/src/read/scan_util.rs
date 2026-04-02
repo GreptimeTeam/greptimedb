@@ -1585,3 +1585,235 @@ pub(crate) fn split_record_batch(record_batch: RecordBatch, batches: &mut VecDeq
         batches.push_back(record_batch.slice(start, rows_in_batch));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    use common_time::Timestamp;
+    use smallvec::{SmallVec, smallvec};
+    use store_api::storage::RegionId;
+
+    use super::*;
+    use crate::cache::CacheStrategy;
+    use crate::memtable::{
+        BoxedBatchIterator, BoxedRecordBatchIterator, IterBuilder, MemtableRange,
+        MemtableRangeContext, MemtableStats,
+    };
+    use crate::read::projection::ProjectionMapper;
+    use crate::read::range::{MemRangeBuilder, SourceIndex};
+    use crate::read::scan_region::ScanInput;
+    use crate::sst::file::{FileHandle, FileMeta};
+    use crate::sst::file_purger::NoopFilePurger;
+    use crate::test_util::memtable_util::metadata_for_test;
+    use crate::test_util::scheduler_util::SchedulerEnv;
+
+    struct EmptyIterBuilder;
+
+    impl IterBuilder for EmptyIterBuilder {
+        fn build(&self, _metrics: Option<MemScanMetrics>) -> Result<BoxedBatchIterator> {
+            Ok(Box::new(std::iter::empty()))
+        }
+
+        fn is_record_batch(&self) -> bool {
+            true
+        }
+
+        fn build_record_batch(
+            &self,
+            _time_range: Option<(Timestamp, Timestamp)>,
+            _metrics: Option<MemScanMetrics>,
+        ) -> Result<BoxedRecordBatchIterator> {
+            Ok(Box::new(std::iter::empty()))
+        }
+    }
+
+    async fn new_test_stream_ctx(
+        files: Vec<FileHandle>,
+        memtables: Vec<MemRangeBuilder>,
+    ) -> Arc<StreamContext> {
+        let env = SchedulerEnv::new().await;
+        let metadata = metadata_for_test();
+        let mapper = ProjectionMapper::new(&metadata, [0, 2, 3].into_iter()).unwrap();
+        let input = ScanInput::new(env.access_layer.clone(), mapper)
+            .with_cache(CacheStrategy::Disabled)
+            .with_memtables(memtables)
+            .with_files(files);
+
+        Arc::new(StreamContext {
+            input,
+            ranges: Vec::new(),
+            scan_fingerprint: None,
+            query_start: Instant::now(),
+        })
+    }
+
+    fn new_test_file(num_rows: u64, num_series: u64) -> FileHandle {
+        let meta = FileMeta {
+            region_id: RegionId::new(123, 456),
+            file_id: Default::default(),
+            time_range: (
+                Timestamp::new_millisecond(0),
+                Timestamp::new_millisecond(1000),
+            ),
+            num_rows,
+            num_series,
+            ..Default::default()
+        };
+        FileHandle::new(meta, Arc::new(NoopFilePurger))
+    }
+
+    fn new_test_memtable(num_rows: usize, series_count: usize) -> MemRangeBuilder {
+        let context = Arc::new(MemtableRangeContext::new(
+            0,
+            Box::new(EmptyIterBuilder),
+            Default::default(),
+        ));
+        let stats = MemtableStats {
+            time_range: Some((
+                Timestamp::new_millisecond(0),
+                Timestamp::new_millisecond(1000),
+            )),
+            num_rows,
+            num_ranges: 1,
+            series_count,
+            ..Default::default()
+        };
+        let range = MemtableRange::new(context, stats.clone());
+        MemRangeBuilder::new(range, stats)
+    }
+
+    fn new_test_range_meta(row_group_indices: SmallVec<[RowGroupIndex; 2]>) -> RangeMeta {
+        let indices = row_group_indices
+            .iter()
+            .map(|row_group_index| SourceIndex {
+                index: row_group_index.index,
+                num_row_groups: 1,
+            })
+            .collect();
+
+        RangeMeta {
+            time_range: (
+                Timestamp::new_millisecond(0),
+                Timestamp::new_millisecond(1000),
+            ),
+            indices,
+            row_group_indices,
+            num_rows: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_should_split_flat_batches_for_merge_uses_splittable_file_rows_per_series() {
+        let num_rows = SPLIT_ROW_THRESHOLD * 2;
+        let num_series = (num_rows / 100).max(1);
+        let stream_ctx =
+            new_test_stream_ctx(vec![new_test_file(num_rows, num_series)], vec![]).await;
+        let range_meta = new_test_range_meta(smallvec![RowGroupIndex {
+            index: 0,
+            row_group_index: 0,
+        }]);
+
+        assert_eq!(
+            Some((num_rows / num_series) as usize),
+            should_split_flat_batches_for_merge(&stream_ctx, &range_meta)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_split_flat_batches_for_merge_skips_small_or_unknown_series_files() {
+        let stream_ctx = new_test_stream_ctx(
+            vec![
+                new_test_file(SPLIT_ROW_THRESHOLD.saturating_sub(1), 1),
+                new_test_file(SPLIT_ROW_THRESHOLD * 2, 0),
+            ],
+            vec![],
+        )
+        .await;
+        let range_meta = new_test_range_meta(smallvec![
+            RowGroupIndex {
+                index: 0,
+                row_group_index: 0,
+            },
+            RowGroupIndex {
+                index: 1,
+                row_group_index: 0,
+            }
+        ]);
+
+        assert_eq!(
+            None,
+            should_split_flat_batches_for_merge(&stream_ctx, &range_meta)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_split_flat_batches_for_merge_returns_none_for_unsplittable_file() {
+        let num_series =
+            (SPLIT_ROW_THRESHOLD / (BATCH_SIZE_THRESHOLD - 1)).max(NUM_SERIES_THRESHOLD) + 1;
+        let stream_ctx =
+            new_test_stream_ctx(vec![new_test_file(SPLIT_ROW_THRESHOLD, num_series)], vec![]).await;
+        let range_meta = new_test_range_meta(smallvec![RowGroupIndex {
+            index: 0,
+            row_group_index: 0,
+        }]);
+
+        assert_eq!(
+            None,
+            should_split_flat_batches_for_merge(&stream_ctx, &range_meta)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_split_flat_batches_for_merge_falls_back_to_memtables() {
+        let stream_ctx = new_test_stream_ctx(vec![], vec![new_test_memtable(5_000, 100)]).await;
+        let range_meta = new_test_range_meta(smallvec![RowGroupIndex {
+            index: 0,
+            row_group_index: 0,
+        }]);
+
+        assert_eq!(
+            Some(50),
+            should_split_flat_batches_for_merge(&stream_ctx, &range_meta)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_split_flat_batches_for_merge_clamps_estimate() {
+        let stream_ctx =
+            new_test_stream_ctx(vec![new_test_file(SPLIT_ROW_THRESHOLD * 2, 1)], vec![]).await;
+        let range_meta = new_test_range_meta(smallvec![RowGroupIndex {
+            index: 0,
+            row_group_index: 0,
+        }]);
+
+        assert_eq!(
+            Some(DEFAULT_READ_BATCH_SIZE),
+            should_split_flat_batches_for_merge(&stream_ctx, &range_meta)
+        );
+    }
+
+    #[test]
+    fn test_compute_parallel_channel_size_clamps_to_max_for_small_batches() {
+        assert_eq!(64, compute_parallel_channel_size(0));
+        assert_eq!(64, compute_parallel_channel_size(1));
+    }
+
+    #[test]
+    fn test_compute_parallel_channel_size_returns_expected_mid_range_size() {
+        assert_eq!(
+            4,
+            compute_parallel_channel_size(DEFAULT_READ_BATCH_SIZE / 2)
+        );
+    }
+
+    #[test]
+    fn test_compute_parallel_channel_size_clamps_to_min_for_large_batches() {
+        assert_eq!(2, compute_parallel_channel_size(DEFAULT_READ_BATCH_SIZE));
+        assert_eq!(
+            2,
+            compute_parallel_channel_size(DEFAULT_READ_BATCH_SIZE * 2)
+        );
+    }
+}
