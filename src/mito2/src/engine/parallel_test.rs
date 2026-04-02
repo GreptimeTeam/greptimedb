@@ -33,13 +33,11 @@ async fn scan_in_parallel(
     region_id: RegionId,
     table_dir: &str,
     parallelism: usize,
-    channel_size: usize,
     flat_format: bool,
 ) {
     let engine = env
         .open_engine(MitoConfig {
             default_experimental_flat_format: flat_format,
-            parallel_scan_channel_size: channel_size,
             ..Default::default()
         })
         .await;
@@ -146,15 +144,13 @@ async fn test_parallel_scan_with_format(flat_format: bool) {
 
     engine.stop().await.unwrap();
 
-    scan_in_parallel(&mut env, region_id, &table_dir, 0, 1, flat_format).await;
+    scan_in_parallel(&mut env, region_id, &table_dir, 0, flat_format).await;
 
-    scan_in_parallel(&mut env, region_id, &table_dir, 1, 1, flat_format).await;
+    scan_in_parallel(&mut env, region_id, &table_dir, 1, flat_format).await;
 
-    scan_in_parallel(&mut env, region_id, &table_dir, 2, 1, flat_format).await;
+    scan_in_parallel(&mut env, region_id, &table_dir, 2, flat_format).await;
 
-    scan_in_parallel(&mut env, region_id, &table_dir, 2, 8, flat_format).await;
+    scan_in_parallel(&mut env, region_id, &table_dir, 4, flat_format).await;
 
-    scan_in_parallel(&mut env, region_id, &table_dir, 4, 8, flat_format).await;
-
-    scan_in_parallel(&mut env, region_id, &table_dir, 8, 2, flat_format).await;
+    scan_in_parallel(&mut env, region_id, &table_dir, 8, flat_format).await;
 }

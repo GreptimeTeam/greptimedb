@@ -48,11 +48,11 @@ use crate::sst::file::{FileTimeRange, RegionFileId};
 use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplyMetrics;
 use crate::sst::index::fulltext_index::applier::FulltextIndexApplyMetrics;
 use crate::sst::index::inverted_index::applier::InvertedIndexApplyMetrics;
-use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
 use crate::sst::parquet::file_range::FileRange;
 use crate::sst::parquet::flat_format::time_index_column_index;
 use crate::sst::parquet::reader::{MetadataCacheMetrics, ReaderFilterMetrics, ReaderMetrics};
 use crate::sst::parquet::row_group::ParquetFetchMetrics;
+use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, DEFAULT_ROW_GROUP_SIZE};
 
 /// Per-file scan metrics.
 #[derive(Default, Clone)]
@@ -1231,15 +1231,19 @@ const NUM_SERIES_THRESHOLD: u64 = 10240;
 /// 60 samples per hour.
 const BATCH_SIZE_THRESHOLD: u64 = 50;
 
-/// Returns true if splitting flat record batches may improve merge performance.
+/// Returns the estimated rows per batch after splitting if splitting flat record batches
+/// may improve merge performance. Returns `None` if splitting is not beneficial.
 pub(crate) fn should_split_flat_batches_for_merge(
     stream_ctx: &Arc<StreamContext>,
     range_meta: &RangeMeta,
-) -> bool {
+) -> Option<usize> {
     // Number of files to split and scan.
     let mut num_files_to_split = 0;
     let mut num_mem_rows = 0;
     let mut num_mem_series = 0;
+    // Total rows and series for estimating batch size after splitting.
+    let mut total_rows: u64 = 0;
+    let mut total_series: u64 = 0;
     // Checks each file range, returns early if any range is not splittable.
     // For mem ranges, we collect the total number of rows and series because the number of rows in a
     // mem range may be too small.
@@ -1261,23 +1265,49 @@ pub(crate) fn should_split_flat_batches_for_merge(
             debug_assert!(file.meta_ref().num_rows > 0);
             if !can_split_series(file.meta_ref().num_rows, file.meta_ref().num_series) {
                 // We can't split batches in a file.
-                return false;
+                return None;
             } else {
                 num_files_to_split += 1;
+                total_rows += file.meta_ref().num_rows;
+                total_series += file.meta_ref().num_series;
             }
         }
         // Skips non-file and non-mem ranges.
     }
 
-    if num_files_to_split > 0 {
+    let should_split = if num_files_to_split > 0 {
         // We mainly consider file ranges because they have enough data for sampling.
         true
-    } else if num_mem_series > 0 && num_mem_rows > 0 {
-        // If we don't have files to scan, we check whether to split by the memtable.
-        can_split_series(num_mem_rows as u64, num_mem_series as u64)
+    } else if num_mem_series > 0
+        && num_mem_rows > 0
+        && can_split_series(num_mem_rows as u64, num_mem_series as u64)
+    {
+        total_rows += num_mem_rows as u64;
+        total_series += num_mem_series as u64;
+        true
     } else {
         false
+    };
+
+    if !should_split {
+        return None;
     }
+
+    // Estimate rows per batch after splitting.
+    let estimated_batch_size = if total_series > 0 && total_rows > 0 {
+        ((total_rows / total_series) as usize).clamp(1, DEFAULT_READ_BATCH_SIZE)
+    } else {
+        // No valid estimate available, use a conservative fallback.
+        DEFAULT_READ_BATCH_SIZE / 4
+    };
+    Some(estimated_batch_size)
+}
+
+/// Computes the channel size for parallel scan based on the estimated rows per batch.
+/// The channel should buffer approximately `2 * DEFAULT_READ_BATCH_SIZE` rows.
+pub(crate) fn compute_parallel_channel_size(estimated_rows_per_batch: usize) -> usize {
+    let size = 2 * DEFAULT_READ_BATCH_SIZE / estimated_rows_per_batch.max(1);
+    size.clamp(2, 64)
 }
 
 fn can_split_series(num_rows: u64, num_series: u64) -> bool {

@@ -43,8 +43,8 @@ use crate::read::pruner::{PartitionPruner, Pruner};
 use crate::read::range::RangeMeta;
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{
-    PartitionMetrics, PartitionMetricsList, SplitRecordBatchStream, scan_flat_file_ranges,
-    scan_flat_mem_ranges, should_split_flat_batches_for_merge,
+    PartitionMetrics, PartitionMetricsList, SplitRecordBatchStream, compute_parallel_channel_size,
+    scan_flat_file_ranges, scan_flat_mem_ranges, should_split_flat_batches_for_merge,
 };
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
 use crate::read::{BoxedRecordBatchStream, ScannerMetrics, scan_util};
@@ -176,7 +176,14 @@ impl SeqScan {
             partition_ranges.len(),
             sources.len()
         );
-        Self::build_flat_reader_from_sources(stream_ctx, sources, None, None).await
+        Self::build_flat_reader_from_sources(
+            stream_ctx,
+            sources,
+            None,
+            None,
+            compute_parallel_channel_size(DEFAULT_READ_BATCH_SIZE),
+        )
+        .await
     }
 
     /// Builds a flat reader to read sources that returns RecordBatch. If `semaphore` is provided, reads sources in parallel
@@ -187,13 +194,16 @@ impl SeqScan {
         mut sources: Vec<BoxedRecordBatchStream>,
         semaphore: Option<Arc<Semaphore>>,
         part_metrics: Option<&PartitionMetrics>,
+        channel_size: usize,
     ) -> Result<BoxedRecordBatchStream> {
         if let Some(semaphore) = semaphore.as_ref() {
             // Read sources in parallel.
             if sources.len() > 1 {
-                sources = stream_ctx
-                    .input
-                    .create_parallel_flat_sources(sources, semaphore.clone())?;
+                sources = stream_ctx.input.create_parallel_flat_sources(
+                    sources,
+                    semaphore.clone(),
+                    channel_size,
+                )?;
             }
         }
 
@@ -322,7 +332,7 @@ impl SeqScan {
             // Scans each part.
             for part_range in partition_ranges {
                 let mut sources = Vec::new();
-                build_flat_sources(
+                let split_batch_size = build_flat_sources(
                     &stream_ctx,
                     &part_range,
                     compaction,
@@ -332,8 +342,11 @@ impl SeqScan {
                     file_scan_semaphore.clone(),
                 ).await?;
 
+                let channel_size = compute_parallel_channel_size(
+                    split_batch_size.unwrap_or(DEFAULT_READ_BATCH_SIZE),
+                );
                 let mut reader =
-                    Self::build_flat_reader_from_sources(&stream_ctx, sources, semaphore.clone(), Some(&part_metrics))
+                    Self::build_flat_reader_from_sources(&stream_ctx, sources, semaphore.clone(), Some(&part_metrics), channel_size)
                         .await?;
 
                 let mut metrics = ScannerMetrics {
@@ -529,6 +542,7 @@ impl fmt::Debug for SeqScan {
 }
 
 /// Builds flat sources for the partition range and push them to the `sources` vector.
+/// Returns the estimated rows per batch after splitting if splitting is applied, or `None`.
 pub(crate) async fn build_flat_sources(
     stream_ctx: &Arc<StreamContext>,
     part_range: &PartitionRange,
@@ -537,7 +551,7 @@ pub(crate) async fn build_flat_sources(
     partition_pruner: Arc<PartitionPruner>,
     sources: &mut Vec<BoxedRecordBatchStream>,
     semaphore: Option<Arc<Semaphore>>,
-) -> Result<()> {
+) -> Result<Option<usize>> {
     // Gets range meta.
     let range_meta = &stream_ctx.ranges[part_range.identifier];
     #[cfg(debug_assertions)]
@@ -561,10 +575,11 @@ pub(crate) async fn build_flat_sources(
     };
     let num_indices = range_meta.row_group_indices.len();
     if num_indices == 0 {
-        return Ok(());
+        return Ok(None);
     }
 
-    let should_split = should_split_flat_batches_for_merge(stream_ctx, range_meta);
+    let split_batch_size = should_split_flat_batches_for_merge(stream_ctx, range_meta);
+    let should_split = split_batch_size.is_some();
     sources.reserve(num_indices);
     let mut ordered_sources = Vec::with_capacity(num_indices);
     ordered_sources.resize_with(num_indices, || None);
@@ -642,7 +657,7 @@ pub(crate) async fn build_flat_sources(
         );
     }
 
-    Ok(())
+    Ok(split_batch_size)
 }
 
 #[cfg(test)]

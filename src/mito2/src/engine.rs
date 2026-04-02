@@ -1027,7 +1027,6 @@ impl EngineInner {
             request,
             CacheStrategy::EnableAll(cache_manager),
         )
-        .with_parallel_scan_channel_size(self.config.parallel_scan_channel_size)
         .with_max_concurrent_scan_files(self.config.max_concurrent_scan_files)
         .with_ignore_inverted_index(self.config.inverted_index.apply_on_query.disabled())
         .with_ignore_fulltext_index(self.config.fulltext_index.apply_on_query.disabled())

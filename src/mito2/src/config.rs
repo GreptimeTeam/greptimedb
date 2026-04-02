@@ -33,8 +33,6 @@ use crate::memtable::MemtableConfig;
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
 
 const MULTIPART_UPLOAD_MINIMUM_SIZE: ReadableSize = ReadableSize::mb(5);
-/// Default channel size for parallel scan task.
-pub(crate) const DEFAULT_SCAN_CHANNEL_SIZE: usize = 32;
 /// Default maximum number of SST files to scan concurrently.
 pub(crate) const DEFAULT_MAX_CONCURRENT_SCAN_FILES: usize = 384;
 
@@ -142,8 +140,6 @@ pub struct MitoConfig {
     // Other configs:
     /// Buffer size for SST writing.
     pub sst_write_buffer_size: ReadableSize,
-    /// Capacity of the channel to send data from parallel scan tasks to the main task (default 32).
-    pub parallel_scan_channel_size: usize,
     /// Maximum number of SST files to scan concurrently (default 384).
     pub max_concurrent_scan_files: usize,
     /// Whether to allow stale entries read during replay.
@@ -217,7 +213,6 @@ impl Default for MitoConfig {
             enable_refill_cache_on_read: true,
             manifest_cache_size: ReadableSize::mb(256),
             sst_write_buffer_size: DEFAULT_WRITE_BUFFER_SIZE,
-            parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
             max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
             allow_stale_entries: false,
             scan_memory_limit: MemoryLimit::default(),
@@ -292,14 +287,6 @@ impl MitoConfig {
             warn!(
                 "Sanitize sst write buffer size to {}",
                 self.sst_write_buffer_size
-            );
-        }
-
-        if self.parallel_scan_channel_size < 1 {
-            self.parallel_scan_channel_size = DEFAULT_SCAN_CHANNEL_SIZE;
-            warn!(
-                "Sanitize scan channel size to {}",
-                self.parallel_scan_channel_size
             );
         }
 

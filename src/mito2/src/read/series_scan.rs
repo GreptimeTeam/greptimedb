@@ -47,9 +47,12 @@ use crate::error::{
 use crate::read::ScannerMetrics;
 use crate::read::pruner::{PartitionPruner, Pruner};
 use crate::read::scan_region::{ScanInput, StreamContext};
-use crate::read::scan_util::{PartitionMetrics, PartitionMetricsList, SeriesDistributorMetrics};
+use crate::read::scan_util::{
+    PartitionMetrics, PartitionMetricsList, SeriesDistributorMetrics, compute_parallel_channel_size,
+};
 use crate::read::seq_scan::{SeqScan, build_flat_sources};
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
+use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::PrimaryKeyArray;
 
@@ -482,10 +485,11 @@ impl SeriesDistributor {
 
         // Scans all parts.
         let mut sources = Vec::with_capacity(self.partitions.len());
+        let mut min_batch_size: Option<usize> = None;
         for partition in &self.partitions {
             sources.reserve(partition.len());
             for part_range in partition {
-                build_flat_sources(
+                let split_batch_size = build_flat_sources(
                     &self.stream_ctx,
                     part_range,
                     false,
@@ -495,15 +499,21 @@ impl SeriesDistributor {
                     self.semaphore.clone(),
                 )
                 .await?;
+                if let Some(size) = split_batch_size {
+                    min_batch_size = Some(min_batch_size.map_or(size, |cur| cur.min(size)));
+                }
             }
         }
 
         // Builds a flat reader that merge sources from all parts.
+        let channel_size =
+            compute_parallel_channel_size(min_batch_size.unwrap_or(DEFAULT_READ_BATCH_SIZE));
         let mut reader = SeqScan::build_flat_reader_from_sources(
             &self.stream_ctx,
             sources,
             self.semaphore.clone(),
             Some(&part_metrics),
+            channel_size,
         )
         .await?;
         let mut metrics = SeriesDistributorMetrics::default();
