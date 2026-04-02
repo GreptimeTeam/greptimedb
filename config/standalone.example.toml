@@ -638,7 +638,7 @@ scan_memory_on_exhausted = "fail"
 min_compaction_interval = "0m"
 
 ## Whether to enable experimental flat format as the default format.
-default_experimental_flat_format = false
+default_experimental_flat_format = true
 
 ## The options for index in Mito engine.
 [region_engine.mito.index]

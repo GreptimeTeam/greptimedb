@@ -230,7 +230,7 @@ impl Default for MitoConfig {
             vector_index: VectorIndexConfig::default(),
             memtable: MemtableConfig::default(),
             min_compaction_interval: Duration::from_secs(0),
-            default_experimental_flat_format: false,
+            default_experimental_flat_format: true,
             gc: GcConfig::default(),
         };
 
