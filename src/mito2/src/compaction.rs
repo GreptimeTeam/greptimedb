@@ -848,7 +848,7 @@ impl CompactionSstReaderBuilder<'_> {
     }
 
     fn build_scan_input(self) -> Result<ScanInput> {
-        let mapper = ProjectionMapper::all(&self.metadata, true)?;
+        let mapper = ProjectionMapper::all(&self.metadata)?;
         let mut scan_input = ScanInput::new(self.sst_layer, mapper)
             .with_files(self.inputs.to_vec())
             .with_append_mode(self.append_mode)
@@ -857,8 +857,7 @@ impl CompactionSstReaderBuilder<'_> {
             .with_filter_deleted(self.filter_deleted)
             // We ignore file not found error during compaction.
             .with_ignore_file_not_found(true)
-            .with_merge_mode(self.merge_mode)
-            .with_flat_format(true);
+            .with_merge_mode(self.merge_mode);
 
         // This serves as a workaround of https://github.com/GreptimeTeam/greptimedb/issues/3944
         // by converting time ranges into predicate.

@@ -175,6 +175,7 @@ impl FileRange {
     }
 
     /// Returns a reader to read the [FileRange].
+    #[allow(dead_code)]
     pub(crate) async fn reader(
         &self,
         selector: Option<TimeSeriesRowSelector>,

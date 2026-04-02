@@ -141,8 +141,6 @@ pub struct ParquetReaderBuilder {
     /// This is usually the latest metadata of the region. The reader use
     /// it get the correct column id of a column by name.
     expected_metadata: Option<RegionMetadataRef>,
-    /// Whether to use flat format for reading.
-    flat_format: bool,
     /// Whether this reader is for compaction.
     compaction: bool,
     /// Mode to pre-filter columns.
@@ -176,7 +174,6 @@ impl ParquetReaderBuilder {
             #[cfg(feature = "vector_index")]
             vector_index_k: None,
             expected_metadata: None,
-            flat_format: false,
             compaction: false,
             pre_filter_mode: PreFilterMode::All,
             decode_primary_key_values: false,
@@ -257,13 +254,6 @@ impl ParquetReaderBuilder {
         self
     }
 
-    /// Sets the flat format flag.
-    #[must_use]
-    pub fn flat_format(mut self, flat_format: bool) -> Self {
-        self.flat_format = flat_format;
-        self
-    }
-
     /// Sets the compaction flag.
     #[must_use]
     pub fn compaction(mut self, compaction: bool) -> Self {
@@ -304,8 +294,7 @@ impl ParquetReaderBuilder {
     pub async fn build(&self) -> Result<Option<ParquetReader>> {
         let mut metrics = ReaderMetrics::default();
 
-        let Some((context, selection)) = self.build_reader_input_inner(&mut metrics, true).await?
-        else {
+        let Some((context, selection)) = self.build_reader_input_inner(&mut metrics).await? else {
             return Ok(None);
         };
         ParquetReader::new(Arc::new(context), selection)
@@ -327,14 +316,12 @@ impl ParquetReaderBuilder {
         &self,
         metrics: &mut ReaderMetrics,
     ) -> Result<Option<(FileRangeContext, RowGroupSelection)>> {
-        self.build_reader_input_inner(metrics, self.flat_format)
-            .await
+        self.build_reader_input_inner(metrics).await
     }
 
     async fn build_reader_input_inner(
         &self,
         metrics: &mut ReaderMetrics,
-        flat_format: bool,
     ) -> Result<Option<(FileRangeContext, RowGroupSelection)>> {
         let start = Instant::now();
 
@@ -376,7 +363,6 @@ impl ParquetReaderBuilder {
         // before compat handling.
         let compaction_projection_mapper = if self.compaction
             && !is_same_region_partition
-            && flat_format
             && region_meta.primary_key_encoding == PrimaryKeyEncoding::Sparse
         {
             Some(CompactionProjectionMapper::try_new(&region_meta)?)
@@ -388,7 +374,7 @@ impl ParquetReaderBuilder {
             ReadFormat::new(
                 region_meta.clone(),
                 Some(column_ids),
-                flat_format,
+                true, // Always reads as flat format.
                 Some(parquet_meta.file_metadata().schema_descr().num_columns()),
                 &file_path,
                 skip_auto_convert,
@@ -404,7 +390,7 @@ impl ParquetReaderBuilder {
             ReadFormat::new(
                 region_meta.clone(),
                 Some(&column_ids),
-                flat_format,
+                true, // Always reads as flat format.
                 Some(parquet_meta.file_metadata().schema_descr().num_columns()),
                 &file_path,
                 skip_auto_convert,
@@ -2060,6 +2046,7 @@ impl RowGroupReaderContext for FileRangeContextRef {
 /// [RowGroupReader] that reads from [FileRange].
 pub(crate) type RowGroupReader = RowGroupReaderBase<FileRangeContextRef>;
 
+#[allow(dead_code)]
 impl RowGroupReader {
     /// Creates a new reader from file range.
     pub(crate) fn new(
@@ -2084,6 +2071,7 @@ pub(crate) struct RowGroupReaderBase<T> {
     override_sequence: Option<ArrayRef>,
 }
 
+#[allow(dead_code)]
 impl<T> RowGroupReaderBase<T>
 where
     T: RowGroupReaderContext,

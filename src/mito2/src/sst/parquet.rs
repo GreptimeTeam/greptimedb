@@ -895,7 +895,6 @@ mod tests {
             handle.clone(),
             object_store.clone(),
         )
-        .flat_format(true)
         .predicate(Some(Predicate::new(preds)))
         .inverted_index_appliers([inverted_index_applier.clone(), None])
         .bloom_filter_index_appliers([bloom_filter_applier.clone(), None])
@@ -960,7 +959,6 @@ mod tests {
             handle.clone(),
             object_store.clone(),
         )
-        .flat_format(true)
         .predicate(Some(Predicate::new(preds)))
         .inverted_index_appliers([inverted_index_applier.clone(), None])
         .bloom_filter_index_appliers([bloom_filter_applier.clone(), None])
@@ -1015,7 +1013,6 @@ mod tests {
             handle.clone(),
             object_store.clone(),
         )
-        .flat_format(true)
         .predicate(Some(Predicate::new(preds)))
         .inverted_index_appliers([inverted_index_applier.clone(), None])
         .bloom_filter_index_appliers([bloom_filter_applier.clone(), None])
@@ -1549,7 +1546,6 @@ mod tests {
             handle.clone(),
             object_store.clone(),
         )
-        .flat_format(true)
         .predicate(Some(Predicate::new(preds)))
         .inverted_index_appliers([inverted_index_applier.clone(), None])
         .cache(CacheStrategy::EnableAll(cache.clone()));
@@ -1652,7 +1648,6 @@ mod tests {
             handle.clone(),
             object_store.clone(),
         )
-        .flat_format(true)
         .predicate(Some(Predicate::new(preds)))
         .bloom_filter_index_appliers([None, bloom_filter_applier.clone()])
         .cache(CacheStrategy::EnableAll(cache.clone()));
@@ -1712,7 +1707,6 @@ mod tests {
 
         let builder =
             ParquetReaderBuilder::new(FILE_DIR.to_string(), PathType::Bare, handle, object_store)
-                .flat_format(true)
                 .predicate(Some(Predicate::new(vec![col("tag_0").eq(lit("a"))])));
 
         let mut metrics = ReaderMetrics::default();
@@ -1774,7 +1768,6 @@ mod tests {
 
         let builder =
             ParquetReaderBuilder::new(FILE_DIR.to_string(), PathType::Bare, handle, object_store)
-                .flat_format(true)
                 .predicate(Some(Predicate::new(vec![col("tag_0").eq(lit("a"))])));
 
         let mut metrics = ReaderMetrics::default();
@@ -1884,7 +1877,6 @@ mod tests {
             handle.clone(),
             object_store.clone(),
         )
-        .flat_format(true)
         .predicate(Some(Predicate::new(preds)))
         .inverted_index_appliers([inverted_index_applier.clone(), None])
         .cache(CacheStrategy::EnableAll(cache.clone()));
@@ -1991,7 +1983,6 @@ mod tests {
             handle.clone(),
             object_store.clone(),
         )
-        .flat_format(true)
         .predicate(Some(Predicate::new(preds)))
         .bloom_filter_index_appliers([None, bloom_filter_applier.clone()])
         .cache(CacheStrategy::EnableAll(cache.clone()));
@@ -2255,7 +2246,6 @@ mod tests {
             handle.clone(),
             object_store.clone(),
         )
-        .flat_format(true)
         .predicate(Some(Predicate::new(preds)))
         .fulltext_index_appliers([None, fulltext_applier.clone()])
         .cache(CacheStrategy::EnableAll(cache.clone()));
@@ -2304,7 +2294,6 @@ mod tests {
             handle.clone(),
             object_store.clone(),
         )
-        .flat_format(true)
         .predicate(Some(Predicate::new(preds)))
         .fulltext_index_appliers([None, fulltext_applier.clone()])
         .cache(CacheStrategy::EnableAll(cache.clone()));

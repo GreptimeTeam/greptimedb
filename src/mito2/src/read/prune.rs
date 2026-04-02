@@ -30,11 +30,13 @@ use crate::sst::file::FileTimeRange;
 use crate::sst::parquet::file_range::FileRangeContextRef;
 use crate::sst::parquet::reader::{FlatRowGroupReader, ReaderMetrics, RowGroupReader};
 
+#[allow(dead_code)]
 pub enum Source {
     RowGroup(RowGroupReader),
     LastRow(RowGroupLastRowCachedReader),
 }
 
+#[allow(dead_code)]
 impl Source {
     async fn next_batch(&mut self) -> Result<Option<Batch>> {
         match self {
@@ -44,6 +46,7 @@ impl Source {
     }
 }
 
+#[allow(dead_code)]
 pub struct PruneReader {
     /// Context for file ranges.
     context: FileRangeContextRef,
@@ -53,6 +56,7 @@ pub struct PruneReader {
     skip_fields: bool,
 }
 
+#[allow(dead_code)]
 impl PruneReader {
     pub(crate) fn new_with_row_group_reader(
         ctx: FileRangeContextRef,

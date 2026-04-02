@@ -211,7 +211,6 @@ impl ObjbenchCommand {
             object_store.clone(),
         )
         .expected_metadata(Some(region_meta.clone()))
-        .flat_format(true)
         .build()
         .await
         .map_err(|e| {
