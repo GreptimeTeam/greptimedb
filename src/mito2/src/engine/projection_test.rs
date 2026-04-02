@@ -19,7 +19,7 @@ use datafusion_common::ScalarValue;
 use datafusion_expr::{col, lit};
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::RegionRequest;
-use store_api::storage::{RegionId, ScanRequest};
+use store_api::storage::{ProjectionInput, RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
 use crate::test_util::batch_util::sort_batches_and_print;
@@ -106,8 +106,9 @@ async fn test_scan_projection_with_format(flat_format: bool) {
     put_rows(&engine, region_id, rows).await;
 
     // Scans tag_1, field_1, ts
+    let projection_input = Some(ProjectionInput::new().with_projection(vec![1, 3, 4]));
     let request = ScanRequest {
-        projection: Some(vec![1, 3, 4]),
+        projection_input,
         filters: Vec::new(),
         ..Default::default()
     };
@@ -183,8 +184,9 @@ async fn test_scan_projection_without_primary_key_with_format(flat_format: bool)
     put_rows(&engine, region_id, rows).await;
 
     // Scan with projection on field_0 and field_1, filter ts >= 2s
+    let projection_input = Some(ProjectionInput::new().with_projection(vec![0, 1]));
     let request = ScanRequest {
-        projection: Some(vec![0, 1]), // field_0 and field_1 (not ts)
+        projection_input, // field_0 and field_1 (not ts)
         filters: vec![col("ts").gt_eq(lit(ScalarValue::TimestampMillisecond(Some(2000), None)))],
         ..Default::default()
     };
