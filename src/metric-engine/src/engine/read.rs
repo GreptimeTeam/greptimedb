@@ -21,7 +21,6 @@ use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadataBuilder, RegionMetadataRef};
 use store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME;
 use store_api::region_engine::{RegionEngine, RegionScannerRef};
-// use store_api::storage::{ProjectionInput, RegionId, ScanRequest, SequenceNumber};
 use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 
 use crate::engine::MetricEngineInner;
