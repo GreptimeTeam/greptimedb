@@ -45,7 +45,7 @@ use servers::query_handler::{
     OpenTelemetryProtocolHandler, PipelineHandlerRef, TraceIngestOutcome,
 };
 use session::context::QueryContextRef;
-use snafu::ResultExt;
+use snafu::{IntoError, ResultExt};
 use table::requests::{OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM};
 
 use crate::instance::Instance;
@@ -684,15 +684,7 @@ impl Instance {
                 "failed to widen trace columns before insert"
             );
 
-            return error::InternalSnafu {
-                err_msg: format!(
-                    "failed to widen trace columns {:?} in table '{}' to Float64 after alter failure ({})",
-                    column_names,
-                    table_name,
-                    err.status_code().as_ref()
-                ),
-            }
-            .fail();
+            return Err(wrap_trace_alter_failure(err));
         }
 
         Ok(())
@@ -812,6 +804,8 @@ impl Instance {
                 continue;
             }
 
+            validate_trace_column_rewrites(&rows.rows, &pending_rewrites, &req.table_name)?;
+
             if !pending_alter_columns.is_empty() {
                 self.alter_trace_table_columns_to_float64(
                     ctx,
@@ -866,6 +860,52 @@ impl Instance {
     }
 }
 
+/// Validate all pending trace column rewrites before any schema mutation happens.
+fn validate_trace_column_rewrites(
+    rows: &[api::v1::Row],
+    pending_rewrites: &[PendingTraceColumnRewrite],
+    table_name: &str,
+) -> ServerResult<()> {
+    for row in rows {
+        for pending_rewrite in pending_rewrites {
+            let Some(value) = row.values.get(pending_rewrite.col_idx) else {
+                continue;
+            };
+            let Some(request_type) = value.value_data.as_ref().and_then(trace_value_datatype)
+            else {
+                continue;
+            };
+            if request_type == pending_rewrite.target_type {
+                continue;
+            }
+
+            coerce_value_data(&value.value_data, pending_rewrite.target_type, request_type)
+                .map_err(|_| {
+                    error::InvalidParameterSnafu {
+                        reason: format!(
+                            "failed to coerce trace column '{}' in table '{}' from {:?} to {:?}",
+                            pending_rewrite.column_name,
+                            table_name,
+                            request_type,
+                            pending_rewrite.target_type
+                        ),
+                    }
+                    .build()
+                })?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Preserve the original alter failure status so chunk retry behavior stays correct.
+fn wrap_trace_alter_failure<E>(err: E) -> servers::error::Error
+where
+    E: ErrorExt + Send + Sync + 'static,
+{
+    error::ExecuteGrpcQuerySnafu.into_error(BoxedError::new(err))
+}
+
 fn enrich_trace_reconcile_error(
     table_name: &str,
     column_name: &str,
@@ -914,12 +954,16 @@ fn push_observed_trace_type(observed_types: &mut Vec<ColumnDataType>, datatype: 
 
 #[cfg(test)]
 mod tests {
-    use api::v1::ColumnDataType;
+    use api::v1::value::ValueData;
+    use api::v1::{ColumnDataType, Row, Value};
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
     use servers::query_handler::TraceIngestOutcome;
 
-    use super::{ChunkFailureReaction, Instance, TraceReconcileDecision};
+    use super::{
+        ChunkFailureReaction, Instance, PendingTraceColumnRewrite, TraceReconcileDecision,
+        validate_trace_column_rewrites, wrap_trace_alter_failure,
+    };
     use crate::metrics::OTLP_TRACES_FAILURE_COUNT;
 
     #[test]
@@ -1133,5 +1177,37 @@ mod tests {
                 ColumnDataType::Float64
             ))
         );
+    }
+
+    #[test]
+    fn test_validate_trace_column_rewrites_rejects_invalid_string_parse() {
+        let rows = vec![Row {
+            values: vec![Value {
+                value_data: Some(ValueData::StringValue("not_a_number".to_string())),
+            }],
+        }];
+        let pending_rewrites = vec![PendingTraceColumnRewrite {
+            col_idx: 0,
+            target_type: ColumnDataType::Int64,
+            column_name: "span_attributes.attr_int".to_string(),
+        }];
+
+        let err = validate_trace_column_rewrites(&rows, &pending_rewrites, "trace_type_atomicity")
+            .unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::InvalidArguments);
+    }
+
+    #[test]
+    fn test_wrap_trace_alter_failure_preserves_status_code() {
+        let err = wrap_trace_alter_failure(
+            servers::error::TableNotFoundSnafu {
+                catalog: "greptime".to_string(),
+                schema: "public".to_string(),
+                table: "trace_type_missing".to_string(),
+            }
+            .build(),
+        );
+
+        assert_eq!(err.status_code(), StatusCode::TableNotFound);
     }
 }

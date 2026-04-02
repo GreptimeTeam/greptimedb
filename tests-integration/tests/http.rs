@@ -5572,6 +5572,80 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
     )
     .await;
 
+    let existing_int_atomic_table_name = "trace_type_existing_int_widen_atomic";
+    let existing_int_atomic_seed_req = make_trace_v1_request(
+        "type-existing-int-atomic",
+        vec![make_trace_v1_span(
+            "00000000000000000000000000000054",
+            "0000000000000054",
+            "existing-int-atomic-seed",
+            1_736_480_942_445_720_000,
+            1_736_480_942_445_820_000,
+            vec![
+                make_int_attr("attr_num", 1),
+                make_int_attr("attr_parse", 10),
+            ],
+        )],
+    );
+    let res = send_trace_v1_req(
+        &client,
+        existing_int_atomic_table_name,
+        existing_int_atomic_seed_req,
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    let existing_int_atomic_req = make_trace_v1_request(
+        "type-existing-int-atomic",
+        vec![make_trace_v1_span(
+            "00000000000000000000000000000055",
+            "0000000000000055",
+            "existing-int-atomic-invalid",
+            1_736_480_942_445_830_000,
+            1_736_480_942_445_930_000,
+            vec![
+                make_double_attr("attr_num", 3.5),
+                make_string_attr("attr_parse", "not_a_number"),
+            ],
+        )],
+    );
+    let res = send_trace_v1_req(
+        &client,
+        existing_int_atomic_table_name,
+        existing_int_atomic_req,
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+    let body = ExportTraceServiceResponse::decode(res.bytes().await).unwrap();
+    let partial_success = body.partial_success.as_ref().unwrap();
+    assert_eq!(partial_success.rejected_spans, 1);
+    assert!(
+        partial_success
+            .error_message
+            .contains("Accepted 0 spans, rejected 1 spans"),
+        "unexpected partial success body: {body:?}"
+    );
+
+    validate_data(
+        "otlp_traces_v1_existing_int_widen_atomic_rows",
+        &client,
+        &format!(
+            "select trace_id, \"span_attributes.attr_num\", \"span_attributes.attr_parse\" from {} order by trace_id;",
+            existing_int_atomic_table_name
+        ),
+        r#"[["00000000000000000000000000000054",1,10]]"#,
+    )
+    .await;
+    validate_data(
+        "otlp_traces_v1_existing_int_widen_atomic_types",
+        &client,
+        "select column_name, lower(data_type), semantic_type from information_schema.columns where table_name = 'trace_type_existing_int_widen_atomic' and column_name in ('span_attributes.attr_num', 'span_attributes.attr_parse') order by column_name;",
+        r#"[["span_attributes.attr_num","bigint","FIELD"],["span_attributes.attr_parse","bigint","FIELD"]]"#,
+    )
+    .await;
+
     let existing_int_float_only_table_name = "trace_type_existing_int_float_only";
     let existing_int_float_only_seed_req = make_trace_v1_request(
         "type-existing-int-float-only",
