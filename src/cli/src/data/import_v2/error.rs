@@ -56,6 +56,16 @@ pub enum Error {
     },
 
     #[snafu(display(
+        "Snapshot is inconsistent: chunk {} is marked completed but its file manifest is empty",
+        chunk_id
+    ))]
+    EmptyChunkManifest {
+        chunk_id: u32,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
         "Snapshot is inconsistent: chunk {} for schema '{}' is marked completed but no files were found under '{}'",
         chunk_id,
         schema,
@@ -105,6 +115,7 @@ impl ErrorExt for Error {
             | Error::SchemaNotInSnapshot { .. }
             | Error::ManifestVersionMismatch { .. }
             | Error::IncompleteSnapshot { .. }
+            | Error::EmptyChunkManifest { .. }
             | Error::MissingChunkData { .. } => StatusCode::InvalidArguments,
             Error::Database { error, .. } => error.status_code(),
             Error::SnapshotStorage { error, .. } | Error::ChunkImportFailed { error, .. } => {

@@ -28,8 +28,9 @@ use crate::common::ObjectStoreConfig;
 use crate::data::export_v2::data::{build_copy_source, execute_copy_database_from};
 use crate::data::export_v2::manifest::{ChunkMeta, ChunkStatus, DataFormat, MANIFEST_VERSION};
 use crate::data::import_v2::error::{
-    ChunkImportFailedSnafu, IncompleteSnapshotSnafu, ManifestVersionMismatchSnafu,
-    MissingChunkDataSnafu, Result, SchemaNotInSnapshotSnafu, SnapshotStorageSnafu,
+    ChunkImportFailedSnafu, EmptyChunkManifestSnafu, IncompleteSnapshotSnafu,
+    ManifestVersionMismatchSnafu, MissingChunkDataSnafu, Result, SchemaNotInSnapshotSnafu,
+    SnapshotStorageSnafu,
 };
 use crate::data::import_v2::executor::{DdlExecutor, DdlStatement};
 use crate::data::path::{data_dir_for_schema_chunk, ddl_path_for_schema};
@@ -540,6 +541,9 @@ async fn validate_data_snapshot(
         if chunk.status == ChunkStatus::Skipped {
             continue;
         }
+        if chunk.files.is_empty() {
+            return EmptyChunkManifestSnafu { chunk_id: chunk.id }.fail();
+        }
         for schema in schemas {
             validate_chunk_schema_files(chunk, schema, &actual_prefixes)?;
         }
@@ -947,5 +951,22 @@ CREATE VIEW v AS SELECT 1;
             .expect_err("missing chunk prefix should reject dry-run validation")
             .to_string();
         assert!(error.contains("marked completed but no files were found"));
+    }
+
+    #[tokio::test]
+    async fn test_validate_data_snapshot_rejects_completed_chunk_with_empty_manifest() {
+        let mut completed = ChunkMeta::new(7, TimeRange::unbounded());
+        completed.status = ChunkStatus::Completed;
+
+        let storage = StubStorage {
+            manifest: Manifest::new_schema_only("greptime".to_string(), vec!["public".to_string()]),
+            files_by_prefix: HashMap::new(),
+        };
+
+        let error = validate_data_snapshot(&storage, &[completed], &["public".to_string()])
+            .await
+            .expect_err("empty completed chunk should reject validation")
+            .to_string();
+        assert!(error.contains("file manifest is empty"));
     }
 }
