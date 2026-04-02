@@ -1022,7 +1022,6 @@ async fn spawn_flush(
 }
 
 struct FlushRegionWrite {
-    row_count: usize,
     datanode: Peer,
     request: RegionRequest,
 }
@@ -1032,6 +1031,7 @@ struct PlannedRegionBatch {
     batch: RecordBatch,
 }
 
+#[cfg(test)]
 impl PlannedRegionBatch {
     fn num_rows(&self) -> usize {
         self.batch.num_rows()
@@ -1176,8 +1176,6 @@ async fn flush_region_writes_concurrently(
                 .with_label_values(&["flush_write_region"])
                 .start_timer();
             node_manager.handle(&write.datanode, write.request).await?;
-            FLUSH_TOTAL.inc();
-            FLUSH_ROWS.observe(write.row_count as f64);
         }
         return Ok(());
     }
@@ -1188,8 +1186,6 @@ async fn flush_region_writes_concurrently(
             .start_timer();
 
         node_manager.handle(&write.datanode, write.request).await?;
-        FLUSH_TOTAL.inc();
-        FLUSH_ROWS.observe(write.row_count as f64);
         Ok::<_, Error>(())
     });
 
@@ -1237,6 +1233,9 @@ async fn flush_batch(
     if result.is_err() {
         FLUSH_FAILURES.inc();
         FLUSH_DROPPED_ROWS.inc_by(total_row_count as u64);
+    } else {
+        FLUSH_TOTAL.inc();
+        FLUSH_ROWS.observe(total_row_count as f64);
     }
 
     debug!(
@@ -1505,7 +1504,6 @@ fn encode_region_write_requests(
     let mut region_writes = Vec::with_capacity(resolved_batches.len());
     for resolved in resolved_batches {
         let region_id = resolved.planned.region_id;
-        let row_count = resolved.planned.num_rows();
         let (schema_bytes, data_header, payload) = {
             let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
                 .with_label_values(&["flush_physical_encode_ipc"])
@@ -1530,7 +1528,6 @@ fn encode_region_write_requests(
         };
 
         region_writes.push(FlushRegionWrite {
-            row_count,
             datanode: resolved.datanode,
             request,
         });
@@ -2039,7 +2036,6 @@ mod tests {
 
         let writes = vec![
             FlushRegionWrite {
-                row_count: 10,
                 datanode: Peer {
                     id: 1,
                     addr: "node1".to_string(),
@@ -2047,7 +2043,6 @@ mod tests {
                 request: RegionRequest::default(),
             },
             FlushRegionWrite {
-                row_count: 12,
                 datanode: Peer {
                     id: 2,
                     addr: "node2".to_string(),
@@ -2637,7 +2632,6 @@ mod tests {
         let writes = encode_region_write_requests(vec![resolved_batch]).unwrap();
 
         assert_eq!(1, writes.len());
-        assert_eq!(1, writes[0].row_count);
         assert_eq!(1, writes[0].datanode.id);
         let Some(region_request::Body::BulkInsert(request)) = &writes[0].request.body else {
             panic!("expected bulk insert request");
