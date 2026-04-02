@@ -25,7 +25,7 @@ use client::Output;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
-use common_telemetry::tracing;
+use common_telemetry::{tracing, warn};
 use itertools::Itertools;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
@@ -677,7 +677,7 @@ impl Instance {
                 return Ok(());
             }
 
-            tracing::warn!(
+            warn!(
                 table_name,
                 columns = ?column_names,
                 error = %err,
