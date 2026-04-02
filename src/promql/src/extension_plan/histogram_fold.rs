@@ -322,7 +322,7 @@ impl HistogramFold {
     /// Transform the schema
     ///
     /// - `le` will be removed
-    pub fn convert_schema(
+    fn convert_schema(
         input_schema: &DFSchemaRef,
         le_column: &str,
     ) -> DataFusionResult<DFSchemaRef> {
@@ -417,34 +417,6 @@ pub struct HistogramFoldExec {
     quantile: f64,
     metric: ExecutionPlanMetricsSet,
     properties: Arc<PlanProperties>,
-}
-
-impl HistogramFoldExec {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        le_column_index: usize,
-        field_column_index: usize,
-        ts_column_index: usize,
-        quantile: f64,
-        input: Arc<dyn ExecutionPlan>,
-        output_schema: SchemaRef,
-        tag_columns: Vec<Arc<dyn PhysicalExpr>>,
-        partition_exprs: Vec<Arc<dyn PhysicalExpr>>,
-        properties: Arc<PlanProperties>,
-    ) -> Self {
-        Self {
-            le_column_index,
-            field_column_index,
-            ts_column_index,
-            quantile,
-            input,
-            output_schema,
-            tag_columns,
-            partition_exprs,
-            metric: ExecutionPlanMetricsSet::new(),
-            properties,
-        }
-    }
 }
 
 impl ExecutionPlan for HistogramFoldExec {
@@ -640,18 +612,10 @@ pub struct HistogramFoldStream {
     output_buffer: Vec<Box<dyn MutableVector>>,
     output_buffered_rows: usize,
 
-    /// Cached parsed le (bucket bound) values — parsed once from the first
-    /// complete bucket's `le` strings, reused for all subsequent groups.
     cached_le_parsed: Option<Vec<f64>>,
-    /// Cached raw `le` values for validating later groups against the first
-    /// observed bucket layout.
     cached_le_raw: Option<StringArray>,
-    /// Whether the cached `le` layout forms a valid histogram bucket layout.
     cached_le_valid: Option<bool>,
-    /// Reusable buffer for counter values to avoid per-group allocation.
     counters_buf: Vec<f64>,
-
-    /// Output batches from the optimistic path (batch-take approach, bypasses MutableVector).
     optimistic_output_batches: Vec<RecordBatch>,
     optimistic_output_rows: usize,
 
@@ -799,12 +763,6 @@ impl HistogramFoldStream {
         Ok(None)
     }
 
-    /// Fold record batches from input buffer and put to output buffer.
-    ///
-    /// Uses a batch-take approach: collects one take index per group (pointing
-    /// to the first row), then applies `compute::take` for all normal columns
-    /// at once. This avoids `Helper::try_into_vectors` and per-row
-    /// `MutableVector::push_value_ref` overhead entirely.
     fn fold_buf(&mut self, bucket_num: usize) -> DataFusionResult<()> {
         let batch = concat_batches(&self.input_schema, self.input_buffer.drain(..).as_ref())?;
         let mut remaining_rows = self.input_buffered_rows;
@@ -817,7 +775,6 @@ impl HistogramFoldStream {
         let field_values = field_array.values();
         let field_no_nulls = field_array.null_count() == 0;
 
-        // Parse and cache the first valid bucket layout for later groups.
         if self.cached_le_parsed.is_none() && remaining_rows >= bucket_num {
             self.cached_le_raw = Some(le_array.slice(cursor, bucket_num));
             let parsed = Self::parse_le_values(le_array, cursor, bucket_num);
@@ -826,7 +783,6 @@ impl HistogramFoldStream {
             self.counters_buf.resize(bucket_num, 0.0);
         }
 
-        // Collect take indices (one per group) and computed field results
         let est_groups = remaining_rows / bucket_num;
         let mut take_indices: Vec<u32> = Vec::with_capacity(est_groups);
         let mut field_results: Vec<f64> = Vec::with_capacity(est_groups);
@@ -838,7 +794,6 @@ impl HistogramFoldStream {
 
             take_indices.push(cursor as u32);
 
-            // Read field values into counters buffer
             let counters = &mut self.counters_buf;
             if field_no_nulls {
                 counters[..bucket_num].copy_from_slice(&field_values[cursor..cursor + bucket_num]);
@@ -875,7 +830,6 @@ impl HistogramFoldStream {
             remaining_rows -= bucket_num;
         }
 
-        // Build output batch from take indices (bypasses VectorRef and MutableVector)
         if !take_indices.is_empty() {
             let num_groups = take_indices.len();
             let indices = UInt32Array::from(take_indices);
@@ -905,7 +859,6 @@ impl HistogramFoldStream {
             self.optimistic_output_batches.push(output_batch);
         }
 
-        // If validation failed mid-batch, switch to safe mode for the remainder
         if remaining_rows >= bucket_num && self.mode == FoldMode::Optimistic {
             let remaining_input_batch = batch.slice(cursor, remaining_rows);
             self.switch_to_safe_mode(remaining_input_batch)?;
@@ -988,18 +941,69 @@ impl HistogramFoldStream {
             return true;
         }
 
-        for &idx in &self.normal_indices {
-            if !Self::column_is_constant_in_range(batch.column(idx).as_ref(), start, bucket_num) {
-                return false;
-            }
+        self.normal_indices.iter().all(|&idx| {
+            Self::column_is_constant_in_range(batch.column(idx).as_ref(), start, bucket_num)
+        })
+    }
+
+    #[inline]
+    fn string_array_is_constant<Offset: datafusion::arrow::array::OffsetSizeTrait>(
+        array: &datafusion::arrow::array::GenericStringArray<Offset>,
+        start: usize,
+        len: usize,
+    ) -> bool {
+        if array.null_count() == 0 {
+            let offsets = array.value_offsets();
+            let data = array.value_data();
+            let expected_start = offsets[start].as_usize();
+            let expected_end = offsets[start + 1].as_usize();
+            let expected = &data[expected_start..expected_end];
+
+            return (start + 1..start + len).all(|row| {
+                let row_start = offsets[row].as_usize();
+                let row_end = offsets[row + 1].as_usize();
+                row_end - row_start == expected.len() && data[row_start..row_end] == *expected
+            });
         }
 
-        true
+        if array.is_null(start) {
+            return (start + 1..start + len).all(|row| array.is_null(row));
+        }
+
+        let expected = array.value(start);
+        (start + 1..start + len).all(|row| !array.is_null(row) && array.value(row) == expected)
+    }
+
+    #[inline]
+    fn primitive_array_is_constant<T>(
+        array: &datafusion::arrow::array::PrimitiveArray<T>,
+        start: usize,
+        len: usize,
+    ) -> bool
+    where
+        T: datafusion::arrow::datatypes::ArrowPrimitiveType,
+        T::Native: PartialEq + Copy,
+    {
+        if array.null_count() == 0 {
+            let values = array.values();
+            let expected = values[start];
+            return values[start + 1..start + len]
+                .iter()
+                .all(|&value| value == expected);
+        }
+
+        if array.is_null(start) {
+            return (start + 1..start + len).all(|row| array.is_null(row));
+        }
+
+        let expected = array.value(start);
+        (start + 1..start + len).all(|row| !array.is_null(row) && array.value(row) == expected)
     }
 
     #[inline]
     fn column_is_constant_in_range(array: &dyn Array, start: usize, len: usize) -> bool {
         use datafusion::arrow::datatypes::{Int64Type, TimestampMillisecondType, UInt64Type};
+        use datafusion::common::ScalarValue;
 
         debug_assert!(len > 0);
         if len == 1 {
@@ -1007,123 +1011,27 @@ impl HistogramFoldStream {
         }
 
         match array.data_type() {
-            DataType::Utf8 => {
-                let arr = array.as_string::<i32>();
-                if arr.null_count() == 0 {
-                    let offsets = arr.value_offsets();
-                    let data = arr.value_data();
-                    let expected_start = offsets[start] as usize;
-                    let expected_end = offsets[start + 1] as usize;
-                    let expected = &data[expected_start..expected_end];
-                    return (start + 1..start + len).all(|row| {
-                        let row_start = offsets[row] as usize;
-                        let row_end = offsets[row + 1] as usize;
-                        row_end - row_start == expected.len()
-                            && data[row_start..row_end] == *expected
-                    });
-                }
-
-                if arr.is_null(start) {
-                    return (start + 1..start + len).all(|row| arr.is_null(row));
-                }
-
-                let expected = arr.value(start);
-                (start + 1..start + len).all(|row| !arr.is_null(row) && arr.value(row) == expected)
-            }
+            DataType::Utf8 => Self::string_array_is_constant(array.as_string::<i32>(), start, len),
             DataType::LargeUtf8 => {
-                let arr = array.as_string::<i64>();
-                if arr.null_count() == 0 {
-                    let offsets = arr.value_offsets();
-                    let data = arr.value_data();
-                    let expected_start = offsets[start] as usize;
-                    let expected_end = offsets[start + 1] as usize;
-                    let expected = &data[expected_start..expected_end];
-                    return (start + 1..start + len).all(|row| {
-                        let row_start = offsets[row] as usize;
-                        let row_end = offsets[row + 1] as usize;
-                        row_end - row_start == expected.len()
-                            && data[row_start..row_end] == *expected
-                    });
-                }
-
-                if arr.is_null(start) {
-                    return (start + 1..start + len).all(|row| arr.is_null(row));
-                }
-
-                let expected = arr.value(start);
-                (start + 1..start + len).all(|row| !arr.is_null(row) && arr.value(row) == expected)
+                Self::string_array_is_constant(array.as_string::<i64>(), start, len)
             }
             DataType::UInt64 => {
-                let arr = array.as_primitive::<UInt64Type>();
-                if arr.null_count() == 0 {
-                    let values = arr.values();
-                    let expected = values[start];
-                    return values[start + 1..start + len]
-                        .iter()
-                        .all(|&value| value == expected);
-                }
-
-                if arr.is_null(start) {
-                    return (start + 1..start + len).all(|row| arr.is_null(row));
-                }
-
-                let expected = arr.value(start);
-                (start + 1..start + len).all(|row| !arr.is_null(row) && arr.value(row) == expected)
+                Self::primitive_array_is_constant(array.as_primitive::<UInt64Type>(), start, len)
             }
             DataType::Int64 => {
-                let arr = array.as_primitive::<Int64Type>();
-                if arr.null_count() == 0 {
-                    let values = arr.values();
-                    let expected = values[start];
-                    return values[start + 1..start + len]
-                        .iter()
-                        .all(|&value| value == expected);
-                }
-
-                if arr.is_null(start) {
-                    return (start + 1..start + len).all(|row| arr.is_null(row));
-                }
-
-                let expected = arr.value(start);
-                (start + 1..start + len).all(|row| !arr.is_null(row) && arr.value(row) == expected)
+                Self::primitive_array_is_constant(array.as_primitive::<Int64Type>(), start, len)
             }
             DataType::Float64 => {
-                let arr = array.as_primitive::<Float64Type>();
-                if arr.null_count() == 0 {
-                    let values = arr.values();
-                    let expected = values[start];
-                    return values[start + 1..start + len]
-                        .iter()
-                        .all(|&value| value == expected);
-                }
-
-                if arr.is_null(start) {
-                    return (start + 1..start + len).all(|row| arr.is_null(row));
-                }
-
-                let expected = arr.value(start);
-                (start + 1..start + len).all(|row| !arr.is_null(row) && arr.value(row) == expected)
+                Self::primitive_array_is_constant(array.as_primitive::<Float64Type>(), start, len)
             }
             DataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Millisecond, _) => {
-                let arr = array.as_primitive::<TimestampMillisecondType>();
-                if arr.null_count() == 0 {
-                    let values = arr.values();
-                    let expected = values[start];
-                    return values[start + 1..start + len]
-                        .iter()
-                        .all(|&value| value == expected);
-                }
-
-                if arr.is_null(start) {
-                    return (start + 1..start + len).all(|row| arr.is_null(row));
-                }
-
-                let expected = arr.value(start);
-                (start + 1..start + len).all(|row| !arr.is_null(row) && arr.value(row) == expected)
+                Self::primitive_array_is_constant(
+                    array.as_primitive::<TimestampMillisecondType>(),
+                    start,
+                    len,
+                )
             }
             _ => {
-                use datafusion::common::ScalarValue;
-
                 let expected = ScalarValue::try_from_array(array, start).ok();
                 (start + 1..start + len)
                     .all(|row| ScalarValue::try_from_array(array, row).ok() == expected)
@@ -1285,8 +1193,6 @@ impl HistogramFoldStream {
                 .all(|(group, now)| group.as_value_ref() == *now)
     }
 
-    /// Compute result from output buffer, combining optimistic (batch-take)
-    /// and safe mode (MutableVector) outputs.
     fn take_output_buf(&mut self) -> DataFusionResult<Option<RecordBatch>> {
         let total_rows = self.output_buffered_rows + self.optimistic_output_rows;
         if total_rows == 0 {
@@ -1301,13 +1207,11 @@ impl HistogramFoldStream {
 
         let mut all_batches: Vec<RecordBatch> = Vec::new();
 
-        // Optimistic output (batch-take path)
         if !self.optimistic_output_batches.is_empty() {
             all_batches.append(&mut self.optimistic_output_batches);
             self.optimistic_output_rows = 0;
         }
 
-        // Safe mode output (MutableVector path)
         if self.output_buffered_rows > 0 {
             let mut output_buf =
                 Self::empty_output_buffer(&self.output_schema, self.le_column_index)?;
@@ -1354,14 +1258,14 @@ impl HistogramFoldStream {
     #[inline]
     fn is_positive_infinity(le_array: &StringArray, index: usize) -> bool {
         le_array.is_valid(index) && {
-            let v = le_array.value(index);
-            v.eq_ignore_ascii_case("+inf") || v.eq_ignore_ascii_case("inf")
+            let value = le_array.value(index);
+            value.eq_ignore_ascii_case("+inf")
+                || value.eq_ignore_ascii_case("inf")
+                || value.eq_ignore_ascii_case("+infinity")
+                || value.eq_ignore_ascii_case("infinity")
         }
     }
 
-    /// Fast quantile evaluation for the optimistic path where bucket bounds
-    /// are pre-validated (sorted, last is +Inf, correct length). Modifies
-    /// counters in-place for monotonicity fix to avoid Cow allocation.
     #[inline]
     fn evaluate_row_fast(quantile: f64, bucket: &[f64], counter: &mut [f64]) -> f64 {
         if bucket.len() != counter.len() || !Self::bucket_layout_is_valid(bucket) {
@@ -1383,7 +1287,6 @@ impl HistogramFoldStream {
             return f64::NAN;
         }
 
-        // Fix counter monotonicity in-place (avoids Cow allocation)
         let mut prev = 0.0f64;
         for v in counter.iter_mut() {
             if !v.is_finite() || *v < prev {
@@ -1519,6 +1422,45 @@ mod test {
         RecordBatch::try_new(schema, columns).unwrap()
     }
 
+    async fn collect_batches(exec: Arc<dyn ExecutionPlan>) -> Vec<RecordBatch> {
+        let session_context = SessionContext::default();
+        datafusion::physical_plan::collect(exec, session_context.task_ctx())
+            .await
+            .unwrap()
+    }
+
+    fn collect_float_values(batches: &[RecordBatch], column: usize) -> Vec<f64> {
+        batches
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .column(column)
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.unwrap())
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    fn collect_utf8_and_float_values(
+        batches: &[RecordBatch],
+        string_column: usize,
+        float_column: usize,
+    ) -> (Vec<String>, Vec<f64>) {
+        let mut strings = Vec::new();
+        let mut floats = Vec::new();
+        for batch in batches {
+            let utf8 = batch.column(string_column).as_string::<i32>();
+            let float = batch.column(float_column).as_primitive::<Float64Type>();
+            strings.extend(utf8.iter().map(|v| v.unwrap().to_string()));
+            floats.extend(float.iter().map(|v| v.unwrap()));
+        }
+        (strings, floats)
+    }
+
     fn prepare_test_data() -> DataSourceExec {
         let schema = Arc::new(Schema::new(vec![
             Field::new("host", DataType::Utf8, true),
@@ -1603,17 +1545,18 @@ mod test {
             field_column_index,
         );
 
-        Arc::new(HistogramFoldExec::new(
+        Arc::new(HistogramFoldExec {
             le_column_index,
             field_column_index,
-            ts_column_index,
             quantile,
+            ts_column_index,
             input,
             output_schema,
             tag_columns,
             partition_exprs,
+            metric: ExecutionPlanMetricsSet::new(),
             properties,
-        ))
+        })
     }
 
     type PlanPropsResult = (
@@ -1679,17 +1622,18 @@ mod test {
         );
         let (tag_columns, partition_exprs, properties) =
             build_test_plan_properties(&memory_exec, output_schema.clone(), 0, 1, 2);
-        let fold_exec = Arc::new(HistogramFoldExec::new(
-            1,
-            2,
-            0,
-            0.4,
-            memory_exec,
+        let fold_exec = Arc::new(HistogramFoldExec {
+            le_column_index: 1,
+            field_column_index: 2,
+            quantile: 0.4,
+            ts_column_index: 0,
+            input: memory_exec,
             output_schema,
             tag_columns,
             partition_exprs,
+            metric: ExecutionPlanMetricsSet::new(),
             properties,
-        ));
+        });
 
         let session_context = SessionContext::default();
         let result = datafusion::physical_plan::collect(fold_exec, session_context.task_ctx())
@@ -2043,20 +1987,8 @@ mod test {
         .unwrap();
 
         let fold_exec = build_fold_exec_from_batches(vec![batch], schema, 0.5, 1, 2, 3);
-        let session_context = SessionContext::default();
-        let result = datafusion::physical_plan::collect(fold_exec, session_context.task_ctx())
-            .await
-            .unwrap();
-
-        let mut values = Vec::new();
-        for batch in result {
-            let array = batch
-                .column(2)
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .unwrap();
-            values.extend(array.iter().map(|v| v.unwrap()));
-        }
+        let result = collect_batches(fold_exec).await;
+        let values = collect_float_values(&result, 2);
 
         assert_eq!(values.len(), 3);
         assert!(values[0].is_finite(), "{values:?}");
@@ -2081,19 +2013,8 @@ mod test {
             RecordBatch::try_new(schema.clone(), vec![host_column, le_column, val_column]).unwrap();
 
         let fold_exec = build_fold_exec_from_batches(vec![batch], schema, 0.5, 0, 1, 2);
-        let session_context = SessionContext::default();
-        let result = datafusion::physical_plan::collect(fold_exec, session_context.task_ctx())
-            .await
-            .unwrap();
-
-        let mut hosts = Vec::new();
-        let mut values = Vec::new();
-        for batch in result {
-            let host_array = batch.column(0).as_string::<i32>();
-            let value_array = batch.column(1).as_primitive::<Float64Type>();
-            hosts.extend(host_array.iter().map(|v| v.unwrap().to_string()));
-            values.extend(value_array.iter().map(|v| v.unwrap()));
-        }
+        let result = collect_batches(fold_exec).await;
+        let (hosts, values) = collect_utf8_and_float_values(&result, 0, 1);
 
         assert_eq!(hosts, vec!["a", "b", "c", "b"]);
         assert_eq!(values.len(), 4);
@@ -2143,20 +2064,8 @@ mod test {
         .unwrap();
 
         let fold_exec = build_fold_exec_from_batches(vec![batch], schema, 0.5, 1, 2, 3);
-        let session_context = SessionContext::default();
-        let result = datafusion::physical_plan::collect(fold_exec, session_context.task_ctx())
-            .await
-            .unwrap();
-
-        let mut values = Vec::new();
-        for batch in result {
-            let array = batch
-                .column(2)
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .unwrap();
-            values.extend(array.iter().map(|v| v.unwrap()));
-        }
+        let result = collect_batches(fold_exec).await;
+        let values = collect_float_values(&result, 2);
 
         assert_eq!(values.len(), 2);
         assert!((values[0] - 3.0).abs() < 1e-12, "{values:?}");
