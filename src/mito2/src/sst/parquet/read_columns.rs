@@ -96,7 +96,7 @@ pub fn build_parquet_leaves_indices(
     parquet_schema_desc: &SchemaDescriptor,
     projection: &ParquetReadColumns,
 ) -> Vec<usize> {
-    let mut map = HashMap::new();
+    let mut map = HashMap::with_capacity(projection.cols.len());
     for col in &projection.cols {
         map.insert(col.root_index, &col.nested_paths);
     }
