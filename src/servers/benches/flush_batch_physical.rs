@@ -152,7 +152,7 @@ fn make_physical_table_metadata(num_tags: usize) -> PhysicalTableMetadata {
 
     PhysicalTableMetadata {
         table_info: Arc::new(table_info),
-        name_to_ids: Some(name_to_ids),
+        col_name_to_ids: Some(name_to_ids),
     }
 }
 

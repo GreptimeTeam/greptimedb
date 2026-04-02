@@ -91,7 +91,8 @@ pub type PendingRowsSchemaAltererRef = Arc<dyn PendingRowsSchemaAlterer>;
 #[derive(Clone)]
 pub struct PhysicalTableMetadata {
     pub table_info: TableInfoRef,
-    pub name_to_ids: Option<HashMap<String, u32>>,
+    /// Mapping from column name to column id
+    pub col_name_to_ids: Option<HashMap<String, u32>>,
 }
 
 #[async_trait]
@@ -147,7 +148,7 @@ impl PhysicalFlushCatalogProvider for CatalogManagerPhysicalFlushAdapter {
                     let name_to_ids = table_info.name_to_ids();
                     PhysicalTableMetadata {
                         table_info,
-                        name_to_ids,
+                        col_name_to_ids: name_to_ids,
                     }
                 })
             })
@@ -860,7 +861,7 @@ fn start_worker(
                         Some(WorkerCommand::Submit { table_batches, total_rows, ctx, response_tx, _permit }) => {
                             idle_timer.as_mut().reset(tokio::time::Instant::now() + worker_idle_timeout);
 
-                            let pending_batch =batch.get_or_insert_with(||{
+                            let pending_batch = batch.get_or_insert_with(||{
                                 PENDING_BATCHES.inc();
                                 PendingBatch::new(ctx)
                             });
@@ -1028,8 +1029,13 @@ struct FlushRegionWrite {
 
 struct PlannedRegionBatch {
     region_id: RegionId,
-    row_count: usize,
     batch: RecordBatch,
+}
+
+impl PlannedRegionBatch {
+    fn num_rows(&self) -> usize {
+        self.batch.num_rows()
+    }
 }
 
 struct ResolvedRegionBatch {
@@ -1272,7 +1278,7 @@ pub async fn flush_batch_physical(
                 ctx.as_ref(),
             )
             .await?
-            .context(error::InternalSnafu {
+            .with_context(|| error::InternalSnafu {
                 err_msg: format!(
                     "Physical table '{}' not found during pending flush",
                     physical_table_name
@@ -1281,12 +1287,14 @@ pub async fn flush_batch_physical(
     };
 
     let physical_table_info = physical_table.table_info;
-    let name_to_ids = physical_table.name_to_ids.context(error::InternalSnafu {
-        err_msg: format!(
-            "Physical table '{}' has no column IDs for pending flush",
-            physical_table_name
-        ),
-    })?;
+    let name_to_ids = physical_table
+        .col_name_to_ids
+        .with_context(|| error::InternalSnafu {
+            err_msg: format!(
+                "Physical table '{}' has no column IDs for pending flush",
+                physical_table_name
+            ),
+        })?;
 
     // 2. Get the physical table's partition rule (one lookup instead of N)
     let partition_rule = {
@@ -1445,12 +1453,10 @@ fn plan_region_batch(
 
     Ok(Some(PlannedRegionBatch {
         region_id: RegionId::new(physical_table_id, region_number),
-        row_count,
         batch: region_batch,
     }))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn plan_region_batches(
     combined_batch: RecordBatch,
     physical_table_id: TableId,
@@ -1499,7 +1505,7 @@ fn encode_region_write_requests(
     let mut region_writes = Vec::with_capacity(resolved_batches.len());
     for resolved in resolved_batches {
         let region_id = resolved.planned.region_id;
-        let row_count = resolved.planned.row_count;
+        let row_count = resolved.planned.num_rows();
         let (schema_bytes, data_header, payload) = {
             let _timer = PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
                 .with_label_values(&["flush_physical_encode_ipc"])
@@ -1678,7 +1684,7 @@ mod tests {
 
         PhysicalTableMetadata {
             table_info: Arc::new(table_info),
-            name_to_ids: Some(HashMap::from([("tag1".to_string(), 3)])),
+            col_name_to_ids: Some(HashMap::from([("tag1".to_string(), 3)])),
         }
     }
 
@@ -2592,10 +2598,10 @@ mod tests {
 
         assert_eq!(2, planned_batches.len());
         assert_eq!(RegionId::new(1024, 1), planned_batches[0].region_id);
-        assert_eq!(1, planned_batches[0].row_count);
+        assert_eq!(1, planned_batches[0].num_rows());
         assert_eq!(3, planned_batches[0].batch.num_columns());
         assert_eq!(RegionId::new(1024, 2), planned_batches[1].region_id);
-        assert_eq!(1, planned_batches[1].row_count);
+        assert_eq!(1, planned_batches[1].num_rows());
         assert_eq!(3, planned_batches[1].batch.num_columns());
     }
 
@@ -2603,7 +2609,6 @@ mod tests {
     fn test_encode_region_write_requests_builds_bulk_insert_requests() {
         let planned_batch = PlannedRegionBatch {
             region_id: RegionId::new(1024, 1),
-            row_count: 1,
             batch: RecordBatch::try_new(
                 Arc::new(ArrowSchema::new(vec![
                     Field::new("__primary_key", ArrowDataType::Binary, false),
