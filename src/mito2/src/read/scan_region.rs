@@ -534,7 +534,10 @@ impl ScanRegion {
             .with_filter_deleted(self.filter_deleted)
             .with_merge_mode(self.version.options.merge_mode())
             .with_series_row_selector(self.request.series_row_selector)
-            .with_distribution(self.request.distribution);
+            .with_distribution(self.request.distribution)
+            .with_explain_flat_format(
+                self.version.options.sst_format == Some(crate::sst::FormatType::Flat),
+            );
         #[cfg(feature = "vector_index")]
         let input = input
             .with_vector_index_applier(vector_index_applier)
@@ -837,6 +840,8 @@ pub struct ScanInput {
     pub(crate) series_row_selector: Option<TimeSeriesRowSelector>,
     /// Hint for the required distribution of the scanner.
     pub(crate) distribution: Option<TimeSeriesDistribution>,
+    /// Whether the region's configured SST format is flat.
+    explain_flat_format: bool,
     /// Whether this scan is for compaction.
     pub(crate) compaction: bool,
     #[cfg(feature = "enterprise")]
@@ -873,6 +878,7 @@ impl ScanInput {
             merge_mode: MergeMode::default(),
             series_row_selector: None,
             distribution: None,
+            explain_flat_format: false,
             compaction: false,
             #[cfg(feature = "enterprise")]
             extension_ranges: Vec::new(),
@@ -1025,6 +1031,13 @@ impl ScanInput {
         distribution: Option<TimeSeriesDistribution>,
     ) -> Self {
         self.distribution = distribution;
+        self
+    }
+
+    /// Sets whether the region's configured SST format is flat for explain output.
+    #[must_use]
+    pub(crate) fn with_explain_flat_format(mut self, explain_flat_format: bool) -> Self {
+        self.explain_flat_format = explain_flat_format;
         self
     }
 
@@ -1679,6 +1692,7 @@ impl StreamContext {
                         .entries(self.input.files.iter().map(|file| FileWrapper { file }))
                         .finish()?;
                 }
+                write!(f, ", \"flat_format\": {}", self.input.explain_flat_format)?;
                 #[cfg(feature = "enterprise")]
                 self.format_extension_ranges(f)?;
 
