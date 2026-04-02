@@ -25,7 +25,8 @@ use api::region::RegionResponse;
 use api::v1::meta::TopicStat;
 use api::v1::region::sync_request::ManifestInfo;
 use api::v1::region::{
-    ListMetadataRequest, RegionResponse as RegionResponseV1, SyncRequest, region_request,
+    ListMetadataRequest, RegionResponse as RegionResponseV1, RemoteDynFilterRequest, SyncRequest,
+    region_request,
 };
 use api::v1::{ResponseHeader, Status};
 use arrow_flight::{FlightData, Ticket};
@@ -84,8 +85,9 @@ use crate::error::{
     ConcurrentQueryLimiterTimeoutSnafu, DataFusionSnafu, DecodeLogicalPlanSnafu,
     ExecuteLogicalPlanSnafu, FindLogicalRegionsSnafu, GetRegionMetadataSnafu,
     HandleBatchDdlRequestSnafu, HandleBatchOpenRequestSnafu, HandleRegionRequestSnafu,
-    NewPlanDecoderSnafu, RegionEngineNotFoundSnafu, RegionNotFoundSnafu, RegionNotReadySnafu,
-    Result, SerializeJsonSnafu, StopRegionEngineSnafu, UnexpectedSnafu, UnsupportedOutputSnafu,
+    NewPlanDecoderSnafu, NotYetImplementedSnafu, RegionEngineNotFoundSnafu, RegionNotFoundSnafu,
+    RegionNotReadySnafu, Result, SerializeJsonSnafu, StopRegionEngineSnafu, UnexpectedSnafu,
+    UnsupportedOutputSnafu,
 };
 use crate::event_listener::RegionServerEventListenerRef;
 use crate::region_server::catalog::{NameAwareCatalogList, NameAwareDataSourceInjectorBuilder};
@@ -696,6 +698,70 @@ impl RegionServer {
         Ok(response)
     }
 
+    async fn handle_remote_dyn_filter_request(
+        &self,
+        request: &RemoteDynFilterRequest,
+    ) -> Result<RegionResponse> {
+        if request.query_id.is_empty() {
+            return error::MissingRequiredFieldSnafu { name: "query_id" }.fail();
+        }
+
+        match request
+            .action
+            .as_ref()
+            .context(error::MissingRequiredFieldSnafu { name: "action" })?
+        {
+            api::v1::region::remote_dyn_filter_request::Action::Update(update) => {
+                self.handle_remote_dyn_filter_update(&request.query_id, update)
+                    .await
+            }
+            api::v1::region::remote_dyn_filter_request::Action::Unregister(unregister) => {
+                self.handle_remote_dyn_filter_unregister(&request.query_id, unregister)
+                    .await
+            }
+        }
+    }
+
+    async fn handle_remote_dyn_filter_update(
+        &self,
+        query_id: &str,
+        request: &api::v1::region::RemoteDynFilterUpdate,
+    ) -> Result<RegionResponse> {
+        if request.filter_id.is_empty() {
+            return error::MissingRequiredFieldSnafu { name: "filter_id" }.fail();
+        }
+
+        if request.payload.is_empty() {
+            return error::MissingRequiredFieldSnafu { name: "payload" }.fail();
+        }
+
+        NotYetImplementedSnafu {
+            what: format!(
+                "remote dyn filter update unary RPC placeholder for query_id {query_id}, filter_id {}",
+                request.filter_id
+            ),
+        }
+        .fail()
+    }
+
+    async fn handle_remote_dyn_filter_unregister(
+        &self,
+        query_id: &str,
+        request: &api::v1::region::RemoteDynFilterUnregister,
+    ) -> Result<RegionResponse> {
+        if request.filter_id.is_empty() {
+            return error::MissingRequiredFieldSnafu { name: "filter_id" }.fail();
+        }
+
+        NotYetImplementedSnafu {
+            what: format!(
+                "remote dyn filter unregister unary RPC placeholder for query_id {query_id}, filter_id {}",
+                request.filter_id
+            ),
+        }
+        .fail()
+    }
+
     /// Sync region manifest and registers new opened logical regions.
     pub async fn sync_region(
         &self,
@@ -765,6 +831,10 @@ impl RegionServerHandler for RegionServer {
             }
             region_request::Body::ListMetadata(list_metadata_request) => {
                 self.handle_list_metadata_request(list_metadata_request)
+                    .await
+            }
+            region_request::Body::RemoteDynFilter(remote_dyn_filter_request) => {
+                self.handle_remote_dyn_filter_request(remote_dyn_filter_request)
                     .await
             }
             _ => self.handle_requests_in_serial(request).await,
@@ -1670,6 +1740,10 @@ mod tests {
     use std::assert_matches;
 
     use api::v1::SemanticType;
+    use api::v1::region::{
+        RemoteDynFilterRequest, RemoteDynFilterUnregister, RemoteDynFilterUpdate,
+        remote_dyn_filter_request,
+    };
     use common_error::ext::ErrorExt;
     use datatypes::prelude::ConcreteDataType;
     use mito2::test_util::CreateRequestBuilder;
@@ -2303,5 +2377,136 @@ mod tests {
             .handle_list_metadata_request(&list_metadata_request)
             .await
             .unwrap_err();
+    }
+
+    #[tokio::test]
+    async fn test_handle_remote_dyn_filter_request_requires_query_id() {
+        let mock_region_server = mock_region_server();
+
+        let err = mock_region_server
+            .handle_remote_dyn_filter_request(&RemoteDynFilterRequest {
+                query_id: String::new(),
+                action: Some(remote_dyn_filter_request::Action::Unregister(
+                    RemoteDynFilterUnregister {
+                        filter_id: "filter-1".to_string(),
+                    },
+                )),
+            })
+            .await
+            .unwrap_err();
+
+        assert_matches!(
+            err,
+            crate::error::Error::MissingRequiredField { ref name, .. } if name == "query_id"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_remote_dyn_filter_request_requires_action() {
+        let mock_region_server = mock_region_server();
+
+        let err = mock_region_server
+            .handle_remote_dyn_filter_request(&RemoteDynFilterRequest {
+                query_id: "query-1".to_string(),
+                action: None,
+            })
+            .await
+            .unwrap_err();
+
+        assert_matches!(
+            err,
+            crate::error::Error::MissingRequiredField { ref name, .. } if name == "action"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_remote_dyn_filter_update_requires_filter_id() {
+        let mock_region_server = mock_region_server();
+
+        let err = mock_region_server
+            .handle_remote_dyn_filter_request(&RemoteDynFilterRequest {
+                query_id: "query-1".to_string(),
+                action: Some(remote_dyn_filter_request::Action::Update(
+                    RemoteDynFilterUpdate {
+                        filter_id: String::new(),
+                        payload: vec![1],
+                        generation: 1,
+                        is_complete: false,
+                    },
+                )),
+            })
+            .await
+            .unwrap_err();
+
+        assert_matches!(
+            err,
+            crate::error::Error::MissingRequiredField { ref name, .. } if name == "filter_id"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_remote_dyn_filter_update_requires_payload() {
+        let mock_region_server = mock_region_server();
+
+        let err = mock_region_server
+            .handle_remote_dyn_filter_request(&RemoteDynFilterRequest {
+                query_id: "query-1".to_string(),
+                action: Some(remote_dyn_filter_request::Action::Update(
+                    RemoteDynFilterUpdate {
+                        filter_id: "filter-1".to_string(),
+                        payload: Vec::new(),
+                        generation: 1,
+                        is_complete: false,
+                    },
+                )),
+            })
+            .await
+            .unwrap_err();
+
+        assert_matches!(
+            err,
+            crate::error::Error::MissingRequiredField { ref name, .. } if name == "payload"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_remote_dyn_filter_update_placeholder() {
+        let mock_region_server = mock_region_server();
+
+        let err = mock_region_server
+            .handle_remote_dyn_filter_request(&RemoteDynFilterRequest {
+                query_id: "query-1".to_string(),
+                action: Some(remote_dyn_filter_request::Action::Update(
+                    RemoteDynFilterUpdate {
+                        filter_id: "filter-1".to_string(),
+                        payload: vec![1],
+                        generation: 1,
+                        is_complete: false,
+                    },
+                )),
+            })
+            .await
+            .unwrap_err();
+
+        assert_matches!(err, crate::error::Error::NotYetImplemented { .. });
+    }
+
+    #[tokio::test]
+    async fn test_handle_remote_dyn_filter_unregister_placeholder() {
+        let mock_region_server = mock_region_server();
+
+        let err = mock_region_server
+            .handle_remote_dyn_filter_request(&RemoteDynFilterRequest {
+                query_id: "query-1".to_string(),
+                action: Some(remote_dyn_filter_request::Action::Unregister(
+                    RemoteDynFilterUnregister {
+                        filter_id: "filter-1".to_string(),
+                    },
+                )),
+            })
+            .await
+            .unwrap_err();
+
+        assert_matches!(err, crate::error::Error::NotYetImplemented { .. });
     }
 }
