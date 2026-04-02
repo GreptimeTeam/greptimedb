@@ -1176,6 +1176,20 @@ pub async fn test_prom_http_api(store_type: StorageType) {
         .await;
     assert_eq!(res.status(), StatusCode::OK);
 
+    // query non-exist label in metric table
+    let res = client
+        .get("/v1/prometheus/api/v1/label/not_exist_label/values?match[]=demo&start=0&end=600")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let prom_resp = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(prom_resp.status, "success");
+    assert!(prom_resp.error.is_none() && prom_resp.error_type.is_none());
+    assert_eq!(
+        prom_resp.data,
+        serde_json::from_value::<PrometheusResponse>(json!([])).unwrap()
+    );
+
     // query `__name__` without match[]
     // create a physical table and a logical table
     let res = client
