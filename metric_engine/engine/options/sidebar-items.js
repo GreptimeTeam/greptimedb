@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_DATA_REGION_COMPACTION_TIME_WINDOW","SEG_ROW_COUNT_FOR_DATA_REGION"],"enum":["IndexOptions"],"fn":["set_data_region_options"],"struct":["PhysicalRegionOptions"]};

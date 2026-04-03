@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["MemoryQuotaState"],"struct":["MemoryManager","MemoryQuota","UnlimitedMemoryQuota"],"trait":["MemoryMetrics"]};

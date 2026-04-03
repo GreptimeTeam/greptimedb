@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["canonicalize_schema_filter","ddl_statement_for_schema","is_schema_scoped_statement","parse_ddl_statements","starts_with_keyword"],"struct":["Import","ImportV2Command"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["build_azblob_connection","build_copy_target","build_gcs_connection","build_oss_connection","build_s3_connection","build_with_options","execute_copy_database","expose_optional_secret","extract_bucket_root","join_root","mask_secrets"],"struct":["CopyOptions","CopyTarget"]};

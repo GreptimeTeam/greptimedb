@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["APP_NAME"],"enum":["SubCommand"],"struct":["Command","DefaultNodeManagerCreator","DefaultProcedureExecutorCreator","DefaultTableIdAllocatorCreator","Instance","InstanceCreator","InstanceCreatorResult","StartCommand"],"trait":["NodeManagerCreator","ProcedureExecutorCreator","TableIdAllocatorCreator"]};

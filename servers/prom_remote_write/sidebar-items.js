@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["decode_remote_write_request","try_decompress"],"mod":["decode","row_builder","types","validation"],"struct":["PROM_WRITE_REQUEST_POOL"]};
