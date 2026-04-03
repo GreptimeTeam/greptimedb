@@ -18,16 +18,15 @@ use arrow_schema::{DataType, TimeUnit as ArrowTimeUnit};
 use datafusion::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::{DFSchemaRef, Result, ScalarValue};
-use datafusion_expr::expr::{Cast, InList, TryCast};
+use datafusion_expr::expr::{Cast, InList, Like, TryCast};
 use datafusion_expr::{
     Between, BinaryExpr, Expr, ExprSchemable, Filter, LogicalPlan, Operator, TableScan, lit,
 };
 use datafusion_expr_common::casts::try_cast_literal_to_type;
 use datafusion_optimizer::analyzer::AnalyzerRule;
 
-/// ConstNormalizationRule rewrites filter literals to the column-side type
-/// ahead of filter pushdown, and also removes lossless casts on column
-/// operands when the literal can be normalized to the source column type.
+/// ConstNormalizationRule rewrites castable constants against their
+/// non-constant comparison operand ahead of filter pushdown.
 #[derive(Debug)]
 pub struct ConstNormalizationRule;
 
@@ -89,191 +88,297 @@ fn normalize_filter_expr(expr: Expr, schema: DFSchemaRef) -> Result<Expr> {
 }
 
 fn normalize_expr_node(expr: Expr, schema: &DFSchemaRef) -> Result<Transformed<Expr>> {
-    let original = expr.clone();
-    let new_expr = match expr {
-        Expr::BinaryExpr(BinaryExpr { left, op, right }) => {
-            normalize_binary_expr(*left, op, *right, schema)?
-        }
-        Expr::Between(Between {
-            expr,
-            negated,
-            low,
-            high,
-        }) => normalize_between_expr(*expr, negated, *low, *high, schema)?,
-        Expr::InList(InList {
-            expr,
-            list,
-            negated,
-        }) => normalize_in_list_expr(*expr, list, negated, schema)?,
-        expr => expr,
-    };
-
-    if new_expr != original {
-        Ok(Transformed::yes(new_expr))
-    } else {
-        Ok(Transformed::no(new_expr))
+    match expr {
+        Expr::BinaryExpr(binary) => normalize_binary_expr(binary, schema),
+        Expr::Between(between) => normalize_between_expr(between, schema),
+        Expr::InList(in_list) => normalize_in_list_expr(in_list, schema),
+        Expr::Like(like) => normalize_like_expr(like, false, schema),
+        Expr::SimilarTo(like) => normalize_like_expr(like, true, schema),
+        expr => Ok(Transformed::no(expr)),
     }
 }
 
 fn normalize_binary_expr(
-    left: Expr,
-    op: Operator,
-    right: Expr,
+    BinaryExpr { left, op, right }: BinaryExpr,
     schema: &DFSchemaRef,
-) -> Result<Expr> {
-    if let Some(expr) = normalize_binary_with_target(left.clone(), op, right.clone(), schema)? {
-        return Ok(expr);
+) -> Result<Transformed<Expr>> {
+    let left = *left;
+    let right = *right;
+
+    if op.supports_propagation() {
+        if let Some(expr) = normalize_binary_side(left.clone(), op, right.clone(), schema)? {
+            return Ok(Transformed::yes(expr));
+        }
+
+        if let Some(swapped_op) = op.swap()
+            && let Some(expr) =
+                normalize_binary_side(right.clone(), swapped_op, left.clone(), schema)?
+        {
+            return Ok(Transformed::yes(expr));
+        }
     }
 
-    if let Some(swapped_op) = op.swap()
-        && let Some(expr) =
-            normalize_binary_with_target(right.clone(), swapped_op, left.clone(), schema)?
-    {
-        return Ok(expr);
-    }
-
-    Ok(Expr::BinaryExpr(BinaryExpr {
+    Ok(Transformed::no(Expr::BinaryExpr(BinaryExpr {
         left: Box::new(left),
         op,
         right: Box::new(right),
-    }))
+    })))
 }
 
-fn normalize_binary_with_target(
-    target: Expr,
+fn normalize_binary_side(
+    target_expr: Expr,
     op: Operator,
-    constant: Expr,
+    constant_expr: Expr,
     schema: &DFSchemaRef,
 ) -> Result<Option<Expr>> {
-    let Some(target) = extract_normalization_target(&target, schema)? else {
-        return Ok(None);
-    };
-    let Some(constant) = extract_constant_scalar(&constant)? else {
+    let Some((target, constants)) =
+        extract_target_and_constants(&target_expr, std::slice::from_ref(&constant_expr), schema)?
+    else {
         return Ok(None);
     };
 
-    if let Some(expr) = normalize_lossless_binary(&target, op, &constant) {
+    if let Some(expr) = normalize_constant_operands(&target, &constants, |target, mut constants| {
+        Expr::BinaryExpr(BinaryExpr {
+            left: Box::new(target),
+            op,
+            right: Box::new(
+                constants
+                    .pop()
+                    .expect("binary normalization expects one constant"),
+            ),
+        })
+    }) {
         return Ok(Some(expr));
     }
 
-    Ok(normalize_timestamp_downcast_binary(&target, op, &constant))
+    Ok(normalize_timestamp_downcast_binary(
+        &target,
+        op,
+        &constants[0],
+    ))
 }
 
 fn normalize_between_expr(
-    expr: Expr,
-    negated: bool,
-    low: Expr,
-    high: Expr,
+    Between {
+        expr,
+        negated,
+        low,
+        high,
+    }: Between,
     schema: &DFSchemaRef,
-) -> Result<Expr> {
-    if negated {
-        return Ok(Expr::Between(Between {
-            expr: Box::new(expr),
-            negated,
-            low: Box::new(low),
-            high: Box::new(high),
-        }));
+) -> Result<Transformed<Expr>> {
+    let expr = *expr;
+    let low = *low;
+    let high = *high;
+
+    if let Some((target, constants)) =
+        extract_target_and_constants(&expr, &[low.clone(), high.clone()], schema)?
+    {
+        if let Some(expr) =
+            normalize_constant_operands(&target, &constants, |target, mut constants| {
+                let high = constants
+                    .pop()
+                    .expect("between normalization expects high constant");
+                let low = constants
+                    .pop()
+                    .expect("between normalization expects low constant");
+                Expr::Between(Between {
+                    expr: Box::new(target),
+                    negated,
+                    low: Box::new(low),
+                    high: Box::new(high),
+                })
+            })
+        {
+            return Ok(Transformed::yes(expr));
+        }
+
+        if !negated
+            && let Some(expr) =
+                normalize_timestamp_downcast_between(&target, &constants[0], &constants[1])
+        {
+            return Ok(Transformed::yes(expr));
+        }
     }
 
-    let Some(target) = extract_normalization_target(&expr, schema)? else {
-        return Ok(Expr::Between(Between {
-            expr: Box::new(expr),
-            negated,
-            low: Box::new(low),
-            high: Box::new(high),
-        }));
-    };
-    let Some(low_value) = extract_constant_scalar(&low)? else {
-        return Ok(Expr::Between(Between {
-            expr: Box::new(expr),
-            negated,
-            low: Box::new(low),
-            high: Box::new(high),
-        }));
-    };
-    let Some(high_value) = extract_constant_scalar(&high)? else {
-        return Ok(Expr::Between(Between {
-            expr: Box::new(expr),
-            negated,
-            low: Box::new(low),
-            high: Box::new(high),
-        }));
-    };
-
-    if let (Some(low), Some(high)) = (
-        normalize_lossless_literal(&target, &low_value),
-        normalize_lossless_literal(&target, &high_value),
-    ) {
-        return Ok(Expr::Between(Between {
-            expr: Box::new(target.source_expr.clone()),
-            negated,
-            low: Box::new(lit(low)),
-            high: Box::new(lit(high)),
-        }));
-    }
-
-    if let Some(expr) = normalize_timestamp_downcast_between(&target, &low_value, &high_value) {
-        return Ok(expr);
-    }
-
-    Ok(Expr::Between(Between {
+    Ok(Transformed::no(Expr::Between(Between {
         expr: Box::new(expr),
         negated,
         low: Box::new(low),
         high: Box::new(high),
-    }))
+    })))
 }
 
 fn normalize_in_list_expr(
-    expr: Expr,
-    list: Vec<Expr>,
-    negated: bool,
+    InList {
+        expr,
+        list,
+        negated,
+    }: InList,
     schema: &DFSchemaRef,
-) -> Result<Expr> {
-    let Some(target) = extract_normalization_target(&expr, schema)? else {
-        return Ok(Expr::InList(InList {
+) -> Result<Transformed<Expr>> {
+    let expr = *expr;
+
+    let Some((target, constants)) = extract_target_and_constants(&expr, &list, schema)? else {
+        return Ok(Transformed::no(Expr::InList(InList {
             expr: Box::new(expr),
             list,
             negated,
-        }));
+        })));
     };
 
-    let mut new_list = Vec::with_capacity(list.len());
-    for item in &list {
-        let Some(value) = extract_constant_scalar(item)? else {
-            return Ok(Expr::InList(InList {
-                expr: Box::new(expr),
-                list,
-                negated,
-            }));
-        };
-        let Some(normalized) = normalize_lossless_literal(&target, &value) else {
-            return Ok(Expr::InList(InList {
-                expr: Box::new(expr),
-                list,
-                negated,
-            }));
-        };
-        new_list.push(lit(normalized));
-    }
+    let Some(expr) = normalize_constant_operands(&target, &constants, |target, constants| {
+        Expr::InList(InList {
+            expr: Box::new(target),
+            list: constants,
+            negated,
+        })
+    }) else {
+        return Ok(Transformed::no(Expr::InList(InList {
+            expr: Box::new(expr),
+            list,
+            negated,
+        })));
+    };
 
-    Ok(Expr::InList(InList {
-        expr: Box::new(target.source_expr.clone()),
-        list: new_list,
+    Ok(Transformed::yes(expr))
+}
+
+fn normalize_like_expr(
+    Like {
         negated,
-    }))
+        expr,
+        pattern,
+        escape_char,
+        case_insensitive,
+    }: Like,
+    similar_to: bool,
+    schema: &DFSchemaRef,
+) -> Result<Transformed<Expr>> {
+    let expr = *expr;
+    let pattern = *pattern;
+
+    let Some((target, constants)) =
+        extract_target_and_constants(&expr, std::slice::from_ref(&pattern), schema)?
+    else {
+        return Ok(Transformed::no(rebuild_like_expr(
+            expr,
+            pattern,
+            negated,
+            escape_char,
+            case_insensitive,
+            similar_to,
+        )));
+    };
+
+    let Some(expr) = normalize_constant_operands(&target, &constants, |target, mut constants| {
+        rebuild_like_expr(
+            target,
+            constants
+                .pop()
+                .expect("like normalization expects one constant"),
+            negated,
+            escape_char,
+            case_insensitive,
+            similar_to,
+        )
+    }) else {
+        return Ok(Transformed::no(rebuild_like_expr(
+            expr,
+            pattern,
+            negated,
+            escape_char,
+            case_insensitive,
+            similar_to,
+        )));
+    };
+
+    Ok(Transformed::yes(expr))
+}
+
+fn rebuild_like_expr(
+    expr: Expr,
+    pattern: Expr,
+    negated: bool,
+    escape_char: Option<char>,
+    case_insensitive: bool,
+    similar_to: bool,
+) -> Expr {
+    let like = Like::new(
+        negated,
+        Box::new(expr),
+        Box::new(pattern),
+        escape_char,
+        case_insensitive,
+    );
+    if similar_to {
+        Expr::SimilarTo(like)
+    } else {
+        Expr::Like(like)
+    }
+}
+
+fn extract_target_and_constants(
+    target_expr: &Expr,
+    constant_exprs: &[Expr],
+    schema: &DFSchemaRef,
+) -> Result<Option<(NormalizationTarget, Vec<ScalarValue>)>> {
+    let Some(target) = extract_normalization_target(target_expr, schema)? else {
+        return Ok(None);
+    };
+    let Some(constants) = extract_constant_scalars(constant_exprs)? else {
+        return Ok(None);
+    };
+    Ok(Some((target, constants)))
+}
+
+fn extract_constant_scalars(exprs: &[Expr]) -> Result<Option<Vec<ScalarValue>>> {
+    let mut values = Vec::with_capacity(exprs.len());
+    for expr in exprs {
+        let Some(value) = extract_constant_scalar(expr)? else {
+            return Ok(None);
+        };
+        values.push(value);
+    }
+    Ok(Some(values))
+}
+
+fn normalize_constant_operands<F>(
+    target: &NormalizationTarget,
+    constants: &[ScalarValue],
+    rebuild: F,
+) -> Option<Expr>
+where
+    F: FnOnce(Expr, Vec<Expr>) -> Expr,
+{
+    let normalized = normalize_constants_losslessly(target, constants)?;
+    Some(rebuild(
+        target.normalized_expr.clone(),
+        normalized.into_iter().map(lit).collect(),
+    ))
+}
+
+fn normalize_constants_losslessly(
+    target: &NormalizationTarget,
+    constants: &[ScalarValue],
+) -> Option<Vec<ScalarValue>> {
+    constants
+        .iter()
+        .map(|constant| normalize_lossless_literal(target, constant))
+        .collect()
 }
 
 #[derive(Clone)]
 struct NormalizationTarget {
-    source_expr: Expr,
-    source_type: DataType,
+    normalized_expr: Expr,
+    normalized_type: DataType,
     kind: CastKind,
 }
 
 #[derive(Clone)]
 enum CastKind {
-    Lossless,
+    Direct,
+    RemovableCast,
     TimestampDowncast {
         source_unit: ArrowTimeUnit,
         target_unit: ArrowTimeUnit,
@@ -285,11 +390,15 @@ fn extract_normalization_target(
     expr: &Expr,
     schema: &DFSchemaRef,
 ) -> Result<Option<NormalizationTarget>> {
-    if expr.try_as_col().is_some() {
+    if extract_constant_scalar(expr)?.is_some() {
+        return Ok(None);
+    }
+
+    if extract_cast_input(expr).is_none() {
         return Ok(Some(NormalizationTarget {
-            source_expr: expr.clone(),
-            source_type: expr.get_type(schema)?,
-            kind: CastKind::Lossless,
+            normalized_expr: expr.clone(),
+            normalized_type: expr.get_type(schema)?,
+            kind: CastKind::Direct,
         }));
     }
 
@@ -297,25 +406,25 @@ fn extract_normalization_target(
         return Ok(None);
     };
 
-    if source_expr.try_as_col().is_none() {
+    if extract_constant_scalar(source_expr)?.is_some() {
         return Ok(None);
     }
 
-    let source_type = source_expr.get_type(schema)?;
-    let Some(kind) = classify_cast_kind(&source_type, target_type) else {
+    let normalized_type = source_expr.get_type(schema)?;
+    let Some(kind) = classify_cast_kind(&normalized_type, target_type) else {
         return Ok(None);
     };
 
     Ok(Some(NormalizationTarget {
-        source_expr: source_expr.clone(),
-        source_type,
+        normalized_expr: source_expr.clone(),
+        normalized_type,
         kind,
     }))
 }
 
 fn classify_cast_kind(source_type: &DataType, target_type: &DataType) -> Option<CastKind> {
-    if is_lossless_column_cast(source_type, target_type) {
-        return Some(CastKind::Lossless);
+    if is_lossless_cast(source_type, target_type) {
+        return Some(CastKind::RemovableCast);
     }
 
     match (source_type, target_type) {
@@ -335,14 +444,15 @@ fn classify_cast_kind(source_type: &DataType, target_type: &DataType) -> Option<
     }
 }
 
-fn is_lossless_column_cast(source_type: &DataType, target_type: &DataType) -> bool {
+fn is_lossless_cast(source_type: &DataType, target_type: &DataType) -> bool {
     match (source_type, target_type) {
         (DataType::Int8, DataType::Int16 | DataType::Int32 | DataType::Int64)
         | (DataType::Int16, DataType::Int32 | DataType::Int64)
         | (DataType::Int32, DataType::Int64)
         | (DataType::UInt8, DataType::UInt16 | DataType::UInt32 | DataType::UInt64)
         | (DataType::UInt16, DataType::UInt32 | DataType::UInt64)
-        | (DataType::UInt32, DataType::UInt64) => true,
+        | (DataType::UInt32, DataType::UInt64)
+        | (DataType::Utf8, DataType::Utf8View | DataType::LargeUtf8) => true,
         (
             DataType::Timestamp(source_unit, source_tz),
             DataType::Timestamp(target_unit, target_tz),
@@ -351,26 +461,13 @@ fn is_lossless_column_cast(source_type: &DataType, target_type: &DataType) -> bo
     }
 }
 
-fn normalize_lossless_binary(
-    target: &NormalizationTarget,
-    op: Operator,
-    constant: &ScalarValue,
-) -> Option<Expr> {
-    let normalized = normalize_lossless_literal(target, constant)?;
-    Some(Expr::BinaryExpr(BinaryExpr {
-        left: Box::new(target.source_expr.clone()),
-        op,
-        right: Box::new(lit(normalized)),
-    }))
-}
-
 fn normalize_lossless_literal(
     target: &NormalizationTarget,
     constant: &ScalarValue,
 ) -> Option<ScalarValue> {
-    matches!(target.kind, CastKind::Lossless)
+    matches!(target.kind, CastKind::Direct | CastKind::RemovableCast)
         .then_some(())
-        .and_then(|_| cast_literal_losslessly(constant, &target.source_type))
+        .and_then(|_| cast_literal_losslessly(constant, &target.normalized_type))
 }
 
 fn normalize_timestamp_downcast_binary(
@@ -406,7 +503,7 @@ fn normalize_timestamp_downcast_binary(
     };
 
     Some(Expr::BinaryExpr(BinaryExpr {
-        left: Box::new(target.source_expr.clone()),
+        left: Box::new(target.normalized_expr.clone()),
         op: normalized_op,
         right: Box::new(lit(timestamp_scalar(*source_unit, timezone.clone(), bound))),
     }))
@@ -437,12 +534,12 @@ fn normalize_timestamp_downcast_between(
 
     Some(
         Expr::BinaryExpr(BinaryExpr {
-            left: Box::new(target.source_expr.clone()),
+            left: Box::new(target.normalized_expr.clone()),
             op: Operator::GtEq,
             right: Box::new(lit(timestamp_scalar(*source_unit, timezone.clone(), lower))),
         })
         .and(Expr::BinaryExpr(BinaryExpr {
-            left: Box::new(target.source_expr.clone()),
+            left: Box::new(target.normalized_expr.clone()),
             op: Operator::Lt,
             right: Box::new(lit(timestamp_scalar(*source_unit, timezone.clone(), upper))),
         })),
@@ -569,6 +666,7 @@ mod tests {
     use datafusion::physical_plan::ExecutionPlan;
     use datafusion_common::arrow::datatypes::Field;
     use datafusion_common::{DFSchema, ScalarValue, ToDFSchema};
+    use datafusion_expr::expr::{Between, Like};
     use datafusion_expr::expr_fn::{cast, col};
     use datafusion_expr::{
         Expr, LogicalPlan, LogicalPlanBuilder, TableProviderFilterPushDown, TableSource, TableType,
@@ -597,6 +695,26 @@ mod tests {
 
         assert_eq!(
             "Filter: t.v >= Int32(42)\n  TableScan: t",
+            result.to_string()
+        );
+    }
+
+    #[test]
+    fn test_normalize_non_column_operand() {
+        let schema = test_schema(vec![Field::new("v", DataType::Int32, false)]);
+        let plan = LogicalPlanBuilder::scan("t", test_source(schema), None)
+            .unwrap()
+            .filter(cast(col("v") + lit(1_i32), DataType::Int64).gt_eq(lit(42_i64)))
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let result = ConstNormalizationRule
+            .analyze(plan, &ConfigOptions::default())
+            .unwrap();
+
+        assert_eq!(
+            "Filter: t.v + Int32(1) >= Int32(42)\n  TableScan: t",
             result.to_string()
         );
     }
@@ -680,6 +798,57 @@ mod tests {
         assert_eq!(
             "Filter: t.v BETWEEN Int16(3) AND Int16(5)\n  TableScan: t",
             between.to_string()
+        );
+    }
+
+    #[test]
+    fn test_normalize_negated_between() {
+        let schema = test_schema(vec![Field::new("v", DataType::Int16, false)]);
+        let plan = LogicalPlanBuilder::scan("t", test_source(schema), None)
+            .unwrap()
+            .filter(Expr::Between(Between {
+                expr: Box::new(cast(col("v"), DataType::Int64)),
+                negated: true,
+                low: Box::new(lit(3_i64)),
+                high: Box::new(lit(5_i64)),
+            }))
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let result = ConstNormalizationRule
+            .analyze(plan, &ConfigOptions::default())
+            .unwrap();
+
+        assert_eq!(
+            "Filter: t.v NOT BETWEEN Int16(3) AND Int16(5)\n  TableScan: t",
+            result.to_string()
+        );
+    }
+
+    #[test]
+    fn test_normalize_like_literal() {
+        let schema = test_schema(vec![Field::new("s", DataType::Utf8, false)]);
+        let plan = LogicalPlanBuilder::scan("t", test_source(schema), None)
+            .unwrap()
+            .filter(Expr::Like(Like::new(
+                false,
+                Box::new(cast(col("s"), DataType::LargeUtf8)),
+                Box::new(lit(ScalarValue::LargeUtf8(Some("api%".to_string())))),
+                None,
+                false,
+            )))
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let result = ConstNormalizationRule
+            .analyze(plan, &ConfigOptions::default())
+            .unwrap();
+
+        assert_eq!(
+            "Filter: t.s LIKE Utf8(\"api%\")\n  TableScan: t",
+            result.to_string()
         );
     }
 
