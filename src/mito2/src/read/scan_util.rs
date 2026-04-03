@@ -1322,6 +1322,24 @@ pub(crate) fn compute_parallel_channel_size(estimated_rows_per_batch: usize) -> 
     size.clamp(2, 64)
 }
 
+/// Computes the average estimated rows per batch across multiple range readers.
+pub(crate) fn compute_average_batch_size(
+    estimated_rows_per_batch: impl IntoIterator<Item = usize>,
+) -> usize {
+    let mut total = 0usize;
+    let mut count = 0usize;
+    for size in estimated_rows_per_batch {
+        total += size;
+        count += 1;
+    }
+
+    if count == 0 {
+        return DEFAULT_READ_BATCH_SIZE;
+    }
+
+    (total / count).clamp(1, DEFAULT_READ_BATCH_SIZE)
+}
+
 fn can_split_series(num_rows: u64, num_series: u64) -> bool {
     if num_rows == 0 || num_series == 0 {
         return false;
@@ -1902,6 +1920,28 @@ mod tests {
         assert_eq!(
             2,
             compute_parallel_channel_size(DEFAULT_READ_BATCH_SIZE * 2)
+        );
+    }
+
+    #[test]
+    fn test_compute_average_batch_size_uses_arithmetic_mean() {
+        assert_eq!(24, compute_average_batch_size([16, 24, 32]));
+    }
+
+    #[test]
+    fn test_compute_average_batch_size_clamps_values() {
+        assert_eq!(
+            DEFAULT_READ_BATCH_SIZE,
+            compute_average_batch_size([DEFAULT_READ_BATCH_SIZE, DEFAULT_READ_BATCH_SIZE * 2])
+        );
+        assert_eq!(1, compute_average_batch_size([0, 1]));
+    }
+
+    #[test]
+    fn test_compute_average_batch_size_falls_back_when_empty() {
+        assert_eq!(
+            DEFAULT_READ_BATCH_SIZE,
+            compute_average_batch_size(std::iter::empty())
         );
     }
 }

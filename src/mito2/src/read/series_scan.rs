@@ -48,11 +48,11 @@ use crate::read::ScannerMetrics;
 use crate::read::pruner::{PartitionPruner, Pruner};
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{
-    PartitionMetrics, PartitionMetricsList, SeriesDistributorMetrics, compute_parallel_channel_size,
+    PartitionMetrics, PartitionMetricsList, SeriesDistributorMetrics, compute_average_batch_size,
+    compute_parallel_channel_size,
 };
 use crate::read::seq_scan::SeqScan;
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
-use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::PrimaryKeyArray;
 
@@ -515,21 +515,25 @@ impl SeriesDistributor {
             }
         }
         let mut range_streams = Vec::with_capacity(tasks.len());
+        let mut estimated_batch_sizes = Vec::with_capacity(tasks.len());
         for task in tasks {
-            range_streams.push(task.await.context(JoinSnafu)??);
+            let (stream, estimated_batch_size) = task.await.context(JoinSnafu)??;
+            range_streams.push(stream);
+            estimated_batch_sizes.push(estimated_batch_size);
         }
+        let channel_size =
+            compute_parallel_channel_size(compute_average_batch_size(estimated_batch_sizes));
         common_telemetry::debug!(
-            "SeriesDistributor built {} range_streams, region: {}, build cost: {:?}",
+            "SeriesDistributor built {} range_streams, region: {}, build cost: {:?}, channel_size: {}",
             range_streams.len(),
             self.stream_ctx.input.region_metadata().region_id,
             build_start.elapsed(),
+            channel_size,
         );
 
         // Each partition range stream is already deduped, so skip dedup here.
         // Use a separate semaphore for the final merge to avoid deadlock with
         // range-level merge tasks that share the range_semaphore.
-        let channel_size =
-            compute_parallel_channel_size(DEFAULT_READ_BATCH_SIZE);
         let mut reader = SeqScan::build_flat_reader_from_sources(
             &self.stream_ctx,
             range_streams,
