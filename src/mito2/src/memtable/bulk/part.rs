@@ -58,7 +58,7 @@ use crate::error::{
     EncodeMemtableSnafu, EncodeSnafu, InvalidMetadataSnafu, InvalidRequestSnafu,
     NewRecordBatchSnafu, Result,
 };
-use crate::memtable::bulk::context::BulkIterContextRef;
+use crate::memtable::bulk::context::{BulkIterContext, BulkIterContextRef};
 use crate::memtable::bulk::part_reader::EncodedBulkPartIter;
 use crate::memtable::time_series::{ValueBuilder, Values};
 use crate::memtable::{BoxedRecordBatchIterator, MemScanMetrics, MemtableStats};
@@ -1369,6 +1369,41 @@ impl PruningStatistics for BatchPruningStats<'_> {
     ) -> Option<BooleanArray> {
         None
     }
+}
+
+/// Returns true if the batch should be pruned (skipped) based on the first-tag min/max
+/// statistics and the predicate in the context. Returns false if no pruning is possible
+/// (no primary key, no predicate, or the batch matches the predicate).
+pub(crate) fn should_prune_bulk_part(
+    batch: &RecordBatch,
+    context: &BulkIterContext,
+    metadata: &RegionMetadata,
+) -> bool {
+    let predicate = match &context.predicate {
+        Some(p) => p,
+        None => return false,
+    };
+    let stats = match BatchStats::compute(std::slice::from_ref(batch), metadata) {
+        Some(s) => s,
+        None => return false,
+    };
+    let region_meta = context.read_format().metadata();
+    let pruning_stats = BatchPruningStats {
+        stats: &stats,
+        metadata: region_meta,
+    };
+    let mask = predicate.prune_with_stats(&pruning_stats, region_meta.schema.arrow_schema());
+    let pruned = !mask.first().copied().unwrap_or(true);
+    if pruned {
+        common_telemetry::info!(
+            "BulkPart pruned by minmax: region={}, rows={}, min_values={:?}, max_values={:?}",
+            region_meta.region_id,
+            batch.num_rows(),
+            stats.min_values,
+            stats.max_values,
+        );
+    }
+    pruned
 }
 
 /// A collection of ordered RecordBatches representing a bulk part without parquet encoding.
