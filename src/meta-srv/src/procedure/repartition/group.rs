@@ -41,14 +41,19 @@ use common_procedure::{
     Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
     Result as ProcedureResult, Status, StringKey, UserMetadata,
 };
-use common_telemetry::{error, info};
+use common_telemetry::{error, info, warn};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{RegionId, TableId};
 use uuid::Uuid;
 
 use crate::error::{self, Result};
+use crate::procedure::repartition::group::apply_staging_manifest::ApplyStagingManifest;
+use crate::procedure::repartition::group::enter_staging_region::EnterStagingRegion;
+use crate::procedure::repartition::group::remap_manifest::RemapManifest;
+use crate::procedure::repartition::group::repartition_end::RepartitionEnd;
 use crate::procedure::repartition::group::repartition_start::RepartitionStart;
+use crate::procedure::repartition::group::update_metadata::UpdateMetadata;
 use crate::procedure::repartition::plan::RegionDescriptor;
 use crate::procedure::repartition::utils::get_datanode_table_value;
 use crate::procedure::repartition::{self};
@@ -192,12 +197,56 @@ impl RepartitionGroupProcedure {
 
         Ok(Self { state, context })
     }
+
+    async fn rollback_inner(&mut self, procedure_ctx: &ProcedureContext) -> Result<()> {
+        if !self.should_rollback_metadata() {
+            return Ok(());
+        }
+
+        let table_lock = common_meta::lock_key::TableLock::Write(self.context.persistent_ctx.table_id).into();
+        let _guard = procedure_ctx.provider.acquire_lock(&table_lock).await;
+        UpdateMetadata::RollbackStaging
+            .rollback_staging_regions(&mut self.context)
+            .await?;
+
+        if let Err(err) = self.context.invalidate_table_cache().await {
+            warn!(
+                err;
+                "Failed to broadcast the invalidate table cache message during repartition group rollback"
+            );
+        }
+
+        self.state = Box::new(RepartitionEnd);
+        Ok(())
+    }
+
+    fn should_rollback_metadata(&self) -> bool {
+        self.state.as_any().is::<EnterStagingRegion>()
+            || self.state.as_any().is::<RemapManifest>()
+            || self.state.as_any().is::<ApplyStagingManifest>()
+            || self
+                .state
+                .as_any()
+                .downcast_ref::<UpdateMetadata>()
+                .is_some_and(|state| {
+                    matches!(
+                        state,
+                        UpdateMetadata::ApplyStaging | UpdateMetadata::RollbackStaging
+                    )
+                })
+    }
 }
 
 #[async_trait::async_trait]
 impl Procedure for RepartitionGroupProcedure {
     fn type_name(&self) -> &str {
         Self::TYPE_NAME
+    }
+
+    async fn rollback(&mut self, ctx: &ProcedureContext) -> ProcedureResult<()> {
+        self.rollback_inner(ctx)
+            .await
+            .map_err(ProcedureError::external)
     }
 
     #[tracing::instrument(skip_all, fields(
@@ -238,7 +287,7 @@ impl Procedure for RepartitionGroupProcedure {
     }
 
     fn rollback_supported(&self) -> bool {
-        false
+        true
     }
 
     fn dump(&self) -> ProcedureResult<String> {
@@ -602,7 +651,10 @@ mod tests {
 
     use common_meta::key::TableMetadataManager;
     use common_meta::kv_backend::test_util::MockKvBackendBuilder;
+    use common_procedure::{Context as ProcedureContext, Procedure, ProcedureId};
+    use common_procedure_test::MockContextProvider;
 
+    use super::{RepartitionGroupProcedure, RepartitionStart};
     use crate::error::Error;
     use crate::procedure::repartition::test_util::{TestingEnv, new_persistent_context};
 
@@ -652,5 +704,38 @@ mod tests {
         let ctx = env.create_context(persistent_context);
         let err = ctx.get_datanode_table_value(1024, 1).await.unwrap_err();
         assert!(err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn test_group_rollback_supported() {
+        let env = TestingEnv::new();
+        let persistent_context = new_persistent_context(1024, vec![], vec![]);
+        let procedure = RepartitionGroupProcedure {
+            state: Box::new(RepartitionStart),
+            context: env.create_context(persistent_context),
+        };
+
+        assert!(procedure.rollback_supported());
+    }
+
+    #[tokio::test]
+    async fn test_group_rollback_is_noop_before_apply_staging() {
+        let env = TestingEnv::new();
+        let persistent_context = new_persistent_context(1024, vec![], vec![]);
+        let ctx = env.create_context(persistent_context.clone());
+        let mut procedure = RepartitionGroupProcedure {
+            state: Box::new(RepartitionStart),
+            context: ctx,
+        };
+        let provider = Arc::new(MockContextProvider::new(Default::default()));
+        let procedure_ctx = ProcedureContext {
+            procedure_id: ProcedureId::random(),
+            provider,
+        };
+
+        procedure.rollback(&procedure_ctx).await.unwrap();
+
+        assert!(procedure.state.as_any().is::<RepartitionStart>());
+        assert_eq!(procedure.context.persistent_ctx, persistent_context);
     }
 }

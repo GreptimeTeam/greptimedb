@@ -20,7 +20,7 @@ use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::sequence::SequenceBuilder;
 use datatypes::value::Value;
-use partition::expr::{PartitionExpr, col};
+use partition::expr::{col, PartitionExpr};
 use store_api::storage::TableId;
 use uuid::Uuid;
 

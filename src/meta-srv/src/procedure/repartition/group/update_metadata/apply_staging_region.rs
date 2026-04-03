@@ -30,7 +30,7 @@ impl UpdateMetadata {
     /// Abort:
     /// - Target region not found.
     /// - Source region not found.
-    fn apply_staging_region_routes(
+    pub(crate) fn apply_staging_region_routes(
         group_id: GroupId,
         sources: &[RegionDescriptor],
         targets: &[RegionDescriptor],
