@@ -59,7 +59,7 @@ EXPLAIN SELECT
 FROM
     cpu
 WHERE
-    usage_small IN (CAST(10 AS BIGINT), CAST(20 AS BIGINT));
+    usage_small IN (10, 20);
 
 +---------------+---------------------------------------------------------------------------------------------------------------------------------------------------+
 | plan_type     | plan                                                                                                                                              |
@@ -67,6 +67,27 @@ WHERE
 | logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                   |
 |               | Projection: cpu.rack                                                                                                                              |
 |               |   Filter: cpu.usage_small = Int16(10) OR cpu.usage_small = Int16(20)                                                                              |
+|               |     TableScan: cpu                                                                                                                                |
+|               | ]]                                                                                                                                                |
+| physical_plan | CooperativeExec                                                                                                                                   |
+|               |   MergeScanExec: REDACTED
+|               |                                                                                                                                                   |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------+
+
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT
+    rack
+FROM
+    cpu
+WHERE
+    usage_small BETWEEN 10 AND 20;
+
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                              |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                   |
+|               | Projection: cpu.rack                                                                                                                              |
+|               |   Filter: cpu.usage_small >= Int16(10) AND cpu.usage_small <= Int16(20)                                                                           |
 |               |     TableScan: cpu                                                                                                                                |
 |               | ]]                                                                                                                                                |
 | physical_plan | CooperativeExec                                                                                                                                   |

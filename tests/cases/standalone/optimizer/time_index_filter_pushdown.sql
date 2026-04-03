@@ -47,7 +47,15 @@ EXPLAIN SELECT
 FROM
     cpu
 WHERE
-    usage_small IN (CAST(10 AS BIGINT), CAST(20 AS BIGINT));
+    usage_small IN (10, 20);
+
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT
+    rack
+FROM
+    cpu
+WHERE
+    usage_small BETWEEN 10 AND 20;
 
 -- SQLNESS SORT_RESULT 3 1
 select

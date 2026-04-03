@@ -90,6 +90,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 | logical_plan after TranscribeAtatRule_| SAME TEXT AS ABOVE_|
 | logical_plan after resolve_grouping_function_| SAME TEXT AS ABOVE_|
 | logical_plan after type_coercion_| SAME TEXT AS ABOVE_|
+| logical_plan after ConstNormalizationRule_| SAME TEXT AS ABOVE_|
 | logical_plan after DistPlannerAnalyzer_| Projection: test.i, test.j, test.k_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
 |_| PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
@@ -233,6 +234,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test AS series;
 | logical_plan after TranscribeAtatRule_| SAME TEXT AS ABOVE_|
 | logical_plan after resolve_grouping_function_| SAME TEXT AS ABOVE_|
 | logical_plan after type_coercion_| SAME TEXT AS ABOVE_|
+| logical_plan after ConstNormalizationRule_| SAME TEXT AS ABOVE_|
 | logical_plan after DistPlannerAnalyzer_| Projection: series, test.k, test.j_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
 |_| Projection: test.i AS series, test.k, test.j_|
@@ -355,6 +357,47 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test AS series;
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
+
+CREATE TABLE test_nano(i DOUBLE, j TIMESTAMP(9) TIME INDEX, k STRING PRIMARY KEY);
+
+Affected Rows: 0
+
+INSERT INTO test_nano VALUES (1, 1000000, "a"), (1, 1000000, "b"), (2, 2000000, "a");
+
+Affected Rows: 3
+
+-- explain at 0s, 5s and 10s for a nanosecond time index.
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+TQL EXPLAIN (0, 10, '5s') test_nano;
+
++---------------+-----------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                              |
++---------------+-----------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]                                       |
+|               |   PromSeriesDivide: tags=["k"]                                                                                                    |
+|               |     Sort: test_nano.k ASC NULLS FIRST, test_nano.j ASC NULLS FIRST                                                                |
+|               |       Projection: test_nano.i, test_nano.k, CAST(test_nano.j AS Timestamp(ms)) AS j                                               |
+|               |         Projection: test_nano.i, test_nano.j, test_nano.k                                                                         |
+|               |           Filter: __common_expr_3 >= TimestampMillisecond(-299999, None) AND __common_expr_3 <= TimestampMillisecond(10000, None) |
+|               |             Projection: CAST(test_nano.j AS Timestamp(ms)) AS __common_expr_3, test_nano.i, test_nano.j, test_nano.k              |
+|               |               MergeScan [is_placeholder=false, remote_input=[                                                                     |
+|               | TableScan: test_nano                                                                                                              |
+|               | ]]                                                                                                                                |
+| physical_plan | PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]                                   |
+|               |   PromSeriesDivideExec: tags=["k"]                                                                                                |
+|               |     SortExec: expr=[k@1 ASC, j@2 ASC], preserve_partitioning=[true]                                                               |
+|               |       RepartitionExec: partitioning=Hash([k@1], 32), input_partitions=32                                                          |
+|               |         ProjectionExec: expr=[i@0 as i, k@2 as k, CAST(j@1 AS Timestamp(ms)) as j]                                                |
+|               |           FilterExec: __common_expr_3@0 >= -299999 AND __common_expr_3@0 <= 10000, projection=[i@1, j@2, k@3]                     |
+|               |             ProjectionExec: expr=[CAST(j@1 AS Timestamp(ms)) as __common_expr_3, i@0 as i, j@1 as j, k@2 as k]                    |
+|               |               MergeScanExec: REDACTED
+|               |                                                                                                                                   |
++---------------+-----------------------------------------------------------------------------------------------------------------------------------+
+
+DROP TABLE test_nano;
+
+Affected Rows: 0
 
 DROP TABLE test;
 

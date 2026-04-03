@@ -24,9 +24,9 @@ use datafusion_expr::{
 };
 use datafusion_optimizer::analyzer::AnalyzerRule;
 
-/// ConstNormalizationRule removes casts on column operands in filters when the
-/// constant side can be normalized to the source column type ahead of filter
-/// pushdown.
+/// ConstNormalizationRule rewrites filter literals to the column-side type
+/// ahead of filter pushdown, and also removes lossless casts on column
+/// operands when the literal can be normalized to the source column type.
 #[derive(Debug)]
 pub struct ConstNormalizationRule;
 
@@ -128,15 +128,13 @@ fn normalize_binary_expr(
     right: Expr,
     schema: &DFSchemaRef,
 ) -> Result<Expr> {
-    if let Some(expr) =
-        normalize_binary_with_casted_column(left.clone(), op, right.clone(), schema)?
-    {
+    if let Some(expr) = normalize_binary_with_target(left.clone(), op, right.clone(), schema)? {
         return Ok(expr);
     }
 
     if let Some(swapped_op) = op.swap()
         && let Some(expr) =
-            normalize_binary_with_casted_column(right.clone(), swapped_op, left.clone(), schema)?
+            normalize_binary_with_target(right.clone(), swapped_op, left.clone(), schema)?
     {
         return Ok(expr);
     }
@@ -148,28 +146,24 @@ fn normalize_binary_expr(
     }))
 }
 
-fn normalize_binary_with_casted_column(
-    casted_column: Expr,
+fn normalize_binary_with_target(
+    target: Expr,
     op: Operator,
     constant: Expr,
     schema: &DFSchemaRef,
 ) -> Result<Option<Expr>> {
-    let Some(casted_column) = extract_casted_column(&casted_column, schema)? else {
+    let Some(target) = extract_normalization_target(&target, schema)? else {
         return Ok(None);
     };
     let Some(constant) = extract_constant_scalar(&constant)? else {
         return Ok(None);
     };
 
-    if let Some(expr) = normalize_lossless_binary(&casted_column, op, &constant) {
+    if let Some(expr) = normalize_lossless_binary(&target, op, &constant) {
         return Ok(Some(expr));
     }
 
-    Ok(normalize_timestamp_downcast_binary(
-        &casted_column,
-        op,
-        &constant,
-    ))
+    Ok(normalize_timestamp_downcast_binary(&target, op, &constant))
 }
 
 fn normalize_between_expr(
@@ -188,7 +182,7 @@ fn normalize_between_expr(
         }));
     }
 
-    let Some(casted_column) = extract_casted_column(&expr, schema)? else {
+    let Some(target) = extract_normalization_target(&expr, schema)? else {
         return Ok(Expr::Between(Between {
             expr: Box::new(expr),
             negated,
@@ -214,20 +208,18 @@ fn normalize_between_expr(
     };
 
     if let (Some(low), Some(high)) = (
-        normalize_lossless_literal(&casted_column, &low_value),
-        normalize_lossless_literal(&casted_column, &high_value),
+        normalize_lossless_literal(&target, &low_value),
+        normalize_lossless_literal(&target, &high_value),
     ) {
         return Ok(Expr::Between(Between {
-            expr: Box::new(casted_column.source_expr.clone()),
+            expr: Box::new(target.source_expr.clone()),
             negated,
             low: Box::new(Expr::Literal(low, None)),
             high: Box::new(Expr::Literal(high, None)),
         }));
     }
 
-    if let Some(expr) =
-        normalize_timestamp_downcast_between(&casted_column, &low_value, &high_value)
-    {
+    if let Some(expr) = normalize_timestamp_downcast_between(&target, &low_value, &high_value) {
         return Ok(expr);
     }
 
@@ -245,7 +237,7 @@ fn normalize_in_list_expr(
     negated: bool,
     schema: &DFSchemaRef,
 ) -> Result<Expr> {
-    let Some(casted_column) = extract_casted_column(&expr, schema)? else {
+    let Some(target) = extract_normalization_target(&expr, schema)? else {
         return Ok(Expr::InList(InList {
             expr: Box::new(expr),
             list,
@@ -262,7 +254,7 @@ fn normalize_in_list_expr(
                 negated,
             }));
         };
-        let Some(normalized) = normalize_lossless_literal(&casted_column, &value) else {
+        let Some(normalized) = normalize_lossless_literal(&target, &value) else {
             return Ok(Expr::InList(InList {
                 expr: Box::new(expr),
                 list,
@@ -273,14 +265,14 @@ fn normalize_in_list_expr(
     }
 
     Ok(Expr::InList(InList {
-        expr: Box::new(casted_column.source_expr.clone()),
+        expr: Box::new(target.source_expr.clone()),
         list: new_list,
         negated,
     }))
 }
 
 #[derive(Clone)]
-struct CastedColumn {
+struct NormalizationTarget {
     source_expr: Expr,
     source_type: DataType,
     kind: CastKind,
@@ -296,7 +288,18 @@ enum CastKind {
     },
 }
 
-fn extract_casted_column(expr: &Expr, schema: &DFSchemaRef) -> Result<Option<CastedColumn>> {
+fn extract_normalization_target(
+    expr: &Expr,
+    schema: &DFSchemaRef,
+) -> Result<Option<NormalizationTarget>> {
+    if matches!(expr, Expr::Column(_)) {
+        return Ok(Some(NormalizationTarget {
+            source_expr: expr.clone(),
+            source_type: expr.get_type(schema)?,
+            kind: CastKind::Lossless,
+        }));
+    }
+
     let (source_expr, target_type) = match expr {
         Expr::Cast(Cast { expr, data_type }) | Expr::TryCast(TryCast { expr, data_type }) => {
             (expr.as_ref(), data_type)
@@ -313,7 +316,7 @@ fn extract_casted_column(expr: &Expr, schema: &DFSchemaRef) -> Result<Option<Cas
         return Ok(None);
     };
 
-    Ok(Some(CastedColumn {
+    Ok(Some(NormalizationTarget {
         source_expr: source_expr.clone(),
         source_type,
         kind,
@@ -359,29 +362,29 @@ fn is_lossless_column_cast(source_type: &DataType, target_type: &DataType) -> bo
 }
 
 fn normalize_lossless_binary(
-    casted_column: &CastedColumn,
+    target: &NormalizationTarget,
     op: Operator,
     constant: &ScalarValue,
 ) -> Option<Expr> {
-    let normalized = normalize_lossless_literal(casted_column, constant)?;
+    let normalized = normalize_lossless_literal(target, constant)?;
     Some(Expr::BinaryExpr(BinaryExpr {
-        left: Box::new(casted_column.source_expr.clone()),
+        left: Box::new(target.source_expr.clone()),
         op,
         right: Box::new(Expr::Literal(normalized, None)),
     }))
 }
 
 fn normalize_lossless_literal(
-    casted_column: &CastedColumn,
+    target: &NormalizationTarget,
     constant: &ScalarValue,
 ) -> Option<ScalarValue> {
-    matches!(casted_column.kind, CastKind::Lossless)
+    matches!(target.kind, CastKind::Lossless)
         .then_some(())
-        .and_then(|_| cast_literal_losslessly(constant, &casted_column.source_type))
+        .and_then(|_| cast_literal_losslessly(constant, &target.source_type))
 }
 
 fn normalize_timestamp_downcast_binary(
-    casted_column: &CastedColumn,
+    target: &NormalizationTarget,
     op: Operator,
     constant: &ScalarValue,
 ) -> Option<Expr> {
@@ -389,7 +392,7 @@ fn normalize_timestamp_downcast_binary(
         source_unit,
         target_unit,
         timezone,
-    } = &casted_column.kind
+    } = &target.kind
     else {
         return None;
     };
@@ -413,7 +416,7 @@ fn normalize_timestamp_downcast_binary(
     };
 
     Some(Expr::BinaryExpr(BinaryExpr {
-        left: Box::new(casted_column.source_expr.clone()),
+        left: Box::new(target.source_expr.clone()),
         op: normalized_op,
         right: Box::new(Expr::Literal(
             timestamp_scalar(*source_unit, timezone.clone(), bound),
@@ -423,7 +426,7 @@ fn normalize_timestamp_downcast_binary(
 }
 
 fn normalize_timestamp_downcast_between(
-    casted_column: &CastedColumn,
+    target: &NormalizationTarget,
     low: &ScalarValue,
     high: &ScalarValue,
 ) -> Option<Expr> {
@@ -431,7 +434,7 @@ fn normalize_timestamp_downcast_between(
         source_unit,
         target_unit,
         timezone,
-    } = &casted_column.kind
+    } = &target.kind
     else {
         return None;
     };
@@ -447,7 +450,7 @@ fn normalize_timestamp_downcast_between(
 
     Some(
         Expr::BinaryExpr(BinaryExpr {
-            left: Box::new(casted_column.source_expr.clone()),
+            left: Box::new(target.source_expr.clone()),
             op: Operator::GtEq,
             right: Box::new(Expr::Literal(
                 timestamp_scalar(*source_unit, timezone.clone(), lower),
@@ -455,7 +458,7 @@ fn normalize_timestamp_downcast_between(
             )),
         })
         .and(Expr::BinaryExpr(BinaryExpr {
-            left: Box::new(casted_column.source_expr.clone()),
+            left: Box::new(target.source_expr.clone()),
             op: Operator::Lt,
             right: Box::new(Expr::Literal(
                 timestamp_scalar(*source_unit, timezone.clone(), upper),
@@ -589,6 +592,54 @@ mod tests {
     }
 
     #[test]
+    fn test_normalize_plain_integer_literals() {
+        let schema = test_schema(vec![Field::new("v", DataType::Int16, false)]);
+        let comparison_plan = LogicalPlanBuilder::scan("t", test_source(schema.clone()), None)
+            .unwrap()
+            .filter(col("v").gt_eq(lit(42_i64)))
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let in_list_plan = LogicalPlanBuilder::scan("t", test_source(schema.clone()), None)
+            .unwrap()
+            .filter(col("v").in_list(vec![lit(1_i64), lit(2_i64)], false))
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let between_plan = LogicalPlanBuilder::scan("t", test_source(schema), None)
+            .unwrap()
+            .filter(col("v").between(lit(3_i64), lit(5_i64)))
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let comparison = ConstNormalizationRule
+            .analyze(comparison_plan, &ConfigOptions::default())
+            .unwrap();
+        let in_list = ConstNormalizationRule
+            .analyze(in_list_plan, &ConfigOptions::default())
+            .unwrap();
+        let between = ConstNormalizationRule
+            .analyze(between_plan, &ConfigOptions::default())
+            .unwrap();
+
+        assert_eq!(
+            "Filter: t.v >= Int16(42)\n  TableScan: t",
+            comparison.to_string()
+        );
+        assert_eq!(
+            "Filter: t.v IN ([Int16(1), Int16(2)])\n  TableScan: t",
+            in_list.to_string()
+        );
+        assert_eq!(
+            "Filter: t.v BETWEEN Int16(3) AND Int16(5)\n  TableScan: t",
+            between.to_string()
+        );
+    }
+
+    #[test]
     fn test_normalize_in_list_and_between() {
         let schema = test_schema(vec![Field::new("v", DataType::Int16, false)]);
         let in_list_plan = LogicalPlanBuilder::scan("t", test_source(schema.clone()), None)
@@ -674,6 +725,52 @@ mod tests {
             TimestampRange::new_inclusive(
                 Some(Timestamp::new_nanosecond(-299_999_999_999)),
                 Some(Timestamp::new_nanosecond(10_000_999_999))
+            ),
+            range
+        );
+    }
+
+    #[test]
+    fn test_normalize_plain_timestamp_literals() {
+        let schema = test_schema(vec![Field::new(
+            "ts",
+            DataType::Timestamp(ArrowTimeUnit::Nanosecond, None),
+            false,
+        )]);
+        let plan = LogicalPlanBuilder::scan("t", test_source(schema), None)
+            .unwrap()
+            .filter(
+                col("ts")
+                    .gt_eq(lit(ScalarValue::TimestampMillisecond(Some(-299_999), None)))
+                    .and(
+                        col("ts").lt_eq(lit(ScalarValue::TimestampMillisecond(Some(10_000), None))),
+                    ),
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let analyzed = ConstNormalizationRule
+            .analyze(plan, &ConfigOptions::default())
+            .unwrap();
+        let expected = "\
+\nFilter: t.ts >= TimestampNanosecond(-299999000000, None) AND t.ts <= TimestampNanosecond(10000000000, None)\
+\n  TableScan: t";
+        assert_eq!(expected.trim_start(), analyzed.to_string());
+
+        let pushed = Optimizer::with_rules(vec![Arc::new(PushDownFilter::new())])
+            .optimize(analyzed, &OptimizerContext::new(), |_, _| {})
+            .unwrap();
+        let expected = "\
+\nTableScan: t, full_filters=[t.ts >= TimestampNanosecond(-299999000000, None), t.ts <= TimestampNanosecond(10000000000, None)]";
+        assert_eq!(expected.trim_start(), pushed.to_string());
+
+        let filters = extract_scan_filters(&pushed);
+        let range = build_time_range_predicate("ts", TimeUnit::Nanosecond, &filters);
+        assert_eq!(
+            TimestampRange::new_inclusive(
+                Some(Timestamp::new_nanosecond(-299_999_000_000)),
+                Some(Timestamp::new_nanosecond(10_000_000_000))
             ),
             range
         );
