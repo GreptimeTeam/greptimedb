@@ -237,14 +237,16 @@ impl ExecutionPlan for PartSortExec {
         } else {
             internal_err!("No children found")?
         };
-        // create a new dynamic filter when with_new_children, as the old filter is bound to the old input and cannot be reused
-        let new = Self::try_new(
-            self.expression.clone(),
-            self.limit,
-            self.partition_ranges.clone(),
-            new_input.clone(),
-        )?;
-        Ok(Arc::new(new))
+        let mut new_exec = self.as_ref().clone();
+        new_exec.input = new_input.clone();
+        let properties = new_exec.input.properties();
+        new_exec.properties = Arc::new(PlanProperties::new(
+            new_exec.input.equivalence_properties().clone(),
+            new_exec.input.output_partitioning().clone(),
+            properties.emission_type,
+            properties.boundedness,
+        ));
+        Ok(Arc::new(new_exec))
     }
 
     fn execute(
