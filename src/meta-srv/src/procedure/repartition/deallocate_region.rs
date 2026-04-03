@@ -116,7 +116,7 @@ impl State for DeallocateRegion {
 }
 
 impl DeallocateRegion {
-    async fn deallocate_regions(
+    pub(crate) async fn deallocate_regions(
         node_manager: &NodeManagerRef,
         leader_region_registry: &LeaderRegionRegistryRef,
         table: TableName,
@@ -141,7 +141,7 @@ impl DeallocateRegion {
         Ok(())
     }
 
-    fn filter_deallocatable_region_routes(
+    pub(crate) fn filter_deallocatable_region_routes(
         table_id: TableId,
         region_routes: &[RegionRoute],
         pending_deallocate_region_ids: &HashSet<RegionId>,
@@ -165,7 +165,7 @@ impl DeallocateRegion {
             .collect::<Vec<_>>()
     }
 
-    fn generate_region_routes(
+    pub(crate) fn generate_region_routes(
         region_routes: &[RegionRoute],
         pending_deallocate_region_ids: &HashSet<RegionId>,
     ) -> Vec<RegionRoute> {

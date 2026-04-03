@@ -59,6 +59,142 @@ impl Collect {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use common_error::mock::MockError;
+    use common_error::status_code::StatusCode;
+    use common_meta::test_util::MockDatanodeManager;
+    use common_procedure::{
+        Context as ProcedureContext, ContextProvider, Error as ProcedureError, ProcedureId,
+        ProcedureState,
+    };
+    use common_procedure_test::MockContextProvider;
+    use tokio::sync::watch;
+
+    use super::*;
+    use crate::procedure::repartition::PersistentContext;
+    use crate::procedure::repartition::test_util::TestingEnv;
+
+    struct FailedProcedureContextProvider {
+        receiver: watch::Receiver<ProcedureState>,
+        inner: MockContextProvider,
+    }
+
+    #[async_trait::async_trait]
+    impl ContextProvider for FailedProcedureContextProvider {
+        async fn procedure_state(
+            &self,
+            procedure_id: ProcedureId,
+        ) -> common_procedure::Result<Option<ProcedureState>> {
+            self.inner.procedure_state(procedure_id).await
+        }
+
+        async fn procedure_state_receiver(
+            &self,
+            _procedure_id: ProcedureId,
+        ) -> common_procedure::Result<Option<watch::Receiver<ProcedureState>>> {
+            Ok(Some(self.receiver.clone()))
+        }
+
+        async fn try_put_poison(
+            &self,
+            key: &common_procedure::PoisonKey,
+            procedure_id: ProcedureId,
+        ) -> common_procedure::Result<()> {
+            self.inner.try_put_poison(key, procedure_id).await
+        }
+
+        async fn acquire_lock(
+            &self,
+            key: &common_procedure::StringKey,
+        ) -> common_procedure::local::DynamicKeyLockGuard {
+            self.inner.acquire_lock(key).await
+        }
+    }
+
+    #[tokio::test]
+    async fn test_collect_returns_error_when_unknown_exists() {
+        let env = TestingEnv::new();
+        let ddl_ctx = env.ddl_context(Arc::new(MockDatanodeManager::new(())));
+        let persistent_ctx = PersistentContext::new(
+            table::table_name::TableName::new("test_catalog", "test_schema", "test_table"),
+            1024,
+            None,
+        );
+        let mut ctx = crate::procedure::repartition::Context::new(
+            &ddl_ctx,
+            env.mailbox_ctx.mailbox().clone(),
+            env.server_addr.clone(),
+            persistent_ctx,
+        );
+        let mut state = Collect {
+            inflight_procedures: vec![],
+            succeeded_procedures: vec![],
+            failed_procedures: vec![],
+            unknown_procedures: vec![ProcedureMeta {
+                plan_index: 0,
+                group_id: uuid::Uuid::new_v4(),
+                procedure_id: common_procedure::ProcedureId::random(),
+            }],
+        };
+
+        let err = state
+            .next(&mut ctx, &TestingEnv::procedure_context())
+            .await
+            .unwrap_err();
+
+        assert!(!err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn test_collect_returns_error_when_failed_exists() {
+        let env = TestingEnv::new();
+        let ddl_ctx = env.ddl_context(Arc::new(MockDatanodeManager::new(())));
+        let persistent_ctx = PersistentContext::new(
+            table::table_name::TableName::new("test_catalog", "test_schema", "test_table"),
+            1024,
+            None,
+        );
+        let mut ctx = crate::procedure::repartition::Context::new(
+            &ddl_ctx,
+            env.mailbox_ctx.mailbox().clone(),
+            env.server_addr.clone(),
+            persistent_ctx,
+        );
+        let procedure_id = common_procedure::ProcedureId::random();
+        let (tx, rx) = watch::channel(ProcedureState::Running);
+        tx.send(ProcedureState::failed(Arc::new(ProcedureError::external(
+            MockError::new(StatusCode::Internal),
+        ))))
+        .unwrap();
+        let procedure_ctx = ProcedureContext {
+            procedure_id: ProcedureId::random(),
+            provider: Arc::new(FailedProcedureContextProvider {
+                receiver: rx,
+                inner: MockContextProvider::default(),
+            }),
+        };
+        let mut state = Collect {
+            inflight_procedures: vec![ProcedureMeta {
+                plan_index: 0,
+                group_id: uuid::Uuid::new_v4(),
+                procedure_id,
+            }],
+            succeeded_procedures: vec![],
+            failed_procedures: vec![],
+            unknown_procedures: vec![],
+        };
+
+        let err = state.next(&mut ctx, &procedure_ctx).await.unwrap_err();
+
+        assert_eq!(state.failed_procedures.len(), 1);
+        assert_eq!(state.unknown_procedures.len(), 0);
+        assert!(!err.is_retryable());
+    }
+}
+
 #[async_trait::async_trait]
 #[typetag::serde]
 impl State for Collect {
@@ -104,7 +240,13 @@ impl State for Collect {
         );
 
         if failed > 0 || unknown > 0 {
-            // TODO(weny): retry the failed or unknown procedures.
+            return crate::error::UnexpectedSnafu {
+                violated: format!(
+                    "Repartition groups failed or became unknown, table_id: {}, failed: {}, unknown: {}",
+                    table_id, failed, unknown
+                ),
+            }
+            .fail();
         }
 
         if let Some(start_time) = ctx.volatile_ctx.dispatch_start_time.take() {

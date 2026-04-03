@@ -221,6 +221,24 @@ impl RepartitionGroupProcedure {
         Ok(())
     }
 
+    /// Returns whether group rollback should revert staging metadata.
+    ///
+    /// This uses an "after metadata apply, before exit staging" semantic.
+    /// Once execution reaches `UpdateMetadata::ApplyStaging` or any later staging state,
+    /// rollback must restore table-route metadata back to the pre-apply view.
+    ///
+    /// State flow:
+    /// `RepartitionStart -> SyncRegion -> UpdateMetadata::ApplyStaging -> EnterStagingRegion`
+    /// `                 -> RemapManifest -> ApplyStagingManifest -> UpdateMetadata::ExitStaging -> RepartitionEnd`
+    /// `                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^`
+    /// `                               rollback staging metadata`
+    ///
+    /// Notes:
+    /// - `RepartitionStart` / `SyncRegion`: no-op, metadata has not been staged yet.
+    /// - `UpdateMetadata::ApplyStaging` / `EnterStagingRegion` / `RemapManifest` /
+    ///   `ApplyStagingManifest` / `UpdateMetadata::RollbackStaging`: rollback-active.
+    /// - `UpdateMetadata::ExitStaging` / `RepartitionEnd`: excluded, because metadata has
+    ///   already moved into the post-commit exit path.
     fn should_rollback_metadata(&self) -> bool {
         self.state.as_any().is::<EnterStagingRegion>()
             || self.state.as_any().is::<RemapManifest>()
