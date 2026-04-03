@@ -135,6 +135,20 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
+    #[snafu(display("Failed to init pending flow reconcile manager"))]
+    InitPendingFlowReconcileManager {
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to reconcile pending flows"))]
+    PendingFlowReconcile {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
     #[snafu(display("Failed to create default catalog and schema"))]
     InitMetadata {
         #[snafu(implicit)]
@@ -1271,6 +1285,8 @@ impl ErrorExt for Error {
             Error::InitMetadata { source, .. }
             | Error::InitDdlManager { source, .. }
             | Error::InitReconciliationManager { source, .. } => source.status_code(),
+            Error::InitPendingFlowReconcileManager { source, .. } => source.status_code(),
+            Error::PendingFlowReconcile { source, .. } => source.status_code(),
 
             Error::BuildTlsOptions { source, .. } => source.status_code(),
             Error::Other { source, .. } => source.status_code(),

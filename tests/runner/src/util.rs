@@ -440,15 +440,46 @@ pub fn get_workspace_root() -> String {
     runner_crate_path.into_os_string().into_string().unwrap()
 }
 
+fn get_target_dir_from_cargo_config() -> Option<PathBuf> {
+    let workspace_root = get_workspace_root();
+    let output = Command::new("cargo")
+        .current_dir(&workspace_root)
+        .args([
+            "config",
+            "get",
+            "build.target-dir",
+            "-Z",
+            "unstable-options",
+            "--format",
+            "json-value",
+        ])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let target_dir = std::str::from_utf8(&output.stdout).ok()?.trim();
+    let target_dir: String = serde_json::from_str(target_dir).ok()?;
+    let target_dir = PathBuf::from(target_dir);
+
+    if target_dir.is_absolute() {
+        Some(target_dir)
+    } else {
+        Some(PathBuf::from(workspace_root).join(target_dir))
+    }
+}
+
 pub fn get_binary_dir(mode: &str) -> PathBuf {
-    // first go to the workspace root.
-    let mut workspace_root = PathBuf::from(get_workspace_root());
+    let mut binary_dir = get_target_dir_from_cargo_config().unwrap_or_else(|| {
+        let mut workspace_root = PathBuf::from(get_workspace_root());
+        workspace_root.push("target");
+        workspace_root
+    });
 
-    // change directory to target dir (workspace/target/<build mode>/)
-    workspace_root.push("target");
-    workspace_root.push(mode);
-
-    workspace_root
+    binary_dir.push(mode);
+    binary_dir
 }
 
 /// Spin-waiting a socket address is available, or timeout.

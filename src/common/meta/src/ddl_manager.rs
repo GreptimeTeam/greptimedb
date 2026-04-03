@@ -29,6 +29,7 @@ use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::TableId;
 use table::table_name::TableName;
 
+use crate::ddl::activate_flow::ActivatePendingFlowProcedure;
 use crate::ddl::alter_database::AlterDatabaseProcedure;
 use crate::ddl::alter_logical_tables::AlterLogicalTablesProcedure;
 use crate::ddl::alter_table::AlterTableProcedure;
@@ -52,7 +53,7 @@ use crate::error::{
 };
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
-use crate::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
+use crate::key::{DeserializedValueWithBytes, FlowId, TableMetadataManagerRef};
 use crate::procedure_executor::ExecutorContext;
 #[cfg(feature = "enterprise")]
 use crate::rpc::ddl::DdlTask::CreateTrigger;
@@ -232,6 +233,7 @@ impl DdlManager {
             CreateTableProcedure,
             CreateLogicalTablesProcedure,
             CreateViewProcedure,
+            ActivatePendingFlowProcedure,
             CreateFlowProcedure,
             AlterTableProcedure,
             AlterLogicalTablesProcedure,
@@ -486,6 +488,17 @@ impl DdlManager {
         let procedure = CreateFlowProcedure::new(create_flow, query_context, context);
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
+        self.execute_procedure_and_wait(procedure_with_id).await
+    }
+
+    pub async fn submit_activate_pending_flow_task(
+        &self,
+        flow_id: FlowId,
+        catalog_name: String,
+    ) -> Result<(ProcedureId, Option<Output>)> {
+        let context = self.create_context();
+        let procedure = ActivatePendingFlowProcedure::new(flow_id, catalog_name, context);
+        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
         self.execute_procedure_and_wait(procedure_with_id).await
     }
 

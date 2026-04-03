@@ -56,6 +56,7 @@ use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::MetaPeerClientRef;
 use crate::error::{self, BuildWalProviderSnafu, OtherSnafu, Result};
 use crate::events::EventHandlerImpl;
+use crate::flow::{PendingFlowReconcileManager, PendingFlowReconcileTickerRef};
 use crate::gc::GcScheduler;
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::handler::failure_handler::RegionFailureHandler;
@@ -556,6 +557,15 @@ impl MetasrvBuilder {
             .try_start()
             .context(error::InitReconciliationManagerSnafu)?;
 
+        let (pending_flow_reconcile_manager, pending_flow_reconcile_ticker) =
+            PendingFlowReconcileManager::new(ddl_manager.clone());
+        pending_flow_reconcile_manager
+            .try_start()
+            .map_err(common_error::ext::BoxedError::new)
+            .context(error::InitPendingFlowReconcileManagerSnafu)?;
+        let pending_flow_reconcile_ticker: Option<PendingFlowReconcileTickerRef> =
+            Some(Arc::new(pending_flow_reconcile_ticker));
+
         let mut resource_stat = ResourceStatImpl::default();
         resource_stat.start_collect_cpu_usage();
 
@@ -597,6 +607,7 @@ impl MetasrvBuilder {
             region_flush_ticker,
             table_id_allocator,
             reconciliation_manager,
+            pending_flow_reconcile_ticker,
             topic_stats_registry,
             resource_stat: Arc::new(resource_stat),
             gc_ticker,
