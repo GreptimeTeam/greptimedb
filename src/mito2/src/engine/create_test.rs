@@ -401,7 +401,7 @@ async fn test_engine_create_with_format_one_case(create_format: &str, default_fl
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_flat_format: default_flat_format,
+            default_flat_format,
             ..Default::default()
         })
         .await;
