@@ -35,4 +35,15 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 TQL EXPLAIN VERBOSE (0, 10, '5s') test AS series;
 
+CREATE TABLE test_nano(i DOUBLE, j TIMESTAMP(9) TIME INDEX, k STRING PRIMARY KEY);
+
+INSERT INTO test_nano VALUES (1, 1000000, "a"), (1, 1000000, "b"), (2, 2000000, "a");
+
+-- explain at 0s, 5s and 10s for a nanosecond time index.
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+TQL EXPLAIN (0, 10, '5s') test_nano;
+
+DROP TABLE test_nano;
+
 DROP TABLE test;

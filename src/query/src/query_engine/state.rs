@@ -59,6 +59,7 @@ use crate::dist_plan::{
 };
 use crate::metrics::{QUERY_MEMORY_POOL_REJECTED_TOTAL, QUERY_MEMORY_POOL_USAGE_BYTES};
 use crate::optimizer::ExtensionAnalyzerRule;
+use crate::optimizer::const_normalization::ConstNormalizationRule;
 use crate::optimizer::constant_term::MatchesConstantTermOptimizer;
 use crate::optimizer::count_nest_aggr::CountNestAggrRule;
 use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
@@ -156,6 +157,7 @@ impl QueryEngineState {
         analyzer
             .rules
             .insert(0, Arc::new(CountWildcardToTimeIndexRule));
+        analyzer.rules.push(Arc::new(ConstNormalizationRule));
 
         // Add ApplyFunctionRewrites rule,
         // Note we cannot use `analyzer.add_function_rewrite`
