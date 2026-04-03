@@ -21,11 +21,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use mito2::memtable::simple_bulk_memtable::SimpleBulkMemtable;
-use mito2::memtable::{IterBuilder, KeyValues, Memtable, MemtableRanges, RangesOptions};
-use mito2::read;
-use mito2::read::Source;
-use mito2::read::dedup::DedupReader;
-use mito2::read::merge::MergeReaderBuilder;
+use mito2::memtable::{IterBuilder, KeyValues, Memtable, RangesOptions};
 use mito2::region::options::MergeMode;
 use mito2::test_util::column_metadata_to_column_schema;
 use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
@@ -126,36 +122,6 @@ fn create_memtable_with_rows(num_batches: usize) -> SimpleBulkMemtable {
 }
 
 async fn flush(mem: &SimpleBulkMemtable) {
-    let MemtableRanges { ranges, .. } = mem.ranges(None, RangesOptions::for_flush()).unwrap();
-
-    let mut source = if ranges.len() == 1 {
-        let only_range = ranges.into_values().next().unwrap();
-        let iter = only_range.build_iter().unwrap();
-        Source::Iter(iter)
-    } else {
-        let sources = ranges
-            .into_values()
-            .map(|r| r.build_iter().map(Source::Iter))
-            .collect::<mito2::error::Result<Vec<_>>>()
-            .unwrap();
-        let merge_reader = MergeReaderBuilder::from_sources(sources)
-            .build()
-            .await
-            .unwrap();
-        let reader = Box::new(DedupReader::new(
-            merge_reader,
-            read::dedup::LastRow::new(true),
-            None,
-        ));
-        Source::Reader(reader)
-    };
-
-    while let Some(b) = source.next_batch().await.unwrap() {
-        black_box(b);
-    }
-}
-
-async fn flush_original(mem: &SimpleBulkMemtable) {
     let iter = mem
         .ranges(None, RangesOptions::default())
         .unwrap()
@@ -180,18 +146,9 @@ fn bench_ranges_parallel_vs_sequential(c: &mut Criterion) {
         let memtable = create_memtable_with_rows(num_batch);
 
         group.bench_with_input(
-            BenchmarkId::new("flush_by_merge_reader", format!("{}k_rows", total_rows_k)),
-            &memtable,
-            |b, memtable| b.to_async(&rt).iter(|| async { flush(memtable).await }),
-        );
-
-        group.bench_with_input(
             BenchmarkId::new("flush_by_iter", format!("{}k_rows", total_rows_k)),
             &memtable,
-            |b, memtable| {
-                b.to_async(&rt)
-                    .iter(|| async { flush_original(memtable).await })
-            },
+            |b, memtable| b.to_async(&rt).iter(|| async { flush(memtable).await }),
         );
     }
 

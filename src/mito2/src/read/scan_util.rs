@@ -39,7 +39,7 @@ use crate::metrics::{
     READ_ROWS_IN_ROW_GROUP_TOTAL, READ_ROWS_RETURN, READ_STAGE_ELAPSED,
 };
 use crate::read::dedup::{DedupMetrics, DedupMetricsReport};
-use crate::read::merge::{MergeMetrics, MergeMetricsReport};
+use crate::read::flat_merge::{MergeMetrics, MergeMetricsReport};
 use crate::read::pruner::PartitionPruner;
 use crate::read::range::{RangeMeta, RowGroupIndex};
 use crate::read::scan_region::StreamContext;
