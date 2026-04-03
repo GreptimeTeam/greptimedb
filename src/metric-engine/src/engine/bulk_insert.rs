@@ -528,7 +528,7 @@ mod tests {
     async fn test_bulk_insert_physical_region_passthrough() {
         // Use flat format so that BulkMemtable is used (supports write_bulk).
         let mito_config = MitoConfig {
-            default_experimental_flat_format: true,
+            default_flat_format: true,
             ..Default::default()
         };
         let env = TestEnv::with_mito_config("", mito_config, Default::default()).await;
@@ -585,7 +585,7 @@ mod tests {
     async fn test_bulk_insert_physical_region_empty_batch() {
         // Use flat format so that BulkMemtable is used (supports write_bulk).
         let mito_config = MitoConfig {
-            default_experimental_flat_format: true,
+            default_flat_format: true,
             ..Default::default()
         };
         let env = TestEnv::with_mito_config("", mito_config, Default::default()).await;

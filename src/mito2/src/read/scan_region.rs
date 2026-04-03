@@ -46,7 +46,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheStrategy;
-use crate::config::{DEFAULT_MAX_CONCURRENT_SCAN_FILES, DEFAULT_SCAN_CHANNEL_SIZE};
+use crate::config::DEFAULT_MAX_CONCURRENT_SCAN_FILES;
 use crate::error::{InvalidPartitionExprSnafu, InvalidRequestSnafu, Result};
 #[cfg(feature = "enterprise")]
 use crate::extension::{BoxedExtensionRange, BoxedExtensionRangeProvider};
@@ -219,8 +219,6 @@ pub(crate) struct ScanRegion {
     request: ScanRequest,
     /// Cache.
     cache_strategy: CacheStrategy,
-    /// Capacity of the channel to send data from parallel scan tasks to the main task.
-    parallel_scan_channel_size: usize,
     /// Maximum number of SST files to scan concurrently.
     max_concurrent_scan_files: usize,
     /// Whether to ignore inverted index.
@@ -251,7 +249,6 @@ impl ScanRegion {
             access_layer,
             request,
             cache_strategy,
-            parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
             max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
             ignore_inverted_index: false,
             ignore_fulltext_index: false,
@@ -261,16 +258,6 @@ impl ScanRegion {
             #[cfg(feature = "enterprise")]
             extension_range_provider: None,
         }
-    }
-
-    /// Sets parallel scan task channel size.
-    #[must_use]
-    pub(crate) fn with_parallel_scan_channel_size(
-        mut self,
-        parallel_scan_channel_size: usize,
-    ) -> Self {
-        self.parallel_scan_channel_size = parallel_scan_channel_size;
-        self
     }
 
     /// Sets maximum number of SST files to scan concurrently.
@@ -527,7 +514,6 @@ impl ScanRegion {
             .with_inverted_index_appliers(inverted_index_appliers)
             .with_bloom_filter_index_appliers(bloom_filter_appliers)
             .with_fulltext_index_appliers(fulltext_index_appliers)
-            .with_parallel_scan_channel_size(self.parallel_scan_channel_size)
             .with_max_concurrent_scan_files(self.max_concurrent_scan_files)
             .with_start_time(self.start_time)
             .with_append_mode(self.version.options.append_mode)
@@ -814,8 +800,6 @@ pub struct ScanInput {
     pub(crate) cache_strategy: CacheStrategy,
     /// Ignores file not found error.
     ignore_file_not_found: bool,
-    /// Capacity of the channel to send data from parallel scan tasks to the main task.
-    pub(crate) parallel_scan_channel_size: usize,
     /// Maximum number of SST files to scan concurrently.
     pub(crate) max_concurrent_scan_files: usize,
     /// Index appliers.
@@ -863,7 +847,6 @@ impl ScanInput {
             files: Vec::new(),
             cache_strategy: CacheStrategy::Disabled,
             ignore_file_not_found: false,
-            parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
             max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
             inverted_index_appliers: [None, None],
             bloom_filter_index_appliers: [None, None],
@@ -925,16 +908,6 @@ impl ScanInput {
     #[must_use]
     pub(crate) fn with_ignore_file_not_found(mut self, ignore: bool) -> Self {
         self.ignore_file_not_found = ignore;
-        self
-    }
-
-    /// Sets scan task channel size.
-    #[must_use]
-    pub(crate) fn with_parallel_scan_channel_size(
-        mut self,
-        parallel_scan_channel_size: usize,
-    ) -> Self {
-        self.parallel_scan_channel_size = parallel_scan_channel_size;
         self
     }
 
@@ -1072,6 +1045,7 @@ impl ScanInput {
         &self,
         sources: Vec<Source>,
         semaphore: Arc<Semaphore>,
+        channel_size: usize,
     ) -> Result<Vec<Source>> {
         if sources.len() <= 1 {
             return Ok(sources);
@@ -1081,7 +1055,7 @@ impl ScanInput {
         let sources = sources
             .into_iter()
             .map(|source| {
-                let (sender, receiver) = mpsc::channel(self.parallel_scan_channel_size);
+                let (sender, receiver) = mpsc::channel(channel_size);
                 self.spawn_scan_task(source, semaphore.clone(), sender);
                 let stream = Box::pin(ReceiverStream::new(receiver));
                 Source::Stream(stream)
@@ -1256,6 +1230,7 @@ impl ScanInput {
         &self,
         sources: Vec<BoxedRecordBatchStream>,
         semaphore: Arc<Semaphore>,
+        channel_size: usize,
     ) -> Result<Vec<BoxedRecordBatchStream>> {
         if sources.len() <= 1 {
             return Ok(sources);
@@ -1265,7 +1240,7 @@ impl ScanInput {
         let sources = sources
             .into_iter()
             .map(|source| {
-                let (sender, receiver) = mpsc::channel(self.parallel_scan_channel_size);
+                let (sender, receiver) = mpsc::channel(channel_size);
                 self.spawn_flat_scan_task(source, semaphore.clone(), sender);
                 let stream = Box::pin(ReceiverStream::new(receiver));
                 Box::pin(stream) as _

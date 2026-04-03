@@ -141,7 +141,7 @@ async fn test_alter_region_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -213,7 +213,7 @@ async fn test_alter_region_with_format(flat_format: bool) {
         .reopen_engine(
             engine,
             MitoConfig {
-                default_experimental_flat_format: flat_format,
+                default_flat_format: flat_format,
                 ..Default::default()
             },
         )
@@ -267,7 +267,7 @@ async fn test_put_after_alter_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -318,7 +318,7 @@ async fn test_put_after_alter_with_format(flat_format: bool) {
         .reopen_engine(
             engine,
             MitoConfig {
-                default_experimental_flat_format: flat_format,
+                default_flat_format: flat_format,
                 ..Default::default()
             },
         )
@@ -387,7 +387,7 @@ async fn test_alter_region_retry_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -457,7 +457,7 @@ async fn test_alter_on_flushing_with_format(flat_format: bool) {
     let engine = env
         .create_engine_with(
             MitoConfig {
-                default_experimental_flat_format: flat_format,
+                default_flat_format: flat_format,
                 ..Default::default()
             },
             None,
@@ -574,7 +574,7 @@ async fn test_alter_column_fulltext_options_with_format(flat_format: bool) {
     let engine = env
         .create_engine_with(
             MitoConfig {
-                default_experimental_flat_format: flat_format,
+                default_flat_format: flat_format,
                 ..Default::default()
             },
             None,
@@ -681,7 +681,7 @@ async fn test_alter_column_fulltext_options_with_format(flat_format: bool) {
         .reopen_engine(
             engine,
             MitoConfig {
-                default_experimental_flat_format: flat_format,
+                default_flat_format: flat_format,
                 ..Default::default()
             },
         )
@@ -718,7 +718,7 @@ async fn test_alter_column_set_inverted_index_with_format(flat_format: bool) {
     let engine = env
         .create_engine_with(
             MitoConfig {
-                default_experimental_flat_format: flat_format,
+                default_flat_format: flat_format,
                 ..Default::default()
             },
             None,
@@ -816,7 +816,7 @@ async fn test_alter_column_set_inverted_index_with_format(flat_format: bool) {
         .reopen_engine(
             engine,
             MitoConfig {
-                default_experimental_flat_format: flat_format,
+                default_flat_format: flat_format,
                 ..Default::default()
             },
         )
@@ -853,7 +853,7 @@ async fn test_alter_region_ttl_options_with_format(flat_format: bool) {
     let engine = env
         .create_engine_with(
             MitoConfig {
-                default_experimental_flat_format: flat_format,
+                default_flat_format: flat_format,
                 ..Default::default()
             },
             None,
@@ -916,7 +916,7 @@ async fn test_write_stall_on_altering_with_format(flat_format: bool) {
     let engine = env
         .create_engine_with(
             MitoConfig {
-                default_experimental_flat_format: flat_format,
+                default_flat_format: flat_format,
                 ..Default::default()
             },
             None,
@@ -994,7 +994,7 @@ async fn test_alter_region_sst_format_with_flush() {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: false,
+            default_flat_format: false,
             ..Default::default()
         })
         .await;
@@ -1085,7 +1085,7 @@ async fn test_alter_region_sst_format_with_flush() {
         .reopen_engine(
             engine,
             MitoConfig {
-                default_experimental_flat_format: false,
+                default_flat_format: false,
                 ..Default::default()
             },
         )
@@ -1118,7 +1118,7 @@ async fn test_alter_region_sst_format_without_flush() {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: false,
+            default_flat_format: false,
             ..Default::default()
         })
         .await;
@@ -1203,7 +1203,7 @@ async fn test_alter_region_sst_format_without_flush() {
         .reopen_engine(
             engine,
             MitoConfig {
-                default_experimental_flat_format: false,
+                default_flat_format: false,
                 ..Default::default()
             },
         )
@@ -1224,6 +1224,250 @@ async fn test_alter_region_sst_format_without_flush() {
         .unwrap();
 
     check_format(&engine, Some(FormatType::Flat));
+
+    let request = ScanRequest::default();
+    let stream = engine.scan_to_stream(region_id, request).await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(expected_all_data, batches.pretty_print().unwrap());
+}
+
+#[tokio::test]
+async fn test_alter_region_sst_format_flat_to_pk_with_flush() {
+    common_telemetry::init_default_ut_logging();
+
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format: true,
+            ..Default::default()
+        })
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let column_schemas = rows_schema(&request);
+    let table_dir = request.table_dir.clone();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Inserts some data with flat format
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows(0, 3),
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    // Flushes to create SST files with flat format
+    flush_region(&engine, region_id, None).await;
+
+    let expected_data = "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| 0     | 0.0     | 1970-01-01T00:00:00 |
+| 1     | 1.0     | 1970-01-01T00:00:01 |
+| 2     | 2.0     | 1970-01-01T00:00:02 |
++-------+---------+---------------------+";
+    let request = ScanRequest::default();
+    let stream = engine.scan_to_stream(region_id, request).await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(expected_data, batches.pretty_print().unwrap());
+
+    // Alters sst_format from flat to primary_key
+    let alter_format_request = RegionAlterRequest {
+        kind: AlterKind::SetRegionOptions {
+            options: vec![SetRegionOption::Format("primary_key".to_string())],
+        },
+    };
+    engine
+        .handle_request(region_id, RegionRequest::Alter(alter_format_request))
+        .await
+        .unwrap();
+
+    // Inserts more data after alter
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows(3, 6),
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    // Flushes to create SST files with primary_key format
+    flush_region(&engine, region_id, None).await;
+
+    let expected_all_data = "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| 0     | 0.0     | 1970-01-01T00:00:00 |
+| 1     | 1.0     | 1970-01-01T00:00:01 |
+| 2     | 2.0     | 1970-01-01T00:00:02 |
+| 3     | 3.0     | 1970-01-01T00:00:03 |
+| 4     | 4.0     | 1970-01-01T00:00:04 |
+| 5     | 5.0     | 1970-01-01T00:00:05 |
++-------+---------+---------------------+";
+    let request = ScanRequest::default();
+    let stream = engine.scan_to_stream(region_id, request).await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(expected_all_data, batches.pretty_print().unwrap());
+
+    // Reopens region to verify format persists
+    let engine = env
+        .reopen_engine(
+            engine,
+            MitoConfig {
+                default_flat_format: false,
+                ..Default::default()
+            },
+        )
+        .await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Open(RegionOpenRequest {
+                engine: String::new(),
+                table_dir,
+                path_type: PathType::Bare,
+                options: HashMap::default(),
+                skip_wal_replay: false,
+                checkpoint: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+    let request = ScanRequest::default();
+    let stream = engine.scan_to_stream(region_id, request).await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(expected_all_data, batches.pretty_print().unwrap());
+}
+
+#[tokio::test]
+async fn test_alter_region_sst_format_flat_to_pk_without_flush() {
+    common_telemetry::init_default_ut_logging();
+
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format: true,
+            ..Default::default()
+        })
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let column_schemas = rows_schema(&request);
+    let table_dir = request.table_dir.clone();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let check_format = |engine: &MitoEngine, expected: Option<FormatType>| {
+        let current_format = engine
+            .get_region(region_id)
+            .unwrap()
+            .version()
+            .options
+            .sst_format;
+        assert_eq!(current_format, expected);
+    };
+    check_format(&engine, Some(FormatType::Flat));
+
+    // Inserts some data with flat format
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows(0, 3),
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    // Alters sst_format from flat to primary_key
+    let alter_format_request = RegionAlterRequest {
+        kind: AlterKind::SetRegionOptions {
+            options: vec![SetRegionOption::Format("primary_key".to_string())],
+        },
+    };
+    engine
+        .handle_request(region_id, RegionRequest::Alter(alter_format_request))
+        .await
+        .unwrap();
+
+    check_format(&engine, Some(FormatType::PrimaryKey));
+
+    // Inserts more data after alter
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows(3, 6),
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    let expected_all_data = "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| 0     | 0.0     | 1970-01-01T00:00:00 |
+| 1     | 1.0     | 1970-01-01T00:00:01 |
+| 2     | 2.0     | 1970-01-01T00:00:02 |
+| 3     | 3.0     | 1970-01-01T00:00:03 |
+| 4     | 4.0     | 1970-01-01T00:00:04 |
+| 5     | 5.0     | 1970-01-01T00:00:05 |
++-------+---------+---------------------+";
+    let request = ScanRequest::default();
+    let stream = engine.scan_to_stream(region_id, request).await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(expected_all_data, batches.pretty_print().unwrap());
+
+    // Reopens region to verify format persists
+    let engine = env
+        .reopen_engine(
+            engine,
+            MitoConfig {
+                default_flat_format: false,
+                ..Default::default()
+            },
+        )
+        .await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Open(RegionOpenRequest {
+                engine: String::new(),
+                table_dir,
+                path_type: PathType::Bare,
+                options: HashMap::default(),
+                skip_wal_replay: false,
+                checkpoint: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+    check_format(&engine, Some(FormatType::PrimaryKey));
 
     let request = ScanRequest::default();
     let stream = engine.scan_to_stream(region_id, request).await.unwrap();

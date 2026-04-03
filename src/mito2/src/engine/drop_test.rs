@@ -45,7 +45,7 @@ async fn test_engine_drop_region_with_format(flat_format: bool) {
     let engine = env
         .create_engine_with(
             MitoConfig {
-                default_experimental_flat_format: flat_format,
+                default_flat_format: flat_format,
                 ..Default::default()
             },
             None,
@@ -175,7 +175,7 @@ async fn test_engine_drop_region_for_custom_store_with_format(flat_format: bool)
     let engine = env
         .create_engine_with_multiple_object_stores(
             MitoConfig {
-                default_experimental_flat_format: flat_format,
+                default_flat_format: flat_format,
                 ..Default::default()
             },
             None,
