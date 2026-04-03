@@ -43,6 +43,7 @@ use greptime_proto::v1::region::RegionRequestHeader;
 use meter_core::data::ReadItem;
 use meter_macros::read_meter;
 use session::context::QueryContextRef;
+use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 use store_api::storage::RegionId;
 use table::table_name::TableName;
 use tokio::time::Instant;
@@ -440,6 +441,22 @@ impl MergeScanExec {
             {
                 overlaps.push(expr.clone());
             }
+        }
+
+        // Metric-engine scans can satisfy any hash distribution that includes `__tsid`.
+        // Equal requested keys also share the same `__tsid`, and equal `__tsid` values stay
+        // co-located across MergeScan partitions.
+        if self
+            .arrow_schema
+            .column_with_name(DATA_SCHEMA_TSID_COLUMN_NAME)
+            .is_some()
+            && hash_exprs.iter().any(|expr| {
+                expr.as_any()
+                    .downcast_ref::<Column>()
+                    .is_some_and(|col_expr| col_expr.name() == DATA_SCHEMA_TSID_COLUMN_NAME)
+            })
+        {
+            overlaps = hash_exprs.clone();
         }
 
         if overlaps.is_empty() {

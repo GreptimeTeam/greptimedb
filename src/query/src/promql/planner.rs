@@ -203,14 +203,6 @@ pub struct PromPlanner {
     ctx: PromPlannerContext,
 }
 
-struct RepeatedBinaryPattern<'a> {
-    repeated: &'a PromExpr,
-    other: &'a PromExpr,
-    inner: &'a PromBinaryExpr,
-    inner_repeated_on_left: bool,
-    outer_inner_on_left: bool,
-}
-
 impl PromPlanner {
     pub async fn stmt_to_plan(
         table_provider: DfTableSourceProvider,
@@ -670,15 +662,6 @@ impl PromPlanner {
             }
             // both are columns. join them on time index
             (None, None) => {
-                if !is_comparison_op
-                    && !Self::is_token_a_set_op(*op)
-                    && let Some(plan) = self
-                        .try_plan_collapsed_repeated_binary_expr(query_engine_state, binary_expr)
-                        .await?
-                {
-                    return Ok(plan);
-                }
-
                 let left_input = self.prom_expr_to_plan(lhs, query_engine_state).await?;
                 let left_field_columns = self.ctx.field_columns.clone();
                 let left_time_index_column = self.ctx.time_index_column.clone();
@@ -797,123 +780,6 @@ impl PromPlanner {
                 }
             }
         }
-    }
-
-    async fn try_plan_collapsed_repeated_binary_expr(
-        &mut self,
-        query_engine_state: &QueryEngineState,
-        binary_expr: &PromBinaryExpr,
-    ) -> Result<Option<LogicalPlan>> {
-        let PromBinaryExpr {
-            lhs,
-            rhs,
-            op,
-            modifier,
-        } = binary_expr;
-        let Some(pattern) = Self::find_repeated_binary_pattern(binary_expr) else {
-            return Ok(None);
-        };
-
-        if modifier.is_some()
-            || pattern.inner.modifier.is_some()
-            || Self::is_token_a_set_op(*op)
-            || Self::is_token_a_set_op(pattern.inner.op)
-            || Self::is_token_a_comparison_op(*op)
-            || Self::is_token_a_comparison_op(pattern.inner.op)
-            || lhs.value_type() != ValueType::Vector
-            || rhs.value_type() != ValueType::Vector
-            || pattern.repeated.value_type() != ValueType::Vector
-            || pattern.other.value_type() != ValueType::Vector
-        {
-            return Ok(None);
-        }
-
-        let repeated_input = self
-            .prom_expr_to_plan(pattern.repeated, query_engine_state)
-            .await?;
-        let repeated_field_columns = self.ctx.field_columns.clone();
-        let repeated_time_index_column = self.ctx.time_index_column.clone();
-        let mut repeated_table_ref = self
-            .table_ref()
-            .unwrap_or_else(|_| TableReference::bare(""));
-        let repeated_context = self.ctx.clone();
-
-        let other_input = self
-            .prom_expr_to_plan(pattern.other, query_engine_state)
-            .await?;
-        let other_field_columns = self.ctx.field_columns.clone();
-        let other_time_index_column = self.ctx.time_index_column.clone();
-        let mut other_table_ref = self
-            .table_ref()
-            .unwrap_or_else(|_| TableReference::bare(""));
-        let other_context = self.ctx.clone();
-
-        if repeated_table_ref == other_table_ref {
-            repeated_table_ref = TableReference::bare("lhs");
-            other_table_ref = TableReference::bare("rhs");
-            if self.ctx.tag_columns.is_empty() {
-                self.ctx = repeated_context.clone();
-                self.ctx.table_name = Some("lhs".to_string());
-            } else {
-                self.ctx.table_name = Some("rhs".to_string());
-            }
-        }
-
-        let field_columns = repeated_field_columns
-            .iter()
-            .zip(other_field_columns.iter())
-            .collect::<Vec<_>>();
-        // The collapsed fast path must preserve the same zipped-field semantics as the
-        // original two-step plan: only the shared prefix of value columns participates.
-        self.ctx.field_columns = field_columns
-            .iter()
-            .map(|(repeated_col_name, _)| (*repeated_col_name).clone())
-            .collect();
-        let mut field_columns = field_columns.into_iter();
-
-        let join_plan = self.join_on_non_field_columns(
-            repeated_input,
-            other_input,
-            repeated_table_ref.clone(),
-            other_table_ref.clone(),
-            repeated_time_index_column,
-            other_time_index_column,
-            repeated_context.tag_columns.is_empty() || other_context.tag_columns.is_empty(),
-            true,
-            &None,
-        )?;
-        let join_plan_schema = join_plan.schema().clone();
-
-        let field_expr_builder = |_: &String| {
-            let (repeated_col_name, other_col_name) = field_columns.next().unwrap();
-            let repeated_col = join_plan_schema
-                .qualified_field_with_name(Some(&repeated_table_ref), repeated_col_name)
-                .context(DataFusionPlanningSnafu)?
-                .into();
-            let other_col = join_plan_schema
-                .qualified_field_with_name(Some(&other_table_ref), other_col_name)
-                .context(DataFusionPlanningSnafu)?
-                .into();
-            let repeated_expr = DfExpr::Column(repeated_col);
-            let other_expr = DfExpr::Column(other_col);
-
-            let inner_expr_builder = Self::prom_token_to_binary_expr_builder(pattern.inner.op)?;
-            let inner_expr = if pattern.inner_repeated_on_left {
-                inner_expr_builder(repeated_expr.clone(), other_expr)?
-            } else {
-                inner_expr_builder(other_expr, repeated_expr.clone())?
-            };
-
-            let outer_expr_builder = Self::prom_token_to_binary_expr_builder(*op)?;
-            if pattern.outer_inner_on_left {
-                outer_expr_builder(inner_expr, repeated_expr)
-            } else {
-                outer_expr_builder(repeated_expr, inner_expr)
-            }
-        };
-
-        self.projection_for_each_field_column(join_plan, field_expr_builder)
-            .map(Some)
     }
 
     fn project_binary_join_side(
@@ -3567,69 +3433,6 @@ impl PromPlanner {
                 .any(|field| field.name() == DATA_SCHEMA_TSID_COLUMN_NAME)
     }
 
-    fn prom_expr_eq(left: &PromExpr, right: &PromExpr) -> bool {
-        Self::strip_paren_expr(left).to_string() == Self::strip_paren_expr(right).to_string()
-    }
-
-    fn strip_paren_expr(mut expr: &PromExpr) -> &PromExpr {
-        while let PromExpr::Paren(paren) = expr {
-            expr = paren.expr.as_ref();
-        }
-        expr
-    }
-
-    fn find_repeated_binary_pattern<'a>(
-        binary_expr: &'a PromBinaryExpr,
-    ) -> Option<RepeatedBinaryPattern<'a>> {
-        let PromBinaryExpr { lhs, rhs, .. } = binary_expr;
-        let lhs = Self::strip_paren_expr(lhs.as_ref());
-        let rhs = Self::strip_paren_expr(rhs.as_ref());
-
-        if let PromExpr::Binary(inner) = lhs {
-            if Self::prom_expr_eq(inner.lhs.as_ref(), rhs) {
-                return Some(RepeatedBinaryPattern {
-                    repeated: rhs,
-                    other: inner.rhs.as_ref(),
-                    inner,
-                    inner_repeated_on_left: true,
-                    outer_inner_on_left: true,
-                });
-            }
-            if Self::prom_expr_eq(inner.rhs.as_ref(), rhs) {
-                return Some(RepeatedBinaryPattern {
-                    repeated: rhs,
-                    other: inner.lhs.as_ref(),
-                    inner,
-                    inner_repeated_on_left: false,
-                    outer_inner_on_left: true,
-                });
-            }
-        }
-
-        if let PromExpr::Binary(inner) = rhs {
-            if Self::prom_expr_eq(inner.lhs.as_ref(), lhs) {
-                return Some(RepeatedBinaryPattern {
-                    repeated: lhs,
-                    other: inner.rhs.as_ref(),
-                    inner,
-                    inner_repeated_on_left: true,
-                    outer_inner_on_left: false,
-                });
-            }
-            if Self::prom_expr_eq(inner.rhs.as_ref(), lhs) {
-                return Some(RepeatedBinaryPattern {
-                    repeated: lhs,
-                    other: inner.lhs.as_ref(),
-                    inner,
-                    inner_repeated_on_left: false,
-                    outer_inner_on_left: false,
-                });
-            }
-        }
-
-        None
-    }
-
     /// Build a inner join on time index column and tag columns to concat two logical plans.
     /// When `only_join_time_index == true` we only join on the time index, because these two plan may not have the same tag columns
     #[allow(clippy::too_many_arguments)]
@@ -5102,7 +4905,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn repeated_tsid_binary_operand_reuses_single_join() {
+    async fn repeated_tsid_binary_operand_keeps_tsid_join_keys() {
         let prom_expr =
             parser::parse("((some_metric - some_alt_metric) / some_metric) * 100").unwrap();
         let eval_stmt = EvalStmt {
@@ -5133,12 +4936,12 @@ mod test {
                 .unwrap();
 
         let plan_str = plan.display_indent_schema().to_string();
-        assert_eq!(plan_str.matches("__tsid =").count(), 1, "{plan_str}");
+        assert_eq!(plan_str.matches("__tsid =").count(), 2, "{plan_str}");
         assert!(!plan_str.contains("tag_0 ="), "{plan_str}");
     }
 
     #[tokio::test]
-    async fn repeated_tsid_binary_operand_uses_shorter_field_side() {
+    async fn repeated_tsid_binary_operand_keeps_shorter_field_side() {
         let prom_expr =
             parser::parse("((two_field_metric - one_field_metric) / one_field_metric) * 100")
                 .unwrap();
@@ -5190,6 +4993,9 @@ mod test {
             })
             .count();
         assert_eq!(value_columns, 1, "{field_names:?}");
+        let plan_str = plan.display_indent_schema().to_string();
+        assert_eq!(plan_str.matches("__tsid =").count(), 2, "{plan_str}");
+        assert!(!plan_str.contains("tag_0 ="), "{plan_str}");
     }
 
     #[tokio::test]
