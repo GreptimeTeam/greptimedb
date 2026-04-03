@@ -3,6 +3,11 @@ name = "tests-integration"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+autotests = false
+
+[[test]]
+name = "main"
+path = "tests/main.rs"
 
 [features]
 dashboard = ["servers/dashboard"]
@@ -58,22 +63,14 @@ meta-client.workspace = true
 meta-srv = { workspace = true, features = ["mock"] }
 mito2.workspace = true
 moka.workspace = true
-mysql_async = { version = "0.35", default-features = false, features = [
-    "time",
-    "default-rustls-ring",
-] }
 object-store.workspace = true
 operator = { workspace = true, features = ["testing"] }
 prost.workspace = true
 query.workspace = true
 rand.workspace = true
-rstest.workspace = true
-rstest_reuse.workspace = true
-sea-query.workspace = true
 serde_json.workspace = true
 servers = { workspace = true, features = ["testing"] }
 session.workspace = true
-similar-asserts.workspace = true
 snafu.workspace = true
 sql.workspace = true
 sqlx = { workspace = true, features = [
@@ -103,6 +100,10 @@ hex.workspace = true
 http.workspace = true
 itertools.workspace = true
 jsonb.workspace = true
+mysql_async = { version = "0.35", default-features = false, features = [
+    "time",
+    "default-rustls-ring",
+] }
 opentelemetry-proto.workspace = true
 otel-arrow-rust.workspace = true
 partition.workspace = true
@@ -110,7 +111,11 @@ paste.workspace = true
 pipeline.workspace = true
 prost.workspace = true
 rand.workspace = true
+rstest.workspace = true
+rstest_reuse.workspace = true
+sea-query.workspace = true
 session = { workspace = true, features = ["testing"] }
+similar-asserts.workspace = true
 store-api.workspace = true
 tokio-postgres = { workspace = true }
 url = "2.3"

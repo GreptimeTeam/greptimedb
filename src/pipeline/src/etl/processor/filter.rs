@@ -158,20 +158,18 @@ impl Processor for FilterProcessor {
         for field in self.fields.iter() {
             let val = val.as_object_mut().context(ValueMustBeMapSnafu)?;
             let index = field.input_field();
-            match val.get(index) {
-                Some(VrlValue::Bytes(b)) => {
+            if let Some(v) = val.get(index) {
+                if let VrlValue::Bytes(b) = v {
                     if self.match_target(&String::from_utf8_lossy(b)) {
                         return Ok(VrlValue::Null);
                     }
-                }
-                Some(v) => {
+                } else {
                     return ProcessorExpectStringSnafu {
                         processor: self.kind(),
                         v: v.clone(),
                     }
                     .fail();
                 }
-                None => {}
             }
         }
 

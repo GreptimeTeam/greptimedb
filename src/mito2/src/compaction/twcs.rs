@@ -588,8 +588,8 @@ mod tests {
             assert_eq!(*overlapping, actual_window.overlapping);
             let mut file_ranges = actual_window
                 .files
-                .iter()
-                .flat_map(|(_, f)| {
+                .values()
+                .flat_map(|f| {
                     f.files().iter().map(|f| {
                         let (s, e) = f.time_range();
                         (s.value(), e.value())

@@ -565,7 +565,7 @@ dependencies = [
  "arrow-schema 57.3.0",
  "arrow-select 57.3.0",
  "flatbuffers",
- "lz4_flex 0.12.0",
+ "lz4_flex 0.12.1",
  "zstd",
 ]
 
@@ -2085,7 +2085,6 @@ dependencies = [
  "rand 0.9.1",
  "regex",
  "reqwest",
- "rexpect",
  "serde",
  "serde_json",
  "servers",
@@ -2155,12 +2154,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "comma"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "55b672471b4e9f9e95499ea597ff64941a309b2cdbffcc46f2cc5e2d971fd335"
-
-[[package]]
 name = "common-base"
 version = "1.0.0-rc.2"
 dependencies = [
@@ -2169,17 +2162,12 @@ dependencies = [
  "async-trait",
  "bitvec",
  "bytes",
- "common-error",
- "common-macro",
  "common-test-util",
  "futures",
  "lazy_static",
- "paste",
  "pin-project",
- "rand 0.9.1",
  "regex",
  "serde",
- "snafu 0.8.6",
  "tokio",
  "toml 0.8.23",
  "zeroize",
@@ -2210,7 +2198,6 @@ dependencies = [
  "object-store",
  "serde",
  "serde_json",
- "serde_with",
  "snafu 0.8.6",
  "temp-env",
  "tempfile",
@@ -2664,6 +2651,7 @@ dependencies = [
  "common-base",
  "common-error",
  "common-macro",
+ "common-memory-manager",
  "common-telemetry",
  "common-time",
  "criterion 0.7.0",
@@ -5261,6 +5249,7 @@ dependencies = [
  "humantime",
  "humantime-serde",
  "hyper-util",
+ "itertools 0.14.0",
  "lazy_static",
  "log-query",
  "meta-client",
@@ -7598,18 +7587,18 @@ dependencies = [
 
 [[package]]
 name = "lz4_flex"
-version = "0.11.5"
+version = "0.11.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08ab2867e3eeeca90e844d1940eab391c9dc5228783db2ed999acbc0a9ed375a"
+checksum = "373f5eceeeab7925e0c1098212f2fbc4d416adec9d35051a6ab251e824c1854a"
 dependencies = [
  "twox-hash",
 ]
 
 [[package]]
 name = "lz4_flex"
-version = "0.12.0"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab6473172471198271ff72e9379150e9dfd70d8e533e0752a27e515b48dd375e"
+checksum = "98c23545df7ecf1b16c303910a69b079e8e251d60f7dd2cc9b4177f2afaf1746"
 dependencies = [
  "twox-hash",
 ]
@@ -7722,15 +7711,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fd3f7eed9d3848f8b98834af67102b720745c4ec028fcd0aa0239277e7de374f"
 dependencies = [
  "libc",
-]
-
-[[package]]
-name = "memoffset"
-version = "0.6.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5aa361d4faea93603064a027415f07bd8e1d5c88c9fbf68bf56a285428fd79ce"
-dependencies = [
- "autocfg",
 ]
 
 [[package]]
@@ -8402,20 +8382,6 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
 name = "nix"
-version = "0.25.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f346ff70e7dbfd675fe90590b92d59ef2de15a8779ae305ebcbfd3f0caf59be4"
-dependencies = [
- "autocfg",
- "bitflags 1.3.2",
- "cfg-if",
- "libc",
- "memoffset 0.6.5",
- "pin-utils",
-]
-
-[[package]]
-name = "nix"
 version = "0.26.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "598beaf3cc6fdd9a5dfb1630c2800c7acd31df7aaf0f565796fba2b53ca1af1b"
@@ -8423,7 +8389,7 @@ dependencies = [
  "bitflags 1.3.2",
  "cfg-if",
  "libc",
- "memoffset 0.7.1",
+ "memoffset",
  "pin-utils",
 ]
 
@@ -8752,7 +8718,6 @@ dependencies = [
  "futures",
  "humantime-serde",
  "lazy_static",
- "moka",
  "opendal",
  "prometheus 0.14.0",
  "reqwest",
@@ -9151,7 +9116,7 @@ dependencies = [
  "flate2",
  "futures",
  "futures-util",
- "lz4_flex 0.11.5",
+ "lz4_flex 0.11.6",
  "lzokay-native",
  "num",
  "prost 0.13.5",
@@ -9374,7 +9339,7 @@ dependencies = [
  "futures",
  "half",
  "hashbrown 0.16.1",
- "lz4_flex 0.12.0",
+ "lz4_flex 0.12.1",
  "num-bigint",
  "num-integer",
  "num-traits",
@@ -9412,6 +9377,7 @@ dependencies = [
  "common-macro",
  "common-meta",
  "common-query",
+ "common-telemetry",
  "criterion 0.7.0",
  "datafusion-common",
  "datafusion-expr",
@@ -9620,9 +9586,9 @@ dependencies = [
 
 [[package]]
 name = "pgwire"
-version = "0.38.1"
+version = "0.38.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2a798d130b8975a566c2cf6d8955746e1f09a9ee2c3ff2e6020a2c6528c5bd1"
+checksum = "3a1bdf05fc8231cc5024572fe056e3ce34eb6b9b755ba7aba110e1c64119cec3"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -10242,6 +10208,7 @@ dependencies = [
  "common-macro",
  "common-recordbatch",
  "common-telemetry",
+ "criterion 0.7.0",
  "datafusion",
  "datafusion-common",
  "datafusion-expr",
@@ -10601,7 +10568,7 @@ dependencies = [
  "common-test-util",
  "derive_builder 0.20.2",
  "futures",
- "lz4_flex 0.11.5",
+ "lz4_flex 0.11.6",
  "moka",
  "pin-project",
  "prometheus 0.14.0",
@@ -11220,19 +11187,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rexpect"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01ff60778f96fb5a48adbe421d21bf6578ed58c0872d712e7e08593c195adff8"
-dependencies = [
- "comma",
- "nix 0.25.1",
- "regex",
- "tempfile",
- "thiserror 1.0.69",
-]
-
-[[package]]
 name = "rgb"
 version = "0.8.50"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11346,9 +11300,9 @@ dependencies = [
 
 [[package]]
 name = "rsasl"
-version = "2.2.0"
+version = "2.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8b534a23662bb559c5c73213be63ecd6524e774d291f3618c2b04b723d184eb"
+checksum = "9f1bcb95b531681a622f3d6972eaab523e17e2aad6d6209f0276628eb1cb5038"
 dependencies = [
  "base64 0.22.1",
  "core2",
@@ -11360,7 +11314,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "stringprep",
- "thiserror 1.0.69",
+ "thiserror 2.0.17",
 ]
 
 [[package]]
@@ -12097,6 +12051,7 @@ dependencies = [
  "local-ip-address",
  "log-query",
  "loki-proto",
+ "metric-engine",
  "mime_guess",
  "mysql_async",
  "notify",
@@ -12108,6 +12063,7 @@ dependencies = [
  "operator",
  "otel-arrow-rust",
  "parking_lot 0.12.4",
+ "partition",
  "permutation",
  "pg_interval_2",
  "pgwire",
@@ -12132,6 +12088,7 @@ dependencies = [
  "session",
  "simd-json",
  "simdutf8",
+ "smallvec",
  "snafu 0.8.6",
  "snap",
  "socket2 0.5.10",
@@ -12347,9 +12304,9 @@ dependencies = [
 
 [[package]]
 name = "slab"
-version = "0.4.10"
+version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04dc19736151f35336d325007ac991178d504a119863a2fcb3758cdb5e52c50d"
+checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "slotmap"
@@ -13263,7 +13220,7 @@ dependencies = [
  "levenshtein_automata",
  "log",
  "lru",
- "lz4_flex 0.11.5",
+ "lz4_flex 0.11.6",
  "measure_time",
  "memmap2",
  "once_cell",
@@ -14753,7 +14710,7 @@ dependencies = [
  "itertools 0.14.0",
  "lalrpop",
  "lalrpop-util",
- "lz4_flex 0.11.5",
+ "lz4_flex 0.11.6",
  "md-5",
  "nom 7.1.3",
  "ofb",

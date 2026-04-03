@@ -987,8 +987,7 @@ impl MySqlElection {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
-    use std::env;
+    use std::{assert_matches, env};
 
     use common_telemetry::init_default_ut_logging;
     use sqlx::MySqlPool;

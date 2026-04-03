@@ -172,7 +172,7 @@ async fn test_on_datanode_drop_regions() {
         let result = rx.try_recv().unwrap();
         results.push(result);
     }
-    results.sort_unstable_by(|(a, _), (b, _)| a.id.cmp(&b.id));
+    results.sort_unstable_by_key(|(a, _)| a.id);
 
     let (peer, request) = results.remove(0);
     check(peer, request, 1, RegionId::new(table_id, 1), false);

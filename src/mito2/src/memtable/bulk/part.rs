@@ -14,66 +14,55 @@
 
 //! Bulk part encoder/decoder.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use api::helper::{ColumnDataTypeWrapper, to_grpc_value};
 use api::v1::bulk_wal_entry::Body;
-use api::v1::{ArrowIpc, BulkWalEntry, Mutation, OpType, bulk_wal_entry};
+use api::v1::{ArrowIpc, BulkWalEntry, Mutation, OpType};
 use bytes::Bytes;
 use common_grpc::flight::{FlightDecoder, FlightEncoder, FlightMessage};
 use common_recordbatch::DfRecordBatch as RecordBatch;
 use common_time::Timestamp;
-use common_time::timestamp::TimeUnit;
 use datatypes::arrow;
-use datatypes::arrow::array::{
-    Array, ArrayRef, BinaryBuilder, BinaryDictionaryBuilder, DictionaryArray, StringBuilder,
-    StringDictionaryBuilder, TimestampMicrosecondArray, TimestampMillisecondArray,
-    TimestampNanosecondArray, TimestampSecondArray, UInt8Array, UInt8Builder, UInt32Array,
-    UInt64Array, UInt64Builder,
-};
-use datatypes::arrow::compute::{SortColumn, SortOptions, TakeOptions};
+use datatypes::arrow::array::{Array, ArrayRef, StringDictionaryBuilder, UInt8Array, UInt64Array};
+use datatypes::arrow::compute::{SortColumn, SortOptions};
 use datatypes::arrow::datatypes::{
     DataType as ArrowDataType, Field, Schema, SchemaRef, UInt32Type,
 };
-use datatypes::arrow_array::BinaryArray;
 use datatypes::data_type::DataType;
-use datatypes::prelude::{MutableVector, ScalarVectorBuilder, Vector};
-use datatypes::value::{Value, ValueRef};
+use datatypes::prelude::{MutableVector, Vector};
+use datatypes::value::ValueRef;
 use datatypes::vectors::Helper;
-use mito_codec::key_values::{KeyValue, KeyValues, KeyValuesRef};
-use mito_codec::row_converter::{
-    DensePrimaryKeyCodec, PrimaryKeyCodec, PrimaryKeyCodecExt, build_primary_key_codec,
-};
+use mito_codec::key_values::{KeyValue, KeyValues};
+use mito_codec::row_converter::PrimaryKeyCodec;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression, ZstdLevel};
-use parquet::data_type::AsBytes;
 use parquet::file::metadata::ParquetMetaData;
 use parquet::file::properties::WriterProperties;
 use smallvec::SmallVec;
-use snafu::{OptionExt, ResultExt, Snafu};
+use snafu::{OptionExt, ResultExt};
 use store_api::codec::PrimaryKeyEncoding;
-use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
+use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
-use store_api::storage::{FileId, RegionId, SequenceNumber, SequenceRange};
-use table::predicate::Predicate;
+use store_api::storage::{FileId, SequenceNumber, SequenceRange};
 
 use crate::error::{
-    self, ColumnNotFoundSnafu, ComputeArrowSnafu, ConvertColumnDataTypeSnafu, CreateDefaultSnafu,
-    DataTypeMismatchSnafu, EncodeMemtableSnafu, EncodeSnafu, InvalidMetadataSnafu,
-    InvalidRequestSnafu, NewRecordBatchSnafu, Result, UnexpectedSnafu,
+    self, ColumnNotFoundSnafu, ComputeArrowSnafu, CreateDefaultSnafu, DataTypeMismatchSnafu,
+    EncodeMemtableSnafu, EncodeSnafu, InvalidMetadataSnafu, InvalidRequestSnafu,
+    NewRecordBatchSnafu, Result,
 };
 use crate::memtable::bulk::context::BulkIterContextRef;
 use crate::memtable::bulk::part_reader::EncodedBulkPartIter;
 use crate::memtable::time_series::{ValueBuilder, Values};
 use crate::memtable::{BoxedRecordBatchIterator, MemScanMetrics, MemtableStats};
+use crate::sst::SeriesEstimator;
 use crate::sst::index::IndexOutput;
 use crate::sst::parquet::file_range::{PreFilterMode, row_group_contains_delete};
 use crate::sst::parquet::flat_format::primary_key_column_index;
-use crate::sst::parquet::format::{PrimaryKeyArray, PrimaryKeyArrayBuilder, ReadFormat};
+use crate::sst::parquet::format::{PrimaryKeyArray, PrimaryKeyArrayBuilder};
 use crate::sst::parquet::{PARQUET_METADATA_KEY, SstInfo};
-use crate::sst::{SeriesEstimator, to_sst_arrow_schema};
 
 const INIT_DICT_VALUE_CAPACITY: usize = 8;
 
@@ -527,8 +516,6 @@ impl PrimaryKeyColumnBuilder {
 
 /// Converter that converts structs into [BulkPart].
 pub struct BulkPartConverter {
-    /// Region metadata.
-    region_metadata: RegionMetadataRef,
     /// Schema of the converted batch.
     schema: SchemaRef,
     /// Primary key codec for encoding keys
@@ -577,7 +564,6 @@ impl BulkPartConverter {
         };
 
         Self {
-            region_metadata: region_metadata.clone(),
             schema,
             primary_key_codec,
             key_buf: Vec::new(),
@@ -1116,7 +1102,6 @@ pub struct BulkPartEncodeMetrics {
 
 pub struct BulkPartEncoder {
     metadata: RegionMetadataRef,
-    row_group_size: usize,
     writer_props: Option<WriterProperties>,
 }
 
@@ -1141,7 +1126,6 @@ impl BulkPartEncoder {
 
         Ok(Self {
             metadata,
-            row_group_size,
             writer_props,
         })
     }
@@ -1182,7 +1166,6 @@ impl BulkPartEncoder {
             iter_start = Instant::now();
         }
         metrics.iter_cost += iter_start.elapsed();
-        iter_start = Instant::now();
 
         if total_rows == 0 {
             return Ok(None);
@@ -1348,11 +1331,6 @@ impl MultiBulkPart {
         self.batches.len()
     }
 
-    /// Returns an iterator over the record batches.
-    pub(crate) fn batches(&self) -> impl Iterator<Item = &RecordBatch> {
-        self.batches.iter()
-    }
-
     /// Returns the estimated memory size of all batches.
     pub(crate) fn estimated_size(&self) -> usize {
         self.batches.iter().map(record_batch_estimated_size).sum()
@@ -1400,19 +1378,22 @@ impl MultiBulkPart {
 mod tests {
     use api::v1::{Row, SemanticType, WriteHint};
     use datafusion_common::ScalarValue;
-    use datatypes::arrow::array::Float64Array;
+    use datatypes::arrow::array::{
+        BinaryArray, DictionaryArray, Float64Array, TimestampMillisecondArray,
+    };
+    use datatypes::arrow::datatypes::UInt32Type;
     use datatypes::prelude::{ConcreteDataType, Value};
     use datatypes::schema::ColumnSchema;
+    use mito_codec::row_converter::build_primary_key_codec;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
     use store_api::storage::consts::ReservedColumnId;
+    use table::predicate::Predicate;
 
     use super::*;
     use crate::memtable::bulk::context::BulkIterContext;
     use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
-    use crate::test_util::memtable_util::{
-        build_key_values_with_ts_seq_values, metadata_for_test, region_metadata_to_row_schema,
-    };
+    use crate::test_util::memtable_util::{build_key_values_with_ts_seq_values, metadata_for_test};
 
     struct MutationInput<'a> {
         k0: &'a str,
@@ -1420,13 +1401,6 @@ mod tests {
         timestamps: &'a [i64],
         v1: &'a [Option<f64>],
         sequence: u64,
-    }
-
-    #[derive(Debug, PartialOrd, PartialEq)]
-    struct BatchOutput<'a> {
-        pk_values: &'a [Value],
-        timestamps: &'a [i64],
-        v1: &'a [Option<f64>],
     }
 
     fn encode(input: &[MutationInput]) -> EncodedBulkPart {
@@ -1482,7 +1456,7 @@ mod tests {
         ]);
 
         let projection = &[4u32];
-        let mut reader = part
+        let reader = part
             .read(
                 Arc::new(
                     BulkIterContext::new(
@@ -1523,7 +1497,7 @@ mod tests {
         let kvs = key_values
             .into_iter()
             .map(|(k0, k1, (start, end), sequence)| {
-                let ts = (start..end);
+                let ts = start..end;
                 let v1 = (start..end).map(|_| None);
                 build_key_values_with_ts_seq_values(&metadata, k0.to_string(), k1, ts, v1, sequence)
             })
@@ -1553,7 +1527,7 @@ mod tests {
             )
             .unwrap(),
         );
-        let mut reader = part
+        let reader = part
             .read(context, None, None)
             .unwrap()
             .expect("expect at least one row group");
@@ -1626,7 +1600,7 @@ mod tests {
             100,
         );
 
-        /// Predicates over field column can do precise filtering.
+        // Predicates over field column can do precise filtering.
         check_prune_row_group(
             &part,
             Some(Predicate::new(vec![

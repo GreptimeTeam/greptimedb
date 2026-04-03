@@ -458,7 +458,7 @@ impl BinaryVector {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
 
     use arrow::datatypes::DataType as ArrowDataType;
     use common_base::bytes::Bytes;

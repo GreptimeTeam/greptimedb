@@ -773,7 +773,7 @@ mod tests {
             r#"Failed to merge JSON datatype: datatypes have conflict, this: {"hello":"<String>","list":["<Number>"],"object":{"a":"<Number>"}}, that: "<Number>""#,
             r#"Failed to merge JSON datatype: datatypes have conflict, this: {"hello":"<String>","list":["<Number>"],"object":{"a":"<Number>"}}, that: ["<Number>"]"#,
         ];
-        for (json, expect) in jsons.into_iter().zip(expects.into_iter()) {
+        for (json, expect) in jsons.into_iter().zip(expects) {
             test(json, json_type, Err(expect))?;
         }
 

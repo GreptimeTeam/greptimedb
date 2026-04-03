@@ -794,16 +794,12 @@ impl Tokenizer {
                     is_quote_present = true;
                     break;
                 }
-                ' ' => {
-                    if !is_quoted {
-                        break;
-                    }
+                ' ' if !is_quoted => {
+                    break;
                 }
-                '(' | ')' | '+' | '-' => {
-                    if !is_quoted {
-                        self.rewind_one();
-                        break;
-                    }
+                '(' | ')' | '+' | '-' if !is_quoted => {
+                    self.rewind_one();
+                    break;
                 }
                 '\\' => {
                     let Some(next) = self.consume_next(pattern) else {

@@ -105,7 +105,7 @@ impl FileRegion {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
 
     use store_api::region_request::PathType;
 

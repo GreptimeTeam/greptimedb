@@ -30,11 +30,13 @@ use crate::sst::file::FileTimeRange;
 use crate::sst::parquet::file_range::FileRangeContextRef;
 use crate::sst::parquet::reader::{FlatRowGroupReader, ReaderMetrics, RowGroupReader};
 
+#[allow(dead_code)]
 pub enum Source {
     RowGroup(RowGroupReader),
     LastRow(RowGroupLastRowCachedReader),
 }
 
+#[allow(dead_code)]
 impl Source {
     async fn next_batch(&mut self) -> Result<Option<Batch>> {
         match self {
@@ -44,6 +46,7 @@ impl Source {
     }
 }
 
+#[allow(dead_code)]
 pub struct PruneReader {
     /// Context for file ranges.
     context: FileRangeContextRef,
@@ -53,6 +56,7 @@ pub struct PruneReader {
     skip_fields: bool,
 }
 
+#[allow(dead_code)]
 impl PruneReader {
     pub(crate) fn new_with_row_group_reader(
         ctx: FileRangeContextRef,
@@ -247,10 +251,10 @@ pub enum FlatSource {
 }
 
 impl FlatSource {
-    fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
+    async fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
         match self {
-            FlatSource::RowGroup(r) => r.next_batch(),
-            FlatSource::LastRow(r) => r.next_batch(),
+            FlatSource::RowGroup(r) => r.next_batch().await,
+            FlatSource::LastRow(r) => r.next_batch().await,
         }
     }
 }
@@ -297,13 +301,16 @@ impl FlatPruneReader {
         self.metrics.clone()
     }
 
-    pub(crate) fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
-        while let Some(record_batch) = {
+    pub(crate) async fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
+        loop {
             let start = std::time::Instant::now();
-            let batch = self.source.next_batch()?;
+            let batch = self.source.next_batch().await?;
             self.metrics.scan_cost += start.elapsed();
-            batch
-        } {
+
+            let Some(record_batch) = batch else {
+                return Ok(None);
+            };
+
             // Update metrics for the received batch
             self.metrics.num_rows += record_batch.num_rows();
             self.metrics.num_batches += 1;
@@ -317,8 +324,6 @@ impl FlatPruneReader {
                 }
             }
         }
-
-        Ok(None)
     }
 
     /// Prunes batches by the pushed down predicate and returns RecordBatch.

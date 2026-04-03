@@ -309,7 +309,7 @@ where
 pub fn reduce_runs<T: Item>(mut runs: Vec<SortedRun<T>>) -> Vec<T> {
     assert!(runs.len() > 1);
     // sort runs by size
-    runs.sort_unstable_by(|a, b| a.size.cmp(&b.size));
+    runs.sort_unstable_by_key(|a| a.size);
     // limit max probe runs to 100
     let probe_end = runs.len().min(100);
     let mut min_penalty = usize::MAX;

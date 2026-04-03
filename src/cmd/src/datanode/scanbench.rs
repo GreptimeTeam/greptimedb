@@ -102,10 +102,6 @@ pub struct ScanbenchCommand {
     #[clap(long, value_name = "FILE")]
     pprof_file: Option<PathBuf>,
 
-    /// Force reading the region in flat format.
-    #[clap(long, default_value_t = false)]
-    force_flat_format: bool,
-
     /// Enable WAL replay when opening the region.
     #[clap(long, default_value_t = false)]
     enable_wal: bool,
@@ -580,12 +576,11 @@ impl ScanbenchCommand {
         };
 
         println!(
-            "{} Scanner: {}, Parallelism: {}, Iterations: {}, Force flat format: {}",
+            "{} Scanner: {}, Parallelism: {}, Iterations: {}",
             "ℹ".blue(),
             self.scanner,
             self.parallelism,
             self.iterations,
-            self.force_flat_format,
         );
 
         // Start profiling if pprof_file is specified (unless pprof_after_warmup is set)
@@ -626,7 +621,6 @@ impl ScanbenchCommand {
                 filters: filters.clone(),
                 series_row_selector,
                 distribution,
-                force_flat_format: self.force_flat_format,
                 ..Default::default()
             };
 
@@ -662,7 +656,7 @@ impl ScanbenchCommand {
 
                 // Sort ranges within each partition by start time ascending
                 for partition in &mut partitions {
-                    partition.sort_by(|a, b| a.start.cmp(&b.start));
+                    partition.sort_by_key(|a| a.start);
                 }
 
                 scanner
@@ -677,7 +671,9 @@ impl ScanbenchCommand {
 
             // Scan all partitions
             let num_partitions = scanner.properties().partitions.len();
-            let ctx = QueryScanContext::default();
+            let ctx = QueryScanContext {
+                explain_verbose: self.verbose,
+            };
             let metrics_set = ExecutionPlanMetricsSet::new();
 
             let mut scan_futures = FuturesUnordered::new();

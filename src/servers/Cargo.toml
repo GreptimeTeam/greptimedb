@@ -78,6 +78,7 @@ jsonb.workspace = true
 lazy_static.workspace = true
 log-query.workspace = true
 loki-proto.workspace = true
+metric-engine.workspace = true
 mime_guess = "2.0"
 notify.workspace = true
 object-pool = "0.5"
@@ -88,8 +89,9 @@ opentelemetry-proto.workspace = true
 operator.workspace = true
 otel-arrow-rust.workspace = true
 parking_lot.workspace = true
+partition.workspace = true
 pg_interval = { version = "0.5.2", package = "pg_interval_2" }
-pgwire = { version = "0.38.1", default-features = false, features = [
+pgwire = { version = "0.38.2", default-features = false, features = [
     "server-api-ring",
     "pg-ext-types",
 ] }
@@ -113,6 +115,7 @@ serde_json.workspace = true
 session.workspace = true
 simd-json.workspace = true
 simdutf8 = "0.1"
+smallvec.workspace = true
 snafu.workspace = true
 snap = "1"
 socket2 = "0.5"
@@ -174,4 +177,8 @@ harness = false
 
 [[bench]]
 name = "loki_labels"
+harness = false
+
+[[bench]]
+name = "flush_batch_physical"
 harness = false

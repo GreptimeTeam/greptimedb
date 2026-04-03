@@ -15,6 +15,7 @@
 use std::any::Any;
 use std::net::SocketAddr;
 use std::string::FromUtf8Error;
+use std::sync::Arc;
 
 use axum::http::StatusCode as HttpStatusCode;
 use axum::response::{IntoResponse, Response};
@@ -51,10 +52,15 @@ pub enum Error {
     Arrow {
         #[snafu(source)]
         error: arrow_schema::ArrowError,
+        #[snafu(implicit)]
+        location: Location,
     },
 
     #[snafu(display("Internal error: {}", err_msg))]
     Internal { err_msg: String },
+
+    #[snafu(display("Pending rows batcher channel closed"))]
+    BatcherChannelClosed,
 
     #[snafu(display("Unsupported data type: {}, reason: {}", data_type, reason))]
     UnsupportedDataType {
@@ -389,7 +395,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Error accessing catalog"))]
+    #[snafu(transparent)]
     Catalog {
         source: catalog::error::Error,
         #[snafu(implicit)]
@@ -675,6 +681,30 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(transparent)]
+    DataTypes {
+        source: datatypes::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(transparent)]
+    Partition {
+        source: partition::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(transparent)]
+    MetricEngine {
+        source: metric_engine::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to submit batch: {}", source))]
+    SubmitBatch { source: Arc<Error> },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -684,6 +714,7 @@ impl ErrorExt for Error {
         use Error::*;
         match self {
             Internal { .. }
+            | BatcherChannelClosed
             | InternalIo { .. }
             | TokioIo { .. }
             | StartHttp { .. }
@@ -752,6 +783,7 @@ impl ErrorExt for Error {
 
             Catalog { source, .. } => source.status_code(),
             RowWriter { source, .. } => source.status_code(),
+            DataTypes { source, .. } => source.status_code(),
 
             TlsRequired { .. } => StatusCode::Unknown,
             Auth { source, .. } => source.status_code(),
@@ -806,6 +838,9 @@ impl ErrorExt for Error {
             MemoryLimitExceeded { .. } => StatusCode::RateLimited,
 
             GreptimeProto { source, .. } => source.status_code(),
+            Partition { source, .. } => source.status_code(),
+            MetricEngine { source, .. } => source.status_code(),
+            SubmitBatch { source, .. } => source.status_code(),
         }
     }
 

@@ -33,8 +33,6 @@ use crate::memtable::MemtableConfig;
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
 
 const MULTIPART_UPLOAD_MINIMUM_SIZE: ReadableSize = ReadableSize::mb(5);
-/// Default channel size for parallel scan task.
-pub(crate) const DEFAULT_SCAN_CHANNEL_SIZE: usize = 32;
 /// Default maximum number of SST files to scan concurrently.
 pub(crate) const DEFAULT_MAX_CONCURRENT_SCAN_FILES: usize = 384;
 
@@ -142,8 +140,6 @@ pub struct MitoConfig {
     // Other configs:
     /// Buffer size for SST writing.
     pub sst_write_buffer_size: ReadableSize,
-    /// Capacity of the channel to send data from parallel scan tasks to the main task (default 32).
-    pub parallel_scan_channel_size: usize,
     /// Maximum number of SST files to scan concurrently (default 384).
     pub max_concurrent_scan_files: usize,
     /// Whether to allow stale entries read during replay.
@@ -151,6 +147,11 @@ pub struct MitoConfig {
     /// Memory limit for table scans across all queries. Setting it to 0 disables the limit.
     /// Supports absolute size (e.g., "2GB") or percentage (e.g., "50%").
     pub scan_memory_limit: MemoryLimit,
+    /// Behavior when scan memory tracking cannot acquire memory from the budget.
+    /// `wait` means `wait(10s)`, not unlimited waiting.
+    /// Defaults to [`OnExhaustedPolicy::Fail`], which intentionally differs from
+    /// [`OnExhaustedPolicy::default()`].
+    pub scan_memory_on_exhausted: OnExhaustedPolicy,
 
     /// Index configs.
     pub index: IndexConfig,
@@ -172,9 +173,9 @@ pub struct MitoConfig {
     #[serde(with = "humantime_serde")]
     pub min_compaction_interval: Duration,
 
-    /// Whether to enable experimental flat format as the default format.
+    /// Whether to enable flat format as the default SST format.
     /// When enabled, forces using BulkMemtable and BulkMemtableBuilder.
-    pub default_experimental_flat_format: bool,
+    pub default_flat_format: bool,
 
     pub gc: GcConfig,
 }
@@ -212,10 +213,10 @@ impl Default for MitoConfig {
             enable_refill_cache_on_read: true,
             manifest_cache_size: ReadableSize::mb(256),
             sst_write_buffer_size: DEFAULT_WRITE_BUFFER_SIZE,
-            parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
             max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
             allow_stale_entries: false,
             scan_memory_limit: MemoryLimit::default(),
+            scan_memory_on_exhausted: OnExhaustedPolicy::Fail,
             index: IndexConfig::default(),
             inverted_index: InvertedIndexConfig::default(),
             fulltext_index: FulltextIndexConfig::default(),
@@ -224,7 +225,7 @@ impl Default for MitoConfig {
             vector_index: VectorIndexConfig::default(),
             memtable: MemtableConfig::default(),
             min_compaction_interval: Duration::from_secs(0),
-            default_experimental_flat_format: false,
+            default_flat_format: true,
             gc: GcConfig::default(),
         };
 
@@ -286,14 +287,6 @@ impl MitoConfig {
             warn!(
                 "Sanitize sst write buffer size to {}",
                 self.sst_write_buffer_size
-            );
-        }
-
-        if self.parallel_scan_channel_size < 1 {
-            self.parallel_scan_channel_size = DEFAULT_SCAN_CHANNEL_SIZE;
-            warn!(
-                "Sanitize scan channel size to {}",
-                self.parallel_scan_channel_size
             );
         }
 

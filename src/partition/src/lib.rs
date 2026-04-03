@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(assert_matches)]
 //! Structs and traits for partitioning rule.
 
 pub mod cache;
@@ -27,5 +26,6 @@ pub mod partition;
 pub mod simplify;
 pub mod splitter;
 pub mod subtask;
+pub mod utils;
 
 pub use crate::partition::{PartitionRule, PartitionRuleRef};

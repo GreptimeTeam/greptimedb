@@ -37,6 +37,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, TimeSeriesRowSelector};
 use table::predicate::Predicate;
 
+use crate::cache::CacheStrategy;
 use crate::error::{
     ComputeArrowSnafu, DataTypeMismatchSnafu, DecodeSnafu, DecodeStatsSnafu,
     EvalPartitionFilterSnafu, NewRecordBatchSnafu, RecordBatchSnafu, Result, StatsNotPresentSnafu,
@@ -53,7 +54,8 @@ use crate::sst::parquet::flat_format::{
 };
 use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::reader::{
-    FlatRowGroupReader, MaybeFilter, RowGroupReader, RowGroupReaderBuilder, SimpleFilterContext,
+    FlatRowGroupReader, MaybeFilter, RowGroupBuildContext, RowGroupReader, RowGroupReaderBuilder,
+    SimpleFilterContext,
 };
 use crate::sst::parquet::row_group::ParquetFetchMetrics;
 use crate::sst::parquet::stats::RowGroupPruningStats;
@@ -173,6 +175,7 @@ impl FileRange {
     }
 
     /// Returns a reader to read the [FileRange].
+    #[allow(dead_code)]
     pub(crate) async fn reader(
         &self,
         selector: Option<TimeSeriesRowSelector>,
@@ -181,14 +184,17 @@ impl FileRange {
         if !self.in_dynamic_filter_range() {
             return Ok(None);
         }
+        // Compute skip_fields once for this row group
+        let skip_fields = self.context.should_skip_fields(self.row_group_idx);
         let parquet_reader = self
             .context
             .reader_builder
-            .build(
+            .build(self.context.build_context(
                 self.row_group_idx,
                 self.row_selection.clone(),
                 fetch_metrics,
-            )
+                skip_fields,
+            ))
             .await?;
 
         let use_last_row_reader = if selector
@@ -209,9 +215,6 @@ impl FileRange {
             // No selector provided, use RowGroupReader
             false
         };
-
-        // Compute skip_fields once for this row group
-        let skip_fields = self.context.should_skip_fields(self.row_group_idx);
 
         let prune_reader = if use_last_row_reader {
             // Row group is PUT only, use LastRowReader to skip unnecessary rows.
@@ -243,14 +246,17 @@ impl FileRange {
         if !self.in_dynamic_filter_range() {
             return Ok(None);
         }
+        // Compute skip_fields once for this row group
+        let skip_fields = self.context.should_skip_fields(self.row_group_idx);
         let parquet_reader = self
             .context
             .reader_builder
-            .build(
+            .build(self.context.build_context(
                 self.row_group_idx,
                 self.row_selection.clone(),
                 fetch_metrics,
-            )
+                skip_fields,
+            ))
             .await?;
 
         let use_last_row_reader = if selector
@@ -271,16 +277,20 @@ impl FileRange {
             false
         };
 
-        // Compute skip_fields once for this row group
-        let skip_fields = self.context.should_skip_fields(self.row_group_idx);
-
         let flat_prune_reader = if use_last_row_reader {
             let flat_row_group_reader =
                 FlatRowGroupReader::new(self.context.clone(), parquet_reader);
+            // Flat PK prefilter makes the input stream predicate-dependent, so cached
+            // selector results are not reusable across queries with different filters.
+            let cache_strategy = if self.context.reader_builder.has_flat_primary_key_prefilter() {
+                CacheStrategy::Disabled
+            } else {
+                self.context.reader_builder.cache_strategy().clone()
+            };
             let reader = FlatRowGroupLastRowCachedReader::new(
                 self.file_handle().file_id().file_id(),
                 self.row_group_idx,
-                self.context.reader_builder.cache_strategy().clone(),
+                cache_strategy,
                 self.context.read_format().projection_indices(),
                 flat_row_group_reader,
             );
@@ -387,7 +397,11 @@ impl FileRangeContext {
         input: RecordBatch,
         skip_fields: bool,
     ) -> Result<Option<RecordBatch>> {
-        self.base.precise_filter_flat(input, skip_fields)
+        self.base.precise_filter_flat(
+            input,
+            skip_fields,
+            self.reader_builder.has_flat_primary_key_prefilter(),
+        )
     }
 
     /// Determines whether to skip field filters based on PreFilterMode and row group delete status.
@@ -406,6 +420,23 @@ impl FileRangeContext {
     pub(crate) fn contains_delete(&self, row_group_index: usize) -> Result<bool> {
         let metadata = self.reader_builder.parquet_metadata();
         row_group_contains_delete(metadata, row_group_index, self.reader_builder.file_path())
+    }
+
+    /// Creates a [RowGroupBuildContext] for building row group readers with prefiltering.
+    pub(crate) fn build_context<'a>(
+        &'a self,
+        row_group_idx: usize,
+        row_selection: Option<RowSelection>,
+        fetch_metrics: Option<&'a ParquetFetchMetrics>,
+        skip_fields: bool,
+    ) -> RowGroupBuildContext<'a> {
+        RowGroupBuildContext {
+            filters: &self.base.filters,
+            skip_fields,
+            row_group_idx,
+            row_selection,
+            fetch_metrics,
+        }
     }
 
     /// Returns the estimated memory size of this context.
@@ -600,9 +631,15 @@ impl RangeBase {
         &self,
         input: RecordBatch,
         skip_fields: bool,
+        skip_prefiltered_pk_filters: bool,
     ) -> Result<Option<RecordBatch>> {
         let mut tag_decode_state = TagDecodeState::new();
-        let mask = self.compute_filter_mask_flat(&input, skip_fields, &mut tag_decode_state)?;
+        let mask = self.compute_filter_mask_flat(
+            &input,
+            skip_fields,
+            skip_prefiltered_pk_filters,
+            &mut tag_decode_state,
+        )?;
 
         // If mask is None, the entire batch is filtered out
         let Some(mut mask) = mask else {
@@ -647,6 +684,7 @@ impl RangeBase {
         &self,
         input: &RecordBatch,
         skip_fields: bool,
+        skip_prefiltered_pk_filters: bool,
         tag_decode_state: &mut TagDecodeState,
     ) -> Result<Option<BooleanBuffer>> {
         let mut mask = BooleanBuffer::new_set(input.num_rows());
@@ -671,6 +709,12 @@ impl RangeBase {
 
             // Skip field filters if skip_fields is true
             if skip_fields && filter_ctx.semantic_type() == SemanticType::Field {
+                continue;
+            }
+
+            // Flat parquet PK prefiltering already applied these tag predicates while refining
+            // row selection, so skip them here to avoid decoding/evaluating the same condition twice.
+            if skip_prefiltered_pk_filters && filter_ctx.usable_primary_key_filter() {
                 continue;
             }
 
@@ -924,5 +968,64 @@ impl RangeBase {
         }
 
         RecordBatch::try_new(arrow_schema.clone(), columns).context(NewRecordBatchSnafu)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use datafusion_expr::{col, lit};
+
+    use super::*;
+    use crate::sst::parquet::format::ReadFormat;
+    use crate::test_util::sst_util::{new_record_batch_with_custom_sequence, sst_region_metadata};
+
+    fn new_test_range_base(filters: Vec<SimpleFilterContext>) -> RangeBase {
+        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
+        let read_format = ReadFormat::new_flat(
+            metadata.clone(),
+            metadata.column_metadatas.iter().map(|c| c.column_id),
+            None,
+            "test",
+            true,
+        )
+        .unwrap();
+
+        RangeBase {
+            filters,
+            dyn_filters: vec![],
+            read_format,
+            expected_metadata: None,
+            prune_schema: metadata.schema.clone(),
+            codec: mito_codec::row_converter::build_primary_key_codec(metadata.as_ref()),
+            compat_batch: None,
+            compaction_projection_mapper: None,
+            pre_filter_mode: PreFilterMode::All,
+            partition_filter: None,
+        }
+    }
+
+    #[test]
+    fn test_compute_filter_mask_flat_skips_prefiltered_pk_filters() {
+        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
+        let filters = vec![
+            SimpleFilterContext::new_opt(&metadata, None, &col("tag_0").eq(lit("a"))).unwrap(),
+            SimpleFilterContext::new_opt(&metadata, None, &col("field_0").gt(lit(1_u64))).unwrap(),
+        ];
+        let base = new_test_range_base(filters);
+        let batch = new_record_batch_with_custom_sequence(&["b", "x"], 0, 4, 1);
+
+        let mask_without_skip = base
+            .compute_filter_mask_flat(&batch, false, false, &mut TagDecodeState::new())
+            .unwrap()
+            .unwrap();
+        assert_eq!(mask_without_skip.count_set_bits(), 0);
+
+        let mask_with_skip = base
+            .compute_filter_mask_flat(&batch, false, true, &mut TagDecodeState::new())
+            .unwrap()
+            .unwrap();
+        assert_eq!(mask_with_skip.count_set_bits(), 2);
     }
 }

@@ -41,7 +41,7 @@ async fn test_scan_with_min_sst_sequence_with_format(flat_format: bool) {
     let mut env = TestEnv::with_prefix("test_scan_with_min_sst_sequence").await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -176,7 +176,7 @@ async fn test_max_concurrent_scan_files() {
 async fn test_max_concurrent_scan_files_with_format(flat_format: bool) {
     let mut env = TestEnv::with_prefix("test_max_concurrent_scan_files").await;
     let config = MitoConfig {
-        default_experimental_flat_format: flat_format,
+        default_flat_format: flat_format,
         max_concurrent_scan_files: 2,
         ..Default::default()
     };
@@ -226,157 +226,16 @@ async fn test_max_concurrent_scan_files_with_format(flat_format: bool) {
 }
 
 #[tokio::test]
-async fn test_series_scan_primarykey() {
-    let mut env = TestEnv::with_prefix("test_series_scan").await;
-    let engine = env
-        .create_engine(MitoConfig {
-            default_experimental_flat_format: false,
-            ..Default::default()
-        })
-        .await;
-
-    let region_id = RegionId::new(1, 1);
-    let request = CreateRequestBuilder::new()
-        .insert_option("compaction.type", "twcs")
-        .insert_option("compaction.twcs.time_window", "1h")
-        .build();
-    let column_schemas = test_util::rows_schema(&request);
-
-    engine
-        .handle_request(region_id, RegionRequest::Create(request))
-        .await
-        .unwrap();
-
-    let put_flush_rows = async |start, end| {
-        let rows = Rows {
-            schema: column_schemas.clone(),
-            rows: test_util::build_rows(start, end),
-        };
-        test_util::put_rows(&engine, region_id, rows).await;
-        test_util::flush_region(&engine, region_id, None).await;
-    };
-    // generates 3 SST files
-    put_flush_rows(0, 3).await;
-    put_flush_rows(2, 6).await;
-    put_flush_rows(3600, 3603).await;
-    // Put to memtable.
-    let rows = Rows {
-        schema: column_schemas.clone(),
-        rows: test_util::build_rows(7200, 7203),
-    };
-    test_util::put_rows(&engine, region_id, rows).await;
-
-    let request = ScanRequest {
-        distribution: Some(TimeSeriesDistribution::PerSeries),
-        ..Default::default()
-    };
-    let scanner = engine.scanner(region_id, request).await.unwrap();
-    let Scanner::Series(mut scanner) = scanner else {
-        panic!("Scanner should be series scan");
-    };
-    // 3 partition ranges for 3 time window.
-    assert_eq!(
-        3,
-        scanner.properties().partitions[0].len(),
-        "unexpected ranges: {:?}",
-        scanner.properties().partitions
-    );
-    let raw_ranges: Vec<_> = scanner
-        .properties()
-        .partitions
-        .iter()
-        .flatten()
-        .cloned()
-        .collect();
-    let mut new_ranges = Vec::with_capacity(3);
-    for range in raw_ranges {
-        new_ranges.push(vec![range]);
-    }
-    scanner
-        .prepare(PrepareRequest {
-            ranges: Some(new_ranges),
-            ..Default::default()
-        })
-        .unwrap();
-
-    let metrics_set = ExecutionPlanMetricsSet::default();
-
-    let mut partition_batches = vec![vec![]; 3];
-    let mut streams: Vec<_> = (0..3)
-        .map(|partition| {
-            let stream = scanner
-                .scan_partition(&Default::default(), &metrics_set, partition)
-                .unwrap();
-            Some(stream)
-        })
-        .collect();
-    let mut num_done = 0;
-    let mut schema = None;
-    // Pull streams in round-robin fashion to get the consistent output from the sender.
-    while num_done < 3 {
-        if schema.is_none() {
-            schema = Some(streams[0].as_ref().unwrap().schema().clone());
-        }
-        for i in 0..3 {
-            let Some(mut stream) = streams[i].take() else {
-                continue;
-            };
-            let Some(rb) = stream.try_next().await.unwrap() else {
-                num_done += 1;
-                continue;
-            };
-            partition_batches[i].push(rb);
-            streams[i] = Some(stream);
-        }
-    }
-
-    let mut check_result = |expected| {
-        let batches =
-            RecordBatches::try_new(schema.clone().unwrap(), partition_batches.remove(0)).unwrap();
-        assert_eq!(expected, batches.pretty_print().unwrap());
-    };
-
-    // Output series order is 0, 1, 2, 3, 3600, 3601, 3602, 4, 5, 7200, 7201, 7202
-    let expected = "\
-+-------+---------+---------------------+
-| tag_0 | field_0 | ts                  |
-+-------+---------+---------------------+
-| 0     | 0.0     | 1970-01-01T00:00:00 |
-| 3     | 3.0     | 1970-01-01T00:00:03 |
-| 3602  | 3602.0  | 1970-01-01T01:00:02 |
-| 7200  | 7200.0  | 1970-01-01T02:00:00 |
-+-------+---------+---------------------+";
-    check_result(expected);
-
-    let expected = "\
-+-------+---------+---------------------+
-| tag_0 | field_0 | ts                  |
-+-------+---------+---------------------+
-| 1     | 1.0     | 1970-01-01T00:00:01 |
-| 3600  | 3600.0  | 1970-01-01T01:00:00 |
-| 4     | 4.0     | 1970-01-01T00:00:04 |
-| 7201  | 7201.0  | 1970-01-01T02:00:01 |
-+-------+---------+---------------------+";
-    check_result(expected);
-
-    let expected = "\
-+-------+---------+---------------------+
-| tag_0 | field_0 | ts                  |
-+-------+---------+---------------------+
-| 2     | 2.0     | 1970-01-01T00:00:02 |
-| 3601  | 3601.0  | 1970-01-01T01:00:01 |
-| 5     | 5.0     | 1970-01-01T00:00:05 |
-| 7202  | 7202.0  | 1970-01-01T02:00:02 |
-+-------+---------+---------------------+";
-    check_result(expected);
+async fn test_series_scan() {
+    test_series_scan_with_format(false).await;
+    test_series_scan_with_format(true).await;
 }
 
-#[tokio::test]
-async fn test_series_scan_flat() {
+async fn test_series_scan_with_format(flat_format: bool) {
     let mut env = TestEnv::with_prefix("test_series_scan").await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: true,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -449,19 +308,19 @@ async fn test_series_scan_flat() {
 
     let mut expected_rows = Vec::new();
     for value in [0_i64, 1, 2, 3, 4, 5, 3600, 3601, 3602, 7200, 7201, 7202] {
-        expected_rows.push((value.to_string(), (value as f64).to_bits(), value * 1000));
+        expected_rows.push((value.to_string(), value as f64, value * 1000));
     }
-    expected_rows.sort();
+    expected_rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.2.cmp(&b.2)));
 
     assert_eq!(expected_rows, actual_rows);
 }
 
-/// Scans all partitions in round-robin fashion and returns sorted rows.
+/// Scans all partitions in round-robin fashion and returns rows sorted by (tag, ts).
 /// Also asserts that each series appears in only one partition.
 async fn collect_partition_rows_round_robin(
     scanner: &dyn RegionScanner,
     num_partitions: usize,
-) -> Vec<(String, u64, i64)> {
+) -> Vec<(String, f64, i64)> {
     let metrics_set = ExecutionPlanMetricsSet::default();
 
     let mut partition_batches = vec![vec![]; num_partitions];
@@ -497,12 +356,12 @@ async fn collect_partition_rows_round_robin(
     collect_and_assert_partition_rows(schema, partition_batches)
 }
 
-/// Collects sorted (tag, field_bits, ts) rows from partition batches.
+/// Collects rows sorted by (tag, ts) from partition batches.
 /// Also asserts that each series appears in only one partition.
 fn collect_and_assert_partition_rows(
     schema: datatypes::schema::SchemaRef,
     partition_batches: Vec<Vec<common_recordbatch::RecordBatch>>,
-) -> Vec<(String, u64, i64)> {
+) -> Vec<(String, f64, i64)> {
     let mut series_to_partition = BTreeMap::new();
     let mut actual_rows = Vec::new();
 
@@ -526,7 +385,7 @@ fn collect_and_assert_partition_rows(
                 let field = fields.value(row);
                 let ts = ts.value(row);
                 partition_series.push(tag.clone());
-                actual_rows.push((tag, field.to_bits(), ts));
+                actual_rows.push((tag, field, ts));
             }
         }
 
@@ -541,7 +400,7 @@ fn collect_and_assert_partition_rows(
         }
     }
 
-    actual_rows.sort();
+    actual_rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.2.cmp(&b.2)));
     actual_rows
 }
 
@@ -552,7 +411,7 @@ async fn test_series_scan_flat_small_permits() {
     let mut env = TestEnv::with_prefix("test_series_scan_small_permits").await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: true,
+            default_flat_format: true,
             ..Default::default()
         })
         .await;
@@ -593,9 +452,9 @@ async fn test_series_scan_flat_small_permits() {
     for value in [
         0_i64, 1, 2, 3, 4, 5, 6, 3600, 3601, 3602, 3603, 3604, 7200, 7201, 7202, 7203,
     ] {
-        expected_rows.push((value.to_string(), (value as f64).to_bits(), value * 1000));
+        expected_rows.push((value.to_string(), value as f64, value * 1000));
     }
-    expected_rows.sort();
+    expected_rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.2.cmp(&b.2)));
 
     // Test with different semaphore sizes (num_partitions controls Semaphore::new(num_partitions)).
     for num_partitions in [1, 2] {

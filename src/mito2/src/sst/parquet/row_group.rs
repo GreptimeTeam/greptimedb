@@ -12,28 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Ports private structs from [parquet crate](https://github.com/apache/arrow-rs/blob/7e134f4d277c0b62c27529fc15a4739de3ad0afd/parquet/src/arrow/async_reader/mod.rs#L644-L650).
+//! Parquet row group reading utilities.
 
 use std::ops::Range;
 use std::sync::Arc;
 
-use bytes::{Buf, Bytes};
-use object_store::ObjectStore;
-use parquet::arrow::ProjectionMask;
-use parquet::arrow::arrow_reader::{RowGroups, RowSelection};
-use parquet::column::page::{PageIterator, PageReader};
-use parquet::errors::{ParquetError, Result};
-use parquet::file::metadata::{ParquetMetaData, RowGroupMetaData};
-use parquet::file::page_index::offset_index::OffsetIndexMetaData;
-use parquet::file::reader::{ChunkReader, Length};
-use parquet::file::serialized_reader::SerializedPageReader;
-use store_api::storage::{FileId, RegionId};
-use tokio::task::yield_now;
-
-use crate::cache::file_cache::{FileType, IndexKey};
-use crate::cache::{CacheStrategy, PageKey, PageValue};
-use crate::metrics::{READ_STAGE_ELAPSED, READ_STAGE_FETCH_PAGES};
-use crate::sst::parquet::helper::{MERGE_GAP, fetch_byte_ranges};
+use crate::sst::parquet::helper::MERGE_GAP;
 
 /// Inner data for ParquetFetchMetrics.
 #[derive(Default, Debug, Clone)]
@@ -64,19 +48,23 @@ pub struct ParquetFetchMetricsData {
     pub store_fetch_elapsed: std::time::Duration,
     /// Total elapsed time for fetching row groups.
     pub total_fetch_elapsed: std::time::Duration,
+    /// Elapsed time for prefilter execution.
+    pub prefilter_cost: std::time::Duration,
+    /// Number of rows filtered out by prefiltering.
+    pub prefilter_filtered_rows: usize,
 }
 
 impl ParquetFetchMetricsData {
     /// Returns true if the metrics are empty (contain no meaningful data).
     fn is_empty(&self) -> bool {
-        self.total_fetch_elapsed.is_zero()
+        self.total_fetch_elapsed.is_zero() && self.prefilter_cost.is_zero()
     }
 }
 
 /// Metrics for tracking page/row group fetch operations.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ParquetFetchMetrics {
-    pub data: std::sync::Mutex<ParquetFetchMetricsData>,
+    pub data: Arc<std::sync::Mutex<ParquetFetchMetricsData>>,
 }
 
 impl std::fmt::Debug for ParquetFetchMetrics {
@@ -100,6 +88,8 @@ impl std::fmt::Debug for ParquetFetchMetrics {
             write_cache_fetch_elapsed,
             store_fetch_elapsed,
             total_fetch_elapsed,
+            prefilter_cost,
+            prefilter_filtered_rows,
         } = *data;
 
         write!(f, "{{")?;
@@ -158,6 +148,16 @@ impl std::fmt::Debug for ParquetFetchMetrics {
         if !store_fetch_elapsed.is_zero() {
             write!(f, ", \"store_fetch_elapsed\":\"{:?}\"", store_fetch_elapsed)?;
         }
+        if !prefilter_cost.is_zero() {
+            write!(f, ", \"prefilter_cost\":\"{:?}\"", prefilter_cost)?;
+        }
+        if prefilter_filtered_rows > 0 {
+            write!(
+                f,
+                ", \"prefilter_filtered_rows\":{}",
+                prefilter_filtered_rows
+            )?;
+        }
 
         write!(f, "}}")
     }
@@ -185,6 +185,8 @@ impl ParquetFetchMetrics {
             write_cache_fetch_elapsed,
             store_fetch_elapsed,
             total_fetch_elapsed,
+            prefilter_cost,
+            prefilter_filtered_rows,
         } = *other.data.lock().unwrap();
 
         let mut data = self.data.lock().unwrap();
@@ -201,357 +203,8 @@ impl ParquetFetchMetrics {
         data.write_cache_fetch_elapsed += write_cache_fetch_elapsed;
         data.store_fetch_elapsed += store_fetch_elapsed;
         data.total_fetch_elapsed += total_fetch_elapsed;
-    }
-}
-
-pub(crate) struct RowGroupBase<'a> {
-    parquet_metadata: &'a ParquetMetaData,
-    row_group_idx: usize,
-    pub(crate) offset_index: Option<&'a [OffsetIndexMetaData]>,
-    /// Compressed page of each column.
-    column_chunks: Vec<Option<Arc<ColumnChunkData>>>,
-    pub(crate) row_count: usize,
-}
-
-impl<'a> RowGroupBase<'a> {
-    pub(crate) fn new(parquet_meta: &'a ParquetMetaData, row_group_idx: usize) -> Self {
-        let metadata = parquet_meta.row_group(row_group_idx);
-        // `offset_index` is always `None` if we don't set
-        // [with_page_index()](https://docs.rs/parquet/latest/parquet/arrow/arrow_reader/struct.ArrowReaderOptions.html#method.with_page_index)
-        // to `true`.
-        let offset_index = parquet_meta
-            .offset_index()
-            // filter out empty offset indexes (old versions specified Some(vec![]) when no present)
-            .filter(|index| !index.is_empty())
-            .map(|x| x[row_group_idx].as_slice());
-
-        Self {
-            parquet_metadata: parquet_meta,
-            row_group_idx,
-            offset_index,
-            column_chunks: vec![None; metadata.columns().len()],
-            row_count: metadata.num_rows() as usize,
-        }
-    }
-
-    pub(crate) fn calc_sparse_read_ranges(
-        &self,
-        projection: &ProjectionMask,
-        offset_index: &[OffsetIndexMetaData],
-        selection: &RowSelection,
-    ) -> (Vec<Range<u64>>, Vec<Vec<usize>>) {
-        // If we have a `RowSelection` and an `OffsetIndex` then only fetch pages required for the
-        // `RowSelection`
-        let mut page_start_offsets: Vec<Vec<usize>> = vec![];
-        let ranges = self
-            .column_chunks
-            .iter()
-            .zip(self.row_group_metadata().columns())
-            .enumerate()
-            .filter(|&(idx, (chunk, _chunk_meta))| chunk.is_none() && projection.leaf_included(idx))
-            .flat_map(|(idx, (_chunk, chunk_meta))| {
-                // If the first page does not start at the beginning of the column,
-                // then we need to also fetch a dictionary page.
-                let mut ranges = vec![];
-                let (start, _len) = chunk_meta.byte_range();
-                match offset_index[idx].page_locations.first() {
-                    Some(first) if first.offset as u64 != start => {
-                        ranges.push(start..first.offset as u64);
-                    }
-                    _ => (),
-                }
-
-                ranges.extend(
-                    selection
-                        .scan_ranges(&offset_index[idx].page_locations)
-                        .iter()
-                        .map(|range| range.start..range.end),
-                );
-                page_start_offsets.push(ranges.iter().map(|range| range.start as usize).collect());
-
-                ranges
-            })
-            .collect::<Vec<_>>();
-        (ranges, page_start_offsets)
-    }
-
-    pub(crate) fn assign_sparse_chunk(
-        &mut self,
-        projection: &ProjectionMask,
-        data: Vec<Bytes>,
-        page_start_offsets: Vec<Vec<usize>>,
-    ) {
-        let mut page_start_offsets = page_start_offsets.into_iter();
-        let mut chunk_data = data.into_iter();
-
-        for (idx, chunk) in self.column_chunks.iter_mut().enumerate() {
-            if chunk.is_some() || !projection.leaf_included(idx) {
-                continue;
-            }
-
-            if let Some(offsets) = page_start_offsets.next() {
-                let mut chunks = Vec::with_capacity(offsets.len());
-                for _ in 0..offsets.len() {
-                    chunks.push(chunk_data.next().unwrap());
-                }
-
-                let column = self
-                    .parquet_metadata
-                    .row_group(self.row_group_idx)
-                    .column(idx);
-                *chunk = Some(Arc::new(ColumnChunkData::Sparse {
-                    length: column.byte_range().1 as usize,
-                    data: offsets.into_iter().zip(chunks).collect(),
-                }))
-            }
-        }
-    }
-
-    pub(crate) fn calc_dense_read_ranges(&self, projection: &ProjectionMask) -> Vec<Range<u64>> {
-        self.column_chunks
-            .iter()
-            .enumerate()
-            .filter(|&(idx, chunk)| chunk.is_none() && projection.leaf_included(idx))
-            .map(|(idx, _chunk)| {
-                let column = self.row_group_metadata().column(idx);
-                let (start, length) = column.byte_range();
-                start..(start + length)
-            })
-            .collect::<Vec<_>>()
-    }
-
-    /// Assigns compressed chunk binary data to [RowGroupBase::column_chunks]
-    /// and returns the chunk offset and binary data assigned.
-    pub(crate) fn assign_dense_chunk(
-        &mut self,
-        projection: &ProjectionMask,
-        chunk_data: Vec<Bytes>,
-    ) {
-        let mut chunk_data = chunk_data.into_iter();
-
-        for (idx, chunk) in self.column_chunks.iter_mut().enumerate() {
-            if chunk.is_some() || !projection.leaf_included(idx) {
-                continue;
-            }
-
-            // Get the fetched page.
-            let Some(data) = chunk_data.next() else {
-                continue;
-            };
-
-            let column = self
-                .parquet_metadata
-                .row_group(self.row_group_idx)
-                .column(idx);
-            *chunk = Some(Arc::new(ColumnChunkData::Dense {
-                offset: column.byte_range().0 as usize,
-                data,
-            }));
-        }
-    }
-
-    /// Create [PageReader] from [RowGroupBase::column_chunks]
-    pub(crate) fn column_reader(
-        &self,
-        col_idx: usize,
-    ) -> Result<SerializedPageReader<ColumnChunkData>> {
-        let page_reader = match &self.column_chunks[col_idx] {
-            None => {
-                return Err(ParquetError::General(format!(
-                    "Invalid column index {col_idx}, column was not fetched"
-                )));
-            }
-            Some(data) => {
-                let page_locations = self
-                    .offset_index
-                    // filter out empty offset indexes (old versions specified Some(vec![]) when no present)
-                    .filter(|index| !index.is_empty())
-                    .map(|index| index[col_idx].page_locations.clone());
-                SerializedPageReader::new(
-                    data.clone(),
-                    self.row_group_metadata().column(col_idx),
-                    self.row_count,
-                    page_locations,
-                )?
-            }
-        };
-
-        Ok(page_reader)
-    }
-
-    pub(crate) fn parquet_metadata(&self) -> &ParquetMetaData {
-        self.parquet_metadata
-    }
-
-    pub(crate) fn row_group_metadata(&self) -> &RowGroupMetaData {
-        self.parquet_metadata().row_group(self.row_group_idx)
-    }
-}
-
-/// An in-memory collection of column chunks
-pub struct InMemoryRowGroup<'a> {
-    region_id: RegionId,
-    file_id: FileId,
-    row_group_idx: usize,
-    cache_strategy: CacheStrategy,
-    file_path: &'a str,
-    /// Object store.
-    object_store: ObjectStore,
-    base: RowGroupBase<'a>,
-}
-
-impl<'a> InMemoryRowGroup<'a> {
-    /// Creates a new [InMemoryRowGroup] by `row_group_idx`.
-    ///
-    /// # Panics
-    /// Panics if the `row_group_idx` is invalid.
-    pub fn create(
-        region_id: RegionId,
-        file_id: FileId,
-        parquet_meta: &'a ParquetMetaData,
-        row_group_idx: usize,
-        cache_strategy: CacheStrategy,
-        file_path: &'a str,
-        object_store: ObjectStore,
-    ) -> Self {
-        Self {
-            region_id,
-            file_id,
-            row_group_idx,
-            cache_strategy,
-            file_path,
-            object_store,
-            base: RowGroupBase::new(parquet_meta, row_group_idx),
-        }
-    }
-
-    /// Fetches the necessary column data into memory
-    pub async fn fetch(
-        &mut self,
-        projection: &ProjectionMask,
-        selection: Option<&RowSelection>,
-        metrics: Option<&ParquetFetchMetrics>,
-    ) -> Result<()> {
-        if let Some((selection, offset_index)) = selection.zip(self.base.offset_index) {
-            let (fetch_ranges, page_start_offsets) =
-                self.base
-                    .calc_sparse_read_ranges(projection, offset_index, selection);
-
-            let chunk_data = self.fetch_bytes(&fetch_ranges, metrics).await?;
-            // Assign sparse chunk data to base.
-            self.base
-                .assign_sparse_chunk(projection, chunk_data, page_start_offsets);
-        } else {
-            // Release the CPU to avoid blocking the runtime. Since `fetch_pages_from_cache`
-            // is a synchronous, CPU-bound operation.
-            yield_now().await;
-
-            // Calculate ranges to read.
-            let fetch_ranges = self.base.calc_dense_read_ranges(projection);
-
-            if fetch_ranges.is_empty() {
-                // Nothing to fetch.
-                return Ok(());
-            }
-
-            // Fetch data with ranges
-            let chunk_data = self.fetch_bytes(&fetch_ranges, metrics).await?;
-
-            // Assigns fetched data to base.
-            self.base.assign_dense_chunk(projection, chunk_data);
-        }
-
-        Ok(())
-    }
-
-    /// Try to fetch data from the memory cache or the WriteCache,
-    /// if not in WriteCache, fetch data from object store directly.
-    async fn fetch_bytes(
-        &self,
-        ranges: &[Range<u64>],
-        metrics: Option<&ParquetFetchMetrics>,
-    ) -> Result<Vec<Bytes>> {
-        // Now fetch page timer includes the whole time to read pages.
-        let _timer = READ_STAGE_FETCH_PAGES.start_timer();
-
-        let page_key = PageKey::new(self.file_id, self.row_group_idx, ranges.to_vec());
-        if let Some(pages) = self.cache_strategy.get_pages(&page_key) {
-            if let Some(metrics) = metrics {
-                let total_size: u64 = ranges.iter().map(|r| r.end - r.start).sum();
-                let mut metrics_data = metrics.data.lock().unwrap();
-                metrics_data.page_cache_hit += 1;
-                metrics_data.pages_to_fetch_mem += ranges.len();
-                metrics_data.page_size_to_fetch_mem += total_size;
-                metrics_data.page_size_needed += total_size;
-            }
-            return Ok(pages.compressed.clone());
-        }
-
-        // Calculate total range size for metrics.
-        let (total_range_size, unaligned_size) = compute_total_range_size(ranges);
-
-        let key = IndexKey::new(self.region_id, self.file_id, FileType::Parquet);
-        let fetch_write_cache_start = metrics.map(|_| std::time::Instant::now());
-        let write_cache_result = self.fetch_ranges_from_write_cache(key, ranges).await;
-        let pages = match write_cache_result {
-            Some(data) => {
-                if let Some(metrics) = metrics {
-                    let elapsed = fetch_write_cache_start
-                        .map(|start| start.elapsed())
-                        .unwrap_or_default();
-                    let range_size_needed: u64 = ranges.iter().map(|r| r.end - r.start).sum();
-                    let mut metrics_data = metrics.data.lock().unwrap();
-                    metrics_data.write_cache_fetch_elapsed += elapsed;
-                    metrics_data.write_cache_hit += 1;
-                    metrics_data.pages_to_fetch_write_cache += ranges.len();
-                    metrics_data.page_size_to_fetch_write_cache += unaligned_size;
-                    metrics_data.page_size_needed += range_size_needed;
-                }
-                data
-            }
-            None => {
-                // Fetch data from object store.
-                let _timer = READ_STAGE_ELAPSED
-                    .with_label_values(&["cache_miss_read"])
-                    .start_timer();
-
-                let start = metrics.map(|_| std::time::Instant::now());
-                let data = fetch_byte_ranges(self.file_path, self.object_store.clone(), ranges)
-                    .await
-                    .map_err(|e| ParquetError::External(Box::new(e)))?;
-                if let Some(metrics) = metrics {
-                    let elapsed = start.map(|start| start.elapsed()).unwrap_or_default();
-                    let range_size_needed: u64 = ranges.iter().map(|r| r.end - r.start).sum();
-                    let mut metrics_data = metrics.data.lock().unwrap();
-                    metrics_data.store_fetch_elapsed += elapsed;
-                    metrics_data.cache_miss += 1;
-                    metrics_data.pages_to_fetch_store += ranges.len();
-                    metrics_data.page_size_to_fetch_store += unaligned_size;
-                    metrics_data.page_size_needed += range_size_needed;
-                }
-                data
-            }
-        };
-
-        // Put pages back to the cache.
-        let page_value = PageValue::new(pages.clone(), total_range_size);
-        self.cache_strategy
-            .put_pages(page_key, Arc::new(page_value));
-
-        Ok(pages)
-    }
-
-    /// Fetches data from write cache.
-    /// Returns `None` if the data is not in the cache.
-    async fn fetch_ranges_from_write_cache(
-        &self,
-        key: IndexKey,
-        ranges: &[Range<u64>],
-    ) -> Option<Vec<Bytes>> {
-        if let Some(cache) = self.cache_strategy.write_cache() {
-            return cache.file_cache().read_ranges(key, ranges).await;
-        }
-        None
+        data.prefilter_cost += prefilter_cost;
+        data.prefilter_filtered_rows += prefilter_filtered_rows;
     }
 }
 
@@ -560,14 +213,14 @@ impl<'a> InMemoryRowGroup<'a> {
 /// - aligned_size: total size aligned to pooled buffer size
 /// - unaligned_size: actual total size without alignment
 // See https://github.com/apache/opendal/blob/v0.54.0/core/src/types/read/reader.rs#L166-L192
-fn compute_total_range_size(ranges: &[Range<u64>]) -> (u64, u64) {
+pub(crate) fn compute_total_range_size(ranges: &[Range<u64>]) -> (u64, u64) {
     if ranges.is_empty() {
         return (0, 0);
     }
 
     let gap = MERGE_GAP as u64;
     let mut sorted_ranges = ranges.to_vec();
-    sorted_ranges.sort_unstable_by(|a, b| a.start.cmp(&b.start));
+    sorted_ranges.sort_unstable_by_key(|a| a.start);
 
     let mut total_size_aligned = 0;
     let mut total_size_unaligned = 0;
@@ -602,96 +255,3 @@ fn align_to_pooled_buf_size(size: u64) -> u64 {
     const POOLED_BUF_SIZE: u64 = 2 * 1024 * 1024;
     size.div_ceil(POOLED_BUF_SIZE) * POOLED_BUF_SIZE
 }
-
-impl RowGroups for InMemoryRowGroup<'_> {
-    fn num_rows(&self) -> usize {
-        self.base.row_count
-    }
-
-    fn column_chunks(&self, i: usize) -> Result<Box<dyn PageIterator>> {
-        // Creates a page reader to read column at `i`.
-        let page_reader = self.base.column_reader(i)?;
-
-        Ok(Box::new(ColumnChunkIterator {
-            reader: Some(Ok(Box::new(page_reader))),
-        }))
-    }
-
-    fn row_groups(&self) -> Box<dyn Iterator<Item = &RowGroupMetaData> + '_> {
-        Box::new(std::iter::once(self.base.row_group_metadata()))
-    }
-
-    fn metadata(&self) -> &ParquetMetaData {
-        self.base.parquet_metadata()
-    }
-}
-
-/// An in-memory column chunk
-#[derive(Clone)]
-pub(crate) enum ColumnChunkData {
-    /// Column chunk data representing only a subset of data pages
-    Sparse {
-        /// Length of the full column chunk
-        length: usize,
-        /// Set of data pages included in this sparse chunk. Each element is a tuple
-        /// of (page offset, page data)
-        data: Vec<(usize, Bytes)>,
-    },
-    /// Full column chunk and its offset
-    Dense { offset: usize, data: Bytes },
-}
-
-impl ColumnChunkData {
-    fn get(&self, start: u64) -> Result<Bytes> {
-        match &self {
-            ColumnChunkData::Sparse { data, .. } => data
-                .binary_search_by_key(&start, |(offset, _)| *offset as u64)
-                .map(|idx| data[idx].1.clone())
-                .map_err(|_| {
-                    ParquetError::General(format!(
-                        "Invalid offset in sparse column chunk data: {start}"
-                    ))
-                }),
-            ColumnChunkData::Dense { offset, data } => {
-                let start = start as usize - *offset;
-                Ok(data.slice(start..))
-            }
-        }
-    }
-}
-
-impl Length for ColumnChunkData {
-    fn len(&self) -> u64 {
-        match &self {
-            ColumnChunkData::Sparse { length, .. } => *length as u64,
-            ColumnChunkData::Dense { data, .. } => data.len() as u64,
-        }
-    }
-}
-
-impl ChunkReader for ColumnChunkData {
-    type T = bytes::buf::Reader<Bytes>;
-
-    fn get_read(&self, start: u64) -> Result<Self::T> {
-        Ok(self.get(start)?.reader())
-    }
-
-    fn get_bytes(&self, start: u64, length: usize) -> Result<Bytes> {
-        Ok(self.get(start)?.slice(..length))
-    }
-}
-
-/// Implements [`PageIterator`] for a single column chunk, yielding a single [`PageReader`]
-pub(crate) struct ColumnChunkIterator {
-    pub(crate) reader: Option<Result<Box<dyn PageReader>>>,
-}
-
-impl Iterator for ColumnChunkIterator {
-    type Item = Result<Box<dyn PageReader>>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.reader.take()
-    }
-}
-
-impl PageIterator for ColumnChunkIterator {}

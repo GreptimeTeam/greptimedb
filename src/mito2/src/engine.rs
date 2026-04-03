@@ -95,7 +95,7 @@ use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_meta::error::UnexpectedSnafu;
 use common_meta::key::SchemaMetadataManagerRef;
-use common_recordbatch::{MemoryPermit, QueryMemoryTracker, SendableRecordBatchStream};
+use common_recordbatch::{QueryMemoryTracker, SendableRecordBatchStream};
 use common_stat::get_total_memory_bytes;
 use common_telemetry::{info, tracing, warn};
 use common_wal::options::WalOptions;
@@ -138,7 +138,8 @@ use crate::gc::GcLimiterRef;
 use crate::manifest::action::RegionEdit;
 use crate::memtable::MemtableStats;
 use crate::metrics::{
-    HANDLE_REQUEST_ELAPSED, SCAN_MEMORY_USAGE_BYTES, SCAN_REQUESTS_REJECTED_TOTAL,
+    HANDLE_REQUEST_ELAPSED, SCAN_MEMORY_EXHAUSTED_TOTAL, SCAN_MEMORY_USAGE_BYTES,
+    SCAN_REQUESTS_REJECTED_TOTAL,
 };
 use crate::read::scan_region::{ScanRegion, Scanner};
 use crate::read::stream::ScanBatchStream;
@@ -167,7 +168,6 @@ pub struct MitoEngineBuilder<'a, S: LogStore> {
     file_ref_manager: FileReferenceManagerRef,
     partition_expr_fetcher: PartitionExprFetcherRef,
     plugins: Plugins,
-    max_concurrent_queries: usize,
     #[cfg(feature = "enterprise")]
     extension_range_provider_factory: Option<BoxedExtensionRangeProviderFactory>,
 }
@@ -183,7 +183,6 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
         file_ref_manager: FileReferenceManagerRef,
         partition_expr_fetcher: PartitionExprFetcherRef,
         plugins: Plugins,
-        max_concurrent_queries: usize,
     ) -> Self {
         Self {
             data_home,
@@ -194,7 +193,6 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
             file_ref_manager,
             plugins,
             partition_expr_fetcher,
-            max_concurrent_queries,
             #[cfg(feature = "enterprise")]
             extension_range_provider_factory: None,
         }
@@ -230,13 +228,17 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
         let total_memory = get_total_memory_bytes().max(0) as u64;
         let scan_memory_limit = config.scan_memory_limit.resolve(total_memory) as usize;
         let scan_memory_tracker =
-            QueryMemoryTracker::new(scan_memory_limit, self.max_concurrent_queries)
-                .with_on_update(|usage| {
+            QueryMemoryTracker::builder(scan_memory_limit, config.scan_memory_on_exhausted)
+                .on_update(|usage| {
                     SCAN_MEMORY_USAGE_BYTES.set(usage as i64);
                 })
-                .with_on_reject(|| {
+                .on_exhausted(|| {
+                    SCAN_MEMORY_EXHAUSTED_TOTAL.inc();
+                })
+                .on_reject(|| {
                     SCAN_REQUESTS_REJECTED_TOTAL.inc();
-                });
+                })
+                .build();
 
         let inner = EngineInner {
             workers,
@@ -285,7 +287,6 @@ impl MitoEngine {
             file_ref_manager,
             partition_expr_fetcher,
             plugins,
-            0, // Default: no limit on concurrent queries
         );
         builder.try_build().await
     }
@@ -1026,7 +1027,6 @@ impl EngineInner {
             request,
             CacheStrategy::EnableAll(cache_manager),
         )
-        .with_parallel_scan_channel_size(self.config.parallel_scan_channel_size)
         .with_max_concurrent_scan_files(self.config.max_concurrent_scan_files)
         .with_ignore_inverted_index(self.config.inverted_index.apply_on_query.disabled())
         .with_ignore_fulltext_index(self.config.fulltext_index.apply_on_query.disabled())
@@ -1212,8 +1212,8 @@ impl RegionEngine for MitoEngine {
             .map_err(BoxedError::new)
     }
 
-    fn register_query_memory_permit(&self) -> Option<Arc<MemoryPermit>> {
-        Some(Arc::new(self.inner.scan_memory_tracker.register_permit()))
+    fn query_memory_tracker(&self) -> Option<QueryMemoryTracker> {
+        Some(self.inner.scan_memory_tracker.clone())
     }
 
     async fn get_committed_sequence(
@@ -1378,13 +1378,18 @@ impl MitoEngine {
         let wal_raw_entry_reader = Arc::new(LogStoreRawEntryReader::new(log_store.clone()));
         let total_memory = get_total_memory_bytes().max(0) as u64;
         let scan_memory_limit = config.scan_memory_limit.resolve(total_memory) as usize;
-        let scan_memory_tracker = QueryMemoryTracker::new(scan_memory_limit, 0)
-            .with_on_update(|usage| {
-                SCAN_MEMORY_USAGE_BYTES.set(usage as i64);
-            })
-            .with_on_reject(|| {
-                SCAN_REQUESTS_REJECTED_TOTAL.inc();
-            });
+        let scan_memory_tracker =
+            QueryMemoryTracker::builder(scan_memory_limit, config.scan_memory_on_exhausted)
+                .on_update(|usage| {
+                    SCAN_MEMORY_USAGE_BYTES.set(usage as i64);
+                })
+                .on_exhausted(|| {
+                    SCAN_MEMORY_EXHAUSTED_TOTAL.inc();
+                })
+                .on_reject(|| {
+                    SCAN_REQUESTS_REJECTED_TOTAL.inc();
+                })
+                .build();
         Ok(MitoEngine {
             inner: Arc::new(EngineInner {
                 workers: WorkerGroup::start_for_test(

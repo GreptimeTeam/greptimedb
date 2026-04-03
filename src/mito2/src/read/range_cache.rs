@@ -696,7 +696,7 @@ mod tests {
     ) -> (StreamContext, PartitionRange) {
         let env = SchedulerEnv::new().await;
         let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
-        let mapper = ProjectionMapper::new(&metadata, [0, 2, 3].into_iter(), true).unwrap();
+        let mapper = ProjectionMapper::new(&metadata, [0, 2, 3].into_iter()).unwrap();
         let predicate = PredicateGroup::new(metadata.as_ref(), &filters).unwrap();
         let file_id = FileId::random();
         let file = sst_file_handle_with_file_id(
@@ -708,8 +708,7 @@ mod tests {
             .with_predicate(predicate)
             .with_time_range(query_time_range)
             .with_files(vec![file])
-            .with_cache(test_cache_strategy())
-            .with_flat_format(true);
+            .with_cache(test_cache_strategy());
         let range_meta = RangeMeta {
             time_range: partition_time_range,
             indices: smallvec![SourceIndex {

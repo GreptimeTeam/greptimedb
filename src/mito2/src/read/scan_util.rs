@@ -43,16 +43,16 @@ use crate::read::merge::{MergeMetrics, MergeMetricsReport};
 use crate::read::pruner::PartitionPruner;
 use crate::read::range::{RangeMeta, RowGroupIndex};
 use crate::read::scan_region::StreamContext;
-use crate::read::{Batch, BoxedBatchStream, BoxedRecordBatchStream, ScannerMetrics, Source};
+use crate::read::{BoxedRecordBatchStream, ScannerMetrics};
 use crate::sst::file::{FileTimeRange, RegionFileId};
 use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplyMetrics;
 use crate::sst::index::fulltext_index::applier::FulltextIndexApplyMetrics;
 use crate::sst::index::inverted_index::applier::InvertedIndexApplyMetrics;
-use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
 use crate::sst::parquet::file_range::FileRange;
 use crate::sst::parquet::flat_format::time_index_column_index;
 use crate::sst::parquet::reader::{MetadataCacheMetrics, ReaderFilterMetrics, ReaderMetrics};
 use crate::sst::parquet::row_group::ParquetFetchMetrics;
+use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, DEFAULT_ROW_GROUP_SIZE};
 
 /// Per-file scan metrics.
 #[derive(Default, Clone)]
@@ -138,6 +138,10 @@ pub(crate) struct ScanMetricsSet {
     mem_batches: usize,
     /// Number of series read from memtables.
     mem_series: usize,
+    /// Duration of prefilter in memtable scan.
+    mem_prefilter_cost: Duration,
+    /// Number of rows filtered by prefilter in memtable scan.
+    mem_prefilter_rows_filtered: usize,
 
     // SST related metrics:
     /// Duration to build file ranges.
@@ -341,6 +345,8 @@ impl fmt::Debug for ScanMetricsSet {
             mem_rows,
             mem_batches,
             mem_series,
+            mem_prefilter_cost,
+            mem_prefilter_rows_filtered,
             inverted_index_apply_metrics,
             bloom_filter_apply_metrics,
             fulltext_index_apply_metrics,
@@ -508,6 +514,15 @@ impl fmt::Debug for ScanMetricsSet {
         }
         if !mem_scan_cost.is_zero() {
             write!(f, ", \"mem_scan_cost\":\"{mem_scan_cost:?}\"")?;
+        }
+        if !mem_prefilter_cost.is_zero() {
+            write!(f, ", \"mem_prefilter_cost\":\"{mem_prefilter_cost:?}\"")?;
+        }
+        if *mem_prefilter_rows_filtered > 0 {
+            write!(
+                f,
+                ", \"mem_prefilter_rows_filtered\":{mem_prefilter_rows_filtered}"
+            )?;
         }
 
         // Write optional verbose metrics if they are not empty
@@ -1061,6 +1076,8 @@ impl PartitionMetrics {
         metrics.mem_rows += data.num_rows;
         metrics.mem_batches += data.num_batches;
         metrics.mem_series += data.total_series;
+        metrics.mem_prefilter_cost += data.prefilter_cost;
+        metrics.mem_prefilter_rows_filtered += data.prefilter_rows_filtered;
     }
 
     /// Merges [ScannerMetrics], `build_reader_cost`, `scan_cost` and `yield_cost`.
@@ -1169,45 +1186,6 @@ pub(crate) struct SeriesDistributorMetrics {
     pub(crate) divider_cost: Duration,
 }
 
-/// Scans memtable ranges at `index`.
-#[tracing::instrument(
-    skip_all,
-    fields(
-        region_id = %stream_ctx.input.region_metadata().region_id,
-        file_or_mem_index = %index.index,
-        row_group_index = %index.row_group_index,
-        source = "mem"
-    )
-)]
-pub(crate) fn scan_mem_ranges(
-    stream_ctx: Arc<StreamContext>,
-    part_metrics: PartitionMetrics,
-    index: RowGroupIndex,
-    time_range: FileTimeRange,
-) -> impl Stream<Item = Result<Batch>> {
-    try_stream! {
-        let ranges = stream_ctx.input.build_mem_ranges(index);
-        part_metrics.inc_num_mem_ranges(ranges.len());
-        for range in ranges {
-            let build_reader_start = Instant::now();
-            let mem_scan_metrics = Some(MemScanMetrics::default());
-            let iter = range.build_prune_iter(time_range, mem_scan_metrics.clone())?;
-            part_metrics.inc_build_reader_cost(build_reader_start.elapsed());
-
-            let mut source = Source::Iter(iter);
-            while let Some(batch) = source.next_batch().await? {
-                yield batch;
-            }
-
-            // Report the memtable scan metrics to partition metrics
-            if let Some(ref metrics) = mem_scan_metrics {
-                let data = metrics.data();
-                part_metrics.report_mem_scan_metrics(&data);
-            }
-        }
-    }
-}
-
 /// Scans memtable ranges at `index` using flat format that returns RecordBatch.
 #[tracing::instrument(
     skip_all,
@@ -1253,15 +1231,19 @@ const NUM_SERIES_THRESHOLD: u64 = 10240;
 /// 60 samples per hour.
 const BATCH_SIZE_THRESHOLD: u64 = 50;
 
-/// Returns true if splitting flat record batches may improve merge performance.
+/// Returns the estimated rows per batch after splitting if splitting flat record batches
+/// may improve merge performance. Returns `None` if splitting is not beneficial.
 pub(crate) fn should_split_flat_batches_for_merge(
     stream_ctx: &Arc<StreamContext>,
     range_meta: &RangeMeta,
-) -> bool {
+) -> Option<usize> {
     // Number of files to split and scan.
     let mut num_files_to_split = 0;
     let mut num_mem_rows = 0;
     let mut num_mem_series = 0;
+    // Total rows and series for estimating batch size after splitting.
+    let mut total_rows: u64 = 0;
+    let mut total_series: u64 = 0;
     // Checks each file range, returns early if any range is not splittable.
     // For mem ranges, we collect the total number of rows and series because the number of rows in a
     // mem range may be too small.
@@ -1295,23 +1277,49 @@ pub(crate) fn should_split_flat_batches_for_merge(
                     file_meta.num_rows,
                     file_meta.num_series,
                 );
-                return false;
+                return None;
             } else {
                 num_files_to_split += 1;
+                total_rows += file.meta_ref().num_rows;
+                total_series += file.meta_ref().num_series;
             }
         }
         // Skips non-file and non-mem ranges.
     }
 
-    if num_files_to_split > 0 {
+    let should_split = if num_files_to_split > 0 {
         // We mainly consider file ranges because they have enough data for sampling.
         true
-    } else if num_mem_series > 0 && num_mem_rows > 0 {
-        // If we don't have files to scan, we check whether to split by the memtable.
-        can_split_series(num_mem_rows as u64, num_mem_series as u64)
+    } else if num_mem_series > 0
+        && num_mem_rows > 0
+        && can_split_series(num_mem_rows as u64, num_mem_series as u64)
+    {
+        total_rows += num_mem_rows as u64;
+        total_series += num_mem_series as u64;
+        true
     } else {
         false
+    };
+
+    if !should_split {
+        return None;
     }
+
+    // Estimate rows per batch after splitting.
+    let estimated_batch_size = if total_series > 0 && total_rows > 0 {
+        ((total_rows / total_series) as usize).clamp(1, DEFAULT_READ_BATCH_SIZE)
+    } else {
+        // No valid estimate available, use a conservative fallback.
+        DEFAULT_READ_BATCH_SIZE / 4
+    };
+    Some(estimated_batch_size)
+}
+
+/// Computes the channel size for parallel scan based on the estimated rows per batch.
+/// The channel should buffer approximately `2 * DEFAULT_READ_BATCH_SIZE` rows.
+pub(crate) fn compute_parallel_channel_size(estimated_rows_per_batch: usize) -> usize {
+    let size = 2 * DEFAULT_READ_BATCH_SIZE / estimated_rows_per_batch.max(1);
+    size.clamp(2, 64)
 }
 
 fn can_split_series(num_rows: u64, num_series: u64) -> bool {
@@ -1324,7 +1332,7 @@ fn can_split_series(num_rows: u64, num_series: u64) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+mod split_tests {
     use std::sync::Arc;
 
     use common_time::Timestamp;
@@ -1343,7 +1351,7 @@ mod tests {
     async fn new_stream_context_with_files(files: Vec<FileHandle>) -> StreamContext {
         let env = SchedulerEnv::new().await;
         let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
-        let mapper = ProjectionMapper::new(&metadata, [0, 2, 3].into_iter(), true).unwrap();
+        let mapper = ProjectionMapper::new(&metadata, [0, 2, 3].into_iter()).unwrap();
         let input = ScanInput::new(env.access_layer.clone(), mapper).with_files(files);
 
         StreamContext {
@@ -1385,10 +1393,9 @@ mod tests {
         let file = FileHandle::new(file, crate::test_util::new_noop_file_purger());
         let stream_ctx = Arc::new(new_stream_context_with_files(vec![file]).await);
 
-        assert!(should_split_flat_batches_for_merge(
-            &stream_ctx,
-            &single_file_range_meta(),
-        ));
+        assert!(
+            should_split_flat_batches_for_merge(&stream_ctx, &single_file_range_meta()).is_some()
+        );
     }
 
     #[test]
@@ -1412,59 +1419,6 @@ fn new_filter_metrics(explain_verbose: bool) -> ReaderFilterMetrics {
     } else {
         ReaderFilterMetrics::default()
     }
-}
-
-/// Scans file ranges at `index`.
-#[tracing::instrument(
-    skip_all,
-    fields(
-        region_id = %stream_ctx.input.region_metadata().region_id,
-        row_group_index = %index.index,
-        source = read_type
-    )
-)]
-pub(crate) async fn scan_file_ranges(
-    stream_ctx: Arc<StreamContext>,
-    part_metrics: PartitionMetrics,
-    index: RowGroupIndex,
-    read_type: &'static str,
-    partition_pruner: Arc<PartitionPruner>,
-) -> Result<impl Stream<Item = Result<Batch>>> {
-    let mut reader_metrics = ReaderMetrics {
-        filter_metrics: new_filter_metrics(part_metrics.explain_verbose()),
-        ..Default::default()
-    };
-    let ranges = partition_pruner
-        .build_file_ranges(index, &part_metrics, &mut reader_metrics)
-        .await?;
-    part_metrics.inc_num_file_ranges(ranges.len());
-    part_metrics.merge_reader_metrics(&reader_metrics, None);
-
-    // Creates initial per-file metrics with build_part_cost.
-    let init_per_file_metrics = if part_metrics.explain_verbose() {
-        let file = stream_ctx.input.file_from_index(index);
-        let file_id = file.file_id();
-
-        let mut map = HashMap::new();
-        map.insert(
-            file_id,
-            FileScanMetrics {
-                build_part_cost: reader_metrics.build_cost,
-                ..Default::default()
-            },
-        );
-        Some(map)
-    } else {
-        None
-    };
-
-    Ok(build_file_range_scan_stream(
-        stream_ctx,
-        part_metrics,
-        read_type,
-        ranges,
-        init_per_file_metrics,
-    ))
 }
 
 /// Scans file ranges at `index` using flat reader that returns RecordBatch.
@@ -1520,70 +1474,6 @@ pub(crate) async fn scan_flat_file_ranges(
     ))
 }
 
-/// Build the stream of scanning the input [`FileRange`]s.
-#[tracing::instrument(
-    skip_all,
-    fields(read_type = read_type, range_count = ranges.len())
-)]
-pub fn build_file_range_scan_stream(
-    stream_ctx: Arc<StreamContext>,
-    part_metrics: PartitionMetrics,
-    read_type: &'static str,
-    ranges: SmallVec<[FileRange; 2]>,
-    mut per_file_metrics: Option<HashMap<RegionFileId, FileScanMetrics>>,
-) -> impl Stream<Item = Result<Batch>> {
-    try_stream! {
-        let fetch_metrics = if part_metrics.explain_verbose() {
-            Some(Arc::new(ParquetFetchMetrics::default()))
-        } else {
-            None
-        };
-        let reader_metrics = &mut ReaderMetrics {
-            fetch_metrics: fetch_metrics.clone(),
-            ..Default::default()
-        };
-        for range in ranges {
-            let build_reader_start = Instant::now();
-            let Some(reader) = range.reader(stream_ctx.input.series_row_selector, fetch_metrics.as_deref()).await? else {
-                continue;
-            };
-            let build_cost = build_reader_start.elapsed();
-            part_metrics.inc_build_reader_cost(build_cost);
-            let compat_batch = range.compat_batch();
-            let mut source = Source::PruneReader(reader);
-            while let Some(mut batch) = source.next_batch().await? {
-                if let Some(compact_batch) = compat_batch {
-                    batch = compact_batch.as_primary_key().unwrap().compat_batch(batch)?;
-                }
-                yield batch;
-            }
-            if let Source::PruneReader(reader) = source {
-                let prune_metrics = reader.metrics();
-
-                // Update per-file metrics if tracking is enabled
-                if let Some(file_metrics_map) = per_file_metrics.as_mut() {
-                    let file_id = range.file_handle().file_id();
-                    let file_metrics = file_metrics_map
-                        .entry(file_id)
-                        .or_insert_with(FileScanMetrics::default);
-
-                    file_metrics.num_ranges += 1;
-                    file_metrics.num_rows += prune_metrics.num_rows;
-                    file_metrics.build_reader_cost += build_cost;
-                    file_metrics.scan_cost += prune_metrics.scan_cost;
-                }
-
-                reader_metrics.merge_from(&prune_metrics);
-            }
-        }
-
-        // Reports metrics.
-        reader_metrics.observe_rows(read_type);
-        reader_metrics.filter_metrics.observe();
-        part_metrics.merge_reader_metrics(reader_metrics, per_file_metrics.as_ref());
-    }
-}
-
 /// Build the stream of scanning the input [`FileRange`]s using flat reader that returns RecordBatch.
 #[tracing::instrument(
     skip_all,
@@ -1622,7 +1512,7 @@ pub fn build_flat_file_range_scan_stream(
                 .transpose()?;
 
             let mapper = range.compaction_projection_mapper();
-            while let Some(record_batch) = reader.next_batch()? {
+            while let Some(record_batch) = reader.next_batch().await? {
                 let record_batch = if let Some(mapper) = mapper {
                     let batch = mapper.project(record_batch)?;
                     batch
@@ -1660,47 +1550,6 @@ pub fn build_flat_file_range_scan_stream(
         reader_metrics.observe_rows(read_type);
         reader_metrics.filter_metrics.observe();
         part_metrics.merge_reader_metrics(reader_metrics, per_file_metrics.as_ref());
-    }
-}
-
-/// Build the stream of scanning the extension range denoted by the [`RowGroupIndex`].
-#[cfg(feature = "enterprise")]
-pub(crate) async fn scan_extension_range(
-    context: Arc<StreamContext>,
-    index: RowGroupIndex,
-    partition_metrics: PartitionMetrics,
-) -> Result<BoxedBatchStream> {
-    use snafu::ResultExt;
-
-    let range = context.input.extension_range(index.index);
-    let reader = range.reader(context.as_ref());
-    let stream = reader
-        .read(context, partition_metrics, index)
-        .await
-        .context(crate::error::ScanExternalRangeSnafu)?;
-    Ok(stream)
-}
-
-pub(crate) async fn maybe_scan_other_ranges(
-    context: &Arc<StreamContext>,
-    index: RowGroupIndex,
-    metrics: &PartitionMetrics,
-) -> Result<BoxedBatchStream> {
-    #[cfg(feature = "enterprise")]
-    {
-        scan_extension_range(context.clone(), index, metrics.clone()).await
-    }
-
-    #[cfg(not(feature = "enterprise"))]
-    {
-        let _ = context;
-        let _ = index;
-        let _ = metrics;
-
-        crate::error::UnexpectedSnafu {
-            reason: "no other ranges scannable",
-        }
-        .fail()
     }
 }
 
@@ -1822,5 +1671,237 @@ pub(crate) fn split_record_batch(record_batch: RecordBatch, batches: &mut VecDeq
         let end = offsets[i + 1];
         let rows_in_batch = end - start;
         batches.push_back(record_batch.slice(start, rows_in_batch));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    use common_time::Timestamp;
+    use smallvec::{SmallVec, smallvec};
+    use store_api::storage::RegionId;
+
+    use super::*;
+    use crate::cache::CacheStrategy;
+    use crate::memtable::{
+        BoxedBatchIterator, BoxedRecordBatchIterator, IterBuilder, MemtableRange,
+        MemtableRangeContext, MemtableStats,
+    };
+    use crate::read::projection::ProjectionMapper;
+    use crate::read::range::{MemRangeBuilder, SourceIndex};
+    use crate::read::scan_region::ScanInput;
+    use crate::sst::file::{FileHandle, FileMeta};
+    use crate::sst::file_purger::NoopFilePurger;
+    use crate::test_util::memtable_util::metadata_for_test;
+    use crate::test_util::scheduler_util::SchedulerEnv;
+
+    struct EmptyIterBuilder;
+
+    impl IterBuilder for EmptyIterBuilder {
+        fn build(&self, _metrics: Option<MemScanMetrics>) -> Result<BoxedBatchIterator> {
+            Ok(Box::new(std::iter::empty()))
+        }
+
+        fn is_record_batch(&self) -> bool {
+            true
+        }
+
+        fn build_record_batch(
+            &self,
+            _time_range: Option<(Timestamp, Timestamp)>,
+            _metrics: Option<MemScanMetrics>,
+        ) -> Result<BoxedRecordBatchIterator> {
+            Ok(Box::new(std::iter::empty()))
+        }
+    }
+
+    async fn new_test_stream_ctx(
+        files: Vec<FileHandle>,
+        memtables: Vec<MemRangeBuilder>,
+    ) -> Arc<StreamContext> {
+        let env = SchedulerEnv::new().await;
+        let metadata = metadata_for_test();
+        let mapper = ProjectionMapper::new(&metadata, [0, 2, 3].into_iter()).unwrap();
+        let input = ScanInput::new(env.access_layer.clone(), mapper)
+            .with_cache(CacheStrategy::Disabled)
+            .with_memtables(memtables)
+            .with_files(files);
+
+        Arc::new(StreamContext {
+            input,
+            ranges: Vec::new(),
+            scan_fingerprint: None,
+            query_start: Instant::now(),
+        })
+    }
+
+    fn new_test_file(num_rows: u64, num_series: u64) -> FileHandle {
+        let meta = FileMeta {
+            region_id: RegionId::new(123, 456),
+            file_id: Default::default(),
+            time_range: (
+                Timestamp::new_millisecond(0),
+                Timestamp::new_millisecond(1000),
+            ),
+            num_rows,
+            num_series,
+            ..Default::default()
+        };
+        FileHandle::new(meta, Arc::new(NoopFilePurger))
+    }
+
+    fn new_test_memtable(num_rows: usize, series_count: usize) -> MemRangeBuilder {
+        let context = Arc::new(MemtableRangeContext::new(
+            0,
+            Box::new(EmptyIterBuilder),
+            Default::default(),
+        ));
+        let stats = MemtableStats {
+            time_range: Some((
+                Timestamp::new_millisecond(0),
+                Timestamp::new_millisecond(1000),
+            )),
+            num_rows,
+            num_ranges: 1,
+            series_count,
+            ..Default::default()
+        };
+        let range = MemtableRange::new(context, stats.clone());
+        MemRangeBuilder::new(range, stats)
+    }
+
+    fn new_test_range_meta(row_group_indices: SmallVec<[RowGroupIndex; 2]>) -> RangeMeta {
+        let indices = row_group_indices
+            .iter()
+            .map(|row_group_index| SourceIndex {
+                index: row_group_index.index,
+                num_row_groups: 1,
+            })
+            .collect();
+
+        RangeMeta {
+            time_range: (
+                Timestamp::new_millisecond(0),
+                Timestamp::new_millisecond(1000),
+            ),
+            indices,
+            row_group_indices,
+            num_rows: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_should_split_flat_batches_for_merge_uses_splittable_file_rows_per_series() {
+        let num_rows = SPLIT_ROW_THRESHOLD * 2;
+        let num_series = (num_rows / 100).max(1);
+        let stream_ctx =
+            new_test_stream_ctx(vec![new_test_file(num_rows, num_series)], vec![]).await;
+        let range_meta = new_test_range_meta(smallvec![RowGroupIndex {
+            index: 0,
+            row_group_index: 0,
+        }]);
+
+        assert_eq!(
+            Some((num_rows / num_series) as usize),
+            should_split_flat_batches_for_merge(&stream_ctx, &range_meta)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_split_flat_batches_for_merge_skips_small_or_unknown_series_files() {
+        let stream_ctx = new_test_stream_ctx(
+            vec![
+                new_test_file(SPLIT_ROW_THRESHOLD.saturating_sub(1), 1),
+                new_test_file(SPLIT_ROW_THRESHOLD * 2, 0),
+            ],
+            vec![],
+        )
+        .await;
+        let range_meta = new_test_range_meta(smallvec![
+            RowGroupIndex {
+                index: 0,
+                row_group_index: 0,
+            },
+            RowGroupIndex {
+                index: 1,
+                row_group_index: 0,
+            }
+        ]);
+
+        assert_eq!(
+            None,
+            should_split_flat_batches_for_merge(&stream_ctx, &range_meta)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_split_flat_batches_for_merge_returns_none_for_unsplittable_file() {
+        let num_series =
+            (SPLIT_ROW_THRESHOLD / (BATCH_SIZE_THRESHOLD - 1)).max(NUM_SERIES_THRESHOLD) + 1;
+        let stream_ctx =
+            new_test_stream_ctx(vec![new_test_file(SPLIT_ROW_THRESHOLD, num_series)], vec![]).await;
+        let range_meta = new_test_range_meta(smallvec![RowGroupIndex {
+            index: 0,
+            row_group_index: 0,
+        }]);
+
+        assert_eq!(
+            None,
+            should_split_flat_batches_for_merge(&stream_ctx, &range_meta)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_split_flat_batches_for_merge_falls_back_to_memtables() {
+        let stream_ctx = new_test_stream_ctx(vec![], vec![new_test_memtable(5_000, 100)]).await;
+        let range_meta = new_test_range_meta(smallvec![RowGroupIndex {
+            index: 0,
+            row_group_index: 0,
+        }]);
+
+        assert_eq!(
+            Some(50),
+            should_split_flat_batches_for_merge(&stream_ctx, &range_meta)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_split_flat_batches_for_merge_clamps_estimate() {
+        let stream_ctx =
+            new_test_stream_ctx(vec![new_test_file(SPLIT_ROW_THRESHOLD * 2, 1)], vec![]).await;
+        let range_meta = new_test_range_meta(smallvec![RowGroupIndex {
+            index: 0,
+            row_group_index: 0,
+        }]);
+
+        assert_eq!(
+            Some(DEFAULT_READ_BATCH_SIZE),
+            should_split_flat_batches_for_merge(&stream_ctx, &range_meta)
+        );
+    }
+
+    #[test]
+    fn test_compute_parallel_channel_size_clamps_to_max_for_small_batches() {
+        assert_eq!(64, compute_parallel_channel_size(0));
+        assert_eq!(64, compute_parallel_channel_size(1));
+    }
+
+    #[test]
+    fn test_compute_parallel_channel_size_returns_expected_mid_range_size() {
+        assert_eq!(
+            4,
+            compute_parallel_channel_size(DEFAULT_READ_BATCH_SIZE / 2)
+        );
+    }
+
+    #[test]
+    fn test_compute_parallel_channel_size_clamps_to_min_for_large_batches() {
+        assert_eq!(2, compute_parallel_channel_size(DEFAULT_READ_BATCH_SIZE));
+        assert_eq!(
+            2,
+            compute_parallel_channel_size(DEFAULT_READ_BATCH_SIZE * 2)
+        );
     }
 }

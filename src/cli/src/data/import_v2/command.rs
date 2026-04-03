@@ -27,7 +27,8 @@ use crate::Tool;
 use crate::common::ObjectStoreConfig;
 use crate::data::export_v2::manifest::MANIFEST_VERSION;
 use crate::data::import_v2::error::{
-    ManifestVersionMismatchSnafu, Result, SchemaNotInSnapshotSnafu, SnapshotStorageSnafu,
+    FullSnapshotImportNotSupportedSnafu, ManifestVersionMismatchSnafu, Result,
+    SchemaNotInSnapshotSnafu, SnapshotStorageSnafu,
 };
 use crate::data::import_v2::executor::{DdlExecutor, DdlStatement};
 use crate::data::path::ddl_path_for_schema;
@@ -57,10 +58,6 @@ pub struct ImportV2Command {
     /// Verify without importing (dry-run).
     #[clap(long)]
     dry_run: bool,
-
-    /// Concurrency level (for future use).
-    #[clap(long, default_value = "1")]
-    parallelism: usize,
 
     /// Basic authentication (user:password).
     #[clap(long)]
@@ -121,7 +118,6 @@ impl ImportV2Command {
         Ok(Box::new(Import {
             schemas,
             dry_run: self.dry_run,
-            _parallelism: self.parallelism,
             storage: Box::new(storage),
             database_client,
         }))
@@ -132,7 +128,6 @@ impl ImportV2Command {
 pub struct Import {
     schemas: Option<Vec<String>>,
     dry_run: bool,
-    _parallelism: usize,
     storage: Box<dyn SnapshotStorage>,
     database_client: DatabaseClient,
 }
@@ -169,6 +164,13 @@ impl Import {
 
         info!("Snapshot contains {} schema(s)", manifest.schemas.len());
 
+        if !manifest.schema_only && !manifest.chunks.is_empty() {
+            return FullSnapshotImportNotSupportedSnafu {
+                chunk_count: manifest.chunks.len(),
+            }
+            .fail();
+        }
+
         // 2. Determine schemas to import
         let schemas_to_import = match &self.schemas {
             Some(filter) => canonicalize_schema_filter(filter, &manifest.schemas)?,
@@ -202,14 +204,6 @@ impl Import {
             "Import completed: {} DDL statements executed",
             ddl_statements.len()
         );
-
-        // 6. Data import would happen here for non-schema-only snapshots (M2/M3)
-        if !manifest.schema_only && !manifest.chunks.is_empty() {
-            info!(
-                "Data import not yet implemented (M3). {} chunks pending.",
-                manifest.chunks.len()
-            );
-        }
 
         Ok(())
     }
@@ -403,7 +397,114 @@ fn canonicalize_schema_filter(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use async_trait::async_trait;
+
     use super::*;
+    use crate::Tool;
+    use crate::data::export_v2::manifest::{ChunkMeta, DataFormat, Manifest, TimeRange};
+    use crate::data::export_v2::schema::SchemaSnapshot;
+    use crate::data::snapshot_storage::SnapshotStorage;
+    use crate::database::DatabaseClient;
+
+    struct StubStorage {
+        manifest: Manifest,
+    }
+
+    #[async_trait]
+    impl SnapshotStorage for StubStorage {
+        async fn exists(&self) -> crate::data::export_v2::error::Result<bool> {
+            Ok(true)
+        }
+
+        async fn read_manifest(&self) -> crate::data::export_v2::error::Result<Manifest> {
+            Ok(self.manifest.clone())
+        }
+
+        async fn write_manifest(
+            &self,
+            _manifest: &Manifest,
+        ) -> crate::data::export_v2::error::Result<()> {
+            unimplemented!("not needed in import_v2::command tests")
+        }
+
+        async fn read_text(&self, _path: &str) -> crate::data::export_v2::error::Result<String> {
+            unimplemented!("not needed in import_v2::command tests")
+        }
+
+        async fn write_text(
+            &self,
+            _path: &str,
+            _content: &str,
+        ) -> crate::data::export_v2::error::Result<()> {
+            unimplemented!("not needed in import_v2::command tests")
+        }
+
+        async fn write_schema(
+            &self,
+            _snapshot: &SchemaSnapshot,
+        ) -> crate::data::export_v2::error::Result<()> {
+            unimplemented!("not needed in import_v2::command tests")
+        }
+
+        async fn create_dir_all(&self, _path: &str) -> crate::data::export_v2::error::Result<()> {
+            unimplemented!("not needed in import_v2::command tests")
+        }
+
+        async fn list_files_recursive(
+            &self,
+            _prefix: &str,
+        ) -> crate::data::export_v2::error::Result<Vec<String>> {
+            unimplemented!("not needed in import_v2::command tests")
+        }
+
+        async fn delete_snapshot(&self) -> crate::data::export_v2::error::Result<()> {
+            unimplemented!("not needed in import_v2::command tests")
+        }
+    }
+
+    fn test_database_client() -> DatabaseClient {
+        DatabaseClient::new(
+            "127.0.0.1:4000".to_string(),
+            "greptime".to_string(),
+            None,
+            Duration::from_secs(1),
+            None,
+            false,
+        )
+    }
+
+    #[tokio::test]
+    async fn test_import_rejects_full_snapshot_before_schema_execution() {
+        let mut manifest = Manifest::new_full(
+            "greptime".to_string(),
+            vec!["public".to_string()],
+            TimeRange::unbounded(),
+            DataFormat::Parquet,
+        );
+        manifest
+            .chunks
+            .push(ChunkMeta::new(1, TimeRange::unbounded()));
+
+        let import = Import {
+            schemas: None,
+            dry_run: false,
+            storage: Box::new(StubStorage { manifest }),
+            database_client: test_database_client(),
+        };
+
+        let error = import
+            .do_work()
+            .await
+            .expect_err("full snapshot import should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("Importing data from full snapshots is not implemented yet")
+        );
+    }
 
     #[test]
     fn test_parse_ddl_statements() {

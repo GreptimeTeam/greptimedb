@@ -14,10 +14,9 @@
 
 //! Integration tests for staging state functionality.
 
-use std::assert_matches::assert_matches;
-use std::fs;
 use std::sync::Arc;
 use std::time::Duration;
+use std::{assert_matches, fs};
 
 use api::v1::Rows;
 use common_error::ext::ErrorExt;
@@ -73,7 +72,7 @@ async fn test_staging_state_integration_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -131,7 +130,7 @@ async fn test_staging_blocks_alter_operations_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -172,7 +171,7 @@ async fn test_staging_blocks_truncate_operations_with_format(flat_format: bool) 
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -309,7 +308,7 @@ async fn test_staging_write_partition_expr_version_with_format(flat_format: bool
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -506,7 +505,7 @@ async fn test_staging_manifest_directory_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -658,7 +657,7 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -884,7 +883,7 @@ async fn test_enter_staging_writes_partition_expr_change_action_with_format(flat
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -948,7 +947,7 @@ async fn test_staging_exit_conflict_partition_expr_change_and_change_with_format
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -1033,7 +1032,7 @@ async fn test_write_stall_on_enter_staging_with_format(flat_format: bool) {
     let engine = env
         .create_engine_with(
             MitoConfig {
-                default_experimental_flat_format: flat_format,
+                default_flat_format: flat_format,
                 ..Default::default()
             },
             None,
@@ -1157,7 +1156,7 @@ async fn test_enter_staging_error(env: &mut TestEnv, flat_format: bool) {
     let partition_expr = default_partition_expr();
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;

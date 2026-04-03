@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(assert_matches)]
-#![feature(duration_millis_float)]
-
 pub mod cache;
 pub mod cache_invalidator;
 pub mod cluster;

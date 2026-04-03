@@ -44,6 +44,15 @@ TQL EVAL (0, 15, '5s') scalar(host{host="host1"}) + host;
 TQL EVAL (0, 15, '5s') scalar(count(count(host) by (host)));
 
 -- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 15, '5s') scalar(count(sum(host) by (host)));
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 15, '5s') scalar(count(avg(host) by (host)));
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 15, '5s') scalar(count(stddev(host) by (host)));
+
+-- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 15, '5s') scalar(host{host="host1"} + scalar(host{host="host2"}));
 
 -- SQLNESS SORT_RESULT 3 1
@@ -149,4 +158,49 @@ TQL EVAL (0, 15, '5s') clamp(clamp_min(host{host="host1"}, 1), 0, 12);
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 15, '5s') clamp_max(clamp(host{host="host1"}, 0, 15), 6);
 
-Drop table host;
+DROP TABLE host;
+
+CREATE TABLE presence_metric (
+  ts timestamp(3) time index,
+  instance STRING,
+  cpu STRING,
+  shard STRING,
+  val DOUBLE,
+  PRIMARY KEY (instance, cpu, shard),
+);
+
+INSERT INTO TABLE presence_metric VALUES
+    (0,      'i1', 'cpu0', 'a', 1.0),
+    (0,      'i1', 'cpu0', 'b', 2.0),
+    (0,      'i1', 'cpu1', 'a', 10.0),
+    (0,      'i1', 'cpu2', 'a', 20.0),
+    (0,      'i2', 'cpu9', 'a', 100.0),
+    (200000, 'i1', 'cpu0', 'a', 'NAN'::DOUBLE),
+    (200000, 'i1', 'cpu0', 'b', 'NAN'::DOUBLE),
+    (200000, 'i1', 'cpu1', 'a', 11.0),
+    (200000, 'i1', 'cpu2', 'a', NULL),
+    (200000, 'i2', 'cpu9', 'a', 101.0),
+    (400000, 'i1', 'cpu1', 'a', 12.0),
+    (400000, 'i2', 'cpu9', 'a', 102.0),
+    (600000, 'i1', 'cpu0', 'a', 7.0),
+    (600000, 'i1', 'cpu0', 'b', 8.0),
+    (600000, 'i2', 'cpu9', 'a', 103.0);
+
+-- NaN drops `cpu0` from the grouped count, while the NULL sample on `cpu2`
+-- still leaves a zero-valued row in `count(...) by (cpu)`.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 600, '200s') count(presence_metric{instance="i1"}) by (cpu);
+
+-- Nested-count rewrite should preserve grouped presence after stale-NaN filtering and null-value pruning.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 600, '200s') scalar(count(count(presence_metric{instance="i1"}) by (cpu)));
+
+-- Non-count inner aggregates must drop NULL-only groups before the outer count.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 600, '200s') scalar(count(sum(presence_metric{instance="i1"}) by (cpu)));
+
+-- False case: outer `by (instance)` keeps multiple series at the scalar input, so scalar should still yield NaN.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 600, '200s') scalar(count(count(presence_metric) by (instance, cpu)) by (instance));
+
+DROP TABLE presence_metric;

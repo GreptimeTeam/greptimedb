@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::assert_matches::assert_matches;
+use std::assert_matches;
 
 use api::v1::Rows;
 use datatypes::value::Value;
@@ -37,7 +37,7 @@ async fn test_remap_manifests_invalid_partition_expr_with_format(flat_format: bo
     let mut env = TestEnv::with_prefix("invalid-partition-expr").await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -83,7 +83,7 @@ async fn test_remap_manifests_invalid_region_state_with_format(flat_format: bool
     let mut env = TestEnv::with_prefix("invalid-region-state").await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -123,7 +123,7 @@ async fn test_remap_manifests_invalid_input_regions_with_format(flat_format: boo
     let mut env = TestEnv::with_prefix("invalid-input-regions").await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -166,7 +166,7 @@ async fn test_remap_manifests_success_with_format(flat_format: bool) {
     let mut env = TestEnv::with_prefix("engine-stop").await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;

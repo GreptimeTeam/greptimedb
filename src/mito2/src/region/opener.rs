@@ -269,7 +269,7 @@ impl RegionOpener {
         // Sets the sst_format based on options or flat_format flag
         let sst_format = if let Some(format) = options.sst_format {
             format
-        } else if config.default_experimental_flat_format {
+        } else if config.default_flat_format {
             options.sst_format = Some(FormatType::Flat);
             FormatType::Flat
         } else {
@@ -309,7 +309,7 @@ impl RegionOpener {
 
         debug!(
             "Create region {} with options: {:?}, default_flat_format: {}",
-            region_id, options, config.default_experimental_flat_format
+            region_id, options, config.default_flat_format
         );
 
         let version = VersionBuilder::new(metadata, mutable)
@@ -626,8 +626,10 @@ pub(crate) fn sanitize_region_options(manifest: &RegionManifest, options: &mut R
             manifest.sst_format,
             manifest.metadata.region_id,
         );
-        options.sst_format = Some(manifest.sst_format);
     }
+    // Always set sst_format from manifest to ensure it's explicitly stored,
+    // even when the default matches the manifest value.
+    options.sst_format = Some(manifest.sst_format);
     if let Some(manifest_append_mode) = manifest.append_mode
         && options.append_mode != manifest_append_mode
     {
@@ -881,7 +883,7 @@ impl RegionLoadCacheTask {
         }
 
         // Sorts files by max timestamp in descending order to loads latest files first
-        files_to_download.sort_by(|a, b| b.2.cmp(&a.2));
+        files_to_download.sort_by_key(|b| std::cmp::Reverse(b.2));
 
         let total_files = files_to_download.len() as i64;
 
@@ -1011,7 +1013,7 @@ async fn preload_parquet_meta_cache_for_files(
     let allow_direct_load = matches!(object_store.info().scheme(), object_store::Scheme::Fs);
 
     // Sort by time range so we can prefer preloading newer files first.
-    files.sort_by(|a, b| b.meta_ref().time_range.1.cmp(&a.meta_ref().time_range.1));
+    files.sort_by_key(|b| std::cmp::Reverse(b.meta_ref().time_range.1));
 
     let mut loaded = 0usize;
     for file_handle in files {

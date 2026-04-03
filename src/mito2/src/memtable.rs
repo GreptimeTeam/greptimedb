@@ -421,7 +421,7 @@ impl MemtableBuilderProvider {
         let flat_format = options
             .sst_format
             .map(|format| format == FormatType::Flat)
-            .unwrap_or(self.config.default_experimental_flat_format);
+            .unwrap_or(self.config.default_flat_format);
         if flat_format {
             if options.memtable.is_some() {
                 common_telemetry::info!(
@@ -497,6 +497,8 @@ impl MemScanMetrics {
         metrics.num_rows += inner.num_rows;
         metrics.num_batches += inner.num_batches;
         metrics.scan_cost += inner.scan_cost;
+        metrics.prefilter_cost += inner.prefilter_cost;
+        metrics.prefilter_rows_filtered += inner.prefilter_rows_filtered;
     }
 
     /// Gets the metrics data.
@@ -515,6 +517,10 @@ pub(crate) struct MemScanMetricsData {
     pub(crate) num_batches: usize,
     /// Duration to scan the memtable.
     pub(crate) scan_cost: Duration,
+    /// Duration of prefilter in memtable scan.
+    pub(crate) prefilter_cost: Duration,
+    /// Number of rows filtered by prefilter in memtable scan.
+    pub(crate) prefilter_rows_filtered: usize,
 }
 
 /// Encoded range in the memtable.

@@ -31,7 +31,7 @@ impl MemoryMetrics for CompactionMemoryMetrics {
         COMPACTION_MEMORY_IN_USE.set(bytes);
     }
 
-    fn inc_rejected(&self, reason: &str) {
+    fn inc_exhausted(&self, reason: &str) {
         COMPACTION_MEMORY_REJECTED
             .with_label_values(&[reason])
             .inc();

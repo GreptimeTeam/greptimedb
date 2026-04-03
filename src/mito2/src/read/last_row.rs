@@ -45,6 +45,7 @@ use crate::sst::parquet::reader::{FlatRowGroupReader, ReaderMetrics, RowGroupRea
 ///
 /// This reader is different from the [MergeMode](crate::region::options::MergeMode) as
 /// it focus on time series (the same key).
+#[allow(dead_code)]
 pub(crate) struct LastRowReader {
     /// Inner reader.
     reader: BoxedBatchReader,
@@ -52,6 +53,7 @@ pub(crate) struct LastRowReader {
     selector: LastRowSelector,
 }
 
+#[allow(dead_code)]
 impl LastRowReader {
     /// Creates a new `LastRowReader`.
     pub(crate) fn new(reader: BoxedBatchReader) -> Self {
@@ -333,10 +335,10 @@ impl FlatRowGroupLastRowCachedReader {
     }
 
     /// Returns the next RecordBatch.
-    pub(crate) fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
+    pub(crate) async fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
         match self {
             FlatRowGroupLastRowCachedReader::Hit(r) => r.next_batch(),
-            FlatRowGroupLastRowCachedReader::Miss(r) => r.next_batch(),
+            FlatRowGroupLastRowCachedReader::Miss(r) => r.next_batch().await,
         }
     }
 
@@ -466,12 +468,12 @@ impl FlatRowGroupLastRowReader {
         Ok(Some(merged))
     }
 
-    fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
+    async fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
         if self.pending.is_full() {
             return self.flush_pending();
         }
 
-        while let Some(batch) = self.reader.next_batch()? {
+        while let Some(batch) = self.reader.next_batch().await? {
             self.selector.on_next(batch, &mut self.pending)?;
             if self.pending.is_full() {
                 return self.flush_pending();

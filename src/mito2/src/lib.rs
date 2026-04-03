@@ -16,8 +16,6 @@
 //!
 //! Mito is the a region engine to store timeseries data.
 
-#![feature(assert_matches)]
-#![feature(int_roundings)]
 #![feature(debug_closure_helpers)]
 #![feature(duration_constructors)]
 

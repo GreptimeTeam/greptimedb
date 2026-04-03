@@ -538,7 +538,6 @@ impl DatanodeBuilder {
                     file_ref_manager,
                     partition_expr_fetcher.clone(),
                     plugins,
-                    opts.max_concurrent_queries,
                 );
 
                 #[cfg(feature = "enterprise")]
@@ -552,14 +551,15 @@ impl DatanodeBuilder {
                 if kafka_config.create_index && opts.node_id.is_none() {
                     warn!("The WAL index creation only available in distributed mode.")
                 }
-                let global_index_collector = if kafka_config.create_index && opts.node_id.is_some()
+                let global_index_collector = if kafka_config.create_index
+                    && let Some(node_id) = opts.node_id
                 {
                     let operator = new_object_store_without_cache(
                         &opts.storage.store,
                         &opts.storage.data_home,
                     )
                     .await?;
-                    let path = default_index_file(opts.node_id.unwrap());
+                    let path = default_index_file(node_id);
                     Some(Self::build_global_index_collector(
                         kafka_config.dump_index_interval,
                         operator,
@@ -581,7 +581,6 @@ impl DatanodeBuilder {
                     file_ref_manager,
                     partition_expr_fetcher,
                     plugins,
-                    opts.max_concurrent_queries,
                 );
 
                 #[cfg(feature = "enterprise")]
@@ -603,7 +602,6 @@ impl DatanodeBuilder {
                     file_ref_manager,
                     partition_expr_fetcher.clone(),
                     plugins,
-                    opts.max_concurrent_queries,
                 );
 
                 #[cfg(feature = "enterprise")]
@@ -785,7 +783,7 @@ async fn open_all_regions(
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
     use std::collections::{BTreeMap, HashMap};
     use std::sync::Arc;
 

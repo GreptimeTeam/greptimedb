@@ -72,17 +72,55 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Cannot resume schema-only snapshot with data export. Use --force to recreate."
+        "Cannot resume snapshot with a different schema_only mode (existing: {}, requested: {}). Use --force to recreate.",
+        existing_schema_only,
+        requested_schema_only
     ))]
-    CannotResumeSchemaOnly {
+    SchemaOnlyModeMismatch {
+        existing_schema_only: bool,
+        requested_schema_only: bool,
         #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display(
-        "Data export is not implemented yet. Use --schema-only to create a schema snapshot."
+        "Cannot resume snapshot with different {} (existing: {}, requested: {}). Use --force to recreate.",
+        field,
+        existing,
+        requested
     ))]
-    DataExportNotImplemented {
+    ResumeConfigMismatch {
+        field: String,
+        existing: String,
+        requested: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to parse time: invalid format: {}", input))]
+    TimeParseInvalidFormat {
+        input: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to parse time: end_time is before start_time"))]
+    TimeParseEndBeforeStart {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "chunk_time_window requires both --start-time and --end-time to be specified"
+    ))]
+    ChunkTimeWindowRequiresBounds {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("--schema-only cannot be used with data export arguments: {}", args))]
+    SchemaOnlyArgsNotAllowed {
+        args: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -154,9 +192,13 @@ impl ErrorExt for Error {
         match self {
             Error::InvalidUri { .. }
             | Error::UnsupportedScheme { .. }
-            | Error::CannotResumeSchemaOnly { .. }
-            | Error::DataExportNotImplemented { .. }
-            | Error::ManifestVersionMismatch { .. } => StatusCode::InvalidArguments,
+            | Error::SchemaOnlyModeMismatch { .. }
+            | Error::ResumeConfigMismatch { .. }
+            | Error::ManifestVersionMismatch { .. }
+            | Error::SchemaOnlyArgsNotAllowed { .. } => StatusCode::InvalidArguments,
+            Error::TimeParseInvalidFormat { .. }
+            | Error::TimeParseEndBeforeStart { .. }
+            | Error::ChunkTimeWindowRequiresBounds { .. } => StatusCode::InvalidArguments,
 
             Error::StorageOperation { .. }
             | Error::ManifestParse { .. }

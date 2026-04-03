@@ -6,7 +6,7 @@ rpc_runtime_size = 8
 [[region_engine]]
 [region_engine.mito]
 {{ if enable_flat_format }}
-default_experimental_flat_format = true
+default_flat_format = true
 {{ endif }}
 
 [wal]

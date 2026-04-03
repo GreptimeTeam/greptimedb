@@ -614,15 +614,12 @@ async fn find_dynamic_options(
     region_options: &crate::region::options::RegionOptions,
     schema_metadata_manager: &SchemaMetadataManagerRef,
 ) -> Result<(crate::region::options::CompactionOptions, TimeToLive)> {
-    if region_options.compaction_override && region_options.ttl.is_some() {
+    if let (true, Some(ttl)) = (region_options.compaction_override, region_options.ttl) {
         debug!(
             "Use region options directly for table {}: compaction={:?}, ttl={:?}",
             table_id, region_options.compaction, region_options.ttl
         );
-        return Ok((
-            region_options.compaction.clone(),
-            region_options.ttl.unwrap(),
-        ));
+        return Ok((region_options.compaction.clone(), ttl));
     }
 
     let db_options = tokio::time::timeout(
@@ -633,12 +630,12 @@ async fn find_dynamic_options(
     .context(TimeoutSnafu)?
     .context(GetSchemaMetadataSnafu)?;
 
-    let ttl = if region_options.ttl.is_some() {
+    let ttl = if let Some(ttl) = region_options.ttl {
         debug!(
             "Use region TTL directly for table {}: ttl={:?}",
             table_id, region_options.ttl
         );
-        region_options.ttl.unwrap()
+        ttl
     } else {
         db_options
             .as_ref()
@@ -851,7 +848,7 @@ impl CompactionSstReaderBuilder<'_> {
     }
 
     fn build_scan_input(self) -> Result<ScanInput> {
-        let mapper = ProjectionMapper::all(&self.metadata, true)?;
+        let mapper = ProjectionMapper::all(&self.metadata)?;
         let mut scan_input = ScanInput::new(self.sst_layer, mapper)
             .with_files(self.inputs.to_vec())
             .with_append_mode(self.append_mode)
@@ -860,8 +857,7 @@ impl CompactionSstReaderBuilder<'_> {
             .with_filter_deleted(self.filter_deleted)
             // We ignore file not found error during compaction.
             .with_ignore_file_not_found(true)
-            .with_merge_mode(self.merge_mode)
-            .with_flat_format(true);
+            .with_merge_mode(self.merge_mode);
 
         // This serves as a workaround of https://github.com/GreptimeTeam/greptimedb/issues/3944
         // by converting time ranges into predicate.
@@ -980,7 +976,7 @@ struct PendingCompaction {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
+    use std::assert_matches;
     use std::time::Duration;
 
     use api::v1::region::StrictWindow;
