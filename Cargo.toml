@@ -131,6 +131,7 @@ datafusion = "=52.1"
 datafusion-common = "=52.1"
 datafusion-datasource = "=52.1"
 datafusion-expr = "=52.1"
+datafusion-expr-common = "=52.1"
 datafusion-functions = "=52.1"
 datafusion-functions-aggregate-common = "=52.1"
 datafusion-functions-window-common = "=52.1"
@@ -334,6 +335,7 @@ rev = "5618e779cf2bb4755b499c630fba4c35e91898cb"
 datafusion = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "02b82535e0160c4545667f36a03e1ff9d1d2e51f" }
 datafusion-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "02b82535e0160c4545667f36a03e1ff9d1d2e51f" }
 datafusion-expr = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "02b82535e0160c4545667f36a03e1ff9d1d2e51f" }
+datafusion-expr-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "02b82535e0160c4545667f36a03e1ff9d1d2e51f" }
 datafusion-functions = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "02b82535e0160c4545667f36a03e1ff9d1d2e51f" }
 datafusion-functions-aggregate-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "02b82535e0160c4545667f36a03e1ff9d1d2e51f" }
 datafusion-functions-window-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "02b82535e0160c4545667f36a03e1ff9d1d2e51f" }
