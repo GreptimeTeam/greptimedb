@@ -21,6 +21,7 @@ mod log_handler;
 mod logs;
 mod opentsdb;
 mod otlp;
+mod otlp_trace_types;
 pub mod prom_store;
 mod promql;
 mod region_query;

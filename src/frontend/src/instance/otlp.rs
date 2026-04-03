@@ -36,10 +36,7 @@ use servers::http::prom_store::PHYSICAL_TABLE_PARAM;
 use servers::interceptor::{OpenTelemetryProtocolInterceptor, OpenTelemetryProtocolInterceptorRef};
 use servers::otlp;
 use servers::otlp::trace::TraceAuxData;
-use servers::otlp::trace::coerce::{
-    coerce_value_data, is_supported_trace_coercion, resolve_new_trace_column_type,
-    trace_value_datatype,
-};
+use servers::otlp::trace::coerce::{coerce_value_data, trace_value_datatype};
 use servers::otlp::trace::span::{TraceSpan, TraceSpanGroup};
 use servers::query_handler::{
     OpenTelemetryProtocolHandler, PipelineHandlerRef, TraceIngestOutcome,
@@ -49,6 +46,10 @@ use snafu::{IntoError, ResultExt};
 use table::requests::{OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM};
 
 use crate::instance::Instance;
+use crate::instance::otlp_trace_types::{
+    PendingTraceColumnRewrite, choose_trace_reconcile_decision, enrich_trace_reconcile_error,
+    is_trace_reconcile_candidate_type, push_observed_trace_type, validate_trace_column_rewrites,
+};
 use crate::metrics::{
     OTLP_LOGS_ROWS, OTLP_METRICS_ROWS, OTLP_TRACES_FAILURE_COUNT, OTLP_TRACES_ROWS,
 };
@@ -61,33 +62,6 @@ enum ChunkFailureReaction {
     RetryPerSpan,
     DiscardChunk,
     Propagate,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TraceReconcileDecision {
-    UseExisting(ColumnDataType),
-    UseRequestLocal(ColumnDataType),
-    AlterExistingTo(ColumnDataType),
-}
-
-impl TraceReconcileDecision {
-    fn target_type(self) -> ColumnDataType {
-        match self {
-            Self::UseExisting(target_type)
-            | Self::UseRequestLocal(target_type)
-            | Self::AlterExistingTo(target_type) => target_type,
-        }
-    }
-
-    fn requires_alter(self) -> bool {
-        matches!(self, Self::AlterExistingTo(_))
-    }
-}
-
-struct PendingTraceColumnRewrite {
-    col_idx: usize,
-    target_type: ColumnDataType,
-    column_name: String,
 }
 
 impl ChunkFailureReaction {
@@ -576,52 +550,6 @@ impl Instance {
         Some(summary)
     }
 
-    /// Picks the reconciliation action for one trace column.
-    ///
-    /// Existing table schema is authoritative unless the only incompatible case is
-    /// widening an existing Int64 column to Float64 for incoming Int64/Float64 data.
-    fn choose_trace_reconcile_decision(
-        observed_types: &[ColumnDataType],
-        existing_type: Option<ColumnDataType>,
-    ) -> ServerResult<Option<TraceReconcileDecision>> {
-        let Some(existing_type) = existing_type else {
-            return resolve_new_trace_column_type(observed_types.iter().copied())
-                .map(|target_type| target_type.map(TraceReconcileDecision::UseRequestLocal))
-                .map_err(|_| {
-                    error::InvalidParameterSnafu {
-                        reason: "unsupported trace type mix".to_string(),
-                    }
-                    .build()
-                });
-        };
-
-        if observed_types.iter().all(|&request_type| {
-            request_type == existing_type
-                || is_supported_trace_coercion(request_type, existing_type)
-        }) {
-            return Ok(Some(TraceReconcileDecision::UseExisting(existing_type)));
-        }
-
-        if existing_type == ColumnDataType::Int64
-            && observed_types.contains(&ColumnDataType::Float64)
-            && observed_types.iter().all(|observed_type| {
-                matches!(
-                    observed_type,
-                    ColumnDataType::Int64 | ColumnDataType::Float64
-                )
-            })
-        {
-            return Ok(Some(TraceReconcileDecision::AlterExistingTo(
-                ColumnDataType::Float64,
-            )));
-        }
-
-        error::InvalidParameterSnafu {
-            reason: "unsupported trace type mix".to_string(),
-        }
-        .fail()
-    }
-
     /// Widen existing trace table columns to Float64 before request rewrite.
     async fn alter_trace_table_columns_to_float64(
         &self,
@@ -763,7 +691,7 @@ impl Instance {
                 // Decide the final type once per column, then rewrite all affected cells
                 // together in one row pass below.
                 let Some(decision) =
-                    Self::choose_trace_reconcile_decision(&observed_types, existing_type).map_err(
+                    choose_trace_reconcile_decision(&observed_types, existing_type).map_err(
                         |_| {
                             enrich_trace_reconcile_error(
                                 &req.table_name,
@@ -860,44 +788,6 @@ impl Instance {
     }
 }
 
-/// Validate all pending trace column rewrites before any schema mutation happens.
-fn validate_trace_column_rewrites(
-    rows: &[api::v1::Row],
-    pending_rewrites: &[PendingTraceColumnRewrite],
-    table_name: &str,
-) -> ServerResult<()> {
-    for row in rows {
-        for pending_rewrite in pending_rewrites {
-            let Some(value) = row.values.get(pending_rewrite.col_idx) else {
-                continue;
-            };
-            let Some(request_type) = value.value_data.as_ref().and_then(trace_value_datatype)
-            else {
-                continue;
-            };
-            if request_type == pending_rewrite.target_type {
-                continue;
-            }
-
-            coerce_value_data(&value.value_data, pending_rewrite.target_type, request_type)
-                .map_err(|_| {
-                    error::InvalidParameterSnafu {
-                        reason: format!(
-                            "failed to coerce trace column '{}' in table '{}' from {:?} to {:?}",
-                            pending_rewrite.column_name,
-                            table_name,
-                            request_type,
-                            pending_rewrite.target_type
-                        ),
-                    }
-                    .build()
-                })?;
-        }
-    }
-
-    Ok(())
-}
-
 /// Preserve the original alter failure status so chunk retry behavior stays correct.
 fn wrap_trace_alter_failure<E>(err: E) -> servers::error::Error
 where
@@ -906,64 +796,13 @@ where
     error::ExecuteGrpcQuerySnafu.into_error(BoxedError::new(err))
 }
 
-fn enrich_trace_reconcile_error(
-    table_name: &str,
-    column_name: &str,
-    observed_types: &[ColumnDataType],
-    existing_type: Option<ColumnDataType>,
-) -> servers::error::Error {
-    let observed_types = observed_types
-        .iter()
-        .map(|datatype| format!("{datatype:?}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    error::InvalidParameterSnafu {
-        reason: match existing_type {
-            Some(existing_type) => format!(
-                "failed to reconcile trace column '{}' in table '{}' with observed types [{}] against existing {:?}",
-                column_name, table_name, observed_types, existing_type
-            ),
-            None => format!(
-                "failed to reconcile trace column '{}' in table '{}' with observed types [{}]",
-                column_name, table_name, observed_types
-            ),
-        },
-    }
-    .build()
-}
-
-/// Only these trace scalar types participate in reconciliation. Other column kinds
-/// such as JSON and binary keep their original write path and schema checks.
-fn is_trace_reconcile_candidate_type(datatype: ColumnDataType) -> bool {
-    matches!(
-        datatype,
-        ColumnDataType::String
-            | ColumnDataType::Boolean
-            | ColumnDataType::Int64
-            | ColumnDataType::Float64
-    )
-}
-
-/// Keeps the observed type list small without depending on enum ordering.
-fn push_observed_trace_type(observed_types: &mut Vec<ColumnDataType>, datatype: ColumnDataType) {
-    if !observed_types.contains(&datatype) {
-        observed_types.push(datatype);
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use api::v1::value::ValueData;
-    use api::v1::{ColumnDataType, Row, Value};
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
     use servers::query_handler::TraceIngestOutcome;
 
-    use super::{
-        ChunkFailureReaction, Instance, PendingTraceColumnRewrite, TraceReconcileDecision,
-        validate_trace_column_rewrites, wrap_trace_alter_failure,
-    };
+    use super::{ChunkFailureReaction, Instance, wrap_trace_alter_failure};
     use crate::metrics::OTLP_TRACES_FAILURE_COUNT;
 
     #[test]
@@ -1115,86 +954,6 @@ mod tests {
             Instance::classify_trace_chunk_failure(StatusCode::Unknown),
             ChunkFailureReaction::DiscardChunk
         );
-    }
-
-    #[test]
-    fn test_choose_trace_reconcile_decision_existing_int64_keeps_int64() {
-        assert_eq!(
-            Instance::choose_trace_reconcile_decision(
-                &[ColumnDataType::Int64],
-                Some(ColumnDataType::Int64)
-            )
-            .unwrap(),
-            Some(TraceReconcileDecision::UseExisting(ColumnDataType::Int64))
-        );
-    }
-
-    #[test]
-    fn test_choose_trace_reconcile_decision_existing_int64_widens_to_float64() {
-        assert_eq!(
-            Instance::choose_trace_reconcile_decision(
-                &[ColumnDataType::Int64, ColumnDataType::Float64],
-                Some(ColumnDataType::Int64)
-            )
-            .unwrap(),
-            Some(TraceReconcileDecision::AlterExistingTo(
-                ColumnDataType::Float64
-            ))
-        );
-    }
-
-    #[test]
-    fn test_choose_trace_reconcile_decision_existing_float64_stays_authoritative() {
-        assert_eq!(
-            Instance::choose_trace_reconcile_decision(
-                &[ColumnDataType::Int64, ColumnDataType::Float64],
-                Some(ColumnDataType::Float64)
-            )
-            .unwrap(),
-            Some(TraceReconcileDecision::UseExisting(ColumnDataType::Float64))
-        );
-    }
-
-    #[test]
-    fn test_choose_trace_reconcile_decision_existing_int64_with_boolean_is_error() {
-        let err = Instance::choose_trace_reconcile_decision(
-            &[ColumnDataType::Boolean, ColumnDataType::Int64],
-            Some(ColumnDataType::Int64),
-        )
-        .unwrap_err();
-        assert_eq!(err.status_code(), StatusCode::InvalidArguments);
-    }
-
-    #[test]
-    fn test_choose_trace_reconcile_decision_request_local_prefers_float64() {
-        assert_eq!(
-            Instance::choose_trace_reconcile_decision(
-                &[ColumnDataType::Int64, ColumnDataType::Float64],
-                None
-            )
-            .unwrap(),
-            Some(TraceReconcileDecision::UseRequestLocal(
-                ColumnDataType::Float64
-            ))
-        );
-    }
-
-    #[test]
-    fn test_validate_trace_column_rewrites_rejects_invalid_string_parse() {
-        let rows = vec![Row {
-            values: vec![Value {
-                value_data: Some(ValueData::StringValue("not_a_number".to_string())),
-            }],
-        }];
-        let pending_rewrites = vec![PendingTraceColumnRewrite {
-            col_idx: 0,
-            target_type: ColumnDataType::Int64,
-            column_name: "span_attributes.attr_int".to_string(),
-        }];
-
-        let err = validate_trace_column_rewrites(&rows, &pending_rewrites, "trace_type_atomicity")
-            .unwrap_err();
-        assert_eq!(err.status_code(), StatusCode::InvalidArguments);
     }
 
     #[test]
