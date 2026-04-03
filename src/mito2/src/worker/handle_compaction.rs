@@ -23,7 +23,8 @@ use crate::error::RegionNotFoundSnafu;
 use crate::metrics::COMPACTION_REQUEST_COUNT;
 use crate::region::MitoRegionRef;
 use crate::request::{
-    BuildIndexRequest, CompactionFailed, CompactionFinished, OnFailure, OptionOutputTx,
+    BuildIndexRequest, CompactionCancelled, CompactionFailed, CompactionFinished, OnFailure,
+    OptionOutputTx,
 };
 use crate::sst::index::IndexBuildType;
 use crate::worker::RegionWorkerLoop;
@@ -88,6 +89,7 @@ impl<S> RegionWorkerLoop<S> {
         );
 
         let index_build_file_metas = std::mem::take(&mut request.edit.files_to_add);
+        let task_id = request.task_id;
 
         // compaction finished.
         request.on_success();
@@ -112,10 +114,40 @@ impl<S> RegionWorkerLoop<S> {
             .compaction_scheduler
             .on_compaction_finished(
                 region_id,
+                task_id,
                 &region.manifest_ctx,
                 self.schema_metadata_manager.clone(),
             )
             .await;
+        self.handle_ddl_requests(&mut pending_ddls).await;
+    }
+
+    pub(crate) async fn handle_compaction_cancelled(
+        &mut self,
+        region_id: RegionId,
+        request: CompactionCancelled,
+    ) where
+        S: LogStore,
+    {
+        let task_id = request.task_id;
+        request.on_success();
+
+        // Reuse the scheduler's finish path to wake pending DDLs after a cooperative stop.
+        let pending_ddls = match self.regions.get_region(region_id) {
+            Some(region) => {
+                self.compaction_scheduler
+                    .on_compaction_cancelled(
+                        region_id,
+                        task_id,
+                        &region.manifest_ctx,
+                        self.schema_metadata_manager.clone(),
+                    )
+                    .await
+            }
+            None => Vec::new(),
+        };
+
+        let mut pending_ddls = pending_ddls;
         self.handle_ddl_requests(&mut pending_ddls).await;
     }
 

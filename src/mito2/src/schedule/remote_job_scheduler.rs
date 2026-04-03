@@ -107,6 +107,7 @@ pub enum RemoteJob {
 /// CompactionJob is a remote job that compacts a set of files in a compaction service.
 #[allow(dead_code)]
 pub struct CompactionJob {
+    pub task_id: u64,
     pub compaction_region: CompactionRegion,
     pub picker_output: PickerOutput,
     pub start_time: Instant,
@@ -126,6 +127,7 @@ pub enum RemoteJobResult {
 pub struct CompactionJobResult {
     pub job_id: JobId,
     pub region_id: RegionId,
+    pub task_id: u64,
     pub start_time: Instant,
     pub region_edit: Result<RegionEdit>,
 }
@@ -155,6 +157,7 @@ impl Notifier for DefaultNotifier {
                     match result.region_edit {
                         Ok(edit) => BackgroundNotify::CompactionFinished(CompactionFinished {
                             region_id: result.region_id,
+                            task_id: result.task_id,
                             senders: waiters,
                             start_time: result.start_time,
                             edit,

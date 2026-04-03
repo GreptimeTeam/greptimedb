@@ -22,6 +22,7 @@ use itertools::Itertools;
 use snafu::ResultExt;
 use tokio::sync::mpsc;
 
+use crate::compaction::RunningCompactionRef;
 use crate::compaction::compactor::{CompactionRegion, Compactor};
 use crate::compaction::memory_manager::{CompactionMemoryGuard, CompactionMemoryManager};
 use crate::compaction::picker::{CompactionTask, PickerOutput};
@@ -30,8 +31,8 @@ use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList
 use crate::metrics::{COMPACTION_FAILURE_COUNT, COMPACTION_MEMORY_WAIT, COMPACTION_STAGE_ELAPSED};
 use crate::region::RegionRoleState;
 use crate::request::{
-    BackgroundNotify, CompactionFailed, CompactionFinished, OutputTx, RegionEditResult,
-    WorkerRequest, WorkerRequestWithTime,
+    BackgroundNotify, CompactionCancelled, CompactionFailed, CompactionFinished, OutputTx,
+    RegionEditResult, WorkerRequest, WorkerRequestWithTime,
 };
 use crate::sst::file::FileMeta;
 use crate::worker::WorkerListener;
@@ -41,6 +42,10 @@ use crate::{error, metrics};
 pub const MAX_PARALLEL_COMPACTION: usize = 1;
 
 pub(crate) struct CompactionTaskImpl {
+    /// Scheduler-assigned id used to validate cancellation/finish callbacks.
+    pub(crate) task_id: u64,
+    /// Shared running-state handle for cooperative cancellation.
+    pub(crate) running: RunningCompactionRef,
     pub compaction_region: CompactionRegion,
     /// Request sender to notify the worker.
     pub(crate) request_sender: mpsc::Sender<WorkerRequestWithTime>,
@@ -184,8 +189,12 @@ impl CompactionTaskImpl {
         );
     }
 
-    async fn handle_expiration_and_compaction(&mut self) -> error::Result<RegionEdit> {
+    async fn handle_expiration_and_compaction(&mut self) -> error::Result<Option<RegionEdit>> {
         self.mark_files_compacting(true);
+
+        if self.is_cancelled() {
+            return Ok(None);
+        }
 
         // 1. In case of local compaction, we can delete expired ssts in advance.
         if !self.picker_output.expired_ssts.is_empty() {
@@ -202,6 +211,9 @@ impl CompactionTaskImpl {
             self.remove_expired(&self.compaction_region, expired_ssts)
                 .await;
             remove_timer.observe_duration();
+            if self.is_cancelled() {
+                return Ok(None);
+            }
         }
 
         // 2. Merge inputs
@@ -239,6 +251,13 @@ impl CompactionTaskImpl {
             .on_merge_ssts_finished(self.compaction_region.region_id)
             .await;
 
+        if self.is_cancelled() {
+            return Ok(None);
+        }
+
+        // Stop accepting cancellation once we are about to publish the compaction edit.
+        crate::compaction::RunningCompaction::mark_finishing(&self.running, self.task_id);
+
         let _manifest_timer = COMPACTION_STAGE_ELAPSED
             .with_label_values(&["write_manifest"])
             .start_timer();
@@ -246,6 +265,11 @@ impl CompactionTaskImpl {
         self.compactor
             .update_manifest(&self.compaction_region, compaction_result)
             .await
+            .map(Some)
+    }
+
+    fn is_cancelled(&self) -> bool {
+        crate::compaction::RunningCompaction::is_cancelled(&self.running, self.task_id)
     }
 
     /// Handles compaction failure, notifies all waiters.
@@ -276,6 +300,11 @@ impl CompactionTaskImpl {
 #[async_trait::async_trait]
 impl CompactionTask for CompactionTaskImpl {
     async fn run(&mut self) {
+        if self.is_cancelled() {
+            self.send_cancelled().await;
+            return;
+        }
+
         // Acquire memory budget before starting compaction
         let _memory_guard = match self.acquire_memory_with_policy().await {
             Ok(guard) => guard,
@@ -296,13 +325,26 @@ impl CompactionTask for CompactionTaskImpl {
             }
         };
 
+        if self.is_cancelled() {
+            self.send_cancelled().await;
+            return;
+        }
+
         let notify = match self.handle_expiration_and_compaction().await {
-            Ok(edit) => BackgroundNotify::CompactionFinished(CompactionFinished {
-                region_id: self.compaction_region.region_id,
-                senders: std::mem::take(&mut self.waiters),
-                start_time: self.start_time,
-                edit,
-            }),
+            Ok(Some(edit)) => {
+                let senders = std::mem::take(&mut self.waiters);
+                BackgroundNotify::CompactionFinished(CompactionFinished {
+                    region_id: self.compaction_region.region_id,
+                    task_id: self.task_id,
+                    senders,
+                    start_time: self.start_time,
+                    edit,
+                })
+            }
+            Ok(None) => {
+                self.send_cancelled().await;
+                return;
+            }
             Err(e) => {
                 error!(e; "Failed to compact region, region id: {}", self.compaction_region.region_id);
                 let err = Arc::new(e);
@@ -318,6 +360,26 @@ impl CompactionTask for CompactionTaskImpl {
         self.send_to_worker(WorkerRequest::Background {
             region_id: self.compaction_region.region_id,
             notify,
+        })
+        .await;
+    }
+}
+
+impl CompactionTaskImpl {
+    async fn send_cancelled(&mut self) {
+        info!(
+            "Compaction cancelled cooperatively, region id: {}",
+            self.compaction_region.region_id
+        );
+        // Reuse the normal worker notification path so pending DDL replay stays centralized.
+        let senders = std::mem::take(&mut self.waiters);
+        self.send_to_worker(WorkerRequest::Background {
+            region_id: self.compaction_region.region_id,
+            notify: BackgroundNotify::CompactionCancelled(CompactionCancelled {
+                region_id: self.compaction_region.region_id,
+                task_id: self.task_id,
+                senders,
+            }),
         })
         .await;
     }
