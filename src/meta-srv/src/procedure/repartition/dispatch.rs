@@ -31,7 +31,7 @@ use crate::procedure::repartition::{self, Context, State};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Dispatch;
 
-fn build_region_mapping(
+pub(crate) fn build_region_mapping(
     source_regions: &[RegionDescriptor],
     target_regions: &[RegionDescriptor],
     transition_map: &[Vec<usize>],

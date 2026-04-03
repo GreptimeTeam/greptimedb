@@ -203,7 +203,8 @@ impl RepartitionGroupProcedure {
             return Ok(());
         }
 
-        let table_lock = common_meta::lock_key::TableLock::Write(self.context.persistent_ctx.table_id).into();
+        let table_lock =
+            common_meta::lock_key::TableLock::Write(self.context.persistent_ctx.table_id).into();
         let _guard = procedure_ctx.provider.acquire_lock(&table_lock).await;
         UpdateMetadata::RollbackStaging
             .rollback_staging_regions(&mut self.context)
@@ -648,15 +649,149 @@ pub(crate) trait State: Sync + Send + Debug {
 mod tests {
     use std::assert_matches;
     use std::sync::Arc;
+    use std::time::Duration;
 
     use common_meta::key::TableMetadataManager;
     use common_meta::kv_backend::test_util::MockKvBackendBuilder;
+    use common_meta::peer::Peer;
+    use common_meta::rpc::router::{Region, RegionRoute};
     use common_procedure::{Context as ProcedureContext, Procedure, ProcedureId};
     use common_procedure_test::MockContextProvider;
+    use partition::expr::PartitionExpr;
+    use store_api::storage::RegionId;
 
-    use super::{RepartitionGroupProcedure, RepartitionStart};
+    use super::{
+        Context, PersistentContext, RepartitionGroupProcedure, RepartitionStart, State,
+        region_routes,
+    };
     use crate::error::Error;
-    use crate::procedure::repartition::test_util::{TestingEnv, new_persistent_context};
+    use crate::procedure::repartition::dispatch::build_region_mapping;
+    use crate::procedure::repartition::group::apply_staging_manifest::ApplyStagingManifest;
+    use crate::procedure::repartition::group::enter_staging_region::EnterStagingRegion;
+    use crate::procedure::repartition::group::remap_manifest::RemapManifest;
+    use crate::procedure::repartition::group::repartition_start::RepartitionStart as GroupRepartitionStart;
+    use crate::procedure::repartition::group::sync_region::SyncRegion;
+    use crate::procedure::repartition::group::update_metadata::UpdateMetadata;
+    use crate::procedure::repartition::plan;
+    use crate::procedure::repartition::repartition_start::RepartitionStart as ParentRepartitionStart;
+    use crate::procedure::repartition::test_util::{
+        TestingEnv, new_persistent_context, range_expr,
+    };
+
+    struct GroupRollbackFixture {
+        context: Context,
+        original_region_routes: Vec<RegionRoute>,
+        next_state: Option<Box<dyn State>>,
+    }
+
+    async fn new_group_rollback_fixture(
+        original_region_routes: Vec<RegionRoute>,
+        from_exprs: Vec<PartitionExpr>,
+        to_exprs: Vec<PartitionExpr>,
+        sync_region: bool,
+    ) -> GroupRollbackFixture {
+        let env = TestingEnv::new();
+        let procedure_ctx = TestingEnv::procedure_context();
+        let table_id = 1024;
+        let mut next_region_number = 10;
+
+        env.create_physical_table_metadata(table_id, original_region_routes.clone())
+            .await;
+
+        let (_, physical_route) = env
+            .table_metadata_manager
+            .table_route_manager()
+            .get_physical_table_route(table_id)
+            .await
+            .unwrap();
+        let allocation_plans =
+            ParentRepartitionStart::build_plan(&physical_route, &from_exprs, &to_exprs).unwrap();
+        assert_eq!(allocation_plans.len(), 1);
+
+        let repartition_plan = plan::convert_allocation_plan_to_repartition_plan(
+            table_id,
+            &mut next_region_number,
+            &allocation_plans[0],
+        );
+        let region_mapping = build_region_mapping(
+            &repartition_plan.source_regions,
+            &repartition_plan.target_regions,
+            &repartition_plan.transition_map,
+        );
+        let persistent_context = PersistentContext::new(
+            repartition_plan.group_id,
+            table_id,
+            "test_catalog".to_string(),
+            "test_schema".to_string(),
+            repartition_plan.source_regions,
+            repartition_plan.target_regions,
+            region_mapping,
+            sync_region,
+            repartition_plan.allocated_region_ids,
+            repartition_plan.pending_deallocate_region_ids,
+            Duration::from_secs(120),
+        );
+        let mut context = env.create_context(persistent_context);
+        let (next_state, _) = GroupRepartitionStart
+            .next(&mut context, &procedure_ctx)
+            .await
+            .unwrap();
+
+        GroupRollbackFixture {
+            context,
+            original_region_routes,
+            next_state: Some(next_state),
+        }
+    }
+
+    async fn new_split_group_rollback_fixture(sync_region: bool) -> GroupRollbackFixture {
+        new_group_rollback_fixture(
+            vec![
+                new_region_route(RegionId::new(1024, 1), Some(range_expr("x", 0, 100))),
+                new_region_route(RegionId::new(1024, 2), Some(range_expr("x", 100, 200))),
+                new_region_route(RegionId::new(1024, 10), None),
+            ],
+            vec![range_expr("x", 0, 100)],
+            vec![range_expr("x", 0, 50), range_expr("x", 50, 100)],
+            sync_region,
+        )
+        .await
+    }
+
+    async fn new_merge_group_rollback_fixture(sync_region: bool) -> GroupRollbackFixture {
+        new_group_rollback_fixture(
+            vec![
+                new_region_route(RegionId::new(1024, 1), Some(range_expr("x", 0, 100))),
+                new_region_route(RegionId::new(1024, 2), Some(range_expr("x", 100, 200))),
+                new_region_route(RegionId::new(1024, 3), Some(range_expr("x", 200, 300))),
+            ],
+            vec![range_expr("x", 0, 100), range_expr("x", 100, 200)],
+            vec![range_expr("x", 0, 200)],
+            sync_region,
+        )
+        .await
+    }
+
+    async fn stage_metadata(context: &mut Context) {
+        UpdateMetadata::ApplyStaging
+            .apply_staging_regions(context)
+            .await
+            .unwrap();
+    }
+
+    fn new_region_route(region_id: RegionId, partition_expr: Option<PartitionExpr>) -> RegionRoute {
+        RegionRoute {
+            region: Region {
+                id: region_id,
+                partition_expr: partition_expr
+                    .map(|expr| expr.as_json_str().unwrap())
+                    .unwrap_or_default(),
+                ..Default::default()
+            },
+            leader_peer: Some(Peer::empty(1)),
+            ..Default::default()
+        }
+    }
 
     #[tokio::test]
     async fn test_get_table_route_value_not_found_error() {
@@ -737,5 +872,166 @@ mod tests {
 
         assert!(procedure.state.as_any().is::<RepartitionStart>());
         assert_eq!(procedure.context.persistent_ctx, persistent_context);
+    }
+
+    async fn assert_noop_rollback(
+        fixture: GroupRollbackFixture,
+        state: Box<dyn State>,
+        assert_state: impl FnOnce(&dyn State),
+    ) {
+        let original_region_routes = fixture.original_region_routes.clone();
+        let procedure_ctx = TestingEnv::procedure_context();
+        let mut procedure = RepartitionGroupProcedure {
+            state,
+            context: fixture.context,
+        };
+
+        procedure.rollback(&procedure_ctx).await.unwrap();
+
+        assert_state(&*procedure.state);
+        let table_route_value = procedure
+            .context
+            .get_table_route_value()
+            .await
+            .unwrap()
+            .into_inner();
+        let region_routes = region_routes(
+            procedure.context.persistent_ctx.table_id,
+            &table_route_value,
+        )
+        .unwrap();
+        assert_eq!(region_routes.clone(), original_region_routes);
+    }
+
+    async fn assert_metadata_rollback_restores_table_route(
+        mut fixture: GroupRollbackFixture,
+        state: Box<dyn State>,
+    ) {
+        let original_region_routes = fixture.original_region_routes.clone();
+        let procedure_ctx = TestingEnv::procedure_context();
+        stage_metadata(&mut fixture.context).await;
+        let mut procedure = RepartitionGroupProcedure {
+            state,
+            context: fixture.context,
+        };
+
+        procedure.rollback(&procedure_ctx).await.unwrap();
+
+        let table_route_value = procedure
+            .context
+            .get_table_route_value()
+            .await
+            .unwrap()
+            .into_inner();
+        let region_routes = region_routes(
+            procedure.context.persistent_ctx.table_id,
+            &table_route_value,
+        )
+        .unwrap();
+        assert_eq!(region_routes.clone(), original_region_routes);
+    }
+
+    #[tokio::test]
+    async fn test_group_rollback_is_noop_in_sync_region() {
+        let mut fixture = new_split_group_rollback_fixture(true).await;
+        assert!(
+            fixture
+                .next_state
+                .as_ref()
+                .unwrap()
+                .as_any()
+                .is::<SyncRegion>()
+        );
+        let state = fixture.next_state.take().unwrap();
+
+        assert_noop_rollback(fixture, state, |state| {
+            assert!(state.as_any().is::<SyncRegion>());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_group_rollback_is_noop_in_exit_staging() {
+        let fixture = new_split_group_rollback_fixture(false).await;
+
+        assert_noop_rollback(fixture, Box::new(UpdateMetadata::ExitStaging), |state| {
+            assert!(state.as_any().is::<UpdateMetadata>());
+            assert!(matches!(
+                state.as_any().downcast_ref::<UpdateMetadata>(),
+                Some(UpdateMetadata::ExitStaging)
+            ));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_group_rollback_restores_split_routes_from_apply_staging() {
+        let fixture = new_split_group_rollback_fixture(false).await;
+        assert_metadata_rollback_restores_table_route(
+            fixture,
+            Box::new(UpdateMetadata::ApplyStaging),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_group_rollback_restores_split_routes_from_enter_staging_region() {
+        let fixture = new_split_group_rollback_fixture(false).await;
+        assert_metadata_rollback_restores_table_route(fixture, Box::new(EnterStagingRegion)).await;
+    }
+
+    #[tokio::test]
+    async fn test_group_rollback_restores_split_routes_from_remap_manifest() {
+        let fixture = new_split_group_rollback_fixture(false).await;
+        assert_metadata_rollback_restores_table_route(fixture, Box::new(RemapManifest)).await;
+    }
+
+    #[tokio::test]
+    async fn test_group_rollback_restores_split_routes_from_apply_staging_manifest() {
+        let fixture = new_split_group_rollback_fixture(false).await;
+        assert_metadata_rollback_restores_table_route(fixture, Box::new(ApplyStagingManifest))
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_group_rollback_restores_merge_routes_and_is_idempotent() {
+        let mut fixture = new_merge_group_rollback_fixture(false).await;
+        let original_region_routes = fixture.original_region_routes.clone();
+        let procedure_ctx = TestingEnv::procedure_context();
+        stage_metadata(&mut fixture.context).await;
+        let mut procedure = RepartitionGroupProcedure {
+            state: Box::new(UpdateMetadata::ApplyStaging),
+            context: fixture.context,
+        };
+
+        procedure.rollback(&procedure_ctx).await.unwrap();
+        let table_route_value = procedure
+            .context
+            .get_table_route_value()
+            .await
+            .unwrap()
+            .into_inner();
+        let once = region_routes(
+            procedure.context.persistent_ctx.table_id,
+            &table_route_value,
+        )
+        .unwrap()
+        .clone();
+        procedure.rollback(&procedure_ctx).await.unwrap();
+        let table_route_value = procedure
+            .context
+            .get_table_route_value()
+            .await
+            .unwrap()
+            .into_inner();
+        let twice = region_routes(
+            procedure.context.persistent_ctx.table_id,
+            &table_route_value,
+        )
+        .unwrap()
+        .clone();
+
+        assert_eq!(once, original_region_routes);
+        assert_eq!(once, twice);
     }
 }

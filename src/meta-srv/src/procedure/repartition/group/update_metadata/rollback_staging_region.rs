@@ -160,7 +160,10 @@ mod tests {
         region_routes: &[RegionRoute],
         targets: &[RegionDescriptor],
     ) -> Vec<RegionRoute> {
-        let target_ids = targets.iter().map(|target| target.region_id).collect::<HashSet<_>>();
+        let target_ids = targets
+            .iter()
+            .map(|target| target.region_id)
+            .collect::<HashSet<_>>();
         region_routes
             .iter()
             .filter(|route| target_ids.contains(&route.region.id))

@@ -16,11 +16,16 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use common_meta::key::table_route::TableRouteValue;
+use common_meta::key::test_utils::new_test_table_info;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::memory::MemoryKvBackend;
+use common_meta::rpc::router::RegionRoute;
 use common_meta::sequence::SequenceBuilder;
+use common_procedure::{Context as ProcedureContext, ProcedureId};
+use common_procedure_test::MockContextProvider;
 use datatypes::value::Value;
-use partition::expr::{col, PartitionExpr};
+use partition::expr::{PartitionExpr, col};
 use store_api::storage::TableId;
 use uuid::Uuid;
 
@@ -75,6 +80,28 @@ impl TestingEnv {
             start_time: Instant::now(),
             volatile_ctx: VolatileContext::default(),
         }
+    }
+
+    pub fn procedure_context() -> ProcedureContext {
+        ProcedureContext {
+            procedure_id: ProcedureId::random(),
+            provider: Arc::new(MockContextProvider::default()),
+        }
+    }
+
+    pub async fn create_physical_table_metadata(
+        &self,
+        table_id: TableId,
+        region_routes: Vec<RegionRoute>,
+    ) {
+        self.table_metadata_manager
+            .create_table_metadata(
+                new_test_table_info(table_id),
+                TableRouteValue::physical(region_routes),
+                HashMap::default(),
+            )
+            .await
+            .unwrap();
     }
 }
 
