@@ -740,13 +740,18 @@ impl RepartitionProcedureFactory for DefaultRepartitionProcedureFactory {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Arc;
 
-    use common_meta::ddl::test_util::datanode_handler::UnexpectedErrorDatanodeHandler;
+    use common_error::mock::MockError;
+    use common_error::status_code::StatusCode;
+    use common_meta::ddl::test_util::datanode_handler::{
+        NaiveDatanodeHandler, UnexpectedErrorDatanodeHandler,
+    };
     use common_meta::peer::Peer;
     use common_meta::rpc::router::{Region, RegionRoute};
     use common_meta::test_util::MockDatanodeManager;
-    use common_procedure::Procedure;
+    use common_procedure::{Error as ProcedureError, Procedure, ProcedureState};
     use store_api::storage::RegionId;
     use table::table_name::TableName;
 
@@ -758,20 +763,10 @@ mod tests {
     use crate::procedure::repartition::plan::RegionDescriptor;
     use crate::procedure::repartition::repartition_end::RepartitionEnd;
     use crate::procedure::repartition::test_util::{
-        TestingEnv, range_expr, test_region_wal_options,
+        TestingEnv, assert_parent_state, current_parent_region_routes, extract_subprocedure_ids,
+        new_parent_context, procedure_context_with_receivers, procedure_state_receiver, range_expr,
+        test_region_route, test_region_wal_options,
     };
-
-    fn test_region_route(region_id: RegionId, partition_expr: &str) -> RegionRoute {
-        RegionRoute {
-            region: Region {
-                id: region_id,
-                partition_expr: partition_expr.to_string(),
-                ..Default::default()
-            },
-            leader_peer: Some(Peer::empty(1)),
-            ..Default::default()
-        }
-    }
 
     fn test_plan(table_id: TableId) -> RepartitionPlanEntry {
         RepartitionPlanEntry {
@@ -786,19 +781,14 @@ mod tests {
                     partition_expr: range_expr("x", 0, 50),
                 },
                 RegionDescriptor {
-                    region_id: RegionId::new(table_id, 2),
+                    region_id: RegionId::new(table_id, 3),
                     partition_expr: range_expr("x", 50, 100),
                 },
             ],
-            allocated_region_ids: vec![RegionId::new(table_id, 2)],
+            allocated_region_ids: vec![RegionId::new(table_id, 3)],
             pending_deallocate_region_ids: vec![],
             transition_map: vec![vec![0, 1]],
         }
-    }
-
-    async fn current_region_routes(ctx: &Context) -> Vec<RegionRoute> {
-        let table_route_value = ctx.get_table_route_value().await.unwrap().into_inner();
-        table_route_value.region_routes().unwrap().clone()
     }
 
     fn test_procedure(state: Box<dyn State>, context: Context) -> RepartitionProcedure {
@@ -916,7 +906,7 @@ mod tests {
             .await
             .unwrap();
 
-        let region_routes = current_region_routes(&procedure.context).await;
+        let region_routes = current_parent_region_routes(&procedure.context).await;
         assert_eq!(region_routes.len(), 1);
         assert_eq!(region_routes[0].region.id, RegionId::new(table_id, 1));
     }
@@ -965,16 +955,137 @@ mod tests {
             .rollback(&TestingEnv::procedure_context())
             .await
             .unwrap();
-        let once = current_region_routes(&procedure.context).await;
+        let once = current_parent_region_routes(&procedure.context).await;
 
         procedure
             .rollback(&TestingEnv::procedure_context())
             .await
             .unwrap();
-        let twice = current_region_routes(&procedure.context).await;
+        let twice = current_parent_region_routes(&procedure.context).await;
 
         assert_eq!(once, twice);
         assert_eq!(once.len(), 1);
         assert_eq!(once[0].region.id, RegionId::new(table_id, 1));
+    }
+
+    #[tokio::test]
+    async fn test_repartition_procedure_flow_split_failed_and_full_rollback() {
+        let env = TestingEnv::new();
+        let table_id = 1024;
+        let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+
+        env.create_physical_table_metadata_for_repartition(
+            table_id,
+            vec![
+                test_region_route(
+                    RegionId::new(table_id, 1),
+                    &range_expr("x", 0, 100).as_json_str().unwrap(),
+                ),
+                test_region_route(
+                    RegionId::new(table_id, 2),
+                    &range_expr("x", 100, 200).as_json_str().unwrap(),
+                ),
+            ],
+            test_region_wal_options(&[1, 2]),
+        )
+        .await;
+
+        let context = new_parent_context(&env, node_manager, table_id);
+        let mut procedure = RepartitionProcedure::new(
+            vec![range_expr("x", 0, 100)],
+            vec![range_expr("x", 0, 50), range_expr("x", 50, 100)],
+            context,
+        );
+
+        let start_status = procedure
+            .execute(&TestingEnv::procedure_context())
+            .await
+            .unwrap();
+        assert!(!start_status.need_persist());
+        assert_parent_state::<AllocateRegion>(&procedure);
+
+        let allocate_status = procedure
+            .execute(&TestingEnv::procedure_context())
+            .await
+            .unwrap();
+        assert!(allocate_status.need_persist());
+        assert_parent_state::<Dispatch>(&procedure);
+        assert_eq!(procedure.context.persistent_ctx.plans.len(), 1);
+        let plan = &procedure.context.persistent_ctx.plans[0];
+        let expected_plan = test_plan(table_id);
+        assert_eq!(plan.source_regions, expected_plan.source_regions);
+        assert_eq!(plan.target_regions, expected_plan.target_regions);
+        assert_eq!(
+            plan.allocated_region_ids,
+            expected_plan.allocated_region_ids
+        );
+        assert_eq!(
+            plan.pending_deallocate_region_ids,
+            expected_plan.pending_deallocate_region_ids
+        );
+        assert_eq!(plan.transition_map, expected_plan.transition_map);
+        assert_eq!(
+            current_parent_region_routes(&procedure.context).await,
+            vec![
+                test_region_route(
+                    RegionId::new(table_id, 1),
+                    &range_expr("x", 0, 100).as_json_str().unwrap(),
+                ),
+                test_region_route(
+                    RegionId::new(table_id, 2),
+                    &range_expr("x", 100, 200).as_json_str().unwrap(),
+                ),
+                RegionRoute {
+                    region: Region {
+                        id: RegionId::new(table_id, 3),
+                        partition_expr: range_expr("x", 50, 100).as_json_str().unwrap(),
+                        ..Default::default()
+                    },
+                    leader_peer: Some(Peer::empty(0)),
+                    ..Default::default()
+                },
+            ]
+        );
+
+        let dispatch_status = procedure
+            .execute(&TestingEnv::procedure_context())
+            .await
+            .unwrap();
+        assert!(dispatch_status.need_persist());
+        let subprocedure_ids = extract_subprocedure_ids(dispatch_status);
+        assert_eq!(subprocedure_ids.len(), 1);
+        assert_parent_state::<Collect>(&procedure);
+
+        let failed_state = ProcedureState::failed(Arc::new(ProcedureError::external(
+            MockError::new(StatusCode::Internal),
+        )));
+        let collect_ctx = procedure_context_with_receivers(HashMap::from([(
+            subprocedure_ids[0],
+            procedure_state_receiver(failed_state),
+        )]));
+
+        let err = procedure.execute(&collect_ctx).await.unwrap_err();
+        assert!(!err.is_retry_later());
+        assert_parent_state::<Collect>(&procedure);
+
+        procedure
+            .rollback(&TestingEnv::procedure_context())
+            .await
+            .unwrap();
+
+        let region_routes = current_parent_region_routes(&procedure.context).await;
+        assert_eq!(
+            region_routes,
+            vec![
+                test_region_route(
+                    RegionId::new(table_id, 1),
+                    &range_expr("x", 0, 100).as_json_str().unwrap(),
+                ),
+                test_region_route(
+                    RegionId::new(table_id, 2),
+                    &range_expr("x", 100, 200).as_json_str().unwrap(),
+                ),
+            ]
+        );
     }
 }
