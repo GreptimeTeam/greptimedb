@@ -16,6 +16,8 @@ SELECT i, h FROM test_alt_format;
 
 ALTER TABLE test_alt_format SET 'sst_format' = 'flat';
 
+SHOW CREATE TABLE test_alt_format;
+
 -- SQLNESS SORT_RESULT 3 1
 SELECT * FROM test_alt_format;
 
@@ -39,6 +41,8 @@ SELECT i, h FROM test_alt_format;
 
 -- allow to change from flat to primary_key
 ALTER TABLE test_alt_format SET 'sst_format' = 'primary_key';
+
+SHOW CREATE TABLE test_alt_format;
 
 INSERT INTO test_alt_format (h, j, i) VALUES (14, 4, 34);
 
@@ -71,6 +75,8 @@ SELECT * FROM t1 ORDER BY ts ASC;
 
 ALTER TABLE alt_format_phy SET 'sst_format' = 'flat';
 
+SHOW CREATE TABLE alt_format_phy;
+
 SELECT * FROM t1 ORDER BY ts ASC;
 
 SELECT host, ts, val FROM t1 where host = 'example.com' ORDER BY ts ASC;
@@ -83,6 +89,8 @@ SELECT host, ts, val FROM t1 where host = 'example.com' ORDER BY ts ASC;
 
 -- allow to change from flat to primary_key
 ALTER TABLE alt_format_phy SET 'sst_format' = 'primary_key';
+
+SHOW CREATE TABLE alt_format_phy;
 
 INSERT INTO t1 (ts, val, host) VALUES
   ('2022-01-01 00:00:02', 5.0, 'example.com');

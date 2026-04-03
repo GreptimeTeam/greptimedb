@@ -42,6 +42,26 @@ ALTER TABLE test_alt_format SET 'sst_format' = 'flat';
 
 Affected Rows: 0
 
+SHOW CREATE TABLE test_alt_format;
+
++-----------------+------------------------------------------------+
+| Table           | Create Table                                   |
++-----------------+------------------------------------------------+
+| test_alt_format | CREATE TABLE IF NOT EXISTS "test_alt_format" ( |
+|                 |   "h" INT NULL,                                |
+|                 |   "i" INT NULL DEFAULT 0,                      |
+|                 |   "j" TIMESTAMP(3) NOT NULL,                   |
+|                 |   "k" INT NULL,                                |
+|                 |   TIME INDEX ("j"),                            |
+|                 |   PRIMARY KEY ("h")                            |
+|                 | )                                              |
+|                 |                                                |
+|                 | ENGINE=mito                                    |
+|                 | WITH(                                          |
+|                 |   sst_format = 'flat'                          |
+|                 | )                                              |
++-----------------+------------------------------------------------+
+
 -- SQLNESS SORT_RESULT 3 1
 SELECT * FROM test_alt_format;
 
@@ -120,6 +140,26 @@ SELECT i, h FROM test_alt_format;
 ALTER TABLE test_alt_format SET 'sst_format' = 'primary_key';
 
 Affected Rows: 0
+
+SHOW CREATE TABLE test_alt_format;
+
++-----------------+------------------------------------------------+
+| Table           | Create Table                                   |
++-----------------+------------------------------------------------+
+| test_alt_format | CREATE TABLE IF NOT EXISTS "test_alt_format" ( |
+|                 |   "h" INT NULL,                                |
+|                 |   "i" INT NULL DEFAULT 0,                      |
+|                 |   "j" TIMESTAMP(3) NOT NULL,                   |
+|                 |   "k" INT NULL,                                |
+|                 |   TIME INDEX ("j"),                            |
+|                 |   PRIMARY KEY ("h")                            |
+|                 | )                                              |
+|                 |                                                |
+|                 | ENGINE=mito                                    |
+|                 | WITH(                                          |
+|                 |   sst_format = 'primary_key'                   |
+|                 | )                                              |
++-----------------+------------------------------------------------+
 
 INSERT INTO test_alt_format (h, j, i) VALUES (14, 4, 34);
 
@@ -204,6 +244,27 @@ ALTER TABLE alt_format_phy SET 'sst_format' = 'flat';
 
 Affected Rows: 0
 
+SHOW CREATE TABLE alt_format_phy;
+
++----------------+-----------------------------------------------+
+| Table          | Create Table                                  |
++----------------+-----------------------------------------------+
+| alt_format_phy | CREATE TABLE IF NOT EXISTS "alt_format_phy" ( |
+|                |   "ts" TIMESTAMP(3) NOT NULL,                 |
+|                |   "val" DOUBLE NULL,                          |
+|                |   "host" STRING NULL,                         |
+|                |   "k" STRING NULL,                            |
+|                |   TIME INDEX ("ts"),                          |
+|                |   PRIMARY KEY ("host", "k")                   |
+|                | )                                             |
+|                |                                               |
+|                | ENGINE=metric                                 |
+|                | WITH(                                         |
+|                |   physical_metric_table = '',                 |
+|                |   sst_format = 'flat'                         |
+|                | )                                             |
++----------------+-----------------------------------------------+
+
 SELECT * FROM t1 ORDER BY ts ASC;
 
 +-------------+---+---------------------+------+
@@ -243,6 +304,27 @@ SELECT host, ts, val FROM t1 where host = 'example.com' ORDER BY ts ASC;
 ALTER TABLE alt_format_phy SET 'sst_format' = 'primary_key';
 
 Affected Rows: 0
+
+SHOW CREATE TABLE alt_format_phy;
+
++----------------+-----------------------------------------------+
+| Table          | Create Table                                  |
++----------------+-----------------------------------------------+
+| alt_format_phy | CREATE TABLE IF NOT EXISTS "alt_format_phy" ( |
+|                |   "ts" TIMESTAMP(3) NOT NULL,                 |
+|                |   "val" DOUBLE NULL,                          |
+|                |   "host" STRING NULL,                         |
+|                |   "k" STRING NULL,                            |
+|                |   TIME INDEX ("ts"),                          |
+|                |   PRIMARY KEY ("host", "k")                   |
+|                | )                                             |
+|                |                                               |
+|                | ENGINE=metric                                 |
+|                | WITH(                                         |
+|                |   physical_metric_table = '',                 |
+|                |   sst_format = 'primary_key'                  |
+|                | )                                             |
++----------------+-----------------------------------------------+
 
 INSERT INTO t1 (ts, val, host) VALUES
   ('2022-01-01 00:00:02', 5.0, 'example.com');
