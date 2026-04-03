@@ -141,7 +141,7 @@ async fn test_alter_region_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -213,7 +213,7 @@ async fn test_alter_region_with_format(flat_format: bool) {
         .reopen_engine(
             engine,
             MitoConfig {
-                default_experimental_flat_format: flat_format,
+                default_flat_format: flat_format,
                 ..Default::default()
             },
         )
@@ -267,7 +267,7 @@ async fn test_put_after_alter_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -318,7 +318,7 @@ async fn test_put_after_alter_with_format(flat_format: bool) {
         .reopen_engine(
             engine,
             MitoConfig {
-                default_experimental_flat_format: flat_format,
+                default_flat_format: flat_format,
                 ..Default::default()
             },
         )
@@ -387,7 +387,7 @@ async fn test_alter_region_retry_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -457,7 +457,7 @@ async fn test_alter_on_flushing_with_format(flat_format: bool) {
     let engine = env
         .create_engine_with(
             MitoConfig {
-                default_experimental_flat_format: flat_format,
+                default_flat_format: flat_format,
                 ..Default::default()
             },
             None,
@@ -574,7 +574,7 @@ async fn test_alter_column_fulltext_options_with_format(flat_format: bool) {
     let engine = env
         .create_engine_with(
             MitoConfig {
-                default_experimental_flat_format: flat_format,
+                default_flat_format: flat_format,
                 ..Default::default()
             },
             None,
@@ -681,7 +681,7 @@ async fn test_alter_column_fulltext_options_with_format(flat_format: bool) {
         .reopen_engine(
             engine,
             MitoConfig {
-                default_experimental_flat_format: flat_format,
+                default_flat_format: flat_format,
                 ..Default::default()
             },
         )
@@ -718,7 +718,7 @@ async fn test_alter_column_set_inverted_index_with_format(flat_format: bool) {
     let engine = env
         .create_engine_with(
             MitoConfig {
-                default_experimental_flat_format: flat_format,
+                default_flat_format: flat_format,
                 ..Default::default()
             },
             None,
@@ -816,7 +816,7 @@ async fn test_alter_column_set_inverted_index_with_format(flat_format: bool) {
         .reopen_engine(
             engine,
             MitoConfig {
-                default_experimental_flat_format: flat_format,
+                default_flat_format: flat_format,
                 ..Default::default()
             },
         )
@@ -853,7 +853,7 @@ async fn test_alter_region_ttl_options_with_format(flat_format: bool) {
     let engine = env
         .create_engine_with(
             MitoConfig {
-                default_experimental_flat_format: flat_format,
+                default_flat_format: flat_format,
                 ..Default::default()
             },
             None,
@@ -916,7 +916,7 @@ async fn test_write_stall_on_altering_with_format(flat_format: bool) {
     let engine = env
         .create_engine_with(
             MitoConfig {
-                default_experimental_flat_format: flat_format,
+                default_flat_format: flat_format,
                 ..Default::default()
             },
             None,
@@ -994,7 +994,7 @@ async fn test_alter_region_sst_format_with_flush() {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: false,
+            default_flat_format: false,
             ..Default::default()
         })
         .await;
@@ -1085,7 +1085,7 @@ async fn test_alter_region_sst_format_with_flush() {
         .reopen_engine(
             engine,
             MitoConfig {
-                default_experimental_flat_format: false,
+                default_flat_format: false,
                 ..Default::default()
             },
         )
@@ -1118,7 +1118,7 @@ async fn test_alter_region_sst_format_without_flush() {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: false,
+            default_flat_format: false,
             ..Default::default()
         })
         .await;
@@ -1203,7 +1203,7 @@ async fn test_alter_region_sst_format_without_flush() {
         .reopen_engine(
             engine,
             MitoConfig {
-                default_experimental_flat_format: false,
+                default_flat_format: false,
                 ..Default::default()
             },
         )
@@ -1238,7 +1238,7 @@ async fn test_alter_region_sst_format_flat_to_pk_with_flush() {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: true,
+            default_flat_format: true,
             ..Default::default()
         })
         .await;
@@ -1329,7 +1329,7 @@ async fn test_alter_region_sst_format_flat_to_pk_with_flush() {
         .reopen_engine(
             engine,
             MitoConfig {
-                default_experimental_flat_format: false,
+                default_flat_format: false,
                 ..Default::default()
             },
         )
@@ -1362,7 +1362,7 @@ async fn test_alter_region_sst_format_flat_to_pk_without_flush() {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: true,
+            default_flat_format: true,
             ..Default::default()
         })
         .await;
@@ -1447,7 +1447,7 @@ async fn test_alter_region_sst_format_flat_to_pk_without_flush() {
         .reopen_engine(
             engine,
             MitoConfig {
-                default_experimental_flat_format: false,
+                default_flat_format: false,
                 ..Default::default()
             },
         )

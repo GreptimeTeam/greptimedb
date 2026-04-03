@@ -173,9 +173,9 @@ pub struct MitoConfig {
     #[serde(with = "humantime_serde")]
     pub min_compaction_interval: Duration,
 
-    /// Whether to enable experimental flat format as the default format.
+    /// Whether to enable flat format as the default SST format.
     /// When enabled, forces using BulkMemtable and BulkMemtableBuilder.
-    pub default_experimental_flat_format: bool,
+    pub default_flat_format: bool,
 
     pub gc: GcConfig,
 }
@@ -225,7 +225,7 @@ impl Default for MitoConfig {
             vector_index: VectorIndexConfig::default(),
             memtable: MemtableConfig::default(),
             min_compaction_interval: Duration::from_secs(0),
-            default_experimental_flat_format: true,
+            default_flat_format: true,
             gc: GcConfig::default(),
         };
 

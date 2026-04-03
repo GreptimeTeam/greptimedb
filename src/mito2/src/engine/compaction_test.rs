@@ -147,7 +147,7 @@ async fn test_compaction_region_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -223,7 +223,7 @@ async fn test_infer_compaction_time_window_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -374,7 +374,7 @@ async fn test_compaction_overlapping_files_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -445,7 +445,7 @@ async fn test_compaction_region_with_overlapping_with_format(flat_format: bool) 
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -503,7 +503,7 @@ async fn test_compaction_region_with_overlapping_delete_all_with_format(flat_for
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -571,7 +571,7 @@ async fn test_readonly_during_compaction_with_format(flat_format: bool) {
     let engine = env
         .create_engine_with(
             MitoConfig {
-                default_experimental_flat_format: flat_format,
+                default_flat_format: flat_format,
                 // Ensure there is only one background worker for purge task.
                 max_background_purges: 1,
                 ..Default::default()
@@ -730,7 +730,7 @@ async fn test_compaction_update_time_window_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -836,7 +836,7 @@ async fn test_change_region_compaction_window_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -938,7 +938,7 @@ async fn test_change_region_compaction_window_with_format(flat_format: bool) {
         .reopen_engine(
             engine,
             MitoConfig {
-                default_experimental_flat_format: flat_format,
+                default_flat_format: flat_format,
                 ..Default::default()
             },
         )
@@ -981,7 +981,7 @@ async fn test_open_overwrite_compaction_window_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -1040,7 +1040,7 @@ async fn test_open_overwrite_compaction_window_with_format(flat_format: bool) {
         .reopen_engine(
             engine,
             MitoConfig {
-                default_experimental_flat_format: flat_format,
+                default_flat_format: flat_format,
                 ..Default::default()
             },
         )

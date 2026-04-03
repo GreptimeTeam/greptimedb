@@ -1570,7 +1570,7 @@ max_concurrent_scan_files = 384
 allow_stale_entries = false
 scan_memory_on_exhausted = "fail"
 min_compaction_interval = "0s"
-default_experimental_flat_format = true
+default_flat_format = true
 
 [region_engine.mito.index]
 aux_path = ""

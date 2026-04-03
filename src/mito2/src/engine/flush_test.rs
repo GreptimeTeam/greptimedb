@@ -49,7 +49,7 @@ async fn test_manual_flush_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -112,7 +112,7 @@ async fn test_flush_engine_with_format(flat_format: bool) {
     let engine = env
         .create_engine_with(
             MitoConfig {
-                default_experimental_flat_format: flat_format,
+                default_flat_format: flat_format,
                 ..Default::default()
             },
             Some(write_buffer_manager.clone()),
@@ -191,7 +191,7 @@ async fn test_write_stall_with_format(flat_format: bool) {
     let engine = env
         .create_engine_with(
             MitoConfig {
-                default_experimental_flat_format: flat_format,
+                default_flat_format: flat_format,
                 ..Default::default()
             },
             Some(write_buffer_manager.clone()),
@@ -274,7 +274,7 @@ async fn test_flush_empty_with_format(flat_format: bool) {
     let engine = env
         .create_engine_with(
             MitoConfig {
-                default_experimental_flat_format: flat_format,
+                default_flat_format: flat_format,
                 ..Default::default()
             },
             Some(write_buffer_manager.clone()),
@@ -447,7 +447,7 @@ async fn test_auto_flush_engine_with_format(flat_format: bool) {
         .create_engine_with_time(
             MitoConfig {
                 auto_flush_interval: Duration::from_secs(60 * 5),
-                default_experimental_flat_format: flat_format,
+                default_flat_format: flat_format,
                 ..Default::default()
             },
             Some(write_buffer_manager.clone()),
@@ -523,7 +523,7 @@ async fn test_flush_workers_with_format(flat_format: bool) {
         .create_engine_with(
             MitoConfig {
                 num_workers: 2,
-                default_experimental_flat_format: flat_format,
+                default_flat_format: flat_format,
                 ..Default::default()
             },
             Some(write_buffer_manager.clone()),

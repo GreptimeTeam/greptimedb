@@ -44,7 +44,7 @@ async fn test_append_mode_write_query_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -112,7 +112,7 @@ async fn test_append_mode_compaction_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -211,7 +211,7 @@ async fn test_append_mode_compaction_with_format(flat_format: bool) {
         .reopen_engine(
             engine,
             MitoConfig {
-                default_experimental_flat_format: flat_format,
+                default_flat_format: flat_format,
                 ..Default::default()
             },
         )
@@ -238,7 +238,7 @@ async fn test_alter_append_mode_clears_merge_mode_with_format(flat_format: bool)
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -329,7 +329,7 @@ async fn test_alter_append_mode_clears_merge_mode_with_format(flat_format: bool)
         .reopen_engine(
             engine,
             MitoConfig {
-                default_experimental_flat_format: flat_format,
+                default_flat_format: flat_format,
                 ..Default::default()
             },
         )
@@ -376,7 +376,7 @@ async fn test_put_single_range_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -474,7 +474,7 @@ async fn test_put_single_range_with_format(flat_format: bool) {
         .reopen_engine(
             engine,
             MitoConfig {
-                default_experimental_flat_format: flat_format,
+                default_flat_format: flat_format,
                 ..Default::default()
             },
         )

@@ -41,7 +41,7 @@ async fn test_scan_with_min_sst_sequence_with_format(flat_format: bool) {
     let mut env = TestEnv::with_prefix("test_scan_with_min_sst_sequence").await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -176,7 +176,7 @@ async fn test_max_concurrent_scan_files() {
 async fn test_max_concurrent_scan_files_with_format(flat_format: bool) {
     let mut env = TestEnv::with_prefix("test_max_concurrent_scan_files").await;
     let config = MitoConfig {
-        default_experimental_flat_format: flat_format,
+        default_flat_format: flat_format,
         max_concurrent_scan_files: 2,
         ..Default::default()
     };
@@ -235,7 +235,7 @@ async fn test_series_scan_with_format(flat_format: bool) {
     let mut env = TestEnv::with_prefix("test_series_scan").await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
