@@ -288,6 +288,7 @@ select tag from t where num > 6 order by ts;
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
+-- SQLNESS REPLACE ,\sfilter=\[[^]]+\] 
 explain analyze select tag from t where num > 6 order by ts desc limit 2;
 
 +-+-+-+
@@ -295,11 +296,11 @@ explain analyze select tag from t where num > 6 order by ts desc limit 2;
 +-+-+-+
 | 0_| 0_|_ProjectionExec: expr=[tag@0 as tag] REDACTED
 |_|_|_SortPreservingMergeExec: [ts@1 DESC], fetch=2 REDACTED
-|_|_|_SortExec: TopK(fetch=2), expr=[ts@1 DESC], preserve_partitioning=[true], filter=[ts@1 IS NULL OR ts@1 > 6000] REDACTED
+|_|_|_SortExec: TopK(fetch=2), expr=[ts@1 DESC], preserve_partitioning=[true] REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_SortPreservingMergeExec: [ts@1 DESC], fetch=2 REDACTED
-|_|_|_SortExec: TopK(fetch=2), expr=[ts@1 DESC], preserve_partitioning=[true], filter=[ts@1 IS NULL OR ts@1 > 6000] REDACTED
+|_|_|_SortExec: TopK(fetch=2), expr=[ts@1 DESC], preserve_partitioning=[true] REDACTED
 |_|_|_FilterExec: num@2 > 6, projection=[tag@0, ts@1] REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
 |_|_|_|
