@@ -239,13 +239,7 @@ impl ExecutionPlan for PartSortExec {
         };
         let mut new_exec = self.as_ref().clone();
         new_exec.input = new_input.clone();
-        let properties = new_exec.input.properties();
-        new_exec.properties = Arc::new(PlanProperties::new(
-            new_exec.input.equivalence_properties().clone(),
-            new_exec.input.output_partitioning().clone(),
-            properties.emission_type,
-            properties.boundedness,
-        ));
+        new_exec.properties = new_input.properties().clone();
         Ok(Arc::new(new_exec))
     }
 
