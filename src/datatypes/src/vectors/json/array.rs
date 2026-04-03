@@ -77,6 +77,8 @@ impl JsonArray<'_> {
                                 JsonArray::from(&array_columns[j]).try_align(expect_type)?
                             }
                             (DataType::List(expect_item), DataType::List(array_item)) => {
+                                common_telemetry::info!("1. expect_item: {}", expect_item.data_type());
+                                common_telemetry::info!("2. array_item: {}", array_item.data_type());
                                 let list_array = array_columns[j].as_list::<i32>();
                                 let item_aligned =
                                     match (expect_item.data_type(), array_item.data_type()) {

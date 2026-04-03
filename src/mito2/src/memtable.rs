@@ -273,8 +273,10 @@ pub(crate) fn merge_json_extension_fields(base: &SchemaRef, others: &[SchemaRef]
         if let Some(merged) = merged
             && field.data_type() != merged.as_ref()
         {
+            common_telemetry::info!("before merged: {}", field.data_type());
             let merged =
                 json_type::merge_as_json_type(field.data_type(), merged.as_ref()).into_owned();
+            common_telemetry::info!("after merged: {}", merged);
 
             let mut new = field.as_ref().clone();
             new.set_data_type(merged);
