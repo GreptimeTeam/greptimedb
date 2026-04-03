@@ -15,7 +15,6 @@
 pub mod constant_term;
 pub mod count_nest_aggr;
 pub mod count_wildcard;
-pub mod join_reduce;
 pub mod parallelize_scan;
 pub mod pass_distribution;
 pub mod remove_duplicate;

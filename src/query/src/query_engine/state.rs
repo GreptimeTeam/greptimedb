@@ -62,7 +62,6 @@ use crate::optimizer::ExtensionAnalyzerRule;
 use crate::optimizer::constant_term::MatchesConstantTermOptimizer;
 use crate::optimizer::count_nest_aggr::CountNestAggrRule;
 use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
-use crate::optimizer::join_reduce::JoinReduceRule;
 use crate::optimizer::parallelize_scan::ParallelizeScan;
 use crate::optimizer::pass_distribution::PassDistribution;
 use crate::optimizer::remove_duplicate::RemoveDuplicate;
@@ -174,10 +173,6 @@ impl QueryEngineState {
         analyzer.rules.push(Arc::new(FixStateUdafOrderingAnalyzer));
 
         let mut optimizer = Optimizer::new();
-        let join_reduce_insert_at = optimizer.rules.len().saturating_sub(1);
-        optimizer
-            .rules
-            .insert(join_reduce_insert_at, Arc::new(JoinReduceRule));
         optimizer.rules.push(Arc::new(ScanHintRule));
 
         // add physical optimizer
