@@ -40,7 +40,10 @@ pub(crate) struct LeaderInfo {
 impl LeaderHandler {
     async fn get_leader_info(&self) -> Result<LeaderInfo> {
         let (leader_addr, is_leader) = if let Some(election) = &self.election {
-            (Some(election.leader().await.context(error::KvBackendSnafu)?.0), election.is_leader())
+            (
+                Some(election.leader().await.context(error::KvBackendSnafu)?.0),
+                election.is_leader(),
+            )
         } else {
             (None, false)
         };
