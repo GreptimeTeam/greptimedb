@@ -44,6 +44,14 @@ INSERT INTO test_nano VALUES (1, 1000000, "a"), (1, 1000000, "b"), (2, 2000000, 
 -- SQLNESS REPLACE (peers.*) REDACTED
 TQL EXPLAIN (0, 10, '5s') test_nano;
 
+-- explain verbose at 0s, 5s and 10s for a nanosecond time index.
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (elapsed_compute.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+TQL EXPLAIN VERBOSE (0, 10, '5s') test_nano;
+
 DROP TABLE test_nano;
 
 DROP TABLE test;

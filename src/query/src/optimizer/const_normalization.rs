@@ -667,10 +667,10 @@ mod tests {
     use datafusion_common::arrow::datatypes::Field;
     use datafusion_common::{DFSchema, ScalarValue, ToDFSchema};
     use datafusion_expr::expr::{Between, Like};
-    use datafusion_expr::expr_fn::{cast, col};
+    use datafusion_expr::expr_fn::{cast, col, try_cast};
     use datafusion_expr::{
-        Expr, LogicalPlan, LogicalPlanBuilder, TableProviderFilterPushDown, TableSource, TableType,
-        lit,
+        Expr, LogicalPlan, LogicalPlanBuilder, TableProviderFilterPushDown, TableScan, TableSource,
+        TableType, lit,
     };
     use datafusion_optimizer::analyzer::AnalyzerRule;
     use datafusion_optimizer::optimizer::{Optimizer, OptimizerContext};
@@ -716,6 +716,86 @@ mod tests {
         assert_eq!(
             "Filter: t.v + Int32(1) >= Int32(42)\n  TableScan: t",
             result.to_string()
+        );
+    }
+
+    #[test]
+    fn test_normalize_swapped_binary_comparison() {
+        let schema = test_schema(vec![Field::new("v", DataType::Int16, false)]);
+        let plan = LogicalPlanBuilder::scan("t", test_source(schema), None)
+            .unwrap()
+            .filter(lit(42_i64).lt_eq(cast(col("v"), DataType::Int64)))
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let result = ConstNormalizationRule
+            .analyze(plan, &ConfigOptions::default())
+            .unwrap();
+
+        assert_eq!(
+            "Filter: t.v >= Int16(42)\n  TableScan: t",
+            result.to_string()
+        );
+    }
+
+    #[test]
+    fn test_normalize_try_cast_target() {
+        let schema = test_schema(vec![Field::new("v", DataType::Int16, false)]);
+        let plan = LogicalPlanBuilder::scan("t", test_source(schema), None)
+            .unwrap()
+            .filter(try_cast(col("v"), DataType::Int64).gt_eq(lit(42_i64)))
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let result = ConstNormalizationRule
+            .analyze(plan, &ConfigOptions::default())
+            .unwrap();
+
+        assert_eq!(
+            "Filter: t.v >= Int16(42)\n  TableScan: t",
+            result.to_string()
+        );
+    }
+
+    #[test]
+    fn test_normalize_casted_constants() {
+        let schema = test_schema(vec![Field::new("v", DataType::Int16, false)]);
+        let binary_plan = LogicalPlanBuilder::scan("t", test_source(schema.clone()), None)
+            .unwrap()
+            .filter(col("v").gt_eq(cast(lit(42_i8), DataType::Int64)))
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let in_list_plan = LogicalPlanBuilder::scan("t", test_source(schema), None)
+            .unwrap()
+            .filter(col("v").in_list(
+                vec![
+                    cast(lit(1_i8), DataType::Int64),
+                    try_cast(lit(2_i8), DataType::Int64),
+                ],
+                false,
+            ))
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let binary = ConstNormalizationRule
+            .analyze(binary_plan, &ConfigOptions::default())
+            .unwrap();
+        let in_list = ConstNormalizationRule
+            .analyze(in_list_plan, &ConfigOptions::default())
+            .unwrap();
+
+        assert_eq!(
+            "Filter: t.v >= Int16(42)\n  TableScan: t",
+            binary.to_string()
+        );
+        assert_eq!(
+            "Filter: t.v IN ([Int16(1), Int16(2)])\n  TableScan: t",
+            in_list.to_string()
         );
     }
 
@@ -802,6 +882,51 @@ mod tests {
     }
 
     #[test]
+    fn test_keep_non_lossless_literal_unchanged() {
+        let schema = test_schema(vec![Field::new("v", DataType::Int16, false)]);
+        let plan = LogicalPlanBuilder::scan("t", test_source(schema), None)
+            .unwrap()
+            .filter(col("v").gt_eq(lit(100_000_i64)))
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let result = ConstNormalizationRule
+            .analyze(plan, &ConfigOptions::default())
+            .unwrap();
+
+        assert_eq!(
+            "Filter: t.v >= Int64(100000)\n  TableScan: t",
+            result.to_string()
+        );
+    }
+
+    #[test]
+    fn test_normalize_scan_filters() {
+        let schema = test_schema(vec![Field::new("v", DataType::Int16, false)]);
+        let scan = LogicalPlanBuilder::scan("t", test_source(schema), None)
+            .unwrap()
+            .build()
+            .unwrap();
+        let LogicalPlan::TableScan(scan) = scan else {
+            panic!("expected table scan");
+        };
+        let plan = LogicalPlan::TableScan(TableScan {
+            filters: vec![cast(col("v"), DataType::Int64).gt_eq(lit(42_i64))],
+            ..scan
+        });
+
+        let analyzed = ConstNormalizationRule
+            .analyze(plan, &ConfigOptions::default())
+            .unwrap();
+
+        assert_eq!(
+            vec![col("v").gt_eq(lit(42_i16))],
+            extract_scan_filters(&analyzed)
+        );
+    }
+
+    #[test]
     fn test_normalize_negated_between() {
         let schema = test_schema(vec![Field::new("v", DataType::Int16, false)]);
         let plan = LogicalPlanBuilder::scan("t", test_source(schema), None)
@@ -848,6 +973,32 @@ mod tests {
 
         assert_eq!(
             "Filter: t.s LIKE Utf8(\"api%\")\n  TableScan: t",
+            result.to_string()
+        );
+    }
+
+    #[test]
+    fn test_normalize_similar_to_literal() {
+        let schema = test_schema(vec![Field::new("s", DataType::Utf8, false)]);
+        let plan = LogicalPlanBuilder::scan("t", test_source(schema), None)
+            .unwrap()
+            .filter(Expr::SimilarTo(Like::new(
+                false,
+                Box::new(cast(col("s"), DataType::LargeUtf8)),
+                Box::new(lit(ScalarValue::LargeUtf8(Some("api.*".to_string())))),
+                None,
+                false,
+            )))
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let result = ConstNormalizationRule
+            .analyze(plan, &ConfigOptions::default())
+            .unwrap();
+
+        assert_eq!(
+            "Filter: t.s SIMILAR TO Utf8(\"api.*\")\n  TableScan: t",
             result.to_string()
         );
     }
@@ -904,6 +1055,108 @@ mod tests {
             TimestampRange::new_inclusive(
                 Some(Timestamp::new_nanosecond(-299_999_999_999)),
                 Some(Timestamp::new_nanosecond(10_000_999_999))
+            ),
+            range
+        );
+    }
+
+    #[test]
+    fn test_normalize_timestamp_between_filter() {
+        let schema = test_schema(vec![Field::new(
+            "ts",
+            DataType::Timestamp(ArrowTimeUnit::Nanosecond, None),
+            false,
+        )]);
+        let plan = LogicalPlanBuilder::scan("t", test_source(schema), None)
+            .unwrap()
+            .filter(
+                cast(
+                    col("ts"),
+                    DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                )
+                .between(
+                    lit(ScalarValue::TimestampMillisecond(Some(-299_999), None)),
+                    lit(ScalarValue::TimestampMillisecond(Some(10_000), None)),
+                ),
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let analyzed = ConstNormalizationRule
+            .analyze(plan, &ConfigOptions::default())
+            .unwrap();
+        let expected = "\
+\nFilter: t.ts >= TimestampNanosecond(-299999999999, None) AND t.ts < TimestampNanosecond(10001000000, None)\
+\n  TableScan: t";
+        assert_eq!(expected.trim_start(), analyzed.to_string());
+
+        let pushed = Optimizer::with_rules(vec![Arc::new(PushDownFilter::new())])
+            .optimize(analyzed, &OptimizerContext::new(), |_, _| {})
+            .unwrap();
+        let expected = "\
+\nTableScan: t, full_filters=[t.ts >= TimestampNanosecond(-299999999999, None), t.ts < TimestampNanosecond(10001000000, None)]";
+        assert_eq!(expected.trim_start(), pushed.to_string());
+
+        let filters = extract_scan_filters(&pushed);
+        let range = build_time_range_predicate("ts", TimeUnit::Nanosecond, &filters);
+        assert_eq!(
+            TimestampRange::new_inclusive(
+                Some(Timestamp::new_nanosecond(-299_999_999_999)),
+                Some(Timestamp::new_nanosecond(10_000_999_999))
+            ),
+            range
+        );
+    }
+
+    #[test]
+    fn test_normalize_strict_timestamp_filter() {
+        let schema = test_schema(vec![Field::new(
+            "ts",
+            DataType::Timestamp(ArrowTimeUnit::Nanosecond, None),
+            false,
+        )]);
+        let plan = LogicalPlanBuilder::scan("t", test_source(schema), None)
+            .unwrap()
+            .filter(
+                cast(
+                    col("ts"),
+                    DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                )
+                .gt(lit(ScalarValue::TimestampMillisecond(Some(10_000), None)))
+                .and(
+                    cast(
+                        col("ts"),
+                        DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                    )
+                    .lt(lit(ScalarValue::TimestampMillisecond(Some(20_000), None))),
+                ),
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let analyzed = ConstNormalizationRule
+            .analyze(plan, &ConfigOptions::default())
+            .unwrap();
+        let expected = "\
+\nFilter: t.ts >= TimestampNanosecond(10001000000, None) AND t.ts < TimestampNanosecond(20000000000, None)\
+\n  TableScan: t";
+        assert_eq!(expected.trim_start(), analyzed.to_string());
+
+        let pushed = Optimizer::with_rules(vec![Arc::new(PushDownFilter::new())])
+            .optimize(analyzed, &OptimizerContext::new(), |_, _| {})
+            .unwrap();
+        let expected = "\
+\nTableScan: t, full_filters=[t.ts >= TimestampNanosecond(10001000000, None), t.ts < TimestampNanosecond(20000000000, None)]";
+        assert_eq!(expected.trim_start(), pushed.to_string());
+
+        let filters = extract_scan_filters(&pushed);
+        let range = build_time_range_predicate("ts", TimeUnit::Nanosecond, &filters);
+        assert_eq!(
+            TimestampRange::new_inclusive(
+                Some(Timestamp::new_nanosecond(10_001_000_000)),
+                Some(Timestamp::new_nanosecond(19_999_999_999))
             ),
             range
         );

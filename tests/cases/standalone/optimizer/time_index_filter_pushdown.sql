@@ -57,6 +57,37 @@ FROM
 WHERE
     usage_small BETWEEN 10 AND 20;
 
+CREATE TABLE
+    IF NOT EXISTS `cpu_single` (
+        `rack` STRING NULL,
+        `usage_small` SMALLINT NULL,
+        `greptime_timestamp` TIMESTAMP(9) NOT NULL,
+        TIME INDEX (`greptime_timestamp`),
+    ) ENGINE = mito
+WITH
+    (append_mode = 'true', sst_format = 'flat');
+
+INSERT INTO
+    cpu_single
+VALUES
+    ("1", 10, "2023-06-12 01:04:49"),
+    ("2", 20, "2023-06-12 01:04:50"),
+    ("3", 25, "2023-06-12 01:05:00");
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE "flat_format":\s\w+, "flat_format": REDACTED,
+EXPLAIN ANALYZE VERBOSE SELECT
+    rack
+FROM
+    cpu_single
+WHERE
+    10 <= usage_small;
+
+drop table cpu_single;
+
 -- SQLNESS SORT_RESULT 3 1
 select
     count(*)
