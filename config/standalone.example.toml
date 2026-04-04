@@ -538,7 +538,9 @@ compress_manifest = false
 ## @toml2docs:none-default="Auto"
 #+ max_background_purges = 8
 
-## Memory budget for compaction tasks. Setting it to 0 or "unlimited" disables the limit.
+## Memory budget for compaction tasks.
+## Supports absolute size (for example, "2GiB" or "512MB") or percentage (for example, "50%").
+## Setting it to 0 or "unlimited" disables the limit.
 ## @toml2docs:none-default="0"
 #+ experimental_compaction_memory_limit = "0"
 
