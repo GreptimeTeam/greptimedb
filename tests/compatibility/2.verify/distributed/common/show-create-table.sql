@@ -1,0 +1,1 @@
+SHOW CREATE TABLE granularity_and_false_positive_rate;
