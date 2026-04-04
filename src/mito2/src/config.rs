@@ -91,7 +91,9 @@ pub struct MitoConfig {
     pub max_background_compactions: usize,
     /// Max number of running background purge jobs (default: number of cpu cores).
     pub max_background_purges: usize,
-    /// Memory budget for compaction tasks. Setting it to 0 or "unlimited" disables the limit.
+    /// Memory budget for compaction tasks.
+    /// Supports absolute size (e.g. "2GiB", "512MB") or percentage (e.g. "50%").
+    /// Setting it to 0 or "unlimited" disables the limit.
     pub experimental_compaction_memory_limit: MemoryLimit,
     /// Behavior when compaction cannot acquire memory from the budget.
     pub experimental_compaction_on_exhausted: OnExhaustedPolicy,
