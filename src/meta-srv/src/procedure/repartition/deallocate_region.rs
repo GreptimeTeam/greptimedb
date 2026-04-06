@@ -181,12 +181,21 @@ impl DeallocateRegion {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    use std::sync::Arc;
 
+    use common_meta::ddl::test_util::datanode_handler::RetryErrorDatanodeHandler;
     use common_meta::peer::Peer;
     use common_meta::rpc::router::{Region, RegionRoute};
+    use common_meta::test_util::MockDatanodeManager;
     use store_api::storage::{RegionId, TableId};
 
+    use crate::error::Error;
+    use crate::procedure::repartition::State;
     use crate::procedure::repartition::deallocate_region::DeallocateRegion;
+    use crate::procedure::repartition::plan::RepartitionPlanEntry;
+    use crate::procedure::repartition::test_util::{
+        TestingEnv, current_parent_region_routes, new_parent_context,
+    };
 
     fn test_region_routes(table_id: TableId) -> Vec<RegionRoute> {
         vec![
@@ -237,5 +246,37 @@ mod tests {
         );
         assert_eq!(new_region_routes.len(), 1);
         assert_eq!(new_region_routes[0].region.id, RegionId::new(table_id, 2));
+    }
+
+    #[tokio::test]
+    async fn test_next_retryable_when_deallocate_regions_retry_later() {
+        let env = TestingEnv::new();
+        let table_id = 1024;
+        let original_routes = test_region_routes(table_id);
+
+        env.create_physical_table_metadata(table_id, original_routes.clone())
+            .await;
+
+        let node_manager = Arc::new(MockDatanodeManager::new(RetryErrorDatanodeHandler));
+        let mut ctx = new_parent_context(&env, node_manager, table_id);
+        ctx.persistent_ctx.plans = vec![RepartitionPlanEntry {
+            group_id: uuid::Uuid::new_v4(),
+            source_regions: vec![],
+            target_regions: vec![],
+            allocated_region_ids: vec![],
+            pending_deallocate_region_ids: vec![RegionId::new(table_id, 1)],
+            transition_map: vec![],
+        }];
+
+        let mut state = DeallocateRegion;
+
+        let err = state
+            .next(&mut ctx, &TestingEnv::procedure_context())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, Error::DeallocateRegions { .. }));
+        assert!(err.is_retryable());
+        assert_eq!(current_parent_region_routes(&ctx).await, original_routes);
     }
 }

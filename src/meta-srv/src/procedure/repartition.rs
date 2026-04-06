@@ -742,18 +742,22 @@ impl RepartitionProcedureFactory for DefaultRepartitionProcedureFactory {
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
+    use common_error::ext::BoxedError;
     use common_error::mock::MockError;
     use common_error::status_code::StatusCode;
     use common_meta::ddl::test_util::datanode_handler::{
-        NaiveDatanodeHandler, UnexpectedErrorDatanodeHandler,
+        DatanodeWatcher, NaiveDatanodeHandler, UnexpectedErrorDatanodeHandler,
     };
+    use common_meta::error;
     use common_meta::peer::Peer;
     use common_meta::rpc::router::{Region, RegionRoute};
     use common_meta::test_util::MockDatanodeManager;
     use common_procedure::{Error as ProcedureError, Procedure, ProcedureState};
     use store_api::storage::RegionId;
     use table::table_name::TableName;
+    use tokio::sync::mpsc;
 
     use super::*;
     use crate::procedure::repartition::allocate_region::AllocateRegion;
@@ -1087,5 +1091,129 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn test_repartition_procedure_flow_split_allocate_retryable_then_resume() {
+        let env = TestingEnv::new();
+        let table_id = 1024;
+        let (tx, _rx) = mpsc::channel(8);
+        let should_retry = Arc::new(AtomicBool::new(true));
+        let datanode_handler = DatanodeWatcher::new(tx).with_handler(move |_, _| {
+            if should_retry.swap(false, Ordering::SeqCst) {
+                return Err(error::Error::RetryLater {
+                    source: BoxedError::new(
+                        error::UnexpectedSnafu {
+                            err_msg: "retry later",
+                        }
+                        .build(),
+                    ),
+                    clean_poisons: false,
+                });
+            }
+
+            Ok(api::region::RegionResponse::new(0))
+        });
+        let node_manager = Arc::new(MockDatanodeManager::new(datanode_handler));
+
+        env.create_physical_table_metadata_for_repartition(
+            table_id,
+            vec![
+                test_region_route(
+                    RegionId::new(table_id, 1),
+                    &range_expr("x", 0, 100).as_json_str().unwrap(),
+                ),
+                test_region_route(
+                    RegionId::new(table_id, 2),
+                    &range_expr("x", 100, 200).as_json_str().unwrap(),
+                ),
+            ],
+            test_region_wal_options(&[1, 2]),
+        )
+        .await;
+
+        let context = new_parent_context(&env, node_manager, table_id);
+        let mut procedure = RepartitionProcedure::new(
+            vec![range_expr("x", 0, 100)],
+            vec![range_expr("x", 0, 50), range_expr("x", 50, 100)],
+            context,
+        );
+
+        let start_status = procedure
+            .execute(&TestingEnv::procedure_context())
+            .await
+            .unwrap();
+        assert!(!start_status.need_persist());
+        assert_parent_state::<AllocateRegion>(&procedure);
+
+        let err = procedure
+            .execute(&TestingEnv::procedure_context())
+            .await
+            .unwrap_err();
+        assert!(err.is_retry_later());
+        assert_parent_state::<AllocateRegion>(&procedure);
+        assert!(procedure.context.persistent_ctx.plans.is_empty());
+        assert_eq!(
+            current_parent_region_routes(&procedure.context).await,
+            vec![
+                test_region_route(
+                    RegionId::new(table_id, 1),
+                    &range_expr("x", 0, 100).as_json_str().unwrap(),
+                ),
+                test_region_route(
+                    RegionId::new(table_id, 2),
+                    &range_expr("x", 100, 200).as_json_str().unwrap(),
+                ),
+            ]
+        );
+
+        let allocate_status = procedure
+            .execute(&TestingEnv::procedure_context())
+            .await
+            .unwrap();
+        assert!(allocate_status.need_persist());
+        assert_parent_state::<Dispatch>(&procedure);
+
+        assert_eq!(procedure.context.persistent_ctx.plans.len(), 1);
+        let plan = &procedure.context.persistent_ctx.plans[0];
+        let expected_plan = test_plan(table_id);
+        assert_eq!(plan.source_regions, expected_plan.source_regions);
+        assert_eq!(plan.target_regions, expected_plan.target_regions);
+        assert_eq!(
+            plan.allocated_region_ids,
+            expected_plan.allocated_region_ids
+        );
+        assert_eq!(plan.transition_map, expected_plan.transition_map);
+        assert_eq!(
+            current_parent_region_routes(&procedure.context).await,
+            vec![
+                test_region_route(
+                    RegionId::new(table_id, 1),
+                    &range_expr("x", 0, 100).as_json_str().unwrap(),
+                ),
+                test_region_route(
+                    RegionId::new(table_id, 2),
+                    &range_expr("x", 100, 200).as_json_str().unwrap(),
+                ),
+                RegionRoute {
+                    region: Region {
+                        id: RegionId::new(table_id, 3),
+                        partition_expr: range_expr("x", 50, 100).as_json_str().unwrap(),
+                        ..Default::default()
+                    },
+                    leader_peer: Some(Peer::empty(0)),
+                    ..Default::default()
+                },
+            ]
+        );
+
+        let dispatch_status = procedure
+            .execute(&TestingEnv::procedure_context())
+            .await
+            .unwrap();
+        assert!(dispatch_status.need_persist());
+        let subprocedure_ids = extract_subprocedure_ids(dispatch_status);
+        assert_eq!(subprocedure_ids.len(), 1);
+        assert_parent_state::<Collect>(&procedure);
     }
 }
