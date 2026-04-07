@@ -50,8 +50,8 @@ use crate::sst::parquet::flat_format::{
     DecodedPrimaryKeys, FlatReadFormat, decode_primary_keys, time_index_column_index,
 };
 use crate::sst::parquet::reader::{
-    FlatRowGroupReader, MaybeFilter, PhysicalFilterContext, RowGroupBuildContext,
-    RowGroupReaderBuilder, SimpleFilterContext,
+    FlatRowGroupReader, MaybeFilter, MaybePhysicalFilter, PhysicalFilterContext,
+    RowGroupBuildContext, RowGroupReaderBuilder, SimpleFilterContext,
 };
 use crate::sst::parquet::row_group::ParquetFetchMetrics;
 use crate::sst::parquet::stats::RowGroupPruningStats;
@@ -199,7 +199,7 @@ impl FileRange {
                 FlatRowGroupReader::new(self.context.clone(), parquet_reader);
             // Flat PK prefilter makes the input stream predicate-dependent, so cached
             // selector results are not reusable across queries with different filters.
-            let cache_strategy = if self.context.reader_builder.has_flat_primary_key_prefilter() {
+            let cache_strategy = if self.context.reader_builder.has_predicate_prefilter() {
                 CacheStrategy::Disabled
             } else {
                 self.context.reader_builder.cache_strategy().clone()
@@ -305,7 +305,7 @@ impl FileRangeContext {
         self.base.precise_filter_flat(
             input,
             skip_fields,
-            self.reader_builder.has_flat_primary_key_prefilter(),
+            self.reader_builder.has_predicate_prefilter(),
         )
     }
 
@@ -418,13 +418,13 @@ impl RangeBase {
         &self,
         input: RecordBatch,
         skip_fields: bool,
-        skip_prefiltered_pk_filters: bool,
+        skip_prefiltered_filters: bool,
     ) -> Result<Option<RecordBatch>> {
         let mut tag_decode_state = TagDecodeState::new();
         let mask = self.compute_filter_mask_flat(
             &input,
             skip_fields,
-            skip_prefiltered_pk_filters,
+            skip_prefiltered_filters,
             &mut tag_decode_state,
         )?;
 
@@ -471,7 +471,7 @@ impl RangeBase {
         &self,
         input: &RecordBatch,
         skip_fields: bool,
-        skip_prefiltered_pk_filters: bool,
+        skip_prefiltered_filters: bool,
         tag_decode_state: &mut TagDecodeState,
     ) -> Result<Option<BooleanBuffer>> {
         let mut mask = BooleanBuffer::new_set(input.num_rows());
@@ -495,7 +495,11 @@ impl RangeBase {
 
             // Flat parquet PK prefiltering already applied these tag predicates while refining
             // row selection, so skip them here to avoid decoding/evaluating the same condition twice.
-            if skip_prefiltered_pk_filters && filter_ctx.usable_primary_key_filter() {
+            if should_skip_simple_filter_after_prefilter(
+                skip_prefiltered_filters,
+                skip_fields,
+                filter_ctx,
+            ) {
                 continue;
             }
 
@@ -528,6 +532,61 @@ impl RangeBase {
                 mask = mask.bitand(&result);
             }
             // Non-tag column not found in projection.
+        }
+
+        for filter_ctx in &self.physical_filters {
+            let filter = match filter_ctx.filter() {
+                MaybePhysicalFilter::Filter(filter) => filter,
+                MaybePhysicalFilter::Matched => continue,
+                MaybePhysicalFilter::Pruned => return Ok(None),
+            };
+
+            if skip_fields && filter_ctx.semantic_type() == SemanticType::Field {
+                continue;
+            }
+
+            if should_skip_physical_filter_after_prefilter(
+                skip_prefiltered_filters,
+                skip_fields,
+                filter_ctx,
+            ) {
+                continue;
+            }
+
+            let column =
+                if let Some((idx, _)) = input.schema().column_with_name(filter_ctx.column_name()) {
+                    Some(input.column(idx).clone())
+                } else if filter_ctx.semantic_type() == SemanticType::Tag {
+                    self.maybe_decode_tag_column(
+                        metadata,
+                        filter_ctx.column_id(),
+                        input,
+                        tag_decode_state,
+                    )?
+                } else {
+                    None
+                };
+
+            let Some(column) = column else {
+                continue;
+            };
+
+            let record_batch = RecordBatch::try_new(filter_ctx.schema().clone(), vec![column])
+                .context(NewRecordBatchSnafu)?;
+            let evaluated = filter
+                .evaluate(&record_batch)
+                .context(EvalPartitionFilterSnafu)?;
+            let array = evaluated
+                .into_array(record_batch.num_rows())
+                .context(EvalPartitionFilterSnafu)?;
+            let boolean_array =
+                array
+                    .as_any()
+                    .downcast_ref::<BooleanArray>()
+                    .context(UnexpectedSnafu {
+                        reason: "Failed to downcast physical filter result to BooleanArray",
+                    })?;
+            mask = mask.bitand(boolean_array.values());
         }
 
         Ok(Some(mask))
@@ -667,6 +726,36 @@ impl RangeBase {
         }
 
         RecordBatch::try_new(arrow_schema.clone(), columns).context(NewRecordBatchSnafu)
+    }
+}
+
+fn should_skip_simple_filter_after_prefilter(
+    skip_prefiltered_filters: bool,
+    skip_fields: bool,
+    filter_ctx: &SimpleFilterContext,
+) -> bool {
+    if !skip_prefiltered_filters {
+        return false;
+    }
+
+    match filter_ctx.semantic_type() {
+        SemanticType::Field => !skip_fields,
+        SemanticType::Tag | SemanticType::Timestamp => true,
+    }
+}
+
+fn should_skip_physical_filter_after_prefilter(
+    skip_prefiltered_filters: bool,
+    skip_fields: bool,
+    filter_ctx: &PhysicalFilterContext,
+) -> bool {
+    if !skip_prefiltered_filters {
+        return false;
+    }
+
+    match filter_ctx.semantic_type() {
+        SemanticType::Field => !skip_fields,
+        SemanticType::Tag | SemanticType::Timestamp => true,
     }
 }
 

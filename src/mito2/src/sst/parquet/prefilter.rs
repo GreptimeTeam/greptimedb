@@ -371,7 +371,6 @@ impl PrefilterContextBuilder {
                 .all(SimpleFilterContext::usable_primary_key_filter)
             && prefilter_count == 1
         {
-            let num_parquet_columns = parquet_schema.num_columns();
             let pk_column_index = 0;
             return Some(Self {
                 projection,

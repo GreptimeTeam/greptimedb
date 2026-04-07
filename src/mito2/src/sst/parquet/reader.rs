@@ -1706,7 +1706,7 @@ impl RowGroupReaderBuilder {
         &self.cache_strategy
     }
 
-    pub(crate) fn has_flat_primary_key_prefilter(&self) -> bool {
+    pub(crate) fn has_predicate_prefilter(&self) -> bool {
         self.prefilter_builder.is_some()
     }
 
