@@ -1016,6 +1016,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_repartition_rollback_from_collect_only_removes_failed_allocated_routes() {
+        let env = TestingEnv::new();
+        let table_id = 1024;
+        let node_manager = Arc::new(MockDatanodeManager::new(UnexpectedErrorDatanodeHandler));
+        let ddl_ctx = env.ddl_context(node_manager);
+        let original_region_routes = vec![
+            test_region_route(
+                RegionId::new(table_id, 1),
+                &range_expr("x", 0, 100).as_json_str().unwrap(),
+            ),
+            test_region_route(
+                RegionId::new(table_id, 2),
+                &range_expr("x", 100, 200).as_json_str().unwrap(),
+            ),
+            test_region_route(RegionId::new(table_id, 3), ""),
+            test_region_route(RegionId::new(table_id, 4), ""),
+        ];
+        env.create_physical_table_metadata_with_wal_options(
+            table_id,
+            original_region_routes,
+            test_region_wal_options(&[1, 2, 3, 4]),
+        )
+        .await;
+
+        let mut persistent_ctx = PersistentContext::new(
+            TableName::new("test_catalog", "test_schema", "test_table"),
+            table_id,
+            None,
+        );
+        let failed_plan = test_plan(table_id);
+        let succeeded_plan = RepartitionPlanEntry {
+            group_id: Uuid::new_v4(),
+            source_regions: vec![RegionDescriptor {
+                region_id: RegionId::new(table_id, 2),
+                partition_expr: range_expr("x", 100, 200),
+            }],
+            target_regions: vec![
+                RegionDescriptor {
+                    region_id: RegionId::new(table_id, 2),
+                    partition_expr: range_expr("x", 100, 150),
+                },
+                RegionDescriptor {
+                    region_id: RegionId::new(table_id, 4),
+                    partition_expr: range_expr("x", 150, 200),
+                },
+            ],
+            allocated_region_ids: vec![RegionId::new(table_id, 4)],
+            pending_deallocate_region_ids: vec![],
+            transition_map: vec![vec![0]],
+        };
+        persistent_ctx.plans = vec![failed_plan, succeeded_plan];
+        persistent_ctx.failed_procedures = vec![ProcedureMeta {
+            plan_index: 0,
+            group_id: persistent_ctx.plans[0].group_id,
+            procedure_id: ProcedureId::random(),
+        }];
+
+        let context = Context::new(
+            &ddl_ctx,
+            env.mailbox_ctx.mailbox().clone(),
+            env.server_addr.clone(),
+            persistent_ctx,
+        );
+        let mut procedure = RepartitionProcedure {
+            state: Box::new(Collect::new(vec![])),
+            context,
+        };
+
+        procedure
+            .rollback(&TestingEnv::procedure_context())
+            .await
+            .unwrap();
+
+        let region_routes = current_parent_region_routes(&procedure.context).await;
+        assert_eq!(region_routes.len(), 3);
+        assert_eq!(region_routes[0].region.id, RegionId::new(table_id, 1));
+        assert_eq!(region_routes[1].region.id, RegionId::new(table_id, 2));
+        assert_eq!(region_routes[2].region.id, RegionId::new(table_id, 4));
+    }
+
+    #[tokio::test]
     async fn test_repartition_rollback_is_idempotent() {
         let env = TestingEnv::new();
         let table_id = 1024;
