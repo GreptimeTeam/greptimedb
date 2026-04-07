@@ -50,8 +50,8 @@ use crate::sst::parquet::flat_format::{
     DecodedPrimaryKeys, FlatReadFormat, decode_primary_keys, time_index_column_index,
 };
 use crate::sst::parquet::reader::{
-    FlatRowGroupReader, MaybeFilter, RowGroupBuildContext, RowGroupReaderBuilder,
-    SimpleFilterContext,
+    FlatRowGroupReader, MaybeFilter, PhysicalFilterContext, RowGroupBuildContext,
+    RowGroupReaderBuilder, SimpleFilterContext,
 };
 use crate::sst::parquet::row_group::ParquetFetchMetrics;
 use crate::sst::parquet::stats::RowGroupPruningStats;
@@ -327,6 +327,7 @@ impl FileRangeContext {
     ) -> RowGroupBuildContext<'a> {
         RowGroupBuildContext {
             filters: &self.base.filters,
+            physical_filters: &self.base.physical_filters,
             row_group_idx,
             row_selection,
             fetch_metrics,
@@ -367,6 +368,8 @@ pub(crate) struct PartitionFilterContext {
 pub(crate) struct RangeBase {
     /// Filters pushed down.
     pub(crate) filters: Vec<SimpleFilterContext>,
+    /// Physical filters pushed down.
+    pub(crate) physical_filters: Vec<PhysicalFilterContext>,
     /// Dynamic filter physical exprs.
     pub(crate) dyn_filters: Vec<Arc<DynamicFilterPhysicalExpr>>,
     /// Helper to read the SST.
@@ -687,6 +690,7 @@ mod tests {
 
         RangeBase {
             filters,
+            physical_filters: vec![],
             dyn_filters: vec![],
             read_format,
             expected_metadata: None,

@@ -24,10 +24,12 @@ use std::time::{Duration, Instant};
 
 use api::v1::SemanticType;
 use common_recordbatch::filter::SimpleFilterEvaluator;
-use common_telemetry::{tracing, warn};
+use common_telemetry::{error, tracing, warn};
+use datafusion::physical_plan::PhysicalExpr;
 use datafusion_expr::Expr;
-use datatypes::arrow::array::ArrayRef;
-use datatypes::arrow::datatypes::{Field, SchemaRef};
+use datafusion_expr::utils::expr_to_columns;
+use datatypes::arrow::array::{Array as _, ArrayRef, BooleanArray};
+use datatypes::arrow::datatypes::{Field, Schema as ArrowSchema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::DataType;
@@ -450,20 +452,30 @@ impl ParquetReaderBuilder {
             ArrowReaderMetadata::try_new(parquet_meta.clone(), arrow_reader_options)
                 .context(ReadDataPartSnafu)?;
 
-        let filters = if let Some(predicate) = &self.predicate {
-            predicate
-                .exprs()
-                .iter()
-                .filter_map(|expr| {
-                    SimpleFilterContext::new_opt(
-                        &region_meta,
-                        self.expected_metadata.as_deref(),
-                        expr,
-                    )
-                })
-                .collect::<Vec<_>>()
+        let (filters, physical_filters) = if let Some(predicate) = &self.predicate {
+            let mut simple_filters = Vec::new();
+            let mut physical_filters = Vec::new();
+            for expr in predicate.exprs() {
+                if let Some(filter) = SimpleFilterContext::new_opt(
+                    &region_meta,
+                    self.expected_metadata.as_deref(),
+                    expr,
+                ) {
+                    simple_filters.push(filter);
+                    continue;
+                }
+                if let Some(filter) = PhysicalFilterContext::new_opt(
+                    &region_meta,
+                    self.expected_metadata.as_deref(),
+                    &read_format,
+                    expr,
+                ) {
+                    physical_filters.push(filter);
+                }
+            }
+            (simple_filters, physical_filters)
         } else {
-            vec![]
+            (vec![], vec![])
         };
 
         let dyn_filters = if let Some(predicate) = &self.predicate {
@@ -510,6 +522,7 @@ impl ParquetReaderBuilder {
             reader_builder,
             RangeBase {
                 filters,
+                physical_filters,
                 dyn_filters,
                 read_format,
                 expected_metadata: self.expected_metadata.clone(),
@@ -1660,6 +1673,9 @@ pub(crate) struct RowGroupBuildContext<'a> {
     /// Simple filters pushed down. Used by prefilter on other columns.
     #[allow(dead_code)]
     pub(crate) filters: &'a [SimpleFilterContext],
+    /// Physical filters pushed down. Used by prefilter on other columns.
+    #[allow(dead_code)]
+    pub(crate) physical_filters: &'a [PhysicalFilterContext],
     /// Index of the row group to read.
     pub(crate) row_group_idx: usize,
     /// Row selection for the row group. `None` means all rows.
@@ -1897,6 +1913,157 @@ impl SimpleFilterContext {
             MaybeFilter::Filter(filter) => Some(filter.clone()),
             MaybeFilter::Matched | MaybeFilter::Pruned => None,
         }
+    }
+}
+
+#[allow(dead_code)]
+/// The physical filter to evaluate or the prune result of the default value.
+pub(crate) enum MaybePhysicalFilter {
+    /// The filter to evaluate.
+    Filter(Arc<dyn PhysicalExpr>),
+    /// The filter matches the default value.
+    Matched,
+    /// The filter is pruned.
+    Pruned,
+}
+
+#[allow(dead_code)]
+/// Context to evaluate a physical expression for a parquet file.
+pub(crate) struct PhysicalFilterContext {
+    /// Filter to evaluate.
+    filter: MaybePhysicalFilter,
+    /// Id of the column to evaluate.
+    column_id: ColumnId,
+    /// Name of the column to evaluate.
+    column_name: String,
+    /// Semantic type of the column.
+    semantic_type: SemanticType,
+    /// Schema containing only the referenced column.
+    schema: SchemaRef,
+}
+
+#[allow(dead_code)]
+impl PhysicalFilterContext {
+    /// Creates a context for the `expr`.
+    ///
+    /// Returns None if the expression doesn't reference exactly one column or the
+    /// column to filter doesn't exist in the SST metadata or the expected metadata.
+    pub(crate) fn new_opt(
+        sst_meta: &RegionMetadataRef,
+        expected_meta: Option<&RegionMetadata>,
+        read_format: &ReadFormat,
+        expr: &Expr,
+    ) -> Option<Self> {
+        let column_name = Self::single_column_name(expr)?;
+        let (column_metadata, column_in_sst) = match expected_meta {
+            Some(meta) => {
+                let column = meta.column_by_name(&column_name)?;
+                let column_in_sst = sst_meta.column_by_id(column.column_id).is_some();
+                (column, column_in_sst)
+            }
+            None => {
+                let column = sst_meta.column_by_name(&column_name)?;
+                (column, true)
+            }
+        };
+
+        let field =
+            if let Some((_, field)) = read_format.arrow_schema().column_with_name(&column_name) {
+                field.clone()
+            } else {
+                let field = Field::try_from(&column_metadata.column_schema).ok()?;
+                if column_metadata.semantic_type == SemanticType::Tag
+                    && column_metadata.column_schema.data_type.is_string()
+                {
+                    tag_maybe_to_dictionary_field(
+                        &column_metadata.column_schema.data_type,
+                        &Arc::new(field),
+                    )
+                    .as_ref()
+                    .clone()
+                } else {
+                    field
+                }
+            };
+        let schema = Arc::new(ArrowSchema::new(vec![field]));
+        let physical_expr = Predicate::new(vec![expr.clone()])
+            .to_physical_exprs(&schema)
+            .inspect_err(|e| {
+                error!("Unable to build physical filter for {expr}, schema: {schema:?}, err: {e}");
+            })
+            .ok()?
+            .into_iter()
+            .next()?;
+
+        let filter = if column_in_sst {
+            MaybePhysicalFilter::Filter(physical_expr)
+        } else {
+            let default_value = column_metadata
+                .column_schema
+                .create_default()
+                .ok()
+                .flatten()?;
+            let scalar_value = default_value
+                .try_to_scalar_value(&column_metadata.column_schema.data_type)
+                .ok()?;
+            let array = scalar_value.to_array_of_size(1).ok()?;
+            let record_batch = RecordBatch::try_new(schema.clone(), vec![array]).ok()?;
+            let evaluated = physical_expr.evaluate(&record_batch).ok()?;
+            let array = evaluated.into_array(record_batch.num_rows()).ok()?;
+            let boolean_array = array.as_any().downcast_ref::<BooleanArray>()?;
+            if boolean_array.is_null(0) {
+                return None;
+            }
+            if boolean_array.value(0) {
+                MaybePhysicalFilter::Matched
+            } else {
+                MaybePhysicalFilter::Pruned
+            }
+        };
+
+        Some(Self {
+            filter,
+            column_id: column_metadata.column_id,
+            column_name,
+            semantic_type: column_metadata.semantic_type,
+            schema,
+        })
+    }
+
+    fn single_column_name(expr: &Expr) -> Option<String> {
+        let mut columns = HashSet::new();
+        if expr_to_columns(expr, &mut columns).is_err() {
+            return None;
+        }
+        if columns.len() != 1 {
+            return None;
+        }
+        columns.iter().next().map(|column| column.name.clone())
+    }
+
+    /// Returns the filter to evaluate.
+    pub(crate) fn filter(&self) -> &MaybePhysicalFilter {
+        &self.filter
+    }
+
+    /// Returns the column id.
+    pub(crate) fn column_id(&self) -> ColumnId {
+        self.column_id
+    }
+
+    /// Returns the column name.
+    pub(crate) fn column_name(&self) -> &str {
+        &self.column_name
+    }
+
+    /// Returns the semantic type of the column.
+    pub(crate) fn semantic_type(&self) -> SemanticType {
+        self.semantic_type
+    }
+
+    /// Returns the schema containing only the referenced column.
+    pub(crate) fn schema(&self) -> &SchemaRef {
+        &self.schema
     }
 }
 
