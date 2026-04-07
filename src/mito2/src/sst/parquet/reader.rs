@@ -1660,9 +1660,6 @@ pub(crate) struct RowGroupBuildContext<'a> {
     /// Simple filters pushed down. Used by prefilter on other columns.
     #[allow(dead_code)]
     pub(crate) filters: &'a [SimpleFilterContext],
-    /// Whether to skip field filters. Used by prefilter on other columns.
-    #[allow(dead_code)]
-    pub(crate) skip_fields: bool,
     /// Index of the row group to read.
     pub(crate) row_group_idx: usize,
     /// Row selection for the row group. `None` means all rows.
@@ -1956,7 +1953,6 @@ impl ParquetReader {
                     row_group_idx,
                     Some(row_selection),
                     Some(&self.fetch_metrics),
-                    skip_fields,
                 ))
                 .await?;
             self.reader = Some(FlatPruneReader::new_with_row_group_reader(
@@ -1987,7 +1983,6 @@ impl ParquetReader {
                     row_group_idx,
                     Some(row_selection),
                     Some(&fetch_metrics),
-                    skip_fields,
                 ))
                 .await?;
             Some(FlatPruneReader::new_with_row_group_reader(

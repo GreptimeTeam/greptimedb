@@ -172,7 +172,6 @@ impl FileRange {
                 self.row_group_idx,
                 self.row_selection.clone(),
                 fetch_metrics,
-                skip_fields,
             ))
             .await?;
 
@@ -325,11 +324,9 @@ impl FileRangeContext {
         row_group_idx: usize,
         row_selection: Option<RowSelection>,
         fetch_metrics: Option<&'a ParquetFetchMetrics>,
-        skip_fields: bool,
     ) -> RowGroupBuildContext<'a> {
         RowGroupBuildContext {
             filters: &self.base.filters,
-            skip_fields,
             row_group_idx,
             row_selection,
             fetch_metrics,

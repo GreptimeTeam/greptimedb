@@ -216,18 +216,26 @@ impl PrimaryKeyFilter for CachedPrimaryKeyFilter {
     }
 }
 
+enum PrefilterVariant {
+    /// Primary-key prefiltering for primary-key-format data.
+    PrimaryKey {
+        /// PK filter instance.
+        pk_filter: Box<dyn PrimaryKeyFilter>,
+        /// Index of the PK column within the prefilter projection batch.
+        /// This is 0 when we project only the PK column.
+        pk_column_index: usize,
+    },
+}
+
 /// Context for prefiltering a row group.
 ///
 /// Currently supports primary key (PK) filtering only.
 /// Will be extended with simple column filters and physical filters in the future.
 pub(crate) struct PrefilterContext {
-    /// PK filter instance.
-    pk_filter: Box<dyn PrimaryKeyFilter>,
-    /// Projection mask for reading only the PK column.
-    pk_projection: ProjectionMask,
-    /// Index of the PK column within the prefilter projection batch.
-    /// This is 0 when we project only the PK column.
-    pk_column_index: usize,
+    /// Projection mask for reading prefilter columns.
+    projection: ProjectionMask,
+    /// Filter execution strategy for this prefilter context.
+    variant: PrefilterVariant,
 }
 
 /// Pre-built state for constructing [PrefilterContext] per row group.
@@ -236,7 +244,7 @@ pub(crate) struct PrefilterContext {
 /// are computed once. A fresh [PrefilterContext] with its own mutable PK filter
 /// is created via [PrefilterContextBuilder::build()] for each row group.
 pub(crate) struct PrefilterContextBuilder {
-    pk_projection: ProjectionMask,
+    projection: ProjectionMask,
     pk_column_index: usize,
     codec: Arc<dyn PrimaryKeyCodec>,
     metadata: RegionMetadataRef,
@@ -274,13 +282,13 @@ impl PrefilterContextBuilder {
         // Compute PK-only projection mask.
         let num_parquet_columns = parquet_schema.num_columns();
         let pk_index = primary_key_column_index(num_parquet_columns);
-        let pk_projection = ProjectionMask::roots(parquet_schema, [pk_index]);
+        let projection = ProjectionMask::roots(parquet_schema, [pk_index]);
 
         // The PK column is the only column in the projection, so its index is 0.
         let pk_column_index = 0;
 
         Some(Self {
-            pk_projection,
+            projection,
             pk_column_index,
             codec: Arc::clone(codec),
             metadata: metadata.clone(),
@@ -297,9 +305,11 @@ impl PrefilterContextBuilder {
                 .primary_key_filter(&self.metadata, Arc::clone(&self.pk_filters), false);
         let pk_filter = Box::new(CachedPrimaryKeyFilter::new(pk_filter));
         PrefilterContext {
-            pk_filter,
-            pk_projection: self.pk_projection.clone(),
-            pk_column_index: self.pk_column_index,
+            projection: self.projection.clone(),
+            variant: PrefilterVariant::PrimaryKey {
+                pk_filter,
+                pk_column_index: self.pk_column_index,
+            },
         }
     }
 }
@@ -321,12 +331,36 @@ pub(crate) async fn execute_prefilter(
     reader_builder: &RowGroupReaderBuilder,
     build_ctx: &RowGroupBuildContext<'_>,
 ) -> Result<PrefilterResult> {
+    match &mut prefilter_ctx.variant {
+        PrefilterVariant::PrimaryKey {
+            pk_filter,
+            pk_column_index,
+        } => {
+            execute_primary_key_prefilter(
+                prefilter_ctx.projection.clone(),
+                *pk_column_index,
+                pk_filter.as_mut(),
+                reader_builder,
+                build_ctx,
+            )
+            .await
+        }
+    }
+}
+
+async fn execute_primary_key_prefilter(
+    projection: ProjectionMask,
+    pk_column_index: usize,
+    pk_filter: &mut dyn PrimaryKeyFilter,
+    reader_builder: &RowGroupReaderBuilder,
+    build_ctx: &RowGroupBuildContext<'_>,
+) -> Result<PrefilterResult> {
     // Reads PK column only.
     let mut pk_stream = reader_builder
         .build_with_projection(
             build_ctx.row_group_idx,
             build_ctx.row_selection.clone(),
-            prefilter_ctx.pk_projection.clone(),
+            projection,
             build_ctx.fetch_metrics,
         )
         .await?;
@@ -346,11 +380,7 @@ pub(crate) async fn execute_prefilter(
         }
         rows_before_filter += batch_num_rows;
 
-        let ranges = matching_row_ranges_by_primary_key(
-            &batch,
-            prefilter_ctx.pk_column_index,
-            prefilter_ctx.pk_filter.as_mut(),
-        )?;
+        let ranges = matching_row_ranges_by_primary_key(&batch, pk_column_index, pk_filter)?;
         matched_row_ranges.extend(
             ranges
                 .into_iter()
