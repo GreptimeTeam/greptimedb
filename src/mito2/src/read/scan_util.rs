@@ -1759,6 +1759,7 @@ mod tests {
         let meta = FileMeta {
             region_id: RegionId::new(123, 456),
             file_id: Default::default(),
+            level: 1,
             time_range: (
                 Timestamp::new_millisecond(0),
                 Timestamp::new_millisecond(1000),
