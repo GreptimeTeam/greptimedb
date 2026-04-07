@@ -16,14 +16,14 @@ use std::sync::Arc;
 
 use arrow_schema::{DataType, TimeUnit as ArrowTimeUnit};
 use datafusion::config::ConfigOptions;
-use datafusion_common::tree_node::{Transformed, TreeNode};
+use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, TreeNodeRewriter};
 use datafusion_common::{DFSchemaRef, Result, ScalarValue};
 use datafusion_expr::expr::{Cast, InList, Like, TryCast};
-use datafusion_expr::{
-    Between, BinaryExpr, Expr, ExprSchemable, Filter, LogicalPlan, Operator, TableScan, lit,
-};
+use datafusion_expr::{Between, BinaryExpr, Expr, ExprSchemable, LogicalPlan, Operator, lit};
 use datafusion_expr_common::casts::try_cast_literal_to_type;
 use datafusion_optimizer::analyzer::AnalyzerRule;
+
+use crate::plan::ExtractExpr;
 
 /// ConstNormalizationRule rewrites castable constants against their
 /// non-constant comparison operand ahead of filter pushdown.
@@ -33,8 +33,14 @@ pub struct ConstNormalizationRule;
 impl AnalyzerRule for ConstNormalizationRule {
     fn analyze(&self, plan: LogicalPlan, _config: &ConfigOptions) -> Result<LogicalPlan> {
         plan.transform(|plan| match plan {
-            LogicalPlan::Filter(filter) => normalize_filter_plan(filter),
-            LogicalPlan::TableScan(scan) => normalize_scan_plan(scan),
+            LogicalPlan::Filter(filter) => {
+                let schema = filter.input.schema().clone();
+                rewrite_plan_exprs(LogicalPlan::Filter(filter), schema)
+            }
+            LogicalPlan::TableScan(scan) => {
+                let schema = scan.projected_schema.clone();
+                rewrite_plan_exprs(LogicalPlan::TableScan(scan), schema)
+            }
             _ => Ok(Transformed::no(plan)),
         })
         .map(|x| x.data)
@@ -45,280 +51,221 @@ impl AnalyzerRule for ConstNormalizationRule {
     }
 }
 
-fn normalize_filter_plan(filter: Filter) -> Result<Transformed<LogicalPlan>> {
-    let predicate = normalize_filter_expr(filter.predicate.clone(), filter.input.schema().clone())?;
-    if predicate != filter.predicate {
-        Ok(Transformed::yes(LogicalPlan::Filter(Filter::try_new(
-            predicate,
-            filter.input,
-        )?)))
-    } else {
-        Ok(Transformed::no(LogicalPlan::Filter(filter)))
-    }
-}
-
-fn normalize_scan_plan(scan: TableScan) -> Result<Transformed<LogicalPlan>> {
-    if scan.filters.is_empty() {
-        return Ok(Transformed::no(LogicalPlan::TableScan(scan)));
-    }
-
-    let filters = scan
-        .filters
+fn rewrite_plan_exprs(plan: LogicalPlan, schema: DFSchemaRef) -> Result<Transformed<LogicalPlan>> {
+    let mut rewriter = ConstNormalizationRewriter {
+        schema,
+        transformed: false,
+    };
+    let exprs = plan
+        .expressions_consider_join()
         .iter()
-        .map(|expr| normalize_filter_expr(expr.clone(), scan.projected_schema.clone()))
+        .map(|expr| {
+            expr.clone()
+                .rewrite(&mut rewriter)
+                .map(|rewritten| rewritten.data)
+        })
         .collect::<Result<Vec<_>>>()?;
+    if !rewriter.transformed {
+        return Ok(Transformed::no(plan));
+    }
 
-    if filters != scan.filters {
-        Ok(Transformed::yes(LogicalPlan::TableScan(TableScan {
-            table_name: scan.table_name,
-            source: scan.source,
-            projection: scan.projection,
-            projected_schema: scan.projected_schema,
-            filters,
-            fetch: scan.fetch,
-        })))
-    } else {
-        Ok(Transformed::no(LogicalPlan::TableScan(scan)))
+    let inputs = plan.inputs().into_iter().cloned().collect::<Vec<_>>();
+    plan.with_new_exprs(exprs, inputs).map(Transformed::yes)
+}
+
+struct ConstNormalizationRewriter {
+    schema: DFSchemaRef,
+    transformed: bool,
+}
+
+impl TreeNodeRewriter for ConstNormalizationRewriter {
+    type Node = Expr;
+
+    fn f_down(&mut self, expr: Expr) -> Result<Transformed<Expr>> {
+        let recursion = if matches!(
+            expr,
+            Expr::Exists(_) | Expr::InSubquery(_) | Expr::ScalarSubquery(_)
+        ) {
+            TreeNodeRecursion::Jump
+        } else {
+            TreeNodeRecursion::Continue
+        };
+
+        Ok(Transformed::new(expr, false, recursion))
+    }
+
+    fn f_up(&mut self, expr: Expr) -> Result<Transformed<Expr>> {
+        let rewritten = rewrite_expr_node(expr, &self.schema)?;
+        self.transformed |= rewritten.transformed;
+        Ok(rewritten)
     }
 }
 
-fn normalize_filter_expr(expr: Expr, schema: DFSchemaRef) -> Result<Expr> {
-    expr.transform_up(|expr| normalize_expr_node(expr, &schema))
-        .map(|x| x.data)
-}
-
-fn normalize_expr_node(expr: Expr, schema: &DFSchemaRef) -> Result<Transformed<Expr>> {
+fn rewrite_expr_node(expr: Expr, schema: &DFSchemaRef) -> Result<Transformed<Expr>> {
     match expr {
-        Expr::BinaryExpr(binary) => normalize_binary_expr(binary, schema),
-        Expr::Between(between) => normalize_between_expr(between, schema),
-        Expr::InList(in_list) => normalize_in_list_expr(in_list, schema),
-        Expr::Like(like) => normalize_like_expr(like, false, schema),
-        Expr::SimilarTo(like) => normalize_like_expr(like, true, schema),
+        Expr::BinaryExpr(binary) => match rewrite_binary_expr(binary.clone(), schema)? {
+            Some(expr) => Ok(Transformed::yes(expr)),
+            None => Ok(Transformed::no(Expr::BinaryExpr(binary))),
+        },
+        Expr::Between(between) => match rewrite_between_expr(between.clone(), schema)? {
+            Some(expr) => Ok(Transformed::yes(expr)),
+            None => Ok(Transformed::no(Expr::Between(between))),
+        },
+        Expr::InList(in_list) => match rewrite_in_list_expr(in_list.clone(), schema)? {
+            Some(expr) => Ok(Transformed::yes(expr)),
+            None => Ok(Transformed::no(Expr::InList(in_list))),
+        },
+        Expr::Like(like) => rewrite_like_expr(like, PatternMatchKind::Like, schema),
+        Expr::SimilarTo(like) => rewrite_like_expr(like, PatternMatchKind::SimilarTo, schema),
         expr => Ok(Transformed::no(expr)),
     }
 }
 
-fn normalize_binary_expr(
-    BinaryExpr { left, op, right }: BinaryExpr,
-    schema: &DFSchemaRef,
-) -> Result<Transformed<Expr>> {
-    let left = *left;
-    let right = *right;
+fn rewrite_between_expr(between: Between, schema: &DFSchemaRef) -> Result<Option<Expr>> {
+    let Between {
+        expr,
+        negated,
+        low,
+        high,
+    } = between;
+    let expr = *expr;
+    let low_expr = *low;
+    let high_expr = *high;
+    let Some((target, constants)) =
+        extract_rewrite_operands(&expr, &[low_expr.clone(), high_expr.clone()], schema)?
+    else {
+        return Ok(None);
+    };
 
-    if op.supports_propagation() {
-        if let Some(expr) = normalize_binary_side(left.clone(), op, right.clone(), schema)? {
-            return Ok(Transformed::yes(expr));
-        }
-
-        if let Some(swapped_op) = op.swap()
-            && let Some(expr) =
-                normalize_binary_side(right.clone(), swapped_op, left.clone(), schema)?
-        {
-            return Ok(Transformed::yes(expr));
-        }
+    if let Some(mut constants) = target.normalize_constants(&constants) {
+        let high = constants
+            .pop()
+            .expect("between normalization expects high constant");
+        let low = constants
+            .pop()
+            .expect("between normalization expects low constant");
+        return Ok(Some(Expr::Between(Between {
+            expr: Box::new(target.expr.clone()),
+            negated,
+            low: Box::new(lit(low)),
+            high: Box::new(lit(high)),
+        })));
     }
 
-    Ok(Transformed::no(Expr::BinaryExpr(BinaryExpr {
-        left: Box::new(left),
-        op,
-        right: Box::new(right),
-    })))
+    Ok((!negated)
+        .then(|| target.normalize_timestamp_between(&constants[0], &constants[1]))
+        .flatten())
 }
 
-fn normalize_binary_side(
+fn rewrite_in_list_expr(in_list: InList, schema: &DFSchemaRef) -> Result<Option<Expr>> {
+    let InList {
+        expr,
+        list,
+        negated,
+    } = in_list;
+    let expr = *expr;
+    let Some((target, constants)) = extract_rewrite_operands(&expr, &list, schema)? else {
+        return Ok(None);
+    };
+
+    Ok(target.normalize_constants(&constants).map(|constants| {
+        target
+            .expr
+            .clone()
+            .in_list(constants.into_iter().map(lit).collect(), negated)
+    }))
+}
+
+fn rewrite_like_expr(
+    like: Like,
+    kind: PatternMatchKind,
+    schema: &DFSchemaRef,
+) -> Result<Transformed<Expr>> {
+    let original = match kind {
+        PatternMatchKind::Like => Expr::Like(like.clone()),
+        PatternMatchKind::SimilarTo => Expr::SimilarTo(like.clone()),
+    };
+    let Like {
+        negated,
+        expr,
+        pattern,
+        escape_char,
+        case_insensitive,
+    } = like;
+    let expr = *expr;
+    let pattern = *pattern;
+    let Some((target, constants)) =
+        extract_rewrite_operands(&expr, std::slice::from_ref(&pattern), schema)?
+    else {
+        return Ok(Transformed::no(original));
+    };
+    let Some(mut constants) = target.normalize_constants(&constants) else {
+        return Ok(Transformed::no(original));
+    };
+
+    let pattern = lit(constants
+        .pop()
+        .expect("pattern normalization expects one constant"));
+    let like = Like::new(
+        negated,
+        Box::new(target.expr.clone()),
+        Box::new(pattern),
+        escape_char,
+        case_insensitive,
+    );
+    let rewritten = match kind {
+        PatternMatchKind::Like => Expr::Like(like),
+        PatternMatchKind::SimilarTo => Expr::SimilarTo(like),
+    };
+    Ok(Transformed::yes(rewritten))
+}
+
+fn rewrite_binary_expr(binary: BinaryExpr, schema: &DFSchemaRef) -> Result<Option<Expr>> {
+    if !binary.op.supports_propagation() {
+        return Ok(None);
+    }
+
+    let BinaryExpr { left, op, right } = binary;
+    let left = *left;
+    let right = *right;
+    if let Some(expr) = rewrite_binary_side(left.clone(), op, right.clone(), schema)? {
+        return Ok(Some(expr));
+    }
+
+    let Some(swapped_op) = op.swap() else {
+        return Ok(None);
+    };
+
+    rewrite_binary_side(right, swapped_op, left, schema)
+}
+
+fn rewrite_binary_side(
     target_expr: Expr,
     op: Operator,
     constant_expr: Expr,
     schema: &DFSchemaRef,
 ) -> Result<Option<Expr>> {
     let Some((target, constants)) =
-        extract_target_and_constants(&target_expr, std::slice::from_ref(&constant_expr), schema)?
+        extract_rewrite_operands(&target_expr, std::slice::from_ref(&constant_expr), schema)?
     else {
         return Ok(None);
     };
 
-    if let Some(expr) = normalize_constant_operands(&target, &constants, |target, mut constants| {
-        Expr::BinaryExpr(BinaryExpr {
-            left: Box::new(target),
+    if let Some(mut constants) = target.normalize_constants(&constants) {
+        let constant = constants
+            .pop()
+            .expect("binary normalization expects one constant");
+        return Ok(Some(Expr::BinaryExpr(BinaryExpr {
+            left: Box::new(target.expr.clone()),
             op,
-            right: Box::new(
-                constants
-                    .pop()
-                    .expect("binary normalization expects one constant"),
-            ),
-        })
-    }) {
-        return Ok(Some(expr));
-    }
-
-    Ok(normalize_timestamp_downcast_binary(
-        &target,
-        op,
-        &constants[0],
-    ))
-}
-
-fn normalize_between_expr(
-    Between {
-        expr,
-        negated,
-        low,
-        high,
-    }: Between,
-    schema: &DFSchemaRef,
-) -> Result<Transformed<Expr>> {
-    let expr = *expr;
-    let low = *low;
-    let high = *high;
-
-    if let Some((target, constants)) =
-        extract_target_and_constants(&expr, &[low.clone(), high.clone()], schema)?
-    {
-        if let Some(expr) =
-            normalize_constant_operands(&target, &constants, |target, mut constants| {
-                let high = constants
-                    .pop()
-                    .expect("between normalization expects high constant");
-                let low = constants
-                    .pop()
-                    .expect("between normalization expects low constant");
-                Expr::Between(Between {
-                    expr: Box::new(target),
-                    negated,
-                    low: Box::new(low),
-                    high: Box::new(high),
-                })
-            })
-        {
-            return Ok(Transformed::yes(expr));
-        }
-
-        if !negated
-            && let Some(expr) =
-                normalize_timestamp_downcast_between(&target, &constants[0], &constants[1])
-        {
-            return Ok(Transformed::yes(expr));
-        }
-    }
-
-    Ok(Transformed::no(Expr::Between(Between {
-        expr: Box::new(expr),
-        negated,
-        low: Box::new(low),
-        high: Box::new(high),
-    })))
-}
-
-fn normalize_in_list_expr(
-    InList {
-        expr,
-        list,
-        negated,
-    }: InList,
-    schema: &DFSchemaRef,
-) -> Result<Transformed<Expr>> {
-    let expr = *expr;
-
-    let Some((target, constants)) = extract_target_and_constants(&expr, &list, schema)? else {
-        return Ok(Transformed::no(Expr::InList(InList {
-            expr: Box::new(expr),
-            list,
-            negated,
+            right: Box::new(lit(constant)),
         })));
-    };
-
-    let Some(expr) = normalize_constant_operands(&target, &constants, |target, constants| {
-        Expr::InList(InList {
-            expr: Box::new(target),
-            list: constants,
-            negated,
-        })
-    }) else {
-        return Ok(Transformed::no(Expr::InList(InList {
-            expr: Box::new(expr),
-            list,
-            negated,
-        })));
-    };
-
-    Ok(Transformed::yes(expr))
-}
-
-fn normalize_like_expr(
-    Like {
-        negated,
-        expr,
-        pattern,
-        escape_char,
-        case_insensitive,
-    }: Like,
-    similar_to: bool,
-    schema: &DFSchemaRef,
-) -> Result<Transformed<Expr>> {
-    let expr = *expr;
-    let pattern = *pattern;
-
-    let Some((target, constants)) =
-        extract_target_and_constants(&expr, std::slice::from_ref(&pattern), schema)?
-    else {
-        return Ok(Transformed::no(rebuild_like_expr(
-            expr,
-            pattern,
-            negated,
-            escape_char,
-            case_insensitive,
-            similar_to,
-        )));
-    };
-
-    let Some(expr) = normalize_constant_operands(&target, &constants, |target, mut constants| {
-        rebuild_like_expr(
-            target,
-            constants
-                .pop()
-                .expect("like normalization expects one constant"),
-            negated,
-            escape_char,
-            case_insensitive,
-            similar_to,
-        )
-    }) else {
-        return Ok(Transformed::no(rebuild_like_expr(
-            expr,
-            pattern,
-            negated,
-            escape_char,
-            case_insensitive,
-            similar_to,
-        )));
-    };
-
-    Ok(Transformed::yes(expr))
-}
-
-fn rebuild_like_expr(
-    expr: Expr,
-    pattern: Expr,
-    negated: bool,
-    escape_char: Option<char>,
-    case_insensitive: bool,
-    similar_to: bool,
-) -> Expr {
-    let like = Like::new(
-        negated,
-        Box::new(expr),
-        Box::new(pattern),
-        escape_char,
-        case_insensitive,
-    );
-    if similar_to {
-        Expr::SimilarTo(like)
-    } else {
-        Expr::Like(like)
     }
+
+    Ok(target.normalize_timestamp_binary(op, &constants[0]))
 }
 
-fn extract_target_and_constants(
+fn extract_rewrite_operands(
     target_expr: &Expr,
     constant_exprs: &[Expr],
     schema: &DFSchemaRef,
@@ -326,64 +273,118 @@ fn extract_target_and_constants(
     let Some(target) = extract_normalization_target(target_expr, schema)? else {
         return Ok(None);
     };
-    let Some(constants) = extract_constant_scalars(constant_exprs)? else {
-        return Ok(None);
-    };
-    Ok(Some((target, constants)))
-}
 
-fn extract_constant_scalars(exprs: &[Expr]) -> Result<Option<Vec<ScalarValue>>> {
-    let mut values = Vec::with_capacity(exprs.len());
-    for expr in exprs {
-        let Some(value) = extract_constant_scalar(expr)? else {
-            return Ok(None);
-        };
-        values.push(value);
-    }
-    Ok(Some(values))
-}
-
-fn normalize_constant_operands<F>(
-    target: &NormalizationTarget,
-    constants: &[ScalarValue],
-    rebuild: F,
-) -> Option<Expr>
-where
-    F: FnOnce(Expr, Vec<Expr>) -> Expr,
-{
-    let normalized = normalize_constants_losslessly(target, constants)?;
-    Some(rebuild(
-        target.normalized_expr.clone(),
-        normalized.into_iter().map(lit).collect(),
-    ))
-}
-
-fn normalize_constants_losslessly(
-    target: &NormalizationTarget,
-    constants: &[ScalarValue],
-) -> Option<Vec<ScalarValue>> {
-    constants
-        .iter()
-        .map(|constant| normalize_lossless_literal(target, constant))
-        .collect()
+    extract_constant_scalars(constant_exprs)
+        .map(|constants| constants.map(|constants| (target, constants)))
 }
 
 #[derive(Clone)]
 struct NormalizationTarget {
-    normalized_expr: Expr,
-    normalized_type: DataType,
-    kind: CastKind,
+    expr: Expr,
+    data_type: DataType,
+    kind: NormalizationKind,
 }
 
 #[derive(Clone)]
-enum CastKind {
-    Direct,
-    RemovableCast,
+enum NormalizationKind {
+    Lossless,
     TimestampDowncast {
         source_unit: ArrowTimeUnit,
         target_unit: ArrowTimeUnit,
         timezone: Option<Arc<str>>,
     },
+}
+
+impl NormalizationTarget {
+    fn normalize_constants(&self, constants: &[ScalarValue]) -> Option<Vec<ScalarValue>> {
+        constants
+            .iter()
+            .map(|constant| self.normalize_constant(constant))
+            .collect()
+    }
+
+    fn normalize_constant(&self, constant: &ScalarValue) -> Option<ScalarValue> {
+        match self.kind {
+            NormalizationKind::TimestampDowncast { .. } => None,
+            NormalizationKind::Lossless => cast_literal_losslessly(constant, &self.data_type),
+        }
+    }
+
+    fn normalize_timestamp_binary(&self, op: Operator, constant: &ScalarValue) -> Option<Expr> {
+        let NormalizationKind::TimestampDowncast {
+            source_unit,
+            target_unit,
+            timezone,
+        } = &self.kind
+        else {
+            return None;
+        };
+
+        let constant = constant
+            .cast_to(&DataType::Timestamp(*target_unit, timezone.clone()))
+            .ok()?;
+        let value = timestamp_scalar_value(&constant)?;
+        let bound = match op {
+            Operator::GtEq => lower_bound_for_ge(value, *source_unit, *target_unit)?,
+            Operator::Gt => lower_bound_for_ge(value.checked_add(1)?, *source_unit, *target_unit)?,
+            Operator::Lt => lower_bound_for_ge(value, *source_unit, *target_unit)?,
+            Operator::LtEq => {
+                lower_bound_for_ge(value.checked_add(1)?, *source_unit, *target_unit)?
+            }
+            _ => return None,
+        };
+
+        let normalized_op = match op {
+            Operator::GtEq | Operator::Gt => Operator::GtEq,
+            Operator::Lt | Operator::LtEq => Operator::Lt,
+            _ => return None,
+        };
+
+        Some(match normalized_op {
+            Operator::GtEq => self.expr.clone().gt_eq(lit(timestamp_scalar(
+                *source_unit,
+                timezone.clone(),
+                bound,
+            ))),
+            Operator::Lt => {
+                self.expr
+                    .clone()
+                    .lt(lit(timestamp_scalar(*source_unit, timezone.clone(), bound)))
+            }
+            _ => unreachable!("timestamp normalization only rewrites to >= or <"),
+        })
+    }
+
+    fn normalize_timestamp_between(&self, low: &ScalarValue, high: &ScalarValue) -> Option<Expr> {
+        let NormalizationKind::TimestampDowncast {
+            source_unit,
+            target_unit,
+            timezone,
+        } = &self.kind
+        else {
+            return None;
+        };
+
+        let target_type = DataType::Timestamp(*target_unit, timezone.clone());
+        let low = low.cast_to(&target_type).ok()?;
+        let high = high.cast_to(&target_type).ok()?;
+        let low = timestamp_scalar_value(&low)?;
+        let high = timestamp_scalar_value(&high)?;
+
+        let lower = lower_bound_for_ge(low, *source_unit, *target_unit)?;
+        let upper = lower_bound_for_ge(high.checked_add(1)?, *source_unit, *target_unit)?;
+
+        Some(
+            self.expr
+                .clone()
+                .gt_eq(lit(timestamp_scalar(*source_unit, timezone.clone(), lower)))
+                .and(self.expr.clone().lt(lit(timestamp_scalar(
+                    *source_unit,
+                    timezone.clone(),
+                    upper,
+                )))),
+        )
+    }
 }
 
 fn extract_normalization_target(
@@ -394,37 +395,32 @@ fn extract_normalization_target(
         return Ok(None);
     }
 
-    if extract_cast_input(expr).is_none() {
-        return Ok(Some(NormalizationTarget {
-            normalized_expr: expr.clone(),
-            normalized_type: expr.get_type(schema)?,
-            kind: CastKind::Direct,
-        }));
-    }
-
     let Some((_, source_expr, target_type)) = extract_cast_input(expr) else {
-        return Ok(None);
+        return Ok(Some(NormalizationTarget {
+            expr: expr.clone(),
+            data_type: expr.get_type(schema)?,
+            kind: NormalizationKind::Lossless,
+        }));
     };
 
-    if extract_constant_scalar(source_expr)?.is_some() {
-        return Ok(None);
-    }
-
-    let normalized_type = source_expr.get_type(schema)?;
-    let Some(kind) = classify_cast_kind(&normalized_type, target_type) else {
+    let data_type = source_expr.get_type(schema)?;
+    let Some(kind) = classify_normalization_kind(&data_type, target_type) else {
         return Ok(None);
     };
 
     Ok(Some(NormalizationTarget {
-        normalized_expr: source_expr.clone(),
-        normalized_type,
+        expr: source_expr.clone(),
+        data_type,
         kind,
     }))
 }
 
-fn classify_cast_kind(source_type: &DataType, target_type: &DataType) -> Option<CastKind> {
+fn classify_normalization_kind(
+    source_type: &DataType,
+    target_type: &DataType,
+) -> Option<NormalizationKind> {
     if is_lossless_cast(source_type, target_type) {
-        return Some(CastKind::RemovableCast);
+        return Some(NormalizationKind::Lossless);
     }
 
     match (source_type, target_type) {
@@ -434,7 +430,7 @@ fn classify_cast_kind(source_type: &DataType, target_type: &DataType) -> Option<
         ) if source_tz == target_tz
             && time_unit_rank(*source_unit) > time_unit_rank(*target_unit) =>
         {
-            Some(CastKind::TimestampDowncast {
+            Some(NormalizationKind::TimestampDowncast {
                 source_unit: *source_unit,
                 target_unit: *target_unit,
                 timezone: source_tz.clone(),
@@ -461,89 +457,22 @@ fn is_lossless_cast(source_type: &DataType, target_type: &DataType) -> bool {
     }
 }
 
-fn normalize_lossless_literal(
-    target: &NormalizationTarget,
-    constant: &ScalarValue,
-) -> Option<ScalarValue> {
-    matches!(target.kind, CastKind::Direct | CastKind::RemovableCast)
-        .then_some(())
-        .and_then(|_| cast_literal_losslessly(constant, &target.normalized_type))
+#[derive(Clone, Copy)]
+enum PatternMatchKind {
+    Like,
+    SimilarTo,
 }
 
-fn normalize_timestamp_downcast_binary(
-    target: &NormalizationTarget,
-    op: Operator,
-    constant: &ScalarValue,
-) -> Option<Expr> {
-    let CastKind::TimestampDowncast {
-        source_unit,
-        target_unit,
-        timezone,
-    } = &target.kind
-    else {
-        return None;
-    };
+fn extract_constant_scalars(exprs: &[Expr]) -> Result<Option<Vec<ScalarValue>>> {
+    let mut values = Vec::with_capacity(exprs.len());
+    for expr in exprs {
+        let Some(value) = extract_constant_scalar(expr)? else {
+            return Ok(None);
+        };
+        values.push(value);
+    }
 
-    let constant = constant
-        .cast_to(&DataType::Timestamp(*target_unit, timezone.clone()))
-        .ok()?;
-    let value = timestamp_scalar_value(&constant)?;
-    let bound = match op {
-        Operator::GtEq => lower_bound_for_ge(value, *source_unit, *target_unit)?,
-        Operator::Gt => lower_bound_for_ge(value.checked_add(1)?, *source_unit, *target_unit)?,
-        Operator::Lt => lower_bound_for_ge(value, *source_unit, *target_unit)?,
-        Operator::LtEq => lower_bound_for_ge(value.checked_add(1)?, *source_unit, *target_unit)?,
-        _ => return None,
-    };
-
-    let normalized_op = match op {
-        Operator::GtEq | Operator::Gt => Operator::GtEq,
-        Operator::Lt | Operator::LtEq => Operator::Lt,
-        _ => return None,
-    };
-
-    Some(Expr::BinaryExpr(BinaryExpr {
-        left: Box::new(target.normalized_expr.clone()),
-        op: normalized_op,
-        right: Box::new(lit(timestamp_scalar(*source_unit, timezone.clone(), bound))),
-    }))
-}
-
-fn normalize_timestamp_downcast_between(
-    target: &NormalizationTarget,
-    low: &ScalarValue,
-    high: &ScalarValue,
-) -> Option<Expr> {
-    let CastKind::TimestampDowncast {
-        source_unit,
-        target_unit,
-        timezone,
-    } = &target.kind
-    else {
-        return None;
-    };
-
-    let target_type = DataType::Timestamp(*target_unit, timezone.clone());
-    let low = low.cast_to(&target_type).ok()?;
-    let high = high.cast_to(&target_type).ok()?;
-    let low = timestamp_scalar_value(&low)?;
-    let high = timestamp_scalar_value(&high)?;
-
-    let lower = lower_bound_for_ge(low, *source_unit, *target_unit)?;
-    let upper = lower_bound_for_ge(high.checked_add(1)?, *source_unit, *target_unit)?;
-
-    Some(
-        Expr::BinaryExpr(BinaryExpr {
-            left: Box::new(target.normalized_expr.clone()),
-            op: Operator::GtEq,
-            right: Box::new(lit(timestamp_scalar(*source_unit, timezone.clone(), lower))),
-        })
-        .and(Expr::BinaryExpr(BinaryExpr {
-            left: Box::new(target.normalized_expr.clone()),
-            op: Operator::Lt,
-            right: Box::new(lit(timestamp_scalar(*source_unit, timezone.clone(), upper))),
-        })),
-    )
+    Ok(Some(values))
 }
 
 fn extract_constant_scalar(expr: &Expr) -> Result<Option<ScalarValue>> {
@@ -677,237 +606,123 @@ mod tests {
     use datafusion_optimizer::push_down_filter::PushDownFilter;
     use table::predicate::build_time_range_predicate;
 
-    use super::ConstNormalizationRule;
+    use super::{ConstNormalizationRule, PatternMatchKind};
 
     #[test]
     fn test_normalize_direct_integer_cast_comparison() {
-        let schema = test_schema(vec![Field::new("v", DataType::Int32, false)]);
-        let plan = LogicalPlanBuilder::scan("t", test_source(schema.clone()), None)
-            .unwrap()
-            .filter(cast(col("v"), DataType::Int64).gt_eq(lit(42_i64)))
-            .unwrap()
-            .build()
-            .unwrap();
-
-        let result = ConstNormalizationRule
-            .analyze(plan, &ConfigOptions::default())
-            .unwrap();
-
-        assert_eq!(
+        assert_filter_plan(
+            vec![Field::new("v", DataType::Int32, false)],
+            cast(col("v"), DataType::Int64).gt_eq(lit(42_i64)),
             "Filter: t.v >= Int32(42)\n  TableScan: t",
-            result.to_string()
         );
     }
 
     #[test]
     fn test_normalize_non_column_operand() {
-        let schema = test_schema(vec![Field::new("v", DataType::Int32, false)]);
-        let plan = LogicalPlanBuilder::scan("t", test_source(schema), None)
-            .unwrap()
-            .filter(cast(col("v") + lit(1_i32), DataType::Int64).gt_eq(lit(42_i64)))
-            .unwrap()
-            .build()
-            .unwrap();
-
-        let result = ConstNormalizationRule
-            .analyze(plan, &ConfigOptions::default())
-            .unwrap();
-
-        assert_eq!(
+        assert_filter_plan(
+            vec![Field::new("v", DataType::Int32, false)],
+            cast(col("v") + lit(1_i32), DataType::Int64).gt_eq(lit(42_i64)),
             "Filter: t.v + Int32(1) >= Int32(42)\n  TableScan: t",
-            result.to_string()
         );
     }
 
     #[test]
     fn test_normalize_swapped_binary_comparison() {
-        let schema = test_schema(vec![Field::new("v", DataType::Int16, false)]);
-        let plan = LogicalPlanBuilder::scan("t", test_source(schema), None)
-            .unwrap()
-            .filter(lit(42_i64).lt_eq(cast(col("v"), DataType::Int64)))
-            .unwrap()
-            .build()
-            .unwrap();
-
-        let result = ConstNormalizationRule
-            .analyze(plan, &ConfigOptions::default())
-            .unwrap();
-
-        assert_eq!(
+        assert_filter_plan(
+            vec![Field::new("v", DataType::Int16, false)],
+            lit(42_i64).lt_eq(cast(col("v"), DataType::Int64)),
             "Filter: t.v >= Int16(42)\n  TableScan: t",
-            result.to_string()
         );
     }
 
     #[test]
     fn test_normalize_try_cast_target() {
-        let schema = test_schema(vec![Field::new("v", DataType::Int16, false)]);
-        let plan = LogicalPlanBuilder::scan("t", test_source(schema), None)
-            .unwrap()
-            .filter(try_cast(col("v"), DataType::Int64).gt_eq(lit(42_i64)))
-            .unwrap()
-            .build()
-            .unwrap();
-
-        let result = ConstNormalizationRule
-            .analyze(plan, &ConfigOptions::default())
-            .unwrap();
-
-        assert_eq!(
+        assert_filter_plan(
+            vec![Field::new("v", DataType::Int16, false)],
+            try_cast(col("v"), DataType::Int64).gt_eq(lit(42_i64)),
             "Filter: t.v >= Int16(42)\n  TableScan: t",
-            result.to_string()
         );
     }
 
     #[test]
     fn test_normalize_casted_constants() {
-        let schema = test_schema(vec![Field::new("v", DataType::Int16, false)]);
-        let binary_plan = LogicalPlanBuilder::scan("t", test_source(schema.clone()), None)
-            .unwrap()
-            .filter(col("v").gt_eq(cast(lit(42_i8), DataType::Int64)))
-            .unwrap()
-            .build()
-            .unwrap();
+        let fields = vec![Field::new("v", DataType::Int16, false)];
+        let cases = [
+            (
+                col("v").gt_eq(cast(lit(42_i8), DataType::Int64)),
+                "Filter: t.v >= Int16(42)\n  TableScan: t",
+            ),
+            (
+                col("v").in_list(
+                    vec![
+                        cast(lit(1_i8), DataType::Int64),
+                        try_cast(lit(2_i8), DataType::Int64),
+                    ],
+                    false,
+                ),
+                "Filter: t.v IN ([Int16(1), Int16(2)])\n  TableScan: t",
+            ),
+        ];
 
-        let in_list_plan = LogicalPlanBuilder::scan("t", test_source(schema), None)
-            .unwrap()
-            .filter(col("v").in_list(
-                vec![
-                    cast(lit(1_i8), DataType::Int64),
-                    try_cast(lit(2_i8), DataType::Int64),
-                ],
-                false,
-            ))
-            .unwrap()
-            .build()
-            .unwrap();
-
-        let binary = ConstNormalizationRule
-            .analyze(binary_plan, &ConfigOptions::default())
-            .unwrap();
-        let in_list = ConstNormalizationRule
-            .analyze(in_list_plan, &ConfigOptions::default())
-            .unwrap();
-
-        assert_eq!(
-            "Filter: t.v >= Int16(42)\n  TableScan: t",
-            binary.to_string()
-        );
-        assert_eq!(
-            "Filter: t.v IN ([Int16(1), Int16(2)])\n  TableScan: t",
-            in_list.to_string()
-        );
+        for (predicate, expected) in cases {
+            assert_filter_plan(fields.clone(), predicate, expected);
+        }
     }
 
     #[test]
     fn test_normalize_plain_integer_literals() {
-        let schema = test_schema(vec![Field::new("v", DataType::Int16, false)]);
-        let comparison_plan = LogicalPlanBuilder::scan("t", test_source(schema.clone()), None)
-            .unwrap()
-            .filter(col("v").gt_eq(lit(42_i64)))
-            .unwrap()
-            .build()
-            .unwrap();
+        let fields = vec![Field::new("v", DataType::Int16, false)];
+        let cases = [
+            (
+                col("v").gt_eq(lit(42_i64)),
+                "Filter: t.v >= Int16(42)\n  TableScan: t",
+            ),
+            (
+                col("v").in_list(vec![lit(1_i64), lit(2_i64)], false),
+                "Filter: t.v IN ([Int16(1), Int16(2)])\n  TableScan: t",
+            ),
+            (
+                col("v").between(lit(3_i64), lit(5_i64)),
+                "Filter: t.v BETWEEN Int16(3) AND Int16(5)\n  TableScan: t",
+            ),
+        ];
 
-        let in_list_plan = LogicalPlanBuilder::scan("t", test_source(schema.clone()), None)
-            .unwrap()
-            .filter(col("v").in_list(vec![lit(1_i64), lit(2_i64)], false))
-            .unwrap()
-            .build()
-            .unwrap();
-
-        let between_plan = LogicalPlanBuilder::scan("t", test_source(schema), None)
-            .unwrap()
-            .filter(col("v").between(lit(3_i64), lit(5_i64)))
-            .unwrap()
-            .build()
-            .unwrap();
-
-        let comparison = ConstNormalizationRule
-            .analyze(comparison_plan, &ConfigOptions::default())
-            .unwrap();
-        let in_list = ConstNormalizationRule
-            .analyze(in_list_plan, &ConfigOptions::default())
-            .unwrap();
-        let between = ConstNormalizationRule
-            .analyze(between_plan, &ConfigOptions::default())
-            .unwrap();
-
-        assert_eq!(
-            "Filter: t.v >= Int16(42)\n  TableScan: t",
-            comparison.to_string()
-        );
-        assert_eq!(
-            "Filter: t.v IN ([Int16(1), Int16(2)])\n  TableScan: t",
-            in_list.to_string()
-        );
-        assert_eq!(
-            "Filter: t.v BETWEEN Int16(3) AND Int16(5)\n  TableScan: t",
-            between.to_string()
-        );
+        for (predicate, expected) in cases {
+            assert_filter_plan(fields.clone(), predicate, expected);
+        }
     }
 
     #[test]
     fn test_normalize_in_list_and_between() {
-        let schema = test_schema(vec![Field::new("v", DataType::Int16, false)]);
-        let in_list_plan = LogicalPlanBuilder::scan("t", test_source(schema.clone()), None)
-            .unwrap()
-            .filter(cast(col("v"), DataType::Int64).in_list(vec![lit(1_i64), lit(2_i64)], false))
-            .unwrap()
-            .build()
-            .unwrap();
+        let fields = vec![Field::new("v", DataType::Int16, false)];
+        let cases = [
+            (
+                cast(col("v"), DataType::Int64).in_list(vec![lit(1_i64), lit(2_i64)], false),
+                "Filter: t.v IN ([Int16(1), Int16(2)])\n  TableScan: t",
+            ),
+            (
+                cast(col("v"), DataType::Int64).between(lit(3_i64), lit(5_i64)),
+                "Filter: t.v BETWEEN Int16(3) AND Int16(5)\n  TableScan: t",
+            ),
+        ];
 
-        let between_plan = LogicalPlanBuilder::scan("t", test_source(schema), None)
-            .unwrap()
-            .filter(cast(col("v"), DataType::Int64).between(lit(3_i64), lit(5_i64)))
-            .unwrap()
-            .build()
-            .unwrap();
-
-        let in_list = ConstNormalizationRule
-            .analyze(in_list_plan, &ConfigOptions::default())
-            .unwrap();
-        let between = ConstNormalizationRule
-            .analyze(between_plan, &ConfigOptions::default())
-            .unwrap();
-
-        assert_eq!(
-            "Filter: t.v IN ([Int16(1), Int16(2)])\n  TableScan: t",
-            in_list.to_string()
-        );
-        assert_eq!(
-            "Filter: t.v BETWEEN Int16(3) AND Int16(5)\n  TableScan: t",
-            between.to_string()
-        );
+        for (predicate, expected) in cases {
+            assert_filter_plan(fields.clone(), predicate, expected);
+        }
     }
 
     #[test]
     fn test_keep_non_lossless_literal_unchanged() {
-        let schema = test_schema(vec![Field::new("v", DataType::Int16, false)]);
-        let plan = LogicalPlanBuilder::scan("t", test_source(schema), None)
-            .unwrap()
-            .filter(col("v").gt_eq(lit(100_000_i64)))
-            .unwrap()
-            .build()
-            .unwrap();
-
-        let result = ConstNormalizationRule
-            .analyze(plan, &ConfigOptions::default())
-            .unwrap();
-
-        assert_eq!(
+        assert_filter_plan(
+            vec![Field::new("v", DataType::Int16, false)],
+            col("v").gt_eq(lit(100_000_i64)),
             "Filter: t.v >= Int64(100000)\n  TableScan: t",
-            result.to_string()
         );
     }
 
     #[test]
     fn test_normalize_scan_filters() {
-        let schema = test_schema(vec![Field::new("v", DataType::Int16, false)]);
-        let scan = LogicalPlanBuilder::scan("t", test_source(schema), None)
-            .unwrap()
-            .build()
-            .unwrap();
+        let scan = build_scan_plan(test_schema(vec![Field::new("v", DataType::Int16, false)]));
         let LogicalPlan::TableScan(scan) = scan else {
             panic!("expected table scan");
         };
@@ -916,9 +731,7 @@ mod tests {
             ..scan
         });
 
-        let analyzed = ConstNormalizationRule
-            .analyze(plan, &ConfigOptions::default())
-            .unwrap();
+        let analyzed = analyze_plan(plan);
 
         assert_eq!(
             vec![col("v").gt_eq(lit(42_i16))],
@@ -928,284 +741,206 @@ mod tests {
 
     #[test]
     fn test_normalize_negated_between() {
-        let schema = test_schema(vec![Field::new("v", DataType::Int16, false)]);
-        let plan = LogicalPlanBuilder::scan("t", test_source(schema), None)
-            .unwrap()
-            .filter(Expr::Between(Between {
+        assert_filter_plan(
+            vec![Field::new("v", DataType::Int16, false)],
+            Expr::Between(Between {
                 expr: Box::new(cast(col("v"), DataType::Int64)),
                 negated: true,
                 low: Box::new(lit(3_i64)),
                 high: Box::new(lit(5_i64)),
-            }))
-            .unwrap()
-            .build()
-            .unwrap();
-
-        let result = ConstNormalizationRule
-            .analyze(plan, &ConfigOptions::default())
-            .unwrap();
-
-        assert_eq!(
+            }),
             "Filter: t.v NOT BETWEEN Int16(3) AND Int16(5)\n  TableScan: t",
-            result.to_string()
         );
     }
 
     #[test]
     fn test_normalize_like_literal() {
-        let schema = test_schema(vec![Field::new("s", DataType::Utf8, false)]);
-        let plan = LogicalPlanBuilder::scan("t", test_source(schema), None)
-            .unwrap()
-            .filter(Expr::Like(Like::new(
-                false,
-                Box::new(cast(col("s"), DataType::LargeUtf8)),
-                Box::new(lit(ScalarValue::LargeUtf8(Some("api%".to_string())))),
-                None,
-                false,
-            )))
-            .unwrap()
-            .build()
-            .unwrap();
-
-        let result = ConstNormalizationRule
-            .analyze(plan, &ConfigOptions::default())
-            .unwrap();
-
-        assert_eq!(
+        assert_pattern_match_plan(
+            PatternMatchKind::Like,
+            ScalarValue::LargeUtf8(Some("api%".to_string())),
             "Filter: t.s LIKE Utf8(\"api%\")\n  TableScan: t",
-            result.to_string()
         );
     }
 
     #[test]
     fn test_normalize_similar_to_literal() {
-        let schema = test_schema(vec![Field::new("s", DataType::Utf8, false)]);
-        let plan = LogicalPlanBuilder::scan("t", test_source(schema), None)
-            .unwrap()
-            .filter(Expr::SimilarTo(Like::new(
-                false,
-                Box::new(cast(col("s"), DataType::LargeUtf8)),
-                Box::new(lit(ScalarValue::LargeUtf8(Some("api.*".to_string())))),
-                None,
-                false,
-            )))
-            .unwrap()
-            .build()
-            .unwrap();
-
-        let result = ConstNormalizationRule
-            .analyze(plan, &ConfigOptions::default())
-            .unwrap();
-
-        assert_eq!(
+        assert_pattern_match_plan(
+            PatternMatchKind::SimilarTo,
+            ScalarValue::LargeUtf8(Some("api.*".to_string())),
             "Filter: t.s SIMILAR TO Utf8(\"api.*\")\n  TableScan: t",
-            result.to_string()
         );
     }
 
     #[test]
     fn test_normalize_direct_timestamp_filter() {
-        let schema = test_schema(vec![
-            Field::new(
-                "ts",
-                DataType::Timestamp(ArrowTimeUnit::Nanosecond, None),
-                false,
-            ),
-            Field::new("tag", DataType::Utf8, true),
-        ]);
-        let plan = LogicalPlanBuilder::scan("t", test_source(schema), None)
-            .unwrap()
-            .filter(
-                cast(
-                    col("ts"),
-                    DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
-                )
-                .gt_eq(lit(ScalarValue::TimestampMillisecond(Some(-299_999), None)))
-                .and(
-                    cast(
-                        col("ts"),
-                        DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
-                    )
-                    .lt_eq(lit(ScalarValue::TimestampMillisecond(Some(10_000), None))),
-                )
+        assert_timestamp_pushdown(
+            vec![
+                Field::new(
+                    "ts",
+                    DataType::Timestamp(ArrowTimeUnit::Nanosecond, None),
+                    false,
+                ),
+                Field::new("tag", DataType::Utf8, true),
+            ],
+            ts_cast_to_ms()
+                .gt_eq(ts_ms_literal(-299_999))
+                .and(ts_cast_to_ms().lt_eq(ts_ms_literal(10_000)))
                 .and(col("tag").eq(lit("api"))),
-            )
-            .unwrap()
-            .build()
-            .unwrap();
-
-        let analyzed = ConstNormalizationRule
-            .analyze(plan, &ConfigOptions::default())
-            .unwrap();
-        let expected = "\
-\nFilter: t.ts >= TimestampNanosecond(-299999999999, None) AND t.ts < TimestampNanosecond(10001000000, None) AND t.tag = Utf8(\"api\")\
-\n  TableScan: t";
-        assert_eq!(expected.trim_start(), analyzed.to_string());
-
-        let pushed = Optimizer::with_rules(vec![Arc::new(PushDownFilter::new())])
-            .optimize(analyzed, &OptimizerContext::new(), |_, _| {})
-            .unwrap();
-        let expected = "\
-\nTableScan: t, full_filters=[t.ts >= TimestampNanosecond(-299999999999, None), t.ts < TimestampNanosecond(10001000000, None), t.tag = Utf8(\"api\")]";
-        assert_eq!(expected.trim_start(), pushed.to_string());
-
-        let filters = extract_scan_filters(&pushed);
-        let range = build_time_range_predicate("ts", TimeUnit::Nanosecond, &filters);
-        assert_eq!(
+            "Filter: t.ts >= TimestampNanosecond(-299999999999, None) AND t.ts < TimestampNanosecond(10001000000, None) AND t.tag = Utf8(\"api\")\n  TableScan: t",
+            "TableScan: t, full_filters=[t.ts >= TimestampNanosecond(-299999999999, None), t.ts < TimestampNanosecond(10001000000, None), t.tag = Utf8(\"api\")]",
             TimestampRange::new_inclusive(
                 Some(Timestamp::new_nanosecond(-299_999_999_999)),
-                Some(Timestamp::new_nanosecond(10_000_999_999))
+                Some(Timestamp::new_nanosecond(10_000_999_999)),
             ),
-            range
         );
     }
 
     #[test]
     fn test_normalize_timestamp_between_filter() {
-        let schema = test_schema(vec![Field::new(
-            "ts",
-            DataType::Timestamp(ArrowTimeUnit::Nanosecond, None),
-            false,
-        )]);
-        let plan = LogicalPlanBuilder::scan("t", test_source(schema), None)
-            .unwrap()
-            .filter(
-                cast(
-                    col("ts"),
-                    DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
-                )
-                .between(
-                    lit(ScalarValue::TimestampMillisecond(Some(-299_999), None)),
-                    lit(ScalarValue::TimestampMillisecond(Some(10_000), None)),
-                ),
-            )
-            .unwrap()
-            .build()
-            .unwrap();
-
-        let analyzed = ConstNormalizationRule
-            .analyze(plan, &ConfigOptions::default())
-            .unwrap();
-        let expected = "\
-\nFilter: t.ts >= TimestampNanosecond(-299999999999, None) AND t.ts < TimestampNanosecond(10001000000, None)\
-\n  TableScan: t";
-        assert_eq!(expected.trim_start(), analyzed.to_string());
-
-        let pushed = Optimizer::with_rules(vec![Arc::new(PushDownFilter::new())])
-            .optimize(analyzed, &OptimizerContext::new(), |_, _| {})
-            .unwrap();
-        let expected = "\
-\nTableScan: t, full_filters=[t.ts >= TimestampNanosecond(-299999999999, None), t.ts < TimestampNanosecond(10001000000, None)]";
-        assert_eq!(expected.trim_start(), pushed.to_string());
-
-        let filters = extract_scan_filters(&pushed);
-        let range = build_time_range_predicate("ts", TimeUnit::Nanosecond, &filters);
-        assert_eq!(
+        assert_timestamp_pushdown(
+            vec![Field::new(
+                "ts",
+                DataType::Timestamp(ArrowTimeUnit::Nanosecond, None),
+                false,
+            )],
+            ts_cast_to_ms().between(ts_ms_literal(-299_999), ts_ms_literal(10_000)),
+            "Filter: t.ts >= TimestampNanosecond(-299999999999, None) AND t.ts < TimestampNanosecond(10001000000, None)\n  TableScan: t",
+            "TableScan: t, full_filters=[t.ts >= TimestampNanosecond(-299999999999, None), t.ts < TimestampNanosecond(10001000000, None)]",
             TimestampRange::new_inclusive(
                 Some(Timestamp::new_nanosecond(-299_999_999_999)),
-                Some(Timestamp::new_nanosecond(10_000_999_999))
+                Some(Timestamp::new_nanosecond(10_000_999_999)),
             ),
-            range
         );
     }
 
     #[test]
     fn test_normalize_strict_timestamp_filter() {
-        let schema = test_schema(vec![Field::new(
-            "ts",
-            DataType::Timestamp(ArrowTimeUnit::Nanosecond, None),
-            false,
-        )]);
-        let plan = LogicalPlanBuilder::scan("t", test_source(schema), None)
-            .unwrap()
-            .filter(
-                cast(
-                    col("ts"),
-                    DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
-                )
-                .gt(lit(ScalarValue::TimestampMillisecond(Some(10_000), None)))
-                .and(
-                    cast(
-                        col("ts"),
-                        DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
-                    )
-                    .lt(lit(ScalarValue::TimestampMillisecond(Some(20_000), None))),
-                ),
-            )
-            .unwrap()
-            .build()
-            .unwrap();
-
-        let analyzed = ConstNormalizationRule
-            .analyze(plan, &ConfigOptions::default())
-            .unwrap();
-        let expected = "\
-\nFilter: t.ts >= TimestampNanosecond(10001000000, None) AND t.ts < TimestampNanosecond(20000000000, None)\
-\n  TableScan: t";
-        assert_eq!(expected.trim_start(), analyzed.to_string());
-
-        let pushed = Optimizer::with_rules(vec![Arc::new(PushDownFilter::new())])
-            .optimize(analyzed, &OptimizerContext::new(), |_, _| {})
-            .unwrap();
-        let expected = "\
-\nTableScan: t, full_filters=[t.ts >= TimestampNanosecond(10001000000, None), t.ts < TimestampNanosecond(20000000000, None)]";
-        assert_eq!(expected.trim_start(), pushed.to_string());
-
-        let filters = extract_scan_filters(&pushed);
-        let range = build_time_range_predicate("ts", TimeUnit::Nanosecond, &filters);
-        assert_eq!(
+        assert_timestamp_pushdown(
+            vec![Field::new(
+                "ts",
+                DataType::Timestamp(ArrowTimeUnit::Nanosecond, None),
+                false,
+            )],
+            ts_cast_to_ms()
+                .gt(ts_ms_literal(10_000))
+                .and(ts_cast_to_ms().lt(ts_ms_literal(20_000))),
+            "Filter: t.ts >= TimestampNanosecond(10001000000, None) AND t.ts < TimestampNanosecond(20000000000, None)\n  TableScan: t",
+            "TableScan: t, full_filters=[t.ts >= TimestampNanosecond(10001000000, None), t.ts < TimestampNanosecond(20000000000, None)]",
             TimestampRange::new_inclusive(
                 Some(Timestamp::new_nanosecond(10_001_000_000)),
-                Some(Timestamp::new_nanosecond(19_999_999_999))
+                Some(Timestamp::new_nanosecond(19_999_999_999)),
             ),
-            range
         );
     }
 
     #[test]
     fn test_normalize_plain_timestamp_literals() {
-        let schema = test_schema(vec![Field::new(
-            "ts",
-            DataType::Timestamp(ArrowTimeUnit::Nanosecond, None),
-            false,
-        )]);
-        let plan = LogicalPlanBuilder::scan("t", test_source(schema), None)
-            .unwrap()
-            .filter(
-                col("ts")
-                    .gt_eq(lit(ScalarValue::TimestampMillisecond(Some(-299_999), None)))
-                    .and(
-                        col("ts").lt_eq(lit(ScalarValue::TimestampMillisecond(Some(10_000), None))),
-                    ),
-            )
-            .unwrap()
-            .build()
-            .unwrap();
-
-        let analyzed = ConstNormalizationRule
-            .analyze(plan, &ConfigOptions::default())
-            .unwrap();
-        let expected = "\
-\nFilter: t.ts >= TimestampNanosecond(-299999000000, None) AND t.ts <= TimestampNanosecond(10000000000, None)\
-\n  TableScan: t";
-        assert_eq!(expected.trim_start(), analyzed.to_string());
-
-        let pushed = Optimizer::with_rules(vec![Arc::new(PushDownFilter::new())])
-            .optimize(analyzed, &OptimizerContext::new(), |_, _| {})
-            .unwrap();
-        let expected = "\
-\nTableScan: t, full_filters=[t.ts >= TimestampNanosecond(-299999000000, None), t.ts <= TimestampNanosecond(10000000000, None)]";
-        assert_eq!(expected.trim_start(), pushed.to_string());
-
-        let filters = extract_scan_filters(&pushed);
-        let range = build_time_range_predicate("ts", TimeUnit::Nanosecond, &filters);
-        assert_eq!(
+        assert_timestamp_pushdown(
+            vec![Field::new(
+                "ts",
+                DataType::Timestamp(ArrowTimeUnit::Nanosecond, None),
+                false,
+            )],
+            col("ts")
+                .gt_eq(ts_ms_literal(-299_999))
+                .and(col("ts").lt_eq(ts_ms_literal(10_000))),
+            "Filter: t.ts >= TimestampNanosecond(-299999000000, None) AND t.ts <= TimestampNanosecond(10000000000, None)\n  TableScan: t",
+            "TableScan: t, full_filters=[t.ts >= TimestampNanosecond(-299999000000, None), t.ts <= TimestampNanosecond(10000000000, None)]",
             TimestampRange::new_inclusive(
                 Some(Timestamp::new_nanosecond(-299_999_000_000)),
-                Some(Timestamp::new_nanosecond(10_000_000_000))
+                Some(Timestamp::new_nanosecond(10_000_000_000)),
             ),
-            range
         );
+    }
+
+    fn assert_pattern_match_plan(kind: PatternMatchKind, pattern: ScalarValue, expected: &str) {
+        let predicate = match kind {
+            PatternMatchKind::Like => Expr::Like(Like::new(
+                false,
+                Box::new(cast(col("s"), DataType::LargeUtf8)),
+                Box::new(lit(pattern)),
+                None,
+                false,
+            )),
+            PatternMatchKind::SimilarTo => Expr::SimilarTo(Like::new(
+                false,
+                Box::new(cast(col("s"), DataType::LargeUtf8)),
+                Box::new(lit(pattern)),
+                None,
+                false,
+            )),
+        };
+
+        assert_filter_plan(
+            vec![Field::new("s", DataType::Utf8, false)],
+            predicate,
+            expected,
+        );
+    }
+
+    fn assert_filter_plan(fields: Vec<Field>, predicate: Expr, expected: &str) {
+        assert_eq!(expected, analyze_filter(fields, predicate).to_string());
+    }
+
+    fn assert_timestamp_pushdown(
+        fields: Vec<Field>,
+        predicate: Expr,
+        expected_analyzed: &str,
+        expected_pushed: &str,
+        expected_range: TimestampRange,
+    ) {
+        let analyzed = analyze_filter(fields, predicate);
+        assert_eq!(expected_analyzed, analyzed.to_string());
+
+        let pushed = push_down_filters(analyzed);
+        assert_eq!(expected_pushed, pushed.to_string());
+
+        let range =
+            build_time_range_predicate("ts", TimeUnit::Nanosecond, &extract_scan_filters(&pushed));
+        assert_eq!(expected_range, range);
+    }
+
+    fn analyze_filter(fields: Vec<Field>, predicate: Expr) -> LogicalPlan {
+        analyze_plan(build_filter_plan(test_schema(fields), predicate))
+    }
+
+    fn analyze_plan(plan: LogicalPlan) -> LogicalPlan {
+        ConstNormalizationRule
+            .analyze(plan, &ConfigOptions::default())
+            .unwrap()
+    }
+
+    fn build_filter_plan(schema: Arc<DFSchema>, predicate: Expr) -> LogicalPlan {
+        LogicalPlanBuilder::scan("t", test_source(schema), None)
+            .unwrap()
+            .filter(predicate)
+            .unwrap()
+            .build()
+            .unwrap()
+    }
+
+    fn build_scan_plan(schema: Arc<DFSchema>) -> LogicalPlan {
+        LogicalPlanBuilder::scan("t", test_source(schema), None)
+            .unwrap()
+            .build()
+            .unwrap()
+    }
+
+    fn push_down_filters(plan: LogicalPlan) -> LogicalPlan {
+        Optimizer::with_rules(vec![Arc::new(PushDownFilter::new())])
+            .optimize(plan, &OptimizerContext::new(), |_, _| {})
+            .unwrap()
+    }
+
+    fn ts_cast_to_ms() -> Expr {
+        cast(
+            col("ts"),
+            DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+        )
+    }
+
+    fn ts_ms_literal(value: i64) -> Expr {
+        lit(ScalarValue::TimestampMillisecond(Some(value), None))
     }
 
     fn extract_scan_filters(plan: &LogicalPlan) -> Vec<Expr> {
