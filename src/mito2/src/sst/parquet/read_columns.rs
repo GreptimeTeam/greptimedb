@@ -23,6 +23,7 @@ pub type ParquetNestedPath = Vec<String>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParquetReadColumns {
     cols: Vec<ParquetReadColumn>,
+    has_nested: bool,
 }
 
 impl ParquetReadColumns {
@@ -35,11 +36,22 @@ impl ParquetReadColumns {
             .into_iter()
             .map(ParquetReadColumn::new)
             .collect();
-        Self { cols }
+        Self {
+            cols,
+            has_nested: false,
+        }
     }
 
     pub fn columns(&self) -> &[ParquetReadColumn] {
         &self.cols
+    }
+
+    pub fn has_nested(&self) -> bool {
+        self.has_nested
+    }
+
+    pub fn root_indices_iter(&self) -> impl Iterator<Item = usize> + '_ {
+        self.cols.iter().map(|col| col.root_index)
     }
 }
 
@@ -141,6 +153,7 @@ mod tests {
                 root_index: 0,
                 nested_paths: vec![],
             }],
+            has_nested: false,
         };
 
         assert_eq!(
@@ -164,6 +177,7 @@ mod tests {
                     nested_paths: vec![],
                 },
             ],
+            has_nested: true,
         };
 
         assert_eq!(
@@ -181,6 +195,7 @@ mod tests {
                 root_index: 0,
                 nested_paths: vec![vec!["j".to_string(), "b".to_string()]],
             }],
+            has_nested: true,
         };
 
         assert_eq!(
@@ -198,6 +213,7 @@ mod tests {
                 root_index: 0,
                 nested_paths: vec![vec!["j".to_string(), "b".to_string(), "c".to_string()]],
             }],
+            has_nested: true,
         };
 
         assert_eq!(
@@ -218,6 +234,7 @@ mod tests {
                     vec!["j".to_string(), "b".to_string(), "d".to_string()],
                 ],
             }],
+            has_nested: true,
         };
 
         assert_eq!(

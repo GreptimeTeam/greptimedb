@@ -424,9 +424,14 @@ impl ParquetReaderBuilder {
         let parquet_projection = ParquetReadColumns::from_deduped_root_indices(
             read_format.projection_indices().iter().copied(),
         );
-        let leaf_indices = build_parquet_leaves_indices(parquet_schema_desc, &parquet_projection);
-        let projection_mask =
-            ProjectionMask::leaves(parquet_schema_desc, leaf_indices.iter().copied());
+
+        let projection_mask = if parquet_projection.has_nested() {
+            let leaf_indices =
+                build_parquet_leaves_indices(parquet_schema_desc, &parquet_projection);
+            ProjectionMask::leaves(parquet_schema_desc, leaf_indices.iter().copied())
+        } else {
+            ProjectionMask::roots(parquet_schema_desc, parquet_projection.root_indices_iter())
+        };
         let selection = self
             .row_groups_to_read(&read_format, &parquet_meta, &mut metrics.filter_metrics)
             .await;
