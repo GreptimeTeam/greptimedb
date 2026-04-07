@@ -769,7 +769,10 @@ mod tests {
     use crate::sst::parquet::flat_format::FlatReadFormat;
     use crate::test_util::sst_util::{new_record_batch_with_custom_sequence, sst_region_metadata};
 
-    fn new_test_range_base(filters: Vec<SimpleFilterContext>) -> RangeBase {
+    fn new_test_range_base(
+        filters: Vec<SimpleFilterContext>,
+        physical_filters: Vec<PhysicalFilterContext>,
+    ) -> RangeBase {
         let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
         let read_format = FlatReadFormat::new(
             metadata.clone(),
@@ -782,7 +785,7 @@ mod tests {
 
         RangeBase {
             filters,
-            physical_filters: vec![],
+            physical_filters,
             dyn_filters: vec![],
             read_format,
             expected_metadata: None,
@@ -802,7 +805,7 @@ mod tests {
             SimpleFilterContext::new_opt(&metadata, None, &col("tag_0").eq(lit("a"))).unwrap(),
             SimpleFilterContext::new_opt(&metadata, None, &col("field_0").gt(lit(1_u64))).unwrap(),
         ];
-        let base = new_test_range_base(filters);
+        let base = new_test_range_base(filters, vec![]);
         let batch = new_record_batch_with_custom_sequence(&["b", "x"], 0, 4, 1);
 
         let mask_without_skip = base
@@ -815,6 +818,42 @@ mod tests {
             .compute_filter_mask_flat(&batch, false, true, &mut TagDecodeState::new())
             .unwrap()
             .unwrap();
-        assert_eq!(mask_with_skip.count_set_bits(), 2);
+        assert_eq!(mask_with_skip.count_set_bits(), 4);
+    }
+
+    #[test]
+    fn test_compute_filter_mask_flat_skips_prefiltered_physical_filters() {
+        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
+        let read_format = ReadFormat::new_flat(
+            metadata.clone(),
+            metadata.column_metadatas.iter().map(|c| c.column_id),
+            None,
+            "test",
+            true,
+        )
+        .unwrap();
+        let physical_filters = vec![
+            PhysicalFilterContext::new_opt(
+                &metadata,
+                None,
+                &read_format,
+                &((col("field_0") + lit(1_u64)).gt(lit(2_u64))),
+            )
+            .unwrap(),
+        ];
+        let base = new_test_range_base(vec![], physical_filters);
+        let batch = new_record_batch_with_custom_sequence(&["b", "x"], 0, 4, 1);
+
+        let mask_without_skip = base
+            .compute_filter_mask_flat(&batch, false, false, &mut TagDecodeState::new())
+            .unwrap()
+            .unwrap();
+        assert_eq!(mask_without_skip.count_set_bits(), 2);
+
+        let mask_with_skip = base
+            .compute_filter_mask_flat(&batch, false, true, &mut TagDecodeState::new())
+            .unwrap()
+            .unwrap();
+        assert_eq!(mask_with_skip.count_set_bits(), 4);
     }
 }

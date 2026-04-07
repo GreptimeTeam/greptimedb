@@ -791,6 +791,7 @@ mod tests {
     };
     use datatypes::arrow::datatypes::{Schema, UInt32Type};
     use mito_codec::row_converter::{PrimaryKeyFilter, build_primary_key_codec};
+    use parquet::arrow::ArrowSchemaConverter;
     use store_api::codec::PrimaryKeyEncoding;
 
     use super::*;
@@ -869,6 +870,33 @@ mod tests {
             .iter()
             .filter_map(SimpleFilterEvaluator::try_new)
             .collect()
+    }
+
+    fn new_simple_filter_contexts(
+        metadata: &RegionMetadataRef,
+        exprs: &[datafusion_expr::Expr],
+    ) -> Vec<SimpleFilterContext> {
+        exprs
+            .iter()
+            .filter_map(|expr| SimpleFilterContext::new_opt(metadata, None, expr))
+            .collect()
+    }
+
+    fn new_physical_filter_contexts(
+        metadata: &RegionMetadataRef,
+        read_format: &ReadFormat,
+        exprs: &[datafusion_expr::Expr],
+    ) -> Vec<PhysicalFilterContext> {
+        exprs
+            .iter()
+            .filter_map(|expr| PhysicalFilterContext::new_opt(metadata, None, read_format, expr))
+            .collect()
+    }
+
+    fn parquet_schema(read_format: &ReadFormat) -> SchemaDescriptor {
+        ArrowSchemaConverter::new()
+            .convert(read_format.arrow_schema())
+            .unwrap()
     }
 
     fn new_raw_batch(primary_keys: &[&[u8]], field_values: &[u64]) -> RecordBatch {
@@ -983,5 +1011,92 @@ mod tests {
 
         assert_eq!(filtered.num_rows(), 4);
         assert_eq!(field_values(&filtered), vec![10, 11, 14, 15]);
+    }
+
+    #[test]
+    fn test_prefilter_builder_restricts_field_filters_to_append_mode() {
+        let metadata: RegionMetadataRef =
+            Arc::new(sst_region_metadata_with_encoding(PrimaryKeyEncoding::Dense));
+        let read_format = ReadFormat::new_flat(
+            metadata.clone(),
+            metadata.column_metadatas.iter().map(|c| c.column_id),
+            None,
+            "test",
+            false,
+        )
+        .unwrap();
+        let codec = build_primary_key_codec(metadata.as_ref());
+        let filters = new_simple_filter_contexts(&metadata, &[col("field_0").gt(lit(1_u64))]);
+        let parquet_schema = parquet_schema(&read_format);
+
+        let builder = PrefilterContextBuilder::new(
+            &read_format,
+            &codec,
+            None,
+            &filters,
+            &[],
+            &parquet_schema,
+            false,
+        );
+        assert!(builder.is_none());
+
+        let builder = PrefilterContextBuilder::new(
+            &read_format,
+            &codec,
+            None,
+            &filters,
+            &[],
+            &parquet_schema,
+            true,
+        );
+        assert!(builder.is_some());
+    }
+
+    #[test]
+    fn test_apply_filters_to_batch_decodes_tag_columns() {
+        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
+        let codec = build_primary_key_codec(metadata.as_ref());
+        let filters = new_simple_filter_contexts(&metadata, &[col("tag_0").eq(lit("a"))]);
+        let pk_a = new_primary_key(&["a", "x"]);
+        let pk_b = new_primary_key(&["b", "x"]);
+        let batch = new_raw_batch(
+            &[
+                pk_a.as_slice(),
+                pk_a.as_slice(),
+                pk_b.as_slice(),
+                pk_b.as_slice(),
+            ],
+            &[10, 11, 12, 13],
+        );
+
+        let mask = apply_filters_to_batch(&batch, &filters, &[], &metadata, codec.as_ref())
+            .unwrap()
+            .unwrap();
+        assert_eq!(mask.count_set_bits(), 2);
+    }
+
+    #[test]
+    fn test_apply_filters_to_batch_evaluates_physical_filters() {
+        let metadata: RegionMetadataRef =
+            Arc::new(sst_region_metadata_with_encoding(PrimaryKeyEncoding::Dense));
+        let read_format = ReadFormat::new_flat(
+            metadata.clone(),
+            metadata.column_metadatas.iter().map(|c| c.column_id),
+            None,
+            "test",
+            false,
+        )
+        .unwrap();
+        let codec = build_primary_key_codec(metadata.as_ref());
+        let expr = (col("field_0") + lit(1_u64)).gt(lit(11_u64));
+        let physical_filters = new_physical_filter_contexts(&metadata, &read_format, &[expr]);
+        let pk = new_primary_key(&["a", "x"]);
+        let batch = new_raw_batch(&[pk.as_slice(), pk.as_slice(), pk.as_slice()], &[9, 10, 11]);
+
+        let mask =
+            apply_filters_to_batch(&batch, &[], &physical_filters, &metadata, codec.as_ref())
+                .unwrap()
+                .unwrap();
+        assert_eq!(mask.count_set_bits(), 1);
     }
 }
