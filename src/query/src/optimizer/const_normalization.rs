@@ -554,7 +554,7 @@ fn lower_bound_for_ge(
 ) -> Option<i64> {
     let ratio = finer_to_coarser_ratio(source_unit, target_unit)?;
     let base = target_value.checked_mul(ratio)?;
-    if target_value < 0 {
+    if target_value <= 0 {
         base.checked_sub(ratio - 1)
     } else {
         Some(base)
@@ -829,6 +829,42 @@ mod tests {
             TimestampRange::new_inclusive(
                 Some(Timestamp::new_nanosecond(10_001_000_000)),
                 Some(Timestamp::new_nanosecond(19_999_999_999)),
+            ),
+        );
+    }
+
+    #[test]
+    fn test_normalize_zero_boundary_timestamp_filter() {
+        let fields = vec![Field::new(
+            "ts",
+            DataType::Timestamp(ArrowTimeUnit::Nanosecond, None),
+            false,
+        )];
+
+        assert_timestamp_pushdown(
+            fields.clone(),
+            ts_cast_to_ms().gt_eq(ts_ms_literal(0)),
+            "Filter: t.ts >= TimestampNanosecond(-999999, None)\n  TableScan: t",
+            "TableScan: t, full_filters=[t.ts >= TimestampNanosecond(-999999, None)]",
+            TimestampRange::from_start(Timestamp::new_nanosecond(-999_999)),
+        );
+
+        assert_timestamp_pushdown(
+            fields.clone(),
+            ts_cast_to_ms().lt(ts_ms_literal(0)),
+            "Filter: t.ts < TimestampNanosecond(-999999, None)\n  TableScan: t",
+            "TableScan: t, full_filters=[t.ts < TimestampNanosecond(-999999, None)]",
+            TimestampRange::until_end(Timestamp::new_nanosecond(-999_999), false),
+        );
+
+        assert_timestamp_pushdown(
+            fields,
+            ts_cast_to_ms().between(ts_ms_literal(0), ts_ms_literal(0)),
+            "Filter: t.ts >= TimestampNanosecond(-999999, None) AND t.ts < TimestampNanosecond(1000000, None)\n  TableScan: t",
+            "TableScan: t, full_filters=[t.ts >= TimestampNanosecond(-999999, None), t.ts < TimestampNanosecond(1000000, None)]",
+            TimestampRange::new_inclusive(
+                Some(Timestamp::new_nanosecond(-999_999)),
+                Some(Timestamp::new_nanosecond(999_999)),
             ),
         );
     }
