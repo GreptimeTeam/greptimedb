@@ -505,6 +505,18 @@ impl RepartitionProcedure {
     }
 
     fn rollback_allocated_region_ids(&self) -> HashSet<store_api::storage::RegionId> {
+        if self.state.as_any().is::<allocate_region::AllocateRegion>()
+            || self.state.as_any().is::<dispatch::Dispatch>()
+        {
+            return self
+                .context
+                .persistent_ctx
+                .plans
+                .iter()
+                .flat_map(|plan| plan.allocated_region_ids.iter().copied())
+                .collect();
+        }
+
         self.context
             .persistent_ctx
             .failed_procedures
@@ -937,6 +949,58 @@ mod tests {
         );
         let mut procedure = RepartitionProcedure {
             state: Box::new(Dispatch),
+            context,
+        };
+
+        procedure
+            .rollback(&TestingEnv::procedure_context())
+            .await
+            .unwrap();
+
+        let region_routes = current_parent_region_routes(&procedure.context).await;
+        assert_eq!(region_routes.len(), 2);
+        assert_eq!(region_routes[0].region.id, RegionId::new(table_id, 1));
+        assert_eq!(region_routes[1].region.id, RegionId::new(table_id, 2));
+    }
+
+    #[tokio::test]
+    async fn test_repartition_rollback_removes_allocated_routes_from_allocate() {
+        let env = TestingEnv::new();
+        let table_id = 1024;
+        let node_manager = Arc::new(MockDatanodeManager::new(UnexpectedErrorDatanodeHandler));
+        let ddl_ctx = env.ddl_context(node_manager);
+        let original_region_routes = vec![
+            test_region_route(
+                RegionId::new(table_id, 1),
+                &range_expr("x", 0, 100).as_json_str().unwrap(),
+            ),
+            test_region_route(
+                RegionId::new(table_id, 2),
+                &range_expr("x", 50, 100).as_json_str().unwrap(),
+            ),
+            test_region_route(RegionId::new(table_id, 3), ""),
+        ];
+        env.create_physical_table_metadata_with_wal_options(
+            table_id,
+            original_region_routes,
+            test_region_wal_options(&[1, 2]),
+        )
+        .await;
+
+        let mut persistent_ctx = PersistentContext::new(
+            TableName::new("test_catalog", "test_schema", "test_table"),
+            table_id,
+            None,
+        );
+        persistent_ctx.plans = vec![test_plan(table_id)];
+        let context = Context::new(
+            &ddl_ctx,
+            env.mailbox_ctx.mailbox().clone(),
+            env.server_addr.clone(),
+            persistent_ctx,
+        );
+        let mut procedure = RepartitionProcedure {
+            state: Box::new(AllocateRegion::new(vec![])),
             context,
         };
 
