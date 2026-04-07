@@ -569,6 +569,10 @@ impl RepartitionProcedure {
                 schema_name: self.context.persistent_ctx.schema_name.clone(),
                 table_name: self.context.persistent_ctx.table_name.clone(),
             };
+            let _operating_guards = Context::register_operating_regions(
+                &self.context.memory_region_keeper,
+                &allocated_region_routes,
+            )?;
             if let Err(err) = DeallocateRegion::deallocate_regions(
                 &self.context.node_manager,
                 &self.context.leader_region_registry,
@@ -1194,6 +1198,11 @@ mod tests {
             .await
             .unwrap();
         assert!(!start_status.need_persist());
+        let start_status = procedure
+            .execute(&TestingEnv::procedure_context())
+            .await
+            .unwrap();
+        assert!(start_status.need_persist());
         assert_parent_state::<AllocateRegion>(&procedure);
 
         let allocate_status = procedure
@@ -1283,6 +1292,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_repartition_procedure_flow_split_allocate_retryable_then_resume() {
+        common_telemetry::init_default_ut_logging();
         let env = TestingEnv::new();
         let table_id = 1024;
         let (tx, _rx) = mpsc::channel(8);
@@ -1332,6 +1342,11 @@ mod tests {
             .await
             .unwrap();
         assert!(!start_status.need_persist());
+        let start_status = procedure
+            .execute(&TestingEnv::procedure_context())
+            .await
+            .unwrap();
+        assert!(start_status.need_persist());
         assert_parent_state::<AllocateRegion>(&procedure);
 
         let err = procedure
@@ -1340,7 +1355,7 @@ mod tests {
             .unwrap_err();
         assert!(err.is_retry_later());
         assert_parent_state::<AllocateRegion>(&procedure);
-        assert!(procedure.context.persistent_ctx.plans.is_empty());
+        assert!(!procedure.context.persistent_ctx.plans.is_empty());
         assert_eq!(
             current_parent_region_routes(&procedure.context).await,
             vec![
