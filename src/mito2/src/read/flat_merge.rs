@@ -48,21 +48,25 @@ use crate::sst::parquet::format::PrimaryKeyArray;
 /// offset overflow in `interleave_bytes()` natively.
 ///
 /// See: <https://github.com/apache/arrow-rs/blob/65ad652f2410fc51ad77da1805e85c0a76d9a7ea/arrow-select/src/interleave.rs#L208-L225>
-fn check_interleave_bytes_overflow<'a, T: datatypes::arrow::datatypes::ByteArrayType>(
-    values: impl Iterator<Item = &'a dyn Array>,
+fn check_interleave_bytes_overflow<T: datatypes::arrow::datatypes::ByteArrayType>(
+    batches: &[(usize, RecordBatch)],
+    col_idx: usize,
     indices: &[(usize, usize)],
 ) -> std::result::Result<(), ArrowError> {
-    let arrays: Vec<_> = values.map(|a| a.as_bytes::<T>()).collect();
     // Quick check: if concatenating all value data won't overflow, interleaving
     // a subset of rows definitely won't either.
-    let total: usize = arrays.iter().map(|a| a.value_data().len()).sum();
+    let total: usize = batches
+        .iter()
+        .map(|(_, batch)| batch.column(col_idx).as_bytes::<T>().value_data().len())
+        .sum();
     if T::Offset::from_usize(total).is_some() {
         return Ok(());
     }
     // Total exceeds the offset limit, do the precise per-row check.
     let mut capacity: usize = 0;
     for &(a, b) in indices {
-        let o = arrays[a].value_offsets();
+        let array = batches[a].1.column(col_idx).as_bytes::<T>();
+        let o = array.value_offsets();
         let element_len = o[b + 1].as_usize() - o[b].as_usize();
         capacity += element_len;
         T::Offset::from_usize(capacity).ok_or(ArrowError::OffsetOverflowError(capacity))?;
@@ -79,17 +83,11 @@ fn check_interleave_overflow(
     for (col_idx, field) in schema.fields.iter().enumerate() {
         match field.data_type() {
             DataType::Utf8 => {
-                let iter = batches
-                    .iter()
-                    .map(|(_, batch)| batch.column(col_idx).as_ref());
-                check_interleave_bytes_overflow::<Utf8Type>(iter, indices)
+                check_interleave_bytes_overflow::<Utf8Type>(batches, col_idx, indices)
                     .context(ComputeArrowSnafu)?;
             }
             DataType::Binary => {
-                let iter = batches
-                    .iter()
-                    .map(|(_, batch)| batch.column(col_idx).as_ref());
-                check_interleave_bytes_overflow::<BinaryType>(iter, indices)
+                check_interleave_bytes_overflow::<BinaryType>(batches, col_idx, indices)
                     .context(ComputeArrowSnafu)?;
             }
             _ => continue,
