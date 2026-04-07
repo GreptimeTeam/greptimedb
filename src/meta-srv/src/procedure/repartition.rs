@@ -56,6 +56,7 @@ use store_api::storage::{RegionNumber, TableId};
 use table::table_name::TableName;
 
 use crate::error::{self, Result};
+use crate::procedure::repartition::collect::ProcedureMeta;
 use crate::procedure::repartition::deallocate_region::DeallocateRegion;
 use crate::procedure::repartition::group::{
     Context as RepartitionGroupContext, RepartitionGroupProcedure,
@@ -75,6 +76,10 @@ pub struct PersistentContext {
     pub table_name: String,
     pub table_id: TableId,
     pub plans: Vec<RepartitionPlanEntry>,
+    #[serde(default)]
+    pub failed_procedures: Vec<ProcedureMeta>,
+    #[serde(default)]
+    pub unknown_procedures: Vec<ProcedureMeta>,
     /// The timeout for repartition operations.
     #[serde(with = "humantime_serde", default = "default_timeout")]
     pub timeout: Duration,
@@ -103,6 +108,8 @@ impl PersistentContext {
             table_name,
             table_id,
             plans: vec![],
+            failed_procedures: vec![],
+            unknown_procedures: vec![],
             timeout: timeout.unwrap_or_else(default_timeout),
         }
     }
@@ -488,24 +495,28 @@ impl RepartitionProcedure {
     ///
     /// Notes:
     /// - `RepartitionStart`: no-op, because allocation has not happened yet.
-    /// - `AllocateRegion` / `Dispatch` / `Collect` / `DeallocateRegion`: rollback-active.
+    /// - `AllocateRegion` / `Dispatch` / `Collect`  rollback-active.
+    /// - `DeallocateRegion`: is not rollback-active.
     /// - `RepartitionEnd`: no-op.
     fn should_rollback_allocated_regions(&self) -> bool {
         self.state.as_any().is::<allocate_region::AllocateRegion>()
             || self.state.as_any().is::<dispatch::Dispatch>()
             || self.state.as_any().is::<collect::Collect>()
-            || self
-                .state
-                .as_any()
-                .is::<deallocate_region::DeallocateRegion>()
     }
 
-    fn allocated_region_ids(&self) -> HashSet<store_api::storage::RegionId> {
+    fn rollback_allocated_region_ids(&self) -> HashSet<store_api::storage::RegionId> {
         self.context
             .persistent_ctx
-            .plans
+            .failed_procedures
             .iter()
-            .flat_map(|plan| plan.allocated_region_ids.iter().copied())
+            .chain(self.context.persistent_ctx.unknown_procedures.iter())
+            .flat_map(|procedure_meta| {
+                let plan_index = procedure_meta.plan_index;
+                self.context.persistent_ctx.plans[plan_index]
+                    .allocated_region_ids
+                    .iter()
+                    .copied()
+            })
             .collect()
     }
 
@@ -526,7 +537,7 @@ impl RepartitionProcedure {
         }
 
         let table_id = self.context.persistent_ctx.table_id;
-        let allocated_region_ids = self.allocated_region_ids();
+        let allocated_region_ids = self.rollback_allocated_region_ids();
         if allocated_region_ids.is_empty() {
             return Ok(());
         }
@@ -771,10 +782,11 @@ mod tests {
     use common_meta::peer::Peer;
     use common_meta::rpc::router::{Region, RegionRoute};
     use common_meta::test_util::MockDatanodeManager;
-    use common_procedure::{Error as ProcedureError, Procedure, ProcedureState};
+    use common_procedure::{Error as ProcedureError, Procedure, ProcedureId, ProcedureState};
     use store_api::storage::RegionId;
     use table::table_name::TableName;
     use tokio::sync::mpsc;
+    use uuid::Uuid;
 
     use super::*;
     use crate::procedure::repartition::allocate_region::AllocateRegion;
@@ -876,7 +888,7 @@ mod tests {
         assert!(procedure.should_rollback_allocated_regions());
 
         let procedure = test_procedure(Box::new(DeallocateRegion), test_context(&env, table_id));
-        assert!(procedure.should_rollback_allocated_regions());
+        assert!(!procedure.should_rollback_allocated_regions());
 
         let procedure = test_procedure(Box::new(RepartitionEnd), test_context(&env, table_id));
         assert!(!procedure.should_rollback_allocated_regions());
@@ -912,6 +924,11 @@ mod tests {
             None,
         );
         persistent_ctx.plans = vec![test_plan(table_id)];
+        persistent_ctx.failed_procedures = vec![ProcedureMeta {
+            plan_index: 0,
+            group_id: Uuid::new_v4(),
+            procedure_id: ProcedureId::random(),
+        }];
         let context = Context::new(
             &ddl_ctx,
             env.mailbox_ctx.mailbox().clone(),
@@ -964,6 +981,11 @@ mod tests {
             None,
         );
         persistent_ctx.plans = vec![test_plan(table_id)];
+        persistent_ctx.failed_procedures = vec![ProcedureMeta {
+            plan_index: 0,
+            group_id: Uuid::new_v4(),
+            procedure_id: ProcedureId::random(),
+        }];
         let context = Context::new(
             &ddl_ctx,
             env.mailbox_ctx.mailbox().clone(),

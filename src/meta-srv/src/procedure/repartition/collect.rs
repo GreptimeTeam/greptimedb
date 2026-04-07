@@ -59,6 +59,78 @@ impl Collect {
     }
 }
 
+#[async_trait::async_trait]
+#[typetag::serde]
+impl State for Collect {
+    async fn next(
+        &mut self,
+        ctx: &mut Context,
+        procedure_ctx: &ProcedureContext,
+    ) -> Result<(Box<dyn State>, Status)> {
+        let table_id = ctx.persistent_ctx.table_id;
+        for procedure_meta in self.inflight_procedures.iter() {
+            let procedure_id = procedure_meta.procedure_id;
+            let group_id = procedure_meta.group_id;
+            let Some(mut receiver) = procedure_ctx
+                .provider
+                .procedure_state_receiver(procedure_id)
+                .await
+                .context(RepartitionSubprocedureStateReceiverSnafu { procedure_id })?
+            else {
+                error!(
+                    "failed to get procedure state receiver, procedure_id: {}, group_id: {}",
+                    procedure_id, group_id
+                );
+                self.unknown_procedures.push(*procedure_meta);
+                continue;
+            };
+
+            match watcher::wait(&mut receiver).await {
+                Ok(_) => self.succeeded_procedures.push(*procedure_meta),
+                Err(e) => {
+                    error!(e; "failed to wait for repartition subprocedure, procedure_id: {}, group_id: {}", procedure_id, group_id);
+                    self.failed_procedures.push(*procedure_meta);
+                }
+            }
+        }
+
+        let inflight = self.inflight_procedures.len();
+        let succeeded = self.succeeded_procedures.len();
+        let failed = self.failed_procedures.len();
+        let unknown = self.unknown_procedures.len();
+        info!(
+            "Collected repartition group results for table_id: {}, inflight: {}, succeeded: {}, failed: {}, unknown: {}",
+            table_id, inflight, succeeded, failed, unknown
+        );
+
+        if failed > 0 || unknown > 0 {
+            ctx.persistent_ctx
+                .failed_procedures
+                .extend(self.failed_procedures.iter());
+            ctx.persistent_ctx
+                .unknown_procedures
+                .extend(self.unknown_procedures.iter());
+            return crate::error::UnexpectedSnafu {
+                violated: format!(
+                    "Repartition groups failed or became unknown, table_id: {}, failed: {}, unknown: {}",
+                    table_id, failed, unknown
+                ),
+            }
+            .fail();
+        }
+
+        if let Some(start_time) = ctx.volatile_ctx.dispatch_start_time.take() {
+            ctx.update_finish_groups_elapsed(start_time.elapsed());
+        }
+
+        Ok((Box::new(DeallocateRegion), Status::executing(true)))
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -192,71 +264,5 @@ mod tests {
         assert_eq!(state.failed_procedures.len(), 1);
         assert_eq!(state.unknown_procedures.len(), 0);
         assert!(!err.is_retryable());
-    }
-}
-
-#[async_trait::async_trait]
-#[typetag::serde]
-impl State for Collect {
-    async fn next(
-        &mut self,
-        ctx: &mut Context,
-        procedure_ctx: &ProcedureContext,
-    ) -> Result<(Box<dyn State>, Status)> {
-        let table_id = ctx.persistent_ctx.table_id;
-        for procedure_meta in self.inflight_procedures.iter() {
-            let procedure_id = procedure_meta.procedure_id;
-            let group_id = procedure_meta.group_id;
-            let Some(mut receiver) = procedure_ctx
-                .provider
-                .procedure_state_receiver(procedure_id)
-                .await
-                .context(RepartitionSubprocedureStateReceiverSnafu { procedure_id })?
-            else {
-                error!(
-                    "failed to get procedure state receiver, procedure_id: {}, group_id: {}",
-                    procedure_id, group_id
-                );
-                self.unknown_procedures.push(*procedure_meta);
-                continue;
-            };
-
-            match watcher::wait(&mut receiver).await {
-                Ok(_) => self.succeeded_procedures.push(*procedure_meta),
-                Err(e) => {
-                    error!(e; "failed to wait for repartition subprocedure, procedure_id: {}, group_id: {}", procedure_id, group_id);
-                    self.failed_procedures.push(*procedure_meta);
-                }
-            }
-        }
-
-        let inflight = self.inflight_procedures.len();
-        let succeeded = self.succeeded_procedures.len();
-        let failed = self.failed_procedures.len();
-        let unknown = self.unknown_procedures.len();
-        info!(
-            "Collected repartition group results for table_id: {}, inflight: {}, succeeded: {}, failed: {}, unknown: {}",
-            table_id, inflight, succeeded, failed, unknown
-        );
-
-        if failed > 0 || unknown > 0 {
-            return crate::error::UnexpectedSnafu {
-                violated: format!(
-                    "Repartition groups failed or became unknown, table_id: {}, failed: {}, unknown: {}",
-                    table_id, failed, unknown
-                ),
-            }
-            .fail();
-        }
-
-        if let Some(start_time) = ctx.volatile_ctx.dispatch_start_time.take() {
-            ctx.update_finish_groups_elapsed(start_time.elapsed());
-        }
-
-        Ok((Box::new(DeallocateRegion), Status::executing(true)))
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 }
