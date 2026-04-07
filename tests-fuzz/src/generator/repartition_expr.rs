@@ -25,6 +25,8 @@ use crate::ir::repartition_expr::{MergePartitionExpr, SplitPartitionExpr};
 #[builder(pattern = "owned")]
 pub struct SplitPartitionExprGenerator {
     table_ctx: TableContextRef,
+    #[builder(default = "true")]
+    wait: bool,
 }
 
 impl<R: Rng + 'static> Generator<SplitPartitionExpr, R> for SplitPartitionExprGenerator {
@@ -66,6 +68,7 @@ impl<R: Rng + 'static> Generator<SplitPartitionExpr, R> for SplitPartitionExprGe
             table_name,
             target: from_expr,
             into: vec![left, right],
+            wait: self.wait,
         })
     }
 }
@@ -74,6 +77,8 @@ impl<R: Rng + 'static> Generator<SplitPartitionExpr, R> for SplitPartitionExprGe
 #[builder(pattern = "owned")]
 pub struct MergePartitionExprGenerator {
     table_ctx: TableContextRef,
+    #[builder(default = "true")]
+    wait: bool,
 }
 
 impl<R: Rng + 'static> Generator<MergePartitionExpr, R> for MergePartitionExprGenerator {
@@ -96,6 +101,7 @@ impl<R: Rng + 'static> Generator<MergePartitionExpr, R> for MergePartitionExprGe
         Ok(MergePartitionExpr {
             table_name,
             targets: vec![left, right],
+            wait: self.wait,
         })
     }
 }

@@ -19,6 +19,7 @@ pub mod crd;
 pub mod csv_dump_writer;
 pub mod health;
 pub mod migration;
+pub mod network_chaos;
 pub mod partition;
 pub mod pod_failure;
 pub mod procedure;
