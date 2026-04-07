@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use arrow::datatypes::Schema;
 use arrow_ipc::CompressionType;
-use arrow_ipc::writer::{FileWriter, IpcWriteOptions};
+use arrow_ipc::writer::{StreamWriter, IpcWriteOptions};
 use axum::http::{HeaderValue, header};
 use axum::response::{IntoResponse, Response};
 use common_error::status_code::StatusCode;
@@ -48,7 +48,7 @@ async fn write_arrow_bytes(
         let options = IpcWriteOptions::default()
             .try_with_compression(compression)
             .context(error::ArrowSnafu)?;
-        let mut writer = FileWriter::try_new_with_options(&mut bytes, schema, options)
+        let mut writer = StreamWriter::try_new_with_options(&mut bytes, schema, options)
             .context(error::ArrowSnafu)?;
 
         while let Some(rb) = recordbatches.next().await {
@@ -164,7 +164,7 @@ impl IntoResponse for ArrowResponse {
 mod test {
     use std::io::Cursor;
 
-    use arrow_ipc::reader::FileReader;
+    use arrow_ipc::reader::StreamReader;
     use arrow_schema::DataType;
     use common_recordbatch::{RecordBatch, RecordBatches};
     use datatypes::prelude::*;
@@ -201,7 +201,7 @@ mod test {
                 HttpResponse::Arrow(resp) => {
                     let output = resp.data;
                     let mut reader =
-                        FileReader::try_new(Cursor::new(output), None).expect("Arrow reader error");
+                        StreamReader::try_new(Cursor::new(output), None).expect("Arrow reader error");
                     let schema = reader.schema();
                     assert_eq!(schema.fields[0].name(), "numbers");
                     assert_eq!(schema.fields[0].data_type(), &DataType::UInt32);
