@@ -21,12 +21,11 @@ use common_meta::ddl::create_table::template::{
 };
 use common_meta::lock_key::TableLock;
 use common_meta::node_manager::NodeManagerRef;
-use common_meta::region_keeper::{MemoryRegionKeeperRef, OperatingRegionGuard};
-use common_meta::rpc::router::{RegionRoute, operating_leader_regions};
+use common_meta::rpc::router::RegionRoute;
 use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::info;
 use serde::{Deserialize, Serialize};
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 use store_api::storage::{RegionNumber, TableId};
 use table::metadata::TableInfo;
 use table::table_reference::TableReference;
@@ -122,7 +121,7 @@ impl State for AllocateRegion {
             table_id, new_region_count, new_regions_brief
         );
 
-        let _operating_guards = Self::register_operating_regions(
+        let _operating_guards = Context::register_operating_regions(
             &ctx.memory_region_keeper,
             &new_allocated_region_routes,
         )?;
@@ -159,23 +158,6 @@ impl State for AllocateRegion {
 impl AllocateRegion {
     pub fn new(plan_entries: Vec<AllocationPlanEntry>) -> Self {
         Self { plan_entries }
-    }
-
-    fn register_operating_regions(
-        memory_region_keeper: &MemoryRegionKeeperRef,
-        region_routes: &[RegionRoute],
-    ) -> Result<Vec<OperatingRegionGuard>> {
-        let mut operating_guards = Vec::with_capacity(region_routes.len());
-        for (region_id, datanode_id) in operating_leader_regions(region_routes) {
-            let guard = memory_region_keeper
-                .register(datanode_id, region_id)
-                .context(error::RegionOperatingRaceSnafu {
-                    peer_id: datanode_id,
-                    region_id,
-                })?;
-            operating_guards.push(guard);
-        }
-        Ok(operating_guards)
     }
 
     fn generate_region_routes(

@@ -40,9 +40,9 @@ use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
 use common_meta::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
 use common_meta::node_manager::NodeManagerRef;
-use common_meta::region_keeper::MemoryRegionKeeperRef;
+use common_meta::region_keeper::{MemoryRegionKeeperRef, OperatingRegionGuard};
 use common_meta::region_registry::LeaderRegionRegistryRef;
-use common_meta::rpc::router::RegionRoute;
+use common_meta::rpc::router::{RegionRoute, operating_leader_regions};
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
     BoxedProcedure, Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
@@ -393,6 +393,23 @@ impl Context {
             .invalidate(&ctx, &[CacheIdent::TableId(table_id)])
             .await;
         Ok(())
+    }
+
+    pub fn register_operating_regions(
+        memory_region_keeper: &MemoryRegionKeeperRef,
+        region_routes: &[RegionRoute],
+    ) -> Result<Vec<OperatingRegionGuard>> {
+        let mut operating_guards = Vec::with_capacity(region_routes.len());
+        for (region_id, datanode_id) in operating_leader_regions(region_routes) {
+            let guard = memory_region_keeper
+                .register(datanode_id, region_id)
+                .context(error::RegionOperatingRaceSnafu {
+                    peer_id: datanode_id,
+                    region_id,
+                })?;
+            operating_guards.push(guard);
+        }
+        Ok(operating_guards)
     }
 }
 
@@ -880,6 +897,7 @@ mod tests {
                 RegionId::new(table_id, 2),
                 &range_expr("x", 50, 100).as_json_str().unwrap(),
             ),
+            test_region_route(RegionId::new(table_id, 3), ""),
         ];
         env.create_physical_table_metadata_with_wal_options(
             table_id,
@@ -911,8 +929,9 @@ mod tests {
             .unwrap();
 
         let region_routes = current_parent_region_routes(&procedure.context).await;
-        assert_eq!(region_routes.len(), 1);
+        assert_eq!(region_routes.len(), 2);
         assert_eq!(region_routes[0].region.id, RegionId::new(table_id, 1));
+        assert_eq!(region_routes[1].region.id, RegionId::new(table_id, 2));
     }
 
     #[tokio::test]
@@ -930,6 +949,7 @@ mod tests {
                 RegionId::new(table_id, 2),
                 &range_expr("x", 50, 100).as_json_str().unwrap(),
             ),
+            test_region_route(RegionId::new(table_id, 3), ""),
         ];
         env.create_physical_table_metadata_with_wal_options(
             table_id,
@@ -968,8 +988,9 @@ mod tests {
         let twice = current_parent_region_routes(&procedure.context).await;
 
         assert_eq!(once, twice);
-        assert_eq!(once.len(), 1);
+        assert_eq!(once.len(), 2);
         assert_eq!(once[0].region.id, RegionId::new(table_id, 1));
+        assert_eq!(once[1].region.id, RegionId::new(table_id, 2));
     }
 
     #[tokio::test]

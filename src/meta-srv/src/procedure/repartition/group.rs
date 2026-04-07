@@ -51,7 +51,6 @@ use crate::error::{self, Result};
 use crate::procedure::repartition::group::apply_staging_manifest::ApplyStagingManifest;
 use crate::procedure::repartition::group::enter_staging_region::EnterStagingRegion;
 use crate::procedure::repartition::group::remap_manifest::RemapManifest;
-use crate::procedure::repartition::group::repartition_end::RepartitionEnd;
 use crate::procedure::repartition::group::repartition_start::RepartitionStart;
 use crate::procedure::repartition::group::update_metadata::UpdateMetadata;
 use crate::procedure::repartition::plan::RegionDescriptor;
@@ -217,7 +216,6 @@ impl RepartitionGroupProcedure {
             );
         }
 
-        self.state = Box::new(RepartitionEnd);
         Ok(())
     }
 
