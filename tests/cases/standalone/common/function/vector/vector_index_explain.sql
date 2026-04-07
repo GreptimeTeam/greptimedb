@@ -87,6 +87,7 @@ ADMIN FLUSH_TABLE('vectors_explain_left');
 -- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE SeqScan:.* SeqScan: REDACTED 
 EXPLAIN ANALYZE VERBOSE
 SELECT l.vec_id
 FROM vectors_explain_left l
@@ -152,6 +153,7 @@ LIMIT 2;
 -- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE SeqScan:.* SeqScan: REDACTED 
 EXPLAIN ANALYZE VERBOSE
 SELECT vec_id
 FROM vectors_explain_metric
