@@ -172,6 +172,7 @@ impl FileRange {
                 self.row_group_idx,
                 self.row_selection.clone(),
                 fetch_metrics,
+                skip_fields,
             ))
             .await?;
 
@@ -324,6 +325,7 @@ impl FileRangeContext {
         row_group_idx: usize,
         row_selection: Option<RowSelection>,
         fetch_metrics: Option<&'a ParquetFetchMetrics>,
+        skip_fields: bool,
     ) -> RowGroupBuildContext<'a> {
         RowGroupBuildContext {
             filters: &self.base.filters,
@@ -331,6 +333,7 @@ impl FileRangeContext {
             row_group_idx,
             row_selection,
             fetch_metrics,
+            skip_fields,
         }
     }
 
@@ -342,7 +345,7 @@ impl FileRangeContext {
 }
 
 /// Mode to pre-filter columns in a range.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreFilterMode {
     /// Filters all columns.
     All,

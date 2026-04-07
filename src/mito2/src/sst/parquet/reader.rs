@@ -499,7 +499,10 @@ impl ParquetReaderBuilder {
             &read_format,
             &codec,
             primary_key_filters.as_ref(),
+            &filters,
+            &physical_filters,
             parquet_meta.file_metadata().schema_descr(),
+            self.pre_filter_mode == PreFilterMode::All,
         );
 
         let output_schema = read_format.output_arrow_schema()?;
@@ -1805,6 +1808,7 @@ impl RowGroupReaderBuilder {
     }
 }
 
+#[derive(Clone)]
 /// The filter to evaluate or the prune result of the default value.
 pub(crate) enum MaybeFilter {
     /// The filter to evaluate.
@@ -1815,6 +1819,7 @@ pub(crate) enum MaybeFilter {
     Pruned,
 }
 
+#[derive(Clone)]
 /// Context to evaluate the column filter for a parquet file.
 pub(crate) struct SimpleFilterContext {
     /// Filter to evaluate.
@@ -1916,6 +1921,7 @@ impl SimpleFilterContext {
     }
 }
 
+#[derive(Clone)]
 #[allow(dead_code)]
 /// The physical filter to evaluate or the prune result of the default value.
 pub(crate) enum MaybePhysicalFilter {
@@ -1927,6 +1933,7 @@ pub(crate) enum MaybePhysicalFilter {
     Pruned,
 }
 
+#[derive(Clone)]
 #[allow(dead_code)]
 /// Context to evaluate a physical expression for a parquet file.
 pub(crate) struct PhysicalFilterContext {
