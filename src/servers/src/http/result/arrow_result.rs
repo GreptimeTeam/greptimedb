@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use arrow::datatypes::Schema;
 use arrow_ipc::CompressionType;
-use arrow_ipc::writer::{StreamWriter, IpcWriteOptions};
+use arrow_ipc::writer::{IpcWriteOptions, StreamWriter};
 use axum::http::{HeaderValue, header};
 use axum::response::{IntoResponse, Response};
 use common_error::status_code::StatusCode;
@@ -200,8 +200,8 @@ mod test {
             match http_resp {
                 HttpResponse::Arrow(resp) => {
                     let output = resp.data;
-                    let mut reader =
-                        StreamReader::try_new(Cursor::new(output), None).expect("Arrow reader error");
+                    let mut reader = StreamReader::try_new(Cursor::new(output), None)
+                        .expect("Arrow reader error");
                     let schema = reader.schema();
                     assert_eq!(schema.fields[0].name(), "numbers");
                     assert_eq!(schema.fields[0].data_type(), &DataType::UInt32);
