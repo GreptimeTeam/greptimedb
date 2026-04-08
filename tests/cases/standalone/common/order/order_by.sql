@@ -95,6 +95,7 @@ select tag from t where num > 6 order by ts;
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
+-- SQLNESS REPLACE ,\sfilter=\[[^]]+\] 
 explain analyze select tag from t where num > 6 order by ts desc limit 2;
 
 drop table t;

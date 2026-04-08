@@ -94,6 +94,8 @@ impl WindowedSortPhysicalRule {
                         && scanner_info
                             .time_index
                             .contains(input_schema.field(column_expr.index()).name())
+                        && sort_exec.fetch().is_none()
+                    // skip if there is a limit, as dyn filter along is good enough in this case
                     {
                     } else {
                         return Ok(Transformed::no(plan));
