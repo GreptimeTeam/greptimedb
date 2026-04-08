@@ -18,21 +18,17 @@ use std::sync::Arc;
 
 use criterion::{BenchmarkId, Criterion, criterion_group};
 use datafusion::arrow::array::Float64Array;
-use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
+use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::ToDFSchema;
 use datafusion::datasource::memory::MemorySourceConfig;
 use datafusion::datasource::source::DataSourceExec;
-use datafusion::physical_expr::EquivalenceProperties;
-use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-use datafusion::physical_plan::expressions::Column as PhyColumn;
-use datafusion::physical_plan::{
-    ExecutionPlan, ExecutionPlanProperties, Partitioning, PlanProperties,
-};
+use datafusion::logical_expr::{EmptyRelation, LogicalPlan};
+use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::SessionContext;
 use datatypes::arrow::array::TimestampMillisecondArray;
 use datatypes::arrow_array::StringArray;
-use promql::extension_plan::{HistogramFold, HistogramFoldExec};
+use promql::extension_plan::HistogramFold;
 
 /// Standard Prometheus histogram bucket bounds.
 const STANDARD_BUCKETS: &[&str] = &[
@@ -94,45 +90,20 @@ fn build_histogram_input(
 }
 
 fn build_exec(input: Arc<dyn ExecutionPlan>, quantile: f64) -> Arc<dyn ExecutionPlan> {
-    let input_schema = input.schema();
-    let output_schema: SchemaRef = {
-        let df_schema = Arc::new(input_schema.as_ref().clone().to_dfschema().unwrap());
-        Arc::new(
-            HistogramFold::convert_schema(&df_schema, "le")
-                .unwrap()
-                .as_arrow()
-                .clone(),
-        )
-    };
+    let logical_input = LogicalPlan::EmptyRelation(EmptyRelation {
+        produce_one_row: false,
+        schema: Arc::new(input.schema().as_ref().clone().to_dfschema().unwrap()),
+    });
 
-    // le=1, val=2, ts=3; tag columns = [host(0)]
-    let tag_columns: Vec<Arc<dyn datafusion::physical_plan::PhysicalExpr>> =
-        vec![Arc::new(PhyColumn::new("host", 0)) as _];
-
-    let mut partition_exprs = tag_columns.clone();
-    partition_exprs.push(Arc::new(PhyColumn::new("ts", 3)) as _);
-
-    let properties = Arc::new(PlanProperties::new(
-        EquivalenceProperties::new(output_schema.clone()),
-        Partitioning::Hash(
-            partition_exprs.clone(),
-            input.output_partitioning().partition_count(),
-        ),
-        EmissionType::Incremental,
-        Boundedness::Bounded,
-    ));
-
-    Arc::new(HistogramFoldExec::new(
-        1, // le_column_index
-        2, // field_column_index
-        3, // ts_column_index
+    HistogramFold::new(
+        "le".to_string(),
+        "val".to_string(),
+        "ts".to_string(),
         quantile,
-        input,
-        output_schema,
-        tag_columns,
-        partition_exprs,
-        properties,
-    ))
+        logical_input,
+    )
+    .unwrap()
+    .to_execution_plan(input)
 }
 
 fn run(exec: Arc<dyn ExecutionPlan>, rt: &tokio::runtime::Runtime) {
