@@ -358,7 +358,7 @@ pub struct CreateTableData {
     #[serde(default)]
     pub column_metadatas: Vec<ColumnMetadata>,
     /// None stands for not allocated yet.
-    table_route: Option<PhysicalTableRouteValue>,
+    pub(crate) table_route: Option<PhysicalTableRouteValue>,
     /// None stands for not allocated yet.
     pub region_wal_options: Option<HashMap<RegionNumber, String>>,
 }

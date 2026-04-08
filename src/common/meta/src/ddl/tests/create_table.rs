@@ -42,7 +42,7 @@ use crate::ddl::test_util::datanode_handler::{
     DatanodeWatcher, NaiveDatanodeHandler, RetryErrorDatanodeHandler,
     UnexpectedErrorDatanodeHandler,
 };
-use crate::ddl::test_util::{assert_column_name, get_raw_table_info};
+use crate::ddl::test_util::{assert_column_name, get_raw_table_info, put_datanode_address};
 use crate::error::{Error, Result};
 use crate::key::table_route::TableRouteValue;
 use crate::kv_backend::memory::MemoryKvBackend;
@@ -242,6 +242,27 @@ async fn test_on_datanode_create_regions_should_not_retry() {
     };
     let error = procedure.execute(&ctx).await.unwrap_err();
     assert!(!error.is_retry_later());
+}
+
+#[tokio::test]
+async fn test_on_datanode_create_regions_remaps_addresses_when_retrying() {
+    let (tx, mut rx) = mpsc::channel(8);
+    let datanode_handler = DatanodeWatcher::new(tx).with_handler(create_request_handler);
+    let node_manager = Arc::new(MockDatanodeManager::new(datanode_handler));
+    let ddl_context = new_ddl_context(node_manager);
+    let task = test_create_table_task("foo");
+    let mut procedure = CreateTableProcedure::new(task, ddl_context.clone()).unwrap();
+    procedure.on_prepare().await.unwrap();
+
+    let table_route = procedure.data.table_route.as_mut().unwrap();
+    let leader = table_route.region_routes[0].leader_peer.as_mut().unwrap();
+    leader.addr = "old-addr".to_string();
+    put_datanode_address(&ddl_context, leader.id, "new-addr").await;
+
+    procedure.on_datanode_create_regions(true).await.unwrap();
+
+    let (peer, _) = rx.try_recv().unwrap();
+    assert_eq!(peer.addr, "new-addr");
 }
 
 #[tokio::test]
