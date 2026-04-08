@@ -94,13 +94,12 @@ impl State for Collect {
             }
         }
 
-        let inflight = self.inflight_procedures.len();
         let succeeded = self.succeeded_procedures.len();
         let failed = self.failed_procedures.len();
         let unknown = self.unknown_procedures.len();
         info!(
-            "Collected repartition group results for table_id: {}, inflight: {}, succeeded: {}, failed: {}, unknown: {}",
-            table_id, inflight, succeeded, failed, unknown
+            "Collected repartition group results for table_id: {}, succeeded: {}, failed: {}, unknown: {}",
+            table_id, succeeded, failed, unknown
         );
 
         if failed > 0 || unknown > 0 {
