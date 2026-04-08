@@ -806,7 +806,7 @@ impl HistogramFoldStream {
                 }
             }
 
-            let result = Self::evaluate_row_fast_validated(self.quantile, cached_bucket, counters);
+            let result = Self::evaluate_row_fast(self.quantile, cached_bucket, counters);
             field_results.push(result);
 
             cursor += bucket_num;
@@ -1089,7 +1089,10 @@ impl HistogramFoldStream {
     }
 
     #[inline]
-    fn evaluate_row_fast_validated(quantile: f64, bucket: &[f64], counter: &mut [f64]) -> f64 {
+    fn evaluate_row_fast(quantile: f64, bucket: &[f64], counter: &mut [f64]) -> f64 {
+        if bucket.len() <= 1 || bucket.len() != counter.len() {
+            return f64::NAN;
+        }
         if quantile < 0.0 {
             return f64::NEG_INFINITY;
         }
@@ -1606,6 +1609,38 @@ mod test {
 | host | val |
 +------+-----+
 | c    | NaN |
++------+-----+",
+        );
+        assert_eq!(result_literal, expected);
+    }
+
+    #[tokio::test]
+    async fn optimistic_single_inf_bucket_emits_nan() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("host", DataType::Utf8, true),
+            Field::new("le", DataType::Utf8, true),
+            Field::new("val", DataType::Float64, true),
+        ]));
+        let host_column = Arc::new(StringArray::from(vec!["a", "b"])) as _;
+        let le_column = Arc::new(StringArray::from(vec!["+Inf", "+Inf"])) as _;
+        let val_column = Arc::new(Float64Array::from(vec![2.0, 5.0])) as _;
+        let batch =
+            RecordBatch::try_new(schema.clone(), vec![host_column, le_column, val_column]).unwrap();
+        let fold_exec = build_fold_exec_from_batches(vec![batch], schema, 0.5, 0, 1, 2);
+        let session_context = SessionContext::default();
+        let result = datafusion::physical_plan::collect(fold_exec, session_context.task_ctx())
+            .await
+            .unwrap();
+        let result_literal = datatypes::arrow::util::pretty::pretty_format_batches(&result)
+            .unwrap()
+            .to_string();
+
+        let expected = String::from(
+            "+------+-----+\n\
+| host | val |\n\
++------+-----+\n\
+| a    | NaN |\n\
+| b    | NaN |\n\
 +------+-----+",
         );
         assert_eq!(result_literal, expected);
