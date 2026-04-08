@@ -51,6 +51,7 @@ INSERT INTO tsid_binary_join_right (host, job, ts, greptime_value) VALUES
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / tsid_binary_join_right;
 
@@ -60,6 +61,7 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / tsid_binary_join_right;
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / ignoring(host) tsid_binary_join_right;
 
@@ -70,6 +72,7 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / ignoring(host) tsid_binary_join
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 TQL ANALYZE (0, 5, '5s') tsid_binary_join_left > tsid_binary_join_right;
 
@@ -79,6 +82,7 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left > tsid_binary_join_right;
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 TQL ANALYZE (0, 5, '5s') tsid_binary_join_left > bool tsid_binary_join_right;
 
