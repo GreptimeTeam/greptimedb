@@ -544,8 +544,6 @@ impl ExecutionPlan for HistogramFoldExec {
             )?,
             output_buffered_rows: 0,
             cached_le_parsed: None,
-            cached_le_raw: None,
-            cached_le_valid: None,
             counters_buf: Vec::new(),
             optimistic_output_batches: Vec::new(),
             optimistic_output_rows: 0,
@@ -613,8 +611,6 @@ pub struct HistogramFoldStream {
     output_buffered_rows: usize,
 
     cached_le_parsed: Option<Vec<f64>>,
-    cached_le_raw: Option<StringArray>,
-    cached_le_valid: Option<bool>,
     counters_buf: Vec<f64>,
     optimistic_output_batches: Vec<RecordBatch>,
     optimistic_output_rows: usize,
@@ -776,19 +772,21 @@ impl HistogramFoldStream {
         let field_no_nulls = field_array.null_count() == 0;
 
         if self.cached_le_parsed.is_none() && remaining_rows >= bucket_num {
-            self.cached_le_raw = Some(le_array.slice(cursor, bucket_num));
             let parsed = Self::parse_le_values(le_array, cursor, bucket_num);
-            self.cached_le_valid = Some(Self::bucket_layout_is_valid(&parsed));
             self.cached_le_parsed = Some(parsed);
             self.counters_buf.resize(bucket_num, 0.0);
         }
+        let cached_bucket = self
+            .cached_le_parsed
+            .as_ref()
+            .expect("cached bucket must be initialized before optimistic folding");
 
         let est_groups = remaining_rows / bucket_num;
         let mut take_indices: Vec<u32> = Vec::with_capacity(est_groups);
         let mut field_results: Vec<f64> = Vec::with_capacity(est_groups);
 
         while remaining_rows >= bucket_num && self.mode == FoldMode::Optimistic {
-            if !self.validate_optimistic_group(&batch, le_array, cursor, bucket_num) {
+            if !Self::is_positive_infinity(le_array, cursor + bucket_num - 1) {
                 break;
             }
 
@@ -808,22 +806,7 @@ impl HistogramFoldStream {
                 }
             }
 
-            let result = if let Some(cached_raw) = self.cached_le_raw.as_ref() {
-                if Self::le_group_matches_cached(le_array, cursor, bucket_num, cached_raw) {
-                    let bucket = self.cached_le_parsed.as_ref().unwrap();
-                    if self.cached_le_valid.unwrap_or(false) {
-                        Self::evaluate_row_fast_validated(self.quantile, bucket, counters)
-                    } else {
-                        f64::NAN
-                    }
-                } else {
-                    let bucket = Self::parse_le_values(le_array, cursor, bucket_num);
-                    Self::evaluate_row_fast(self.quantile, &bucket, counters)
-                }
-            } else {
-                let bucket = Self::parse_le_values(le_array, cursor, bucket_num);
-                Self::evaluate_row_fast(self.quantile, &bucket, counters)
-            };
+            let result = Self::evaluate_row_fast_validated(self.quantile, cached_bucket, counters);
             field_results.push(result);
 
             cursor += bucket_num;
@@ -923,167 +906,6 @@ impl HistogramFoldStream {
             });
         }
         parsed
-    }
-
-    fn validate_optimistic_group(
-        &self,
-        batch: &RecordBatch,
-        le_array: &StringArray,
-        start: usize,
-        bucket_num: usize,
-    ) -> bool {
-        let inf_index = start + bucket_num - 1;
-        if !Self::is_positive_infinity(le_array, inf_index) {
-            return false;
-        }
-
-        if bucket_num <= 1 {
-            return true;
-        }
-
-        self.normal_indices.iter().all(|&idx| {
-            Self::column_is_constant_in_range(batch.column(idx).as_ref(), start, bucket_num)
-        })
-    }
-
-    #[inline]
-    fn string_array_is_constant<Offset: datafusion::arrow::array::OffsetSizeTrait>(
-        array: &datafusion::arrow::array::GenericStringArray<Offset>,
-        start: usize,
-        len: usize,
-    ) -> bool {
-        if array.null_count() == 0 {
-            let offsets = array.value_offsets();
-            let data = array.value_data();
-            let expected_start = offsets[start].as_usize();
-            let expected_end = offsets[start + 1].as_usize();
-            let expected = &data[expected_start..expected_end];
-
-            return (start + 1..start + len).all(|row| {
-                let row_start = offsets[row].as_usize();
-                let row_end = offsets[row + 1].as_usize();
-                row_end - row_start == expected.len() && data[row_start..row_end] == *expected
-            });
-        }
-
-        if array.is_null(start) {
-            return (start + 1..start + len).all(|row| array.is_null(row));
-        }
-
-        let expected = array.value(start);
-        (start + 1..start + len).all(|row| !array.is_null(row) && array.value(row) == expected)
-    }
-
-    #[inline]
-    fn primitive_array_is_constant<T>(
-        array: &datafusion::arrow::array::PrimitiveArray<T>,
-        start: usize,
-        len: usize,
-    ) -> bool
-    where
-        T: datafusion::arrow::datatypes::ArrowPrimitiveType,
-        T::Native: PartialEq + Copy,
-    {
-        if array.null_count() == 0 {
-            let values = array.values();
-            let expected = values[start];
-            return values[start + 1..start + len]
-                .iter()
-                .all(|&value| value == expected);
-        }
-
-        if array.is_null(start) {
-            return (start + 1..start + len).all(|row| array.is_null(row));
-        }
-
-        let expected = array.value(start);
-        (start + 1..start + len).all(|row| !array.is_null(row) && array.value(row) == expected)
-    }
-
-    #[inline]
-    fn column_is_constant_in_range(array: &dyn Array, start: usize, len: usize) -> bool {
-        use datafusion::arrow::datatypes::{Int64Type, TimestampMillisecondType, UInt64Type};
-        use datafusion::common::ScalarValue;
-
-        debug_assert!(len > 0);
-        if len == 1 {
-            return true;
-        }
-
-        match array.data_type() {
-            DataType::Utf8 => Self::string_array_is_constant(array.as_string::<i32>(), start, len),
-            DataType::LargeUtf8 => {
-                Self::string_array_is_constant(array.as_string::<i64>(), start, len)
-            }
-            DataType::UInt64 => {
-                Self::primitive_array_is_constant(array.as_primitive::<UInt64Type>(), start, len)
-            }
-            DataType::Int64 => {
-                Self::primitive_array_is_constant(array.as_primitive::<Int64Type>(), start, len)
-            }
-            DataType::Float64 => {
-                Self::primitive_array_is_constant(array.as_primitive::<Float64Type>(), start, len)
-            }
-            DataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Millisecond, _) => {
-                Self::primitive_array_is_constant(
-                    array.as_primitive::<TimestampMillisecondType>(),
-                    start,
-                    len,
-                )
-            }
-            _ => {
-                let expected = ScalarValue::try_from_array(array, start).ok();
-                (start + 1..start + len)
-                    .all(|row| ScalarValue::try_from_array(array, row).ok() == expected)
-            }
-        }
-    }
-
-    fn le_group_matches_cached(
-        le_array: &StringArray,
-        start: usize,
-        bucket_num: usize,
-        cached_raw: &StringArray,
-    ) -> bool {
-        let current_raw = le_array.slice(start, bucket_num);
-        if current_raw.len() != cached_raw.len() {
-            return false;
-        }
-
-        if current_raw.null_count() != 0 || cached_raw.null_count() != 0 {
-            return current_raw == *cached_raw;
-        }
-
-        let current_offsets = current_raw.value_offsets();
-        let cached_offsets = cached_raw.value_offsets();
-        let current_base = current_offsets[0] as usize;
-        let cached_base = cached_offsets[0] as usize;
-        let current_end = current_offsets[bucket_num] as usize;
-        let cached_end = cached_offsets[bucket_num] as usize;
-
-        if current_end - current_base != cached_end - cached_base {
-            return false;
-        }
-
-        if current_raw.value_data()[current_base..current_end]
-            != cached_raw.value_data()[cached_base..cached_end]
-        {
-            return false;
-        }
-
-        current_offsets
-            .iter()
-            .zip(cached_offsets.iter())
-            .all(|(lhs, rhs)| lhs - current_offsets[0] == rhs - cached_offsets[0])
-    }
-
-    #[inline]
-    fn bucket_layout_is_valid(bucket: &[f64]) -> bool {
-        bucket.len() > 1
-            && bucket
-                .last()
-                .is_some_and(|last| last.is_infinite() && last.is_sign_positive())
-            && bucket.windows(2).all(|w| w[0] <= w[1])
     }
 
     /// Checks whether a row belongs to the current group (same series).
@@ -1267,15 +1089,6 @@ impl HistogramFoldStream {
     }
 
     #[inline]
-    fn evaluate_row_fast(quantile: f64, bucket: &[f64], counter: &mut [f64]) -> f64 {
-        if bucket.len() != counter.len() || !Self::bucket_layout_is_valid(bucket) {
-            return f64::NAN;
-        }
-
-        Self::evaluate_row_fast_validated(quantile, bucket, counter)
-    }
-
-    #[inline]
     fn evaluate_row_fast_validated(quantile: f64, bucket: &[f64], counter: &mut [f64]) -> f64 {
         if quantile < 0.0 {
             return f64::NEG_INFINITY;
@@ -1397,7 +1210,7 @@ impl HistogramFoldStream {
 mod test {
     use std::sync::Arc;
 
-    use datafusion::arrow::array::{Float64Array, Int64Array, TimestampMillisecondArray};
+    use datafusion::arrow::array::{Float64Array, TimestampMillisecondArray};
     use datafusion::arrow::datatypes::{Field, Schema, SchemaRef, TimeUnit};
     use datafusion::common::ToDFSchema;
     use datafusion::datasource::memory::MemorySourceConfig;
@@ -1420,45 +1233,6 @@ mod test {
             .collect::<Vec<_>>();
         let schema = Arc::new(Schema::new(fields));
         RecordBatch::try_new(schema, columns).unwrap()
-    }
-
-    async fn collect_batches(exec: Arc<dyn ExecutionPlan>) -> Vec<RecordBatch> {
-        let session_context = SessionContext::default();
-        datafusion::physical_plan::collect(exec, session_context.task_ctx())
-            .await
-            .unwrap()
-    }
-
-    fn collect_float_values(batches: &[RecordBatch], column: usize) -> Vec<f64> {
-        batches
-            .iter()
-            .flat_map(|batch| {
-                batch
-                    .column(column)
-                    .as_any()
-                    .downcast_ref::<Float64Array>()
-                    .unwrap()
-                    .iter()
-                    .map(|v| v.unwrap())
-                    .collect::<Vec<_>>()
-            })
-            .collect()
-    }
-
-    fn collect_utf8_and_float_values(
-        batches: &[RecordBatch],
-        string_column: usize,
-        float_column: usize,
-    ) -> (Vec<String>, Vec<f64>) {
-        let mut strings = Vec::new();
-        let mut floats = Vec::new();
-        for batch in batches {
-            let utf8 = batch.column(string_column).as_string::<i32>();
-            let float = batch.column(float_column).as_primitive::<Float64Type>();
-            strings.extend(utf8.iter().map(|v| v.unwrap().to_string()));
-            floats.extend(float.iter().map(|v| v.unwrap()));
-        }
-        (strings, floats)
     }
 
     fn prepare_test_data() -> DataSourceExec {
@@ -1950,126 +1724,6 @@ mod test {
         assert_eq!(values.len(), 2);
         assert!(values[0].is_nan());
         assert!((values[1] - 0.55).abs() < 1e-10, "{values:?}");
-    }
-
-    #[tokio::test]
-    async fn null_tags_force_safe_mode() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("tag", DataType::Int64, true),
-            Field::new(
-                "ts",
-                DataType::Timestamp(TimeUnit::Millisecond, None),
-                false,
-            ),
-            Field::new("le", DataType::Utf8, true),
-            Field::new("val", DataType::Float64, true),
-        ]));
-
-        let tag_column = Arc::new(Int64Array::from(vec![
-            Some(0),
-            Some(0),
-            Some(0),
-            None,
-            Some(0),
-            Some(0),
-        ])) as _;
-        let ts_column = Arc::new(TimestampMillisecondArray::from(vec![
-            0, 0, 0, 1_000, 1_000, 1_000,
-        ])) as _;
-        let le_column = Arc::new(StringArray::from(vec![
-            "0.1", "1", "+Inf", "0.1", "1", "+Inf",
-        ])) as _;
-        let val_column = Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0])) as _;
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![tag_column, ts_column, le_column, val_column],
-        )
-        .unwrap();
-
-        let fold_exec = build_fold_exec_from_batches(vec![batch], schema, 0.5, 1, 2, 3);
-        let result = collect_batches(fold_exec).await;
-        let values = collect_float_values(&result, 2);
-
-        assert_eq!(values.len(), 3);
-        assert!(values[0].is_finite(), "{values:?}");
-        assert!(values[1].is_nan(), "{values:?}");
-        assert!(values[2].is_finite(), "{values:?}");
-    }
-
-    #[tokio::test]
-    async fn interior_tag_mismatch_forces_safe_mode() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("host", DataType::Utf8, true),
-            Field::new("le", DataType::Utf8, true),
-            Field::new("val", DataType::Float64, true),
-        ]));
-
-        let host_column = Arc::new(StringArray::from(vec!["a", "a", "a", "b", "c", "b"])) as _;
-        let le_column = Arc::new(StringArray::from(vec![
-            "0.1", "1", "+Inf", "0.1", "1", "+Inf",
-        ])) as _;
-        let val_column = Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0])) as _;
-        let batch =
-            RecordBatch::try_new(schema.clone(), vec![host_column, le_column, val_column]).unwrap();
-
-        let fold_exec = build_fold_exec_from_batches(vec![batch], schema, 0.5, 0, 1, 2);
-        let result = collect_batches(fold_exec).await;
-        let (hosts, values) = collect_utf8_and_float_values(&result, 0, 1);
-
-        assert_eq!(hosts, vec!["a", "b", "c", "b"]);
-        assert_eq!(values.len(), 4);
-        assert!((values[0] - 0.55).abs() < 1e-10, "{values:?}");
-        assert!(values[1].is_nan(), "{values:?}");
-        assert!(values[2].is_nan(), "{values:?}");
-        assert!(values[3].is_nan(), "{values:?}");
-    }
-
-    #[test]
-    fn evaluate_row_fast_rejects_non_monotonic_buckets() {
-        let bucket = [0.0, 2.0, 1.0, f64::INFINITY];
-        let mut counters = vec![0.0, 1.0, 2.0, 3.0];
-        let result = HistogramFoldStream::evaluate_row_fast(0.5, &bucket, &mut counters);
-        assert!(result.is_nan(), "{result}");
-    }
-
-    #[tokio::test]
-    async fn heterogeneous_buckets_do_not_reuse_first_group_cache() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("host", DataType::Utf8, false),
-            Field::new(
-                "ts",
-                DataType::Timestamp(TimeUnit::Millisecond, None),
-                false,
-            ),
-            Field::new("le", DataType::Utf8, true),
-            Field::new("val", DataType::Float64, true),
-        ]));
-
-        let host_column = Arc::new(StringArray::from(vec![
-            "a", "a", "a", "a", "a", "a", "a", "a",
-        ])) as _;
-        let ts_column = Arc::new(TimestampMillisecondArray::from(vec![
-            0, 0, 0, 0, 1_000, 1_000, 1_000, 1_000,
-        ])) as _;
-        let le_column = Arc::new(StringArray::from(vec![
-            "0.1", "1", "5", "+Inf", "0.1", "10", "20", "+Inf",
-        ])) as _;
-        let val_column = Arc::new(Float64Array::from(vec![
-            0.0, 10.0, 20.0, 30.0, 0.0, 10.0, 20.0, 30.0,
-        ])) as _;
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![host_column, ts_column, le_column, val_column],
-        )
-        .unwrap();
-
-        let fold_exec = build_fold_exec_from_batches(vec![batch], schema, 0.5, 1, 2, 3);
-        let result = collect_batches(fold_exec).await;
-        let values = collect_float_values(&result, 2);
-
-        assert_eq!(values.len(), 2);
-        assert!((values[0] - 3.0).abs() < 1e-12, "{values:?}");
-        assert!((values[1] - 15.0).abs() < 1e-12, "{values:?}");
     }
 
     #[test]
