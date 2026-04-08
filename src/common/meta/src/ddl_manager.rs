@@ -72,7 +72,6 @@ use crate::rpc::ddl::{
     CreateTableTask, CreateViewTask, DropDatabaseTask, DropFlowTask, DropTableTask, DropViewTask,
     QueryContext, SubmitDdlTaskRequest, SubmitDdlTaskResponse, TruncateTableTask,
 };
-use crate::rpc::router::RegionRoute;
 
 /// A configurator that customizes or enhances a [`DdlManager`].
 #[async_trait::async_trait]
@@ -521,15 +520,9 @@ impl DdlManager {
         &self,
         truncate_table_task: TruncateTableTask,
         table_info_value: DeserializedValueWithBytes<TableInfoValue>,
-        region_routes: Vec<RegionRoute>,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
-        let procedure = TruncateTableProcedure::new(
-            truncate_table_task,
-            table_info_value,
-            region_routes,
-            context,
-        );
+        let procedure = TruncateTableProcedure::new(truncate_table_task, table_info_value, context);
 
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
@@ -658,19 +651,16 @@ async fn handle_truncate_table_task(
     let table_metadata_manager = &ddl_manager.table_metadata_manager();
     let table_ref = truncate_table_task.table_ref();
 
-    let (table_info_value, table_route_value) =
-        table_metadata_manager.get_full_table_info(table_id).await?;
-
-    let table_info_value = table_info_value.with_context(|| TableInfoNotFoundSnafu {
-        table: table_ref.to_string(),
-    })?;
-
-    let table_route_value = table_route_value.context(TableRouteNotFoundSnafu { table_id })?;
-
-    let table_route = table_route_value.into_inner().region_routes()?.clone();
+    let table_info_value = table_metadata_manager
+        .table_info_manager()
+        .get(table_id)
+        .await?
+        .with_context(|| TableInfoNotFoundSnafu {
+            table: table_ref.to_string(),
+        })?;
 
     let (id, _) = ddl_manager
-        .submit_truncate_table_task(truncate_table_task, table_info_value, table_route)
+        .submit_truncate_table_task(truncate_table_task, table_info_value)
         .await?;
 
     info!("Table: {table_id} is truncated via procedure_id {id:?}");

@@ -96,10 +96,25 @@ impl State for DropDatabaseExecutor {
     async fn next(
         &mut self,
         ddl_ctx: &DdlContext,
-        _ctx: &mut DropDatabaseContext,
+        ctx: &mut DropDatabaseContext,
     ) -> Result<(Box<dyn State>, Status)> {
         self.register_dropping_regions(ddl_ctx)?;
         let executor = DropTableExecutor::new(self.table_name.clone(), self.table_id, true);
+        if ctx.retrying {
+            info!(
+                "Remapping region routes addresses for retrying drop regions for table_id: {}",
+                self.table_id
+            );
+            let storage = ddl_ctx
+                .table_metadata_manager
+                .table_route_manager()
+                .table_route_storage();
+            // The peer addresses may change during retries,
+            // so we always remap the region routes.
+            storage
+                .remap_region_routes(&mut self.physical_region_routes)
+                .await?;
+        }
         // Deletes metadata for table permanently.
         let table_route_value = TableRouteValue::new(
             self.table_id,
@@ -206,6 +221,7 @@ mod tests {
                 schema: DEFAULT_SCHEMA_NAME.to_string(),
                 drop_if_exists: false,
                 tables: None,
+                retrying: false,
             };
             let (state, status) = state.next(&ddl_context, &mut ctx).await.unwrap();
             assert!(!status.need_persist());
@@ -218,6 +234,7 @@ mod tests {
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             drop_if_exists: false,
             tables: None,
+            retrying: false,
         };
         let mut state = DropDatabaseExecutor::new(
             physical_table_id,
@@ -258,6 +275,7 @@ mod tests {
                 schema: DEFAULT_SCHEMA_NAME.to_string(),
                 drop_if_exists: false,
                 tables: None,
+                retrying: false,
             };
             let (state, status) = state.next(&ddl_context, &mut ctx).await.unwrap();
             assert!(!status.need_persist());
@@ -270,6 +288,7 @@ mod tests {
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             drop_if_exists: false,
             tables: None,
+            retrying: false,
         };
         let mut state = DropDatabaseExecutor::new(
             logical_table_id,
@@ -360,6 +379,7 @@ mod tests {
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             drop_if_exists: false,
             tables: None,
+            retrying: false,
         };
         let err = state.next(&ddl_context, &mut ctx).await.unwrap_err();
         assert!(err.is_retry_later());
@@ -389,6 +409,7 @@ mod tests {
                 schema: DEFAULT_SCHEMA_NAME.to_string(),
                 drop_if_exists: false,
                 tables: None,
+                retrying: false,
             };
             state.recover(&ddl_context).unwrap();
             assert_eq!(state.dropping_regions.len(), 1);

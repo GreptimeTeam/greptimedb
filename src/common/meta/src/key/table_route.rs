@@ -675,7 +675,7 @@ impl TableRouteStorage {
     pub async fn get(&self, table_id: TableId) -> Result<Option<TableRouteValue>> {
         let mut table_route = self.get_inner(table_id).await?;
         if let Some(table_route) = &mut table_route {
-            self.remap_route_address(table_route).await?;
+            self.remap_table_route(table_route).await?;
         };
 
         Ok(table_route)
@@ -697,7 +697,7 @@ impl TableRouteStorage {
     ) -> Result<Option<DeserializedValueWithBytes<TableRouteValue>>> {
         let mut table_route = self.get_with_raw_bytes_inner(table_id).await?;
         if let Some(table_route) = &mut table_route {
-            self.remap_route_address(table_route).await?;
+            self.remap_table_route(table_route).await?;
         };
 
         Ok(table_route)
@@ -791,10 +791,7 @@ impl TableRouteStorage {
         Ok(())
     }
 
-    pub(crate) async fn remap_route_address(
-        &self,
-        table_route: &mut TableRouteValue,
-    ) -> Result<()> {
+    pub(crate) async fn remap_table_route(&self, table_route: &mut TableRouteValue) -> Result<()> {
         let keys = extract_address_keys(table_route).into_iter().collect();
         let node_addrs = self.get_node_addresses(keys).await?;
         set_addresses(&node_addrs, table_route)?;
@@ -802,7 +799,7 @@ impl TableRouteStorage {
         Ok(())
     }
 
-    pub(crate) async fn remap_region_routes_addresses(
+    pub(crate) async fn remap_region_routes(
         &self,
         region_routes: &mut [RegionRoute],
     ) -> Result<()> {
@@ -1124,7 +1121,7 @@ mod tests {
         .unwrap();
 
         table_route_storage
-            .remap_route_address(&mut table_route)
+            .remap_table_route(&mut table_route)
             .await
             .unwrap();
 

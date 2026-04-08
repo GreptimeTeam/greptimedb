@@ -154,8 +154,8 @@ impl DropTableProcedure {
         Ok(Status::executing(true))
     }
 
-    pub async fn on_datanode_drop_regions(&mut self, is_retry: bool) -> Result<Status> {
-        if is_retry {
+    pub async fn on_datanode_drop_regions(&mut self, retrying: bool) -> Result<Status> {
+        if retrying {
             info!(
                 "Remapping region routes addresses for retrying drop regions for table_id: {}",
                 self.data.table_id()
@@ -168,7 +168,7 @@ impl DropTableProcedure {
             // The peer addresses may change during retries,
             // so we always remap the region routes.
             storage
-                .remap_region_routes_addresses(&mut self.data.physical_region_routes)
+                .remap_region_routes(&mut self.data.physical_region_routes)
                 .await?;
         }
 
@@ -243,15 +243,8 @@ impl Procedure for DropTableProcedure {
             DropTableState::DeleteMetadata => self.on_delete_metadata().await,
             DropTableState::InvalidateTableCache => self.on_broadcast().await,
             DropTableState::DatanodeDropRegions => {
-                let is_retry = ctx
-                    .provider
-                    .procedure_state(ctx.procedure_id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|s| s.is_retrying())
-                    .unwrap_or(false);
-                self.on_datanode_drop_regions(is_retry).await
+                let retrying = ctx.is_retrying().await.unwrap_or(false);
+                self.on_datanode_drop_regions(retrying).await
             }
             DropTableState::DeleteTombstone => self.on_delete_metadata_tombstone().await,
         }
