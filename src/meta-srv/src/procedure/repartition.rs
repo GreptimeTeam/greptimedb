@@ -1252,7 +1252,7 @@ mod tests {
             .execute(&TestingEnv::procedure_context())
             .await
             .unwrap();
-        assert!(dispatch_status.need_persist());
+        assert!(!dispatch_status.need_persist());
         let subprocedure_ids = extract_subprocedure_ids(dispatch_status);
         assert_eq!(subprocedure_ids.len(), 1);
         assert_parent_state::<Collect>(&procedure);

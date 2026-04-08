@@ -106,7 +106,7 @@ impl State for Dispatch {
 
         Ok((
             Box::new(Collect::new(procedure_metas)),
-            Status::suspended(procedures, true),
+            Status::suspended(procedures, false),
         ))
     }
 
