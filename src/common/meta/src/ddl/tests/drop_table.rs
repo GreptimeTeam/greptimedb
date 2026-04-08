@@ -146,7 +146,7 @@ async fn test_on_datanode_drop_regions() {
     // Drop table
     let mut procedure = DropTableProcedure::new(task, ddl_context);
     procedure.on_prepare().await.unwrap();
-    procedure.on_datanode_drop_regions().await.unwrap();
+    procedure.on_datanode_drop_regions(false).await.unwrap();
 
     let check = |peer: Peer,
                  request: RegionRequest,
