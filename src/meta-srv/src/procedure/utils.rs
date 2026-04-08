@@ -190,6 +190,23 @@ pub(crate) async fn flush_region(
             operation: "Flush regions",
         }
         .fail(),
+        Err(error::Error::MailboxChannelClosed { .. }) => match error_strategy {
+            ErrorStrategy::Ignore => {
+                warn!(
+                    "Failed to flush regions({:?}), the datanode({}) is unreachable(MailboxChannelClosed). Skip flush operation.",
+                    region_ids, datanode
+                );
+                Ok(())
+            }
+            ErrorStrategy::Retry => error::RetryLaterSnafu {
+                reason: format!(
+                    "Mailbox closed when sending flush region to datanode {:?}, elapsed: {:?}",
+                    datanode,
+                    now.elapsed()
+                ),
+            }
+            .fail()?,
+        },
         Err(err) => Err(err),
     }
 }
