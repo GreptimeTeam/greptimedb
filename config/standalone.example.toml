@@ -173,6 +173,17 @@ enable = true
 enable = true
 ## Whether to store the data from Prometheus remote write in metric engine.
 with_metric_engine = true
+## Interval to flush pending rows batcher.
+## Set to "0s" to disable batching mode in Prometheus Remote Write endpoint
+#+pending_rows_flush_interval = "0s"
+## Max rows per pending batch before triggering a flush.
+#+max_batch_rows = 100000
+## Max number of concurrent batch flushes.
+#+max_concurrent_flushes = 256
+## Capacity of the pending batch worker channel.
+#+worker_channel_capacity = 65526
+## Max inflight write requests before backpressure.
+#+max_inflight_requests = 3000
 
 ## The WAL options.
 [wal]

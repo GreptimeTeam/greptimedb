@@ -69,6 +69,11 @@
 | `prom_store` | -- | -- | Prometheus remote storage options |
 | `prom_store.enable` | Bool | `true` | Whether to enable Prometheus remote write and read in HTTP API. |
 | `prom_store.with_metric_engine` | Bool | `true` | Whether to store the data from Prometheus remote write in metric engine. |
+| `prom_store.pending_rows_flush_interval` | String | `0s` | Interval to flush pending rows batcher.<br/>Set to "0s" to disable batching mode in Prometheus Remote Write endpoint |
+| `prom_store.max_batch_rows` | Integer | `100000` | Max rows per pending batch before triggering a flush. |
+| `prom_store.max_concurrent_flushes` | Integer | `256` | Max number of concurrent batch flushes. |
+| `prom_store.worker_channel_capacity` | Integer | `65526` | Capacity of the pending batch worker channel. |
+| `prom_store.max_inflight_requests` | Integer | `3000` | Max inflight write requests before backpressure. |
 | `wal` | -- | -- | The WAL options. |
 | `wal.provider` | String | `raft_engine` | The provider of the WAL.<br/>- `raft_engine`: the wal is stored in the local file system by raft-engine.<br/>- `kafka`: it's remote wal that data is stored in Kafka. |
 | `wal.dir` | String | Unset | The directory to store the WAL files.<br/>**It's only used when the provider is `raft_engine`**. |
@@ -292,6 +297,11 @@
 | `prom_store` | -- | -- | Prometheus remote storage options |
 | `prom_store.enable` | Bool | `true` | Whether to enable Prometheus remote write and read in HTTP API. |
 | `prom_store.with_metric_engine` | Bool | `true` | Whether to store the data from Prometheus remote write in metric engine. |
+| `prom_store.pending_rows_flush_interval` | String | `0s` | Interval to flush pending rows batcher.<br/>Set to "0s" to disable batching mode in Prometheus Remote Write endpoint |
+| `prom_store.max_batch_rows` | Integer | `100000` | Max rows per pending batch before triggering a flush. |
+| `prom_store.max_concurrent_flushes` | Integer | `256` | Max number of concurrent batch flushes. |
+| `prom_store.worker_channel_capacity` | Integer | `65526` | Capacity of the pending batch worker channel. |
+| `prom_store.max_inflight_requests` | Integer | `3000` | Max inflight write requests before backpressure. |
 | `meta_client` | -- | -- | The metasrv client options. |
 | `meta_client.metasrv_addrs` | Array | -- | The addresses of the metasrv. |
 | `meta_client.timeout` | String | `3s` | Operation timeout. |
