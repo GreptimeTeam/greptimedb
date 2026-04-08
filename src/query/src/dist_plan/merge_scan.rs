@@ -43,7 +43,6 @@ use greptime_proto::v1::region::RegionRequestHeader;
 use meter_core::data::ReadItem;
 use meter_macros::read_meter;
 use session::context::QueryContextRef;
-use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 use store_api::storage::RegionId;
 use table::table_name::TableName;
 use tokio::time::Instant;
@@ -429,35 +428,20 @@ impl MergeScanExec {
             return None;
         }
 
-        // Metric-engine scans can satisfy any hash distribution that includes `__tsid`.
-        // Equal requested keys also share the same `__tsid`, and equal `__tsid` values stay
-        // co-located across MergeScan partitions.
-        let overlaps = if self
-            .arrow_schema
-            .column_with_name(DATA_SCHEMA_TSID_COLUMN_NAME)
-            .is_some()
-            && hash_exprs.iter().any(|expr| {
+        let all_partition_col_aliases: HashSet<_> = self
+            .partition_cols
+            .values()
+            .flat_map(|aliases| aliases.iter().map(|c| c.name()))
+            .collect();
+        let overlaps: Vec<_> = hash_exprs
+            .iter()
+            .filter(|expr| {
                 expr.as_any()
                     .downcast_ref::<Column>()
-                    .is_some_and(|col_expr| col_expr.name() == DATA_SCHEMA_TSID_COLUMN_NAME)
-            }) {
-            hash_exprs
-        } else {
-            let all_partition_col_aliases: HashSet<_> = self
-                .partition_cols
-                .values()
-                .flat_map(|aliases| aliases.iter().map(|c| c.name()))
-                .collect();
-            hash_exprs
-                .iter()
-                .filter(|expr| {
-                    expr.as_any()
-                        .downcast_ref::<Column>()
-                        .is_some_and(|col_expr| all_partition_col_aliases.contains(col_expr.name()))
-                })
-                .cloned()
-                .collect()
-        };
+                    .is_some_and(|col_expr| all_partition_col_aliases.contains(col_expr.name()))
+            })
+            .cloned()
+            .collect();
 
         if overlaps.is_empty() {
             return None;

@@ -248,12 +248,18 @@ mod tests {
 
     fn test_merge_scan_exec(schema: SchemaRef) -> MergeScanExec {
         let session_state = SessionStateBuilder::new().with_default_features().build();
-        let partition_cols = BTreeMap::from([(
-            DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
-            BTreeSet::from([datafusion_common::Column::from_name(
-                DATA_SCHEMA_TSID_COLUMN_NAME,
-            )]),
-        )]);
+        let partition_cols = BTreeMap::from([
+            (
+                DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
+                BTreeSet::from([datafusion_common::Column::from_name(
+                    DATA_SCHEMA_TSID_COLUMN_NAME,
+                )]),
+            ),
+            (
+                "greptime_timestamp".to_string(),
+                BTreeSet::from([datafusion_common::Column::from_name("greptime_timestamp")]),
+            ),
+        ]);
         let plan = LogicalPlanBuilder::empty(false).build().unwrap();
 
         MergeScanExec::new(

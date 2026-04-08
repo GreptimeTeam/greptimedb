@@ -727,7 +727,6 @@ impl PromPlanner {
                     // if left plan or right plan tag is empty, means case like `scalar(...) + host` or `host + scalar(...)`
                     // under this case we only join on time index
                     left_context.tag_columns.is_empty() || right_context.tag_columns.is_empty(),
-                    is_comparison_op,
                     modifier,
                 )?;
                 let join_plan_schema = join_plan.schema().clone();
@@ -769,7 +768,12 @@ impl PromPlanner {
                             }
                             _ => (&left_table_ref, &left_context),
                         };
-                    self.project_binary_join_side(filtered, project_table_ref, project_context)
+                    self.project_binary_join_side(
+                        filtered,
+                        project_table_ref,
+                        project_context,
+                        false,
+                    )
                 } else {
                     self.projection_for_each_field_column(join_plan, bin_expr_builder)
                 }
@@ -782,6 +786,7 @@ impl PromPlanner {
         input: LogicalPlan,
         table_ref: &TableReference,
         context: &PromPlannerContext,
+        keep_tsid: bool,
     ) -> Result<LogicalPlan> {
         let schema = input.schema();
 
@@ -818,7 +823,7 @@ impl PromPlanner {
         // Preserve `__tsid` if present, so it can still be used internally downstream. It's
         // stripped from the final output anyway.
         if let Some(tsid_col) =
-            Self::optional_tsid_projection(schema, Some(table_ref), context.use_tsid)
+            Self::optional_tsid_projection(schema, Some(table_ref), keep_tsid && context.use_tsid)
         {
             project_exprs.push(tsid_col);
         }
@@ -832,6 +837,7 @@ impl PromPlanner {
         // Update context to reflect the projected schema. Don't keep a table qualifier since
         // the result is a derived expression.
         self.ctx = context.clone();
+        self.ctx.use_tsid = keep_tsid && context.use_tsid;
         self.ctx.table_name = None;
         self.ctx.schema_name = None;
 
@@ -3439,11 +3445,9 @@ impl PromPlanner {
         left: &LogicalPlan,
         right: &LogicalPlan,
         only_join_time_index: bool,
-        is_comparison_op: bool,
         modifier: &Option<BinModifier>,
     ) -> (BTreeSet<String>, BTreeSet<String>) {
-        let use_tsid_join = !is_comparison_op
-            && !only_join_time_index
+        let use_tsid_join = !only_join_time_index
             && modifier.as_ref().is_none_or(|modifier| {
                 modifier.matching.is_none()
                     && matches!(modifier.card, VectorMatchCardinality::OneToOne)
@@ -3504,16 +3508,10 @@ impl PromPlanner {
         left_time_index_column: Option<String>,
         right_time_index_column: Option<String>,
         only_join_time_index: bool,
-        is_comparison_op: bool,
         modifier: &Option<BinModifier>,
     ) -> Result<LogicalPlan> {
-        let (mut left_tag_columns, mut right_tag_columns) = self.binary_join_key_columns(
-            &left,
-            &right,
-            only_join_time_index,
-            is_comparison_op,
-            modifier,
-        );
+        let (mut left_tag_columns, mut right_tag_columns) =
+            self.binary_join_key_columns(&left, &right, only_join_time_index, modifier);
 
         // push time index column if it exists
         if let (Some(left_time_index_column), Some(right_time_index_column)) =
@@ -5048,8 +5046,49 @@ mod test {
     }
 
     #[tokio::test]
-    async fn comparison_binary_join_does_not_use_tsid() {
+    async fn comparison_binary_join_uses_tsid_but_filtered_result_drops_it() {
         let eval_stmt = build_eval_stmt("some_metric > some_alt_metric");
+
+        let table_provider = build_test_table_provider_with_tsid(
+            &[
+                (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+                (
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                    "some_alt_metric".to_string(),
+                ),
+            ],
+            2,
+            1,
+        )
+        .await;
+        let mut planner = PromPlanner {
+            table_provider,
+            ctx: PromPlannerContext::from_eval_stmt(&eval_stmt),
+        };
+        let plan = planner
+            .prom_expr_to_plan(&eval_stmt.expr, &build_query_engine_state())
+            .await
+            .unwrap();
+
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(
+            plan_str.contains("some_metric.__tsid = some_alt_metric.__tsid"),
+            "{plan_str}"
+        );
+        assert!(
+            !plan
+                .schema()
+                .fields()
+                .iter()
+                .any(|field| field.name() == DATA_SCHEMA_TSID_COLUMN_NAME),
+            "{plan_str}"
+        );
+        assert!(!planner.ctx.use_tsid, "{plan_str}");
+    }
+
+    #[tokio::test]
+    async fn comparison_bool_binary_join_uses_tsid_when_available() {
+        let eval_stmt = build_eval_stmt("some_metric > bool some_alt_metric");
 
         let table_provider = build_test_table_provider_with_tsid(
             &[
@@ -5069,11 +5108,12 @@ mod test {
                 .unwrap();
 
         let plan_str = plan.display_indent_schema().to_string();
-        assert!(!plan_str.contains("__tsid ="), "{plan_str}");
         assert!(
-            plan_str.contains("some_metric.tag_1 = some_alt_metric.tag_1"),
+            plan_str.contains("some_metric.__tsid = some_alt_metric.__tsid"),
             "{plan_str}"
         );
+        assert!(!plan_str.contains("tag_0 ="), "{plan_str}");
+        assert!(!plan_str.contains("tag_1 ="), "{plan_str}");
     }
 
     #[tokio::test]

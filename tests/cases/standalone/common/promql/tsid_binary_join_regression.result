@@ -1,6 +1,6 @@
 -- Regression test for TSID-backed PromQL binary joins on metric-engine tables.
--- Default arithmetic joins should use `__tsid`, while label modifiers and comparison
--- filters must continue to use label-based matching.
+-- Default arithmetic and comparison joins should use `__tsid` when matching is the
+-- default one-to-one case. Label modifiers still have to stay label-based.
 CREATE TABLE tsid_binary_join_physical (
   ts TIMESTAMP(3) TIME INDEX,
   greptime_value DOUBLE,
@@ -68,10 +68,10 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / tsid_binary_join_right;
 +-+-+-+
 | 0_| 0_|_ProjectionExec: expr=[host@2 as host, job@3 as job, ts@5 as ts, __tsid@4 as __tsid, greptime_value@0 / greptime_value@1 as tsid_binary_join_left.greptime_value / tsid_binary_join_right.greptime_value] REDACTED
 |_|_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(__tsid@1, __tsid@3), (ts@2, ts@4)], projection=[greptime_value@0, greptime_value@3, host@4, job@5, __tsid@6, ts@7], NullsEqual: true REDACTED
+|_|_|_RepartitionExec: partitioning=Hash([__tsid@1, ts@2], 32), input_partitions=32 REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@0 as greptime_value, __tsid@3 as __tsid, ts@4 as ts] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_MergeScanExec: REDACTED
-|_|_|_CooperativeExec REDACTED
+|_|_|_RepartitionExec: partitioning=Hash([__tsid@3, ts@4], 32), input_partitions=32 REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
@@ -124,7 +124,8 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / ignoring(host) tsid_binary_join
 |_|_| Total rows: 4_|
 +-+-+-+
 
--- Comparison filters must keep label-based matching semantics.
+-- Comparison filters can join on `__tsid`, but the filtered result must still behave like
+-- a regular derived vector downstream.
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (-+) -
@@ -136,12 +137,47 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left > tsid_binary_join_right;
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_ProjectionExec: expr=[ts@4 as ts, greptime_value@0 as greptime_value, host@1 as host, job@2 as job, __tsid@3 as __tsid] REDACTED
-|_|_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(host@1, host@1), (job@2, job@2), (ts@4, ts@3)], filter=greptime_value@1 < greptime_value@0, projection=[greptime_value@0, host@1, job@2, __tsid@3, ts@4], NullsEqual: true REDACTED
-|_|_|_RepartitionExec: partitioning=Hash([host@1, job@2, ts@4], 32), input_partitions=32 REDACTED
+| 0_| 0_|_ProjectionExec: expr=[ts@3 as ts, greptime_value@0 as greptime_value, host@1 as host, job@2 as job] REDACTED
+|_|_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(__tsid@3, __tsid@1), (ts@4, ts@2)], filter=greptime_value@1 < greptime_value@0, projection=[greptime_value@0, host@1, job@2, ts@4], NullsEqual: true REDACTED
+|_|_|_RepartitionExec: partitioning=Hash([__tsid@3, ts@4], 32), input_partitions=32 REDACTED
 |_|_|_MergeScanExec: REDACTED
-|_|_|_RepartitionExec: partitioning=Hash([host@1, job@2, ts@3], 32), input_partitions=32 REDACTED
-|_|_|_ProjectionExec: expr=[greptime_value@0 as greptime_value, host@1 as host, job@2 as job, ts@4 as ts] REDACTED
+|_|_|_RepartitionExec: partitioning=Hash([__tsid@1, ts@2], 32), input_partitions=32 REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@0 as greptime_value, __tsid@3 as __tsid, ts@4 as ts] REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
+|_|_|_|
+| 1_| 0_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
+|_|_|_|
+|_|_| Total rows: 4_|
++-+-+-+
+
+-- `bool` comparison should follow the same TSID-backed matching path.
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+TQL ANALYZE (0, 5, '5s') tsid_binary_join_left > bool tsid_binary_join_right;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_ProjectionExec: expr=[host@2 as host, job@3 as job, ts@5 as ts, __tsid@4 as __tsid, CAST(greptime_value@1 < greptime_value@0 AS Float64) as tsid_binary_join_left.greptime_value > tsid_binary_join_right.greptime_value] REDACTED
+|_|_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(__tsid@1, __tsid@3), (ts@2, ts@4)], projection=[greptime_value@0, greptime_value@3, host@4, job@5, __tsid@6, ts@7], NullsEqual: true REDACTED
+|_|_|_RepartitionExec: partitioning=Hash([__tsid@1, ts@2], 32), input_partitions=32 REDACTED
+|_|_|_ProjectionExec: expr=[greptime_value@0 as greptime_value, __tsid@3 as __tsid, ts@4 as ts] REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_RepartitionExec: partitioning=Hash([__tsid@3, ts@4], 32), input_partitions=32 REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED

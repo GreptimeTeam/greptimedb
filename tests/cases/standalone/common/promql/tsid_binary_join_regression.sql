@@ -1,6 +1,6 @@
 -- Regression test for TSID-backed PromQL binary joins on metric-engine tables.
--- Default arithmetic joins should use `__tsid`, while label modifiers and comparison
--- filters must continue to use label-based matching.
+-- Default arithmetic and comparison joins should use `__tsid` when matching is the
+-- default one-to-one case. Label modifiers still have to stay label-based.
 
 CREATE TABLE tsid_binary_join_physical (
   ts TIMESTAMP(3) TIME INDEX,
@@ -63,7 +63,8 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / tsid_binary_join_right;
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / ignoring(host) tsid_binary_join_right;
 
--- Comparison filters must keep label-based matching semantics.
+-- Comparison filters can join on `__tsid`, but the filtered result must still behave like
+-- a regular derived vector downstream.
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (-+) -
@@ -71,6 +72,15 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / ignoring(host) tsid_binary_join
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 TQL ANALYZE (0, 5, '5s') tsid_binary_join_left > tsid_binary_join_right;
+
+-- `bool` comparison should follow the same TSID-backed matching path.
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+TQL ANALYZE (0, 5, '5s') tsid_binary_join_left > bool tsid_binary_join_right;
 
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 5, '5s') tsid_binary_join_left / tsid_binary_join_right;
