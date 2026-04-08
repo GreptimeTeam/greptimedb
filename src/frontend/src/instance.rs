@@ -485,7 +485,10 @@ fn derive_timeout(stmt: &Statement, query_ctx: &QueryContextRef) -> Option<Durat
 
 /// Derives timeout for plan execution. When statement is not available,
 /// applies timeout for PostgreSQL only (can't determine readonly status without statement).
-fn derive_timeout_for_plan(stmt: Option<&Statement>, query_ctx: &QueryContextRef) -> Option<Duration> {
+fn derive_timeout_for_plan(
+    stmt: Option<&Statement>,
+    query_ctx: &QueryContextRef,
+) -> Option<Duration> {
     match stmt {
         Some(s) => derive_timeout(s, query_ctx),
         None => {
@@ -608,7 +611,7 @@ impl Instance {
 
     async fn exec_plan(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output> {
         self.query_engine
-            .execute(plan.clone(), query_ctx)
+            .execute(plan, query_ctx)
             .await
             .context(ExecLogicalPlanSnafu)
     }
@@ -623,18 +626,13 @@ impl Instance {
         match timeout {
             Some(timeout) => {
                 let start = tokio::time::Instant::now();
-                let output = tokio::time::timeout(
-                    timeout,
-                    self.exec_plan(plan, query_ctx),
-                )
-                .await
-                .map_err(|_| StatementTimeoutSnafu.build())??;
+                let output = tokio::time::timeout(timeout, self.exec_plan(plan, query_ctx))
+                    .await
+                    .map_err(|_| StatementTimeoutSnafu.build())??;
                 let remaining_timeout = timeout.checked_sub(start.elapsed()).unwrap_or_default();
                 attach_timeout(output, remaining_timeout)
             }
-            None => {
-                self.exec_plan(plan, query_ctx).await
-            }
+            None => self.exec_plan(plan, query_ctx).await,
         }
     }
 
@@ -674,7 +672,7 @@ impl Instance {
                 slow_query_timer,
             );
 
-            let query_fut = self.exec_plan_with_timeout(Some(stmt), plan, query_ctx.clone());
+            let query_fut = self.exec_plan_with_timeout(Some(stmt), plan, query_ctx);
 
             CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
                 .await
