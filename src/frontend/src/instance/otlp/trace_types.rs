@@ -46,14 +46,43 @@ pub(super) struct PendingTraceColumnRewrite {
     pub(super) column_name: String,
 }
 
+/// Returns the canonical scalar type for flattened trace semconv columns whose
+/// types are stable in the current OpenTelemetry semantic conventions.
+pub(super) fn trace_semconv_fixed_type(column_name: &str) -> Option<ColumnDataType> {
+    match column_name {
+        "resource_attributes.service.name"
+        | "resource_attributes.service.instance.id"
+        | "span_attributes.http.request.method"
+        | "span_attributes.server.address"
+        | "span_attributes.rpc.system.name"
+        | "span_attributes.rpc.service"
+        | "span_attributes.rpc.method"
+        | "span_attributes.db.system.name"
+        | "span_attributes.db.namespace"
+        | "span_attributes.messaging.system"
+        | "span_attributes.error.type" => Some(ColumnDataType::String),
+        "span_attributes.http.response.status_code"
+        | "span_attributes.server.port"
+        | "span_attributes.network.peer.port" => Some(ColumnDataType::Int64),
+        "span_attributes.messaging.destination.anonymous"
+        | "span_attributes.messaging.destination.temporary" => Some(ColumnDataType::Boolean),
+        _ => None,
+    }
+}
+
 /// Picks the reconciliation action for one trace column.
 ///
 /// Existing table schema is authoritative unless the only incompatible case is
 /// widening an existing Int64 column to Float64 for incoming Int64/Float64 data.
 pub(super) fn choose_trace_reconcile_decision(
+    column_name: &str,
     observed_types: &[ColumnDataType],
     existing_type: Option<ColumnDataType>,
 ) -> ServerResult<Option<TraceReconcileDecision>> {
+    if let Some(fixed_type) = trace_semconv_fixed_type(column_name) {
+        return choose_fixed_trace_reconcile_decision(fixed_type, observed_types, existing_type);
+    }
+
     let Some(existing_type) = existing_type else {
         return resolve_new_trace_column_type(observed_types.iter().copied())
             .map(|target_type| target_type.map(TraceReconcileDecision::UseRequestLocal))
@@ -83,6 +112,37 @@ pub(super) fn choose_trace_reconcile_decision(
         return Ok(Some(TraceReconcileDecision::AlterExistingTo(
             ColumnDataType::Float64,
         )));
+    }
+
+    error::InvalidParameterSnafu {
+        reason: "unsupported trace type mix".to_string(),
+    }
+    .fail()
+}
+
+fn choose_fixed_trace_reconcile_decision(
+    fixed_type: ColumnDataType,
+    observed_types: &[ColumnDataType],
+    existing_type: Option<ColumnDataType>,
+) -> ServerResult<Option<TraceReconcileDecision>> {
+    let Some(existing_type) = existing_type else {
+        return Ok(Some(TraceReconcileDecision::UseRequestLocal(fixed_type)));
+    };
+
+    if existing_type == fixed_type {
+        return Ok(Some(TraceReconcileDecision::UseExisting(fixed_type)));
+    }
+
+    if fixed_type == ColumnDataType::Float64
+        && existing_type == ColumnDataType::Int64
+        && observed_types.iter().all(|observed_type| {
+            matches!(
+                observed_type,
+                ColumnDataType::Int64 | ColumnDataType::Float64
+            )
+        })
+    {
+        return Ok(Some(TraceReconcileDecision::AlterExistingTo(fixed_type)));
     }
 
     error::InvalidParameterSnafu {
@@ -134,6 +194,7 @@ pub(super) fn enrich_trace_reconcile_error(
     column_name: &str,
     observed_types: &[ColumnDataType],
     existing_type: Option<ColumnDataType>,
+    fixed_type: Option<ColumnDataType>,
 ) -> servers::error::Error {
     let observed_types = observed_types
         .iter()
@@ -142,12 +203,20 @@ pub(super) fn enrich_trace_reconcile_error(
         .join(", ");
 
     error::InvalidParameterSnafu {
-        reason: match existing_type {
-            Some(existing_type) => format!(
+        reason: match (existing_type, fixed_type) {
+            (Some(existing_type), Some(fixed_type)) => format!(
+                "failed to reconcile trace column '{}' in table '{}' with observed types [{}] against existing {:?} and fixed semconv {:?}",
+                column_name, table_name, observed_types, existing_type, fixed_type
+            ),
+            (Some(existing_type), None) => format!(
                 "failed to reconcile trace column '{}' in table '{}' with observed types [{}] against existing {:?}",
                 column_name, table_name, observed_types, existing_type
             ),
-            None => format!(
+            (None, Some(fixed_type)) => format!(
+                "failed to reconcile trace column '{}' in table '{}' with observed types [{}] and fixed semconv {:?}",
+                column_name, table_name, observed_types, fixed_type
+            ),
+            (None, None) => format!(
                 "failed to reconcile trace column '{}' in table '{}' with observed types [{}]",
                 column_name, table_name, observed_types
             ),
@@ -188,14 +257,34 @@ mod tests {
     use super::{
         PendingTraceColumnRewrite, TraceReconcileDecision, choose_trace_reconcile_decision,
         enrich_trace_reconcile_error, is_trace_reconcile_candidate_type, push_observed_trace_type,
-        validate_trace_column_rewrites,
+        trace_semconv_fixed_type, validate_trace_column_rewrites,
     };
+
+    #[test]
+    fn test_trace_semconv_fixed_type_known_key() {
+        assert_eq!(
+            trace_semconv_fixed_type("span_attributes.http.response.status_code"),
+            Some(ColumnDataType::Int64)
+        );
+    }
+
+    #[test]
+    fn test_trace_semconv_fixed_type_unknown_key() {
+        assert_eq!(
+            trace_semconv_fixed_type("span_attributes.custom.attr"),
+            None
+        );
+    }
 
     #[test]
     fn test_choose_trace_reconcile_decision_existing_int64_keeps_int64() {
         assert_eq!(
-            choose_trace_reconcile_decision(&[ColumnDataType::Int64], Some(ColumnDataType::Int64))
-                .unwrap(),
+            choose_trace_reconcile_decision(
+                "span_attributes.attr_int",
+                &[ColumnDataType::Int64],
+                Some(ColumnDataType::Int64)
+            )
+            .unwrap(),
             Some(TraceReconcileDecision::UseExisting(ColumnDataType::Int64))
         );
     }
@@ -204,6 +293,7 @@ mod tests {
     fn test_choose_trace_reconcile_decision_existing_int64_widens_to_float64() {
         assert_eq!(
             choose_trace_reconcile_decision(
+                "span_attributes.attr_double",
                 &[ColumnDataType::Int64, ColumnDataType::Float64],
                 Some(ColumnDataType::Int64)
             )
@@ -218,6 +308,7 @@ mod tests {
     fn test_choose_trace_reconcile_decision_existing_float64_stays_authoritative() {
         assert_eq!(
             choose_trace_reconcile_decision(
+                "span_attributes.attr_double",
                 &[ColumnDataType::Int64, ColumnDataType::Float64],
                 Some(ColumnDataType::Float64)
             )
@@ -229,6 +320,7 @@ mod tests {
     #[test]
     fn test_choose_trace_reconcile_decision_existing_int64_with_boolean_is_error() {
         let err = choose_trace_reconcile_decision(
+            "span_attributes.attr_numeric",
             &[ColumnDataType::Boolean, ColumnDataType::Int64],
             Some(ColumnDataType::Int64),
         )
@@ -240,6 +332,76 @@ mod tests {
     fn test_choose_trace_reconcile_decision_request_local_prefers_float64() {
         assert_eq!(
             choose_trace_reconcile_decision(
+                "span_attributes.attr_numeric",
+                &[ColumnDataType::Int64, ColumnDataType::Float64],
+                None
+            )
+            .unwrap(),
+            Some(TraceReconcileDecision::UseRequestLocal(
+                ColumnDataType::Float64
+            ))
+        );
+    }
+
+    #[test]
+    fn test_choose_trace_reconcile_decision_whitelisted_new_int64_column_uses_fixed_type() {
+        assert_eq!(
+            choose_trace_reconcile_decision(
+                "span_attributes.http.response.status_code",
+                &[ColumnDataType::String, ColumnDataType::Int64],
+                None
+            )
+            .unwrap(),
+            Some(TraceReconcileDecision::UseRequestLocal(
+                ColumnDataType::Int64
+            ))
+        );
+    }
+
+    #[test]
+    fn test_choose_trace_reconcile_decision_whitelisted_new_boolean_column_uses_fixed_type() {
+        assert_eq!(
+            choose_trace_reconcile_decision(
+                "span_attributes.messaging.destination.temporary",
+                &[ColumnDataType::String, ColumnDataType::Boolean],
+                None
+            )
+            .unwrap(),
+            Some(TraceReconcileDecision::UseRequestLocal(
+                ColumnDataType::Boolean
+            ))
+        );
+    }
+
+    #[test]
+    fn test_choose_trace_reconcile_decision_whitelisted_existing_matching_type_uses_fixed_type() {
+        assert_eq!(
+            choose_trace_reconcile_decision(
+                "resource_attributes.service.name",
+                &[ColumnDataType::String],
+                Some(ColumnDataType::String)
+            )
+            .unwrap(),
+            Some(TraceReconcileDecision::UseExisting(ColumnDataType::String))
+        );
+    }
+
+    #[test]
+    fn test_choose_trace_reconcile_decision_whitelisted_existing_conflicting_type_is_error() {
+        let err = choose_trace_reconcile_decision(
+            "span_attributes.server.port",
+            &[ColumnDataType::Int64],
+            Some(ColumnDataType::String),
+        )
+        .unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::InvalidArguments);
+    }
+
+    #[test]
+    fn test_choose_trace_reconcile_decision_non_whitelisted_retains_dynamic_behavior() {
+        assert_eq!(
+            choose_trace_reconcile_decision(
+                "span_attributes.attr_numeric",
                 &[ColumnDataType::Int64, ColumnDataType::Float64],
                 None
             )
@@ -269,17 +431,67 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_trace_column_rewrites_whitelisted_values_validate_against_fixed_type() {
+        let rows = vec![Row {
+            values: vec![Value {
+                value_data: Some(ValueData::StringValue("503".to_string())),
+            }],
+        }];
+        let pending_rewrites = vec![PendingTraceColumnRewrite {
+            col_idx: 0,
+            target_type: ColumnDataType::Int64,
+            column_name: "span_attributes.http.response.status_code".to_string(),
+        }];
+
+        validate_trace_column_rewrites(&rows, &pending_rewrites, "trace_type_atomicity").unwrap();
+    }
+
+    #[test]
+    fn test_validate_trace_column_rewrites_whitelisted_boolean_rejects_invalid_string_parse() {
+        let rows = vec![Row {
+            values: vec![Value {
+                value_data: Some(ValueData::StringValue("not_a_bool".to_string())),
+            }],
+        }];
+        let pending_rewrites = vec![PendingTraceColumnRewrite {
+            col_idx: 0,
+            target_type: ColumnDataType::Boolean,
+            column_name: "span_attributes.messaging.destination.temporary".to_string(),
+        }];
+
+        let err = validate_trace_column_rewrites(&rows, &pending_rewrites, "trace_type_atomicity")
+            .unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::InvalidArguments);
+    }
+
+    #[test]
     fn test_enrich_trace_reconcile_error_includes_existing_type() {
         let err = enrich_trace_reconcile_error(
             "trace_type_atomicity",
             "span_attributes.attr_int",
             &[ColumnDataType::String, ColumnDataType::Int64],
             Some(ColumnDataType::Boolean),
+            None,
         );
 
         assert_eq!(err.status_code(), StatusCode::InvalidArguments);
         assert!(err.to_string().contains("span_attributes.attr_int"));
         assert!(err.to_string().contains("Boolean"));
+    }
+
+    #[test]
+    fn test_enrich_trace_reconcile_error_includes_fixed_semconv_type() {
+        let err = enrich_trace_reconcile_error(
+            "trace_type_atomicity",
+            "span_attributes.server.port",
+            &[ColumnDataType::String, ColumnDataType::Int64],
+            Some(ColumnDataType::String),
+            Some(ColumnDataType::Int64),
+        );
+
+        assert_eq!(err.status_code(), StatusCode::InvalidArguments);
+        assert!(err.to_string().contains("span_attributes.server.port"));
+        assert!(err.to_string().contains("fixed semconv Int64"));
     }
 
     #[test]
