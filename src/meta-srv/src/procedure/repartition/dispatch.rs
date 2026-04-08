@@ -106,6 +106,10 @@ impl State for Dispatch {
 
         Ok((
             Box::new(Collect::new(procedure_metas)),
+            // The state is not persisted after sub-procedures are spawned.
+            // If metasrv restarts before all sub-procedures complete,
+            // it restores from the `Dispatch` state and re-dispatches them.
+            // This is safe because the sub-procedures are idempotent.
             Status::suspended(procedures, false),
         ))
     }

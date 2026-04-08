@@ -88,9 +88,8 @@ impl State for DeallocateRegion {
             &ctx.persistent_ctx.schema_name,
             &ctx.persistent_ctx.table_name,
         );
-        let _operating_guards =
-            Context::register_operating_regions(&ctx.memory_region_keeper, &deallocating_regions)?;
-        // Deallocates the regions on datanodes.
+        // Memory guards are not required here,
+        // because the table metadata still contains routes for the deallocating regions.
         Self::deallocate_regions(
             &ctx.node_manager,
             &ctx.leader_region_registry,

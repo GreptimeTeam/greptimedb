@@ -76,9 +76,11 @@ pub struct PersistentContext {
     pub table_name: String,
     pub table_id: TableId,
     pub plans: Vec<RepartitionPlanEntry>,
+    /// Records failed sub-procedures for metadata rollback.
     #[serde(default)]
     pub failed_procedures: Vec<ProcedureMeta>,
     #[serde(default)]
+    /// Records unknown sub-procedures for metadata rollback.
     pub unknown_procedures: Vec<ProcedureMeta>,
     /// The timeout for repartition operations.
     #[serde(with = "humantime_serde", default = "default_timeout")]
@@ -569,10 +571,8 @@ impl RepartitionProcedure {
                 schema_name: self.context.persistent_ctx.schema_name.clone(),
                 table_name: self.context.persistent_ctx.table_name.clone(),
             };
-            let _operating_guards = Context::register_operating_regions(
-                &self.context.memory_region_keeper,
-                &allocated_region_routes,
-            )?;
+            // Memory guards are not required here,
+            // because the table metadata still contains routes for the deallocating regions.
             if let Err(err) = DeallocateRegion::deallocate_regions(
                 &self.context.node_manager,
                 &self.context.leader_region_registry,
@@ -1414,7 +1414,7 @@ mod tests {
             .execute(&TestingEnv::procedure_context())
             .await
             .unwrap();
-        assert!(dispatch_status.need_persist());
+        assert!(!dispatch_status.need_persist());
         let subprocedure_ids = extract_subprocedure_ids(dispatch_status);
         assert_eq!(subprocedure_ids.len(), 1);
         assert_parent_state::<Collect>(&procedure);

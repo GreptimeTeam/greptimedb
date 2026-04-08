@@ -187,6 +187,7 @@ impl ExecutePlan {
             table_id, new_region_count, new_regions_brief
         );
 
+        // The table route metadata is not updated yet; register it in memory for region lease renewal.
         let _operating_guards = Context::register_operating_regions(
             &ctx.memory_region_keeper,
             &new_allocated_region_routes,
