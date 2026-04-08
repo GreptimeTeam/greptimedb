@@ -1393,8 +1393,7 @@ pub(crate) fn should_prune_bulk_part(
         metadata: region_meta,
     };
     let mask = predicate.prune_with_stats(&pruning_stats, region_meta.schema.arrow_schema());
-    let pruned = !mask.first().copied().unwrap_or(true);
-    pruned
+    !mask.first().copied().unwrap_or(true)
 }
 
 /// A collection of ordered RecordBatches representing a bulk part without parquet encoding.
@@ -2657,5 +2656,129 @@ mod tests {
         // series_b,2: ts=2000, 4000
         let timestamps: Vec<i64> = ts_array.values().to_vec();
         assert_eq!(timestamps, vec![1000, 3000, 2000, 4000]);
+    }
+
+    /// Helper to create a converted BulkPart (with __primary_key column) from MutationInputs.
+    fn build_converted_bulk_part(inputs: &[MutationInput]) -> BulkPart {
+        let metadata = metadata_for_test();
+        let kvs = inputs
+            .iter()
+            .map(|m| {
+                build_key_values_with_ts_seq_values(
+                    &metadata,
+                    m.k0.to_string(),
+                    m.k1,
+                    m.timestamps.iter().copied(),
+                    m.v1.iter().copied(),
+                    m.sequence,
+                )
+            })
+            .collect::<Vec<_>>();
+        let schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
+        let primary_key_codec = build_primary_key_codec(&metadata);
+        let mut converter = BulkPartConverter::new(&metadata, schema, 64, primary_key_codec, true);
+        for kv in kvs {
+            converter.append_key_values(&kv).unwrap();
+        }
+        converter.convert().unwrap()
+    }
+
+    /// Helper to create a MultiBulkPart where each group becomes a separate batch.
+    fn build_multi_bulk_part(groups: &[&[MutationInput]]) -> (MultiBulkPart, RegionMetadataRef) {
+        let metadata = metadata_for_test();
+        let mut all_batches = Vec::new();
+        let mut min_ts = i64::MAX;
+        let mut max_ts = i64::MIN;
+        let mut max_seq = 0u64;
+
+        for inputs in groups {
+            let part = build_converted_bulk_part(inputs);
+            min_ts = min_ts.min(part.min_timestamp);
+            max_ts = max_ts.max(part.max_timestamp);
+            max_seq = max_seq.max(part.sequence);
+            all_batches.push(part.batch);
+        }
+
+        let multi = MultiBulkPart::new(
+            all_batches,
+            min_ts,
+            max_ts,
+            max_seq,
+            groups.len(),
+            &metadata,
+        );
+        (multi, metadata)
+    }
+
+    #[test]
+    fn test_multi_bulk_part_prune_batches() {
+        // Three batches with distinct k0 ranges: ["a"], ["m"], ["z"].
+        let (multi, metadata) = build_multi_bulk_part(&[
+            &[MutationInput {
+                k0: "a",
+                k1: 0,
+                timestamps: &[1, 2],
+                v1: &[Some(1.0), Some(2.0)],
+                sequence: 0,
+            }],
+            &[MutationInput {
+                k0: "m",
+                k1: 0,
+                timestamps: &[3, 4],
+                v1: &[Some(3.0), Some(4.0)],
+                sequence: 1,
+            }],
+            &[MutationInput {
+                k0: "z",
+                k1: 0,
+                timestamps: &[5, 6],
+                v1: &[Some(5.0), Some(6.0)],
+                sequence: 2,
+            }],
+        ]);
+        assert_eq!(multi.num_rows(), 6);
+        assert_eq!(multi.num_batches(), 3);
+
+        // k0 = "m" => only middle batch (2 rows).
+        let context = Arc::new(
+            BulkIterContext::new(
+                metadata.clone(),
+                None,
+                Some(Predicate::new(vec![
+                    datafusion_expr::col("k0").eq(datafusion_expr::lit("m")),
+                ])),
+                false,
+            )
+            .unwrap(),
+        );
+        let reader = multi
+            .read(context, None, None)
+            .unwrap()
+            .expect("should have results");
+        let total_rows: usize = reader.map(|r| r.unwrap().num_rows()).sum();
+        assert_eq!(total_rows, 2);
+
+        // k0 = "nonexistent" => all pruned, returns None.
+        let context = Arc::new(
+            BulkIterContext::new(
+                metadata.clone(),
+                None,
+                Some(Predicate::new(vec![
+                    datafusion_expr::col("k0").eq(datafusion_expr::lit("nonexistent")),
+                ])),
+                false,
+            )
+            .unwrap(),
+        );
+        assert!(multi.read(context, None, None).unwrap().is_none());
+
+        // No predicate => all 6 rows.
+        let context = Arc::new(BulkIterContext::new(metadata.clone(), None, None, false).unwrap());
+        let reader = multi
+            .read(context, None, None)
+            .unwrap()
+            .expect("should have results");
+        let total_rows: usize = reader.map(|r| r.unwrap().num_rows()).sum();
+        assert_eq!(total_rows, 6);
     }
 }
