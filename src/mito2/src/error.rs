@@ -228,6 +228,20 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "STALE_CURSOR: incremental query stale, region: {}, given_seq: {}, min_readable_seq: {}, retry_hint: FALLBACK_FULL_RECOMPUTE",
+        region_id,
+        given_seq,
+        min_readable_seq
+    ))]
+    IncrementalQueryStale {
+        region_id: RegionId,
+        given_seq: u64,
+        min_readable_seq: u64,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Old manifest missing for region {}", region_id))]
     MissingOldManifest {
         region_id: RegionId,
@@ -1294,6 +1308,8 @@ impl ErrorExt for Error {
             | MissingPartitionExpr { .. }
             | SerializePartitionExpr { .. }
             | InvalidSourceAndTargetRegion { .. } => StatusCode::InvalidArguments,
+
+            IncrementalQueryStale { .. } => StatusCode::RequestOutdated,
 
             RegionMetadataNotFound { .. }
             | Join { .. }
