@@ -48,7 +48,7 @@ async fn test_engine_open_empty_with_format(flat_format: bool) {
     let mut env = TestEnv::with_prefix("open-empty").await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -87,7 +87,7 @@ async fn test_engine_open_existing_with_format(flat_format: bool) {
     let mut env = TestEnv::with_prefix("open-exiting").await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -126,7 +126,7 @@ async fn test_engine_reopen_region_with_format(flat_format: bool) {
     let mut env = TestEnv::with_prefix("reopen-region").await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -153,7 +153,7 @@ async fn test_engine_open_readonly_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -207,7 +207,7 @@ async fn test_engine_region_open_with_options_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -260,7 +260,7 @@ async fn test_engine_region_open_with_custom_store_with_format(flat_format: bool
     let engine = env
         .create_engine_with_multiple_object_stores(
             MitoConfig {
-                default_experimental_flat_format: flat_format,
+                default_flat_format: flat_format,
                 ..Default::default()
             },
             None,
@@ -332,7 +332,7 @@ async fn test_open_region_skip_wal_replay_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -376,7 +376,7 @@ async fn test_open_region_skip_wal_replay_with_format(flat_format: bool) {
         .reopen_engine(
             engine,
             MitoConfig {
-                default_experimental_flat_format: flat_format,
+                default_flat_format: flat_format,
                 ..Default::default()
             },
         )
@@ -415,7 +415,7 @@ async fn test_open_region_skip_wal_replay_with_format(flat_format: bool) {
         .reopen_engine(
             engine,
             MitoConfig {
-                default_experimental_flat_format: flat_format,
+                default_flat_format: flat_format,
                 ..Default::default()
             },
         )
@@ -462,7 +462,7 @@ async fn test_open_region_wait_for_opening_region_ok_with_format(flat_format: bo
     let mut env = TestEnv::with_prefix("wait-for-opening-region-ok").await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -513,7 +513,7 @@ async fn test_open_region_wait_for_opening_region_err_with_format(flat_format: b
     let mut env = TestEnv::with_prefix("wait-for-opening-region-err").await;
     let engine = env
         .create_engine(MitoConfig {
-            default_experimental_flat_format: flat_format,
+            default_flat_format: flat_format,
             ..Default::default()
         })
         .await;
@@ -569,7 +569,7 @@ async fn test_open_compaction_region() {
 async fn test_open_compaction_region_with_format(flat_format: bool) {
     let mut env = TestEnv::new().await;
     let mut mito_config = MitoConfig {
-        default_experimental_flat_format: flat_format,
+        default_flat_format: flat_format,
         ..Default::default()
     };
     mito_config

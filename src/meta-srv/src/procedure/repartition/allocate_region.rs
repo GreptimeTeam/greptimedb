@@ -21,12 +21,11 @@ use common_meta::ddl::create_table::template::{
 };
 use common_meta::lock_key::TableLock;
 use common_meta::node_manager::NodeManagerRef;
-use common_meta::region_keeper::{MemoryRegionKeeperRef, OperatingRegionGuard};
-use common_meta::rpc::router::{RegionRoute, operating_leader_regions};
+use common_meta::rpc::router::RegionRoute;
 use common_procedure::{Context as ProcedureContext, Status};
-use common_telemetry::info;
-use serde::{Deserialize, Serialize};
-use snafu::{OptionExt, ResultExt};
+use common_telemetry::{debug, info};
+use serde::{Deserialize, Deserializer, Serialize};
+use snafu::ResultExt;
 use store_api::storage::{RegionNumber, TableId};
 use table::metadata::TableInfo;
 use table::table_reference::TableReference;
@@ -40,14 +39,103 @@ use crate::procedure::repartition::plan::{
 };
 use crate::procedure::repartition::{Context, State};
 
+#[derive(Debug, Clone, Serialize)]
+pub enum AllocateRegion {
+    Build(BuildPlan),
+    Execute(ExecutePlan),
+}
+
+impl<'de> Deserialize<'de> for AllocateRegion {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        enum CurrentAllocateRegion {
+            Build(BuildPlan),
+            Execute(ExecutePlan),
+        }
+
+        #[derive(Deserialize)]
+        struct LegacyAllocateRegion {
+            plan_entries: Vec<AllocationPlanEntry>,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum AllocateRegionRepr {
+            Current(CurrentAllocateRegion),
+            Legacy(LegacyAllocateRegion),
+        }
+
+        match AllocateRegionRepr::deserialize(deserializer)? {
+            AllocateRegionRepr::Current(CurrentAllocateRegion::Build(build_plan)) => {
+                Ok(Self::Build(build_plan))
+            }
+            AllocateRegionRepr::Current(CurrentAllocateRegion::Execute(execute_plan)) => {
+                Ok(Self::Execute(execute_plan))
+            }
+            AllocateRegionRepr::Legacy(legacy) => Ok(Self::Build(BuildPlan {
+                plan_entries: legacy.plan_entries,
+            })),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AllocateRegion {
+pub struct BuildPlan {
     plan_entries: Vec<AllocationPlanEntry>,
 }
 
-#[async_trait::async_trait]
-#[typetag::serde]
-impl State for AllocateRegion {
+impl BuildPlan {
+    async fn next(
+        &mut self,
+        ctx: &mut Context,
+        _procedure_ctx: &ProcedureContext,
+    ) -> Result<(Box<dyn State>, Status)> {
+        let timer = Instant::now();
+        let table_id = ctx.persistent_ctx.table_id;
+        let table_route_value = ctx.get_table_route_value().await?;
+        let mut next_region_number =
+            AllocateRegion::get_next_region_number(table_route_value.max_region_number().unwrap());
+
+        // Converts allocation plan to repartition plan.
+        let repartition_plan_entries = AllocateRegion::convert_to_repartition_plans(
+            table_id,
+            &mut next_region_number,
+            &self.plan_entries,
+        );
+        let plan_count = repartition_plan_entries.len();
+        let to_allocate = AllocateRegion::count_regions_to_allocate(&repartition_plan_entries);
+        info!(
+            "Repartition allocate regions start, table_id: {}, groups: {}, regions_to_allocate: {}",
+            table_id, plan_count, to_allocate
+        );
+
+        // If no region to allocate, directly dispatch the plan.
+        if AllocateRegion::count_regions_to_allocate(&repartition_plan_entries) == 0 {
+            ctx.persistent_ctx.plans = repartition_plan_entries;
+            ctx.update_allocate_region_elapsed(timer.elapsed());
+            return Ok((Box::new(Dispatch), Status::executing(true)));
+        }
+
+        ctx.persistent_ctx.plans = repartition_plan_entries;
+        debug!(
+            "Repartition allocate regions build plan completed, table_id: {}, elapsed: {:?}",
+            table_id,
+            timer.elapsed()
+        );
+        Ok((
+            Box::new(AllocateRegion::Execute(ExecutePlan)),
+            Status::executing(true),
+        ))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutePlan;
+
+impl ExecutePlan {
     async fn next(
         &mut self,
         ctx: &mut Context,
@@ -55,36 +143,13 @@ impl State for AllocateRegion {
     ) -> Result<(Box<dyn State>, Status)> {
         let timer = Instant::now();
         let table_id = ctx.persistent_ctx.table_id;
+        let allocate_regions = AllocateRegion::collect_allocate_regions(&ctx.persistent_ctx.plans);
+        let region_number_and_partition_exprs =
+            AllocateRegion::prepare_region_allocation_data(&allocate_regions)?;
+        let table_info_value = ctx.get_table_info_value().await?;
         let table_route_value = ctx.get_table_route_value().await?;
         // Safety: it is physical table route value.
         let region_routes = table_route_value.region_routes().unwrap();
-        let mut next_region_number =
-            Self::get_next_region_number(table_route_value.max_region_number().unwrap());
-
-        // Converts allocation plan to repartition plan.
-        let repartition_plan_entries = Self::convert_to_repartition_plans(
-            table_id,
-            &mut next_region_number,
-            &self.plan_entries,
-        );
-        let plan_count = repartition_plan_entries.len();
-        let to_allocate = Self::count_regions_to_allocate(&repartition_plan_entries);
-        info!(
-            "Repartition allocate regions start, table_id: {}, groups: {}, regions_to_allocate: {}",
-            table_id, plan_count, to_allocate
-        );
-
-        // If no region to allocate, directly dispatch the plan.
-        if Self::count_regions_to_allocate(&repartition_plan_entries) == 0 {
-            ctx.persistent_ctx.plans = repartition_plan_entries;
-            ctx.update_allocate_region_elapsed(timer.elapsed());
-            return Ok((Box::new(Dispatch), Status::executing(true)));
-        }
-
-        let allocate_regions = Self::collect_allocate_regions(&repartition_plan_entries);
-        let region_number_and_partition_exprs =
-            Self::prepare_region_allocation_data(&allocate_regions)?;
-        let table_info_value = ctx.get_table_info_value().await?;
         let new_allocated_region_routes = ctx
             .region_routes_allocator
             .allocate(
@@ -122,12 +187,13 @@ impl State for AllocateRegion {
             table_id, new_region_count, new_regions_brief
         );
 
-        let _operating_guards = Self::register_operating_regions(
+        // The table route metadata is not updated yet; register it in memory for region lease renewal.
+        let _operating_guards = Context::register_operating_regions(
             &ctx.memory_region_keeper,
             &new_allocated_region_routes,
         )?;
         // Allocates the regions on datanodes.
-        Self::allocate_regions(
+        AllocateRegion::allocate_regions(
             &ctx.node_manager,
             &table_info_value.table_info,
             &new_allocated_region_routes,
@@ -135,20 +201,32 @@ impl State for AllocateRegion {
         )
         .await?;
 
-        // TODO(weny): for metric engine, sync logical regions from the the central region.
-
         // Updates the table routes.
         let table_lock = TableLock::Write(table_id).into();
         let _guard = procedure_ctx.provider.acquire_lock(&table_lock).await;
         let new_region_routes =
-            Self::generate_region_routes(region_routes, &new_allocated_region_routes);
+            AllocateRegion::generate_region_routes(region_routes, &new_allocated_region_routes);
         ctx.update_table_route(&table_route_value, new_region_routes, wal_options)
             .await?;
         ctx.invalidate_table_cache().await?;
 
-        ctx.persistent_ctx.plans = repartition_plan_entries;
         ctx.update_allocate_region_elapsed(timer.elapsed());
         Ok((Box::new(Dispatch), Status::executing(true)))
+    }
+}
+
+#[async_trait::async_trait]
+#[typetag::serde]
+impl State for AllocateRegion {
+    async fn next(
+        &mut self,
+        ctx: &mut Context,
+        procedure_ctx: &ProcedureContext,
+    ) -> Result<(Box<dyn State>, Status)> {
+        match self {
+            AllocateRegion::Build(build_plan) => build_plan.next(ctx, procedure_ctx).await,
+            AllocateRegion::Execute(execute_plan) => execute_plan.next(ctx, procedure_ctx).await,
+        }
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -158,24 +236,7 @@ impl State for AllocateRegion {
 
 impl AllocateRegion {
     pub fn new(plan_entries: Vec<AllocationPlanEntry>) -> Self {
-        Self { plan_entries }
-    }
-
-    fn register_operating_regions(
-        memory_region_keeper: &MemoryRegionKeeperRef,
-        region_routes: &[RegionRoute],
-    ) -> Result<Vec<OperatingRegionGuard>> {
-        let mut operating_guards = Vec::with_capacity(region_routes.len());
-        for (region_id, datanode_id) in operating_leader_regions(region_routes) {
-            let guard = memory_region_keeper
-                .register(datanode_id, region_id)
-                .context(error::RegionOperatingRaceSnafu {
-                    peer_id: datanode_id,
-                    region_id,
-                })?;
-            operating_guards.push(guard);
-        }
-        Ok(operating_guards)
+        AllocateRegion::Build(BuildPlan { plan_entries })
     }
 
     fn generate_region_routes(
@@ -300,6 +361,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+    use crate::procedure::repartition::State;
     use crate::procedure::repartition::test_util::range_expr;
 
     fn create_region_descriptor(
@@ -487,5 +549,72 @@ mod tests {
         // Verify partition expressions are serialized
         assert!(!result[0].1.is_empty());
         assert!(!result[1].1.is_empty());
+    }
+
+    #[test]
+    fn test_allocate_region_state_backward_compatibility() {
+        // Arrange
+        let serialized = r#"{"repartition_state":"AllocateRegion","plan_entries":[]}"#;
+
+        // Act
+        let state: Box<dyn State> = serde_json::from_str(serialized).unwrap();
+
+        // Assert
+        let allocate_region = state
+            .as_any()
+            .downcast_ref::<AllocateRegion>()
+            .expect("expected AllocateRegion state");
+        match allocate_region {
+            AllocateRegion::Build(build_plan) => assert!(build_plan.plan_entries.is_empty()),
+            AllocateRegion::Execute(_) => panic!("expected build plan"),
+        }
+    }
+
+    #[test]
+    fn test_allocate_region_state_round_trip() {
+        // Arrange
+        let state: Box<dyn State> = Box::new(AllocateRegion::new(vec![]));
+
+        // Act
+        let serialized = serde_json::to_string(&state).unwrap();
+        let deserialized: Box<dyn State> = serde_json::from_str(&serialized).unwrap();
+
+        // Assert
+        assert_eq!(
+            serialized,
+            r#"{"repartition_state":"AllocateRegion","Build":{"plan_entries":[]}}"#
+        );
+        let allocate_region = deserialized
+            .as_any()
+            .downcast_ref::<AllocateRegion>()
+            .expect("expected AllocateRegion state");
+        match allocate_region {
+            AllocateRegion::Build(build_plan) => assert!(build_plan.plan_entries.is_empty()),
+            AllocateRegion::Execute(_) => panic!("expected build plan"),
+        }
+    }
+
+    #[test]
+    fn test_allocate_region_execute_state_round_trip() {
+        // Arrange
+        let state: Box<dyn State> = Box::new(AllocateRegion::Execute(ExecutePlan));
+
+        // Act
+        let serialized = serde_json::to_string(&state).unwrap();
+        let deserialized: Box<dyn State> = serde_json::from_str(&serialized).unwrap();
+
+        // Assert
+        assert_eq!(
+            serialized,
+            r#"{"repartition_state":"AllocateRegion","Execute":null}"#
+        );
+        let allocate_region = deserialized
+            .as_any()
+            .downcast_ref::<AllocateRegion>()
+            .expect("expected AllocateRegion state");
+        match allocate_region {
+            AllocateRegion::Execute(_) => {}
+            AllocateRegion::Build(_) => panic!("expected execute plan"),
+        }
     }
 }

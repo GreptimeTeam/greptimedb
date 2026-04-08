@@ -1312,7 +1312,7 @@ mod test {
     use std::io::Cursor;
     use std::sync::Arc;
 
-    use arrow_ipc::reader::FileReader;
+    use arrow_ipc::reader::StreamReader;
     use arrow_schema::DataType;
     use axum::handler::Handler;
     use axum::http::StatusCode;
@@ -1684,8 +1684,8 @@ mod test {
 
                 HttpResponse::Arrow(resp) => {
                     let output = resp.data;
-                    let mut reader =
-                        FileReader::try_new(Cursor::new(output), None).expect("Arrow reader error");
+                    let mut reader = StreamReader::try_new(Cursor::new(output), None)
+                        .expect("Arrow reader error");
                     let schema = reader.schema();
                     assert_eq!(schema.fields[0].name(), "numbers");
                     assert_eq!(schema.fields[0].data_type(), &DataType::UInt32);

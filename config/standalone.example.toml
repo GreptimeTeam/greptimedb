@@ -173,6 +173,17 @@ enable = true
 enable = true
 ## Whether to store the data from Prometheus remote write in metric engine.
 with_metric_engine = true
+## Interval to flush pending rows batcher.
+## Set to "0s" to disable batching mode in Prometheus Remote Write endpoint
+#+pending_rows_flush_interval = "0s"
+## Max rows per pending batch before triggering a flush.
+#+max_batch_rows = 100000
+## Max number of concurrent batch flushes.
+#+max_concurrent_flushes = 256
+## Capacity of the pending batch worker channel.
+#+worker_channel_capacity = 65526
+## Max inflight write requests before backpressure.
+#+max_inflight_requests = 3000
 
 ## The WAL options.
 [wal]
@@ -538,7 +549,9 @@ compress_manifest = false
 ## @toml2docs:none-default="Auto"
 #+ max_background_purges = 8
 
-## Memory budget for compaction tasks. Setting it to 0 or "unlimited" disables the limit.
+## Memory budget for compaction tasks.
+## Supports absolute size (e.g., "2GiB", "512MB") or percentage of system memory (e.g., "50%").
+## Setting it to 0 or "unlimited" disables the limit.
 ## @toml2docs:none-default="0"
 #+ experimental_compaction_memory_limit = "0"
 
@@ -612,9 +625,6 @@ manifest_cache_size = "256MB"
 ## Buffer size for SST writing.
 sst_write_buffer_size = "8MB"
 
-## Capacity of the channel to send data from parallel scan tasks to the main task.
-parallel_scan_channel_size = 32
-
 ## Maximum number of SST files to scan concurrently.
 max_concurrent_scan_files = 384
 
@@ -637,8 +647,8 @@ scan_memory_on_exhausted = "fail"
 ## To align with the old behavior, the default value is 0 (no restrictions).
 min_compaction_interval = "0m"
 
-## Whether to enable experimental flat format as the default format.
-default_experimental_flat_format = false
+## Whether to enable flat format as the default SST format.
+default_flat_format = true
 
 ## The options for index in Mito engine.
 [region_engine.mito.index]

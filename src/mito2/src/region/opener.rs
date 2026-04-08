@@ -269,7 +269,7 @@ impl RegionOpener {
         // Sets the sst_format based on options or flat_format flag
         let sst_format = if let Some(format) = options.sst_format {
             format
-        } else if config.default_experimental_flat_format {
+        } else if config.default_flat_format {
             options.sst_format = Some(FormatType::Flat);
             FormatType::Flat
         } else {
@@ -309,7 +309,7 @@ impl RegionOpener {
 
         debug!(
             "Create region {} with options: {:?}, default_flat_format: {}",
-            region_id, options, config.default_experimental_flat_format
+            region_id, options, config.default_flat_format
         );
 
         let version = VersionBuilder::new(metadata, mutable)
@@ -626,8 +626,10 @@ pub(crate) fn sanitize_region_options(manifest: &RegionManifest, options: &mut R
             manifest.sst_format,
             manifest.metadata.region_id,
         );
-        options.sst_format = Some(manifest.sst_format);
     }
+    // Always set sst_format from manifest to ensure it's explicitly stored,
+    // even when the default matches the manifest value.
+    options.sst_format = Some(manifest.sst_format);
     if let Some(manifest_append_mode) = manifest.append_mode
         && options.append_mode != manifest_append_mode
     {

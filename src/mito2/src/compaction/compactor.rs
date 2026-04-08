@@ -322,11 +322,7 @@ impl DefaultCompactor {
             .region_options
             .sst_format
             .map(|format| format == FormatType::Flat)
-            .unwrap_or(
-                compaction_region
-                    .engine_config
-                    .default_experimental_flat_format,
-            );
+            .unwrap_or(compaction_region.engine_config.default_flat_format);
 
         let index_config = compaction_region.engine_config.index.clone();
         let inverted_index_config = compaction_region.engine_config.inverted_index.clone();

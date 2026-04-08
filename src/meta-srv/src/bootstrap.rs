@@ -24,7 +24,6 @@ use common_base::Plugins;
 use common_config::Configurable;
 #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
 use common_meta::distributed_time_constants::META_LEASE_SECS;
-use common_meta::election::CANDIDATE_LEASE_SECS;
 use common_meta::election::etcd::EtcdElection;
 use common_meta::kv_backend::chroot::ChrootKvBackend;
 use common_meta::kv_backend::etcd::EtcdStore;
@@ -290,6 +289,7 @@ pub async fn metasrv_builder(
             use std::time::Duration;
 
             use common_meta::distributed_time_constants::POSTGRES_KEEP_ALIVE_SECS;
+            use common_meta::election::CANDIDATE_LEASE_SECS;
             use common_meta::election::rds::postgres::{ElectionPgClient, PgElection};
             use common_meta::kv_backend::rds::PgStore;
             use deadpool_postgres::{Config, ManagerConfig, RecyclingMethod};
@@ -354,6 +354,7 @@ pub async fn metasrv_builder(
         (None, BackendImpl::MysqlStore) => {
             use std::time::Duration;
 
+            use common_meta::election::CANDIDATE_LEASE_SECS;
             use common_meta::election::rds::mysql::{ElectionMysqlClient, MySqlElection};
             use common_meta::kv_backend::rds::MySqlStore;
 

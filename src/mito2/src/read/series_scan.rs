@@ -30,7 +30,7 @@ use datatypes::arrow::array::BinaryArray;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::schema::SchemaRef;
 use futures::{StreamExt, TryStreamExt};
-use smallvec::{SmallVec, smallvec};
+use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
@@ -44,12 +44,15 @@ use crate::error::{
     Error, InvalidSenderSnafu, PartitionOutOfRangeSnafu, Result, ScanMultiTimesSnafu,
     ScanSeriesSnafu, TooManyFilesToReadSnafu,
 };
+use crate::read::ScannerMetrics;
 use crate::read::pruner::{PartitionPruner, Pruner};
 use crate::read::scan_region::{ScanInput, StreamContext};
-use crate::read::scan_util::{PartitionMetrics, PartitionMetricsList, SeriesDistributorMetrics};
-use crate::read::seq_scan::{SeqScan, build_flat_sources, build_sources};
+use crate::read::scan_util::{
+    PartitionMetrics, PartitionMetricsList, SeriesDistributorMetrics, compute_parallel_channel_size,
+};
+use crate::read::seq_scan::{SeqScan, build_flat_sources};
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
-use crate::read::{Batch, ScannerMetrics};
+use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::PrimaryKeyArray;
 
@@ -443,11 +446,7 @@ impl SeriesDistributor {
         fields(region_id = %self.stream_ctx.input.mapper.metadata().region_id)
     )]
     async fn execute(&mut self) {
-        let result = if self.stream_ctx.input.flat_format {
-            self.scan_partitions_flat().await
-        } else {
-            self.scan_partitions().await
-        };
+        let result = self.scan_partitions_flat().await;
 
         if let Err(e) = result {
             self.senders.send_error(e).await;
@@ -486,10 +485,11 @@ impl SeriesDistributor {
 
         // Scans all parts.
         let mut sources = Vec::with_capacity(self.partitions.len());
+        let mut min_batch_size: Option<usize> = None;
         for partition in &self.partitions {
             sources.reserve(partition.len());
             for part_range in partition {
-                build_flat_sources(
+                let split_batch_size = build_flat_sources(
                     &self.stream_ctx,
                     part_range,
                     false,
@@ -499,15 +499,21 @@ impl SeriesDistributor {
                     self.semaphore.clone(),
                 )
                 .await?;
+                if let Some(size) = split_batch_size {
+                    min_batch_size = Some(min_batch_size.map_or(size, |cur| cur.min(size)));
+                }
             }
         }
 
         // Builds a flat reader that merge sources from all parts.
+        let channel_size =
+            compute_parallel_channel_size(min_batch_size.unwrap_or(DEFAULT_READ_BATCH_SIZE));
         let mut reader = SeqScan::build_flat_reader_from_sources(
             &self.stream_ctx,
             sources,
             self.semaphore.clone(),
             Some(&part_metrics),
+            channel_size,
         )
         .await?;
         let mut metrics = SeriesDistributorMetrics::default();
@@ -559,151 +565,11 @@ impl SeriesDistributor {
 
         Ok(())
     }
-
-    /// Scans all parts.
-    #[tracing::instrument(
-        skip_all,
-        fields(region_id = %self.stream_ctx.input.mapper.metadata().region_id)
-    )]
-    async fn scan_partitions(&mut self) -> Result<()> {
-        // Initialize reference counts for all partition ranges.
-        for partition_ranges in &self.partitions {
-            self.pruner.add_partition_ranges(partition_ranges);
-        }
-
-        // Create PartitionPruner covering all partitions
-        let all_partition_ranges: Vec<_> = self.partitions.iter().flatten().cloned().collect();
-        let partition_pruner = Arc::new(PartitionPruner::new(
-            self.pruner.clone(),
-            &all_partition_ranges,
-        ));
-
-        let part_metrics = new_partition_metrics(
-            &self.stream_ctx,
-            self.explain_verbose,
-            &self.metrics_set,
-            self.partitions.len(),
-            &self.metrics_list,
-        );
-        part_metrics.on_first_poll();
-        // Start fetch time before building sources so scan cost contains
-        // build part cost.
-        let mut fetch_start = Instant::now();
-
-        // Scans all parts.
-        let mut sources = Vec::with_capacity(self.partitions.len());
-        for partition in &self.partitions {
-            sources.reserve(partition.len());
-            for part_range in partition {
-                build_sources(
-                    &self.stream_ctx,
-                    part_range,
-                    false,
-                    &part_metrics,
-                    partition_pruner.clone(),
-                    &mut sources,
-                    self.semaphore.clone(),
-                )
-                .await?;
-            }
-        }
-
-        // Builds a reader that merge sources from all parts.
-        let mut reader = SeqScan::build_reader_from_sources(
-            &self.stream_ctx,
-            sources,
-            self.semaphore.clone(),
-            Some(&part_metrics),
-        )
-        .await?;
-        let mut metrics = SeriesDistributorMetrics::default();
-
-        let mut current_series = PrimaryKeySeriesBatch::default();
-        while let Some(batch) = reader.next_batch().await? {
-            metrics.scan_cost += fetch_start.elapsed();
-            metrics.num_batches += 1;
-            metrics.num_rows += batch.num_rows();
-
-            debug_assert!(!batch.is_empty());
-            if batch.is_empty() {
-                fetch_start = Instant::now();
-                continue;
-            }
-
-            let Some(last_key) = current_series.current_key() else {
-                current_series.push(batch);
-                fetch_start = Instant::now();
-                continue;
-            };
-
-            if last_key == batch.primary_key() {
-                current_series.push(batch);
-                fetch_start = Instant::now();
-                continue;
-            }
-
-            // We find a new series, send the current one.
-            let to_send =
-                std::mem::replace(&mut current_series, PrimaryKeySeriesBatch::single(batch));
-            let yield_start = Instant::now();
-            self.senders
-                .send_batch(SeriesBatch::PrimaryKey(to_send))
-                .await?;
-            metrics.yield_cost += yield_start.elapsed();
-            fetch_start = Instant::now();
-        }
-
-        if !current_series.is_empty() {
-            let yield_start = Instant::now();
-            self.senders
-                .send_batch(SeriesBatch::PrimaryKey(current_series))
-                .await?;
-            metrics.yield_cost += yield_start.elapsed();
-        }
-
-        metrics.scan_cost += fetch_start.elapsed();
-        metrics.num_series_send_timeout = self.senders.num_timeout;
-        metrics.num_series_send_full = self.senders.num_full;
-        part_metrics.set_distributor_metrics(&metrics);
-
-        part_metrics.on_finish();
-
-        Ok(())
-    }
-}
-
-/// Batches of the same series in primary key format.
-#[derive(Default, Debug)]
-pub struct PrimaryKeySeriesBatch {
-    pub batches: SmallVec<[Batch; 4]>,
-}
-
-impl PrimaryKeySeriesBatch {
-    /// Creates a new [PrimaryKeySeriesBatch] from a single [Batch].
-    fn single(batch: Batch) -> Self {
-        Self {
-            batches: smallvec![batch],
-        }
-    }
-
-    fn current_key(&self) -> Option<&[u8]> {
-        self.batches.first().map(|batch| batch.primary_key())
-    }
-
-    fn push(&mut self, batch: Batch) {
-        self.batches.push(batch);
-    }
-
-    /// Returns true if there is no batch.
-    fn is_empty(&self) -> bool {
-        self.batches.is_empty()
-    }
 }
 
 /// Batches of the same series.
 #[derive(Debug)]
 pub enum SeriesBatch {
-    PrimaryKey(PrimaryKeySeriesBatch),
     Flat(FlatSeriesBatch),
 }
 
@@ -711,7 +577,6 @@ impl SeriesBatch {
     /// Returns the number of batches.
     pub fn num_batches(&self) -> usize {
         match self {
-            SeriesBatch::PrimaryKey(primary_key_batch) => primary_key_batch.batches.len(),
             SeriesBatch::Flat(flat_batch) => flat_batch.batches.len(),
         }
     }
@@ -719,9 +584,6 @@ impl SeriesBatch {
     /// Returns the total number of rows across all batches.
     pub fn num_rows(&self) -> usize {
         match self {
-            SeriesBatch::PrimaryKey(primary_key_batch) => {
-                primary_key_batch.batches.iter().map(|x| x.num_rows()).sum()
-            }
             SeriesBatch::Flat(flat_batch) => flat_batch.batches.iter().map(|x| x.num_rows()).sum(),
         }
     }

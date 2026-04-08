@@ -102,7 +102,7 @@ impl State for RepartitionStart {
 }
 
 impl RepartitionStart {
-    fn build_plan(
+    pub(crate) fn build_plan(
         physical_route: &PhysicalTableRouteValue,
         from_exprs: &[PartitionExpr],
         to_exprs: &[PartitionExpr],
