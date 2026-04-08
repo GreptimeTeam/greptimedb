@@ -36,8 +36,9 @@ use store_api::metric_engine_consts::{
     LOGICAL_TABLE_METADATA_KEY, PHYSICAL_TABLE_METADATA_KEY, is_metric_engine_option_key,
 };
 use store_api::mito_engine_options::{
-    APPEND_MODE_KEY, COMPACTION_TYPE, MEMTABLE_TYPE, MERGE_MODE_KEY, TWCS_FALLBACK_TO_LOCAL,
-    TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM, is_mito_engine_option_key,
+    APPEND_MODE_KEY, COMPACTION_TYPE, MEMTABLE_TYPE, MERGE_MODE_KEY, SST_FORMAT_KEY,
+    TWCS_FALLBACK_TO_LOCAL, TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM,
+    is_mito_engine_option_key,
 };
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 
@@ -56,13 +57,14 @@ pub const TABLE_DATA_MODEL_TRACE_V1: &str = "greptime_trace_v1";
 pub const OTLP_METRIC_COMPAT_KEY: &str = "otlp_metric_compat";
 pub const OTLP_METRIC_COMPAT_PROM: &str = "prom";
 
-pub const VALID_TABLE_OPTION_KEYS: [&str; 12] = [
+pub const VALID_TABLE_OPTION_KEYS: [&str; 13] = [
     // common keys:
     WRITE_BUFFER_SIZE_KEY,
     TTL_KEY,
     STORAGE_KEY,
     COMMENT_KEY,
     SKIP_WAL_KEY,
+    SST_FORMAT_KEY,
     // file engine keys:
     FILE_TABLE_LOCATION_KEY,
     FILE_TABLE_FORMAT_KEY,
@@ -94,6 +96,7 @@ static VALID_DB_OPT_KEYS: Lazy<HashSet<&str>> = Lazy::new(|| {
     set.insert(TWCS_TIME_WINDOW);
     set.insert(TWCS_TRIGGER_FILE_NUM);
     set.insert(TWCS_MAX_OUTPUT_FILE_SIZE);
+    set.insert(SST_FORMAT_KEY);
     set
 });
 

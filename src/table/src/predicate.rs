@@ -203,7 +203,7 @@ pub fn build_time_range_predicate(
 
 /// Extract time range filter from `WHERE`/`IN (...)`/`BETWEEN` clauses.
 /// Return None if no time range can be found in expr.
-fn extract_time_range_from_expr(
+pub fn extract_time_range_from_expr(
     ts_col_name: &str,
     ts_col_unit: TimeUnit,
     expr: &Expr,

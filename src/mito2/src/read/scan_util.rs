@@ -247,6 +247,12 @@ pub(crate) struct ScanMetricsSet {
     num_range_builders: isize,
     /// Peak number of file range builders.
     num_peak_range_builders: isize,
+    /// Total bytes added to the range cache during this scan.
+    range_cache_size: usize,
+    /// Number of range cache hits during this scan.
+    range_cache_hit: usize,
+    /// Number of range cache misses during this scan.
+    range_cache_miss: usize,
 }
 
 /// Wrapper for file metrics that compares by total cost in reverse order.
@@ -345,6 +351,9 @@ impl fmt::Debug for ScanMetricsSet {
             build_ranges_peak_mem_size,
             num_range_builders: _,
             num_peak_range_builders,
+            range_cache_size,
+            range_cache_hit,
+            range_cache_miss,
         } = self;
 
         // Write core metrics
@@ -588,6 +597,16 @@ impl fmt::Debug for ScanMetricsSet {
                 write!(f, "\"{}\": {:?}", file_id, metrics)?;
             }
             write!(f, "}}")?;
+        }
+
+        if *range_cache_size > 0 {
+            write!(f, ", \"range_cache_size\":{range_cache_size}")?;
+        }
+        if *range_cache_hit > 0 {
+            write!(f, ", \"range_cache_hit\":{range_cache_hit}")?;
+        }
+        if *range_cache_miss > 0 {
+            write!(f, ", \"range_cache_miss\":{range_cache_miss}")?;
         }
 
         write!(
@@ -1097,6 +1116,27 @@ impl PartitionMetrics {
     pub(crate) fn dedup_metrics_reporter(&self) -> Arc<dyn DedupMetricsReport> {
         self.0.clone()
     }
+
+    /// Increments the total bytes added to the range cache.
+    #[allow(dead_code)]
+    pub(crate) fn inc_range_cache_size(&self, size: usize) {
+        let mut metrics = self.0.metrics.lock().unwrap();
+        metrics.range_cache_size += size;
+    }
+
+    /// Increments the range cache hit counter.
+    #[allow(dead_code)]
+    pub(crate) fn inc_range_cache_hit(&self) {
+        let mut metrics = self.0.metrics.lock().unwrap();
+        metrics.range_cache_hit += 1;
+    }
+
+    /// Increments the range cache miss counter.
+    #[allow(dead_code)]
+    pub(crate) fn inc_range_cache_miss(&self) {
+        let mut metrics = self.0.metrics.lock().unwrap();
+        metrics.range_cache_miss += 1;
+    }
 }
 
 impl fmt::Debug for PartitionMetrics {
@@ -1493,7 +1533,7 @@ pub fn build_flat_file_range_scan_stream(
                 .transpose()?;
 
             let mapper = range.compaction_projection_mapper();
-            while let Some(record_batch) = reader.next_batch()? {
+            while let Some(record_batch) = reader.next_batch().await? {
                 let record_batch = if let Some(mapper) = mapper {
                     let batch = mapper.project(record_batch)?;
                     batch

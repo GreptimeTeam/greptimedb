@@ -121,11 +121,60 @@ lazy_static! {
     /// Duration to convert prometheus write request to gRPC request.
     pub static ref METRIC_HTTP_PROM_STORE_CONVERT_ELAPSED: Histogram = METRIC_HTTP_PROM_STORE_CODEC_ELAPSED
         .with_label_values(&["convert"]);
-        /// The samples count of Prometheus remote write.
+    /// The samples count of Prometheus remote write.
     pub static ref PROM_STORE_REMOTE_WRITE_SAMPLES: IntCounterVec = register_int_counter_vec!(
         "greptime_servers_prometheus_remote_write_samples",
         "frontend prometheus remote write samples",
         &[METRIC_DB_LABEL]
+    )
+    .unwrap();
+    pub static ref PENDING_BATCHES: IntGauge = register_int_gauge!(
+        "greptime_prom_store_pending_batches",
+        "Number of pending batches waiting to be flushed"
+    )
+    .unwrap();
+    pub static ref PENDING_ROWS: IntGauge = register_int_gauge!(
+        "greptime_prom_store_pending_rows",
+        "Number of pending rows waiting to be flushed"
+    )
+    .unwrap();
+    pub static ref PENDING_WORKERS: IntGauge = register_int_gauge!(
+        "greptime_prom_store_pending_workers",
+        "Number of active pending rows batch workers"
+    )
+    .unwrap();
+    pub static ref FLUSH_TOTAL: IntCounter = register_int_counter!(
+        "greptime_prom_store_flush_total",
+        "Total number of batch flushes"
+    )
+    .unwrap();
+    pub static ref FLUSH_ROWS: Histogram = register_histogram!(
+        "greptime_prom_store_flush_rows",
+        "Number of rows per flush",
+        vec![100.0, 1000.0, 10000.0, 50000.0, 100000.0, 500000.0]
+    )
+    .unwrap();
+    pub static ref FLUSH_ELAPSED: Histogram = register_histogram!(
+        "greptime_prom_store_flush_elapsed",
+        "Elapsed time of pending rows batch flush in seconds",
+        vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
+    )
+    .unwrap();
+    pub static ref FLUSH_DROPPED_ROWS: IntCounter = register_int_counter!(
+        "greptime_pending_rows_flush_dropped_rows",
+        "Total rows dropped due to pending rows flush failures"
+    )
+    .unwrap();
+    pub static ref FLUSH_FAILURES: IntCounter = register_int_counter!(
+        "greptime_pending_rows_flush_failures",
+        "Total pending rows flush failures"
+    )
+    .unwrap();
+    pub static ref PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED: HistogramVec = register_histogram_vec!(
+        "greptime_prom_store_pending_rows_batch_ingest_stage_elapsed",
+        "Elapsed time of pending rows batch ingestion stages in seconds",
+        &["stage"],
+        vec![0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0]
     )
     .unwrap();
     /// Http prometheus read duration per database.

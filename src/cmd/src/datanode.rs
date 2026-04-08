@@ -43,7 +43,7 @@ use crate::error::{
 };
 use crate::options::{GlobalOptions, GreptimeOptions};
 
-pub const APP_NAME: &str = "greptime-datanode";
+pub const APP_NAME: &str = const_format::concatcp!(common_version::product_name(), "-datanode");
 
 type DatanodeOptions = GreptimeOptions<datanode::config::DatanodeOptions>;
 

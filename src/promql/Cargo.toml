@@ -27,4 +27,12 @@ prost.workspace = true
 snafu.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
+datafusion-common.workspace = true
+datafusion-expr.workspace = true
+datatypes.workspace = true
 tokio.workspace = true
+
+[[bench]]
+name = "bench_main"
+harness = false

@@ -20,11 +20,11 @@ use cmd::error::{InitTlsProviderSnafu, Result};
 use cmd::options::GlobalOptions;
 use cmd::{App, cli, datanode, flownode, frontend, metasrv, standalone};
 use common_base::Plugins;
-use common_version::{verbose_version, version};
+use common_version::{product_name, verbose_version, version};
 use servers::install_ring_crypto_provider;
 
 #[derive(Parser)]
-#[command(name = "greptime", author, version, long_version = verbose_version(), about)]
+#[command(name = product_name(), author, version, long_version = verbose_version(), about)]
 #[command(propagate_version = true)]
 pub(crate) struct Command {
     #[clap(subcommand)]
@@ -52,11 +52,11 @@ enum SubCommand {
     #[clap(name = "metasrv")]
     Metasrv(metasrv::Command),
 
-    /// Run greptimedb as a standalone service.
+    /// Start service in standalone mode.
     #[clap(name = "standalone")]
     Standalone(standalone::Command),
 
-    /// Execute the cli tools for greptimedb.
+    /// Execute the cli tools.
     #[clap(name = "cli")]
     Cli(cli::Command),
 }
@@ -148,7 +148,7 @@ async fn start(cli: Command) -> Result<()> {
 
 fn setup_human_panic() {
     human_panic::setup_panic!(
-        human_panic::Metadata::new("GreptimeDB", version())
+        human_panic::Metadata::new(product_name(), version())
             .homepage("https://github.com/GreptimeTeam/greptimedb/discussions")
     );
 

@@ -116,6 +116,8 @@ pub struct MitoConfig {
     pub page_cache_size: ReadableSize,
     /// Cache size for time series selector (e.g. `last_value()`). Setting it to 0 to disable the cache.
     pub selector_result_cache_size: ReadableSize,
+    /// Cache size for flat range scan results. Setting it to 0 to disable the cache.
+    pub range_result_cache_size: ReadableSize,
     /// Whether to enable the write cache.
     pub enable_write_cache: bool,
     /// File system path for write cache dir's root, defaults to `{data_home}`.
@@ -149,6 +151,11 @@ pub struct MitoConfig {
     /// Memory limit for table scans across all queries. Setting it to 0 disables the limit.
     /// Supports absolute size (e.g., "2GB") or percentage (e.g., "50%").
     pub scan_memory_limit: MemoryLimit,
+    /// Behavior when scan memory tracking cannot acquire memory from the budget.
+    /// `wait` means `wait(10s)`, not unlimited waiting.
+    /// Defaults to [`OnExhaustedPolicy::Fail`], which intentionally differs from
+    /// [`OnExhaustedPolicy::default()`].
+    pub scan_memory_on_exhausted: OnExhaustedPolicy,
 
     /// Index configs.
     pub index: IndexConfig,
@@ -200,6 +207,7 @@ impl Default for MitoConfig {
             vector_cache_size: ReadableSize::mb(512),
             page_cache_size: ReadableSize::mb(512),
             selector_result_cache_size: ReadableSize::mb(512),
+            range_result_cache_size: ReadableSize::mb(512),
             enable_write_cache: false,
             write_cache_path: String::new(),
             write_cache_size: ReadableSize::gb(5),
@@ -213,6 +221,7 @@ impl Default for MitoConfig {
             max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
             allow_stale_entries: false,
             scan_memory_limit: MemoryLimit::default(),
+            scan_memory_on_exhausted: OnExhaustedPolicy::Fail,
             index: IndexConfig::default(),
             inverted_index: InvertedIndexConfig::default(),
             fulltext_index: FulltextIndexConfig::default(),
@@ -336,6 +345,7 @@ impl MitoConfig {
         self.vector_cache_size = mem_cache_size;
         self.page_cache_size = page_cache_size;
         self.selector_result_cache_size = mem_cache_size;
+        self.range_result_cache_size = mem_cache_size;
 
         self.index.adjust_buffer_and_cache_size(sys_memory);
     }

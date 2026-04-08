@@ -43,14 +43,19 @@ impl Function for VersionFunction {
         let version = match func_ctx.query_ctx.channel() {
             Channel::Mysql => {
                 format!(
-                    "{}-greptimedb-{}",
+                    "{}-{}-{}",
                     std::env::var("GREPTIMEDB_MYSQL_SERVER_VERSION")
                         .unwrap_or_else(|_| "8.4.2".to_string()),
+                    common_version::product_name(),
                     common_version::version()
                 )
             }
             Channel::Postgres => {
-                format!("PostgreSQL 16.3 GreptimeDB {}", common_version::version())
+                format!(
+                    "PostgreSQL 16.3 {} {}",
+                    common_version::product_name(),
+                    common_version::version()
+                )
             }
             _ => common_version::version().to_string(),
         };

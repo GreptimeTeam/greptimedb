@@ -20,7 +20,7 @@ use std::time::Instant;
 
 use common_error::ext::BoxedError;
 use common_recordbatch::{
-    DfRecordBatch, DfSendableRecordBatchStream, MemoryPermit, MemoryTrackedStream,
+    DfRecordBatch, DfSendableRecordBatchStream, MemoryTrackedStream, QueryMemoryTracker,
     SendableRecordBatchStream,
 };
 use common_telemetry::tracing::Span;
@@ -67,7 +67,7 @@ pub struct RegionScanExec {
     // TODO(ruihang): handle TimeWindowed dist via this parameter
     distribution: Option<TimeSeriesDistribution>,
     explain_verbose: bool,
-    query_memory_permit: Option<Arc<MemoryPermit>>,
+    query_memory_tracker: Option<QueryMemoryTracker>,
 }
 
 impl std::fmt::Debug for RegionScanExec {
@@ -91,7 +91,7 @@ impl RegionScanExec {
     pub fn new(
         scanner: RegionScannerRef,
         request: ScanRequest,
-        query_memory_permit: Option<Arc<MemoryPermit>>,
+        query_memory_tracker: Option<QueryMemoryTracker>,
     ) -> DfResult<Self> {
         let arrow_schema = scanner.schema().arrow_schema().clone();
         let scanner_props = scanner.properties();
@@ -226,7 +226,7 @@ impl RegionScanExec {
             is_partition_set: false,
             distribution: request.distribution,
             explain_verbose: false,
-            query_memory_permit,
+            query_memory_tracker,
         })
     }
 
@@ -299,7 +299,7 @@ impl RegionScanExec {
             is_partition_set: true,
             distribution: self.distribution,
             explain_verbose: self.explain_verbose,
-            query_memory_permit: self.query_memory_permit.clone(),
+            query_memory_tracker: self.query_memory_tracker.clone(),
         })
     }
 
@@ -387,8 +387,8 @@ impl ExecutionPlan for RegionScanExec {
             .scan_partition(&ctx, &self.metric, partition)
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
 
-        let stream = if let Some(permit) = &self.query_memory_permit {
-            Box::pin(MemoryTrackedStream::new(stream, permit.clone()))
+        let stream = if let Some(tracker) = &self.query_memory_tracker {
+            Box::pin(MemoryTrackedStream::new(stream, tracker.clone()))
         } else {
             stream
         };
@@ -599,7 +599,12 @@ mod test {
             .primary_key(vec![1]);
         let region_metadata = Arc::new(builder.build().unwrap());
 
-        let scanner = Box::new(SinglePartitionScanner::new(stream, false, region_metadata));
+        let scanner = Box::new(SinglePartitionScanner::new(
+            stream,
+            false,
+            region_metadata,
+            None,
+        ));
         let plan = RegionScanExec::new(scanner, ScanRequest::default(), None).unwrap();
         let actual: SchemaRef = Arc::new(
             plan.properties

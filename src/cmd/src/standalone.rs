@@ -48,6 +48,7 @@ use common_telemetry::info;
 use common_telemetry::logging::{DEFAULT_LOGGING_DIR, TracingOptions};
 use common_time::timezone::set_default_timezone;
 use common_version::{short_version, verbose_version};
+use const_format::concatcp;
 use datanode::config::DatanodeOptions;
 use datanode::datanode::{Datanode, DatanodeBuilder};
 use datanode::region_server::RegionServer;
@@ -75,7 +76,7 @@ use crate::error::{OtherSnafu, Result, StartFlownodeSnafu};
 use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{App, create_resource_limit_metrics, error, log_versions, maybe_activate_heap_profile};
 
-pub const APP_NAME: &str = "greptime-standalone";
+pub const APP_NAME: &str = concatcp!(common_version::product_name(), "-standalone");
 
 #[derive(Parser)]
 pub struct Command {

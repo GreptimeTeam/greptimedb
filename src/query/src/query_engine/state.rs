@@ -60,6 +60,7 @@ use crate::dist_plan::{
 use crate::metrics::{QUERY_MEMORY_POOL_REJECTED_TOTAL, QUERY_MEMORY_POOL_USAGE_BYTES};
 use crate::optimizer::ExtensionAnalyzerRule;
 use crate::optimizer::constant_term::MatchesConstantTermOptimizer;
+use crate::optimizer::count_nest_aggr::CountNestAggrRule;
 use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
 use crate::optimizer::parallelize_scan::ParallelizeScan;
 use crate::optimizer::pass_distribution::PassDistribution;
@@ -146,6 +147,7 @@ impl QueryEngineState {
 
         // The [`TypeConversionRule`] must be at first
         extension_rules.insert(0, Arc::new(TypeConversionRule) as _);
+        extension_rules.push(Arc::new(CountNestAggrRule) as _);
 
         // Apply the datafusion rules
         let mut analyzer = Analyzer::new();

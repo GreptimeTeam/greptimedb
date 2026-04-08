@@ -12,124 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::ops::Range;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use datatypes::arrow::array::RecordBatch;
-use datatypes::arrow::error::ArrowError;
-use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, RowGroups, RowSelection};
-use parquet::arrow::{FieldLevels, ProjectionMask, parquet_to_arrow_field_levels};
-use parquet::column::page::{PageIterator, PageReader};
-use parquet::file::metadata::{ParquetMetaData, RowGroupMetaData};
+use parquet::arrow::ProjectionMask;
+use parquet::arrow::arrow_reader::{
+    ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReader,
+    ParquetRecordBatchReaderBuilder, RowSelection,
+};
+use parquet::file::metadata::ParquetMetaData;
 use snafu::ResultExt;
 
 use crate::error;
 use crate::error::ReadDataPartSnafu;
+use crate::memtable::bulk::chunk_reader::MemtableChunkReader;
 use crate::memtable::bulk::context::BulkIterContextRef;
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
-use crate::sst::parquet::format::ReadFormat;
-use crate::sst::parquet::reader::RowGroupReaderContext;
-use crate::sst::parquet::row_group::{ColumnChunkIterator, RowGroupBase};
-
-/// Helper for reading specific row group inside Memtable Parquet parts.
-// This is similar to [mito2::sst::parquet::row_group::InMemoryRowGroup] since
-// it's a workaround for lacking of keyword generics.
-pub struct MemtableRowGroupPageFetcher<'a> {
-    /// Shared structs for reading row group.
-    base: RowGroupBase<'a>,
-    bytes: Bytes,
-}
-
-impl<'a> MemtableRowGroupPageFetcher<'a> {
-    pub(crate) fn create(
-        row_group_idx: usize,
-        parquet_meta: &'a ParquetMetaData,
-        bytes: Bytes,
-    ) -> Self {
-        Self {
-            // the cached `column_uncompressed_pages` would never be used in Memtable readers.
-            base: RowGroupBase::new(parquet_meta, row_group_idx),
-            bytes,
-        }
-    }
-
-    /// Fetches column pages from memory file.
-    pub(crate) fn fetch(&mut self, projection: &ProjectionMask, selection: Option<&RowSelection>) {
-        if let Some((selection, offset_index)) = selection.zip(self.base.offset_index) {
-            // Selection provided.
-            let (fetch_ranges, page_start_offsets) =
-                self.base
-                    .calc_sparse_read_ranges(projection, offset_index, selection);
-            if fetch_ranges.is_empty() {
-                return;
-            }
-            let chunk_data = self.fetch_bytes(&fetch_ranges);
-
-            self.base
-                .assign_sparse_chunk(projection, chunk_data, page_start_offsets);
-        } else {
-            let fetch_ranges = self.base.calc_dense_read_ranges(projection);
-            if fetch_ranges.is_empty() {
-                // Nothing to fetch.
-                return;
-            }
-            let chunk_data = self.fetch_bytes(&fetch_ranges);
-            self.base.assign_dense_chunk(projection, chunk_data);
-        }
-    }
-
-    fn fetch_bytes(&self, ranges: &[Range<u64>]) -> Vec<Bytes> {
-        ranges
-            .iter()
-            .map(|range| self.bytes.slice(range.start as usize..range.end as usize))
-            .collect()
-    }
-
-    /// Creates a page reader to read column at `i`.
-    fn column_page_reader(&self, i: usize) -> parquet::errors::Result<Box<dyn PageReader>> {
-        let reader = self.base.column_reader(i)?;
-        Ok(Box::new(reader))
-    }
-}
-
-impl RowGroups for MemtableRowGroupPageFetcher<'_> {
-    fn num_rows(&self) -> usize {
-        self.base.row_count
-    }
-
-    fn column_chunks(&self, i: usize) -> parquet::errors::Result<Box<dyn PageIterator>> {
-        Ok(Box::new(ColumnChunkIterator {
-            reader: Some(self.column_page_reader(i)),
-        }))
-    }
-
-    fn row_groups(&self) -> Box<dyn Iterator<Item = &RowGroupMetaData> + '_> {
-        Box::new(std::iter::once(self.base.row_group_metadata()))
-    }
-
-    fn metadata(&self) -> &ParquetMetaData {
-        self.base.parquet_metadata()
-    }
-}
-
-impl RowGroupReaderContext for BulkIterContextRef {
-    fn map_result(
-        &self,
-        result: Result<Option<RecordBatch>, ArrowError>,
-    ) -> error::Result<Option<RecordBatch>> {
-        result.context(error::DecodeArrowRowGroupSnafu)
-    }
-
-    fn read_format(&self) -> &ReadFormat {
-        self.as_ref().read_format()
-    }
-}
 
 pub(crate) struct MemtableRowGroupReaderBuilder {
     projection: ProjectionMask,
     parquet_metadata: Arc<ParquetMetaData>,
-    field_levels: FieldLevels,
+    arrow_metadata: ArrowReaderMetadata,
     data: Bytes,
 }
 
@@ -140,15 +43,16 @@ impl MemtableRowGroupReaderBuilder {
         parquet_metadata: Arc<ParquetMetaData>,
         data: Bytes,
     ) -> error::Result<Self> {
-        let parquet_schema_desc = parquet_metadata.file_metadata().schema_descr();
-        let hint = Some(context.read_format().arrow_schema().fields());
-        let field_levels =
-            parquet_to_arrow_field_levels(parquet_schema_desc, projection.clone(), hint)
+        // Create ArrowReaderMetadata for building the reader.
+        let arrow_reader_options =
+            ArrowReaderOptions::new().with_schema(context.read_format().arrow_schema().clone());
+        let arrow_metadata =
+            ArrowReaderMetadata::try_new(parquet_metadata.clone(), arrow_reader_options)
                 .context(ReadDataPartSnafu)?;
         Ok(Self {
             projection,
             parquet_metadata,
-            field_levels,
+            arrow_metadata,
             data,
         })
     }
@@ -159,23 +63,21 @@ impl MemtableRowGroupReaderBuilder {
         row_group_idx: usize,
         row_selection: Option<RowSelection>,
     ) -> error::Result<ParquetRecordBatchReader> {
-        let mut row_group = MemtableRowGroupPageFetcher::create(
-            row_group_idx,
-            &self.parquet_metadata,
-            self.data.clone(),
-        );
-        // Fetches data from memory part. Currently, row selection is not supported.
-        row_group.fetch(&self.projection, row_selection.as_ref());
+        let chunk_reader = MemtableChunkReader::new(self.data.clone());
 
-        // Builds the parquet reader.
-        // Now the row selection is None.
-        ParquetRecordBatchReader::try_new_with_row_groups(
-            &self.field_levels,
-            &row_group,
-            DEFAULT_READ_BATCH_SIZE,
-            row_selection,
+        let mut builder = ParquetRecordBatchReaderBuilder::new_with_metadata(
+            chunk_reader,
+            self.arrow_metadata.clone(),
         )
-        .context(ReadDataPartSnafu)
+        .with_row_groups(vec![row_group_idx])
+        .with_projection(self.projection.clone())
+        .with_batch_size(DEFAULT_READ_BATCH_SIZE);
+
+        if let Some(selection) = row_selection {
+            builder = builder.with_row_selection(selection);
+        }
+
+        builder.build().context(ReadDataPartSnafu)
     }
 
     /// Computes whether to skip field filters for a specific row group based on PreFilterMode.

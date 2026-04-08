@@ -32,6 +32,8 @@ use common_meta::ddl_manager::DdlManagerRef;
 use common_meta::distributed_time_constants::{
     self, BASE_HEARTBEAT_INTERVAL, default_distributed_time_constants, frontend_heartbeat_interval,
 };
+use common_meta::election::LeaderChangeMessage;
+pub use common_meta::election::{ElectionRef, MetasrvNodeInfo};
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackend, ResettableKvBackendRef};
@@ -64,7 +66,6 @@ use tokio::sync::broadcast::error::RecvError;
 
 use crate::cluster::MetaPeerClientRef;
 use crate::discovery;
-use crate::election::{Election, LeaderChangeMessage};
 use crate::error::{
     self, InitMetadataSnafu, KvBackendSnafu, Result, StartProcedureManagerSnafu,
     StartTelemetryTaskSnafu, StopProcedureManagerSnafu,
@@ -459,76 +460,6 @@ impl Context {
     }
 }
 
-/// The value of the leader. It is used to store the leader's address.
-pub struct LeaderValue(pub String);
-
-impl<T: AsRef<[u8]>> From<T> for LeaderValue {
-    fn from(value: T) -> Self {
-        let string = String::from_utf8_lossy(value.as_ref());
-        Self(string.to_string())
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MetasrvNodeInfo {
-    // The metasrv's address
-    pub addr: String,
-    // The node build version
-    pub version: String,
-    // The node build git commit hash
-    pub git_commit: String,
-    // The node start timestamp in milliseconds
-    pub start_time_ms: u64,
-    // The node total cpu millicores
-    #[serde(default)]
-    pub total_cpu_millicores: i64,
-    // The node total memory bytes
-    #[serde(default)]
-    pub total_memory_bytes: i64,
-    /// The node build cpu usage millicores
-    #[serde(default)]
-    pub cpu_usage_millicores: i64,
-    /// The node build memory usage bytes
-    #[serde(default)]
-    pub memory_usage_bytes: i64,
-    // The node hostname
-    #[serde(default)]
-    pub hostname: String,
-}
-
-// TODO(zyy17): Allow deprecated fields for backward compatibility. Remove this when the deprecated top-level fields are removed from the proto.
-#[allow(deprecated)]
-impl From<MetasrvNodeInfo> for api::v1::meta::MetasrvNodeInfo {
-    fn from(node_info: MetasrvNodeInfo) -> Self {
-        Self {
-            peer: Some(api::v1::meta::Peer {
-                addr: node_info.addr,
-                ..Default::default()
-            }),
-            // TODO(zyy17): The following top-level fields are deprecated. They are kept for backward compatibility and will be removed in a future version.
-            // New code should use the fields in `info.NodeInfo` instead.
-            version: node_info.version.clone(),
-            git_commit: node_info.git_commit.clone(),
-            start_time_ms: node_info.start_time_ms,
-            cpus: node_info.total_cpu_millicores as u32,
-            memory_bytes: node_info.total_memory_bytes as u64,
-            // The canonical location for node information.
-            info: Some(api::v1::meta::NodeInfo {
-                version: node_info.version,
-                git_commit: node_info.git_commit,
-                start_time_ms: node_info.start_time_ms,
-                total_cpu_millicores: node_info.total_cpu_millicores,
-                total_memory_bytes: node_info.total_memory_bytes,
-                cpu_usage_millicores: node_info.cpu_usage_millicores,
-                memory_usage_bytes: node_info.memory_usage_bytes,
-                cpus: node_info.total_cpu_millicores as u32,
-                memory_bytes: node_info.total_memory_bytes as u64,
-                hostname: node_info.hostname,
-            }),
-        }
-    }
-}
-
 #[derive(Clone, Copy)]
 pub enum SelectTarget {
     Datanode,
@@ -552,7 +483,6 @@ pub struct SelectorContext {
 pub type SelectorRef = Arc<dyn Selector<Context = SelectorContext, Output = Vec<Peer>>>;
 pub type RegionStatAwareSelectorRef =
     Arc<dyn RegionStatAwareSelector<Context = SelectorContext, Output = Vec<(RegionId, Peer)>>>;
-pub type ElectionRef = Arc<dyn Election<Leader = LeaderValue>>;
 
 pub struct MetaStateHandler {
     subscribe_manager: Option<SubscriptionManagerRef>,

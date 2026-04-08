@@ -267,7 +267,7 @@ impl InformationSchemaRegionPeersBuilder {
             ];
 
             if !predicates.eval(&row) {
-                return;
+                continue;
             }
 
             self.table_catalogs.push(Some(table_catalog));
@@ -329,5 +329,89 @@ impl DfPartitionStream for InformationSchemaRegionPeers {
                     .map_err(Into::into)
             }),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use api::v1::meta::Peer;
+    use arrow::array::AsArray;
+    use common_meta::rpc::router::{Region, RegionRoute};
+    use datafusion::common::ScalarValue;
+    use datafusion::logical_expr::{BinaryExpr, Expr, Operator, col};
+    use store_api::storage::{RegionId, ScanRequest};
+
+    use super::*;
+
+    fn new_region_route(table_id: u32, region_number: u32, peer_id: u64) -> RegionRoute {
+        RegionRoute {
+            region: Region {
+                id: RegionId::new(table_id, region_number),
+                ..Default::default()
+            },
+            leader_peer: Some(Peer {
+                id: peer_id,
+                addr: format!("127.0.0.1:{}", 3000 + peer_id),
+            }),
+            follower_peers: vec![],
+            leader_state: None,
+            leader_down_since: None,
+            write_route_policy: None,
+        }
+    }
+
+    #[test]
+    fn test_add_region_peers_predicate_filters_correctly() {
+        let schema = InformationSchemaRegionPeers::schema();
+        let mut builder = InformationSchemaRegionPeersBuilder::new(
+            schema,
+            "greptime".to_string(),
+            Weak::<KvBackendCatalogManager>::new(),
+        );
+
+        let table_id = 1;
+        // 3 regions: region_number 0, 1, 2
+        let routes = vec![
+            new_region_route(table_id, 0, 1),
+            new_region_route(table_id, 1, 2),
+            new_region_route(table_id, 2, 3),
+        ];
+
+        // Build a predicate that matches only the last region (region_number=2).
+        // With the old `return` bug, encountering the first non-matching region
+        // (region_number=0) would exit add_region_peers entirely, so region_number=2
+        // would never be found.
+        let target_region_id = RegionId::new(table_id, 2).as_u64();
+        let filter = Expr::BinaryExpr(BinaryExpr::new(
+            Box::new(col(REGION_ID)),
+            Operator::Eq,
+            Box::new(Expr::Literal(
+                ScalarValue::UInt64(Some(target_region_id)),
+                None,
+            )),
+        ));
+        let request = ScanRequest {
+            filters: vec![filter],
+            ..Default::default()
+        };
+        let predicates = Predicates::from_scan_request(&Some(request));
+
+        builder.add_region_peers(
+            "greptime",
+            "public",
+            "test_table",
+            &predicates,
+            table_id,
+            &routes,
+        );
+
+        let batch = builder.finish().unwrap();
+        // Should have exactly 1 row for the matching region
+        assert_eq!(batch.num_rows(), 1);
+        // Verify it's the correct region
+        let region_id_col = batch
+            .column(3)
+            .as_primitive::<arrow::datatypes::UInt64Type>();
+        assert_eq!(region_id_col.value(0), target_region_id);
     }
 }
