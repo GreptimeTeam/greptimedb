@@ -7290,7 +7290,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07033963ba89ebaf1584d767badaa2e8fcec21aedea6b8c0346d487d49c28667"
 dependencies = [
  "cfg-if",
- "windows-targets 0.48.5",
+ "windows-targets 0.52.6",
 ]
 
 [[package]]
@@ -9586,9 +9586,9 @@ dependencies = [
 
 [[package]]
 name = "pgwire"
-version = "0.38.2"
+version = "0.38.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a1bdf05fc8231cc5024572fe056e3ce34eb6b9b755ba7aba110e1c64119cec3"
+checksum = "24bd4e6b1bfddc5c6420dee6602ec80946700b4c31ddcb64ee190ad6d979c210"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
