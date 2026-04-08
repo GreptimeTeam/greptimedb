@@ -831,4 +831,73 @@ mod tests {
         assert_eq!(batch_sizes, vec![3, 3, 3, 1]);
         assert_eq!(output_timestamps, vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 10]);
     }
+
+    #[tokio::test]
+    async fn test_absent_resumes_same_input_timestamp_after_batch_flush() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                true,
+            ),
+            Field::new("value", DataType::Float64, true),
+        ]));
+
+        let timestamp_array = Arc::new(TimestampMillisecondArray::from(vec![9]));
+        let value_array = Arc::new(Float64Array::from(vec![1.0]));
+        let batch =
+            RecordBatch::try_new(schema.clone(), vec![timestamp_array, value_array]).unwrap();
+
+        let memory_exec = DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![batch]], schema, None).unwrap(),
+        ));
+
+        let output_schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                true,
+            ),
+            Field::new("value", DataType::Float64, true),
+        ]));
+
+        let absent_exec = AbsentExec {
+            start: 0,
+            end: 9,
+            step: 1,
+            time_index_column: "timestamp".to_string(),
+            value_column: "value".to_string(),
+            fake_labels: vec![],
+            output_schema: output_schema.clone(),
+            input: Arc::new(memory_exec),
+            properties: Arc::new(PlanProperties::new(
+                EquivalenceProperties::new(output_schema.clone()),
+                Partitioning::UnknownPartitioning(1),
+                EmissionType::Incremental,
+                Boundedness::Bounded,
+            )),
+            metric: ExecutionPlanMetricsSet::new(),
+        };
+
+        let session_ctx = SessionContext::new_with_config(SessionConfig::new().with_batch_size(3));
+        let task_ctx = session_ctx.task_ctx();
+        let mut stream = absent_exec.execute(0, task_ctx).unwrap();
+
+        let mut output_timestamps = Vec::new();
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result.unwrap();
+            let ts_array = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .unwrap();
+            for i in 0..ts_array.len() {
+                if !ts_array.is_null(i) {
+                    output_timestamps.push(ts_array.value(i));
+                }
+            }
+        }
+
+        assert_eq!(output_timestamps, vec![0, 1, 2, 3, 4, 5, 6, 7, 8]);
+    }
 }
