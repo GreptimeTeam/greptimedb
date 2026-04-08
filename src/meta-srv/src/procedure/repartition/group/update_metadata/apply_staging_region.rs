@@ -50,10 +50,12 @@ impl UpdateMetadata {
                     region_id: target.region_id,
                 },
             )?;
+            // Set the new partition expression for the target region route.
             region_route.region.partition_expr = target
                 .partition_expr
                 .as_json_str()
                 .context(error::SerializePartitionExprSnafu)?;
+            // Set leader staging state and write route policy for the target region route.
             region_route.set_leader_staging();
             region_route.clear_ignore_all_writes();
         }
@@ -65,6 +67,7 @@ impl UpdateMetadata {
                     region_id: source.region_id,
                 },
             )?;
+            // Set leader staging state for the source region route.
             region_route.set_leader_staging();
             if pending_deallocate_region_ids.contains(&source.region_id) {
                 // When a region is pending deallocation, it should ignore all writes.

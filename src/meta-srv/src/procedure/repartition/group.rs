@@ -370,7 +370,7 @@ impl Context {
 pub struct GroupPrepareResult {
     /// The validated source region routes.
     pub source_routes: Vec<RegionRoute>,
-    /// The validated target region routes.
+    /// Validated target region routes used for metadata rollback (logical rollback).
     pub target_routes: Vec<RegionRoute>,
     /// The primary source region id (first source region), used for retrieving region options.
     pub central_region: RegionId,

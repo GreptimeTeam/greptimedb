@@ -34,7 +34,7 @@ impl UpdateMetadata {
     fn rollback_staging_region_routes(
         group_id: GroupId,
         sources: &[RegionDescriptor],
-        target_routes: &[RegionRoute],
+        original_target_routes: &[RegionRoute],
         pending_deallocate_region_ids: &[RegionId],
         current_region_routes: &[RegionRoute],
     ) -> Result<Vec<RegionRoute>> {
@@ -50,13 +50,16 @@ impl UpdateMetadata {
                     region_id: source.region_id,
                 },
             )?;
+            // Clean leader staging state for source regions.
             region_route.clear_leader_staging();
             if pending_deallocate_region_ids.contains(&source.region_id) {
+                // Clean ignore all writes state for source regions if it's pending to be deallocated,
+                // which means the source region is merged into the target region.
                 region_route.clear_ignore_all_writes();
             }
         }
 
-        for target in target_routes {
+        for target in original_target_routes {
             let region_route = region_routes_map.get_mut(&target.region.id).context(
                 error::RepartitionTargetRegionMissingSnafu {
                     group_id,
@@ -64,9 +67,11 @@ impl UpdateMetadata {
                 },
             )?;
 
+            // Revert the partition expression and write route policy to the original value for the target region.
             region_route.region.partition_expr = target.region.partition_expr.clone();
             region_route.write_route_policy = target.write_route_policy;
 
+            // Clean leader staging state for target regions.
             region_route.clear_leader_staging();
         }
 
