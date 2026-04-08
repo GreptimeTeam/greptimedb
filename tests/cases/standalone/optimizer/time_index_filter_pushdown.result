@@ -119,6 +119,7 @@ Affected Rows: 3
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE "flat_format":\s\w+, "flat_format": REDACTED,
@@ -133,7 +134,7 @@ WHERE
 | stage | node | plan_|
 +-+-+-+
 | 0_| 0_|_CooperativeExec REDACTED
-|_|_|_MergeScanExec: peers=[4402341478400(1025, 0), ], REDACTED
+|_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_FilterExec: usage_small@1 >= 10, projection=[rack@0] REDACTED
 |_|_|_CooperativeExec REDACTED
