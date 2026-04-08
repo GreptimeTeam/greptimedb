@@ -85,9 +85,10 @@ impl PassDistribution {
         let mut new_children = Vec::with_capacity(children.len());
         for (idx, child) in children.into_iter().enumerate() {
             let child_req = match required.get(idx) {
-                Some(Distribution::UnspecifiedDistribution) => {
-                    Self::propagate_unspecified_child_requirement(plan.as_ref(), idx, &current_req)
+                Some(Distribution::UnspecifiedDistribution) if idx == 0 => {
+                    Self::map_hash_requirement_through_projection(plan.as_ref(), &current_req)
                 }
+                Some(Distribution::UnspecifiedDistribution) => None,
                 None => current_req.clone(),
                 Some(req) => Some(req.clone()),
             };
@@ -108,15 +109,10 @@ impl PassDistribution {
         }
     }
 
-    fn propagate_unspecified_child_requirement(
+    fn map_hash_requirement_through_projection(
         plan: &dyn ExecutionPlan,
-        idx: usize,
         current_req: &Option<Distribution>,
     ) -> Option<Distribution> {
-        if idx != 0 {
-            return None;
-        }
-
         let Some(Distribution::HashPartitioned(required_exprs)) = current_req else {
             return None;
         };

@@ -709,17 +709,12 @@ impl PromPlanner {
                         self.ctx.table_name = Some("rhs".to_string());
                     }
                 }
-                let field_columns = left_field_columns
-                    .iter()
-                    .zip(right_field_columns.iter())
-                    .collect::<Vec<_>>();
+                let (output_field_columns, field_columns) =
+                    Self::align_binary_field_columns(&left_field_columns, &right_field_columns);
                 // PromQL binary arithmetic only combines the shared prefix of value columns.
                 // Keep the output field count aligned with that zipped prefix so planning
                 // remains stable even when the two sides have uneven multi-field schemas.
-                self.ctx.field_columns = field_columns
-                    .iter()
-                    .map(|(left_col_name, _)| (*left_col_name).clone())
-                    .collect();
+                self.ctx.field_columns = output_field_columns;
                 let mut field_columns = field_columns.into_iter();
 
                 let join_plan = self.join_on_non_field_columns(
@@ -732,7 +727,7 @@ impl PromPlanner {
                     // if left plan or right plan tag is empty, means case like `scalar(...) + host` or `host + scalar(...)`
                     // under this case we only join on time index
                     left_context.tag_columns.is_empty() || right_context.tag_columns.is_empty(),
-                    !is_comparison_op,
+                    is_comparison_op,
                     modifier,
                 )?;
                 let join_plan_schema = join_plan.schema().clone();
@@ -822,11 +817,10 @@ impl PromPlanner {
 
         // Preserve `__tsid` if present, so it can still be used internally downstream. It's
         // stripped from the final output anyway.
-        if context.use_tsid
-            && let Ok(tsid_col) =
-                schema.qualified_field_with_name(Some(table_ref), DATA_SCHEMA_TSID_COLUMN_NAME)
+        if let Some(tsid_col) =
+            Self::optional_tsid_projection(schema, Some(table_ref), context.use_tsid)
         {
-            project_exprs.push(DfExpr::Column(tsid_col.into()));
+            project_exprs.push(tsid_col);
         }
 
         let plan = LogicalPlanBuilder::from(input)
@@ -3405,56 +3399,58 @@ impl PromPlanner {
         )
     }
 
-    fn can_use_tsid_for_binary_join(
+    fn align_binary_field_columns<'a>(
+        left_field_columns: &'a [String],
+        right_field_columns: &'a [String],
+    ) -> (Vec<String>, Vec<(&'a String, &'a String)>) {
+        let field_pairs = left_field_columns
+            .iter()
+            .zip(right_field_columns.iter())
+            .collect::<Vec<_>>();
+        let output_field_columns = field_pairs
+            .iter()
+            .map(|(left_col_name, _)| (*left_col_name).clone())
+            .collect();
+        (output_field_columns, field_pairs)
+    }
+
+    fn plan_has_tsid_column(plan: &LogicalPlan) -> bool {
+        plan.schema()
+            .fields()
+            .iter()
+            .any(|field| field.name() == DATA_SCHEMA_TSID_COLUMN_NAME)
+    }
+
+    fn optional_tsid_projection(
+        schema: &DFSchemaRef,
+        table_ref: Option<&TableReference>,
+        keep_tsid: bool,
+    ) -> Option<DfExpr> {
+        keep_tsid.then_some(()).and_then(|_| {
+            schema
+                .qualified_field_with_name(table_ref, DATA_SCHEMA_TSID_COLUMN_NAME)
+                .ok()
+                .map(|field| DfExpr::Column(field.into()))
+        })
+    }
+
+    fn binary_join_key_columns(
+        &self,
         left: &LogicalPlan,
         right: &LogicalPlan,
         only_join_time_index: bool,
-        allow_tsid_join: bool,
+        is_comparison_op: bool,
         modifier: &Option<BinModifier>,
-    ) -> bool {
-        if only_join_time_index || !allow_tsid_join {
-            return false;
-        }
+    ) -> (BTreeSet<String>, BTreeSet<String>) {
+        let use_tsid_join = !is_comparison_op
+            && !only_join_time_index
+            && modifier.as_ref().is_none_or(|modifier| {
+                modifier.matching.is_none()
+                    && matches!(modifier.card, VectorMatchCardinality::OneToOne)
+            })
+            && Self::plan_has_tsid_column(left)
+            && Self::plan_has_tsid_column(right);
 
-        let modifier_allows_tsid = modifier.as_ref().is_none_or(|modifier| {
-            modifier.matching.is_none() && matches!(modifier.card, VectorMatchCardinality::OneToOne)
-        });
-
-        modifier_allows_tsid
-            && left
-                .schema()
-                .fields()
-                .iter()
-                .any(|field| field.name() == DATA_SCHEMA_TSID_COLUMN_NAME)
-            && right
-                .schema()
-                .fields()
-                .iter()
-                .any(|field| field.name() == DATA_SCHEMA_TSID_COLUMN_NAME)
-    }
-
-    /// Build a inner join on time index column and tag columns to concat two logical plans.
-    /// When `only_join_time_index == true` we only join on the time index, because these two plan may not have the same tag columns
-    #[allow(clippy::too_many_arguments)]
-    fn join_on_non_field_columns(
-        &self,
-        left: LogicalPlan,
-        right: LogicalPlan,
-        left_table_ref: TableReference,
-        right_table_ref: TableReference,
-        left_time_index_column: Option<String>,
-        right_time_index_column: Option<String>,
-        only_join_time_index: bool,
-        allow_tsid_join: bool,
-        modifier: &Option<BinModifier>,
-    ) -> Result<LogicalPlan> {
-        let use_tsid_join = Self::can_use_tsid_for_binary_join(
-            &left,
-            &right,
-            only_join_time_index,
-            allow_tsid_join,
-            modifier,
-        );
         let (mut left_tag_columns, mut right_tag_columns) = if use_tsid_join {
             (
                 BTreeSet::from([DATA_SCHEMA_TSID_COLUMN_NAME.to_string()]),
@@ -3474,29 +3470,50 @@ impl PromPlanner {
             (left_tag_columns, right_tag_columns)
         };
 
-        // apply modifier
-        if !use_tsid_join && let Some(modifier) = modifier {
-            // apply label modifier
-            if let Some(matching) = &modifier.matching {
-                match matching {
-                    // keeps columns mentioned in `on`
-                    LabelModifier::Include(on) => {
-                        let mask = on.labels.iter().cloned().collect::<BTreeSet<_>>();
-                        left_tag_columns = left_tag_columns.intersection(&mask).cloned().collect();
-                        right_tag_columns =
-                            right_tag_columns.intersection(&mask).cloned().collect();
-                    }
-                    // removes columns memtioned in `ignoring`
-                    LabelModifier::Exclude(ignoring) => {
-                        // doesn't check existence of label
-                        for label in &ignoring.labels {
-                            let _ = left_tag_columns.remove(label);
-                            let _ = right_tag_columns.remove(label);
-                        }
+        if !use_tsid_join
+            && let Some(modifier) = modifier
+            && let Some(matching) = &modifier.matching
+        {
+            match matching {
+                LabelModifier::Include(on) => {
+                    let mask = on.labels.iter().cloned().collect::<BTreeSet<_>>();
+                    left_tag_columns = left_tag_columns.intersection(&mask).cloned().collect();
+                    right_tag_columns = right_tag_columns.intersection(&mask).cloned().collect();
+                }
+                LabelModifier::Exclude(ignoring) => {
+                    for label in &ignoring.labels {
+                        let _ = left_tag_columns.remove(label);
+                        let _ = right_tag_columns.remove(label);
                     }
                 }
             }
         }
+
+        (left_tag_columns, right_tag_columns)
+    }
+
+    /// Build a inner join on time index column and tag columns to concat two logical plans.
+    /// When `only_join_time_index == true` we only join on the time index, because these two plan may not have the same tag columns
+    #[allow(clippy::too_many_arguments)]
+    fn join_on_non_field_columns(
+        &self,
+        left: LogicalPlan,
+        right: LogicalPlan,
+        left_table_ref: TableReference,
+        right_table_ref: TableReference,
+        left_time_index_column: Option<String>,
+        right_time_index_column: Option<String>,
+        only_join_time_index: bool,
+        is_comparison_op: bool,
+        modifier: &Option<BinModifier>,
+    ) -> Result<LogicalPlan> {
+        let (mut left_tag_columns, mut right_tag_columns) = self.binary_join_key_columns(
+            &left,
+            &right,
+            only_join_time_index,
+            is_comparison_op,
+            modifier,
+        );
 
         // push time index column if it exists
         if let (Some(left_time_index_column), Some(right_time_index_column)) =
@@ -3919,24 +3936,10 @@ impl PromPlanner {
             .iter()
             .chain(self.ctx.time_index_column.iter())
             .map(|col| Ok(DfExpr::Column(Column::new(table_ref.clone(), col))));
-        let tsid_iter = self
-            .ctx
-            .use_tsid
-            .then_some(())
-            .filter(|_| {
-                input
-                    .schema()
-                    .fields()
-                    .iter()
-                    .any(|field| field.name() == DATA_SCHEMA_TSID_COLUMN_NAME)
-            })
-            .into_iter()
-            .map(|_| {
-                Ok(DfExpr::Column(Column::new(
-                    table_ref.clone(),
-                    DATA_SCHEMA_TSID_COLUMN_NAME,
-                )))
-            });
+        let tsid_iter =
+            Self::optional_tsid_projection(input.schema(), table_ref.as_ref(), self.ctx.use_tsid)
+                .into_iter()
+                .map(Ok);
 
         // build computation exprs
         let result_field_columns = self
@@ -4193,6 +4196,18 @@ mod test {
     async fn assert_nested_count_rewrite_missing(query: &str, num_tag: usize, lookback_secs: u64) {
         let plan_str = build_optimized_tsid_plan(query, num_tag, 1, 100_000, lookback_secs).await;
         assert!(!plan_str.contains("Distinct:"), "{plan_str}");
+    }
+
+    fn build_eval_stmt(expr: &str) -> EvalStmt {
+        EvalStmt {
+            expr: parser::parse(expr).unwrap(),
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        }
     }
 
     async fn build_test_table_provider(
@@ -4825,16 +4840,7 @@ mod test {
 
     #[tokio::test]
     async fn default_binary_join_uses_tsid_when_available() {
-        let prom_expr = parser::parse("some_metric / some_alt_metric").unwrap();
-        let eval_stmt = EvalStmt {
-            expr: prom_expr,
-            start: UNIX_EPOCH,
-            end: UNIX_EPOCH
-                .checked_add(Duration::from_secs(100_000))
-                .unwrap(),
-            interval: Duration::from_secs(5),
-            lookback_delta: Duration::from_secs(1),
-        };
+        let eval_stmt = build_eval_stmt("some_metric / some_alt_metric");
 
         let table_provider = build_test_table_provider_with_tsid(
             &[
@@ -4866,17 +4872,7 @@ mod test {
 
     #[tokio::test]
     async fn tsid_is_preserved_for_nested_default_binary_joins() {
-        let prom_expr =
-            parser::parse("(some_metric - some_alt_metric) / some_third_metric").unwrap();
-        let eval_stmt = EvalStmt {
-            expr: prom_expr,
-            start: UNIX_EPOCH,
-            end: UNIX_EPOCH
-                .checked_add(Duration::from_secs(100_000))
-                .unwrap(),
-            interval: Duration::from_secs(5),
-            lookback_delta: Duration::from_secs(1),
-        };
+        let eval_stmt = build_eval_stmt("(some_metric - some_alt_metric) / some_third_metric");
 
         let table_provider = build_test_table_provider_with_tsid(
             &[
@@ -4906,17 +4902,7 @@ mod test {
 
     #[tokio::test]
     async fn repeated_tsid_binary_operand_keeps_tsid_join_keys() {
-        let prom_expr =
-            parser::parse("((some_metric - some_alt_metric) / some_metric) * 100").unwrap();
-        let eval_stmt = EvalStmt {
-            expr: prom_expr,
-            start: UNIX_EPOCH,
-            end: UNIX_EPOCH
-                .checked_add(Duration::from_secs(100_000))
-                .unwrap(),
-            interval: Duration::from_secs(5),
-            lookback_delta: Duration::from_secs(1),
-        };
+        let eval_stmt = build_eval_stmt("((some_metric - some_alt_metric) / some_metric) * 100");
 
         let table_provider = build_test_table_provider_with_tsid(
             &[
@@ -4942,18 +4928,8 @@ mod test {
 
     #[tokio::test]
     async fn repeated_tsid_binary_operand_keeps_shorter_field_side() {
-        let prom_expr =
-            parser::parse("((two_field_metric - one_field_metric) / one_field_metric) * 100")
-                .unwrap();
-        let eval_stmt = EvalStmt {
-            expr: prom_expr,
-            start: UNIX_EPOCH,
-            end: UNIX_EPOCH
-                .checked_add(Duration::from_secs(100_000))
-                .unwrap(),
-            interval: Duration::from_secs(5),
-            lookback_delta: Duration::from_secs(1),
-        };
+        let eval_stmt =
+            build_eval_stmt("((two_field_metric - one_field_metric) / one_field_metric) * 100");
 
         let table_provider = build_test_table_provider_with_tsid_fields(
             &[
@@ -5000,16 +4976,7 @@ mod test {
 
     #[tokio::test]
     async fn tsid_binary_join_uses_shorter_field_side() {
-        let prom_expr = parser::parse("one_field_metric / two_field_metric").unwrap();
-        let eval_stmt = EvalStmt {
-            expr: prom_expr,
-            start: UNIX_EPOCH,
-            end: UNIX_EPOCH
-                .checked_add(Duration::from_secs(100_000))
-                .unwrap(),
-            interval: Duration::from_secs(5),
-            lookback_delta: Duration::from_secs(1),
-        };
+        let eval_stmt = build_eval_stmt("one_field_metric / two_field_metric");
 
         let table_provider = build_test_table_provider_with_tsid_fields(
             &[
@@ -5053,16 +5020,7 @@ mod test {
 
     #[tokio::test]
     async fn label_matching_modifier_disables_tsid_binary_join() {
-        let prom_expr = parser::parse("some_metric / ignoring(tag_0) some_alt_metric").unwrap();
-        let eval_stmt = EvalStmt {
-            expr: prom_expr,
-            start: UNIX_EPOCH,
-            end: UNIX_EPOCH
-                .checked_add(Duration::from_secs(100_000))
-                .unwrap(),
-            interval: Duration::from_secs(5),
-            lookback_delta: Duration::from_secs(1),
-        };
+        let eval_stmt = build_eval_stmt("some_metric / ignoring(tag_0) some_alt_metric");
 
         let table_provider = build_test_table_provider_with_tsid(
             &[
@@ -5091,16 +5049,7 @@ mod test {
 
     #[tokio::test]
     async fn comparison_binary_join_does_not_use_tsid() {
-        let prom_expr = parser::parse("some_metric > some_alt_metric").unwrap();
-        let eval_stmt = EvalStmt {
-            expr: prom_expr,
-            start: UNIX_EPOCH,
-            end: UNIX_EPOCH
-                .checked_add(Duration::from_secs(100_000))
-                .unwrap(),
-            interval: Duration::from_secs(5),
-            lookback_delta: Duration::from_secs(1),
-        };
+        let eval_stmt = build_eval_stmt("some_metric > some_alt_metric");
 
         let table_provider = build_test_table_provider_with_tsid(
             &[
