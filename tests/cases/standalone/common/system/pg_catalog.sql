@@ -6,6 +6,7 @@ create database pg_catalog;
 SELECT session_user is not null;
 
 -- SQLNESS REPLACE PostgreSQL.* VERSION
+-- SQLNESS REPLACE [\s\-]+
 -- current_schema
 -- SQLNESS PROTOCOL POSTGRES
 select current_schema(), current_schemas(true), current_schemas(false), version(), current_database();
