@@ -60,6 +60,8 @@ Affected Rows: 4
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE Hash\(\[__tsid@1,\sts@2\],.* Hash([__tsid@1, ts@2],REDACTED
+-- SQLNESS REPLACE Hash\(\[__tsid@3,\sts@4\],.* Hash([__tsid@3, ts@4],REDACTED
 -- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
@@ -70,10 +72,10 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / tsid_binary_join_right;
 +-+-+-+
 | 0_| 0_|_ProjectionExec: expr=[host@2 as host, job@3 as job, ts@5 as ts, __tsid@4 as __tsid, greptime_value@0 / greptime_value@1 as tsid_binary_join_left.greptime_value / tsid_binary_join_right.greptime_value] REDACTED
 |_|_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(__tsid@1, __tsid@3), (ts@2, ts@4)], projection=[greptime_value@0, greptime_value@3, host@4, job@5, __tsid@6, ts@7], NullsEqual: true REDACTED
-|_|_|_RepartitionExec: partitioning=Hash([__tsid@1, ts@2], 32), input_partitions=REDACTED REDACTED
+|_|_|_RepartitionExec: partitioning=Hash([__tsid@1, ts@2],REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@0 as greptime_value, __tsid@3 as __tsid, ts@4 as ts] REDACTED
 |_|_|_MergeScanExec: REDACTED
-|_|_|_RepartitionExec: partitioning=Hash([__tsid@3, ts@4], 32), input_partitions=REDACTED REDACTED
+|_|_|_RepartitionExec: partitioning=Hash([__tsid@3, ts@4],REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
@@ -97,6 +99,8 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / tsid_binary_join_right;
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE Hash\(\[job@1,\sts@2\],.* Hash([job@1, ts@2],REDACTED
+-- SQLNESS REPLACE Hash\(\[job@2,\sts@4\],.* Hash([job@2, ts@4],REDACTED
 -- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
@@ -107,10 +111,10 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / ignoring(host) tsid_binary_join
 +-+-+-+
 | 0_| 0_|_ProjectionExec: expr=[host@2 as host, job@3 as job, ts@5 as ts, __tsid@4 as __tsid, greptime_value@0 / greptime_value@1 as tsid_binary_join_left.greptime_value / tsid_binary_join_right.greptime_value] REDACTED
 |_|_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(job@1, job@2), (ts@2, ts@4)], projection=[greptime_value@0, greptime_value@3, host@4, job@5, __tsid@6, ts@7], NullsEqual: true REDACTED
-|_|_|_RepartitionExec: partitioning=Hash([job@1, ts@2], 32), input_partitions=REDACTED REDACTED
+|_|_|_RepartitionExec: partitioning=Hash([job@1, ts@2],REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@0 as greptime_value, job@2 as job, ts@4 as ts] REDACTED
 |_|_|_MergeScanExec: REDACTED
-|_|_|_RepartitionExec: partitioning=Hash([job@2, ts@4], 32), input_partitions=REDACTED REDACTED
+|_|_|_RepartitionExec: partitioning=Hash([job@2, ts@4],REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
@@ -135,6 +139,8 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / ignoring(host) tsid_binary_join
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE Hash\(\[__tsid@1,\sts@2\],.* Hash([__tsid@1, ts@2],REDACTED
+-- SQLNESS REPLACE Hash\(\[__tsid@3,\sts@4\],.* Hash([__tsid@3, ts@4],REDACTED
 -- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
@@ -145,9 +151,9 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left > tsid_binary_join_right;
 +-+-+-+
 | 0_| 0_|_ProjectionExec: expr=[ts@3 as ts, greptime_value@0 as greptime_value, host@1 as host, job@2 as job] REDACTED
 |_|_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(__tsid@3, __tsid@1), (ts@4, ts@2)], filter=greptime_value@1 < greptime_value@0, projection=[greptime_value@0, host@1, job@2, ts@4], NullsEqual: true REDACTED
-|_|_|_RepartitionExec: partitioning=Hash([__tsid@3, ts@4], 32), input_partitions=REDACTED REDACTED
+|_|_|_RepartitionExec: partitioning=Hash([__tsid@3, ts@4],REDACTED
 |_|_|_MergeScanExec: REDACTED
-|_|_|_RepartitionExec: partitioning=Hash([__tsid@1, ts@2], 32), input_partitions=REDACTED REDACTED
+|_|_|_RepartitionExec: partitioning=Hash([__tsid@1, ts@2],REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@0 as greptime_value, __tsid@3 as __tsid, ts@4 as ts] REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
@@ -172,6 +178,8 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left > tsid_binary_join_right;
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE Hash\(\[__tsid@1,\sts@2\],.* Hash([__tsid@1, ts@2],REDACTED
+-- SQLNESS REPLACE Hash\(\[__tsid@3,\sts@4\],.* Hash([__tsid@3, ts@4],REDACTED
 -- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
@@ -182,10 +190,10 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left > bool tsid_binary_join_right;
 +-+-+-+
 | 0_| 0_|_ProjectionExec: expr=[host@2 as host, job@3 as job, ts@5 as ts, __tsid@4 as __tsid, CAST(greptime_value@1 < greptime_value@0 AS Float64) as tsid_binary_join_left.greptime_value > tsid_binary_join_right.greptime_value] REDACTED
 |_|_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(__tsid@1, __tsid@3), (ts@2, ts@4)], projection=[greptime_value@0, greptime_value@3, host@4, job@5, __tsid@6, ts@7], NullsEqual: true REDACTED
-|_|_|_RepartitionExec: partitioning=Hash([__tsid@1, ts@2], 32), input_partitions=REDACTED REDACTED
+|_|_|_RepartitionExec: partitioning=Hash([__tsid@1, ts@2],REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@0 as greptime_value, __tsid@3 as __tsid, ts@4 as ts] REDACTED
 |_|_|_MergeScanExec: REDACTED
-|_|_|_RepartitionExec: partitioning=Hash([__tsid@3, ts@4], 32), input_partitions=REDACTED REDACTED
+|_|_|_RepartitionExec: partitioning=Hash([__tsid@3, ts@4],REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
