@@ -25,9 +25,11 @@ use bytes::Bytes;
 use common_grpc::flight::{FlightDecoder, FlightEncoder, FlightMessage};
 use common_recordbatch::DfRecordBatch as RecordBatch;
 use common_time::Timestamp;
+use datafusion_common::Column;
+use datafusion_common::pruning::PruningStatistics;
 use datatypes::arrow;
 use datatypes::arrow::array::{
-    Array, ArrayRef, BinaryArray, StringDictionaryBuilder, UInt8Array, UInt64Array,
+    Array, ArrayRef, BinaryArray, BooleanArray, StringDictionaryBuilder, UInt8Array, UInt64Array,
 };
 use datatypes::arrow::compute::{SortColumn, SortOptions};
 use datatypes::arrow::datatypes::{
@@ -38,9 +40,6 @@ use datatypes::prelude::{MutableVector, Vector};
 use datatypes::value::ValueRef;
 use datatypes::vectors::Helper;
 use mito_codec::key_values::{KeyValue, KeyValues};
-use datafusion_common::Column;
-use datafusion_common::pruning::PruningStatistics;
-use datatypes::arrow::array::BooleanArray;
 use mito_codec::row_converter::{PrimaryKeyCodec, SortField, build_primary_key_codec_with_fields};
 use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression, ZstdLevel};
@@ -1308,10 +1307,7 @@ impl BatchStats {
             .column(pk_index)
             .as_any()
             .downcast_ref::<PrimaryKeyArray>()?;
-        let pk_values = pk_dict
-            .values()
-            .as_any()
-            .downcast_ref::<BinaryArray>()?;
+        let pk_values = pk_dict.values().as_any().downcast_ref::<BinaryArray>()?;
 
         let keys = pk_dict.keys();
         let row_index = if is_min { 0 } else { batch.num_rows() - 1 };
@@ -1563,10 +1559,8 @@ impl MultiBulkPart {
                 stats,
                 metadata: region_meta,
             };
-            let mask = predicate.prune_with_stats(
-                &pruning_stats,
-                region_meta.schema.arrow_schema(),
-            );
+            let mask =
+                predicate.prune_with_stats(&pruning_stats, region_meta.schema.arrow_schema());
             let total = self.batches.len();
             let pruned = mask.iter().filter(|&&s| !s).count();
             common_telemetry::info!(
@@ -1581,13 +1575,11 @@ impl MultiBulkPart {
             self.batches
                 .iter()
                 .zip(mask.iter())
-                .filter_map(|(batch, &selected)| {
-                    if selected {
-                        Some(batch.clone())
-                    } else {
-                        None
-                    }
-                })
+                .filter_map(
+                    |(batch, &selected)| {
+                        if selected { Some(batch.clone()) } else { None }
+                    },
+                )
                 .collect()
         } else {
             self.batches.iter().cloned().collect()
