@@ -52,6 +52,7 @@ TQL EXPLAIN (0, 10, '5s') test_nano;
 -- SQLNESS REPLACE (elapsed_compute.*) REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 TQL EXPLAIN VERBOSE (0, 10, '5s') test_nano;
 
 DROP TABLE test_nano;

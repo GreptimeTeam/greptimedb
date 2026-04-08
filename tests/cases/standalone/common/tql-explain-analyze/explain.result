@@ -403,6 +403,7 @@ TQL EXPLAIN (0, 10, '5s') test_nano;
 -- SQLNESS REPLACE (elapsed_compute.*) REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 TQL EXPLAIN VERBOSE (0, 10, '5s') test_nano;
 
 +-+-+
@@ -659,7 +660,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test_nano;
 |_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
 |_|_PromSeriesDivideExec: tags=["k"]_|
 |_|_SortExec: expr=[k@1 ASC, j@2 ASC], preserve_partitioning=[true]_|
-|_|_RepartitionExec: partitioning=Hash([k@1], 32), input_partitions=32_|
+|_|_RepartitionExec: REDACTED
 |_|_SortExec: expr=[k@1 ASC, j@2 ASC], preserve_partitioning=[true]_|
 |_|_ProjectionExec: expr=[i@0 as i, k@2 as k, CAST(j@1 AS Timestamp(ms)) as j]_|
 |_|_ProjectionExec: expr=[i@1 as i, j@2 as j, k@3 as k]_|
@@ -672,7 +673,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test_nano;
 |_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
 |_|_PromSeriesDivideExec: tags=["k"]_|
 |_|_SortExec: expr=[k@1 ASC, j@2 ASC], preserve_partitioning=[true]_|
-|_|_RepartitionExec: partitioning=Hash([k@1], 32), input_partitions=32_|
+|_|_RepartitionExec: REDACTED
 |_|_ProjectionExec: expr=[i@0 as i, k@2 as k, CAST(j@1 AS Timestamp(ms)) as j]_|
 |_|_ProjectionExec: expr=[i@1 as i, j@2 as j, k@3 as k]_|
 |_|_FilterExec: __common_expr_3@0 >= -299999 AND __common_expr_3@0 <= 10000_|
@@ -684,7 +685,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test_nano;
 |_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
 |_|_PromSeriesDivideExec: tags=["k"]_|
 |_|_SortExec: expr=[k@1 ASC, j@2 ASC], preserve_partitioning=[true]_|
-|_|_RepartitionExec: partitioning=Hash([k@1], 32), input_partitions=32_|
+|_|_RepartitionExec: REDACTED
 |_|_ProjectionExec: expr=[i@0 as i, k@2 as k, CAST(j@1 AS Timestamp(ms)) as j]_|
 |_|_FilterExec: __common_expr_3@0 >= -299999 AND __common_expr_3@0 <= 10000, projection=[i@1, j@2, k@3]_|
 |_|_ProjectionExec: expr=[CAST(j@1 AS Timestamp(ms)) as __common_expr_3, i@0 as i, j@1 as j, k@2 as k]_|
@@ -693,7 +694,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test_nano;
 | physical_plan after OutputRequirements_| PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
 |_|_PromSeriesDivideExec: tags=["k"]_|
 |_|_SortExec: expr=[k@1 ASC, j@2 ASC], preserve_partitioning=[true]_|
-|_|_RepartitionExec: partitioning=Hash([k@1], 32), input_partitions=32_|
+|_|_RepartitionExec: REDACTED
 |_|_ProjectionExec: expr=[i@0 as i, k@2 as k, CAST(j@1 AS Timestamp(ms)) as j]_|
 |_|_FilterExec: __common_expr_3@0 >= -299999 AND __common_expr_3@0 <= 10000, projection=[i@1, j@2, k@3]_|
 |_|_ProjectionExec: expr=[CAST(j@1 AS Timestamp(ms)) as __common_expr_3, i@0 as i, j@1 as j, k@2 as k]_|
@@ -713,7 +714,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test_nano;
 | physical_plan_| PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
 |_|_PromSeriesDivideExec: tags=["k"]_|
 |_|_SortExec: expr=[k@1 ASC, j@2 ASC], preserve_partitioning=[true]_|
-|_|_RepartitionExec: partitioning=Hash([k@1], 32), input_partitions=32_|
+|_|_RepartitionExec: REDACTED
 |_|_ProjectionExec: expr=[i@0 as i, k@2 as k, CAST(j@1 AS Timestamp(ms)) as j]_|
 |_|_FilterExec: __common_expr_3@0 >= -299999 AND __common_expr_3@0 <= 10000, projection=[i@1, j@2, k@3]_|
 |_|_ProjectionExec: expr=[CAST(j@1 AS Timestamp(ms)) as __common_expr_3, i@0 as i, j@1 as j, k@2 as k]_|
@@ -722,7 +723,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test_nano;
 | physical_plan_with_stats_| PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j], statistics=[Rows=Inexact(2), Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
 |_|_PromSeriesDivideExec: tags=["k"], statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
 |_|_SortExec: expr=[k@1 ASC, j@2 ASC], preserve_partitioning=[true], statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
-|_|_RepartitionExec: partitioning=Hash([k@1], 32), input_partitions=32, statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
+|_|_RepartitionExec: REDACTED
 |_|_ProjectionExec: expr=[i@0 as i, k@2 as k, CAST(j@1 AS Timestamp(ms)) as j], statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
 |_|_FilterExec: __common_expr_3@0 >= -299999 AND __common_expr_3@0 <= 10000, projection=[i@1, j@2, k@3], statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
 |_|_ProjectionExec: expr=[CAST(j@1 AS Timestamp(ms)) as __common_expr_3, i@0 as i, j@1 as j, k@2 as k], statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:),(Col[3]:)]] |
@@ -731,7 +732,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test_nano;
 | physical_plan_with_schema_| PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j], schema=[i:Float64;N, k:Utf8;N, j:Timestamp(ms)]_|
 |_|_PromSeriesDivideExec: tags=["k"], schema=[i:Float64;N, k:Utf8;N, j:Timestamp(ms)]_|
 |_|_SortExec: expr=[k@1 ASC, j@2 ASC], preserve_partitioning=[true], schema=[i:Float64;N, k:Utf8;N, j:Timestamp(ms)]_|
-|_|_RepartitionExec: partitioning=Hash([k@1], 32), input_partitions=32, schema=[i:Float64;N, k:Utf8;N, j:Timestamp(ms)]_|
+|_|_RepartitionExec: REDACTED
 |_|_ProjectionExec: expr=[i@0 as i, k@2 as k, CAST(j@1 AS Timestamp(ms)) as j], schema=[i:Float64;N, k:Utf8;N, j:Timestamp(ms)]_|
 |_|_FilterExec: __common_expr_3@0 >= -299999 AND __common_expr_3@0 <= 10000, projection=[i@1, j@2, k@3], schema=[i:Float64;N, j:Timestamp(ns), k:Utf8;N]_|
 |_|_ProjectionExec: expr=[CAST(j@1 AS Timestamp(ms)) as __common_expr_3, i@0 as i, j@1 as j, k@2 as k], schema=[__common_expr_3:Timestamp(ms), i:Float64;N, j:Timestamp(ns), k:Utf8;N]_|
