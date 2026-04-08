@@ -1257,6 +1257,10 @@ impl BatchStats {
     /// Returns `None` if there is no primary key (no first tag to collect stats for)
     /// or if extracting statistics fails.
     fn compute(batches: &[RecordBatch], metadata: &RegionMetadata) -> Option<Self> {
+        // `primary_key.first()` is correct for both dense and sparse encodings.
+        // For dense, values follow the order of `metadata.primary_key`.
+        // For sparse, `decode_leftmost` decodes the first value which also
+        // corresponds to `primary_key.first()`. See `SparsePrimaryKeyCodec` for format details.
         let first_tag_id = *metadata.primary_key.first()?;
         let first_tag_column = metadata.column_by_id(first_tag_id)?;
         let data_type = &first_tag_column.column_schema.data_type;
@@ -1390,15 +1394,6 @@ pub(crate) fn should_prune_bulk_part(
     };
     let mask = predicate.prune_with_stats(&pruning_stats, region_meta.schema.arrow_schema());
     let pruned = !mask.first().copied().unwrap_or(true);
-    if pruned {
-        common_telemetry::info!(
-            "BulkPart pruned by minmax: region={}, rows={}, min_values={:?}, max_values={:?}",
-            region_meta.region_id,
-            batch.num_rows(),
-            stats.min_values,
-            stats.max_values,
-        );
-    }
     pruned
 }
 
@@ -1561,17 +1556,6 @@ impl MultiBulkPart {
             };
             let mask =
                 predicate.prune_with_stats(&pruning_stats, region_meta.schema.arrow_schema());
-            let total = self.batches.len();
-            let pruned = mask.iter().filter(|&&s| !s).count();
-            common_telemetry::info!(
-                "MultiBulkPart batch pruning: region={}, total_batches={}, pruned_batches={}, total_rows={}, min_values={:?}, max_values={:?}",
-                region_meta.region_id,
-                total,
-                pruned,
-                self.total_rows,
-                stats.min_values,
-                stats.max_values,
-            );
             self.batches
                 .iter()
                 .zip(mask.iter())
