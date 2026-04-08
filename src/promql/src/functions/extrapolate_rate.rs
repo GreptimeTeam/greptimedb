@@ -129,7 +129,7 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
     /// * 0: timestamp range vector
     /// * 1: value range vector
     /// * 2: timestamp vector
-    /// * 3: range length. Range duration in millisecond. Not used here
+    /// * 3: range length. Range duration in milliseconds
     fn calc(&self, input: &[ColumnarValue]) -> DfResult<ColumnarValue> {
         if input.len() != 4 {
             return Err(DataFusionError::Plan(
@@ -214,6 +214,9 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
             let last_value = all_values[end - 1];
 
             let result_value = if IS_COUNTER {
+                // Adjacent normalized windows usually slide forward by one sample. Reuse the
+                // previous window's accumulated reset correction and adjust only the dropped and
+                // newly added edges, falling back to a full scan when the layout changes.
                 if prev_offset != usize::MAX && offset == prev_offset + 1 && length == prev_length {
                     if all_values[prev_offset + 1] < all_values[prev_offset] {
                         counter_correction -= all_values[prev_offset];
@@ -246,6 +249,8 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
             let mut duration_to_start_ms = (first_ts - range_start) as f64;
             let duration_to_end_ms = (range_end - last_ts) as f64;
 
+            // Counters cannot be negative, so Prometheus allows the extrapolation window to snap
+            // back to the inferred zero point instead of extending into negative values.
             if IS_COUNTER && result_value > 0.0 && first_value >= 0.0 {
                 let duration_to_zero = sampled_interval_ms * (first_value / result_value);
                 if duration_to_zero < duration_to_start_ms {
@@ -256,6 +261,8 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
             let extrapolation_threshold = average_interval_ms * 1.1;
             let mut extrapolated_interval_ms = sampled_interval_ms;
 
+            // Mirror Prometheus extrapolation: extend to the real range boundary when a sample is
+            // close enough, otherwise add half an average sampling interval on that side.
             if duration_to_start_ms < extrapolation_threshold {
                 extrapolated_interval_ms += duration_to_start_ms;
             } else {
