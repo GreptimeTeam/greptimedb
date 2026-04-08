@@ -137,7 +137,7 @@ struct CollectedParts {
 /// All parts in a bulk memtable.
 #[derive(Default)]
 struct BulkParts {
-    /// Unordered small parts (< 1024 rows).
+    /// Unordered small parts.
     unordered_part: UnorderedPart,
     /// All parts (raw and encoded).
     parts: Vec<BulkPartWrapper>,
